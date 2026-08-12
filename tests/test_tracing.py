@@ -1144,11 +1144,16 @@ def test_append_receipt_journal_is_bounded_and_hardlink_safe(tmp_path, monkeypat
     source = tmp_path / "spans.jsonl"
     exporter = JsonlSpanExporter(source)
     # One receipt fits, two do not: the second append compacts to its own checkpoint transition.
-    monkeypatch.setattr(tracing, "SPAN_APPEND_JOURNAL_MAX_BYTES", 400)
+    # The cap is measured off the receipt the CURRENT schema writes rather than hard-coded: a literal
+    # byte count quietly turns this from "one fits" into "none fit" the first time the wire contract
+    # gains a field, and the test would keep passing while proving something else.
     exporter.export({"name": "one"})
-    exporter.export({"name": "two"})
     journal = tmp_path / SPAN_APPEND_JOURNAL_NAME
-    assert len(journal.read_bytes()) <= 400
+    one_receipt = len(journal.read_bytes())
+    assert one_receipt > 0 and len(journal.read_bytes().splitlines()) == 1
+    monkeypatch.setattr(tracing, "SPAN_APPEND_JOURNAL_MAX_BYTES", one_receipt + 1)
+    exporter.export({"name": "two"})
+    assert len(journal.read_bytes()) <= one_receipt + 1
     assert len(journal.read_bytes().splitlines()) == 1
 
     journal.unlink()

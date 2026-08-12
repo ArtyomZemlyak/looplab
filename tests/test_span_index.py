@@ -873,24 +873,87 @@ def test_windows_growth_rebuilds_before_trusting_creation_time_receipts(
         before.st_ino, before.st_size, before.st_mtime_ns)
 
     # This is a real exporter append with its normal durable receipt. On Windows that receipt's ctime
-    # fields are creation time, so it cannot prove that the old prefix above was unchanged.
+    # fields are creation time, so ctime alone cannot prove the old prefix above was unchanged — the
+    # schema-2 mutation token is what witnesses it, and the in-place rewrite already moved that token
+    # away from the one this index recorded. The chain therefore cannot close over the rewrite.
     JsonlSpanExporter(source).export(_gen(1, "tr1", "foreign-after-rewrite", "root1", 30))
     state["token"] = 302
     if cold_reload:
         with span_index._CACHE_LOCK:
             span_index._CACHE.clear()
 
-    def receipt_reuse_forbidden(*_args, **_kwargs):
-        raise AssertionError("Windows growth must rebuild before receipt-based top-up")
+    # The validator is consulted now rather than skipped, so pin the OUTCOME it must produce: a
+    # refusal. Asserting "never called" would pin the mechanism, and would go green again for the
+    # wrong reason the moment the platform gate moved somewhere else.
+    verdicts: list[object] = []
+    real_transition = span_index._validated_append_transition
 
-    monkeypatch.setattr(
-        span_index, "_validated_append_transition", receipt_reuse_forbidden)
+    def spy(*args, **kwargs):
+        verdict = real_transition(*args, **kwargs)
+        verdicts.append(verdict)
+        return verdict
+
+    monkeypatch.setattr(span_index, "_validated_append_transition", spy)
     refreshed = get_index(source)
 
+    assert verdicts and all(v is None for v in verdicts), (
+        "a broken change-token chain must refuse the receipt top-up, not stitch through it")
     assert refreshed is not initial
     assert refreshed.node_window_revision(0, 512, generation=0)[0] != original_revision
     assert (refreshed.full_span("g0_1") or {})["attributes"]["output"].startswith("PPPP")
     assert refreshed.full_span("foreign-after-rewrite") is not None
+
+
+@pytest.mark.parametrize("writer_has_token", [True, False],
+                         ids=["schema2-token", "token-unavailable"])
+def test_windows_growth_tops_up_only_with_a_proven_change_token_chain(
+        run, monkeypatch, writer_has_token):
+    """Windows earns the incremental path from the schema-2 token, and only from it.
+
+    Its ``st_ctime_ns`` is a creation stamp, so before schema 2 there was no witness for an in-place
+    prefix rewrite and every growth rebuilt. The receipt now carries the descriptor-bound mutation
+    token on both sides; when that chain closes, the append is proven and only the appended bytes are
+    read. When the writer could not record a token (schema 1, or an API failure), nothing is proven
+    and the reader must still rebuild — the same fail-closed answer as before.
+    """
+    from looplab.core import tracing as tracing_mod
+    from looplab.core.tracing import JsonlSpanExporter
+
+    _rd, source, _spans = run
+    # Monotone stand-in for FILE_BASIC_INFO.ChangeTime, read by BOTH the writer and the reader so the
+    # chain is exercised end to end on any host. It advances with the file, which is the property the
+    # happy path depends on; the rewrite-with-restored-metadata refusal is the sibling test above.
+    def fake_token(fd, info=None):
+        return 1_000_000 + os.fstat(fd).st_size
+
+    monkeypatch.setattr(span_index, "_IS_WINDOWS", True)
+    monkeypatch.setattr(span_index, "_windows_change_time", lambda fd: fake_token(fd))
+    monkeypatch.setattr(
+        tracing_mod, "trace_file_change_token",
+        (lambda fd, info=None: fake_token(fd)) if writer_has_token
+        else (lambda fd, info=None: None))
+
+    index = get_index(source)
+    before_size = source.stat().st_size
+    JsonlSpanExporter(source).export(
+        _gen(1, "tr1", "windows-token-proof", "root1", 30))
+    appended_bytes = source.stat().st_size - before_size
+
+    scanned: list[tuple[int, int]] = []
+    real_scan = span_index._scan_light_stream
+    monkeypatch.setattr(span_index, "_scan_light_stream",
+                        lambda stream, base, size, **kw: (scanned.append((base, size))
+                                                          or real_scan(stream, base, size, **kw)))
+    refreshed = get_index(source)
+
+    assert refreshed.full_span("windows-token-proof") is not None      # the span is served either way
+    if writer_has_token:
+        assert refreshed is index, "a closed token chain must reuse the index, not rebuild it"
+        assert scanned == [(before_size, appended_bytes)], (
+            "a proven append must read only the appended bytes")
+    else:
+        assert refreshed is not index, "no token means nothing is proven; Windows must rebuild"
+        assert scanned == [(0, source.stat().st_size)], "a rebuild re-reads the whole source"
 
 
 @pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])

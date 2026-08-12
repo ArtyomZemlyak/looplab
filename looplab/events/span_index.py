@@ -42,7 +42,7 @@ from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
 from looplab.core.trace_append import (
     SPAN_APPEND_JOURNAL_MAX_BYTES, SPAN_APPEND_JOURNAL_NAME,
-    SPAN_APPEND_RECEIPT_SCHEMA)
+    SPAN_APPEND_RECEIPT_SCHEMA, SPAN_APPEND_RECEIPT_SCHEMA_V1)
 from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES, TRACE_WRITER_LOCK_NAME, assert_private_trace_file,
     iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
@@ -331,10 +331,18 @@ def _journal_checkpoint(source_path: Path) -> tuple[Optional[tuple[int, int]], i
         return None, 0
 
 
-_APPEND_RECEIPT_KEYS = frozenset({
+_APPEND_RECEIPT_KEYS_V1 = frozenset({
     "schema", "dev", "ino", "before_size", "before_mtime_ns", "before_ctime_ns",
     "after_size", "after_mtime_ns", "after_ctime_ns", "append_sha256",
 })
+# Schema 2 adds the descriptor-bound mutation token on both sides of the append. The key set stays
+# EXACT per version on purpose: a receipt carrying an unknown key is a writer this reader does not
+# understand, and the safe answer to that is a rebuild, not a partial read.
+_APPEND_RECEIPT_KEYS_V2 = _APPEND_RECEIPT_KEYS_V1 | {"before_change_token", "after_change_token"}
+_APPEND_RECEIPT_KEYS_BY_SCHEMA = {
+    SPAN_APPEND_RECEIPT_SCHEMA_V1: _APPEND_RECEIPT_KEYS_V1,
+    SPAN_APPEND_RECEIPT_SCHEMA: _APPEND_RECEIPT_KEYS_V2,
+}
 
 
 def _decode_append_receipt(raw: bytes) -> Optional[dict]:
@@ -344,9 +352,18 @@ def _decode_append_receipt(raw: bytes) -> Optional[dict]:
         value = orjson.loads(raw)
     except orjson.JSONDecodeError:
         return None
-    if (not isinstance(value, dict) or set(value) != _APPEND_RECEIPT_KEYS
-            or value.get("schema") != SPAN_APPEND_RECEIPT_SCHEMA):
+    if not isinstance(value, dict):
         return None
+    expected_keys = _APPEND_RECEIPT_KEYS_BY_SCHEMA.get(value.get("schema"))
+    if expected_keys is None or set(value) != expected_keys:
+        return None
+    for key in ("before_change_token", "after_change_token"):
+        # Absent on schema 1; on schema 2 a writer that could not read the token records null rather
+        # than a guess. Both are legal and both mean "unproven" to every consumer below.
+        token = value.get(key)
+        if token is not None and (not isinstance(token, int) or isinstance(token, bool) or token <= 0):
+            return None
+        value[key] = token
     for key in ("dev", "ino", "before_size", "before_mtime_ns", "before_ctime_ns",
                 "after_size", "after_mtime_ns", "after_ctime_ns"):
         item = value.get(key)
@@ -363,11 +380,19 @@ def _decode_append_receipt(raw: bytes) -> Optional[dict]:
 
 def _validated_append_transition(
         idx: "SpanIndex", source, size: int, mtime_ns: int, ctime_ns: int,
+        change_token: Optional[int] = None, *, require_change_token: bool = False,
 ) -> Optional[tuple[tuple[int, int], int]]:
     """Validate a contiguous receipt chain and only its appended source bytes.
 
     This is the incremental fast-path authority. Any missing/torn/rotated/forged transition returns
     ``None`` and the caller rebuilds from source truth; it never attempts to repair the journal.
+
+    ``change_token`` is the descriptor-bound mutation token observed on the source right now, and the
+    chain must land on it exactly like it lands on size/mtime/ctime. ``require_change_token`` makes
+    that proof MANDATORY: Windows sets it because its ``st_ctime_ns`` is a creation stamp and so
+    cannot witness an in-place prefix rewrite, which leaves the token as the only available witness.
+    A schema-1 receipt carries no token, so on Windows it fails closed here — exactly the rebuild
+    that platform did unconditionally before.
     """
     journal = idx.path.with_name(SPAN_APPEND_JOURNAL_NAME)
     try:
@@ -392,12 +417,24 @@ def _validated_append_transition(
     expected_size = idx.source_size
     expected_mtime = idx.mtime_ns
     expected_ctime = idx.ctime_ns
+    expected_token = idx.source_change_token
     if (expected_size is None or expected_mtime is None or expected_ctime is None
             or idx.identity is None):
+        return None
+    if require_change_token and (expected_token is None or change_token is None):
         return None
     for raw in raw_tail.splitlines(keepends=True):
         receipt = _decode_append_receipt(raw)
         if receipt is None:
+            return None
+        before_token = receipt["before_change_token"]
+        after_token = receipt["after_change_token"]
+        if require_change_token and (before_token is None or after_token is None):
+            return None
+        # A token is checked whenever BOTH sides carry one: on POSIX that is redundant with ctime and
+        # costs nothing, and it means a schema-2 journal is held to the stricter contract everywhere
+        # rather than only on the platform that needed it.
+        if before_token is not None and expected_token is not None and before_token != expected_token:
             return None
         if ((receipt["dev"], receipt["ino"]) != idx.identity
                 or receipt["before_size"] != expected_size
@@ -412,7 +449,12 @@ def _validated_append_transition(
         expected_size = receipt["after_size"]
         expected_mtime = receipt["after_mtime_ns"]
         expected_ctime = receipt["after_ctime_ns"]
+        expected_token = after_token if after_token is not None else expected_token
     if (expected_size != size or expected_mtime != mtime_ns or expected_ctime != ctime_ns):
+        return None
+    if change_token is not None and expected_token is not None and expected_token != change_token:
+        return None
+    if require_change_token and expected_token != change_token:
         return None
     return identity, stt.st_size
 
@@ -976,13 +1018,13 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
             if source_epoch != _source_epoch(
                     identity, observed_size, observed_mtime, observed_change_token):
                 return None
-            # A larger POSIX source is the normal append-only path and can top up from coverage.
-            # Windows receipts expose creation time rather than ChangeTime, so a lagged persisted
-            # source must rebuild; otherwise prefix-rewrite + append can masquerade as pure growth.
-            # A non-growing source whose mtime moved was mutated in-place, even when a corrupt suffix
-            # made ``covers < size``. None of its cached light rows/offsets remain authoritative.
-            if ((_IS_WINDOWS and size > observed_size)
-                    or size < observed_size
+            # A larger source is the normal append-only path and can top up from coverage — on BOTH
+            # platforms now. Growth is not trusted here on its own: the caller still has to validate
+            # a contiguous receipt chain before topping up, and on Windows that chain must carry the
+            # schema-2 mutation token, which is what stops prefix-rewrite + append from masquerading
+            # as pure growth. A non-growing source whose mtime moved was mutated in-place, even when
+            # a corrupt suffix made ``covers < size``. None of its cached rows/offsets survive that.
+            if (size < observed_size
                     or (size == observed_size
                         and (mtime_ns != observed_mtime
                              or source_change_token != observed_change_token))):
@@ -1105,17 +1147,17 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
         if not (replaced or force_rebuild):
             transition = None
             if size > prior_size:
-                if _IS_WINDOWS:
-                    # Receipts currently carry Python's Windows ``st_ctime_ns`` (creation time), not
-                    # FILE_BASIC_INFO.ChangeTime. They cannot distinguish a prefix rewrite followed
-                    # by a legitimate append, so Windows growth must rebuild until that durable wire
-                    # contract itself carries before/after ChangeTime.
-                    force_rebuild = True
-                else:
-                    transition = _validated_append_transition(
-                        idx, handle, size, mtime_ns, ctime_ns)
-                    if transition is None:
-                        force_rebuild = True   # growth without a complete writer chain is a rewrite
+                # Windows must PROVE the prefix was untouched rather than infer it: its
+                # ``st_ctime_ns`` is a creation stamp, so the schema-2 mutation token
+                # (FILE_BASIC_INFO.ChangeTime) is the only available witness of an in-place rewrite.
+                # `require_change_token` makes that proof mandatory there, so a schema-1 journal —
+                # or one whose writer could not read the token — fails closed and rebuilds, which is
+                # exactly what this platform did unconditionally before the receipt carried it.
+                transition = _validated_append_transition(
+                    idx, handle, size, mtime_ns, ctime_ns, source_change_token,
+                    require_change_token=_IS_WINDOWS)
+                if transition is None:
+                    force_rebuild = True   # growth without a complete writer chain is a rewrite
             if not force_rebuild:
                 if idx.covers < size:
                     idx._topup(size, handle)
@@ -1142,8 +1184,9 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
         idx.source_epoch = _source_epoch(identity, size, mtime_ns, source_change_token)
         idx._rebuild(size, handle)
     elif idx.source_size is not None and size > idx.source_size:
-        transition = None if _IS_WINDOWS else _validated_append_transition(
-            idx, handle, size, mtime_ns, ctime_ns)
+        transition = _validated_append_transition(
+            idx, handle, size, mtime_ns, ctime_ns, source_change_token,
+            require_change_token=_IS_WINDOWS)
         if transition is None:
             idx = SpanIndex(p)
             idx.identity = identity
