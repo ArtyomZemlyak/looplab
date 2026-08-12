@@ -72,8 +72,14 @@ class ResearchCadenceMixin:
             return self._run_deep_research(state, trigger="manual", manual=True)
         # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
         # node-count already researched (the at_node gate makes resume a no-op).
-        if state.pending_nodes() or n == 0 or self._already_researched_at(state, n):
+        # `n == 0` used to be part of THIS clause; it is now the run-opening branch below, because
+        # "no nodes yet" is not "nothing to research" — see `_ground_run_start`. The at_node gate is
+        # evaluated FIRST so a run-opening memo already in the log makes the branch a no-op on
+        # resume, exactly as it does for every later node-count.
+        if state.pending_nodes() or self._already_researched_at(state, n):
             return state
+        if n == 0:
+            return self._ground_run_start(state)
         # Since-last cadence (not `n % every == 0`): a rung-0/seed batch that jumps the node count by
         # k>1 must not step over the only multiple and skip the whole window. The last researched
         # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
@@ -103,6 +109,58 @@ class ResearchCadenceMixin:
                 and (hist[-1].get("strategy") or {}).get("request_research")):
             return self._run_deep_research(state, trigger="strategist", manual=False)
         return state
+
+    def _ground_run_start(self, state: RunState) -> RunState:
+        """The RUN-OPENING think: one Deep-Research pass at `at_node=0`, BEFORE the first idea is
+        proposed. Fires once per run, for any cadence that is not spelled OFF.
+
+        WHY THIS IS NOT THE CADENCE. `cadence_due` cannot express it — `n > 0` is in its body and
+        `engine/cadence.py` is shared by five other consumers for which "no nodes yet" really is
+        "nothing to do". So the run-opening pass is a SEPARATE, once-per-run branch, in the spirit of
+        `cadence.seed_boundary_due` (a first-ever firing the ordinary window cannot reach), and it
+        deliberately does not touch the window: the marks this pass leaves are `at_node=0`, and
+        `max(marks, default=0)` is 0 either way, so the first CADENCE think still lands a full
+        `every` nodes into the run and every later one is unchanged. Grounding the run costs one
+        think, not a re-phasing.
+
+        WHY IT MUST EXIST AT ALL. Measured over the whole shipped run corpus on 2026-08-12: NOT ONE
+        run of 22 with any research row ever recorded one at `at_node=0`. The earliest anywhere is
+        `at_node=1` (`runs/lt-recovery-0811`, the only run on the shipped `deep_research_every=0`),
+        i.e. the first memo has always landed AFTER the first idea was proposed and the first
+        Developer build was committed. 2026-08-07 removed the node-counted WINDOW from the front of
+        the run (`deep_research_window`), which bought the overlap with the first eval; it did not
+        remove the `n == 0` guard, so the one proposal that has no results to learn from — the one
+        that seeds the entire tree, and in Card-driven mode mints card-0's action identity — was
+        still the only proposal made with no memo behind it. `runs/rubertlite-dr-unified-v5` spent
+        its first 13.5 minutes on exactly that proposal.
+
+        AND IT IS NOT CONDITIONED ON CROSS-RUN MEMORY. "Only when this task fingerprint has no prior
+        lessons" is the tempting narrower rule and it is the wrong one, for a replay reason before a
+        product one: the cross-run stores are explicit SIDECARS that `fold` does not rebuild (see the
+        module header of `events/replay.py` and CLAUDE.md), so gating a PAID side effect on them
+        would make whether the run paid depend on a mutable file outside the log — two replays of one
+        event log could disagree about what the engine did. The gates that decide paid work read
+        folded state only. (The product half: prior lessons for a fingerprint are an input to the
+        memo, not a substitute for it — they say what happened last time, not what to try now.)
+
+        OFF STILL MEANS OFF. `deep_research_every=-1` (`cadence.DEEP_RESEARCH_OFF`) settles to a
+        window of 0 and this branch declines, so an operator who spelled the stage off does not
+        acquire a paid think at run start; manual `deep_research` and the Strategist's
+        `request_research` remain their only triggers, and the manual branch above already answers at
+        `n == 0`. A wired researcher is required for the same reason the cadence branch requires one:
+        with no model `_run_deep_research` records a STUB memo by contract, which here would spend
+        the run-opening slot on a think nobody could have run.
+
+        THE CONCURRENT SEAM IS DELIBERATELY NOT CHANGED. `_due_research_trigger` keeps its `n == 0`
+        answer of None: it exists to overlap a think with a RUNNING eval, and at node-count 0 there
+        is no eval to overlap with. This pass is serial on purpose — the whole point is that the
+        first proposal waits for it.
+        """
+        if self.deep_researcher is None:
+            return state
+        if deep_research_window(self.deep_research_every) <= 0:
+            return state
+        return self._run_deep_research(state, trigger="run_start", manual=False)
 
     @classmethod
     def _cadence_research_marks(cls, state: RunState) -> set[int]:

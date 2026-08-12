@@ -3999,7 +3999,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     # ------------------------------ research cadence (extracted to engine/research_cadence.py)
     # The P2 deep-research + open-hypothesis-board merge + run-report cadence cluster
-    # (`_maybe_deep_research`, `_already_researched_at`, `_run_deep_research`,
+    # (`_maybe_deep_research`, `_ground_run_start`, `_already_researched_at`, `_run_deep_research`,
     # `_compute_deep_research`, `_record_deep_research`, `_due_research_trigger`,
     # `_maybe_merge_hypotheses`, `_maybe_refresh_report`, `_write_report`) lives in
     # looplab/engine/research_cadence.py (ResearchCadenceMixin — inherited, zero call-site churn).

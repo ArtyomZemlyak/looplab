@@ -1467,6 +1467,12 @@ class Settings(BaseSettings):
     # restriction to protect. The old default of 3 was measured to make the stage UNREACHABLE there:
     # `runs/rubert-dr-0804/0805/0807` (1.5-4 h per node) recorded zero `research_attempted` and zero
     # `research_completed` rows each, because three nodes is 5-12 hours away.
+    # Independently of the interval, ANY enabled value (i.e. anything but `-1`) also buys ONE
+    # run-OPENING think at node-count 0, before the first idea is proposed
+    # (`engine/research_cadence.py::_ground_run_start`): the window governs how OFTEN the run
+    # re-thinks, never whether its first proposal is grounded. It leaves an `at_node=0` mark, which
+    # is what `max(marks, default=0)` already reads as "never fired", so the interval is not
+    # re-phased by it.
     deep_research_every: int = 0
     # Overlap a DUE deep-research "think" with the GPU-bound eval instead of running it in its own
     # serial step (the agent is otherwise idle while a node trains). research() computes from a state
