@@ -20,8 +20,8 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
-import { NARR, GROUPS, GROUP_GLYPH, TYPE2GROUP, kindOf, isCuratedType,
-  eventNarration } from './narration.js'
+import { NARR, GROUPS, GROUP_GLYPH, STATUS_NOISE, TYPE2GROUP, kindOf, isCuratedType,
+  eventNarration, liveStatusAgeLabel } from './narration.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
@@ -196,11 +196,9 @@ export function LiveTrace({ runId, generation, active }) {
 
 // Bookkeeping events that do NOT reflect what the agent is DOING — skip them when inferring the
 // between-experiments status, else the strip flickers to "Thinking…" every time one of these lands
-// right after a node (coverage/cost/lessons/reflection all fire post-eval).
-const STATUS_NOISE = new Set([
-  'coverage_snapshot', 'llm_cost', 'reflection_note', 'diversity_archive',
-  'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building', 'command_ack',
-])
+// right after a node (coverage/cost/lessons/reflection all fire post-eval). Defined in narration.js
+// because the status CLOCK reads the same filter: the label and its age must never be able to
+// describe different moments.
 
 function agentStatus(live, log) {
   if (!live) return null
@@ -1210,8 +1208,15 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         {!showControls && (() => {
           const pipeline = atLiveView ? agentStatus(live, log) : null
           if (!pipeline) return null
+          // HOW LONG. The label named the phase but never its age, so a build silent for forty
+          // minutes looked exactly like one that started two seconds ago — the operator's "it hangs
+          // for a very long time with no logs". Suppressed under 20 s, where a ticking number is
+          // churn rather than information.
+          const age = liveStatusAgeLabel(live, log)
           return <div className="agent-status dock-agent-status">
-            <div className="as-line"><span className="as-dot" /><span className="as-seg">{pipeline}</span></div>
+            <div className="as-line"><span className="as-dot" /><span className="as-seg">{pipeline}</span>
+              {age && <span className="muted as-age" title="how long this phase has been running">
+                {age}</span>}</div>
             <LiveTrace runId={runId} generation={timeline.generation} active={atLiveView} />
           </div>
         })()}
