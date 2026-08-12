@@ -19,6 +19,7 @@ import {
   conversationWindowNotice, nodeAttemptOptions, traceDetailState, traceForAttempt, traceUnavailable,
   traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
+import { cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
   TRACE_SCROLL_SETTLED, settleTraceRead, traceReadDeadlineMs, traceScrollBoundedSuffix,
@@ -393,7 +394,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
           draftStore={draftStore} draftSurface="inspector" />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace key={`trace:${detailScope}:${n.attempt ?? 'pending'}`}
-          n={n} runId={runId} expectedGeneration={expectedGeneration}
+          n={n} runId={runId} expectedGeneration={expectedGeneration} onOpenCard={onOpenCard}
           expectedTraceRevision={n.trace_revision}
           live={live} working={nodeWorking}
           detailStatus={detailStatus} reloadPending={!!detailPending}
@@ -1805,7 +1806,32 @@ function usePagedNodeTrace({
 // for a BIGGER window and the bigger response reaches the screen, and no amount of reading this
 // file's text can see that. The Inspector shipped a dead partial notice for months underneath pins
 // that were all green.
+// One operation's trace, fetched by its own trace id. `Dock.jsx::OpTrace` is the same thing, but
+// Dock already imports `NodeTrace`/`TraceUnavailable` from THIS file, so importing it back would
+// close a module cycle. Twelve lines is cheaper than that, and the renderer is shared either way.
+function _TraceById({ runId, traceId, expectedGeneration }) {
+  const [state, setState] = useState(null)
+  useEffect(() => {
+    setState(null)
+    if (!runId || !traceId) return undefined
+    let alive = true
+    const request = traceDeadlineGet(
+      runApiPath(runId, `/trace/by_trace/${encodeURIComponent(traceId)}`), expectedGeneration)
+    request.promise
+      .then(d => {
+        if (!traceGenerationMatches(d, expectedGeneration)) throw 0
+        if (alive) setState({ spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {} })
+      })
+      .catch(() => { if (alive) setState({ spans: [], projection: { unavailable: true } }) })
+    return () => { alive = false; request.abort?.() }
+  }, [runId, traceId, expectedGeneration])
+  if (state === null) return <div className="muted trace-loading" role="status">loading trace…</div>
+  return <NodeTrace spans={state.spans} projection={state.projection} runId={runId}
+    expectedGeneration={expectedGeneration} />
+}
+
 export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
+  onOpenCard = null,
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
@@ -1909,6 +1935,44 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     {historicalAttempt && <button type="button" className="seg"
       onClick={() => setViewAttempt(null)}>back to current</button>}
   </span>
+  // THE RESEARCH BEHIND THIS EXPERIMENT. The Researcher works per CARD (a hypothesis) and the
+  // Developer per NODE, so this node's reasoning lives one level up and is SHARED with every sibling
+  // experiment on the same card. Rather than making the operator go and find it, the node's own trace
+  // offers it here: expand it in place, or jump to the card for the full story. Fetched only when
+  // opened — most visits to this tab are about the Developer's work, not the proposal.
+  const cardId = n.idea?.card_id || null
+  const [researchOpen, setResearchOpen] = useState(false)
+  const [research, setResearch] = useState(null)
+  useEffect(() => { setResearchOpen(false); setResearch(null) }, [cardId, expectedGeneration])
+  useEffect(() => {
+    if (!researchOpen || research !== null || !cardId || !runId) return undefined
+    let alive = true
+    deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`))
+      .then(d => { if (alive) setResearch(d || {}) })
+      .catch(() => { if (alive) setResearch({ projection: { unavailable: true } }) })
+    return () => { alive = false }
+  }, [researchOpen, research, cardId, runId])
+  const researchRows = research
+    ? (cardTraceSections(research).find(section => section.kind === 'research')?.rows || [])
+    : []
+  const researchStrip = cardId && <div className="trace-card-research">
+    <button type="button" className="seg" aria-expanded={researchOpen}
+      title={`The research that proposed ${cardId}. Shared with every experiment on this work item.`}
+      onClick={() => setResearchOpen(value => !value)}>
+      {researchOpen ? '▾' : '▸'} research · shared with {cardId}
+    </button>
+    {onOpenCard && <button type="button" className="seg" onClick={() => onOpenCard(cardId)}>
+      open {cardId} ›</button>}
+    {researchOpen && <div className="trace-card-research-body">
+      {research === null && <div className="muted" role="status">loading research…</div>}
+      {research !== null && !researchRows.length && <div className="muted" role="status">
+        No research is linked to {cardId} — it is never inferred from timing.</div>}
+      {researchRows.map(row => <div key={row.span_id} className="card-trace-row">
+        <span className="muted">Researcher · {researchLinkLabel(row.link)}</span>
+        <_TraceById runId={runId} traceId={row.trace_id} expectedGeneration={expectedGeneration} />
+      </div>)}
+    </div>}
+  </div>
   const clearBtn = <span className="trace-clear">
     <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
       className={'seg' + (clearing ? ' on' : '')}
@@ -1974,6 +2038,7 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
       {attemptPicker}<span className="spacer" />{clearBtn}{nav}
     </div>
+    {researchStrip}
   </div>
   if (view === 'conversation')
     return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId}

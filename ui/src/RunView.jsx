@@ -128,7 +128,6 @@ const CrossRunPanel = lazyNamed(loadPanels, 'CrossRunPanel')
 const CollabPanel = lazy(() => import('./CollabPanel.jsx'))
 const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
-const OperationsPanel = lazyNamed(loadPanels, 'OperationsPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 
@@ -167,11 +166,7 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
 // `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  // `Operations` sits beside Research because it answers the same question one level down: Research
-  // shows the deep-research MEMOS, Operations shows every root operation the run performed —
-  // including the Researcher's own `propose` traces, which no per-node view can reach (they carry no
-  // node_id, see `operationsModel.js`).
-  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['operations', 'Operations'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
@@ -2961,8 +2956,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}
         onSelectEvidence={selectEvidenceFromPanel} />}
-      {panel === 'operations' && panelAllowed('operations') && <OperationsPanel runId={runId}
-        expectedGeneration={generation} onSelect={selectNodeFromPanel} onClose={closePanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
       {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} />}
       {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNodeFromPanel} onClose={closePanel} />}

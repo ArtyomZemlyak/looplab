@@ -524,27 +524,6 @@ class AppState:
             total_spans=idx.node_span_count(nid, generation=generation),
             span_cap=span_cap)
 
-    def operations_view(self, rd: Path, cap: Optional[int] = None) -> dict:
-        """Every ROOT operation this run performed, from the LIGHT index — the run-level agents' only
-        reachable surface.
-
-        Deliberately NOT built on `trace_view`: that projection keeps a `TRACE_VIEW_SPAN_CAP` TAIL of
-        the run's spans, so on a real run it drops most operations entirely (measured on
-        `rubert-dr-0807`: 3 of 15 Researcher `propose` operations survived, 6,265 of 7,289 spans
-        omitted). Enumerating ROOTS instead is what makes "show me the Researcher's trace" answerable
-        at all — see `traceview.project_operations` for the full measurement.
-
-        No fallback to a heavier read: with no index this returns an empty listing carrying its own
-        omission receipt, because the point of the surface is that it is cheap enough to always load.
-        """
-        from looplab.events.span_index import get_index
-        from looplab.events.traceview import OPERATIONS_CAP, project_operations
-        settled = OPERATIONS_CAP if not isinstance(cap, int) or cap <= 0 else min(cap, OPERATIONS_CAP)
-        idx = get_index(rd / "spans.jsonl")
-        if idx is None:
-            return project_operations([], cap=settled)
-        return project_operations(idx.light_spans(), cap=settled, _normalized=True)
-
     def card_trace_view(self, rd: Path, card_id: str) -> dict:
         """The whole story of ONE card: its research, then every node it produced.
 

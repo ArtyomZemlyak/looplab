@@ -261,16 +261,16 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
-- **Operations** (Progress hub) — every ROOT operation the run performed, listed from the light span
-  index: name, the node it belongs to *or* `run-level`, timing, status, and the size of its trace.
-  This is the only surface on which a **run-level agent** is reachable. Every other trace view
-  projects by node, and the Researcher has none — its `propose` span is a root with no `node_id`,
-  because the idea exists before the node built from it does. Measured on `rubert-dr-0807`: 15
-  Researcher operations holding 493 generations and 944 tool calls, previously reachable from nowhere
-  (`GET /api/runs/{id}/operations`; opening a row reads `GET /api/runs/{id}/trace/by_trace/{trace_id}`).
-  The listing enumerates *all* roots rather than a span tail, so it can state what it dropped:
-  `projection.omitted_operations`. "Agent work only" is on by default and hides bookkeeping
-  operations (`lessons_*` and friends were 99 of that run's 176) while reporting how many it hid.
+- **A Card's whole story** — a Card is one hypothesis; the Researcher proposes it and the Developer
+  builds one or more experiments (nodes) under it. The card's **Trace** section reads that story in
+  order: the proposal(s) that produced the card, then a section per node. Sections name their traces
+  rather than inlining them, so you open only what you want
+  (`GET /api/runs/{id}/cards/{card_id}/trace`). Research is matched to a card by the `card_id` the
+  engine stamps on the `propose` span, or — for the re-proposal a node reset performs, where the
+  replacement card is minted after the span closes — by the trace it shares with that node's
+  `node_created`. Each row says which rule matched it, and a card whose research cannot be
+  identified shows none rather than a guess: a mis-attributed hypothesis is worse than an empty
+  section.
 - **Earlier attempts of a repaired node** — the node trace carries an `attempt` picker whenever the
   node has more than one generation. Each inline repair bumps the generation and each keeps its own
   trace, so the attempt that actually CRASHED — usually the one worth reading — is selectable

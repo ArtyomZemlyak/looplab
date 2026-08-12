@@ -3,9 +3,10 @@
 // (cardControlReflected / _cardWithOptimisticControls / the sentEditRef pruning) and the hypothesis
 // delete-recovery journal, which is what makes it a module rather than one more function in the hub.
 // panels.jsx re-exports HypothesisBoard, so RunView still funnels every panel through one lazy chunk.
-import React, { useEffect, useRef, useState } from 'react'
-import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, getRunCommand,
-  isTransientCommandReadError, retryRunCommand, runCommand, submitCommand } from './util.js'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
+  isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
+  submitCommand } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
 import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
@@ -24,6 +25,7 @@ import {
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
+import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
@@ -592,9 +594,80 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
 // The right-hand pane. It has exactly two modes and a breadcrumb between them, rather than nesting a
 // node Inspector inside a scrolling card sheet: the Card and the Node are different objects, and the
 // pane says which one you are looking at instead of blurring them into one column.
+// A CARD's whole story in one place: the proposal(s) that produced it, then a section per
+// experiment it produced. Sections name their traces instead of inlining them, so the reader opens
+// only what they want — the same bounded `/trace/by_trace/{tid}` tree the event feed uses. The
+// decisions (ordering, matching labels, the omission receipt) live in `cardTraceModel.js`.
+const LazyOpTrace = React.lazy(
+  () => import('./Dock.jsx').then(module => ({ default: module.OpTrace })))
+
+function _CardTrace({ card, runId, expectedGeneration, onOpenNode }) {
+  const [payload, setPayload] = useState(null)
+  const [open, setOpen] = useState(null)
+  const cardId = card?.id
+  useEffect(() => {
+    setPayload(null); setOpen(null)
+    if (!cardId || !runId) return undefined
+    let alive = true
+    deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
+      PANEL_REQUEST_TIMEOUT_MS)
+      .then(d => { if (alive) setPayload(d || {}) })
+      .catch(() => { if (alive) setPayload({ projection: { unavailable: true } }) })
+    return () => { alive = false }
+  }, [cardId, runId, expectedGeneration])
+  const sections = useMemo(() => cardTraceSections(payload), [payload])
+  const notice = cardTraceNotice(payload)
+
+  if (payload === null) return <div className="muted" role="status">loading this work item’s trace…</div>
+  return <div className="card-trace">
+    {notice && <div className="muted" role="status">{notice}</div>}
+    {sections.map(section => section.kind === 'research'
+      ? <div key={section.key} className="card-trace-section">
+          <div className="section-h">{section.title}</div>
+          {section.rows.map(row => <div key={row.span_id} className="card-trace-row">
+            <button type="button" className="btn xs ghost" disabled={!row.openable}
+              aria-expanded={open === row.trace_id}
+              onClick={() => setOpen(cur => (cur === row.trace_id ? null : row.trace_id))}>
+              {open === row.trace_id ? '▾' : '▸'} Researcher · {row.label}
+            </button>
+            <span className="muted">{fmtInt(row.generations)} gen · {fmtInt(row.tools)} tools
+              · {fmtInt(row.tokens?.total)} tok</span>
+            {open === row.trace_id && <div className="card-trace-body">
+              <React.Suspense fallback={<div className="muted" role="status">loading trace…</div>}>
+                <LazyOpTrace runId={runId} traceId={row.trace_id}
+                  expectedGeneration={expectedGeneration} />
+              </React.Suspense>
+            </div>}
+          </div>)}
+        </div>
+      : <div key={section.key} className="card-trace-section">
+          <div className="section-h card-trace-divider">{section.title}</div>
+          <div className="card-trace-row">
+            <button type="button" className="btn xs ghost" disabled={!section.openable}
+              aria-expanded={open === section.node.trace_id}
+              onClick={() => setOpen(cur =>
+                (cur === section.node.trace_id ? null : section.node.trace_id))}>
+              {open === section.node.trace_id ? '▾' : '▸'} Developer · build and evaluation
+            </button>
+            <button type="button" className="btn xs ghost"
+              onClick={() => onOpenNode?.(Number(section.node.node_id))}>open experiment ›</button>
+            <span className="muted">{fmtInt(section.node.generations)} gen
+              · {fmtInt(section.node.tools)} tools · {fmtInt(section.node.tokens?.total)} tok
+              {section.node.errors ? ` · ${fmtInt(section.node.errors)} error` : ''}</span>
+            {open === section.node.trace_id && <div className="card-trace-body">
+              <React.Suspense fallback={<div className="muted" role="status">loading trace…</div>}>
+                <LazyOpTrace runId={runId} traceId={section.node.trace_id}
+                  expectedGeneration={expectedGeneration} />
+              </React.Suspense>
+            </div>}
+          </div>
+        </div>)}
+  </div>
+}
+
 function _CardDetailPane({
   card, receipt, attempts, selectedNodeId, onOpenNode, onSelect, onControl, controlState,
-  controlsLocked, renderInspector, state, onRecover,
+  controlsLocked, renderInspector, state, onRecover, runId = null, expectedGeneration = null,
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
@@ -620,6 +693,8 @@ function _CardDetailPane({
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
       onRecover={onRecover} onSelect={onSelect} onClose={null} />
+    {runId && <_CardTrace card={card} runId={runId} expectedGeneration={expectedGeneration}
+      onOpenNode={onOpenNode} />}
   </div>
 }
 
@@ -960,7 +1035,8 @@ function _CardKanban({
           onControl={control} renderInspector={renderInspector} state={state}
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
-          onRecover={recoverCardControl} />
+          onRecover={recoverCardControl}
+          runId={runId} expectedGeneration={state?.generation || null} />
       </aside>}
     </div>
   }

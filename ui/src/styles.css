@@ -3272,3 +3272,16 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 /* Age of the current live phase, beside its label. Muted and small: it answers "is this stuck?",
    which is a glance, not a reading. */
 .as-age { margin-left: 6px; font-variant-numeric: tabular-nums; }
+
+/* A card's whole story: the proposal(s), then a section per experiment. Sections name their traces
+   rather than inlining them, so the pane stays readable on a card with a dozen attempts. */
+.card-trace { margin-top: 12px; }
+.card-trace-section { margin-bottom: 10px; }
+.card-trace-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
+.card-trace-body { flex-basis: 100%; margin: 4px 0 8px 14px; }
+.card-trace-divider { border-top: 1px solid var(--line, #2a2a2a); padding-top: 6px; }
+
+/* The research strip on a node's trace: the reasoning that produced this experiment's work item,
+   shared with every sibling experiment on the same card. */
+.trace-card-research { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
+.trace-card-research-body { flex-basis: 100%; margin-left: 12px; }

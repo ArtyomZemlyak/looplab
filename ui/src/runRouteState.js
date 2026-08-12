@@ -4,7 +4,7 @@
 
 export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 export const RUN_ROUTE_PANELS = [
-  'overview', 'queue', 'research', 'operations', 'failures', 'trust', 'pareto', 'data',
+  'overview', 'queue', 'research', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
   'collab', 'authoring', 'events', 'gpu', 'config',
 ]
