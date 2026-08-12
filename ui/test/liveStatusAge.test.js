@@ -1,0 +1,87 @@
+// "It hangs for a very long time with no logs (or they are not visible)."
+//
+// The logs existed; the CLOCK did not. The live status strip named the phase ("Writing experiment
+// #3…") and never how long it had been in it, so a build that had been silent for forty minutes read
+// exactly like one that started two seconds ago — there was nothing on screen to distinguish work
+// from a stall. No new backend data was needed: `_on_node_building` already stamps `started` on every
+// marker and every event carries `ts`.
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import { createServer } from 'vite'
+
+// `narration.js` reaches markdown.jsx, which node cannot load directly — the same vite SSR harness
+// every other narration test uses.
+const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
+const vite = await createServer({
+  root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+  server: { middlewareMode: true },
+})
+const { STATUS_NOISE, liveStatusAgeLabel, liveStatusStartedAt } =
+  await vite.ssrLoadModule('/src/narration.js')
+test.after(() => vite.close())
+
+test('the clock follows the OLDEST in-flight build, not the newest', () => {
+  // With several Developers writing at once, the number that matters is how long the SLOWEST has
+  // been going — that is the one stalling the batch. Keying on the newest would hide it.
+  const live = { buildings: { 3: { node_id: 3, started: 1000 }, 4: { node_id: 4, started: 1900 } } }
+  assert.equal(liveStatusStartedAt(live, []), 1000)
+  assert.equal(liveStatusAgeLabel(live, [], 2200), '20m')
+})
+
+test('a serial-build run falls back to the singular marker', () => {
+  assert.equal(liveStatusStartedAt({ building: { node_id: 1, started: 500 } }, []), 500)
+})
+
+test('between experiments the clock starts at the last MEANINGFUL event', () => {
+  // Same noise filter the label uses, so the two can never describe different moments.
+  const log = [
+    { type: 'node_evaluated', ts: 100 },
+    { type: 'llm_cost', ts: 900 },
+    { type: 'coverage_snapshot', ts: 950 },
+  ]
+  assert.ok(STATUS_NOISE.has('llm_cost') && STATUS_NOISE.has('coverage_snapshot'))
+  assert.equal(liveStatusStartedAt({}, log), 100, 'bookkeeping must not reset the clock')
+  assert.equal(liveStatusAgeLabel({}, log, 400), '5m')
+})
+
+test('a young phase shows nothing — a ticking number under 20s is churn, not information', () => {
+  const live = { building: { node_id: 1, started: 1000 } }
+  assert.equal(liveStatusAgeLabel(live, [], 1005), '')
+  assert.equal(liveStatusAgeLabel(live, [], 1019), '')
+  assert.equal(liveStatusAgeLabel(live, [], 1020), '20s')
+})
+
+test('the scale stays readable from seconds to hours', () => {
+  // Base at a real instant, not 0: epoch 0 is rejected as junk on purpose (the same "absent is not
+  // zero" rule the rest of this UI is guarded by), which the skew test below pins.
+  const BASE = 1_700_000_000
+  const at = seconds => liveStatusAgeLabel({ building: { started: BASE } }, [], BASE + seconds)
+  assert.equal(at(45), '45s')
+  assert.equal(at(89), '89s')
+  assert.equal(at(90), '2m')
+  assert.equal(at(3600), '60m')
+  assert.equal(at(5400), '1h 30m')
+  assert.equal(at(7200), '2h')
+})
+
+test('clock skew and junk timestamps produce no label rather than a wrong one', () => {
+  // A negative age is skew between the engine host and the browser, not a fact about the run.
+  assert.equal(liveStatusAgeLabel({ building: { started: 5000 } }, [], 1000), '')
+  assert.equal(liveStatusStartedAt({ building: { started: 'soon' } }, []), null)
+  assert.equal(liveStatusStartedAt({ building: { started: 0 } }, []), null)
+  assert.equal(liveStatusStartedAt({}, []), null)
+  assert.equal(liveStatusAgeLabel({}, [], 1000), '')
+  assert.equal(liveStatusStartedAt({}, [{ type: 'node_created', ts: NaN }]), null)
+})
+
+test('Dock renders the age beside the phase label', () => {
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'Dock.jsx'), 'utf8')
+  assert.ok(src.includes('liveStatusAgeLabel(live, log)'))
+  assert.ok(src.includes('className="muted as-age"'))
+  // One definition of the noise filter, shared by the label and the clock.
+  assert.ok(!src.includes('const STATUS_NOISE = new Set('), 'the second copy came back')
+})

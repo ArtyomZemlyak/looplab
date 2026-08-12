@@ -475,3 +475,53 @@ export function eventNarration(event) {
     return `${event?.type || 'event'} — details could not be summarized`
   }
 }
+
+
+// HOW LONG HAS THIS BEEN GOING ON? The live status strip named the phase ("Writing experiment #3…")
+// but never how long it had been in it, so a build that had been silent for forty minutes read
+// exactly like one that started two seconds ago. That is the whole of the operator's report — "it
+// hangs for a very long time with no logs (or they are not visible)": the logs existed, the *clock*
+// did not, so there was nothing on screen to distinguish work from a stall.
+//
+// No new backend data is needed. `_on_node_building` already stamps `started: e.ts` on every marker,
+// and every event carries `ts`; this only reads them.
+// Bookkeeping events that must not move the live status. They are excluded from the
+// between-experiments label, else the strip flickers to "Thinking…" every time one lands right after
+// a node (coverage/cost/lessons/reflection all fire post-eval) — and from the CLOCK below, so the
+// two always describe the same moment.
+export const STATUS_NOISE = new Set([
+  'coverage_snapshot', 'llm_cost', 'reflection_note', 'diversity_archive',
+  'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building', 'command_ack',
+])
+
+const STATUS_AGE_MIN_S = 20      // below this the clock is noise, and a blinking number reads as churn
+
+export function liveStatusStartedAt(live, log = []) {
+  // The OLDEST in-flight build, not the newest: with several Developers writing at once the number
+  // that matters is how long the slowest one has been going, which is the one that stalls the batch.
+  const started = (Object.values(live?.buildings || {}).length
+    ? Object.values(live.buildings) : live?.building ? [live.building] : [])
+    .map(marker => Number(marker?.started))
+    .filter(value => Number.isFinite(value) && value > 0)
+  if (started.length) return Math.min(...started)
+  // Otherwise the phase began at the last event that MEANT something — the same noise filter the
+  // label itself uses, so the clock and the label can never describe different moments.
+  for (let i = log.length - 1; i >= 0; i--) {
+    const ts = Number(log[i]?.ts)
+    if (!STATUS_NOISE.has(log[i]?.type) && Number.isFinite(ts) && ts > 0) return ts
+  }
+  return null
+}
+
+export function liveStatusAgeLabel(live, log = [], now = Date.now() / 1000) {
+  const started = liveStatusStartedAt(live, log)
+  if (started == null) return ''
+  const seconds = Math.floor(now - started)
+  // A negative age is clock skew between the engine host and the browser, not a fact about the run.
+  if (!Number.isFinite(seconds) || seconds < STATUS_AGE_MIN_S) return ''
+  if (seconds < 90) return `${seconds}s`
+  if (seconds < 5400) return `${Math.round(seconds / 60)}m`
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.round((seconds % 3600) / 60)
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
+}

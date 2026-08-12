@@ -3247,3 +3247,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
    view toggle rather than claiming a row of its own. */
 .trace-attempt { display: inline-flex; align-items: center; gap: 4px; }
 .trace-attempt select { max-width: 15em; }
+
+/* Age of the current live phase, beside its label. Muted and small: it answers "is this stuck?",
+   which is a glance, not a reading. */
+.as-age { margin-left: 6px; font-variant-numeric: tabular-nums; }
