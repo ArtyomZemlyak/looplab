@@ -760,6 +760,47 @@ class CardSelectionProvenance(BaseModel):
         return self
 
 
+def surviving_work_item_aliases(card) -> list[str]:
+    """The ids folded into ``card`` that may still own EXECUTABLE work — the `merged_work_items` set.
+
+    Two very different things arrive through ``Card.aliases`` and this is the one place that tells them
+    apart, because the answer decides whether a card can ever be selected and aliases never expire:
+
+      * a WORK ITEM merged in (another native card, or any id some node names as its ``idea.card_id``).
+        The merged chain must stay CLOSED — ``_derive_cards`` keys ``own_work_items_by_card`` by the
+        CANONICAL id, so an alias's node is in the canonical card's own-work-item set by construction
+        and would otherwise launder the debug-anchor exemption on a node this card never authored.
+      * a pure research BELIEF merged in by the duplicate-belief consolidation cadence
+        (``engine/research_cadence.py::_maybe_merge_hypotheses``). It owns no action, no node and no
+        receipt; there is nothing to launder and nothing to be ambiguous about.
+
+    Conflating them is not a theoretical cost. On ``runs/rubertlite-dr-unified-v6`` the consolidator
+    folded eight paraphrases of one belief into their canonical at the 20:15 resume; two hours later
+    the Researcher minted a native card for that SAME statement, ``_card_identity_map`` bridged the
+    belief's hash onto the native id (that bridge is correct — it is one claim), and the eight
+    paraphrases arrived as aliases of a work item that had never been touched. Its blockers were
+    exactly ``['merged_work_items']``: native identity, one complete action owner, current freshness,
+    no work in flight — the queue's only candidate, permanently unselectable, with the second H200
+    idle. Consolidating duplicate beliefs must not kill the work item they name.
+
+    So the rule is a SUBTRACTION and it fails closed: an alias blocks unless the fold certified it a
+    belief in ``Card.belief_aliases``. A card's own seed-statement hash is likewise not another work
+    item — it is this card's belief spelling — and stays exempt exactly as before.
+
+    Pure and total over a Card or any duck-typed row, so the fold's blocker, the model's
+    fail-closed validator and the public projection can all state the rule ONCE.
+    """
+    aliases = getattr(card, "aliases", None) or []
+    beliefs = {alias for alias in (getattr(card, "belief_aliases", None) or [])
+               if isinstance(alias, str)}
+    seed_statement = getattr(card, "seed_statement", "") or ""
+    own_belief_id = hypothesis_id(seed_statement) if seed_statement else None
+    return [
+        alias for alias in aliases
+        if alias not in beliefs and (own_belief_id is None or alias != own_belief_id)
+    ]
+
+
 # Belief-vs-work-item identity (peer review): a Card is a WORK ITEM, but two cards that reuse the exact
 # hypothesis wording are ONE belief. The Researcher proposal feed (roles._state_brief) and foresight
 # ranking now consume `open_research_beliefs()` — `open_research_cards()` collapsed by seed-statement
@@ -870,6 +911,11 @@ class Card(BaseModel):
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away
     aliases: list[str] = Field(default_factory=list)    # ids folded INTO this canonical card
+    # The subset of `aliases` the FOLD proved owns no executable work — a pure research BELIEF that was
+    # consolidated into this card, never a work item. It is a CERTIFICATE, not a second audit list:
+    # `surviving_work_item_aliases` subtracts it, so an alias that is not certified keeps blocking. See
+    # that function for why the two kinds must be told apart and what conflating them cost.
+    belief_aliases: list[str] = Field(default_factory=list)
     dropped_reason: Optional[str] = None
     dropped_by: Optional[str] = None                    # operator | engine | freshness | novelty
     # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
@@ -952,12 +998,18 @@ class Card(BaseModel):
             and self.status == "proposed"
             and self.verdict == "open"
             and not self.evidence
-            and not [
-                alias for alias in self.aliases
-                if not self.seed_statement or alias != hypothesis_id(self.seed_statement)
-            ]
+            and not surviving_work_item_aliases(self)
             and self.dropped_reason is None
             and self.merged_into is None
         ):
             raise ValueError("selection_ready requires one fresh, native, unowned work item")
+        return self
+
+    @model_validator(mode="after")
+    def _belief_certificate_names_only_folded_ids(self) -> "Card":
+        # `belief_aliases` is what `surviving_work_item_aliases` SUBTRACTS, so a row certifying an id
+        # it never absorbed could exempt an alias that is not there yet but will be. Coherence is
+        # checkable without the log even though belief-ness is not, so check the half that is.
+        if not set(self.belief_aliases) <= set(self.aliases):
+            raise ValueError("belief_aliases must name ids folded into this card")
         return self

@@ -38,6 +38,7 @@ from looplab.core.cards import (
     normalize_researcher_footprint,
     normalize_steering_context as _normalize_steering_context,
     normalized_hypothesis_statement as _normalized_hypothesis_statement,
+    surviving_work_item_aliases as _surviving_work_item_aliases,
     transitional_card_action_digest_v1 as _transitional_card_action_digest_v1,
     transitional_card_ownership_receipt_v1 as _transitional_card_ownership_receipt_v1,
     valid_card_action_digest as _valid_card_action_digest,
@@ -86,6 +87,7 @@ legacy_card_action_digest_v1 = _legacy_card_action_digest_v1
 legacy_card_ownership_receipt_v1 = _legacy_card_ownership_receipt_v1
 normalize_steering_context = _normalize_steering_context
 normalized_hypothesis_statement = _normalized_hypothesis_statement
+surviving_work_item_aliases = _surviving_work_item_aliases
 transitional_card_action_digest_v1 = _transitional_card_action_digest_v1
 transitional_card_ownership_receipt_v1 = _transitional_card_ownership_receipt_v1
 valid_card_action_digest = _valid_card_action_digest

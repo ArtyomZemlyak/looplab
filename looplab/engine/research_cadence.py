@@ -790,6 +790,12 @@ class ResearchCadenceMixin:
         # filter cost, are now stated once at module level (`is_pure_belief`), because the append-site
         # bound `_admissible_beliefs` has to mean the SAME board this cadence merges. Merges emit
         # `hypothesis_merged` with card ids, which `_derive_cards` applies unchanged.
+        # The canonical this picks is a belief, but it need not STAY one: the Researcher may later
+        # mint a native work item for that exact statement, and `_card_identity_map` bridges the
+        # belief hash onto the native id — one claim, one row, which is what we want. The consequence
+        # (every paraphrase becomes an alias of a work item nobody has touched) is handled where it
+        # is decidable, at fold time: `core/cards.py::surviving_work_item_aliases` blocks only aliases
+        # that could own work. Nothing here needs to predict a card that does not exist yet.
         _pure_belief = is_pure_belief
         open_hyps = [c for c in state.open_research_cards()
                      if not c.selection_ready and _pure_belief(c)]

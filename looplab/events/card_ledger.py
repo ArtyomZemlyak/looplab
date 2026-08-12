@@ -51,6 +51,7 @@ from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGES
                      node_counts_toward_card_budget,
                      normalize_extra_metrics, normalize_researcher_footprint,
                      normalize_steering_context,
+                     surviving_work_item_aliases,
                      valid_card_action_digest, valid_researcher_footprint)
 
 # A module-private "key absent" marker for ``dict.get``, so an absent receipt stays distinguishable
@@ -1649,7 +1650,42 @@ def _card_control_ids(identity: _CardIdentity, ledger: _CardLedger) -> dict[str,
     return control_ids
 
 
-def _fold_merged_cards(identity: _CardIdentity, ledger: _CardLedger, aliases: _CardAliases,
+def _card_work_item_ids(st: RunState, ledger: _CardLedger) -> frozenset[str]:
+    """Every card id in this log that owns EXECUTABLE work, in every spelling it is reachable by.
+
+    The complement is what ``Card.belief_aliases`` certifies: a pure research belief. Read the
+    PRE-merge ledger tables — after ``_fold_merged_cards`` the per-member rows are summed onto the
+    canonical and the distinction is gone, which is exactly why the blocker could not make it.
+
+    Five durable ways to own work, so a fold that misses one cannot certify a work item as a belief:
+      * a node names the id as its ``idea.card_id``. THIS is the launder vector
+        (``own_work_items_by_card`` is keyed canonically), and it is read straight off ``st.nodes``
+        rather than off the ledger because a node whose card id was suppressed as conflicted/ambiguous
+        materializes no card row at all and would otherwise look belief-clean.
+      * an action-owner row (`card_added` with an action block, or a linked node).
+      * a `card_added` REGISTRATION, i.e. a native work-item identity of its own — even a thin one
+        whose action block never landed.
+      * ``action_owned_cards``, the backfilled-from-a-node action block.
+      * evidence: nodes already joined to it.
+    A ``hypothesis_added`` belief with no node and no receipt hits none of the five.
+    """
+    work_items: set[str] = set()
+    for node in st.nodes.values():
+        raw = getattr(node.idea, "card_id", None) if node.idea is not None else None
+        if isinstance(raw, str) and raw:
+            # Both spellings: `_link_cards_to_nodes` strips, `own_work_items_by_card` does not.
+            work_items.add(raw)
+            work_items.add(raw.strip())
+    work_items.update(cid for cid, row in ledger.action_owners.items() if row["count"] > 0)
+    work_items.update(cid for cid, row in ledger.card_registrations.items() if row["count"] > 0)
+    work_items.update(ledger.action_owned_cards)
+    work_items.update(cid for cid, card in ledger.cards.items() if card.evidence)
+    work_items.discard("")
+    return frozenset(work_items)
+
+
+def _fold_merged_cards(st: RunState, identity: _CardIdentity, ledger: _CardLedger,
+                       aliases: _CardAliases,
                        control_ids: dict[str, set[str]]) -> dict[str, set[str]]:
     """Union every alias chain onto its canonical Card. Returns the rewritten control-id map."""
     cards = ledger.cards
@@ -1662,6 +1698,8 @@ def _fold_merged_cards(identity: _CardIdentity, ledger: _CardLedger, aliases: _C
     merged_stmt = aliases.merged_stmt
     _canon = aliases.canon
     if alias:
+        # Answered BEFORE the union below rewrites the per-member tables it reads.
+        work_item_ids = _card_work_item_ids(st, ledger)
         folded: dict[str, Card] = {}
         folded_control_ids: dict[str, set[str]] = {}
         folded_origins: dict[str, str] = {}
@@ -1731,6 +1769,11 @@ def _fold_merged_cards(identity: _CardIdentity, ledger: _CardLedger, aliases: _C
                 )
                 if alias_id not in ambiguous_seeds:
                     target_controls.add(alias_id)
+        # …then certify, once, over the FINAL alias set (the bridge loop above appends to it). Sorted
+        # by construction, and a pure function of folded state — order-tolerant like every phase here.
+        for card in folded.values():
+            card.belief_aliases = [
+                alias_id for alias_id in card.aliases if alias_id not in work_item_ids]
         cards = folded
         control_ids = folded_control_ids
         card_origins = folded_origins
@@ -2302,8 +2345,13 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
     # reader will otherwise trust it: this does NOT stop a `card_merged` alias's node from laundering
     # the exemption. This map is keyed by `_canon(...)`, so an alias's node IS in the canonical
     # Card's own-work-item set by construction. What keeps a merged chain closed is the blocker pair
-    # it earns anyway — `merged_work_items` (any surviving work-item alias) and usually
-    # `action_owner_ambiguous` (>1 action owner) — both of which are unconditional.
+    # it earns anyway — `merged_work_items` and usually `action_owner_ambiguous` (>1 action owner).
+    # Both remain unconditional FOR A WORK ITEM, and note the second is not incidental to the first:
+    # a node is precisely what makes an alias a work item, and every node linked to a card id records
+    # an action owner for that id (`_link_cards_to_nodes`), so a launderable alias always pushes the
+    # owner count past one as well. `merged_work_items` is now keyed on `Card.belief_aliases` — the
+    # fold's certificate that an alias owns no work at all — so consolidating duplicate BELIEFS into
+    # a work item no longer disables it, while every alias that could carry a node still shuts it.
     # The intersection's real protection is narrower and worth keeping on its own terms: the
     # legacy STATEMENT-HASH join (step 2 above) attaches a node to a Card by hypothesis wording when
     # the node names no `card_id` at all. Such a node is evidence but was never this Card's work
@@ -2416,11 +2464,10 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
             blockers.append("work_owner_unknown")
         if c.status in {"dropped", "gated"} or c.verdict == "abandoned":
             blockers.append("card_terminal")
-        work_item_aliases = [
-            alias_id for alias_id in c.aliases
-            if not c.seed_statement or alias_id != hypothesis_id(c.seed_statement)
-        ]
-        if work_item_aliases:
+        # Only a surviving WORK-ITEM alias closes the chain. A consolidated pure belief does not —
+        # see `surviving_work_item_aliases` for the distinction, why the Card model can state it, and
+        # what folding the two together cost on `runs/rubertlite-dr-unified-v6`.
+        if surviving_work_item_aliases(c):
             blockers.append("merged_work_items")
         c.selection_blockers = blockers
         c.selection_ready = not blockers
@@ -2476,7 +2523,7 @@ def derive_cards(
     _link_cards_to_nodes(st, identity, ledger)
     aliases = _card_merge_aliases(st, identity)
     control_ids = _card_control_ids(identity, ledger)
-    control_ids = _fold_merged_cards(identity, ledger, aliases, control_ids)
+    control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_ids = _card_building_ids(st, ledger, aliases)

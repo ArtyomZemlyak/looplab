@@ -39,6 +39,7 @@ _FIELDS = (
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
+    "belief_aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
     "params", "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
@@ -69,7 +70,7 @@ _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "fo
 _NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
-_REF_LIST_FIELDS = {"aliases", "concept_tags", "lesson_refs", "claim_refs"}
+_REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", "claim_refs"}
 _INT_LIST_FIELDS = {"evidence", "parent_ids"}
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}
@@ -608,7 +609,18 @@ def _public_selection_lifecycle_is_coherent(card, out: dict) -> bool:
     if (not isinstance(evidence, (list, tuple)) or evidence
             or not isinstance(aliases, (list, tuple)) or len(aliases) > _MAX_ITEMS):
         return False
-    work_item_aliases = list(aliases)
+    # Belief-ness is a fact about the LOG (does any node name this id?) and this boundary has only the
+    # card, so unlike `shadow_id` below it cannot be re-derived here. Consume the fold's certificate —
+    # the same trust level this function already extends to `identity`/`selection_provenance` — but
+    # bound it, and subtract rather than allow-list, so an UNCERTIFIED alias still sinks the claim.
+    belief_aliases = _field(card, "belief_aliases")
+    if belief_aliases is _SKIP or belief_aliases is None:
+        belief_aliases = ()
+    if not isinstance(belief_aliases, (list, tuple)) or len(belief_aliases) > _MAX_ITEMS:
+        return False
+    certified = {alias for alias in belief_aliases if isinstance(alias, str)}
+    work_item_aliases = [alias for alias in aliases
+                         if not isinstance(alias, str) or alias not in certified]
     if work_item_aliases:
         seed_statement = _field(card, "seed_statement")
         if (not isinstance(seed_statement, str) or not seed_statement

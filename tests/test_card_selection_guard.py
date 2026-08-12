@@ -1035,6 +1035,156 @@ def test_an_alias_node_is_in_the_canonical_cards_own_work_items_and_is_closed_an
     assert canonical.selection_ready is False
     assert "merged_work_items" in canonical.selection_blockers
     assert "action_owner_ambiguous" in canonical.selection_blockers
+    # and the alias is NOT certified a belief — it owns a node, which is the whole launder vector
+    assert canonical.belief_aliases == []
+
+
+def _belief(statement: str):
+    return ("hypothesis_added", {"statement": statement, "source": "researcher"})
+
+
+def _r_drop_board():
+    """The live shape from `runs/rubertlite-dr-unified-v6`, in six rows.
+
+    The consolidator merges near-duplicate BELIEFS with each other (it never names a native card —
+    `_maybe_merge_hypotheses` filters the board by `is_pure_belief`), and here the canonical it picks
+    is a belief the Researcher LATER mints a work item for, word for word. `_card_identity_map` then
+    bridges that belief's hash onto the native id — correctly, it is one claim — and every paraphrase
+    arrives as an alias of a card that has never been touched.
+    """
+    seed = "Add R-Drop (alpha=0.5, symmetric KL between two dropout passes) on the contrastive loss."
+    paraphrases = [
+        "port r-drop onto the in-batch contrastive loss",
+        "once the baseline lands, run r-drop on top of the contrastive loss",
+    ]
+    return seed, [
+        *_baseline(),
+        _belief(seed),
+        *(_belief(text) for text in paraphrases),
+        ("hypothesis_merged", {
+            "canonical": hypothesis_id(seed),
+            "aliases": [hypothesis_id(text) for text in paraphrases],
+            "statement": seed}),
+        _native_card_added("card-3", seed),
+    ], [hypothesis_id(text) for text in paraphrases]
+
+
+def test_consolidating_duplicate_beliefs_does_not_disable_the_work_item_they_name():
+    """The defect measured on the LIVE run: the queue's only candidate, permanently unselectable.
+
+    `card-3` was native, owned one complete action, was fresh, and had no work in flight — its
+    blockers were exactly `['merged_work_items']`, earned for eight paraphrases of its OWN belief that
+    a merge two hours older had folded onto its identity. Aliases never expire, so consolidating
+    duplicate research beliefs killed the work item they named, and the run went serial on two H200s
+    with nothing else selectable.
+
+    Belief-ness is provable at fold time — a belief owns no node, no action and no receipt — so the
+    two cases are distinguished rather than the blocker weakened.
+    """
+    seed, rows, paraphrase_ids = _r_drop_board()
+    state = fold(_events(rows))
+
+    card = state.cards["card-3"]
+    assert card.identity.kind == "native"
+    assert card.aliases == sorted(paraphrase_ids), "the paraphrases still land on the work item…"
+    assert card.belief_aliases == sorted(paraphrase_ids), "…certified, every one, as pure beliefs"
+    assert card.selection_blockers == [] and card.selection_ready is True
+    # the belief rows are gone from the board — consolidation still consolidated
+    assert not [cid for cid in state.cards if cid in paraphrase_ids]
+    assert hypothesis_id(seed) not in state.cards
+
+    # the same claim survives the model's own fail-closed validator and the public wire boundary,
+    # which each re-state the rule and would otherwise strip the readiness they cannot verify.
+    assert Card.model_validate(card.model_dump(mode="json")).selection_ready is True
+    wire = public_cards(state.cards)["card-3"]
+    assert wire["selection_ready"] is True
+    assert wire["belief_aliases"] == sorted(paraphrase_ids)
+
+
+def test_the_belief_certificate_is_order_tolerant_across_the_mint_merge_splice():
+    """Invariant 5. The merge is position-keyed (`canon_at`), the certificate is not — it is a pure
+    function of folded state — so minting the native card BEFORE the consolidation must fold to the
+    identical answer, not merely to a still-selectable one."""
+    seed, rows, _ = _r_drop_board()
+    mint = rows[-1]
+    merge = rows[-2]
+    spliced = [*rows[:-2], mint, merge]
+
+    after, before = fold(_events(rows)), fold(_events(spliced))
+    assert [card.model_dump(mode="json") for _, card in sorted(after.cards.items())] == [
+        card.model_dump(mode="json") for _, card in sorted(before.cards.items())]
+    assert before.cards["card-3"].selection_ready is True
+
+
+def test_an_alias_that_could_own_work_is_never_certified_a_belief():
+    """The control the blocker exists for, on the two shapes the readiness gate does NOT otherwise
+    catch — because "merged into another work item" has to keep meaning something.
+
+    A merged-in WORK ITEM usually also pushes `action_owner_count` past one (every node linked to a
+    card id records an owner for it), and that is what shuts the classic laundering case. These two
+    do not, and `merged_work_items` is the only thing standing on them:
+
+      * a THIN native `card_added` — a work-item identity of its own whose action block never landed.
+        It contributes no action owner at all, so the canonical still folds to exactly one.
+      * a GHOST id: suppressed as a conflicted native identity, so it materializes no card row and
+        records no owner, while a real node still names it as its `idea.card_id` — which is precisely
+        what puts that node in the canonical's `own_work_items_by_card` set.
+    """
+    thin = fold(_events([
+        *_baseline(),
+        _native_card_added("card-9", "try a bounded improvement"),
+        ("card_added", {"id": "thin-alias", "source": "engine",
+                        "statement": "a second work item whose action block never landed"}),
+        ("card_merged", {"canonical": "card-9", "aliases": ["thin-alias"]}),
+    ]))
+    canonical = thin.cards["card-9"]
+    assert canonical.aliases == ["thin-alias"] and canonical.belief_aliases == []
+    assert canonical.selection_provenance.action_owner_count == 1, "no ambiguity to fall back on"
+    assert canonical.selection_blockers == ["merged_work_items"]
+    assert canonical.selection_ready is False
+    assert public_cards(thin.cards)["card-9"]["selection_ready"] is False
+
+    ghost = fold(_events([
+        *_failed_node_2(),
+        _native_operator_card_added("debug-canon", "repair the failed candidate", "debug", [2]),
+        # one id, two statements: `_card_identity_map` suppresses it, so no card row and no owner row
+        _native_operator_card_added("ghost-alias", "ghost one", "debug", [2]),
+        _native_operator_card_added("ghost-alias", "ghost two", "debug", [2]),
+        *_speculative_build(3, "ghost-alias", "debug", [2]),
+        ("card_merged", {"canonical": "debug-canon", "aliases": ["ghost-alias"]}),
+    ]))
+    canonical = ghost.cards["debug-canon"]
+    assert "ghost-alias" not in ghost.cards and ghost.nodes[3].idea.card_id == "ghost-alias"
+    assert canonical.aliases == ["ghost-alias"] and canonical.belief_aliases == []
+    assert canonical.selection_provenance.action_owner_count == 1
+    assert "merged_work_items" in canonical.selection_blockers
+    assert canonical.selection_ready is False
+
+
+def test_the_alias_rule_is_one_statable_subtraction_that_fails_closed():
+    """Three consumers state this rule — the fold's blocker, `Card`'s fail-closed validator and the
+    public projection — so it is ONE function with a truth table rather than three re-derivations.
+
+    The direction matters: an alias blocks unless the fold CERTIFIED it a belief. An uncertified
+    alias (an older log with no certificate, a future alias kind nobody classified) keeps blocking.
+    """
+    from looplab.core.models import surviving_work_item_aliases
+
+    seed = "one belief"
+    def card(**kw):
+        return Card(id="card-1", statement=seed, seed_statement=seed, **kw)
+
+    assert surviving_work_item_aliases(card()) == []
+    # certified beliefs are subtracted; the card's own belief spelling was never another work item
+    assert surviving_work_item_aliases(
+        card(aliases=["b1", "b2"], belief_aliases=["b1", "b2"])) == []
+    assert surviving_work_item_aliases(card(aliases=[hypothesis_id(seed)])) == []
+    # …everything else survives, including a half-certified merge and an uncertified legacy row
+    assert surviving_work_item_aliases(card(aliases=["b1", "w1"], belief_aliases=["b1"])) == ["w1"]
+    assert surviving_work_item_aliases(card(aliases=["w1", "w2"])) == ["w1", "w2"]
+    # a certificate can only name ids this card actually absorbed
+    with pytest.raises(ValueError):
+        card(aliases=["b1"], belief_aliases=["b1", "never-folded-in"])
 
 
 def test_the_fold_never_imports_search_which_is_why_the_predicate_lives_in_core():
