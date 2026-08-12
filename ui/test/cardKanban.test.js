@@ -188,13 +188,30 @@ test('Card evidence chips retain the node-selection callback contract', async ()
   assert.match(card, /onClose\?\.\(\)/)
 })
 
-test('Card belief, retry, and research identities are visible instead of wire-only', async () => {
-  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
-  const card = source.slice(source.indexOf('function _CardKanbanCard'), source.indexOf('function _CardKanban('))
-  assert.match(card, /card\.belief_id/)
-  assert.match(card, /card\.retry_of/)
-  assert.match(card, /card\.claim_refs/)
-  assert.match(card, /Open Research Atlas/)
+test('Card belief, retry, and research identities are visible instead of wire-only', () => {
+  // Rendered, not pinned. Reading CardBoard.jsx for `card.belief_id` proves the identifier is
+  // MENTIONED in the file — a commented-out block satisfies that just as well, and it says nothing
+  // about whether an operator ever sees the value. Put the fields on a real card and read the markup.
+  const beliefId = 'a'.repeat(64)
+  const cards = {
+    'card-0': { status: 'proposed', statement: 'the original', selection_ready: false, evidence: [] },
+    'card-1': {
+      status: 'proposed', statement: 'the retry', selection_ready: false, evidence: [],
+      belief_id: beliefId, retry_of: 'card-0', claim_refs: ['claim:v1:' + 'b'.repeat(64)],
+    },
+  }
+  const markup = renderToStaticMarkup(React.createElement(HypothesisBoard, {
+    state: {
+      cards, hypotheses: {},
+      cards_projection: { source_valid: true, total: 2, returned: 2, omitted: 0, complete: true, items: {} },
+    },
+    runId: 'run', onClose() {}, onSelect() {},
+  }))
+
+  assert.match(markup, /belief a{8}/,
+    'the belief identity must be shown to the operator, and shortened rather than dumped')
+  assert.match(markup, /retry of card-0/, 'a retry must name the card it retries')
+  assert.match(markup, /Open Research Atlas/, 'a card with claim_refs must offer its research')
 })
 
 test('Card controls use only generation-fenced command helpers and never client provenance', async () => {
