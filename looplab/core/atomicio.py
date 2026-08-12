@@ -22,19 +22,20 @@ from pathlib import Path
 # Parsed defensively: this module is imported transitively everywhere, so a garbage override
 # (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
 def file_identity(info: os.stat_result) -> tuple[int, ...]:
-    """The canonical "is this still the same file, unchanged?" tuple for a `stat`/`lstat`/`fstat`.
+    """The canonical portable stat identity tuple for a `stat`/`lstat`/`fstat`.
 
-    A read-then-verify sequence (open the receipt, read it, re-stat, compare) is only sound if the
-    comparison notices every way the bytes could have been swapped underneath it. Each field earns
-    its place:
+    On POSIX this is the project's ordinary "same file, unchanged?" fence. On Windows, Python exposes
+    creation time as ``st_ctime_ns``; callers that must detect same-file content mutation after mtime
+    restoration need descriptor-bound ``FILE_BASIC_INFO.ChangeTime`` (as SpanIndex does), a content
+    digest, or a fail-closed fallback. Each portable stat field still earns its place:
 
       * ``st_dev``/``st_ino`` — a REPLACEMENT: `os.replace` gives the name a different inode, so a
         same-size same-mtime swap is invisible without these.
       * ``st_size`` — the cheapest real change.
       * ``st_mtime_ns`` — nanoseconds, not seconds: a same-size rewrite inside one second is
         invisible to `st_mtime`, and on a fast local disk that is the COMMON case, not a corner.
-      * ``st_ctime_ns`` — catches a same-size rewrite that preserved mtime (a restore, a `touch -r`,
-        or an A/B/A edit); on Windows it is creation time, which serves the same purpose here.
+      * ``st_ctime_ns`` — on POSIX, catches a same-size rewrite that preserved mtime (a restore, a
+        `touch -r`, or an A/B/A edit); on Windows it is creation time and is not mutation proof.
       * ``st_file_attributes`` — Windows only (``getattr`` default 0 elsewhere): a file that gained
         a reparse point is no longer the file that was validated.
 

@@ -119,6 +119,29 @@ def test_full_span_roundtrip_by_offset(run):
     assert idx.full_span("nope") is None
 
 
+def test_full_span_same_id_body_rewrite_fails_unavailable_on_row_digest(run):
+    """A same-length row can keep its span_id while its diagnostic body becomes different evidence."""
+    _rd, source, _spans = run
+    idx = get_index(source)
+    row = idx.by_sid["g0_1"]
+    off, length = idx.meta[row]
+    before = source.stat()
+    with open(source, "r+b") as stream:
+        stream.seek(off)
+        original = stream.read(length)
+        rewritten = original.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
+        assert len(rewritten) == len(original) and rewritten != original
+        assert orjson.loads(rewritten)["span_id"] == orjson.loads(original)["span_id"] == "g0_1"
+        stream.seek(off)
+        stream.write(rewritten)
+        stream.flush()
+        os.fsync(stream.fileno())
+    assert source.stat().st_ino == before.st_ino and source.stat().st_size == before.st_size
+
+    with pytest.raises(OSError, match="source digest"):
+        idx.full_span("g0_1")
+
+
 def test_conversation_identical_via_node_offsets(run):
     rd, sp, spans = run
     for nid in (0, 1):
@@ -127,6 +150,59 @@ def test_conversation_identical_via_node_offsets(run):
         got = build_conversation(ST, idx.full_spans_for_node(nid), nid)
         assert _canon(ref) == _canon(got)
         assert got["stages"]                                     # non-empty (sanity)
+
+
+def test_node_window_revision_tracks_full_rows_but_ignores_foreign_appends(run):
+    """The conversation cursor is exact for one selected window, not global spans mtime."""
+    from looplab.core.tracing import JsonlSpanExporter
+
+    rd, source, _spans = run
+    idx = get_index(source)
+    original, total = idx.node_window_revision(0, 512, generation=0)
+    assert total == len(_spans_for(0, "tr0"))
+
+    exporter = JsonlSpanExporter(source)
+    exporter.export(_gen(1, "tr1", "foreign-late", "root1", 20))
+    foreign, foreign_total = get_index(source).node_window_revision(0, 512, generation=0)
+    assert (foreign, foreign_total) == (original, total)
+
+    exporter.export(_gen(0, "tr0", "own-late", "root0", 21))
+    own, own_total = get_index(source).node_window_revision(0, 512, generation=0)
+    assert own != original and own_total == total + 1
+
+    # A cold reader can derive the same candidate, but cannot use untrusted persisted digests for a
+    # conditional response until that exact window has been checked against source bytes.
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    cold_idx = get_index(source)
+    cold, cold_total, conditional_ok = cold_idx.node_window_snapshot(
+        0, 512, generation=0)
+    assert (cold, cold_total) == (own, own_total)
+    assert conditional_ok is False
+    assert cold_idx.full_spans_for_node(0, 512, generation=0)
+    assert cold_idx.node_window_snapshot(0, 512, generation=0) == (
+        own, own_total, True)
+
+
+def test_node_window_revision_fails_closed_across_same_inode_and_atomic_rewrites(run):
+    """Full-row rewrites rotate the revision even when ids/lengths or all bytes stay the same."""
+    _rd, source, _spans = run
+    before = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    raw = source.read_bytes()
+    rewritten = raw.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
+    assert len(rewritten) == len(raw) and rewritten != raw
+    with open(source, "r+b") as stream:
+        stream.write(rewritten)
+        stream.flush()
+        os.fsync(stream.fileno())
+    after_in_place = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    assert after_in_place != before
+
+    replacement = source.with_name("spans.replacement")
+    replacement.write_bytes(source.read_bytes())
+    os.replace(replacement, source)
+    after_replace = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    assert after_replace != after_in_place
 
 
 def test_full_node_spans_filter_generation_before_the_window(tmp_path):
@@ -583,6 +659,25 @@ def test_corrupt_persisted_index_falls_back_to_rebuild(run):
     assert _canon(ref) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
 
 
+def test_persisted_last_row_digest_mismatch_falls_back_to_source_rebuild(run):
+    """A damaged derived digest is rejected by the cold spotcheck, not exposed as read failure."""
+    rd, source, _spans = run
+    get_index(source)
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    index_path = rd / "spans.index.jsonl"
+    lines = [line for line in index_path.read_bytes().splitlines() if line]
+    last = orjson.loads(lines[-1])
+    last["_h"] = "0" * 64
+    lines[-1] = orjson.dumps(last)
+    index_path.write_bytes(b"\n".join(lines) + b"\n")
+
+    rebuilt = get_index(source)
+
+    assert rebuilt.row_digests[-1] != "0" * 64
+    assert rebuilt.full_span(rebuilt.light[-1]["span_id"]) is not None
+
+
 def test_persisted_index_with_wrong_identity_is_rejected(run):
     rd, sp, spans = run
     get_index(sp)
@@ -654,7 +749,8 @@ def test_same_inode_non_growth_rewrite_rebuilds_when_coverage_lags(
     assert [span["span_id"] for span in refreshed.light_spans()] == ["new-a", "last-z"]
 
 
-def test_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp_path):
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses descriptor ChangeTime, tested below")
+def test_posix_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp_path):
     source = tmp_path / "spans.jsonl"
 
     def row(span_id, start):
@@ -687,6 +783,114 @@ def test_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp_path)
     assert refreshed is not initial
     assert refreshed.full_span("old-mid") is None
     assert refreshed.full_span("new-mid") is not None
+
+
+def test_windows_change_time_is_descriptor_bound_and_controls_warm_reuse(run, monkeypatch):
+    """The mocked WinAPI token, not Windows creation time, is the mutation authority."""
+    _rd, source, _spans = run
+    state = {"token": 101}
+    descriptors = []
+
+    def change_time(fd):
+        descriptors.append(fd)
+        return state["token"]
+
+    monkeypatch.setattr(span_index, "_IS_WINDOWS", True)
+    monkeypatch.setattr(span_index, "_windows_change_time", change_time)
+    first = get_index(source)
+    epoch = first.source_epoch
+
+    assert first.source_change_token == 101 and epoch is not None
+    assert get_index(source) is first
+    state["token"] = 102
+    changed = get_index(source)
+
+    assert changed is not first
+    assert changed.source_change_token == 102
+    assert changed.source_epoch is not None and changed.source_epoch != epoch
+    assert descriptors and all(isinstance(fd, int) for fd in descriptors)
+
+
+def test_unavailable_windows_change_time_disables_warm_and_persisted_reuse(
+        run, monkeypatch):
+    """No proven ChangeTime means rebuild-per-observation and deliberately unstable validators."""
+    rd, source, _spans = run
+    state = {"token": 201}
+    monkeypatch.setattr(span_index, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        span_index, "_windows_change_time", lambda _fd: state["token"])
+    trusted = get_index(source)
+    persisted = rd / "spans.index.jsonl"
+    assert persisted.exists() and trusted.source_epoch is not None
+
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    state["token"] = None
+
+    def persisted_reuse_forbidden(*_args, **_kwargs):
+        raise AssertionError("an unproven source must not load a persisted index")
+
+    monkeypatch.setattr(span_index, "_load_persisted", persisted_reuse_forbidden)
+    first = get_index(source)
+    first_revision = first.node_window_revision(0, 512, generation=0)[0]
+    second = get_index(source)
+    second_revision = second.node_window_revision(0, 512, generation=0)[0]
+
+    assert first is not trusted and second is not first
+    assert first.source_epoch is None and second.source_epoch is None
+    assert first.source_change_token is None and second.source_change_token is None
+    assert second_revision != first_revision
+
+
+@pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])
+def test_windows_growth_rebuilds_before_trusting_creation_time_receipts(
+        run, monkeypatch, cold_reload):
+    """Prefix rewrite + legitimate append cannot stitch through Windows creation-time receipts."""
+    from looplab.core.tracing import JsonlSpanExporter
+
+    _rd, source, _spans = run
+    state = {"token": 301}
+    monkeypatch.setattr(span_index, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        span_index, "_windows_change_time", lambda _fd: state["token"])
+    initial = get_index(source)
+    original_revision = initial.node_window_revision(0, 512, generation=0)[0]
+    row = initial.by_sid["g0_1"]
+    off, length = initial.meta[row]
+    before = source.stat()
+    with open(source, "r+b") as stream:
+        stream.seek(off)
+        original = stream.read(length)
+        rewritten = original.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
+        assert len(rewritten) == len(original) and rewritten != original
+        stream.seek(off)
+        stream.write(rewritten)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    rewritten_stat = source.stat()
+    assert (rewritten_stat.st_ino, rewritten_stat.st_size, rewritten_stat.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns)
+
+    # This is a real exporter append with its normal durable receipt. On Windows that receipt's ctime
+    # fields are creation time, so it cannot prove that the old prefix above was unchanged.
+    JsonlSpanExporter(source).export(_gen(1, "tr1", "foreign-after-rewrite", "root1", 30))
+    state["token"] = 302
+    if cold_reload:
+        with span_index._CACHE_LOCK:
+            span_index._CACHE.clear()
+
+    def receipt_reuse_forbidden(*_args, **_kwargs):
+        raise AssertionError("Windows growth must rebuild before receipt-based top-up")
+
+    monkeypatch.setattr(
+        span_index, "_validated_append_transition", receipt_reuse_forbidden)
+    refreshed = get_index(source)
+
+    assert refreshed is not initial
+    assert refreshed.node_window_revision(0, 512, generation=0)[0] != original_revision
+    assert (refreshed.full_span("g0_1") or {})["attributes"]["output"].startswith("PPPP")
+    assert refreshed.full_span("foreign-after-rewrite") is not None
 
 
 @pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])
@@ -1185,6 +1389,306 @@ def test_endpoints_serve_through_the_index(tmp_path):
     assert client.get("/api/runs/demo/spans/g0_1").json()["attributes"] == {}   # node 0's span is gone
 
 
+def test_conversation_conditional_read_is_exact_for_node_lifecycle_and_window(
+        tmp_path, monkeypatch):
+    """An unchanged poll is bodyless/cheap without borrowing another representation's validator."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.core.tracing import JsonlSpanExporter
+    from looplab.events import traceview
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    path = "/api/runs/demo/nodes/0/conversation"
+    params = {"attempt": 0, "limit": 512}
+    first = client.get(path, params=params)
+
+    assert first.status_code == 200
+    assert first.headers["cache-control"] == "no-store"
+    etag = first.headers["etag"]
+    assert etag.startswith('W/"llconv1-') and etag.endswith('"')
+    assert first.json()["cursor"] == etag
+
+    builds = 0
+    real_build = traceview.build_conversation
+
+    def counted_build(*args, **kwargs):
+        nonlocal builds
+        builds += 1
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(traceview, "build_conversation", counted_build)
+    exporter = JsonlSpanExporter(rd / "spans.jsonl")
+
+    # The global file stat changes, but this node's selected full rows do not: its validator and the
+    # zero-build fast path remain valid while a parallel node appends.
+    exporter.export(_gen(1, "tr1", "foreign-late", "root1", 20))
+    unchanged = client.get(path, params=params, headers={"If-None-Match": etag})
+    assert unchanged.status_code == 304
+    assert unchanged.content == b""
+    assert unchanged.headers["etag"] == etag
+    assert unchanged.headers["cache-control"] == "no-store"
+    assert builds == 0
+
+    # GET uses weak comparison, including a comma-list carrying a strong spelling of the same tag.
+    listed = client.get(path, params=params, headers={
+        "If-None-Match": f'"not-this-one", {etag[2:]}'})
+    assert listed.status_code == 304 and listed.content == b""
+    assert builds == 0
+
+    # Invalid list syntax is a miss, never permission to send a bodyless response.
+    malformed = client.get(path, params=params, headers={
+        "If-None-Match": f"{etag} trailing-garbage"})
+    assert malformed.status_code == 200
+    assert malformed.headers["etag"] == etag
+    assert malformed.json()["cursor"] == etag
+    assert builds == 1
+
+    # A selected-row append and a different settled span window are different representations.
+    exporter.export(_gen(0, "tr0", "own-late", "root0", 21))
+    changed = client.get(path, params=params, headers={"If-None-Match": etag})
+    assert changed.status_code == 200
+    changed_etag = changed.headers["etag"]
+    assert changed_etag != etag and changed.json()["cursor"] == changed_etag
+    assert builds == 2
+
+    wider = client.get(path, params={"attempt": 0, "limit": 1024},
+                       headers={"If-None-Match": changed_etag})
+    assert wider.status_code == 200
+    assert wider.headers["etag"] != changed_etag
+    assert wider.json()["cursor"] == wider.headers["etag"]
+    assert builds == 3
+
+    # Lifecycle resolution precedes conditional success. An abandoned attempt never gets a 304,
+    # even if its bytes and validator still exist in the append log.
+    EventStore(rd / "events.jsonl").append(
+        "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    stale = client.get(path, params=params, headers={"If-None-Match": changed_etag})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "node_attempt_changed"
+    assert builds == 3
+
+
+def test_conversation_cold_persisted_window_requires_source_verification_before_304(
+        tmp_path, monkeypatch):
+    """A crafted cold accelerator cannot replay an old ETag without an exact source-row read."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.core.trace_files import open_private_trace_file
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    source = rd / "spans.jsonl"
+    index_path = rd / "spans.index.jsonl"
+    path = "/api/runs/demo/nodes/0/conversation"
+    params = {"attempt": 0, "limit": 512}
+    client = TestClient(make_app(tmp_path))
+    seed = client.get(path, params=params)
+    old_etag = seed.headers["etag"]
+    assert seed.status_code == 200 and index_path.exists()
+
+    cold_loads = []
+    native_load_persisted = span_index._load_persisted
+
+    def observed_load(*args, **kwargs):
+        loaded = native_load_persisted(*args, **kwargs)
+        cold_loads.append(loaded)
+        return loaded
+
+    monkeypatch.setattr(span_index, "_load_persisted", observed_load)
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+
+    # The candidate bytes are unchanged, but a fresh process has only untrusted persisted hashes.
+    # It must send one verifying 200; that read promotes the exact window, so the next poll is cheap.
+    first_cold = client.get(
+        path, params=params, headers={"If-None-Match": old_etag})
+    assert first_cold.status_code == 200 and first_cold.content
+    assert first_cold.headers["etag"] == old_etag
+    assert first_cold.json()["cursor"] == old_etag
+    assert cold_loads and cold_loads[-1] is not None
+    assert cold_loads[-1]._source_derived is False
+
+    verified = client.get(path, params=params, headers={"If-None-Match": old_etag})
+    assert verified.status_code == 304 and verified.content == b""
+
+    # Rewrite one selected non-tail row in place, but craft the untrusted persisted header to match
+    # the new descriptor metadata while retaining its old epoch/digests. The unchanged final row
+    # keeps the loader's O(1) spotcheck green — this is the exact historical false-304 shape.
+    current = get_index(source)
+    row = current.by_sid["g0_1"]
+    off, length = current.meta[row]
+    before = source.stat()
+    with open(source, "r+b") as stream:
+        stream.seek(off)
+        raw = stream.read(length)
+        rewritten = raw.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
+        assert len(rewritten) == len(raw) and rewritten != raw
+        stream.seek(off)
+        stream.write(rewritten)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with open_private_trace_file(source) as stream:
+        source_stat = os.fstat(stream.fileno())
+        change_token = span_index._source_change_token(stream, source_stat)
+
+    lines = [line for line in index_path.read_bytes().splitlines() if line]
+    header = orjson.loads(lines[0])
+    retained_epoch = header["source_epoch"]
+    header.update({
+        "source_size": source_stat.st_size,
+        "mtime_ns": source_stat.st_mtime_ns,
+        "ctime_ns": source_stat.st_ctime_ns,
+        "source_change_token": change_token,
+    })
+    assert header["source_epoch"] == retained_epoch
+    lines[0] = orjson.dumps(header)
+    index_path.write_bytes(b"\n".join(lines) + b"\n")
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    cold_loads.clear()
+
+    tampered = client.get(path, params=params, headers={"If-None-Match": old_etag})
+
+    # The epoch/header binding rejects the crafted cold accelerator before its unchanged-tail
+    # spotcheck can make it authoritative. Rebuilding from source yields the changed representation.
+    assert cold_loads and cold_loads[-1] is None
+    assert tampered.status_code == 200 and tampered.content
+    assert (tampered.json().get("projection") or {}).get("unavailable") is not True
+    changed_etag = tampered.headers["etag"]
+    assert changed_etag != old_etag and tampered.json()["cursor"] == changed_etag
+    assert "PPPP" in tampered.text
+
+    # Membership is the harder adversarial shape: all OLD selected rows remain byte-exact, while a
+    # formerly foreign non-tail row becomes selected. Selected-only verification cannot discover it;
+    # the descriptor-bound cold epoch must force a source rebuild before the old ETag is considered.
+    rebuilt = get_index(source)
+    old_total = rebuilt.node_span_count(0, generation=0)
+    foreign_row = rebuilt.by_sid["g1_0"]
+    foreign_off, foreign_length = rebuilt.meta[foreign_row]
+    before = source.stat()
+    with open(source, "r+b") as stream:
+        stream.seek(foreign_off)
+        raw = stream.read(foreign_length)
+        rewritten = raw.replace(b'"node_id":1', b'"node_id":0', 1)
+        assert len(rewritten) == len(raw) and rewritten != raw
+        stream.seek(foreign_off)
+        stream.write(rewritten)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+    with open_private_trace_file(source) as stream:
+        source_stat = os.fstat(stream.fileno())
+        change_token = span_index._source_change_token(stream, source_stat)
+    lines = [line for line in index_path.read_bytes().splitlines() if line]
+    header = orjson.loads(lines[0])
+    header.update({
+        "source_size": source_stat.st_size,
+        "mtime_ns": source_stat.st_mtime_ns,
+        "ctime_ns": source_stat.st_ctime_ns,
+        "source_change_token": change_token,
+    })
+    lines[0] = orjson.dumps(header)
+    index_path.write_bytes(b"\n".join(lines) + b"\n")
+    with span_index._CACHE_LOCK:
+        span_index._CACHE.clear()
+    cold_loads.clear()
+
+    membership_changed = client.get(
+        path, params=params, headers={"If-None-Match": changed_etag})
+
+    assert cold_loads and cold_loads[-1] is None
+    assert membership_changed.status_code == 200 and membership_changed.content
+    assert membership_changed.headers["etag"] != changed_etag
+    assert get_index(source).node_span_count(0, generation=0) == old_total + 1
+
+
+def test_conversation_source_change_during_projection_never_labels_a_raced_body(
+        tmp_path, monkeypatch):
+    """The post-build source CAS must not attach a new/current ETag to an older assembled body."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.core.tracing import JsonlSpanExporter
+    from looplab.events import traceview
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    exporter = JsonlSpanExporter(rd / "spans.jsonl")
+    real_build = traceview.build_conversation
+    appended = False
+
+    def append_after_build(*args, **kwargs):
+        nonlocal appended
+        body = real_build(*args, **kwargs)
+        if not appended:
+            appended = True
+            exporter.export(_gen(0, "tr0", "raced-own-row", "root0", 23))
+        return body
+
+    monkeypatch.setattr(traceview, "build_conversation", append_after_build)
+    response = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/nodes/0/conversation", params={"attempt": 0, "limit": 512})
+
+    assert appended is True and response.status_code == 200
+    assert "etag" not in response.headers
+    assert response.json()["cursor"] is None
+
+
+def test_conversation_windows_change_time_aba_between_snapshots_never_returns_304(
+        tmp_path, monkeypatch):
+    """Same-inode/same-size/restored-mtime mutation after the first match invalidates the 304."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    source = rd / "spans.jsonl"
+    state = {"token": 401}
+    monkeypatch.setattr(span_index, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        span_index, "_windows_change_time", lambda _fd: state["token"])
+    client = TestClient(make_app(tmp_path))
+    path = "/api/runs/demo/nodes/0/conversation"
+    params = {"attempt": 0, "limit": 512}
+    first = client.get(path, params=params)
+    old_etag = first.headers["etag"]
+    real_snapshot = span_index.SpanIndex.node_window_snapshot
+    observed = {}
+
+    def mutate_after_first_match(index, *args, **kwargs):
+        snapshot = real_snapshot(index, *args, **kwargs)
+        if not observed:
+            before = source.stat()
+            raw = source.read_bytes()
+            rewritten = raw.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
+            assert len(rewritten) == len(raw) and rewritten != raw
+            with open(source, "r+b") as stream:
+                stream.write(rewritten)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+            after = source.stat()
+            observed.update(before=before, after=after)
+            state["token"] = 402
+        return snapshot
+
+    monkeypatch.setattr(
+        span_index.SpanIndex, "node_window_snapshot", mutate_after_first_match)
+    raced = client.get(path, params=params, headers={"If-None-Match": old_etag})
+
+    before, after = observed["before"], observed["after"]
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns)
+    assert raced.status_code == 200 and raced.content
+    assert raced.headers["etag"] != old_etag
+    assert raced.json()["cursor"] == raced.headers["etag"]
+    assert "PPPP" in raced.text
+
+
 def test_node_trace_endpoint_rejects_abandoned_attempt_and_reads_current_exactly(
         tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
@@ -1321,7 +1825,7 @@ def test_conversation_rechecks_run_generation_when_node_attempt_is_unchanged(
     monkeypatch.setattr(commands, "run_generation", generation_moves_after_read)
     raced = client.get("/api/runs/demo/nodes/0/conversation", params={
         "attempt": 0, "expected_generation": expected,
-    })
+    }, headers={"If-None-Match": current.headers["etag"]})
     assert raced.status_code == 409
     detail = raced.json()["detail"]
     assert detail["code"] == "run_generation_changed"
@@ -1447,6 +1951,86 @@ def test_trace_cache_rejects_same_size_same_mtime_file_replacement(tmp_path):
     assert "zr0" in rendered and "tr0" not in rendered
 
 
+def test_trace_cache_uses_descriptor_change_time_for_windows_same_file_rewrite(
+        tmp_path, monkeypatch):
+    """Windows creation time must not authorize reuse after an in-place A/B rewrite."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.serve import appstate
+    from looplab.serve.server import make_app
+
+    rd = _http_run(tmp_path)
+    sp = rd / "spans.jsonl"
+    state = {"token": 101}
+    descriptors = []
+
+    def change_token(fd, _status=None):
+        descriptors.append(fd)
+        return state["token"]
+
+    # Model Windows' creation-time file_identity on this POSIX test host: the native descriptor
+    # token below must be the only signature component that changes.
+    monkeypatch.setattr(
+        appstate, "file_identity",
+        lambda status: (
+            int(status.st_dev), int(status.st_ino), int(status.st_size),
+            int(status.st_mtime_ns), int(getattr(status, "st_file_attributes", 0))))
+    monkeypatch.setattr(appstate, "trace_file_change_token", change_token)
+    client = TestClient(make_app(tmp_path))
+    first = client.get("/api/runs/demo/trace")
+    assert first.status_code == 200 and "tr0" in first.text
+
+    before = sp.stat()
+    replacement = sp.read_bytes().replace(b'"tr0"', b'"zr0"')
+    assert len(replacement) == before.st_size
+    with open(sp, "r+b") as stream:
+        stream.write(replacement)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(sp, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = sp.stat()
+    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mtime_ns)
+    state["token"] = 102
+
+    second = client.get("/api/runs/demo/trace")
+
+    assert second.status_code == 200
+    assert "zr0" in second.text and "tr0" not in second.text
+    assert descriptors and all(isinstance(fd, int) for fd in descriptors)
+
+
+def test_trace_cache_does_not_reuse_when_windows_change_time_is_unavailable(
+        tmp_path, monkeypatch):
+    """An unavailable ChangeTime may rebuild a view, but cannot validate a cached one."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events import span_index as span_index_module
+    from looplab.serve import appstate
+    from looplab.serve.server import make_app
+
+    _http_run(tmp_path)
+    calls = []
+    native_get_index = span_index_module.get_index
+
+    def observed_get_index(path):
+        calls.append(path)
+        return native_get_index(path)
+
+    monkeypatch.setattr(appstate, "trace_file_change_token", lambda _fd, _status=None: None)
+    monkeypatch.setattr(span_index_module, "get_index", observed_get_index)
+    client = TestClient(make_app(tmp_path))
+
+    first = client.get("/api/runs/demo/trace")
+    calls_after_first = len(calls)
+    second = client.get("/api/runs/demo/trace")
+
+    assert first.status_code == 200 and second.status_code == 200
+    assert calls_after_first >= 1 and len(calls) > calls_after_first
+
+
 def test_trace_carries_run_id_even_with_an_unfoldable_log(tmp_path):
     """Degraded path: `trace_scalars` reads run_id/task_id from the folded state, but if events.jsonl
     can't be folded it must still return the correct run_id (from the run dir name) so /trace's run_id
@@ -1535,10 +2119,10 @@ def test_persisted_index_alias_is_rejected_promptly_and_rebuilt(run, alias_kind)
         assert victim.read_bytes() == marker
 
 
-def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
+def test_persisted_index_offset_drift_fails_unavailable_not_wrong_span(run):
     """R6-F1.1: if a persisted offset drifts onto a DIFFERENT but still-valid span line (bit-rot on a
-    network mount), full_span must return None — never the neighboring span as if it were the requested
-    one. The read cross-checks the span_id against the row it indexes."""
+    network mount), full_span must fail unavailable — never return the neighboring span or silently
+    publish incomplete trace evidence. The exact source-row digest detects the drift before parsing."""
     rd, sp, spans = run
     get_index(sp)
     span_index._CACHE.clear()
@@ -1555,8 +2139,10 @@ def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
     # drift path is genuinely exercised — not silently rebuilt, which would make the check trivial.
     row = idx.by_sid["g0_1"]
     assert idx.meta[row] == (other["_o"], other["_l"])
-    # The drifted row reads g1_0's bytes; the span_id mismatch is detected → None, never the wrong span.
-    assert idx.full_span("g0_1") is None
+    # The drifted row reads g1_0's bytes; its digest mismatch is an availability failure, never the
+    # wrong span and never a complete-looking None/empty projection.
+    with pytest.raises(OSError, match="source digest"):
+        idx.full_span("g0_1")
     assert (idx.full_span("g1_0") or {}).get("span_id") == "g1_0"   # the intact row still resolves
 
 

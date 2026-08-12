@@ -140,21 +140,52 @@ export function assertNotReviewMutation(path) {
   throw error
 }
 
+const readResponse = (path, { headers = {}, ...options } = {}) =>
+  fetch(apiUrl(reviewReadPath(path)), {
+    ...options, headers: _authHeaders(headers),
+    ...(isReviewLocation() ? { cache: 'no-store' } : {}),
+  })
+
 export async function get(path, options = {}) {
   // Carry the UI token on reads too: most GETs don't need it, but the artifact routes (raw file
   // content) are token-gated server-side. _authHeaders is a no-op when no token is set (local), so
   // ordinary local use is unchanged.
-  const requestPath = reviewReadPath(path)
   // Every review bearer addresses the same small URL namespace.  Force a cache bypass so a cached
   // 401/410 from a revoked capability can never poison a subsequently created link in this tab.
-  const { headers = {}, ...fetchOptions } = options || {}
-  const r = await fetch(apiUrl(requestPath), {
-    ...fetchOptions,
-    headers: _authHeaders(headers),
-    ...(isReviewLocation() ? { cache: 'no-store' } : {}),
-  })
+  const r = await readResponse(path, options || {})
   if (!r.ok) await _throw(r, path)
   return r.json()
+}
+
+const entityTag = value => /^W\/"llconv1-[0-9a-f]{64}"$/.test(value) ? value : null
+
+// Conditional JSON transport for application-owned last-good snapshots. A 304 is deliberately a
+// tagged result rather than flowing through generic get(): Fetch marks 304 as `ok === false`, and it
+// has no JSON body. Callers may reuse `data` only from the exact scope that supplied `validator`.
+// Owner/review path translation and credentials stay at this same boundary as every other GET.
+export async function conditionalGet(path, validator, options = {}) {
+  const { headers = {}, ...fetchOptions } = options || {}
+  const sent = entityTag(validator)
+  // `Headers` normalizes names case-insensitively and also accepts an existing Headers instance.
+  // Re-materialize a plain object because `_authHeaders` deliberately spreads its base before it
+  // chooses one credential; spreading a Headers instance would silently discard every entry.
+  const requestHeaders = Object.fromEntries(new Headers(headers))
+  delete requestHeaders['if-none-match']
+  if (sent) requestHeaders['If-None-Match'] = sent
+  const requestOptions = { ...fetchOptions, headers: requestHeaders }
+  let r = await readResponse(path, requestOptions)
+  // A bodyless response without a validator has nothing a caller can safely reuse. Retry once as an
+  // unconditional reload; a second 304 is a protocol failure and follows the normal error path.
+  if (r.status === 304 && !sent) {
+    r = await readResponse(path, { ...requestOptions, cache: 'no-store' })
+  }
+  const etag = entityTag(r.headers?.get?.('ETag'))
+  if (r.status === 304) {
+    if (!sent) await _throw(r, path)
+    return { unchanged: true, etag, data: null }
+  }
+  if (!r.ok) await _throw(r, path)
+  return { unchanged: false, etag, data: await r.json() }
 }
 export const deadlineGet = (path, timeout = 8000, options) =>
   deadlineRequest(signal => get(path, { cache: 'no-store', ...options, signal }), timeout)

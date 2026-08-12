@@ -8326,6 +8326,14 @@ anchor appears exactly once; the copy's own baseline is 726 pass / 0 fail):
   `/user/a/proxy/8765/api/review/events carried the owner credential out of a review tab`, the
   shared-primitives pin, and `eventStream.test.js`'s review-SSE test.
 
+*Conditional-read follow-up (2026-08-10):* node-conversation ETag transport was added at this same
+boundary as `apiClient.conditionalGet`, not re-derived in the Inspector. It therefore shares
+`reviewReadPath`, the one owner/reviewer credential decision, caller AbortSignal and structured HTTP
+errors. Its test sends a hostile differently-cased `IF-NONE-MATCH` beside the intended validator and
+proves the boundary normalizes it to one exact header; it also drives bodyless, missing-tag and
+mismatched-tag 304s, the unconditional recovery read, review namespace/credential selection, and an
+abort. The aggregate barrel re-exports the helper, so the no-direct-member-import rule remains intact.
+
 `npm test` 726 pass / 0 fail (720 before, plus this guard's 6). `npm run build` exits 0.
 
 What remains: all four recommended modules are done, so what is still open is what this resolution

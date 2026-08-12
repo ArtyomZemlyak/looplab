@@ -36,7 +36,7 @@ from looplab.core.config import Settings
 from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
-from looplab.serve.http import json_object, request_body_contract
+from looplab.serve.http import if_none_match, json_object, request_body_contract
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
     _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
@@ -86,7 +86,6 @@ _AUTHOR_RECEIPT_FIELDS = frozenset({
     "created_at", "updated_at",
 })
 _AUTHOR_THREAD_LOCK = threading.Lock()
-_ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
 _SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_API_FIELDS))})$"
 
 
@@ -445,37 +444,6 @@ class AuthoringOperationResponse(BaseModel):
     updated_at: int
     ok: bool
     replayable: bool
-
-
-def _if_none_match(value: str | None, current: str) -> bool:
-    """Use RFC 9110 weak comparison for an If-None-Match validator list."""
-    if not isinstance(value, str) or not value.strip():
-        return False
-    value = value.strip()
-    if value == "*":
-        return True
-    target = current[2:] if current.startswith("W/") else current
-    matched = False
-    position = 0
-    while position < len(value):
-        while position < len(value) and value[position] in " \t,":
-            position += 1
-        if position == len(value):
-            break
-        match = _ETAG_TOKEN.match(value, position)
-        if match is None:
-            return False
-        candidate = match.group(0)
-        if candidate.startswith("W/"):
-            candidate = candidate[2:]
-        if candidate == target:
-            matched = True
-        position = match.end()
-        while position < len(value) and value[position] in " \t":
-            position += 1
-        if position < len(value) and value[position] != ",":
-            return False
-    return matched
 
 
 _MEMORY_ROW_BYTES = 128 * 1024
@@ -1321,7 +1289,7 @@ def build_router(srv) -> APIRouter:
             "ETag": SETTINGS_UI_SCHEMA_ETAG,
             "X-LoopLab-Schema-Version": str(SETTINGS_UI_SCHEMA_VERSION),
         }
-        if _if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
+        if if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
             return Response(status_code=304, headers=headers)
         for name, value in headers.items():
             response.headers[name] = value

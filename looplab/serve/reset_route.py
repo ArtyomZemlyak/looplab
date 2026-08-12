@@ -25,7 +25,7 @@ from looplab.core.run_reset import (
 from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.events.span_index import (
-    invalidate as invalidate_span_index, span_index_write_guard)
+    invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending,
     _fresh_run_launch_pending, _resolve_task_file, engine_write_lock_http,
@@ -1053,7 +1053,8 @@ def _reset_blocking(
                     with (run_config_write_lock(snap, operation_id=operation_id),
                           _interprocess_lock(
                               Path(str(rd / "events.jsonl") + ".lock"), required=True),
-                          span_index_write_guard(rd / "spans.jsonl", required=True)):
+                          span_destructive_write_guard(
+                              rd / "spans.jsonl", required=True)):
                         (finished, receipt, spawn_args, spawn_env, launch_settings,
                          launch_task, resolved_settings) = _publish_and_archive(
                              srv, rd, receipt_path, receipt, operation_id=operation_id,
