@@ -841,6 +841,59 @@ EXPECT_MISSING = ("stage {stage!r} exited 0 but did NOT produce its declared art
                   "stage manifest DECLARES this stage produces it, so either the stage's code never "
                   "wrote it (fix the code) or the declaration names the wrong path (fix "
                   "looplab_stages.json). Do not delete the declaration to make this pass.")
+# Appended to EXPECT_MISSING when a file of the SAME NAME was in fact written somewhere else during
+# this stage. That is the difference between "your training produced nothing" and "your training
+# worked and you named the output wrong" — and the two need opposite repairs.
+EXPECT_MISSING_NEARBY = (" A file of that name WAS written by this stage at {found!r} — so the code "
+                         "ran and produced output; the declared path is what disagrees with it.")
+# How much of the workdir the near-miss scan may look at. It runs ONLY on a failure that has already
+# cost the stage's full runtime, so a bounded walk is free by comparison — but a node workdir holds a
+# materialized repo plus every checkpoint, on a FUSE mount, so it must still be bounded rather than
+# merely "fast enough here".
+_NEARBY_MAX_DIRS = 4000
+_NEARBY_SKIP = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
+                          ".pytest_cache", ".ipynb_checkpoints"})
+
+
+def _artifact_written_elsewhere(workdir: str, rel: str, since: Optional[float]) -> Optional[str]:
+    """Where a file with this basename was actually written during the stage, if anywhere.
+
+    Answers the question the operator asks first and the message could not: "did it not run, or did
+    it write somewhere else?". Measured case that motivated it — `rubertlite-dr-unified-v5` node 0
+    trained for 76 minutes on two H200s, exited 0, wrote a complete checkpoint, and died because the
+    testbed composes its output directory as `<run_name>_<model>` while the manifest declared
+    `<run_name>`. The metric it had already computed was recall@100 = 0.743, and nothing said so.
+
+    FRESH ONLY (`since`), for the same reason the main contract has a staleness rule: a leftover from
+    an earlier attempt or a foreign experiment would send the repair at the wrong file. Bounded, and
+    best-effort — a scan that fails contributes nothing rather than turning a stage failure into an
+    eval crash.
+    """
+    name = os.path.basename(str(rel or ""))
+    if not name:
+        return None
+    root = Path(workdir)
+    visited = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            visited += 1
+            if visited > _NEARBY_MAX_DIRS:
+                return None
+            dirnames[:] = [d for d in dirnames if d not in _NEARBY_SKIP and not d.startswith(".")]
+            if name not in filenames:
+                continue
+            candidate = Path(dirpath) / name
+            try:
+                if candidate.stat().st_size <= 0 or not _file_is_fresh(candidate, since):
+                    continue
+            except OSError:
+                continue
+            found = candidate.relative_to(root) if candidate.is_relative_to(root) else candidate
+            if str(found) != str(rel):
+                return str(found)
+    except Exception:  # noqa: BLE001 — a diagnostic must never be the thing that fails the eval
+        return None
+    return None
 EXPECT_EMPTY = ("stage {stage!r} exited 0 but its declared artifact {path!r} is EMPTY (0 bytes). The "
                 "stage reported success while producing nothing — fix the code that writes it.")
 EXPECT_STALE = ("stage {stage!r} exited 0 but its declared artifact {path!r} was NOT written by this "
@@ -888,7 +941,9 @@ def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: st
         try:
             st = p.stat()
         except OSError:
-            return EXPECT_MISSING.format(stage=stage, path=rel)
+            message = EXPECT_MISSING.format(stage=stage, path=rel)
+            elsewhere = _artifact_written_elsewhere(workdir, rel, since)
+            return message + EXPECT_MISSING_NEARBY.format(found=elsewhere) if elsewhere else message
         if p.is_dir():
             try:
                 empty = not any(p.iterdir())
@@ -1308,7 +1363,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                              if _expect.get("files") else None)
         if _artifact_problem:
             stage_results[-1]["status"] = "expect_failed"
-            stage_results[-1]["concern"] = str(_artifact_problem)[:300]
+            # 700, not the 300 the AGENTIC concern below gets. That one is model prose and bounding
+            # it is the point; this one is a fixed, code-owned sentence that is 375 characters before
+            # the near-miss path is appended — at 300 the row lost its own remediation ("Do not
+            # delete the declaration to make this pass") and would now lose the one part that says
+            # the stage actually worked. A cap that truncates the answer is not a bound, it is a bug.
+            stage_results[-1]["concern"] = str(_artifact_problem)[:700]
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
