@@ -261,6 +261,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
+- **Which kind of memory is which** — the Memory panel's four tabs each say what they ARE, because
+  the tiers have different writers and different readers and four counts alone did not convey that.
+  **Lessons** are what a run CONCLUDED (one transferable claim per row, with its evidence);
+  **Cases** are the best known SOLUTION for a task — one row per *task*, not per experiment, which
+  is why there are so few; **Notes** are a run's own closing summary, context for reading the
+  lessons rather than a claim; **Knowledge** is what a HUMAN authored (prompts, skills, notes) and
+  is the one tab nothing written by a run ever reaches. That last line is the answer to "how is
+  authoring different from memory": who wrote it.
 - **A Card's whole story** — a Card is one hypothesis; the Researcher proposes it and the Developer
   builds one or more experiments (nodes) under it. The card's **Trace** section reads that story in
   order: the proposal(s) that produced the card, then a section per node. Sections name their traces

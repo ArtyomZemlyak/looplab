@@ -6,8 +6,8 @@ import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTR
 } from './util.js'
 import { usePoll, useScopedResource } from './hooks.js'
 import {
-  coverageSummary, filterRows, groupByConceptTree, rowConcepts, rowSource, shelfConcepts,
-  SOURCE_RUN, UNTAGGED,
+  coverageSummary, filterRows, groupByConceptTree, memoryTierBlurb, rowConcepts, rowSource,
+  shelfConcepts, SOURCE_RUN, UNTAGGED,
 } from './conceptShelf.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
@@ -2042,6 +2042,9 @@ export function MemoryPanel({ onClose }) {
           onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data
             ? `${n}${incomplete ? ' shown' : ''}` : '…'}</span></button>)}
       </div>
+      {/* WHAT THIS TAB IS. Four tabs with counts and nothing else left the operator asking what
+          Cases were even for. The tiers have different writers and different readers; say so. */}
+      <p className="muted memory-tier-blurb">{memoryTierBlurb(tab)}</p>
       <PanelResourceNotice resource={selectedResource} label={tab === 'knowledge' ? 'Knowledge notes' : 'Cross-run memory'}
         onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
       {tab !== 'knowledge' && memory.status === 'ready' && selectedReceiptIncomplete

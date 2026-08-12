@@ -1822,15 +1822,29 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     def _collect(attr):
         return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
+    # WHAT HAPPENED TO MY TURN. On budget exhaustion the loop salvages one forced emit from what it
+    # gathered — the right move — but presenting a cut-short investigation as a finished answer is
+    # how "the assistant hangs around 40 tool uses and then something odd comes back" reads to an
+    # operator who was never told the turn ran out of wall clock. `agent_time_budget_s` is unset by
+    # default, so the 5-minute floor below is what most turns actually hit.
+    budget_box: dict = {}
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
                                 finalize=_fin, fallback=_fb, on_step=_on_step, on_text=on_text,
-                                cancel_check=cancel_check, **opts)
+                                cancel_check=cancel_check, on_budget=budget_box.update, **opts)
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, **safe_assistant_failure(e), "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),
                 "todos": _collect("todos"), "refs": refs, "mode": mode}
     reply = reply or box.get("reply") or "(no reply)"
+    if budget_box:
+        kind = budget_box.get("kind")
+        limit = ("wall-clock budget" if kind == "time" else "turn budget")
+        reply = (f"{reply}\n\n---\n_This turn hit its {limit} after "
+                 f"{budget_box.get('turns')} tool turns ({budget_box.get('seconds')}s) and was cut "
+                 f"short — the answer above is the best I could assemble from what I had gathered, "
+                 f"not a finished investigation. Ask me to continue, or raise "
+                 f"`agent_time_budget_s`._")
     # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
     # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
     # (One extra call; reuses the context the loop built. The loop's emit reply is the fallback.)
@@ -1882,7 +1896,11 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
             pass
     return {"ok": True, "reply": reply, "steps": steps,
             "applied": _collect("applied"), "proposals": _collect("proposals"),
-            "todos": _collect("todos"), "refs": refs, "mode": mode}
+            "todos": _collect("todos"), "refs": refs, "mode": mode,
+            # Absent on an ordinary turn. Present, with its kind and numbers, when the answer above
+            # is a salvage rather than a conclusion — so the UI can say so instead of the operator
+            # inferring it from a reply that stops early.
+            **({"budget_exhausted": dict(budget_box)} if budget_box else {})}
 
 
 def _step_label(ev: dict) -> str:

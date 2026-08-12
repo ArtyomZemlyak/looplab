@@ -139,3 +139,22 @@ export function coverageSummary(receipt) {
     complete: tagged !== null && tagged === receipt.total,
   }
 }
+
+// WHAT EACH TIER IS. The panel showed four tabs — Lessons, Cases, Notes, Knowledge — with counts and
+// nothing else, so the operator's question was reasonable: "I don't understand what Cases are even
+// for", and "there should be captions so I can tell the kinds of memory apart". The tiers really are
+// different things with different writers and different readers, and none of that was on screen.
+export const MEMORY_TIER_BLURB = Object.freeze({
+  lessons: 'What a run CONCLUDED — one transferable claim per row, distilled at the end of a run '
+    + 'from its own experiments, with the evidence and confidence behind it. Written by the engine; '
+    + 'read back into a later run’s Researcher prompt.',
+  cases: 'The best known SOLUTION for a task — one row per task, holding the winning parameters and '
+    + 'why they won. A later run on the SAME task starts from it instead of rediscovering it. That '
+    + 'is why there are so few: it is one per task, not one per experiment.',
+  notes: 'A run’s own closing summary — what it ended up with and how far it got. Context for '
+    + 'reading the lessons above, not a claim in itself.',
+  knowledge: 'What a HUMAN authored: prompts, skills and notes every run can read. Nothing here is '
+    + 'written by a run — that is the whole difference between this tab and the three beside it.',
+})
+
+export const memoryTierBlurb = tier => MEMORY_TIER_BLURB[tier] || ''

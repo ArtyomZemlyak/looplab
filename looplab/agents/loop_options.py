@@ -162,6 +162,7 @@ LOOP_OPTION_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(LoopOptions))
 EXPLICIT_ONLY_LOOP_ARGS: tuple[str, ...] = (
     "finalize", "fallback", "validate",         # per-call result handling
     "on_step", "on_text", "cancel_check", "on_tool_result",  # per-call observers / provenance hook
+    "on_budget",                                # …and the one that fires when the loop RAN OUT
     "nudge_prompt", "stuck_prompt",             # prompt CONTRACTS — kept verbatim at the owning site
     "emit_retries",                             # per-call; nothing derives it from Settings
 )

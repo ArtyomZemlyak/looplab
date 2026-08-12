@@ -3285,3 +3285,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
    shared with every sibling experiment on the same card. */
 .trace-card-research { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
 .trace-card-research-body { flex-basis: 100%; margin-left: 12px; }
+
+/* One line under the memory tabs saying what the selected tier IS. The tiers have different writers
+   and different readers, and four tabs with counts alone did not say that. */
+.memory-tier-blurb { margin: -4px 0 12px; max-width: 78ch; font-size: 12px; line-height: 1.5; }

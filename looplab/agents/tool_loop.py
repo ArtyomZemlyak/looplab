@@ -355,9 +355,23 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     return result, repeat_note
 
 
+def _note_budget(on_budget, kind: str, *, turns, seconds) -> None:
+    """Report that the loop ran OUT — of wall clock or of turns — without ever raising.
+
+    An observer is best-effort by construction: this fires on the way to a salvage emit, and a
+    broken callback must not turn a rescued answer into a crash.
+    """
+    if on_budget is None:
+        return
+    try:
+        on_budget({"kind": kind, "turns": turns, "seconds": round(float(seconds or 0.0), 3)})
+    except Exception:  # noqa: BLE001 - an observer may never break the loop it observes
+        pass
+
+
 def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                     max_turns: int = 0, context_budget_chars: int | None = None,
-                    time_budget_s: float = 0.0, finalize=None, fallback=None,
+                    time_budget_s: float = 0.0, finalize=None, fallback=None, on_budget=None,
                     stuck_detection: bool = True,
                     stuck_repeat: int = 4, stuck_alternate: int = 4,
                     self_plan: bool = False, plan_reinject_every: int = 5,
@@ -511,6 +525,11 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             break
         if time_budget_s and (time.monotonic() - started) > time_budget_s:
             exhausted = True
+            # TELL SOMEONE. The salvage below rescues an answer from what was gathered, which is
+            # right — but presenting a cut-short investigation as a finished one is how "the
+            # assistant hangs around 40 tool uses and then something odd comes back" reads to an
+            # operator who was never told the turn ran out of wall clock.
+            _note_budget(on_budget, "time", turns=turn_idx, seconds=time.monotonic() - started)
             break                       # out of wall-clock budget -> salvage an emit below
         _compact_in_place(messages, context_budget_chars, auto_summary, summarize)
         # C1: re-surface the agent's own plan periodically so a long loop can't drift off-goal. A
@@ -674,6 +693,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             break
     else:
         exhausted = True                # every turn used without an emit
+        _note_budget(on_budget, "turns", turns=max_turns, seconds=time.monotonic() - started)
     if exhausted and not _cancelled():
         # Budget exhaustion (turns or wall-clock) used to fall STRAIGHT to fallback, discarding the
         # whole investigation — the Developer's STAGES phase read a big repo for its full 30-turn
