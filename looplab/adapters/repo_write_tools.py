@@ -309,6 +309,60 @@ class RepoWriteTools:
             return f"(refused: {p} is outside your editable surface: {', '.join(self._surface)})"
         return None
 
+    def _source_root_paths(self, content: str) -> list[str]:
+        """Absolute paths in `content` that point INTO an editable repo's SOURCE tree.
+
+        Such a path is wrong by construction and the error is invisible at authoring time. A node
+        evaluates in its OWN materialized copy of the editable repo, so a path rooted at the source
+        never names anything this node produced — it names the operator's original, whose contents
+        belong to whoever last ran something there by hand.
+
+        Measured, on `runs/rubertlite-dr-unified-v6` node 0. The train stage ran correctly and wrote
+        its checkpoint exactly where its manifest declared, workdir-relative:
+        `vectorsearch/experiments/unified-mnr-t05-b8192-e10_rubert-tiny-lite/final/`. But the
+        node's `vectorsearch/configs/config.yaml` set
+        `test.retriever.model_settings.checkpoint_path` to
+        `/home/jovyan/data/vectorizer-unified/vectorsearch/experiments/<same name>/final` — the
+        SOURCE tree, where that directory does not and cannot exist (upstream only ever held an old
+        human run's `unified-baseline_rubert-tiny-lite`). So the scorer's `.exists()` check failed,
+        as it would on every node and every attempt forever, and the scorer retrained. `overwrite:
+        true` then deleted the good checkpoint the train stage had produced. The stage's `expect`
+        contract was satisfied and then destroyed by the step that was supposed to measure it.
+
+        Reported as a NOTE on a successful write, never a refusal, and this is the deliberate part.
+        The rule "an absolute path into the editable source is wrong" is true for artifacts this
+        pipeline PRODUCES and merely questionable for a large untracked input the seed mode does not
+        copy — a case with a real, first-class answer (`data:`/`references:` mounts, or
+        `seed_mode: "all"`) but not one worth refusing a write over, because a refusal the model
+        cannot satisfy costs a whole repair attempt. So it goes back the way the compile error does
+        (aider-style: feed it straight back at the moment the model can act), and the fully mechanical
+        version of this check — refusing an artifact path that collides with a declared `expect.files`
+        entry — is written up separately rather than guessed at here.
+        """
+        out: list[str] = []
+        for _name, root in self._roots:
+            r = str(root or "").replace("\\", "/").rstrip("/")
+            # A root of "" or "/" would match every absolute path; a relative root cannot appear as
+            # an absolute path in generated code at all.
+            if len(r) < 2 or not r.startswith("/"):
+                continue
+            idx = content.find(r + "/")
+            if idx >= 0 and r not in out:
+                out.append(r)
+        return out
+
+    def _source_root_note(self, content: str) -> str:
+        """The advisory tail appended to a successful write/edit (see `_source_root_paths`)."""
+        roots = self._source_root_paths(content)
+        if not roots:
+            return ""
+        return (f" NOTE: this content hard-codes an absolute path inside the editable repo's SOURCE "
+                f"tree ({roots[0]}/…). This node runs in its OWN copy of that tree, so such a path "
+                "can NEVER name an artifact this node's pipeline produced — it names the operator's "
+                "original, which will not contain it, and a 'does it exist' check on it fails on "
+                "every node forever. Use a path RELATIVE to the eval workdir for anything your own "
+                "stages write or read (the same paths your stage manifest declares in `expect`).")
+
     @staticmethod
     def _py_syntax_error(path: str, content: str) -> Optional[str]:
         """Auto-validator (aider/Claude-Code style: compile after every edit, feed the error straight
@@ -345,7 +399,7 @@ class RepoWriteTools:
         self.files[p] = content
         if p in self.deleted:
             self.deleted.remove(p)
-        return f"wrote {p} ({len(content)} bytes)"
+        return f"wrote {p} ({len(content)} bytes)" + self._source_root_note(content)
 
     def _edit(self, p, args: dict) -> str:
         if not p:
@@ -378,7 +432,10 @@ class RepoWriteTools:
         self.files[p] = new
         if p in self.deleted:
             self.deleted.remove(p)          # an edit resurrects a previously-deleted file
-        return msg
+        # Only the REPLACEMENT text, not the whole file: a source-root path the repo already carried
+        # is not this edit's doing, and re-reporting it on every unrelated hunk in that file is how a
+        # note becomes noise the model learns to skip.
+        return msg + self._source_root_note(replace)
 
     def _delete(self, p) -> str:
         if not p:

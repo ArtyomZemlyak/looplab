@@ -178,9 +178,12 @@ authors a `dataset` task; for a Kaggle competition it sets the `mlebench_real` s
 The canonical [`repo`](tasks.md#repo) task: the agent edits files matching `edit_surface`, and
 success is **your own** `cmd` (the scorer) + metric. The file the metric is **read from** (a
 `file_json`/`file_regex` path, or an onboarding adapter) is auto-protected so the agent can't fake a
-score. The scorer **entrypoint itself is NOT auto-protected** — `cmd` is a contract for *how it's
-scored*, separate from *what may be edited* — so if the agent must not change your scorer, list it in
-`protect` (as below). Composable form:
+score. **The scorer entrypoint is auto-protected too, when your `cmd` names a file the repo already
+ships** (`python -m pkg.mod` / `python eval.py`) — `cmd.protect_entrypoint: false` hands it back to
+the agent, and a `cmd` naming no in-repo file (a wrapper script, a console script) warns at submit
+because nothing there *can* be frozen. A scorer your repo does **not** ship is still the agent's to
+author, which is the whole point of the "I have a test but no train" case below.
+Listing it in `protect` as well is harmless and explicit. Composable form:
 
 ```jsonc
 {
@@ -487,8 +490,10 @@ node fails and its stderr is fed back to the agent's repair.
   does **not** sandbox you from your own command.
 - **The agent** (the LLM / coding agent) **cannot author or change** those commands, nor the file the
   metric is read from. The metric-source file (a `file_json`/`file_regex` path or an onboarding
-  adapter) is auto-protected; the scorer **entrypoint** is protected only when you list it in `protect`
-  (`cmd` is a contract for *how it's scored*, separate from the edit-scope). The surface gate is
+  adapter) is auto-protected, and so is the **entrypoint** your `cmd` executes whenever the argv names
+  a file the editable repo already ships (`cmd.protect_entrypoint`, default `true`). An entrypoint the
+  repo does *not* ship is the agent's to author by design, and a `cmd` that names no in-repo file at
+  all is warned about at submit rather than silently unprotected. The surface gate is
   *reject-not-strip* (a patch touching anything outside `edit_surface`, or a protected/escape path like
   `..`/absolute, is rejected wholesale). So the agent's only influence on execution is the **code it
   writes inside `edit_surface`**, which runs under the sandbox tier — it can't issue an arbitrary host

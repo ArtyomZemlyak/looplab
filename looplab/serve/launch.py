@@ -468,6 +468,12 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     effective, inferred, base_digest = _resolved_settings(
         canonical_task, saved_settings, file_settings, launch_settings)
     warnings = ("backend=llm was inferred for this generative task",) if inferred else ()
+    # The same submit-time warning the CLI prints: an eval `command` that names no in-repo file
+    # leaves the score stage's CODE inside the Developer's edit surface, while the Developer's
+    # prompt tells it the scoring cannot be rewritten. `adapter` may be an injected dict in tests —
+    # the helper is total over that (it isinstance-checks a RepoTask and returns [] otherwise).
+    from looplab.adapters.repo_task import eval_entrypoint_unprotected
+    warnings += tuple(eval_entrypoint_unprotected(adapter))
     token = _launch_token(
         run_id, canonical_task, effective, source_fp, referenced_paths,
         _sha(saved_settings), base_digest, seed_chat)

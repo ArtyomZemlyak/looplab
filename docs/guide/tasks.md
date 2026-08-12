@@ -154,10 +154,36 @@ What makes a salvaged metric admissible is narrow on purpose:
   second evaluation. A salvaged node does not carry a broken manifest into its next attempt.
 
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
-edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the
-file `cmd` runs, so: if `cmd` points at an operator-owned scorer the agent must not change (e.g. the
-framework's `test.py`), add that file to `protect`; if the scorer must be *built*, leave it editable (a
-protected file can't be created).
+edit; default = the whole repo) minus `protect` (exceptions).
+
+**The file your `cmd` runs is protected by default, when your repo already ships it.** If `cmd` is
+`["python","-m","pkg.mod"]` or `["python","eval/score.py"]` and that file exists in the editable
+source, LoopLab adds it to that repo's `protect` for you: the write gate refuses it and it is
+materialized into every node workdir like any other protected file. That is what the Developer's own
+prompt has always claimed ("the operator's `cmd` is appended as the final, protected `score` stage —
+you cannot rewrite how the run is scored"), and until 2026-08-12 only the *stage* was protected while
+the *file* sat in the edit surface. On a live run with `protect: []` and `edit_surface: ["**/*"]` the
+Developer edited the scorer to shell out to the training module when it found no checkpoint — the
+run paid twice for GPU on every node and reported a number its own train stage had not produced.
+
+Three things follow, and each is deliberate:
+
+* **A scorer your repo does *not* ship stays the agent's to author.** That is the normal flow for this
+  adapter — you name `cmd: ["python","looplab_eval.py"]`, the Developer writes it. Protection keys on
+  *the file exists in the source*, precisely so this case is untouched.
+* **The opt-out is `cmd.protect_entrypoint: false`**, not "list your own `protect`". `protect` only
+  adds, so keying the off-switch on it would mean protecting `data/**` silently gave up the scorer
+  freeze. Use it when your repo happens to ship a file at the scorer's path but you want the agent to
+  rewrite it anyway.
+* **A `cmd` that names no in-repo file warns at submit** — `["bash","run.sh"]`, a console script,
+  `python -c`. Nothing there can be protected, so `looplab run` and `/api/start` say so while you can
+  still add the real files to `protect`. It is a warning, not a refusal: such a command is legitimate.
+
+**What is protected is the entrypoint file, not what it imports.** A scorer's import closure is the
+repo (its model, config and data modules), so freezing it would freeze everything and leave the agent
+nothing to change. A scorer that reads its checkpoint path from an *editable* config can therefore
+still be pointed elsewhere; what holds that line is the stage `expect` contract (below), not a wider
+`protect` list.
 
 **A `protect`ed file is also always MATERIALIZED into every node workdir**, whatever `seed_mode` says —
 it is copied from the editable source after the tree seed, before the mounts. That is not cosmetic: the
@@ -449,6 +475,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint). Also copied into every node workdir regardless of `seed_mode` — see the note above |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
+| `eval.protect_entrypoint` | Freeze the file `eval.command` executes, when the argv names one (`python -m pkg.mod`, `python score.py`) **and the editable source already ships it**. Default `true`. Set `false` to hand a shipped scorer back to the Developer. A command naming no in-repo file (a shell wrapper, a console script, `python -c`) is warned about at submit instead — see the edit-surface section above |
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
 | `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. Legacy `eval.metric.kind` still works **for the four concrete readers only** — `"auto"` must be spelled `{"reader": "auto"}`, because only that spelling folds to the onboarding path (`adapters/tasks.py:241`); `{"kind": "auto"}` is not a known reader and raises. |
 | `eval.metric.key` | The **JSON key** to read (`stdout_json`, `file_json` — dotted keys supported) or the **regex** (`stdout_regex`, `file_regex`). For the two `file_*` readers this is the key/pattern *inside* the file, **not** the file itself — the file is `eval.metric.path`. |
@@ -471,11 +498,12 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
 
 The metric-source file and the files you list in `protect` cannot be overwritten by the agent
-(enforced by the write/diff gate); the scorer entrypoint is protected only if you `protect` it. Offline or
+(enforced by the write/diff gate), and so is the scorer entrypoint itself when `cmd` names a file the
+repo already ships (`cmd.protect_entrypoint`, on by default — see the edit-surface section above). Offline or
 on agent failure, a no-op developer leaves the repo unmodified.
 
-> **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`) and
-> `protect` it — the Developer declares a `train` **stage** in its dedicated STAGES phase (the first of
+> **Have a test/eval but no training script?** Set `cmd` to the scorer (`["python","test.py"]`); it is
+> protected automatically because the repo ships it — the Developer declares a `train` **stage** in its dedicated STAGES phase (the first of
 > its three phases: stages → plan → implement; skipped only if you declare `cmd.stages` yourself or
 > protect `looplab_stages.json`) that runs before the scorer, then the engine
 > trains and your protected `cmd` scores the freshly-trained model. Do **not** run training via

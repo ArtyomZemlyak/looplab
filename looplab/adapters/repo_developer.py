@@ -66,6 +66,10 @@ _REPO_DEV_SYSTEM_INTRO = (
 # operator's `protect` entries into every node workdir. It was NOT true before: `seed_mode="auto"`
 # seeds git-TRACKED files, so an uncommitted protected scorer was simply absent and this clause is
 # what told the model not to check. The model could not have checked usefully anyway — every view it
+# 2026-08-12: "the operator PROTECTED" now also covers the DERIVED case — when the operator's `cmd`
+# names a file the editable repo already ships, `RepoTask._entrypoint_protect` folds it into that
+# repo's `protect`, so it reaches seeding by the same route an explicit entry does and the carve-out
+# below stays true without the operator having written anything.
 # has of "the repo" (`_repo_context`, `_recipes`, `_results_context` and the `_scout_tools` scouts) is
 # rooted at the editable SOURCE, never at the node workdir the eval runs in, so `read_file` answers
 # for a filesystem the command never sees. Measured on runs/rubert-dr-0807 node 2: while the score
@@ -140,7 +144,9 @@ _REPO_DEV_SYSTEM_BODY = (
     "eval entrypoint the `score` step runs). For reference, a stage is "
     "{name:'train',command:['python','train.py','%params%'],timeout:14400,check:true}; the operator's "
     "`cmd` is APPENDED automatically as the final, protected `score` stage — you CANNOT rewrite how the "
-    "run is scored (that's the trust boundary), only add work before it. Stages run in ORDER in the SAME "
+    "run is scored (that's the trust boundary), only add work before it. That covers the stage AND the "
+    "code it runs: when the operator's cmd names a script or module the repo already ships, that file is "
+    "PROTECTED and your write/edit tools will refuse it. Stages run in ORDER in the SAME "
     "workdir (artifacts persist: `train` writes a checkpoint the `score` step reads). This is the ONLY "
     "correct way to get 'a failed step is fixed and re-run WITHOUT paying to re-train': the ENGINE reuses "
     "the completed `train` stage's checkpoint and re-runs only what changed (a FRESH node still trains "
@@ -150,7 +156,17 @@ _REPO_DEV_SYSTEM_BODY = (
     "hyperparameters as `--key value`, or bake the values into the code yourself. Do NOT hand-roll a "
     "single monolithic entrypoint with a 'skip training if a checkpoint already exists' check: the engine "
     "can't see stage boundaries there, so it can't re-run just the scoring — and the ARTIFACT rules below "
-    "explain why such a check silently freezes the metric. THE SAME APPLIES TO A MONOLITH YOU INHERITED: "
+    "explain why such a check silently freezes the metric. AND DO NOT PUT THAT CHECK IN THE SCORER, "
+    "EITHER — whether you wrote the scoring entrypoint or the repo shipped it, NEVER make it train, "
+    "subprocess out to the training script, or 'produce a checkpoint if one is missing'. The scorer's ONE "
+    "job is to score the artifact the TRAIN STAGE produced: if it can retrain, then when its artifact path "
+    "is wrong it does not FAIL — it quietly trains a second model and reports a number from a run the "
+    "pipeline never measured, on top of the training you already paid for (and, if the config overwrites, "
+    "destroying the train stage's artifact). This has happened: a scorer whose checkpoint path pointed "
+    "outside the node's workdir found nothing, re-ran training inside the score stage, and cost the run "
+    "2x GPU per node for a metric that did not belong to its own pipeline. A scorer that cannot find its "
+    "artifact must CRASH — that is a one-line path fix on the next repair; a silent retrain is not "
+    "repairable because nothing reports it. THE SAME APPLIES TO A MONOLITH YOU INHERITED: "
     "when the repo's own training entrypoint also mines, prepares or evaluates inside the same process, "
     "do NOT declare it as your only stage. SPLIT AS FAR AS THE REPO ALLOWS — every boundary you declare "
     "is a boundary a repair can restart from, and the LAST one you declare is the most valuable, because "

@@ -1,8 +1,9 @@
 ﻿"""RepoTask (kind="repo", ADR-7): the R&D agent works inside an EXISTING repo — it edits
 experiment code within an allow-listed surface, and success is measured by running the
 OPERATOR'S OWN eval command and reading the metric it emits. The agent never authors the
-metric (trust boundary): the eval command + its output files are task-owned and protected
-from edits (same mechanism that guards the mlebench grader).
+metric (trust boundary): the eval command, the FILE that command executes when the repo
+already ships it (`entrypoint_candidates` / `_entrypoint_protect`) and its output files are
+task-owned and protected from edits (same mechanism that guards the mlebench grader).
 
 Phase 1: ONE editable repo + read-only references mounted for runtime + an explicit
 operator-written `eval_spec`. The agent backend (opencode) edits the repo worktree;
@@ -15,7 +16,9 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping
 import json
 import os
+from pathlib import Path
 import random
+import re
 from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
@@ -174,6 +177,95 @@ def eval_workspace_conflicts(task_or_spec, workspace_root) -> list[str]:
     return out
 
 
+def entrypoint_candidates(command) -> list[str]:
+    """The cwd-relative file path(s) an eval `command` argv would actually EXECUTE, or [].
+
+    Two forms, the ones an operator's `cmd` actually takes:
+      * `python -m pkg.mod`        -> ["pkg/mod.py", "pkg/mod/__main__.py"]
+      * `python path/to/score.py`  -> ["path/to/score.py"]
+    Both spellings of `-m` are returned because either one can be what the module name resolves to;
+    the caller keeps whichever EXISTS. `-m` wins over a later `.py` token, because
+    `python -m pkg.mod --out x.py` executes the module and not `x.py`.
+
+    Deliberately narrow and purely syntactic — it never touches the filesystem, so its truth table
+    can be stated. Anything else returns []: a shell wrapper (`bash run.sh`), a bare binary, an
+    installed console script, `python -c '...'`, the combined `python -mpkg.mod` spelling, an
+    absolute or escaping path. [] is NOT "nothing to protect"; it is "this argv does not say which
+    file the score stage runs", and `eval_entrypoint_unprotected` turns that into a submit-time
+    warning naming the command. Guessing wider would freeze a file the operator never meant to
+    freeze, which costs the Developer a whole repair attempt on a refusal it cannot act on — the
+    same cost `_declared_deps_brief` exists to avoid on the other side.
+
+    The `.py`-token rule is deliberately the SAME rule `engine/eval_stages.py` already applies to a
+    stage command (`_stage_reachable_files` / `_unrunnable_protected_scripts`): a workdir-relative
+    `.py` token that is not a flag. That file treats `python -m pkg` as OPAQUE and refuses stage
+    reuse over it; here the same argv is RESOLVABLE, because a module name maps to a file path
+    without having to bound what the process reads.
+    """
+    argv = [t for t in (command or []) if isinstance(t, str)]
+    for i, tok in enumerate(argv):
+        if tok == "-m":
+            mod = argv[i + 1] if i + 1 < len(argv) else ""
+            if not mod or not re.match(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$", mod):
+                return []          # `-m` with a non-module argument: say nothing rather than guess
+            stem = mod.replace(".", "/")
+            return [stem + ".py", stem + "/__main__.py"]
+    for tok in argv:
+        if not tok.endswith(".py") or tok.startswith("-"):
+            continue
+        rel = tok.replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        if os.path.isabs(rel) or ".." in rel.split("/"):
+            return []              # outside the workdir: not a name `protect` can express
+        return [rel]
+    return []
+
+
+def eval_entrypoint_unprotected(task) -> list[str]:
+    """The submit-time warning for an eval `command` whose scorer could not be protected, or [].
+
+    The trust boundary the Developer's own prompt states — "the operator's `cmd` is APPENDED
+    automatically as the final, protected `score` stage — you CANNOT rewrite how the run is scored"
+    — was only ever true of the STAGE. The FILE that stage runs sat in the edit surface, and on
+    `runs/rubertlite-dr-unified-v6` (cmd `python -m vectorsearch.test`, `protect: []`,
+    `edit_surface: ["**/*"]`) the Developer edited `vectorsearch/test.py` to shell out to
+    `vectorsearch.train` when it found no checkpoint — the exact "train-then-score if no artifact
+    exists" pattern the same prompt forbids two paragraphs earlier. The train stage had already
+    produced one; the scorer's `checkpoint_path` pointed at an absolute path in the SOURCE repo
+    rather than the node's workdir, so it re-trained inside the scorer (with `overwrite: true`
+    destroying the train stage's artifact) and the run paid 2x GPU per node to report a number the
+    pipeline never measured. `RepoTask._entrypoint_protect` makes the sentence true wherever the
+    argv names a file; this names the residue, at the one moment the operator can still act.
+
+    It fires ONLY when the argv names no in-repo entrypoint at all (`entrypoint_candidates() == []`).
+    An entrypoint that resolves but does not EXIST in the source is deliberately silent: that is the
+    designed flow this adapter is mostly used for — the Developer AUTHORS the eval entrypoint (see
+    `_REPO_DEV_SYSTEM_BODY`, and `PROTECTED_SCRIPT_MISSING`, which tells an operator to DROP a
+    protect entry so the Developer may author it). Warning there would fire on the majority of repo
+    tasks, and a warning that always fires is read as noise.
+
+    A warning, not a refusal: an unresolvable command is legitimate (a wrapper that activates an
+    env, a console script), the run is still perfectly runnable, and the operator may know the
+    scorer is unreachable from the edit surface anyway. What is NOT acceptable is silence, because
+    the prompt promises the operator something the gate is not enforcing.
+    """
+    if not isinstance(task, RepoTask) or task.eval is None or not task.eval.command:
+        return []
+    if not task.eval.protect_entrypoint:
+        return []                  # the operator handed the scorer to the Developer on purpose
+    if entrypoint_candidates(task.eval.command):
+        return []
+    cmd = " ".join(str(t) for t in task.eval.command)
+    return [
+        f"cmd.command `{cmd}` names no in-repo entrypoint file, so LoopLab cannot protect the code "
+        "the score stage runs (a shell wrapper, a bare binary, an installed console script or "
+        f"`python -c` looks like this). The score STAGE is always the operator's; the FILES it runs "
+        "are frozen only when the command names them (`python -m pkg.mod` or `python score.py`). As "
+        "written, the Developer's edit surface may still contain whatever this command ends up "
+        "executing — list those files in `protect` if the scoring code must be frozen."]
+
+
 def _grandfathered(info: ValidationInfo) -> bool:
     """True when this task document is being RE-loaded for a run that ALREADY EXISTS.
 
@@ -204,6 +296,23 @@ class EvalSpec(BaseModel):
     # owns scoring, the reservation only guards Developer manifests.
     stages: list[dict] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
+    # Freeze the FILE the `command` executes, when the argv names one that the editable source
+    # actually ships (`python -m pkg.mod`, `python score.py` — see `entrypoint_candidates`). ON by
+    # default, because that is what the Developer's own prompt already promises the operator ("the
+    # operator's `cmd` is APPENDED automatically as the final, protected `score` stage — you CANNOT
+    # rewrite how the run is scored"), and only the STAGE was ever protected.
+    #
+    # It is a DEFAULT rather than an unconditional rule because the opposite arrangement is a
+    # first-class, documented flow: on most repo tasks the Developer AUTHORS the eval entrypoint,
+    # and `eval_stages.PROTECTED_SCRIPT_MISSING` tells an operator to drop a protect entry so it
+    # can. A repo that HAPPENS to ship a file at the scorer's path (a committed `looplab_eval.py`
+    # from an earlier run) would otherwise silently stop being authorable with no way to say so.
+    #
+    # The off-switch is deliberately NOT "the operator listed their own `protect`". `protect` only
+    # ADDS, so an operator who protects `data/**` would silently give up the scorer freeze that
+    # `protect` is the very vocabulary for — the surprising direction. This field says the thing
+    # itself, and the run's `task.snapshot.json` records the decision.
+    protect_entrypoint: bool = True
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides
     timeout: float = 600.0
@@ -618,10 +727,14 @@ class RepoTask(BaseModel):
     def assets(self) -> dict[str, str]:
         return {}                              # repo/data are tree-mounted, not flat assets
 
-    def _editable_mounts(self) -> list[dict]:
+    def _declared_editable_mounts(self) -> list[dict]:
         """Normalize the single-repo shorthand + the multi `editables` into one list of
         {name, path, surface, protect, seed_mode}. name="." mounts at the workspace root.
-        seed_mode is per-repo; "" defers to the run-wide Settings.seed_mode at seed time."""
+        seed_mode is per-repo; "" defers to the run-wide Settings.seed_mode at seed time.
+
+        The operator's DECLARED lists verbatim. `_editable_mounts` is what every consumer calls;
+        this exists only so the entrypoint derivation below has mounts to resolve against without
+        calling back into its own caller."""
         out: list[dict] = []
         if self.editable_path:
             out.append({"name": ".", "path": self.editable_path,
@@ -632,6 +745,84 @@ class RepoTask(BaseModel):
                         "surface": list(e.surface), "protect": list(e.protect),
                         "seed_mode": (e.seed_mode or self.seed_mode)})
         return out
+
+    def _entrypoint_protect(self, mounts: list[dict]) -> dict[str, list[str]]:
+        """`{editable name -> [source-relative paths]}` for the file the eval `command` EXECUTES,
+        when the argv names one AND that editable actually ships it. `{}` otherwise.
+
+        This is what makes the Developer prompt's trust-boundary sentence true. The score STAGE was
+        always protected; the FILE it runs was in the edit surface, so on a task with
+        `protect: []` + `edit_surface: ["**/*"]` the Developer could — and did, on
+        `runs/rubertlite-dr-unified-v6` — edit the scorer to retrain when it found no checkpoint.
+        See `eval_entrypoint_unprotected` for what that cost.
+
+        THE FILE MUST EXIST IN THE SOURCE, and that condition is the whole safety argument, not an
+        optimization. A repo task's normal shape is that the Developer AUTHORS the eval entrypoint
+        the operator's cmd names; protecting a path that is not there would refuse the one write
+        that makes such a task runnable, and `_unrunnable_protected_scripts` would then refuse every
+        node for a file nothing can create. Existing-in-the-source is exactly the line between "the
+        operator's scorer" and "the file the agent is supposed to write".
+
+        The result is folded into the owning editable's `protect`, NOT appended to
+        `_protected_names()` directly, because `protect` is read by two consumers that must agree:
+        the write gates (via `_protected_names`) and `engine/workspace.py::seed_protected_files`,
+        which materializes protected files into every node workdir whatever the seed mode says. An
+        entrypoint frozen for writes but absent from the workdir under `seed_mode="auto"` is the
+        failure `tests/test_repo_protected_seed.py` was written for; routing through `protect` means
+        it cannot come back through this door.
+
+        Scope: the entrypoint FILE only — deliberately NOT what it imports. A scorer's import
+        closure is unbounded (it is the repo's own model/data/config modules; on the live task
+        `vectorsearch.test` reaches most of `vectorsearch/`), so freezing it would freeze the repo
+        and leave the Developer nothing to change — the adapter would stop being able to run an
+        experiment at all. The residual hole is real and is stated rather than papered over: a
+        scorer that reads its checkpoint path from an editable config can still be pointed
+        somewhere else. What closes THAT is the stage `expect` contract and the artifact rules in
+        the Developer prompt, not a wider protect list.
+        """
+        if self.eval is None or not self.eval.protect_entrypoint:
+            return {}
+        cands = entrypoint_candidates(self.eval.command)
+        if not cands:
+            return {}
+        # The argv is resolved relative to the eval `cwd` (the command's working directory, and for
+        # `-m` also sys.path[0]); `protect` names are relative to the OWNING editable's root. Same
+        # join `_eval_protected` makes on the other side of the same namespace.
+        cwd = self._normp((self.eval.cwd or ".").strip()).strip("/")
+        pre = "" if cwd in (".", "") else cwd + "/"
+        out: dict[str, list[str]] = {}
+        for cand in cands:
+            ws = self._normp(pre + cand)
+            # Named mounts first: a named editable owns `name/...` outright, and only what no named
+            # mount claims can belong to the root repo (the same ownership rule `_in_surface` uses).
+            for ed in sorted(mounts, key=lambda m: m["name"] in (".", "")):
+                nm = str(ed["name"]).rstrip("/")
+                if nm in (".", ""):
+                    rel = ws
+                elif ws.startswith(nm + "/"):
+                    rel = ws[len(nm) + 1:]
+                else:
+                    continue
+                try:
+                    exists = (Path(ed["path"]) / rel).is_file()
+                except OSError:            # unreadable source -> nothing we can claim to protect
+                    exists = False
+                if exists:
+                    out.setdefault(ed["name"], []).append(rel)
+                    break                  # one file, one owner
+        return out
+
+    def _editable_mounts(self) -> list[dict]:
+        """`_declared_editable_mounts` plus the DERIVED protection of the eval entrypoint (see
+        `_entrypoint_protect`), folded into the owning repo's `protect` so every consumer of a
+        mount — the write gates, the agent brief, workspace seeding — sees one list and cannot
+        disagree about what the operator owns."""
+        mounts = self._declared_editable_mounts()
+        derived = self._entrypoint_protect(mounts)
+        for ed in mounts:
+            ed["protect"] = ed["protect"] + [p for p in derived.get(ed["name"], [])
+                                             if p not in ed["protect"]]
+        return mounts
 
     def eval_spec(self) -> dict:
         return self.eval.model_dump() if self.eval else {}

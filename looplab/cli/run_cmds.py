@@ -28,7 +28,8 @@ from looplab.engine.orchestrator import (
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
-from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
+from looplab.adapters.repo_task import (eval_entrypoint_unprotected, eval_reader_path_errors,
+                                        eval_workspace_conflicts)
 from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
@@ -546,6 +547,28 @@ def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
 
 
 
+def _report_task_warnings(task, task_dict: dict) -> None:
+    """Everything the operator should be told about the task at submit that must NOT stop the run.
+
+    The counterpart of `_assert_run_startable` (the refusals) and its natural neighbour: both are
+    "say it while the operator can still edit the spec", and both are one call in `run()` rather
+    than a loop-per-diagnosis, which is what `test_cli_lifecycle_triage.py`'s length guard exists to
+    push back on. The launch API prints the same two through `LaunchPreflight.warnings`.
+
+      * a task input path that isn't on disk (esp. Genesis-authored): a mistyped/invented data/repo
+        path caught HERE, not as a cryptic mid-run 'No such file or directory'. A warning, not a
+        stop, because a repo's setup step may create some paths and the user may know better.
+      * an eval `cmd` whose scorer LoopLab cannot protect. The Developer's prompt tells it the
+        scoring cannot be rewritten; when the argv names no in-repo file, nothing enforces that,
+        and the same gap cost `runs/rubertlite-dr-unified-v6` 2x GPU per node before anyone looked.
+        See `repo_task.eval_entrypoint_unprotected` for why it is a warning and not a refusal.
+    """
+    for field, p in _missing_task_paths(task_dict):
+        typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
+    for warning in eval_entrypoint_unprotected(task):
+        typer.echo(f"⚠ {warning}", err=True)
+
+
 def _assert_run_startable(task, out) -> None:
     """Every refusal that must happen once the run DIRECTORY is known and before any of it exists.
 
@@ -784,12 +807,7 @@ def run(
             mode="json", by_alias=True, exclude_none=True)
     else:
         task_dict.pop("comparison_contract", None)
-    # Path sanity-check (esp. for Genesis-authored tasks): warn loudly when an input path doesn't
-    # exist, so a mistyped/invented data/repo path is caught HERE — not as a cryptic mid-run
-    # 'No such file or directory'. A warning (not a hard stop): a repo's setup step may create some
-    # paths, and the user may know better. Use --no-genesis or fix the path to silence it.
-    for field, p in _missing_task_paths(task_dict):
-        typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
+    _report_task_warnings(task, task_dict)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
     _assert_run_startable(task, out)
     out.mkdir(parents=True, exist_ok=True)
