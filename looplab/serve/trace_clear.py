@@ -587,7 +587,14 @@ def _strict_replace_prepared_trace(prepared: _PreparedTrace, destination: Path) 
             | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
         )
 
-    with open(temporary, "rb", opener=nofollow_opener) as stream:
+    # Opened for UPDATE, not read-only, purely so the durable sync below can run: on Windows
+    # `os.fsync` is the CRT `_commit`, which needs write access and raises EBADF on a read-only
+    # descriptor — `strict_fsync` then reports "durable fsync failed" and the route answers 503
+    # `trace_clear_outcome_unknown`, telling the operator to verify the same operation again. That
+    # advice could never succeed, because the failure is deterministic: every clear failed on this
+    # platform and left its write-ahead receipt pending. Nothing here reads through the handle; the
+    # nofollow/type/identity checks around it are unaffected by the mode, and "rb+" does not truncate.
+    with open(temporary, "rb+", opener=nofollow_opener) as stream:
         opened = os.fstat(stream.fileno())
         assert_private_trace_file(opened, temporary)
         if trace_file_identity(opened) != trace_file_identity(before):
