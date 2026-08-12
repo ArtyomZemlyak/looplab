@@ -28,7 +28,7 @@ import { shareActionBlock, shareActionFailure, shareSnapshotAudience } from './a
 import {
   sessionDeleteBlock, sessionDeleteFailure, sessionReadSuperseded,
 } from './assistantSessionModel.js'
-import { foldControl, newChatGate } from './assistantChromeModel.js'
+import { contextChipTitle, contextUsage, foldControl, newChatGate } from './assistantChromeModel.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, assistantTurnIndex,
   danglingAssistantTurn,
@@ -3212,13 +3212,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // right now (grows as the chat gets longer) — NOT tokens.prompt, which SUMS the same context re-sent by
   // every tool-loop call in the turn (billed, O(calls²)). The sum of turn totals ≈ what the chat spent
   // (billed). Shown as a faint chip so you can watch the window fill and know when to start a fresh chat.
-  const lastCtx = [...msgs].reverse().find(m => m.tokens?.context || m.tokens?.prompt)?.tokens || {}
-  const lastCtxTok = lastCtx.context || lastCtx.prompt || 0
-  const chatTok = msgs.reduce((s, m) => s + (m.tokens?.total || 0), 0)
+  const ctxUsage = contextUsage(msgs)
   const ktok = (n) => n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : String(n || 0)
-  const ctxChip = lastCtxTok > 0
-    ? <span className="asst-ctxtok" title={`≈${lastCtxTok.toLocaleString()} tokens in the assistant's context (grows with the conversation — start a new chat to reset) · ≈${chatTok.toLocaleString()} total tokens this chat`}>
-        <OpIcon name="sliders" size={10} /> {ktok(lastCtxTok)} ctx</span>
+  const ctxChip = ctxUsage.last > 0
+    ? <span className="asst-ctxtok" title={contextChipTitle(ctxUsage)}>
+        <OpIcon name="sliders" size={10} /> {ktok(ctxUsage.last)} ctx
+        {ctxUsage.compacted && <span className="muted"> ↓{ktok(ctxUsage.peak)}</span>}</span>
     : null
 
   const slashMatch = /^\/(\w*)$/.exec(input)

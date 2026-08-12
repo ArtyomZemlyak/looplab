@@ -39,3 +39,48 @@ export function foldControl(directConfirm, idleTitle = undefined) {
       }
     : { action: 'collapse', label: '▾ bar', title: idleTitle }
 }
+
+
+// THE CONTEXT CHIP, and why its number moved. The operator watched it read 20k, then 50k, then 25k,
+// then 18k inside ONE conversation and reasonably concluded the accounting was broken. It was not —
+// but the label was: the chip said "tokens in the assistant's context (grows with the conversation)",
+// a promise the number cannot keep, for two honest reasons.
+//
+//   * It shows the LAST TURN's peak single prompt. A turn with forty tool calls carries a big peak;
+//     the one-line turn after it carries a small one. Neither is the window "shrinking".
+//   * `drive_tool_loop` COMPACTS the history in place when it grows past the budget, so the context
+//     really does get smaller — that is the loop working, and the chip made it look like a fault.
+//
+// So the chip now reports both: what the last turn actually carried, and the high-water mark for the
+// chat, which is the monotonic number the old label was describing.
+export function contextUsage(messages = []) {
+  let last = 0
+  let peak = 0
+  let spent = 0
+  for (const message of messages) {
+    const tokens = message?.tokens || {}
+    // `context` is the peak SINGLE prompt of that turn; `prompt` SUMS the same context re-sent by
+    // every call in the turn (billed, O(calls²)), so it is a cost number and never a window number.
+    const value = Number(tokens.context || 0)
+    if (Number.isFinite(value) && value > 0) {
+      last = value
+      if (value > peak) peak = value
+    }
+    const total = Number(tokens.total || 0)
+    if (Number.isFinite(total) && total > 0) spent += total
+  }
+  return { last, peak, spent, compacted: peak > 0 && last > 0 && last < peak }
+}
+
+export function contextChipTitle(usage) {
+  if (!usage || !usage.last) return ''
+  const parts = [`≈${usage.last.toLocaleString()} tokens carried by the last turn`]
+  if (usage.compacted) {
+    parts.push(`peak this chat ≈${usage.peak.toLocaleString()} — it fell because the agent loop `
+      + 'compacted the history, which is the loop working, not a fault')
+  } else if (usage.peak > usage.last) {
+    parts.push(`peak this chat ≈${usage.peak.toLocaleString()}`)
+  }
+  parts.push(`≈${usage.spent.toLocaleString()} tokens billed across this chat`)
+  return parts.join(' · ')
+}
