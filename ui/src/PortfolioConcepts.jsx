@@ -6,6 +6,7 @@ import {
   partnersOf, visibleForestRows,
 } from './conceptForest.js'
 import { conceptMemory, conceptMemoryNotice } from './conceptMemoryModel.js'
+import { get } from './api.js'
 import './portfolio-concepts.css'
 
 // The GLOBAL concept view — the run list's `Concepts` representation, beside List / Lineage / Compare.
@@ -196,8 +197,10 @@ export default function PortfolioConcepts({
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch('/api/cross-run/concept-policy', { signal: controller.signal })
-      .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+    // `get`, not a bare `fetch`: a root-relative `/api/...` misses the deployment's path prefix
+    // (this UI is served under `/user/<name>/proxy/<port>/` on JupyterHub) and carries no owner
+    // token, so both reads 404 or 401 on exactly the deployment the operator uses.
+    get('/api/cross-run/concept-policy', { signal: controller.signal })
       .then(policy => setPolicyState({ status: 'ready', policy }))
       .catch(error => {
         if (error?.name !== 'AbortError') setPolicyState({ status: 'unavailable', policy: null })
@@ -207,8 +210,7 @@ export default function PortfolioConcepts({
 
   useEffect(() => {
     const controller = new AbortController()
-    fetch('/api/memory', { signal: controller.signal })
-      .then(response => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+    get('/api/memory', { signal: controller.signal })
       .then(payload => setMemory(payload))
       .catch(error => { if (error?.name !== 'AbortError') setMemory({}) })
     return () => controller.abort()

@@ -85,3 +85,17 @@ test('no selection matches nothing rather than everything', () => {
   const result = conceptMemory(memory(), '')
   assert.equal(result.matched, 0)
 })
+
+
+test('the Concepts view reads the API through the prefixed helper, never a bare fetch', async () => {
+  // A root-relative `/api/...` resolves against the ORIGIN, so it misses the deployment's path
+  // prefix — this UI is served under `/user/<name>/proxy/<port>/` on JupyterHub — and carries no
+  // owner token. Both reads would 404 or 401 on exactly the deployment the operator uses, and the
+  // section would silently render as "cross-run memory is empty". Found by review; the pre-existing
+  // concept-policy read had the same shape and is fixed with it.
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../src/PortfolioConcepts.jsx', import.meta.url), 'utf8')
+  assert.ok(!/\bfetch\('\/api/.test(source), 'a bare fetch of an /api path came back')
+  assert.ok(source.includes("get('/api/memory'"), 'the memory read must go through the helper')
+  assert.ok(source.includes("get('/api/cross-run/concept-policy'"))
+})
