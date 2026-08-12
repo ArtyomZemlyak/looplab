@@ -169,21 +169,25 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // a second settle path there is how it went back to saying nothing. The behaviour itself is
   // driven in inspectorTracePager.test.js; this only holds the single-path shape.
   assert.match(inspector,
-    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const candidate = observation\?\.unchanged \? prior\?\.payload : observation\?\.data[\s\S]*?const payload = matchingNodePayload\([\s\S]*?commit\(!!payload, payload, etag\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const candidate = observation\?\.unchanged \? prior\?\.payload : observation\?\.data[\s\S]*?const payload = matchingTracePayload\([\s\S]*?commit\(!!payload, payload, etag\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
     'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
-  assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?No execution spans/,
-    'an empty node trace must check unavailable and the window before successful empty')
-  assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
+  // The order is the whole property, and it now lives in the ONE surface both tabs render:
+  // unavailable beats every empty/partial shape, and a bounded window beats "nothing was recorded".
+  assert.match(inspector, /if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(!spans\.length\) \{[\s\S]*?if \(spanWindow\.kind !== 'complete'\)[\s\S]*?TRACE_PARTIAL_EMPTY_NOTICE[\s\S]*?traceSubjectEmptyNotice\(subject\)/,
+    'an empty trace must check unavailable and the window before successful empty')
+  assert.ok(inspector.indexOf('if (view === TRACE_VIEW_CONVERSATION) {') > 0
+    && inspector.indexOf('if (view === TRACE_VIEW_CONVERSATION) {')
+      < inspector.indexOf('if (!spans.length) {'),
     'the selected conversation view must load before raw-tree empty/unavailable branches')
   assert.match(inspector, /const request = traceDeadlineGet\([\s\S]*?runApiPath\(runId, `\/spans\/\$\{encodeURIComponent\(s\.span_id\)\}`\), expectedGeneration\)[\s\S]*?request\.promise\.then[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?onIo\(traceDetailState\(d\)\)[\s\S]*?\[open, io, runId, expectedGeneration, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => onIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
-  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, n\.id, nodeAttempt, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, subjectKey, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
   assert.match(inspector,
-    /const scope = \[runId, expectedGeneration \|\| '', n\.id, nodeAttempt, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?`\/conversation\$\{traceReadQuery\(expectedGeneration, nodeAttempt, spanLimit\)\}`[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
+    /const scope = \[runId, expectedGeneration \|\| '', subjectKey, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?traceReadQuery\(expectedGeneration, subjectAttempt, spanLimit\)[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
     'the conversation must conditionally read only its exact generation/lifecycle/window scope')
   assert.match(inspector,
-    /const lifecycleScope = \[runId, expectedGeneration \|\| '', n\.id, nodeAttempt, reloadNonce\][\s\S]*?const currentRead = read\?\.lifecycleScope === lifecycleScope \? read : null[\s\S]*?const prior = readRef\.current/,
+    /const lifecycleScope = \[runId, expectedGeneration \|\| '', subjectKey, reloadNonce\][\s\S]*?const currentRead = read\?\.lifecycleScope === lifecycleScope \? read : null[\s\S]*?const prior = readRef\.current/,
     'fallback evidence must be gated by lifecycle, independently of the requested span window')
   assert.match(api,
     /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit\), timeout\)/,

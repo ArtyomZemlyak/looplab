@@ -1,6 +1,6 @@
 // Earlier attempts of a repaired node — the trace an operator opens the Inspector to read.
 //
-// The routes have taken `?attempt=` all along and `usePagedNodeTrace` already fenced on it; the
+// The routes have taken `?attempt=` all along and `usePagedTrace` already fenced on it; the
 // Inspector simply always sent the CURRENT generation and rejected any response carrying an older
 // one as stale. So on a node that was repaired five times, the five traces that actually crashed
 // were unreachable and only the last one — often the abandon — could be read.
@@ -52,9 +52,14 @@ test('a historical attempt must be fetched; the current one only when paging fur
 
 test('the Inspector sends the SELECTED attempt and follows the node forward by default', () => {
   const source = readFileSync(join(SRC, 'Inspector.jsx'), 'utf8')
-  assert.ok(source.includes('attempt: selectedAttempt'),
-    'the paged read must send the selected attempt, not the node’s current one')
-  assert.ok(!source.includes('attempt: nodeGeneration,'), 'the pinned-to-current read came back')
+  // The trace SUBJECT is what carries the attempt into every read the surface makes (the span tree
+  // and the conversation both derive their query from it), so this is where the selection has to
+  // land. Driven end-to-end in traceSurfaceReuse.test.js, which mounts the tab, picks an earlier
+  // attempt and reads the attempt off the request that goes out.
+  assert.ok(source.includes('nodeTraceSubject(n.id, selectedAttempt)'),
+    'the read must be scoped to the selected attempt, not the node’s current one')
+  assert.ok(!source.includes('nodeTraceSubject(n.id, nodeGeneration)'),
+    'the pinned-to-current read came back')
   // `null` means "follow the node": a live node that repairs mid-read must not strand the operator
   // on the generation that happened to be current when they opened the tab.
   assert.ok(source.includes('viewAttempt == null ? (nodeGeneration ?? 0) : viewAttempt'))

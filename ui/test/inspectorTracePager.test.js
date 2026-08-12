@@ -443,11 +443,14 @@ test('conversation fallback is lifecycle-scoped while a same-lifecycle widen kee
     })
     try {
       const { Conversation } = await vite.ssrLoadModule('/src/Inspector.jsx')
+      // The conversation reads whatever SUBJECT it is given — a node here, one operation's own
+      // trace on the card's research surface. The lifecycle below is keyed on that subject.
+      const { nodeTraceSubject } = await vite.ssrLoadModule('/src/traceSurfaceModel.js')
       const { createRoot } = await import('react-dom/client')
       const { act } = await import('react-dom/test-utils')
       const container = dom.window.document.getElementById('root')
       const root = createRoot(container)
-      const props = { n: { id: 7, attempt: 0 }, runId: 'demo', working: false,
+      const props = { subject: nodeTraceSubject(7, 0), runId: 'demo', working: false,
         spanLimit: 512, reloadNonce: 0 }
       const settle = async () => {
         await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
@@ -474,7 +477,7 @@ test('conversation fallback is lifecycle-scoped while a same-lifecycle widen kee
         'a failed first observation in the new lifecycle is unavailable')
 
       await act(async () => { root.render(React.createElement(Conversation, {
-        ...props, n: { id: 8, attempt: 1 }, spanLimit: 1024, reloadNonce: 1,
+        ...props, subject: nodeTraceSubject(8, 1), spanLimit: 1024, reloadNonce: 1,
       })) })
       assert.doesNotMatch(container.textContent, /turn 0/,
         'node/attempt replacement may not borrow another lifecycle while its read fails')

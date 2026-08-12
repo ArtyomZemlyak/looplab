@@ -233,6 +233,11 @@ button { font: inherit; }
   color: var(--working-text); }
 .chip.ok { background: color-mix(in srgb, var(--ok) 10%, var(--bg-3)); border-color: var(--ok);
   color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }
+/* A fact, not a state to act on: a dashed outline and no fill, so it reads as an ANNOTATION beside
+   the solid status chips rather than competing with them. This is what "its experiment has
+   finished" gets, while a broken ownership receipt keeps `.warn` — the whole point of the split. */
+.chip.quiet { background: none; border-style: dashed; border-color: var(--line-2);
+  color: var(--fg-mut); }
 
 .pill { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line-2);
   color: var(--fg-dim); text-transform: uppercase; letter-spacing: .5px; }
@@ -3307,13 +3312,48 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .card-trace { margin-top: 12px; }
 .card-trace-section { margin-bottom: 10px; }
 .card-trace-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 2px 0; }
-.card-trace-body { flex-basis: 100%; margin: 4px 0 8px 14px; }
+/* `min-width: 0` is what lets the embedded trace shrink: a grid/flex item defaults to its CONTENT
+   minimum, and the span tree's timeline rows do not shrink on their own. */
+.card-trace-body { flex-basis: 100%; min-width: 0; margin: 4px 0 8px 14px; }
 .card-trace-divider { border-top: 1px solid var(--line, #2a2a2a); padding-top: 6px; }
 
-/* The research strip on a node's trace: the reasoning that produced this experiment's work item,
-   shared with every sibling experiment on the same card. */
-.trace-card-research { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 6px 0; }
-.trace-card-research-body { flex-basis: 100%; margin-left: 12px; }
+/* THE RESEARCH LANE — the reasoning that produced a work item, shared by every experiment on it.
+   It renders in two places (the node's Trace tab as a disclosure, the card's Trace tab as a
+   section) and looks the same in both, because it is the same component.
+
+   Two things it must not do, both of which it did:
+   * be a bare `<button class="seg">`. `.seg` is a CONTAINER rule (`.seg button` carries the
+     background) — as a class on the button itself it contributes a border and NOTHING else, so the
+     UA's `buttonface` came through and the disclosure rendered as a solid white slab in a dark UI.
+     These are `.btn.xs.ghost`, which is fully specified and themed.
+   * put the trace BESIDE its label. The label was a flex sibling of the whole span tree, so the
+     tree — search bar, timeline bars and all — was squeezed into whatever was left of the row. The
+     heading is its own block and the trace gets the full width underneath it. */
+.trace-research { margin: 4px 0 2px; }
+.trace-research-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.trace-research-toggle { font-weight: 600; }
+.trace-research-caret { display: inline-block; width: 10px; color: var(--fg-mut); }
+/* Open, it becomes a lane: a left rule in the accent tint says "this is the Researcher's half of
+   the story", against the page's own surface rather than a slab of its own. */
+.trace-research.open .trace-research-body {
+  margin: 6px 0 2px; padding: 8px 0 2px 10px;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 42%, var(--line));
+}
+.research-traces { display: flex; flex-direction: column; gap: 8px; }
+.research-trace { min-width: 0; }
+.research-trace-h { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 0 0 2px; font-size: 12px; font-weight: 500; }
+.research-trace-toggle { font-weight: 600; }
+.research-trace-caret { display: inline-block; width: 10px; color: var(--fg-mut); }
+.research-who { color: var(--accent-text); }
+.research-trace-roll { font-size: 11px; font-variant-numeric: tabular-nums; margin-left: auto; }
+/* The trace itself, embedded rather than owning the scroll container: no sticky bar, no negative
+   margins cancelling a panel's padding, and a quieter control row than the Inspector tab's. */
+.trace-head-inline { position: static; margin: 0 0 6px; padding: 0; border-bottom: 0;
+  background: transparent; }
+.trace-head-inline .conv-toggle { width: auto; margin-bottom: 4px; }
+.trace-inline { min-width: 0; }
+.trace-inline .span-tree-virtual { height: clamp(220px, 34vh, 420px); }
 
 /* One line under the memory tabs saying what the selected tier IS. The tiers have different writers
    and different readers, and four tabs with counts alone did not say that. */

@@ -49,7 +49,12 @@ export function cardTraceSections(payload) {
       key: `node-${node.node_id}`,
       title: `Experiment #${node.node_id}`,
       node,
-      openable: Number(node.spans || 0) > 0 && !!node.trace_id,
+      // Deliberately NOT `&& node.trace_id`. `trace_id` is the trace the node was AUTHORED in
+      // (`node_created.trace_id`) — two spans, `Author node` → `materialize_node` — and the section
+      // used to open exactly that, which is how the Developer's build, repairs and evaluation
+      // vanished from this surface. The Developer's trace is the NODE's, read per node, and
+      // `spans` is the count of it: 61 for rubertlite-dr-unified-v3 node 0 against that trace's 2.
+      openable: Number(node.spans || 0) > 0,
     })
   }
   return sections

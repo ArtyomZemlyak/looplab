@@ -2579,21 +2579,34 @@ def test_the_attribution_root_accepts_an_orphan_but_the_structural_root_does_not
 
 
 def test_both_views_attribute_through_the_shared_rule():
-    """The two projections reach attribution through `trace_root_node_id`/`effective_node_id`.
+    """The projections reach attribution through `trace_root_node_id`/`effective_node_id`.
 
-    Comment-proof (`called_names` resolves real `ast.Call` nodes), but still an ENUMERATION of the two
-    views — and that is exactly what it can and cannot do. It says these two have not stopped calling
+    Comment-proof (`called_names` resolves real `ast.Call` nodes), but still an ENUMERATION of the
+    views — and that is exactly what it can and cannot do. It says these have not stopped calling
     the shared rule; it says nothing about a THIRD site, which is the failure that actually happened.
     `test_no_site_re_derives_the_trace_root` below is the half that discovers rather than enumerates.
+
+    The band builder `_conversation_bands` is now where the root rule is CALLED, because the per-node
+    and per-trace conversations share it (the trace one is what makes a Researcher proposal readable
+    on the same surface as a node's build). So the pin follows the call: whichever of the two spells
+    the rule, the OTHER must reach it through this one helper — a conversation that re-derived either
+    half for itself is exactly the drift this rule exists to catch.
     """
     from _source_scan import called_names
 
     from looplab.events import traceview
 
-    for name in ("build_trace_view", "build_conversation"):
+    for name in ("build_trace_view", "_conversation_bands"):
         calls = called_names(getattr(traceview, name))
         assert "trace_root_node_id" in calls, f"{name} no longer uses the shared root rule"
-        assert "effective_node_id" in calls, f"{name} no longer uses the shared attribution"
+    # `build_conversation` owns the node ATTRIBUTION predicate (which of a trace's spans are this
+    # node's); the band helper owns the structural root the predicate is resolved against.
+    node_conversation = called_names(traceview.build_conversation)
+    assert "effective_node_id" in node_conversation, \
+        "build_conversation no longer uses the shared attribution"
+    for name in ("build_conversation", "build_trace_conversation"):
+        assert "_conversation_bands" in called_names(getattr(traceview, name)), \
+            f"{name} builds its own bands again — the root rule would be re-derived next"
 
 
 def test_indexed_and_unindexed_conversations_agree_on_an_orphan_headed_trace(tmp_path):

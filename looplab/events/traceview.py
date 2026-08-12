@@ -1246,25 +1246,18 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
     return out
 
 
-def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None,
-                       span_cap: int = TRACE_CONVERSATION_SPAN_CAP,
-                       generation: Optional[int] = None,
-                       _normalized: bool = False) -> dict:
-    """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
-    with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
-    files-as-truth; caps every string for the browser, but never re-sends the growing history.
+def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[dict]]:
+    """Bands + threaded turns over an ALREADY-SELECTED, already-normalized span set.
 
-    `span_cap` is the UI's "load more" window (settled by `settle_node_span_cap` at the route). It
-    widens the read AND, through `conversation_render_caps`, the stage/turn caps below in step — see
-    that function for why moving only one of the three surfaces nothing."""
-    stage_cap, turn_cap = conversation_render_caps(span_cap)
-    selected, _observed_total = _bounded_node_trace_tail(
-        spans, node_id, span_cap, generation=generation, _normalized=_normalized)
-    # Both production readers (`load_spans` and SpanIndex's full-offset reads) have already crossed
-    # `_normalize_span`'s security boundary. Re-running its text redaction/entropy scan over as many
-    # as 4096 prompt-heavy rows on every 4 s live poll was pure work (measured seconds at the ceiling).
-    # The default remains fail-closed for public/direct callers; only explicit trusted call sites skip.
-    spans = list(selected) if _normalized else _normalize_spans(selected)
+    `keep(span, trace_node_id) -> bool` is the only thing that differs between the two conversations
+    this serves: the per-NODE one keeps the spans attributed to its node, the per-TRACE one keeps
+    everything in the trace it was handed. Everything below — how a trace splits into sub-loop bands,
+    how turns are threaded and de-duplicated, which band a live-but-unclosed operation belongs to —
+    is the same reading and is deliberately written once. The card surface used to open a bare span
+    tree instead precisely because this half was unreachable from anywhere but a node id.
+
+    Returns `(stages, matching_spans)`; the caller owns the render caps and the projection receipt.
+    """
     by_id = {s["span_id"]: s for s in spans}
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
@@ -1301,12 +1294,9 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         # the loss surfaced as generic truncation rather than as the missing attribution it was.
         # Root-only legacy logs are unaffected: their spans have no own id and all fall back to the
         # same trace node.
-        mine = [s for s in ss_sorted
-                if (nid := effective_node_id(s, trace_nid)) is not None
-                and str(nid) == str(node_id)]
+        mine = [s for s in ss_sorted if keep(s, trace_nid)]
         if not mine:
             continue
-        matching_span_count += len(mine)
         matching_spans.extend(mine)
         # Split EVERY trace into its sub-loop bands (propose / stages / plan / implement / repair /
         # inline_repair / …) so the conversation reads as ordered role blocks. Wrapper roots
@@ -1376,6 +1366,19 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
                                "start": _first_turn_start(g),
                                "rollup": _rollup(grp), "turns": turns})
     stages.sort(key=lambda x: x.get("start", 0.0))
+    return stages, matching_spans
+
+
+def _conversation_payload(state: RunState, stages: list[dict], matching_spans: list[dict], *,
+                          observed_total: int, total_spans, span_cap: int,
+                          identity: dict) -> dict:
+    """The render caps + the omission receipt, shared by both conversations.
+
+    `identity` names the SUBJECT this reading is of (`node_id` / `trace_id`) and is echoed so the
+    browser can fence a late in-flight response from the previous subject — the same fence the node
+    surface has always applied, now stated once for both.
+    """
+    stage_cap, turn_cap = conversation_render_caps(span_cap)
     total_stages = len(stages)
     total_turns = sum(len(stage.get("turns") or []) for stage in stages)
     # Bound the rendered thread globally, not merely each text field.  A crafted trace
@@ -1393,9 +1396,9 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         remaining = max(0, remaining - len(keep))
     stages = list(reversed(visible))
     visible_turns = sum(len(stage.get("turns") or []) for stage in stages)
-    # `_observed_total` is the exact number of observations in traces attributed to this node for both
-    # the whole-run fallback and the node-scoped index path; it is measured before the response cap.
-    reported_total = max(matching_span_count, _observed_total, _projection_counter(total_spans))
+    # `observed_total` is the exact number of observations in traces attributed to this subject for
+    # both the whole-run fallback and the index path; it is measured before the response cap.
+    reported_total = max(len(matching_spans), observed_total, _projection_counter(total_spans))
     projection = _response_projection(
         total_spans=reported_total, visible_spans=len(matching_spans),
         truncated_spans=sum(1 for span in matching_spans
@@ -1405,7 +1408,57 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
         total_turns=total_turns, visible_turns=visible_turns,
         omitted_turns=max(0, total_turns - visible_turns))
     return {"schema": TRACE_PROJECTION_SCHEMA, "run_id": state.run_id, "task_id": state.task_id,
-            "node_id": str(node_id), "stages": stages, "projection": projection}
+            **identity, "stages": stages, "projection": projection}
+
+
+def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None,
+                       span_cap: int = TRACE_CONVERSATION_SPAN_CAP,
+                       generation: Optional[int] = None,
+                       _normalized: bool = False) -> dict:
+    """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
+    with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
+    files-as-truth; caps every string for the browser, but never re-sends the growing history.
+
+    `span_cap` is the UI's "load more" window (settled by `settle_node_span_cap` at the route). It
+    widens the read AND, through `conversation_render_caps`, the stage/turn caps below in step — see
+    that function for why moving only one of the three surfaces nothing."""
+    selected, observed_total = _bounded_node_trace_tail(
+        spans, node_id, span_cap, generation=generation, _normalized=_normalized)
+    # Both production readers (`load_spans` and SpanIndex's full-offset reads) have already crossed
+    # `_normalize_span`'s security boundary. Re-running its text redaction/entropy scan over as many
+    # as 4096 prompt-heavy rows on every 4 s live poll was pure work (measured seconds at the ceiling).
+    # The default remains fail-closed for public/direct callers; only explicit trusted call sites skip.
+    spans = list(selected) if _normalized else _normalize_spans(selected)
+    stages, matching_spans = _conversation_bands(spans, keep=lambda s, trace_nid: (
+        (nid := effective_node_id(s, trace_nid)) is not None and str(nid) == str(node_id)))
+    return _conversation_payload(state, stages, matching_spans, observed_total=observed_total,
+                                 total_spans=total_spans, span_cap=span_cap,
+                                 identity={"node_id": str(node_id)})
+
+
+def build_trace_conversation(state: RunState, spans: list[dict], trace_id, *, total_spans=None,
+                             span_cap: int = TRACE_CONVERSATION_SPAN_CAP,
+                             _normalized: bool = False) -> dict:
+    """ONE operation's trace as the SAME linear conversation the node surface reads.
+
+    The Researcher's proposal is the case this exists for. Its spans carry no node_id at all
+    (measured on `runs/rubertlite-dr-unified-v5` card-0: 252 spans, 86 generations, 165 tool calls,
+    every one of them `node_id=None`), so no node conversation can ever contain them — which is why
+    a proposal was readable only as a raw span tree, in the card AND in the node's research
+    disclosure, with the view switcher inert beside it. Everything about the reading is identical;
+    only the SELECTION differs, so only the selection is written here.
+
+    The caller passes the spans it wants read (the index serves one trace by byte offset); this
+    filters by `trace_id` anyway, because a caller handing over the whole run must not silently get
+    a conversation of every operation in it.
+    """
+    mine = [s for s in spans if str(s.get("trace_id") or "") == str(trace_id)]
+    selected, observed_total = _bounded_tail(mine, span_cap)
+    spans = list(selected) if _normalized else _normalize_spans(selected)
+    stages, matching_spans = _conversation_bands(spans, keep=lambda s, trace_nid: True)
+    return _conversation_payload(state, stages, matching_spans, observed_total=observed_total,
+                                 total_spans=total_spans, span_cap=span_cap,
+                                 identity={"trace_id": str(trace_id)})
 
 
 def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,

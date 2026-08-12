@@ -3103,17 +3103,29 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str,
+                       limit: int = Query(default=0, ge=0),
                        expected_generation: Optional[str] = Query(default=None)):
         """Spans of ONE operation's trace (by trace_id) as a tree, WITH capped I/O — powers the
         per-event trace expansion: a strategy_decision / hypothesis_merged event carries its own
         operation's trace_id (the engine wraps each op in a named new_trace span and appends the event
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
-        Researcher+Developer trace."""
+        Researcher+Developer trace.
+
+        `limit` (>0) is the same "reach for earlier steps" window the node surfaces page by, and it
+        is here for the same reason: this route's default cap is TRACE_DETAIL_SPAN_CAP (256) and a
+        real Researcher proposal exceeds it (measured 2026-08-12: 252 spans in
+        `runs/rubertlite-dr-unified-v5` card-0, 272 in the v3 backup's), so the operator reading a
+        proposal on the ONE shared trace surface would otherwise hit a bound the identical surface
+        lifts for a node. 0/absent keeps the default; the ceiling is the shared
+        TRACE_NODE_SPAN_CAP_MAX and a negative limit is refused at the boundary (422), the same wire
+        contract as both node twins."""
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(rd, expected_generation)
         from looplab.events.traceview import (
             TRACE_DETAIL_SPAN_CAP, _bounded_tail, _cap_span_io, _normalized_id,
-            _projection_counter, _response_projection, _tree, hydrate_inputs, load_spans)
+            _projection_counter, _response_projection, _tree, hydrate_inputs, load_spans,
+            settle_node_span_cap)
+        span_cap = settle_node_span_cap(limit, default=TRACE_DETAIL_SPAN_CAP)
         try:
             # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
             from looplab.events.span_index import get_index
@@ -3123,11 +3135,11 @@ def build_router(srv) -> APIRouter:
                 raise ValueError("invalid trace id")
             total = idx.trace_span_count(safe_tid) if idx is not None else None
             if idx is not None:
-                raw = idx.full_spans_for_trace(safe_tid, TRACE_DETAIL_SPAN_CAP)
+                raw = idx.full_spans_for_trace(safe_tid, span_cap)
             else:
                 raw, total = _bounded_tail(
                     (s for s in load_spans(rd / "spans.jsonl")
-                     if s.get("trace_id") == safe_tid), TRACE_DETAIL_SPAN_CAP)
+                     if s.get("trace_id") == safe_tid), span_cap)
             # Reconstruct the retained delta-encoded input before applying browser caps, so the per-op
             # tree does not mistake a delta for a complete diagnostic projection.
             # Both `raw` branches above are already normalized (SpanIndex._read_full / load_spans).
@@ -3146,7 +3158,59 @@ def build_router(srv) -> APIRouter:
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             payload = _trace_unavailable(spans=[])
         generation = _finish_trace_read(rd, before_generation, expected_generation)
-        return _trace_response({**payload, "run_generation": generation or None})
+        # Echo the SUBJECT. Every trace surface fences a late response from the previous subject
+        # before rendering it (`ui/src/traceSurfaceModel.js::traceSubjectMatches`); the node routes
+        # have echoed `node_id`/`attempt` for exactly that all along, and this one answered with no
+        # identity at all — so the one surface that now renders both had nothing to fence on here.
+        return _trace_response({**payload, "trace_id": str(trace_id),
+                                "run_generation": generation or None})
+
+    @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}/conversation")
+    def trace_by_trace_conversation(run_id: str, trace_id: str,
+                                    limit: int = Query(default=0, ge=0),
+                                    expected_generation: Optional[str] = Query(default=None)):
+        """ONE operation's trace as the LINEAR conversation, the twin of `/nodes/{nid}/conversation`.
+
+        A Researcher proposal's spans carry no node_id (they precede the node they argue for, and
+        may argue for no node at all), so no node conversation can contain them: the proposal was
+        readable only as a raw span tree while the identical surface offered a node both readings.
+        Measured on `runs/rubertlite-dr-unified-v5` card-0, this answers with one `propose` band of
+        269 turns over 86 generations and 165 tool calls — the Researcher's actual reasoning.
+
+        No ETag here, deliberately. The node twin's conditional machinery is keyed on the node
+        window snapshot (`SpanIndex.node_window_snapshot`) and exists because that surface polls
+        every 4 s while a node is being worked; a closed operation's trace is immutable and is read
+        once, so the cheap `no-store` contract is the honest one rather than a second cache key that
+        would need its own invalidation proof."""
+        rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(rd, expected_generation)
+        from looplab.events.traceview import (
+            TRACE_CONVERSATION_SPAN_CAP, _normalized_id, build_trace_conversation, hydrate_inputs,
+            load_spans, settle_node_span_cap)
+        span_cap = settle_node_span_cap(limit, default=TRACE_CONVERSATION_SPAN_CAP)
+        try:
+            from looplab.events.span_index import get_index
+            idx = get_index(rd / "spans.jsonl")
+            safe_tid = _normalized_id(trace_id)
+            if safe_tid is None:
+                raise ValueError("invalid trace id")
+            total = idx.trace_span_count(safe_tid) if idx is not None else None
+            raw = (idx.full_spans_for_trace(safe_tid, span_cap) if idx is not None
+                   else load_spans(rd / "spans.jsonl"))
+            # Same delta reconstruction the span-tree twin does: a retained delta is not a complete
+            # observation, and the conversation reads those inputs.
+            payload = build_trace_conversation(
+                srv.trace_scalars(rd), hydrate_inputs(raw, _normalized=True), safe_tid,
+                total_spans=total, span_cap=span_cap,
+                # Both branches above return normalized projections, never raw durable dictionaries.
+                _normalized=True)
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
+            payload = _trace_unavailable(trace_id=str(trace_id), stages=[])
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return _trace_response({**payload, "trace_id": str(trace_id),
+                                "run_generation": generation or None})
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):

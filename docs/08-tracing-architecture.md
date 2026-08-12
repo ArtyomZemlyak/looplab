@@ -156,8 +156,16 @@ called rather than assume that every response has `total_spans` and `visible_spa
 |---|---|
 | run/node trace and node conversation | known total/visible/omitted span counts plus truncated-span or stage/turn omission counters |
 | `trace/by_trace/{trace_id}` | operation `count`, `visible_count`, `omitted_count` plus the corresponding span projection receipt |
+| `trace/by_trace/{trace_id}/conversation` | the same stage/turn omission counters as the node conversation — it is the same projection over one operation's spans instead of one node's |
 | `spans/{span_id}` | `detail_truncated` for the selected span plus `siblings_elided`, `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when cardinality is known |
 | `trace/tail` | the bounded tail's visible/omitted counts and `source_truncated`; it does not pretend to know a whole-run total |
+
+Both `by_trace` routes echo the requested `trace_id` and take the same `limit` window the node routes
+take (settled by `settle_node_span_cap`, so the ceiling stays `TRACE_NODE_SPAN_CAP_MAX`). Neither is
+decoration: the browser fences a late response against the subject it asked for, and the span route's
+256-span default really binds on a Researcher proposal (measured 2026-08-12: 252 spans on
+`runs/rubertlite-dr-unified-v5` card-0, 272 on the v3 backup's), so the one trace surface that renders
+both nodes and operations would otherwise meet a wall on one subject that it lifts for the other.
 
 The span-detail route retains aggregate `truncated` for generic tree/tail consumers, where either a
 bounded selected span or omitted trace siblings makes the envelope partial. A selected-detail notice

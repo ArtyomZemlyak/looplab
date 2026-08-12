@@ -21,6 +21,11 @@ import {
 } from './traceProjection.js'
 import { cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
+  TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS, nodeTraceSubject, opTraceSubject, traceRequestPath,
+  traceSubjectAttempt, traceSubjectEmptyNotice, traceSubjectHasLogs, traceSubjectKey,
+  traceSubjectLead, traceSubjectMatches, traceSubjectSpans, traceSubjectValid,
+} from './traceSurfaceModel.js'
+import {
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
   TRACE_SCROLL_SETTLED, settleTraceRead, traceReadDeadlineMs, traceScrollBoundedSuffix,
   traceScrollState, traceWidenStalled,
@@ -1599,13 +1604,27 @@ const matchingNodePayload = (result, nodeId, attempt, expectedGeneration) => {
     ? payload : null
 }
 
-export function Conversation({ n, runId, expectedGeneration, working, allOpen = true, reloadNonce = 0,
-  onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
-  const nodeAttempt = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : 0
+// The same gate for whichever SUBJECT is being read — the node fence above generalized so the
+// proposal reading cannot land under a node's heading (or a second proposal's) either.
+const matchingTracePayload = (result, subject, expectedGeneration) => {
+  const payload = result.value
+  return result.status === 'fulfilled' && traceSubjectMatches(subject, payload)
+    && traceGenerationMatches(payload, expectedGeneration)
+    ? payload : null
+}
+
+// The linear reading, for whatever SUBJECT the surface is showing: a node's build+eval, or ONE
+// operation's own trace (a Researcher proposal, which carries no node_id and is therefore reachable
+// no other way — see traceSurfaceModel.js). Everything below is the same reading; only the path, the
+// fence and whether there are subprocess logs come from the subject.
+export function Conversation({ subject, runId, expectedGeneration, working, allOpen = true,
+  reloadNonce = 0, onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
+  const subjectKey = traceSubjectKey(subject)
+  const subjectAttempt = traceSubjectAttempt(subject)
   // This is the evidence lifecycle, deliberately NOT the request representation: widening the span
   // window may retain last-good evidence on failure, while a reset/clear nonce may not. Gate during
   // render as well as commit so correctness never depends on a passive clearing effect winning a race.
-  const lifecycleScope = [runId, expectedGeneration || '', n.id, nodeAttempt, reloadNonce].join('\0')
+  const lifecycleScope = [runId, expectedGeneration || '', subjectKey, reloadNonce].join('\0')
   // The last SETTLED read, carried with the window that produced it and what that window made
   // visible. Both extra fields earn their place: the window is how "a wider read is in flight" is
   // derived without a second piece of state, and the visible count is what proves a widen actually
@@ -1629,11 +1648,12 @@ export function Conversation({ n, runId, expectedGeneration, working, allOpen = 
     // A validator is reusable only for the exact selected representation. The server independently
     // mixes all five identities into its ETag; keeping the same scope key here prevents even a
     // broken intermediary's 304 from carrying a prior node/window across this client boundary.
-    const scope = [runId, expectedGeneration || '', n.id, nodeAttempt, spanLimit].join('\0')
+    const scope = [runId, expectedGeneration || '', subjectKey, spanLimit].join('\0')
     const prior = readRef.current
     const validator = prior?.scope === scope && prior.etag
-    const conversationPath = runNodeApiPath(runId, n.id,
-      `/conversation${traceReadQuery(expectedGeneration, nodeAttempt, spanLimit)}`)
+    const conversationPath = runApiPath(runId,
+      traceRequestPath(subject, TRACE_VIEW_CONVERSATION)
+      + traceReadQuery(expectedGeneration, subjectAttempt, spanLimit))
     // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
     // cannot disagree about what a failure costs the operator.
     const commit = (ok, payload, etag = null) => {
@@ -1669,17 +1689,21 @@ export function Conversation({ n, runId, expectedGeneration, working, allOpen = 
     }
     const timed = deadlineRequest(signal => Promise.allSettled([
         readConversation(signal),
-        get(runNodeApiPath(runId, n.id,
-          `/logs${traceReadQuery(expectedGeneration, nodeAttempt)}`),
-        { signal, cache: 'no-store' }),
+        // Only a NODE has subprocess logs. A proposal ran no sandbox and no stage, so asking for
+        // its logs would be a second request per poll whose 404 says nothing.
+        ...(traceSubjectHasLogs(subject)
+          ? [get(runNodeApiPath(runId, subject.nodeId,
+            `/logs${traceReadQuery(expectedGeneration, subjectAttempt)}`),
+          { signal, cache: 'no-store' })]
+          : []),
       ]), traceReadDeadlineMs(spanLimit))
     timed.promise.then(([conversation, logs]) => {
       if (!alive()) return
       const observation = conversation.status === 'fulfilled' ? conversation.value : null
       const candidate = observation?.unchanged ? prior?.payload : observation?.data
-      const payload = matchingNodePayload(
+      const payload = matchingTracePayload(
         { status: observation ? 'fulfilled' : 'rejected', value: candidate },
-        n.id, nodeAttempt, expectedGeneration)
+        subject, expectedGeneration)
       // A 200's cursor and ETag must agree before either is sent back. A 304 already matched the
       // exact validator this scope supplied. A proxy/header anomaly costs only the optimization.
       const etag = payload && (observation.unchanged || payload.cursor === observation.etag)
@@ -1688,7 +1712,9 @@ export function Conversation({ n, runId, expectedGeneration, working, allOpen = 
       // settle this attempt's window. The server echoes both identity fields and independently rejects
       // an attempt change before/after its read; this client-side gate also contains proxy/schema drift.
       commit(!!payload, payload, etag)
-      const logPayload = matchingNodePayload(logs, n.id, nodeAttempt, expectedGeneration)
+      const logPayload = logs
+        ? matchingNodePayload(logs, subject.nodeId, subjectAttempt, expectedGeneration)
+        : null
       // The stage bands and their log text are one evidence snapshot. Never combine a retained
       // attempt-A conversation with logs returned while A was rejected/resetting.
       if (payload && logPayload) setLogs(logPayload)
@@ -1698,7 +1724,7 @@ export function Conversation({ n, runId, expectedGeneration, working, allOpen = 
     }).catch(() => { if (alive()) commit(false, null) })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
-  [runId, expectedGeneration, n.id, nodeAttempt, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
+  [runId, expectedGeneration, subjectKey, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
   if (currentRead === null) return <div className="muted trace-small" role="status">loading…</div>
   const conv = currentRead.payload || { stages: [] }
   const stages = conv.stages || []
@@ -1728,7 +1754,9 @@ export function Conversation({ n, runId, expectedGeneration, working, allOpen = 
   const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={currentRead.reachFailed}
     notice={conversationWindowNotice(convWindow)} />
   if (!stages.length) return convWindow.kind === 'complete'
-    ? <>{staleNotice}<div className="muted">No conversation captured for this node yet.</div></>
+    ? <>{staleNotice}<div className="muted">{traceSubjectHasLogs(subject)
+      ? 'No conversation captured for this node yet.'
+      : 'No conversation captured for this operation.'}</div></>
     : <div className="conv">{staleNotice}{reach}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
@@ -1764,27 +1792,31 @@ function RunSetupLog({ text }) {
   </div>
 }
 
-// The span tree's paged read. Returns null until the operator has raised the window (the detail
-// payload's default window is what renders until then), then this node's `/trace` projection at the
-// requested limit. Polls on the same cadence as the conversation while the node is being worked, so
-// paging a LIVE node does not freeze its trace at the moment it was paged; `nonce` re-reads after a
-// trace clear. A failed read stays null and falls back to the detail payload rather than blanking a
-// trace the operator can still see — asking for more must never cost them what they had.
-function usePagedNodeTrace({
-  runId, nodeId, attempt, expectedGeneration, limit, nonce, working, enabled,
+// The span tree's paged read, for whatever SUBJECT the surface is showing. For a node it returns
+// null until the operator has raised the window (the detail payload's default window is what renders
+// until then), then that node's `/trace` projection at the requested limit; for one operation's
+// trace it is the only source there is, so it reads immediately. Polls on the same cadence as the
+// conversation while the subject is being worked, so paging a LIVE node does not freeze its trace at
+// the moment it was paged; `nonce` re-reads after a trace clear. A failed read stays null and falls
+// back to the detail payload rather than blanking a trace the operator can still see — asking for
+// more must never cost them what they had.
+function usePagedTrace({
+  subject, runId, expectedGeneration, limit, nonce, working, enabled,
 }) {
   const [settled, setSettled] = useState(null)
-  const scope = `${expectedGeneration || runId}:${nodeId}:${attempt ?? 0}:${nonce}`
+  const subjectKey = traceSubjectKey(subject)
+  const scope = `${expectedGeneration || runId}:${subjectKey}:${nonce}`
   // Identity changes (and an explicit post-clear nonce) discard evidence. A larger window does not:
   // the narrower successful page remains the last confirmed truth until its replacement settles.
   useEffect(() => { setSettled(null) }, [enabled, scope])
   usePoll((alive) => {
-    const request = traceDeadlineGet(runNodeApiPath(runId, nodeId, '/trace'),
-      expectedGeneration, attempt ?? 0, limit, traceReadDeadlineMs(limit))
+    const request = traceDeadlineGet(
+      runApiPath(runId, traceRequestPath(subject, TRACE_VIEW_SPANS)),
+      expectedGeneration, traceSubjectAttempt(subject), limit, traceReadDeadlineMs(limit))
     request.promise.then(d => {
-      // Same fence the Dock applies: a response for another node/attempt is a stale in-flight read
-      // from the previous scope, never this node's trace.
-      if (d?.node_id !== nodeId || d?.attempt !== (attempt ?? 0)
+      // Same fence the Dock applies: a response for another node/attempt — or another trace — is a
+      // stale in-flight read from the previous scope, never this subject's trace.
+      if (!traceSubjectMatches(subject, d)
           || !traceGenerationMatches(d, expectedGeneration)) throw 0
       if (alive()) setSettled({ scope, payload: d })
     })
@@ -1796,38 +1828,212 @@ function usePagedNodeTrace({
     return request
   },
     working ? 4000 : null,
-    [runId, nodeId, attempt, expectedGeneration, limit, nonce, working, enabled], { enabled })
+    [runId, subjectKey, expectedGeneration, limit, nonce, working, enabled], { enabled })
   return enabled && settled?.scope === scope ? settled : null
 }
 
-// Exported ONLY so a test can mount it (test/inspectorTracePager.test.js). Nothing in the app
-// imports it — the Inspector renders it directly below. It is exported because the property that
-// matters here is not "the file contains a button": it is that clicking the button issues a request
-// for a BIGGER window and the bigger response reaches the screen, and no amount of reading this
-// file's text can see that. The Inspector shipped a dead partial notice for months underneath pins
-// that were all green.
-// One operation's trace, fetched by its own trace id. `Dock.jsx::OpTrace` is the same thing, but
-// Dock already imports `NodeTrace`/`TraceUnavailable` from THIS file, so importing it back would
-// close a module cycle. Twelve lines is cheaper than that, and the renderer is shared either way.
-function _TraceById({ runId, traceId, expectedGeneration }) {
-  const [state, setState] = useState(null)
-  useEffect(() => {
-    setState(null)
-    if (!runId || !traceId) return undefined
-    let alive = true
-    const request = traceDeadlineGet(
-      runApiPath(runId, `/trace/by_trace/${encodeURIComponent(traceId)}`), expectedGeneration)
-    request.promise
-      .then(d => {
-        if (!traceGenerationMatches(d, expectedGeneration)) throw 0
-        if (alive) setState({ spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {} })
-      })
-      .catch(() => { if (alive) setState({ spans: [], projection: { unavailable: true } }) })
-    return () => { alive = false; request.abort?.() }
-  }, [runId, traceId, expectedGeneration])
-  if (state === null) return <div className="muted trace-loading" role="status">loading trace…</div>
-  return <NodeTrace spans={state.spans} projection={state.projection} runId={runId}
-    expectedGeneration={expectedGeneration} />
+// THE TRACE SURFACE — the one way this UI reads a trace, wherever a trace is read.
+//
+// It exists because there were two. The node Inspector's Trace tab grew the whole apparatus (the
+// conversation/span-tree switcher over ONE shared window, in-tree search, scroll-to-reach for
+// earlier steps, the honest partial receipts), and the card's Trace tab then got a second, poorer
+// one: rows that opened a bare `/trace/by_trace/{tid}` span tree. That second surface was not merely
+// thinner — for the Developer it showed the WRONG trace (see traceSurfaceModel.js for the measured
+// counts), so the card's Trace tab reported the Developer's work as two spans and the operator's
+// verdict was that the Developer trace had disappeared.
+//
+// What the OWNER of a surface still provides, because it is not part of reading a trace:
+//   `status`   the live "what is this node doing right now" line
+//   `controls` chrome that belongs on the control bar — the attempt picker, the destructive clear,
+//              the scroll nav. Rendered INSIDE the switcher row, which is what makes the bar one row.
+//   `below`    chrome under the bar (the research disclosure)
+//   `footer`   evidence that follows the trace in every branch (the agent's validation report)
+// Everything else — which views exist, which is showing, the window, the fences, what a bounded or
+// failed read owes the reader — is here, once.
+//
+// Exported so the card can render it (CardBoard lazily imports this module — a static edge would put
+// the whole Inspector in the board's chunk) AND so a test can mount it: the property that matters is
+// that the switcher issues a real request for the other reading and the response reaches the screen,
+// which no amount of reading this file's text can see. The Inspector shipped a dead partial notice
+// for months underneath pins that were all green.
+export function TraceSurface({
+  subject, runId, expectedGeneration = null, working = false,
+  // The node-detail payload already in hand: `{ payload, attempt }`. It is what renders until the
+  // operator asks for a bigger window, so this tab fills in live during a build off the detail poll
+  // that already runs. A trace subject has no such payload and reads immediately.
+  detail = null,
+  nonce = 0,                     // bumped after "clear trace" to reload the bands
+  chrome = 'tab',                // 'tab' = the sticky Inspector bar; 'inline' = embedded in a row
+  status = null, controls = null, below = null, footer = null,
+  detailUnavailable = false, onRetry = null, retryPending = false,
+  bodyRef = null,
+}) {
+  const [view, setView] = useState(TRACE_VIEW_CONVERSATION)  // linear reading by default
+  const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
+  // "Try again" on a failed READ, which is not the same button as "reload this node" — the owner's
+  // `onRetry` reloads the detail payload the span tree falls back to, and only the owner can do
+  // that. A surface with no detail payload has nothing to ask its owner for, so it retries itself.
+  const [retryNonce, setRetryNonce] = useState(0)
+  const retryRead = () => setRetryNonce(value => value + 1)
+  // ONE window for the subject, shared by both readings of it (hooks.js::useNodeSpanWindow, the same
+  // hook the chat feed pages with). Not one per view: "show me more of experiment #7" is about the
+  // experiment, and two independent windows would let the span tree and the conversation disagree
+  // about how much of the same thing they are each showing.
+  const { limit: spanLimit, canPage, loadMore } = useNodeSpanWindow()
+  const subjectAttempt = traceSubjectAttempt(subject)
+  const detailAttempt = detail ? detail.attempt : null
+  // `view` is part of the gate, not just the window: the conversation branch returns below without
+  // ever reading `paged`, and both views raise the SAME shared window BY DESIGN — so an operator who
+  // reached for earlier steps in the conversation had a second 4 s poll running against this node for
+  // as long as it worked, fetching a span tree whose response was thrown away (up to ~1.6 MB per tick
+  // at the x8 ceiling). With no detail payload there is nothing to fall back to, so the read is not
+  // optional at all.
+  const readNonce = `${nonce}:${retryNonce}`
+  const pagedRead = usePagedTrace({
+    subject, runId, expectedGeneration, limit: spanLimit, nonce: readNonce, working,
+    // The validity gate belongs HERE as well as at the early return below: hooks run during render,
+    // so an unguarded read would already be in flight by the time the refusal renders.
+    enabled: traceSubjectValid(subject) && !!runId
+      && view !== TRACE_VIEW_CONVERSATION && (!detail || attemptReadRequired({
+        selected: subjectAttempt, current: detailAttempt,
+        canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
+      })),
+  })
+  const paged = pagedRead?.payload
+  const trace = detail
+    ? traceForAttempt({
+      selected: subjectAttempt, current: detailAttempt, paged, detail: detail.payload,
+    })
+    : paged
+  const spans = traceSubjectSpans(subject, trace)
+  // For a node the owner owns this (it is bound to the DETAIL payload and feeds the destructive
+  // clear's fence, which a failed pager may not move). For a trace subject the read IS the evidence.
+  const unavailable = detailUnavailable || (!detail && traceUnavailable(trace?.projection))
+  const inline = chrome === 'inline'
+  const head = <div className={'trace-head' + (inline ? ' trace-head-inline' : '')}>
+    {status}
+    {view !== TRACE_VIEW_CONVERSATION && pagedRead?.stale && <TraceUnavailable
+      label="Span-tree refresh failed; showing confirmed spans." />}
+    <div className="conv-toggle">
+      <button type="button" aria-pressed={view === TRACE_VIEW_CONVERSATION}
+        className={'seg' + (view === TRACE_VIEW_CONVERSATION ? ' on' : '')}
+        onClick={() => setView(TRACE_VIEW_CONVERSATION)}
+        title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
+      <button type="button" aria-pressed={view === TRACE_VIEW_SPANS}
+        className={'seg' + (view === TRACE_VIEW_SPANS ? ' on' : '')}
+        onClick={() => setView(TRACE_VIEW_SPANS)}>span tree</button>
+      {view === TRACE_VIEW_CONVERSATION && <button type="button" className="seg trace-collapse"
+        aria-pressed={allOpen} title="collapse or expand every stage"
+        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
+      {controls}
+    </div>
+    {below}
+  </div>
+  const shell = body => <div className={'trace' + (inline ? ' trace-inline' : '')} ref={bodyRef}>
+    {head}{body}{footer}</div>
+  // A subject with no id has no path. Both reads below compose `runApiPath(runId, <suffix>)`, and an
+  // empty suffix is `/api/runs/{id}` — the RUN, which would 200 with a payload that fences out and
+  // read as "unavailable". Refuse it here, where the reason can be stated.
+  if (!traceSubjectValid(subject) || !runId)
+    return shell(<div className="muted" role="status">No trace is linked to this item.</div>)
+  if (view === TRACE_VIEW_CONVERSATION) {
+    return shell(<Conversation subject={subject} runId={runId}
+      expectedGeneration={expectedGeneration} working={working} allOpen={allOpen}
+      reloadNonce={readNonce} onRetry={retryRead}
+      spanLimit={spanLimit} onLoadMore={loadMore} />)
+  }
+  // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
+  // Same `canPage` as the conversation, because both raise the SAME window.
+  const spanWindow = traceWindow(trace?.projection, { canPage })
+  // No `pending` here, and that is deliberate: `usePagedTrace` keeps the previous payload rendered
+  // while the wider read is in flight and never blanks it, so there is nothing to announce beyond
+  // the rows arriving. `stalled` likewise has no state to hang on — this surface re-reads the whole
+  // window each time, and its termination is the ceiling the shared hook already stops at.
+  const spanPager = <TraceReach
+    state={traceScrollState({ view: spanWindow, window: spanLimit })}
+    onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
+  // Unavailable takes precedence over every empty/partial shape: a failed observation is never
+  // evidence that the subject recorded nothing.
+  if (unavailable)
+    return shell(<TraceUnavailable onRetry={onRetry || retryRead} pending={retryPending} />)
+  if (!spans.length) {
+    if (spanWindow.kind !== 'complete')
+      return shell(<><div className="notice compact" role="status">
+        {TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}</>)
+    return shell(<div className="muted">{traceSubjectEmptyNotice(subject)}</div>)
+  }
+  const { t0, total } = traceBounds(spans)
+  // Rollup from the RENDERED payload, not always the detail one: after paging, the totals below
+  // describe the spans on screen, so reading them off the narrower window would caption a widened
+  // tree with the old window's generation/token counts.
+  const roll = trace?.rollup || {}
+  const rtok = roll.tokens || {}
+  const identity = `${expectedGeneration || runId}:${traceSubjectKey(subject)}`
+  return shell(<>
+    {spanPager}
+    <div className="muted trace-rollup-intro">
+      {traceSubjectLead(subject)} · offset = start, bar = duration. Expand an observation for
+      bounded, redacted I/O.
+      {(roll.generations || roll.tools) ? <span className="trace-totals"
+          title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
+        {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
+        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
+        {rtok.context ? ` · ${ktok(rtok.context)} ctx` : ''}
+        {rtok.completion ? ` · ${ktok(rtok.completion)} out` : ''}
+        {roll.cost ? ` · $${roll.cost}` : ''}
+      </span> : null}
+    </div>
+    <VirtualSpanTree key={identity} roots={spans} t0={t0} total={total} runId={runId}
+      expectedGeneration={expectedGeneration} identity={identity} />
+  </>)
+}
+
+// THE RESEARCH BEHIND AN EXPERIMENT — the Researcher's proposal(s) for one work item, each on the
+// SAME trace surface as everything else. Rendered by the node's Trace tab (as a disclosure: this
+// node's reasoning lives one level up and is shared with every sibling experiment on the card) and
+// by the card's own Trace tab, so there is one implementation of "read the research" rather than a
+// good one and a poor one.
+export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
+  // One proposal is the common case and the operator asked to READ it, not to find another button.
+  // Several means a re-proposal happened and the reader has to choose, so they stay closed until
+  // picked — each open row is a real read.
+  //
+  // `undefined` is "the operator has not chosen yet", which is NOT the same as `null` ("they closed
+  // it"). The default has to be derived on every render rather than seeded once: this component
+  // mounts while the card read is still in flight, so a mount-time seed would always see zero rows
+  // and the single proposal would render collapsed — which is exactly what it did.
+  const [chosen, setChosen] = useState(undefined)
+  const open = chosen === undefined
+    ? (rows.length === 1 ? rows[0]?.trace_id || null : null)
+    : chosen
+  const setOpen = update => setChosen(current => update(current === undefined
+    ? (rows.length === 1 ? rows[0]?.trace_id || null : null)
+    : current))
+  if (!rows.length) return null
+  return <div className="research-traces">
+    {rows.map(row => {
+      const shown = open === row.trace_id && !!row.trace_id
+      return <section key={row.span_id} className={'research-trace' + (shown ? ' open' : '')}>
+        <h4 className="research-trace-h">
+          <button type="button" className="btn xs ghost research-trace-toggle"
+            aria-expanded={shown} disabled={!row.trace_id}
+            onClick={() => setOpen(current => (current === row.trace_id ? null : row.trace_id))}>
+            <span className="research-trace-caret" aria-hidden="true">{shown ? '▾' : '▸'}</span>
+            <span className="research-who">Researcher</span>
+            <span className="muted">· {researchLinkLabel(row.link)}</span>
+          </button>
+          {(row.generations || row.tools) ? <span className="muted research-trace-roll">
+            {fmtInt(row.generations)} gen · {fmtInt(row.tools)} tools
+            · {fmtInt(row.tokens?.total)} tok</span> : null}
+        </h4>
+        {/* The trace gets the whole width, below its heading. It used to be a flex SIBLING of that
+            label, which squeezed a span tree — search bar, timeline bars and all — into whatever
+            was left of the row. */}
+        {shown && <TraceSurface subject={opTraceSubject(row.trace_id)} runId={runId}
+          expectedGeneration={expectedGeneration} chrome="inline" />}
+      </section>
+    })}
+  </div>
 }
 
 export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
@@ -1835,26 +2041,9 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
-  const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
-  const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
   const bodyRef = useRef(null)
   const nodeGeneration = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : null
-  // ONE window for the node, shared by both readings of it (hooks.js::useNodeSpanWindow, the same
-  // hook the chat feed pages with). Not one per view: "show me more of experiment #7" is about the
-  // experiment, and two independent windows would let the span tree and the conversation disagree
-  // about how much of the same node they are each showing.
-  const { limit: spanLimit, canPage, loadMore } = useNodeSpanWindow()
-  // The span tree renders the node-DETAIL payload's default window until the operator asks for more,
-  // and only then pages through /nodes/{nid}/trace. Deliberately not a fetch on every mount: this tab
-  // must fill in live during a build off the detail poll that already runs, and the extra request is
-  // paid only by the operator who asked for it. (node_detail takes no limit ON PURPOSE — see the
-  // comment at its trace assembly; it folds the whole log and serves no trace at all in History.)
-  // `view` is part of the gate, not just the window: the conversation branch returns below without
-  // ever reading `paged`, and both views raise the SAME shared window BY DESIGN — so an operator who
-  // clicked "load more" in the conversation had a second 4 s poll running against this node for as
-  // long as it worked, fetching a span tree whose response was thrown away (up to ~1.6 MB per tick
-  // at the x8 ceiling).
   // Which ATTEMPT of this node to show. A repaired node has several generations and only the last
   // was ever reachable — the routes have taken `?attempt=` all along, this component just always
   // sent the current number. So the trace of the attempt that actually crashed, which is the one an
@@ -1867,19 +2056,11 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const selectedAttempt = viewAttempt == null ? (nodeGeneration ?? 0) : viewAttempt
   const historicalAttempt = selectedAttempt !== (nodeGeneration ?? 0)
   useEffect(() => { setViewAttempt(null) }, [n.id, expectedGeneration])
-  const pagedRead = usePagedNodeTrace({
-    runId, nodeId: n.id, attempt: selectedAttempt, expectedGeneration,
-    limit: spanLimit, nonce, working,
-    enabled: view !== 'conversation' && attemptReadRequired({
-      selected: selectedAttempt, current: nodeGeneration ?? 0,
-      canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
-    }),
-  })
-  const paged = pagedRead?.payload
-  const trace = traceForAttempt({
-    selected: selectedAttempt, current: nodeGeneration ?? 0, paged, detail: n.trace,
-  })
-  const spans = trace?.nodes || []
+  // What this tab is reading, in the vocabulary every trace surface now shares. The window, the
+  // views, the fences and the paged read live in `TraceSurface`; what stays HERE is the node's own
+  // chrome — the attempt picker, the destructive clear, the live status, the research disclosure.
+  const subject = useMemo(
+    () => nodeTraceSubject(n.id, selectedAttempt), [n.id, selectedAttempt])
   // `unavailable` stays bound to the DETAIL payload, never the paged one. It feeds the trace-clear
   // fence below, and a failed paging request is not evidence that this node's telemetry is
   // unreadable — letting it flip `unavailable` would quietly change when a destructive clear is
@@ -1957,22 +2138,22 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const researchRows = research
     ? (cardTraceSections(research).find(section => section.kind === 'research')?.rows || [])
     : []
-  const researchStrip = cardId && <div className="trace-card-research">
-    <button type="button" className="seg" aria-expanded={researchOpen}
-      title={`The research that proposed ${cardId}. Shared with every experiment on this work item.`}
-      onClick={() => setResearchOpen(value => !value)}>
-      {researchOpen ? '▾' : '▸'} research · shared with {cardId}
-    </button>
-    {onOpenCard && <button type="button" className="seg" onClick={() => onOpenCard(cardId)}>
-      open {cardId} ›</button>}
-    {researchOpen && <div className="trace-card-research-body">
+  const researchStrip = cardId && <div className={'trace-research' + (researchOpen ? ' open' : '')}>
+    <div className="trace-research-bar">
+      <button type="button" className="btn xs ghost trace-research-toggle" aria-expanded={researchOpen}
+        title={`The research that proposed ${cardId}. Shared with every experiment on this work item.`}
+        onClick={() => setResearchOpen(value => !value)}>
+        <span className="trace-research-caret" aria-hidden="true">{researchOpen ? '▾' : '▸'}</span>
+        research <span className="muted">· shared with {cardId}</span>
+      </button>
+      {onOpenCard && <button type="button" className="btn xs ghost"
+        onClick={() => onOpenCard(cardId)}>open {cardId} ›</button>}
+    </div>
+    {researchOpen && <div className="trace-research-body">
       {research === null && <div className="muted" role="status">loading research…</div>}
       {research !== null && !researchRows.length && <div className="muted" role="status">
         No research is linked to {cardId} — it is never inferred from timing.</div>}
-      {researchRows.map(row => <div key={row.span_id} className="card-trace-row">
-        <span className="muted">Researcher · {researchLinkLabel(row.link)}</span>
-        <_TraceById runId={runId} traceId={row.trace_id} expectedGeneration={expectedGeneration} />
-      </div>)}
+      <ResearchTraces rows={researchRows} runId={runId} expectedGeneration={expectedGeneration} />
     </div>}
   </div>
   const clearBtn = <span className="trace-clear">
@@ -2025,82 +2206,27 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const nav = <span className="trace-nav">
     <button className="seg" aria-label="Scroll trace to top" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
     <button className="seg" aria-label="Scroll trace to newest" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
-  // STICKY control bar: pinned to the top of the scroll area (position:sticky in .trace-head) so the view
-  // toggle / collapse-all / scroll nav stay reachable while you page through a long trace, instead of
-  // scrolling off the top. collapse-all is shown only for the conversation view (it acts on the bands).
-  const head = <div className="trace-head">
-    {status}
-    {view !== 'conversation' && pagedRead?.stale && <TraceUnavailable
-      label="Span-tree refresh failed; showing confirmed spans." />}
-    <div className="conv-toggle">
-      <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
-        title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>span tree</button>
-      {view === 'conversation' && <button className="seg trace-collapse" aria-pressed={allOpen} title="collapse or expand every stage"
-        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
-      {attemptPicker}<span className="spacer" />{clearBtn}{nav}
-    </div>
-    {researchStrip}
-  </div>
-  if (view === 'conversation')
-    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId}
-      expectedGeneration={expectedGeneration} working={working} allOpen={allOpen}
-      reloadNonce={nonce} onRetry={() => setNonce(value => value + 1)}
-      spanLimit={spanLimit} onLoadMore={loadMore} />
-      {agent && <AgentReport r={agent} />}</div>
-  // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
-  // Same `canPage` as the conversation, because both raise the SAME window.
-  const spanWindow = traceWindow(trace?.projection, { canPage })
-  // No `pending` here, and that is deliberate: `usePagedNodeTrace` keeps the previous payload
-  // rendered while the wider read is in flight and never blanks it, so there is nothing to announce
-  // beyond the rows arriving. `stalled` likewise has no state to hang on — this surface re-reads the
-  // whole window each time, and its termination is the ceiling the shared hook already stops at.
-  const spanPager = <TraceReach
-    state={traceScrollState({ view: spanWindow, window: spanLimit })}
-    onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
-  if (!spans.length && !agent) {
-    if (unavailable)
-      return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
-        onRetry={retryParentTrace} pending={reloadPending} /></div>
-    if (spanWindow.kind !== 'complete')
-      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}</div>
-    return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans yet. Offline nodes may have none; active nodes update here as they run.</div></div>
-  }
-  if (unavailable)
-    return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable
-      onRetry={retryParentTrace} pending={reloadPending} />
-      {agent && <AgentReport r={agent} />}</div>
-  if (!spans.length && spanWindow.kind !== 'complete')
-    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">{TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}
-      {agent && <AgentReport r={agent} />}</div>
-  const { t0, total } = traceBounds(spans)
-  // Rollup from the RENDERED payload, not always the detail one: after paging, the totals below
-  // describe the spans on screen, so reading them off the narrower window would caption a widened
-  // tree with the old window's generation/token counts.
-  const roll = trace?.rollup || {}
-  const rtok = roll.tokens || {}
-  return <div className="trace" ref={bodyRef}>
-    {head}
-    {spanPager}
-    <div className="muted trace-rollup-intro">
-      Node #{n.id} lifecycle · offset = start, bar = duration. Expand an observation for bounded,
-      redacted I/O.
-      {(roll.generations || roll.tools) ? <span className="trace-totals"
-          title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
-        {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
-        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
-        {rtok.context ? ` · ${ktok(rtok.context)} ctx` : ''}
-        {rtok.completion ? ` · ${ktok(rtok.completion)} out` : ''}
-        {roll.cost ? ` · $${roll.cost}` : ''}
-      </span> : null}
-    </div>
-    <VirtualSpanTree key={`${expectedGeneration || runId}:${n.id}:${n.attempt ?? 0}`}
-      roots={spans} t0={t0} total={total} runId={runId} expectedGeneration={expectedGeneration}
-      identity={`${expectedGeneration || runId}:${n.id}:${n.attempt ?? 0}`} />
-    {/* Validation is node-level evidence, not a span-tree item. Keeping it after the bounded tree
-        avoids lying about its ARIA parent or pinning a large non-span card inside the virtual list. */}
-    {agent && <AgentReport r={agent} />}
-  </div>
+  // STICKY control bar: pinned to the top of the scroll area (position:sticky in .trace-head) so the
+  // view toggle / collapse-all / scroll nav stay reachable while you page through a long trace,
+  // instead of scrolling off the top. The bar itself belongs to `TraceSurface`; these are the
+  // node's own controls, which ride INSIDE it so it stays one row.
+  return <TraceSurface subject={subject} runId={runId} expectedGeneration={expectedGeneration}
+    working={working} nonce={nonce} bodyRef={bodyRef}
+    // The node-DETAIL payload's window is what renders until the operator reaches for more, so this
+    // tab fills in live during a build off the detail poll that already runs and the extra request
+    // is paid only by the operator who asked for it. (node_detail takes no limit ON PURPOSE — see
+    // the comment at its trace assembly; it folds the whole log and serves no trace at all in
+    // History.) The detail payload always describes the CURRENT attempt, which is why the surface
+    // is told which one that is rather than assuming the selected one.
+    detail={{ payload: n.trace, attempt: nodeGeneration ?? 0 }}
+    detailUnavailable={unavailable} onRetry={retryParentTrace} retryPending={reloadPending}
+    status={status}
+    controls={<>{attemptPicker}<span className="spacer" />{clearBtn}{nav}</>}
+    below={researchStrip}
+    // Validation is node-level evidence, not a span-tree item. Passing it as the FOOTER keeps it
+    // after the bounded tree, which avoids lying about its ARIA parent or pinning a large non-span
+    // card inside the virtual list.
+    footer={agent ? <AgentReport r={agent} /> : null} />
 }
 
 function Code({ n, draftStore, draftScope }) {

@@ -652,6 +652,23 @@ action fields, and writing them into that block would make replay read the whole
 future schema and stop the Card being selectable. Until 2026-08-12 the row carried no membership at all
 and every Card-built node was created with no concepts.
 
+A **repair attaches to the card it repairs.** A card is a work item that can carry several nodes, so a
+`debug` re-attempt of a failed node claims that node's own card (one more `node_building`, no second
+`card_added`) instead of minting a new one. The rule is narrow and fails closed: only `debug`, only one
+parent, only a live singly-registered native owner, and only when the two seed statements share a
+`belief_id` — so a repair that genuinely re-scopes its question still gets its own card, and two
+different actions that merely reuse formulaic wording are never merged. Before 2026-08-12 a retry
+reused the parent's Idea verbatim with only `operator` flipped, which is a different action digest and
+therefore a second card whose statement was byte-identical to the first: the board showed one research
+question twice. `Card.belief_id` / `Card.retry_of` still name that relationship for any card that does
+mint, and every pre-existing log folds unchanged.
+
+The **proposal prompt shows both halves of the board.** Untested beliefs are the claimable queue (the
+model returns a `CARD_ID` and the engine restores the immutable seed); the questions that already have
+an experiment — running, failed or evaluated — are listed separately as read-only context, because
+their work item is already owned. Until 2026-08-12 only the first list existed, so a card disappeared
+from the Researcher's view the moment it got a node, including a node still running.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and
@@ -935,8 +952,10 @@ still billed it), and the two Researcher ranking steps — `hyp_prioritize` behi
 that operation emits is **stamped with that trace's id** (the event store reads the active span's ids
 on append; a telemetry event whose op-span already closed carries the captured id explicitly), so the
 UI expands that event's row to ONLY that operation's trace — never the whole node's Researcher+Developer
-tree. `GET /api/runs/{id}/trace/by_trace/{trace_id}` returns one operation's span sub-tree; the node's
-full trace is at `/api/runs/{id}/trace`. Events with no LLM (e.g. `coverage_snapshot`, deterministic)
+tree. `GET /api/runs/{id}/trace/by_trace/{trace_id}` returns one operation's span sub-tree and
+`…/by_trace/{trace_id}/conversation` the same linear reading the node conversation gives, so an
+operation with no node — a Researcher proposal carries no `node_id` at all — is readable and not only
+inspectable; the node's full trace is at `/api/runs/{id}/trace`. Events with no LLM (e.g. `coverage_snapshot`, deterministic)
 carry no trace; a `node_evaluated` row shows the **training** run (the `evaluate` span), not an LLM call.
 
 Every one of these auxiliary LLM steps is now **agentic** (via the shared `agentic_text` /

@@ -42,6 +42,66 @@ export const CARD_FROZEN_STATUSES = new Set(
 export const CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit', 'coded'])
 export const CARD_RENDER_LIMIT = 256 // mirrors PUBLIC_CARD_MAX_COUNT at the wire boundary
 
+// WHY a card is not selectable — and whether that is news.
+//
+// The board used to render one amber `blocked` chip for every value of `selection_ready === false`,
+// with the reason only in a `title`. The operator read it as a STATUS ("I thought it was some kind
+// of state") and it is not: it says the Card queue will not pick this card up next, which for most
+// of these reasons is simply what a card that has already done its work looks like. Measured on the
+// live board, all three blocked cards were blocked for one of two reasons — `work_terminal` (its
+// experiment finished) and `work_in_flight` (it is running right now) — neither of which is a
+// problem, both painted the same amber as an ambiguous ownership receipt.
+//
+// So the split is LIFECYCLE vs FAULT, and it is the whole point: a card resting after its
+// experiment ran needs no colour at all, while a card whose action receipt is incomplete or whose
+// provenance cannot be read is a real defect in the ledger and should look like one. The blocker
+// names come from `events/card_ledger.py` (`c.selection_blockers`) and the two tables below must
+// cover it — `tests`/`cardSelectionBlockers.test.js` derives the vocabulary from this file, so an
+// unmapped blocker degrades to a plain "not selectable" rather than vanishing.
+const BLOCKER_LIFECYCLE = {
+  work_in_flight: 'an experiment is running',
+  work_terminal: 'its experiment has finished',
+  card_terminal: 'closed',
+  merged_work_items: 'merged into another work item',
+  freshness_stale: 'superseded by a newer proposal',
+  identity_not_native: 'legacy work item',
+}
+const BLOCKER_FAULT = {
+  action_owner_missing: 'no ownership receipt',
+  action_owner_ambiguous: 'two ownership receipts',
+  action_receipt_incomplete: 'incomplete ownership receipt',
+  freshness_unknown: 'provenance could not be read',
+  work_owner_unknown: 'owner unknown',
+}
+
+/**
+ * The chip for a card the queue will not pick up: `{tone, label, title}`, or null when it will.
+ *
+ * `tone` is `'lifecycle'` (this is what a card looks like after it has run — no alarm) or `'fault'`
+ * (the ledger says something is wrong). A card with BOTH reports the fault: a real defect is not
+ * made less real by also being finished.
+ */
+export function cardSelectionBlock(card) {
+  if (!isRecord(card) || card.selection_ready !== false) return null
+  const blockers = Array.isArray(card.selection_blockers) ? card.selection_blockers : []
+  const faults = blockers.filter(name => BLOCKER_FAULT[name])
+  const lifecycle = blockers.filter(name => BLOCKER_LIFECYCLE[name])
+  const unmapped = blockers.filter(name => !BLOCKER_FAULT[name] && !BLOCKER_LIFECYCLE[name])
+  const detail = blockers.length
+    ? `not selectable: ${blockers.join(', ')}`
+    : 'not selectable, and the ledger recorded no reason'
+  if (faults.length) {
+    return { tone: 'fault', label: BLOCKER_FAULT[faults[0]], title: detail }
+  }
+  if (lifecycle.length) {
+    return { tone: 'lifecycle', label: BLOCKER_LIFECYCLE[lifecycle[0]], title: detail }
+  }
+  // No reason, or only reasons this build does not know: say the honest minimum rather than
+  // inventing one. An unknown blocker is a FAULT — a card the queue refuses for a reason nothing can
+  // name is exactly the case an operator must be able to see.
+  return { tone: 'fault', label: unmapped.length ? 'not selectable' : 'not selectable', title: detail }
+}
+
 export const cardText = value => typeof value === 'string' && value.trim() ? value.trim() : null
 export const cardNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : null
 export const cardInt = value => Number.isSafeInteger(value) && value >= 0 ? value : null

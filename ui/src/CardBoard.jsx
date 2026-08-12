@@ -22,10 +22,12 @@ import {
   cardNodes as _cardNodes, cardNumber as _cardNumber, cardOrder as _cardOrder,
   cardRows as _cardRows, cardStatus as _cardStatus, cardStatusLabel as _cardStatusLabel,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
+  cardSelectionBlock,
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
+import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
@@ -302,8 +304,17 @@ function _CardKanbanCard({
               : `${roll.total} experiment${roll.total === 1 ? '' : 's'} tested this work item`
                 + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')}>
             {(attemptCoverage?.label ?? roll.total)} exp</span>}
-          {card.selection_ready === false && <span className="chip xs warn"
-            title="not eligible for Card-driven selection">blocked</span>}
+          {/* NOT a status, and no longer painted like one. `selection_ready === false` says the Card
+              queue will not pick this card up next, which for `work_terminal` / `work_in_flight` is
+              simply what a card looks like once its experiment has run or while it is running. The
+              board painted all of those the same amber as a genuinely broken ownership receipt, over
+              the single word "blocked", with the reason buried in a title — so the operator read a
+              lifecycle fact as an alarm. `cardSelectionBlock` splits the two and says which. */}
+          {(() => {
+            const block = cardSelectionBlock(card)
+            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+              title={block.title}>{block.label}</span>
+          })()}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
             title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>partial</span>}
         </span>
@@ -595,13 +606,20 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }
 // node Inspector inside a scrolling card sheet: the Card and the Node are different objects, and the
 // pane says which one you are looking at instead of blurring them into one column.
 // A CARD's whole story in one place: the proposal(s) that produced it, then a section per
-// experiment it produced. Sections name their traces instead of inlining them, so the reader opens
-// only what they want — the same bounded `/trace/by_trace/{tid}` tree the event feed uses. The
-// decisions (ordering, matching labels, the omission receipt) live in `cardTraceModel.js`.
-const LazyOpTrace = React.lazy(
-  () => import('./Dock.jsx').then(module => ({ default: module.OpTrace })))
+// experiment it produced. Sections COUNT their traces and open them on demand, so a card with a
+// dozen attempts stays readable — and what opens is the same surface the node Inspector's Trace tab
+// is, not a lesser rendering of a different trace. The decisions (ordering, matching labels, what is
+// openable at all, the omission receipt) live in `cardTraceModel.js`.
+// THE trace surface, not a second one. It lives in `Inspector.jsx` beside the span tree, the
+// conversation and the reach affordance it is made of, and is loaded LAZILY here: a static edge
+// would pull the whole node Inspector (charts, code viewer, markdown) into the board's chunk, and
+// the board is also a review-route surface. Same shape as the `OpTrace` lazy import this replaces.
+const LazyTraceSurface = React.lazy(
+  () => import('./Inspector.jsx').then(module => ({ default: module.TraceSurface })))
+const LazyResearchTraces = React.lazy(
+  () => import('./Inspector.jsx').then(module => ({ default: module.ResearchTraces })))
 
-function _CardTrace({ card, runId, expectedGeneration, onOpenNode }) {
+function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = [] }) {
   const [payload, setPayload] = useState(null)
   const [open, setOpen] = useState(null)
   const cardId = card?.id
@@ -623,48 +641,61 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode }) {
   const notice = cardTraceNotice(payload)
 
   if (payload === null) return <div className="muted" role="status">loading this work item’s trace…</div>
+  // The node's own generation, when this snapshot knows it. `null` is not zero: it means "whichever
+  // attempt is current", which is what the routes settle an absent one to — asserting 0 for a
+  // repaired node would 409 every read.
+  const entryOf = nodeId => attempts.find(item => String(item.nodeId) === String(nodeId))
+  const attemptOf = nodeId => {
+    const attempt = entryOf(nodeId)?.node?.attempt
+    return Number.isSafeInteger(attempt) && attempt >= 0 ? attempt : null
+  }
+  // Live-refresh only while the node is genuinely in flight, by an ALLOW-list of in-flight statuses
+  // rather than "not terminal": an absent or unrecognized status would otherwise put a 4 s poll on a
+  // node that will never move again.
+  const workingOn = nodeId => ['pending', 'running', 'building']
+    .includes(_cardText(entryOf(nodeId)?.node?.status))
+  const fallback = <div className="muted" role="status">loading trace…</div>
   return <div className="card-trace">
     {notice && <div className="muted" role="status">{notice}</div>}
     {sections.map(section => section.kind === 'research'
       ? <div key={section.key} className="card-trace-section">
           <div className="section-h">{section.title}</div>
-          {section.rows.map(row => <div key={row.span_id} className="card-trace-row">
-            <button type="button" className="btn xs ghost" disabled={!row.openable}
-              aria-expanded={open === row.trace_id}
-              onClick={() => setOpen(cur => (cur === row.trace_id ? null : row.trace_id))}>
-              {open === row.trace_id ? '▾' : '▸'} Researcher · {row.label}
-            </button>
-            <span className="muted">{fmtInt(row.generations)} gen · {fmtInt(row.tools)} tools
-              · {fmtInt(row.tokens?.total)} tok</span>
-            {open === row.trace_id && <div className="card-trace-body">
-              <React.Suspense fallback={<div className="muted" role="status">loading trace…</div>}>
-                <LazyOpTrace runId={runId} traceId={row.trace_id}
-                  expectedGeneration={expectedGeneration} />
-              </React.Suspense>
-            </div>}
-          </div>)}
+          {/* The same research surface the node's Trace tab shows — one implementation, so the
+              proposal reads the same way whichever screen the operator arrived from. */}
+          <React.Suspense fallback={fallback}>
+            <LazyResearchTraces rows={section.rows} runId={runId}
+              expectedGeneration={expectedGeneration} />
+          </React.Suspense>
         </div>
       : <div key={section.key} className="card-trace-section">
           <div className="section-h card-trace-divider">{section.title}</div>
           <div className="card-trace-row">
+            {/* Keyed by NODE, never by `node_created.trace_id`. That trace is where the node was
+                authored — two spans, `Author node` → `materialize_node` — while the Developer's
+                build, repairs and evaluation run in other traces entirely. Opening it here is what
+                made the Developer trace look like it had disappeared: the rollup beside this button
+                counts the NODE's spans (measured on rubertlite-dr-unified-v3 node 0: 61) and the
+                tree below it showed 2. */}
             <button type="button" className="btn xs ghost" disabled={!section.openable}
-              aria-expanded={open === section.node.trace_id}
-              onClick={() => setOpen(cur =>
-                (cur === section.node.trace_id ? null : section.node.trace_id))}>
-              {open === section.node.trace_id ? '▾' : '▸'} Developer · build and evaluation
+              aria-expanded={open === section.key}
+              onClick={() => setOpen(cur => (cur === section.key ? null : section.key))}>
+              {open === section.key ? '▾' : '▸'} Developer · build and evaluation
             </button>
             <button type="button" className="btn xs ghost"
               onClick={() => onOpenNode?.(Number(section.node.node_id))}>open experiment ›</button>
-            <span className="muted">{fmtInt(section.node.generations)} gen
+            <span className="muted">{fmtInt(section.node.spans)} spans
+              · {fmtInt(section.node.generations)} gen
               · {fmtInt(section.node.tools)} tools · {fmtInt(section.node.tokens?.total)} tok
               {section.node.errors ? ` · ${fmtInt(section.node.errors)} error` : ''}</span>
-            {open === section.node.trace_id && <div className="card-trace-body">
-              <React.Suspense fallback={<div className="muted" role="status">loading trace…</div>}>
-                <LazyOpTrace runId={runId} traceId={section.node.trace_id}
-                  expectedGeneration={expectedGeneration} />
-              </React.Suspense>
-            </div>}
           </div>
+          {open === section.key && <div className="card-trace-body">
+            <React.Suspense fallback={fallback}>
+              <LazyTraceSurface
+                subject={nodeTraceSubject(section.node.node_id, attemptOf(section.node.node_id))}
+                runId={runId} expectedGeneration={expectedGeneration} chrome="inline"
+                working={workingOn(section.node.node_id)} />
+            </React.Suspense>
+          </div>}
         </div>)}
   </div>
 }
@@ -698,7 +729,7 @@ function _CardDetailPane({
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
       onRecover={onRecover} onSelect={onSelect} onClose={null} />
     {runId && <_CardTrace card={card} runId={runId} expectedGeneration={expectedGeneration}
-      onOpenNode={onOpenNode} />}
+      onOpenNode={onOpenNode} attempts={attempts} />}
   </div>
 }
 
