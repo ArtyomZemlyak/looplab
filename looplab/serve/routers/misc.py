@@ -33,6 +33,10 @@ from looplab.core.atomicio import (
     strict_atomic_write_bytes, strict_atomic_write_text, strict_fsync_parent,
 )
 from looplab.core.config import Settings
+from looplab.core.memory_window import (
+    MEMORY_SOURCE_BYTES, MEMORY_SOURCE_ROW_BYTES, MEMORY_SOURCE_ROWS,
+    read_memory_jsonl_window,
+)
 from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
@@ -48,8 +52,8 @@ from looplab.core.redact import bounded_redacted_tree, redact_persisted_text
 
 
 _MEMORY_TIER_LIMIT = 200
-_MEMORY_SOURCE_BYTES = 2 * 1024 * 1024
-_MEMORY_SOURCE_ROWS = 1000
+_MEMORY_SOURCE_BYTES = MEMORY_SOURCE_BYTES
+_MEMORY_SOURCE_ROWS = MEMORY_SOURCE_ROWS
 # Bounds for the files-as-truth authoring routes. `knowledge_dir` is agent-writable (the engine's own
 # `remember` tool), so `GET /api/{kind}` needs a hard ceiling or the loop can grow its own OOM; the
 # name guard keeps `PUT /api/{kind}/{name}` to the authored-markdown surface `list_author` can show.
@@ -446,7 +450,7 @@ class AuthoringOperationResponse(BaseModel):
     replayable: bool
 
 
-_MEMORY_ROW_BYTES = 128 * 1024
+_MEMORY_ROW_BYTES = MEMORY_SOURCE_ROW_BYTES
 
 
 def _expected_revision(body: dict) -> Optional[str]:
@@ -585,7 +589,7 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
             return None
         out = {"statement": statement}
         _carry_row_concepts(row, out)
-        for key, maximum in (("run_id", 500), ("task_id", 500), ("role", 40),
+        for key, maximum in (("run_id", 500), ("run_uid", 500), ("task_id", 500), ("role", 40),
                              ("kind", 80), ("outcome", 48), ("claim_stance", 24)):
             value = _memory_text(row.get(key), maximum, entropy=key not in ("run_id", "task_id"))
             if value:
@@ -597,6 +601,32 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
         evidence_count = row.get("evidence_count")
         if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
             out["evidence_count"] = max(0, evidence_count)
+        for key in ("evidence_traceable_count", "evidence_untraceable_count"):
+            value = row.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                out[key] = value
+        lineage = []
+        for ref in row.get("evidence_refs") or []:
+            if not isinstance(ref, dict) or len(lineage) >= _MEMORY_EVIDENCE_MAX:
+                continue
+            node_id = ref.get("node_id")
+            if isinstance(node_id, bool) or not isinstance(node_id, int) or node_id < 0:
+                continue
+            run_id = _memory_text(ref.get("run_id"), 500, entropy=False)
+            run_uid = _memory_text(ref.get("run_uid"), 500, entropy=False)
+            if not (run_id or run_uid):
+                continue
+            item = {"node_id": node_id}
+            if run_id:
+                item["run_id"] = run_id
+            if run_uid:
+                item["run_uid"] = run_uid
+            generation = ref.get("generation")
+            if isinstance(generation, int) and not isinstance(generation, bool) and generation >= 0:
+                item["generation"] = generation
+            lineage.append(item)
+        if lineage:
+            out["evidence_refs"] = lineage
         # The node-level provenance a lesson row genuinely carries, restored to the wire. It was
         # dropped here while `evidence_count` (a scalar the CONSOLIDATION pass writes) survived, which
         # left the UI able to say "3 experiments supported this" and unable to say WHICH — so no
@@ -652,47 +682,19 @@ def _read_memory_tier(path: Path, tier: str, run_id: str = "") -> tuple[list[dic
     filtered result is "not in the recent tail", never "does not exist".
     """
     receipt = {"limit": _MEMORY_TIER_LIMIT, "returned": 0, "skipped": 0, "filtered": 0,
-               "source_window_truncated": False, "unavailable": False}
-    try:
-        with path.open("rb") as handle:
-            handle.seek(0, 2)
-            end = handle.tell()
-            start = max(0, end - _MEMORY_SOURCE_BYTES)
-            preceding = b"\n"
-            if start:
-                handle.seek(start - 1)
-                preceding = handle.read(1)
-            handle.seek(start)
-            raw = handle.read(end - start)
-    except FileNotFoundError:
-        return [], receipt
-    except OSError:
-        receipt["unavailable"] = True
-        return [], receipt
-
-    receipt["source_window_truncated"] = start > 0
-    if start and preceding != b"\n":
-        boundary = raw.find(b"\n")
-        if boundary < 0:
-            receipt["skipped"] = 1
-            return [], receipt
-        raw = raw[boundary + 1:]
-        receipt["skipped"] += 1
-    encoded = raw.splitlines()
-    if len(encoded) > _MEMORY_SOURCE_ROWS:
-        encoded = encoded[-_MEMORY_SOURCE_ROWS:]
-        receipt["source_window_truncated"] = True
+               "superseded": 0,
+               "source_window_truncated": False, "unavailable": False,
+               "source_rows": 0, "source_size": 0, "window_digest": ""}
+    decoded, source = read_memory_jsonl_window(
+        path, max_bytes=_MEMORY_SOURCE_BYTES, max_rows=_MEMORY_SOURCE_ROWS,
+        max_row_bytes=_MEMORY_ROW_BYTES)
+    for key in ("source_window_truncated", "unavailable", "source_rows", "source_size",
+                "window_digest", "skipped"):
+        receipt[key] = source[key]
     projected = []
-    for line in encoded:
-        if not line.strip():
-            continue
-        if len(line) > _MEMORY_ROW_BYTES:
-            receipt["skipped"] += 1
-            continue
-        try:
-            row = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            receipt["skipped"] += 1
+    for _index, row in decoded:
+        if tier == "cases" and isinstance(row, dict) and row.get("active") is False:
+            receipt["superseded"] += 1
             continue
         safe = _project_memory_row(tier, row)
         if safe is None:
@@ -1968,18 +1970,22 @@ def build_router(srv) -> APIRouter:
         # mentions contributes nothing to `concept_index` whether it was folded or not.
         cited = {row.get("run_id") for tier in ("cases", "lessons", "notes") for row in out[tier]
                  if isinstance(row, dict) and isinstance(row.get("run_id"), str) and row.get("run_id")}
+        concept_index_available = True
         try:
             index = run_concept_index(srv.run_summaries(only=cited))
         except Exception:  # noqa: BLE001 — a half-written run must not empty the Memory panel
             index = {}
+            concept_index_available = False
         out["concept_index"] = build_shelf(
             {tier: out[tier] for tier in ("cases", "lessons", "notes")}, index)
         out["projection"] = "bounded_recent_tail"
+        out["concept_index_available"] = concept_index_available
         out["page"] = {"tiers": receipts,
                        "truncated": any(row["source_window_truncated"] for row in receipts.values()),
                        "unavailable": any(row["unavailable"] for row in receipts.values()),
-                       "partial": any(row["source_window_truncated"] or row["skipped"]
-                                      or row["unavailable"] for row in receipts.values())}
+                       "partial": (not concept_index_available or any(
+                           row["source_window_truncated"] or row["skipped"] or row["unavailable"]
+                           for row in receipts.values()))}
         return out
 
     # ------------------------------------------------------------------ authoring (files-as-truth)

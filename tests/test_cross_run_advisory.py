@@ -278,6 +278,28 @@ def test_d8_exact_task_advisory_rejects_opposite_direction(tmp_path):
     assert host._cross_run_advisory_receipt["n_research"] == 1
 
 
+def test_d8_same_display_id_does_not_replace_other_run_incarnation(tmp_path):
+    from looplab.engine.claims import load_research_claims, record_research_claims
+
+    def claim(statement):
+        return [{
+            "statement": statement, "node_ids": [7],
+            "verification": {"verdict": "supported", "method": "llm"},
+        }]
+
+    record_research_claims(
+        str(tmp_path), run_id="run_local", run_uid="root-a:1", task_id="task-a",
+        direction="max", claims=claim("from root a"),
+    )
+    record_research_claims(
+        str(tmp_path), run_id="run_local", run_uid="root-b:1", task_id="task-a",
+        direction="max", claims=claim("from root b"),
+    )
+    rows = [row for row in load_research_claims(tmp_path) if row.get("statement")]
+    assert {(row["run_uid"], row["statement"]) for row in rows} == {
+        ("root-a:1", "from root a"), ("root-b:1", "from root b")}
+
+
 def test_exact_task_advisory_still_rejects_opposite_direction(tmp_path):
     _seed(tmp_path, lessons=[
         _lesson("same objective evidence", "supported", [1], run_id="same", direction="max"),

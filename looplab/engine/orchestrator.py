@@ -358,6 +358,57 @@ class CreationRunawayCounters:
             self.prev_terminal = terminal_now
 
 
+# Failures that are not evidence about the run. `superseded` is a node RESET (the operator or the
+# engine replaced the node's generation) and an aborted node is an operator cancellation: charging
+# either to a no-progress bound would let ordinary steering end the run.
+_NON_EVIDENCE_FAILURE_REASONS = frozenset({"superseded"})
+
+
+def systemic_failure_stop_reason(state, threshold: int) -> Optional[str]:
+    """Should the whole run stop because nothing has EVER worked? The reason, or None.
+
+    `CreationRunawayCounters` is the loop's only run-level no-progress bound and it resets on any
+    TERMINAL — but `node_failed` is a terminal, so a run in which every node fails reads as
+    progress and grinds on unbounded. Measured on `runs/rubertlite-dr-unified-v2` (2026-08-11):
+    26 hours, 1,705 provider calls, 6 failed nodes, 0 evaluated, no stop. Every one of those
+    failures was the SAME environment defect, re-diagnosed from scratch by a fresh Developer each
+    time, because nothing in the loop was allowed to conclude "this is not about the idea".
+
+    The distinction that matters is not how many nodes failed but WHETHER ANYTHING HAS EVER
+    WORKED:
+
+      * At least one evaluated node — the environment, the libraries and the data are PROVEN. A
+        later failure is about that one idea, so only that node and its direction stop and the
+        search continues. This bound is off entirely, whatever the failure count.
+      * No evaluated node, ever — nothing is proven, and the N-th failure is evidence about the
+        RUN rather than about the N-th idea. That is the systemic case ("we only ever start node
+        zero and the environment/library/data is broken"), and the run should stop and say so
+        instead of buying the same diagnosis N more times.
+
+    Counted in DISTINCT nodes that ended failed, not in attempts: a node repaired five times and
+    failed is one failed idea, and the inline-repair limit is what bounds that. Resets and
+    operator aborts are excluded — see `_NON_EVIDENCE_FAILURE_REASONS`.
+
+    `threshold <= 0` disables the bound, matching every other interval knob in the engine.
+    """
+    if not isinstance(threshold, int) or isinstance(threshold, bool) or threshold <= 0:
+        return None
+    if state.evaluated_nodes():
+        return None
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
+    failed = [n for n in state.nodes.values()
+              if n.status is NodeStatus.failed and not n.tombstoned and n.id not in aborted
+              and str(getattr(n, "error_reason", "") or "") not in _NON_EVIDENCE_FAILURE_REASONS]
+    if len(failed) < threshold:
+        return None
+    # Name the shape so the operator can act. The reasons are what the triage already recorded, so
+    # this adds a diagnosis rather than a new opinion.
+    reasons = sorted({str(getattr(n, "error_reason", "") or "unknown") for n in failed})
+    return ("systemic failure: {n} node(s) failed and none has ever produced a metric — "
+            "the environment, dependencies or data are the likely cause rather than any one idea "
+            "({why})").format(n=len(failed), why=", ".join(reasons[:4]))
+
+
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ConceptCadenceMixin, VerifierTiebreakMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
@@ -578,6 +629,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._invalid_pin_verdict: Optional[tuple] = None
         self.strategist_every = max(1, strategist_every)
         self.concept_retag_every = max(1, concept_retag_every)
+        # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
+        # would turn "never stop the run for me" into "stop after one failure".
+        self.systemic_failure_stop = _opt("systemic_failure_stop")
         self.deep_researcher = deep_researcher
         # STORED RAW, deliberately — this was `max(0, deep_research_every)` until 2026-08-07, and
         # under the new spelling that clamp is exactly backwards: `0` now means "start immediately"
@@ -1440,6 +1494,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 terminal_now=sum(1 for _n in state.nodes.values()
                                  if _n.status is not NodeStatus.pending),
             )
+            # …and the bound the charge above cannot express: `node_failed` IS a terminal, so a run
+            # where every node fails resets that guard every time and never stops. This one asks
+            # whether anything has EVER worked — see `systemic_failure_stop_reason` for why that is
+            # the line between "the environment is broken, stop the run" and "this idea is broken,
+            # stop the node". Off once any node has been evaluated, and off entirely at threshold 0.
+            _systemic = systemic_failure_stop_reason(state, self.systemic_failure_stop)
+            if _systemic is not None:
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": _systemic}, after_seq=decision_seq):
+                    break
+                continue
             _signal = self._run_spec_gates(state)
             if _signal == "break":
                 break
@@ -2412,6 +2477,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         EV_RUN_STARTED,
                         {
                             "run_id": self.run_dir.name,
+                            # Display ids are only unique inside a run root. Cross-run memory uses this
+                            # persisted incarnation id so roots named ``run_local`` cannot overwrite or
+                            # self-exclude one another.
+                            "run_uid": secrets.token_hex(16),
                             "task_id": self.task.id,
                             "goal": self.task.goal,
                             "direction": self.task.direction,
@@ -2907,6 +2976,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # scan builds both — the two role pools share every untagged lesson, so re-reading/re-embedding
         # the store per role is wasted work.
         _rid = _entry.run_id or None
+        _ruid = _entry.run_uid or None
         # BEST-EFFORT, exactly like the refresh path (`lessons.maybe_refresh_lessons`) this mirrors.
         # `_load_reflection_priors_both` reads the SHARED store through `read_jsonl_lenient`, which
         # RAISES OSError on an unreadable lessons.jsonl / meta_notes.jsonl (permissions, a transient
@@ -2917,7 +2987,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # retries the store instead of reading the pre-read stamp as "already seen, unchanged".
         try:
             self._prior_note_text, self._dev_prior_note_text = \
-                self._load_reflection_priors_both(exclude_run_id=_rid)
+                self._load_reflection_priors_both(
+                    exclude_run_id=_rid, exclude_run_uid=_ruid)
         except (OSError, ValueError) as e:  # noqa: BLE001 - an advisory prior cannot fail the run
             self._lessons_seen_stamp = None
             self.store.append(EV_LESSONS_STORE_UNAVAILABLE, {
@@ -3986,11 +4057,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.lessons.dev_prior_note_text = value
 
     def _load_reflection_priors(self, exclude_run_id: Optional[str] = None,
+                                exclude_run_uid: Optional[str] = None,
                                 role: Optional[str] = None) -> str:
-        return self.lessons.load_reflection_priors(exclude_run_id=exclude_run_id, role=role)
+        return self.lessons.load_reflection_priors(
+            exclude_run_id=exclude_run_id, exclude_run_uid=exclude_run_uid, role=role)
 
-    def _load_reflection_priors_both(self, exclude_run_id: Optional[str] = None) -> tuple[str, str]:
-        return self.lessons.load_reflection_priors_both(exclude_run_id=exclude_run_id)
+    def _load_reflection_priors_both(self, exclude_run_id: Optional[str] = None,
+                                     exclude_run_uid: Optional[str] = None) -> tuple[str, str]:
+        return self.lessons.load_reflection_priors_both(
+            exclude_run_id=exclude_run_id, exclude_run_uid=exclude_run_uid)
 
     def _empty_state_for_fp(self) -> RunState:
         return self.lessons.empty_state_for_fp()
@@ -4610,8 +4685,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if kind == "draft":
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
-                    code = developer.implement(
-                        self._directed_idea(idea.model_copy(deep=True), state))
+                    code = self._implement(
+                        self._directed_idea(idea.model_copy(deep=True), state),
+                        developer=developer, state=state)
             elif kind == "merge":
                 parents = list(action["parent_ids"])
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
@@ -4624,12 +4700,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # ("can't open file test_looplab.py" — live node 63, 3 repairs couldn't recover). Now
                     # parent[0]'s working code + entrypoint carry over and the idea directs blending in
                     # the other parent. Mean-param merges (numeric tasks, no files) stay from-scratch.
-                    _impl_from = getattr(developer, "implement_from", None)
                     _didea = self._directed_idea(
                         idea.model_copy(deep=True), state)   # §1: directives steer the merge code too
-                    code = (_impl_from(_didea, pnodes[0])
-                            if (self._merge_mode == "ensemble" and _impl_from and pnodes)
-                            else developer.implement(_didea))
+                    code = self._implement(
+                        _didea,
+                        pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
+                        developer=developer, state=state)
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
@@ -4658,14 +4734,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     with self.tracer.span("implement"):
                         code = self._implement(
                             self._directed_idea(idea.model_copy(deep=True), state), parent,
-                            developer=developer)
+                            developer=developer, state=state)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
                 with self.tracer.span("implement"):
                     code = self._implement(
                         self._directed_idea(idea.model_copy(deep=True), state), parent,
-                        developer=developer)
+                        developer=developer, state=state)
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, developer, code)
             # 💡 deep-research provenance: tag the first couple of nodes created right after a research
@@ -4948,7 +5024,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
                 code = self._implement(
-                    self._directed_idea(idea.model_copy(deep=True), state), parent)
+                    self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, self.developer, code)
             latest = fold(self.store.read_all())
@@ -5121,7 +5197,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the
                         # receipt-bound Idea by handing the plugin a deep working copy.
                         _pnode = state.nodes.get(parents[0]) if parents else None
-                        code = self._implement(idea.model_copy(deep=True), _pnode)
+                        code = self._implement(idea.model_copy(deep=True), _pnode, state=state)
                 except Exception:
                     self._fail_reserved_build(
                         node_id=node_id, card_id=reservation.card_id, generation=0,

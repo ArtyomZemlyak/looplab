@@ -48,6 +48,8 @@ def test_memory_reader_uses_bounded_recent_tail_and_discloses_omissions(tmp_path
     assert "recent unique marker" in output
     assert "SOURCE_WINDOW: bounded recent tail" in output
     assert "no matching lessons in the bounded recent memory window" in old
+    assert "SOURCE_WINDOW: bounded recent tail" in old
+    assert "RESULT_SET: matched=0; returned=0" in old
 
 
 def test_memory_result_limit_and_output_are_bounded_and_truthful(tmp_path):

@@ -511,7 +511,7 @@ def research_targets_cmd(
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
-                         repo=asset_repo)
+                         repo=asset_repo, run_dir=run_dir)
     typer.echo(targeting_report(state, m["graph"], tags=m["tags"],
                                 important_uncovered=m["important_uncovered"], asset_brief=m.get("brief", "")))
     typer.echo(f"\n  (targets built by: {m['mode']})")

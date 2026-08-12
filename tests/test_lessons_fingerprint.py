@@ -141,7 +141,7 @@ def test_reflection_reruns_when_a_reopened_run_grows(tmp_path):
     meta_before = (mem / "meta_notes.jsonl").read_text().count("\n")
     # simulate the extension: a folded state with MORE nodes than the first reflection covered. A real
     # reopen (resume + budget_extend + new run_finished) also produces a NEW finish sequence, so give
-    # the grown state one — the crash-idempotency de-dup keys on (run_id, finish_seq), and re-using the
+    # the grown state one — the crash-idempotency de-dup keys on (run_uid, finish_seq), and re-using the
     # first finish's seq would (correctly) read as a plain crash-retry rather than a grown reopen.
     grown = fold(eng.store.read_all())
     base = max(grown.nodes) + 1
@@ -157,6 +157,25 @@ def test_reflection_reruns_when_a_reopened_run_grows(tmp_path):
     import orjson as _orjson
     rows = [_orjson.loads(x) for x in (mem / "lessons.jsonl").read_text().splitlines() if x.strip()]
     assert all(int(o.get("evidence_count", 1)) <= 1 for o in consolidate_lessons(rows))  # single run stays 1
+
+
+def test_reflection_reruns_when_reset_changes_material_at_same_node_count(tmp_path):
+    from looplab.events.replay import fold
+    mem = tmp_path / "mem"
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "r1", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=2, max_nodes=4),
+                 reflection_priors=True, memory_dir=str(mem))
+    anyio.run(eng.run)
+    before = (mem / "meta_notes.jsonl").read_text().count("\n")
+    reset = fold(eng.store.read_all())
+    changed = reset.nodes[min(reset.nodes)]
+    changed.attempt += 1
+    changed.code += "\n# reset lifecycle"
+    reset.last_finish_seq += 100
+    eng._write_reflection_note(reset)
+    assert (mem / "meta_notes.jsonl").read_text().count("\n") > before
 
 
 def test_reflection_meta_note_deduped_after_a_crash_before_the_marker(tmp_path):
@@ -225,13 +244,13 @@ def test_similar_task_retrieves_lessons_including_negatives(tmp_path):
                               metric="mse", param_names=["degree", "lam"])
     fp_cls = task_fingerprint("classification", "max", "tune a classifier", metric="acc")
     _write_lessons(mem, [
-        {"task_id": "reg_A", "fingerprint": fp_reg, "kind": "regression",
+        {"task_id": "reg_A", "fingerprint": fp_reg, "kind": "regression", "direction": "min",
          "statement": "a degree-8 polynomial overfits badly", "outcome": "tested",
          "delta": -0.05, "confidence": 0.5},
-        {"task_id": "reg_A", "fingerprint": fp_reg, "kind": "regression",
+        {"task_id": "reg_A", "fingerprint": fp_reg, "kind": "regression", "direction": "min",
          "statement": "ridge lambda near 1.0 with degree 3 works", "outcome": "supported",
          "delta": 0.12, "confidence": 0.7},
-        {"task_id": "other", "fingerprint": fp_cls, "kind": "classification",
+        {"task_id": "other", "fingerprint": fp_cls, "kind": "classification", "direction": "max",
          "statement": "unrelated classifier trick", "outcome": "supported", "delta": 0.02,
          "confidence": 0.7},
     ])
@@ -380,12 +399,12 @@ def test_one_template_family_cannot_eat_the_whole_lesson_prior(tmp_path):
     mem = tmp_path / "mem"
     # Lowest file index => ranked LAST among equal-confidence rows (recency breaks the tie), so this
     # only reaches the prior if the template family stops consuming every slot.
-    rows = [{"task_id": "slotted", "fingerprint": [], "kind": "regression",
+    rows = [{"task_id": "slotted", "fingerprint": [], "kind": "regression", "direction": "min",
              "statement": "feature standardization is what made the linear model competitive",
              "outcome": "supported", "delta": None, "confidence": 0.55}]
     # Six siblings of ONE template — identical modulo digits, all well inside the old 80-char key.
     for i in range(6):
-        rows.append({"task_id": "slotted", "fingerprint": [], "kind": "regression",
+        rows.append({"task_id": "slotted", "fingerprint": [], "kind": "regression", "direction": "min",
                      "statement": f"changing x {i}.2255->{i}.4047, y -1.9013->-2.7324 "
                                   f"regressed the metric by {i}.227",
                      "outcome": "failed", "delta": None, "confidence": 0.55})
@@ -403,17 +422,18 @@ def test_one_template_family_cannot_eat_the_whole_lesson_prior(tmp_path):
 
 def test_repeated_meta_notes_do_not_eat_the_warm_start_budget(tmp_path):
     """`meta_notes.jsonl` has no consolidation pass at all, and `write_reflection_note`'s only
-    de-dup is per (run_id, finish_seq) — which by construction cannot see a DIFFERENT run that
+    de-dup is per modern (run_uid, finish_seq), with legacy (run_id, finish_seq) fallback — which
+    by construction cannot see a DIFFERENT run that
     landed on the same winner. So the three-slot warm-start tail repeated: on the real shared store
     two of the three `toy_quadratic` slots were byte-identical."""
     mem = tmp_path / "mem"
     mem.mkdir(parents=True, exist_ok=True)
     notes = [
-        {"task_id": "slotted", "note": "best metric 0.5 via op 'draft' params {'x': 1}; 2 nodes"},
-        {"task_id": "slotted", "note": "best metric 0.4 via op 'merge' params {'x': 9}; 7 nodes"},
+        {"task_id": "slotted", "direction": "min", "note": "best metric 0.5 via op 'draft' params {'x': 1}; 2 nodes"},
+        {"task_id": "slotted", "direction": "min", "note": "best metric 0.4 via op 'merge' params {'x': 9}; 7 nodes"},
     ]
     # Three separate runs that all rediscovered the same winner: distinct rows, identical text.
-    notes += [{"task_id": "slotted", "run_id": f"r{i}", "finish_seq": i,
+    notes += [{"task_id": "slotted", "run_id": f"r{i}", "direction": "min", "finish_seq": i,
                "note": "best metric 0.3 via op 'improve' params {'x': 3}; 4 nodes"}
               for i in range(3)]
     (mem / "meta_notes.jsonl").write_text(

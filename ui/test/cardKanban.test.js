@@ -188,6 +188,15 @@ test('Card evidence chips retain the node-selection callback contract', async ()
   assert.match(card, /onClose\?\.\(\)/)
 })
 
+test('Card belief, retry, and research identities are visible instead of wire-only', async () => {
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
+  const card = source.slice(source.indexOf('function _CardKanbanCard'), source.indexOf('function _CardKanban('))
+  assert.match(card, /card\.belief_id/)
+  assert.match(card, /card\.retry_of/)
+  assert.match(card, /card\.claim_refs/)
+  assert.match(card, /Open Research Atlas/)
+})
+
 test('Card controls use only generation-fenced command helpers and never client provenance', async () => {
   const source = await readFile(new URL('../src/api.js', import.meta.url), 'utf8')
   const runView = await readFile(new URL('../src/RunView.jsx', import.meta.url), 'utf8')

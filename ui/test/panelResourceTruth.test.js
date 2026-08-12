@@ -109,10 +109,12 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     // copy. The tier receipts are what make an empty tier legible as complete rather than truncated.
     await reply(requests.at(-1), {
       dir: '/memory', cases: [], lessons: [], notes: [], projection: 'bounded_recent_tail',
+      concept_index_available: true,
       page: {
         truncated: false, unavailable: false, partial: false,
         tiers: Object.fromEntries(['cases', 'lessons', 'notes'].map(key => [key, {
-          limit: 50, returned: 0, skipped: 0, source_window_truncated: false, unavailable: false,
+          limit: 50, returned: 0, skipped: 0, filtered: 0, superseded: 0,
+          source_window_truncated: false, unavailable: false,
         }])),
       },
     })

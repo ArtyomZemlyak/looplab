@@ -331,10 +331,12 @@ def test_repo_developer_scouts_include_cross_run_when_enabled(tmp_path):
     d._cross_run_memory_dir = str(tmp_path)
     d._editables = []
     d.task = SimpleNamespace(id="repo-a", goal="dense retrieval russian", direction="max")
+    d.bind_state(SimpleNamespace(run_id="live", run_uid="uid-live", task_id="repo-a",
+                                 goal="dense retrieval russian", direction="max"))
     tools = d._scout_tools()
     crt = [t for t in tools if isinstance(t, CrossRunTools)]
     assert len(crt) == 1 and crt[0].role == "developer"
-    assert crt[0]._task_id == "repo-a"                    # role AND task scoped to the developer
+    assert crt[0]._task_id == "repo-a" and crt[0]._scope.run_uid == "uid-live"
 
 
 def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):

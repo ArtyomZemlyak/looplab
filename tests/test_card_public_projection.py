@@ -21,6 +21,17 @@ _SECRET = "sk-abcdefghijklmnopqrstuvwxyz1234567890"
 _PRIVATE_MARKER = "PRIVATE-CARD-NOTE-MUST-NOT-SHIP"
 
 
+def test_public_card_projection_preserves_belief_and_retry_lineage():
+    card = public_cards({
+        "card-retry": {
+            "id": "card-retry", "statement": "retry the same belief",
+            "belief_id": "a" * 64, "retry_of": "card-original",
+        }
+    })["card-retry"]
+    assert card["belief_id"] == "a" * 64
+    assert card["retry_of"] == "card-original"
+
+
 def _seed_run(root):
     rd = root / "demo"
     rd.mkdir()

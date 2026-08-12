@@ -353,6 +353,8 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # malformed/hand-edited run_started would take down the WHOLE fold (every view/replay/resume of the
     # run) — the exact hand-edited-log-tolerance the _on_node_created guard was added to provide.
     st.run_id = d.get("run_id", "")
+    _run_uid = d.get("run_uid", "")
+    st.run_uid = _run_uid if isinstance(_run_uid, str) else ""
     st.task_id = d.get("task_id", "")
     st.goal = d.get("goal", "")
     # `direction` drives is_better/best-selection for the whole run — a typo ("Max",

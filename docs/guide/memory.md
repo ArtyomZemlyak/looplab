@@ -1,8 +1,9 @@
 # Memory & knowledge
 
 LoopLab remembers. Across a run and across runs it accumulates several **distinct kinds of memory**,
-each with its own purpose, and it both **injects** the relevant ones into the proposal prompt *and*
-lets the agent **actively pull** any of them on demand. This page is the structured reference: the
+each with its own purpose. It **injects** selected priors into prompts and exposes a role-gated subset
+through explicit tools; cards, curation ledgers and several UI projections are not generic pullable
+memory. This page is the structured reference: the
 types, what each is *for*, how it's written and read, and the methodologies that move data through it.
 
 Both stores are **on by default** (a user asked for it): `~/.looplab/memory` (cross-run memory) and
@@ -82,10 +83,15 @@ run in structured form, and that is a real property. But trace the readers and t
 
 ### `GET /api/memory` and what it can honestly say about one experiment
 
-`GET /api/memory` reads a **bounded recent tail** of each of the three tiers (last 2 MiB / 1000 lines
-of the file, 200 rows returned), and each tier ships a receipt — `limit`, `returned`, `skipped`
-(unreadable rows), `filtered` (excluded by the run filter below), `source_window_truncated`,
-`unavailable`. `?run_id=` narrows all three tiers to rows naming that run; it is applied **inside the
+`GET /api/memory`, the explicit lesson/note tools, passive proposal priors, and the cases half of
+`kb_search` share one **bounded recent JSONL snapshot** rule (last 2 MiB / 1000 lines, 128 KiB per
+row). Each snapshot carries a SHA-256 digest, source row/byte counts, truncation, skipped-row and
+availability truth, so a human can identify the same source window that influenced an agent. The API
+returns at most 200 projected rows and each tier ships a receipt — `limit`, `returned`, `skipped`
+(unreadable rows), `filtered` (excluded by the run filter below), `superseded` (inactive case-source
+contributions), `source_window_truncated`, `unavailable`. The page also reports whether the run concept
+index was available; an index failure makes the projection partial rather than looking like a healthy
+zero. `?run_id=` narrows all three tiers to rows naming that run; it is applied **inside the
 source-window scan**, before the per-tier cap, so a busy store cannot report that a run contributed
 nothing merely because newer rows sit in front of it. It is a filter over the same window, never a
 wider read — an old run can still fall outside it entirely, which is what `source_window_truncated`
@@ -103,18 +109,18 @@ experiment taught* section is built on it:
 * the **run's event log** is the exact, immutable half — `lessons_distilled` (folded, and on
   `GET /api/runs/{id}/state`) carries `evidence_refs: [{node_id, generation}]` and a content-addressed
   `lesson_id`;
-* the **cross-run store** is the mutable half, and consolidation is destructive: `consolidate_lessons`
-  merges a group as `merged = dict(newest)`, so every non-base row's `run_id`, `evidence`,
-  `evidence_sig`, `concepts` and `fingerprint` are dropped and only `evidence_count` accumulates; the
-  agentic pass replaces the statement with LLM-written text; superseded rows are physically removed.
-  There is **no `merged_from`, no tombstone and no redirect**, so a merged-away lesson cannot be
-  resolved to its descendant — only reported as no longer present as written;
+* the **cross-run store** is the mutable half, and consolidation replaces a group with one current
+  base row. Base-specific fields such as its fingerprint/concepts remain authoritative; the agentic
+  pass may replace the statement with LLM-written text and superseded rows are physically removed.
+  Bounded `evidence_refs` and traceable/untraceable counts preserve source lineage across that merge,
+  but they are not a statement redirect: a merged-away sentence is still reported as no longer present
+  as written;
 * **cases** carry no node id at all, and **meta-notes** carry no node id (and no `run_id` at all when
   written off the finalize path);
 * run-end **reflect** lessons ride on the diagnostic `reflection_note` event, which carries neither
   `lesson_id` nor evidence, so they are attributable at run level only;
-* **knowledge notes** (`LOOPLAB_KNOWLEDGE_DIR`) carry no provenance whatsoever and can never be
-  attributed to a run or a node.
+* modern **knowledge notes** written by `remember` carry actor/surface/time provenance; legacy notes
+  remain unattributed, and neither shape is joined to a run/node without explicit source refs.
 
 That is the complete list. No prompt injection, no warm start, no gate, no score, no selection.
 `JsonlCaseLibrary.search()` and `.all()` have **no production call sites at all**. The
@@ -416,7 +422,7 @@ after the durable claim.
 | **Role-split lesson routing** | Cross-run lessons are **tagged by role** at distillation and routed to only that role's context: the **Researcher** proposal prompt gets R&D / "what technique to try" lessons (the LLM reflection consolidation + improve-pair param credit); the **Developer** gets only its own "what code change fixed a crash" lessons (comparative *debug*-pair credit), folded into the idea it implements — most useful on repair. Untagged lessons are **shared** (both roles see them): legacy rows, an unattributed comparative line, and the lessons of a run that produced **no measured result** — those are findings about what blocked the work (library/API/hardware constraints), which is the Developer's category as much as the Researcher's. | lessons |
 | **Active agentic retrieval** | Supported tool-using roles pull memory on demand (see below): Researcher, Strategist, deep research, Genesis, the in-house repo Developer and owner Assistant. Exact availability remains role- and feature-gated. | cross-run claims/concepts, siblings, own run, knowledge |
 | **Harmonic indexing** (Memora) | Indexes by a short *abstraction* + cue *anchors*; consolidates near-duplicates at build time and expands retrieval through anchor links at query time. LLM-optional (degrades to lexical). | knowledge, cases, lessons |
-| **Consolidation / hygiene** (D2) | Merges duplicate lessons into an `evidence_count`, retires contradicted verdicts, and bounds the store size. Dedup identity is `(statement, task, role)` — a Researcher and a Developer lesson with the same statement never collapse (merging would drop one role's copy and break the routing). On top of exact-normalized dedup, a **hybrid-retrieval (grep+BM25+vector, RRF) → agentic paraphrase-merge** pass (per `(task, role)`) lets the Researcher fold re-worded duplicates. | lessons |
+| **Consolidation / hygiene** (D2) | Merges duplicate lessons into an `evidence_count`, preserves bounded cross-run `evidence_refs` plus traceable/untraceable source counts, retires contradicted verdicts, and bounds the store size. Dedup identity is `(statement, task, role)` — a Researcher and a Developer lesson with the same statement never collapse. On top of exact-normalized dedup, a **hybrid-retrieval (grep+BM25+vector, RRF) → agentic paraphrase-merge** pass (per `(task, role)`) folds re-worded duplicates. | lessons |
 | **Prompt-slot rationing** (read path) | The injected prior has a fixed budget — **5 lessons + 3 meta-notes**. Slots are rationed by a *presentation* key (`lesson_hygiene.prompt_slot_key`: the normalized statement with every **number** collapsed), so N rows of one f-string template ("changing x A→B regressed the metric by D") spend **one** slot and the rest go to genuinely different findings. Rows are ranked first (similarity → confidence × corroboration → recency), so the slot keeps the family's best row and renders it verbatim, digits intact. This is deliberately **lossier than the write-path `(statement, task, role)` identity** and never substitutes for it: consolidation must keep two measurements apart, while a prompt only needs the sentence once. Nothing is dropped from the store. | lessons, meta-notes |
 | **Reconciliation on re-eval** (`lessons_reconciled`) | When a `node_reset` re-eval **flips a node's outcome** (a false-failure re-scored to evaluated, a demoted champion), this run's distilled lessons *grounded in that node* go stale. Each lesson stamps its evidence nodes' outcome **signature** at write time; a cheap `{node→sig}` hash gate detects the drift, then the stale lessons are **retired and re-derived** from the corrected state (same conclusion → identical lesson reappears = no-op; different → the stale row is replaced). Comparative lessons upsert per-pair (un-spend → re-derive → re-spend); reflect lessons re-derive the whole-run batch. Best-effort, LLM-only (never writes a template), replay-safe (idempotent — an empty re-derivation never nukes memory). | lessons |
 | **Verification** (D8) | The evidence ledger — each research claim carries its citing `node_ids`/URLs so a verifier can check it. Verdicts do not re-rank the current run; at finalization, however, only an aligned `supported` verdict may back positive D8 cross-run claim evidence. | research memo, cross-run claims |

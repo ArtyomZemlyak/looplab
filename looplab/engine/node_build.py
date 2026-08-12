@@ -148,13 +148,17 @@ class NodeBuildMixin:
         return [chosen]
 
     @in_llm_lane("build")
-    def _implement(self, idea, parent=None, *, developer=None) -> str:
+    def _implement(self, idea, parent=None, *, developer=None,
+                   state: Optional[RunState] = None) -> str:
         """Route an implement through `implement_from(idea, parent)` when the Developer supports it
         and a parent exists — so an IMPROVE/REFINE starts from the parent's actual solution (its
         code/files) and patches it, instead of regenerating everything from the pristine baseline
         (which loses the parent's accumulated edits and burns tokens re-deriving them). Falls back
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
         developer = developer or self.developer
+        bind_state = getattr(developer, "bind_state", None)
+        if callable(bind_state):
+            bind_state(state)
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
             return impl_from(idea, parent)
@@ -239,6 +243,9 @@ class NodeBuildMixin:
         code honors them too (consistency with the four build sites); without it the raw idea is used."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
+        bind_state = getattr(developer, "bind_state", None)
+        if callable(bind_state):
+            bind_state(state)
         rf = getattr(developer, "repair_from", None)
         if callable(rf):
             return rf(idea, node, err)

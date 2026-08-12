@@ -71,7 +71,7 @@ _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS = frozenset((
     "v", "record_kind", "run_id", "task_id", "direction", "source_receipt",
 ))
 _CLAIM_SOURCE_SEMANTIC_FIELDS = (
-    "v", "record_kind", "run_id", "task_id", "direction", "statement", "metric",
+    "v", "record_kind", "run_id", "run_uid", "task_id", "direction", "statement", "metric",
     "metric_name", "metric_key", "objective_metric", "node_ids", "node_refs", "urls",
     "url_identities", "evidence_receipt", "verification",
     "verification_verdict", "verification_method", "verification_note", "source_receipt",
@@ -426,7 +426,8 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
             # a sentinel is an exact cardinality record, never an open claim envelope. If
             # statement/evidence/verification fields hitch a ride, assessment code must not be able to
             # index them while the same row advertises an authoritative retained count of zero.
-            set(row) == _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS
+            set(row) in (_RESEARCH_SOURCE_RECEIPT_ROW_FIELDS,
+                         _RESEARCH_SOURCE_RECEIPT_ROW_FIELDS | {"run_uid"})
             and row.get("v") == _RESEARCH_CLAIM_VERSION
             and isinstance(run_id, str) and bool(run_id) and len(run_id) <= _MAX_SOURCE_ID
             and isinstance(task_id, str) and len(task_id) <= _MAX_SOURCE_ID
@@ -443,6 +444,9 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
                     or _research_source_receipt(row) is None
                     or not isinstance(row.get("run_id"), str)
                     or not row["run_id"] or len(row["run_id"]) > _MAX_SOURCE_ID
+                    or ("run_uid" in row and (not isinstance(row["run_uid"], str)
+                                               or not row["run_uid"]
+                                               or len(row["run_uid"]) > _MAX_SOURCE_ID))
                     or not isinstance(row.get("task_id"), str)
                     or len(row["task_id"]) > _MAX_SOURCE_ID
                     or not isinstance(row.get("direction"), str)
@@ -473,7 +477,7 @@ def _valid_claim_source_row(row, *, research: bool) -> bool:
     statement = row.get("statement")
     if not isinstance(statement, str) or not statement.strip() or len(statement) > _MAX_SOURCE_STATEMENT:
         return False
-    for key in ("run_id", "task_id"):
+    for key in ("run_id", "run_uid", "task_id"):
         # Absence is the legacy unknown-scope discriminator. Explicit null/container/numeric scope is a
         # malformed semantic field, not permission to normalize the row into the shared portfolio scope.
         if key in row and (not isinstance(row[key], str) or len(row[key]) > _MAX_SOURCE_ID):
@@ -1082,5 +1086,4 @@ def _bounded_claim_projection(row: dict) -> dict:
         # must never silently turn "64 shown of 3,000" into "there are 64".
         out["nested_omitted"] = omitted
     return out
-
 

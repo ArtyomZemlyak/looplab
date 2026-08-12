@@ -158,6 +158,31 @@ def test_memory_persists_and_retains_best(tmp_path):
                       "metric": None, "params": {}}) is True
 
 
+def test_case_store_separates_min_and_max_objectives(tmp_path):
+    path = tmp_path / "cases.jsonl"
+    library = JsonlCaseLibrary(path)
+    base = {"task_id": "shared", "goal": "same task", "params": {}}
+    assert library.add({**base, "direction": "min", "metric": 0.1})
+    assert library.add({**base, "direction": "max", "metric": 0.9})
+    rows = JsonlCaseLibrary(path).all()
+    assert {(row["direction"], row["metric"]) for row in rows} == {
+        ("min", 0.1), ("max", 0.9)}
+
+
+def test_case_store_recomputes_champion_when_same_run_is_refinalized(tmp_path):
+    path = tmp_path / "cases.jsonl"
+    library = JsonlCaseLibrary(path)
+    base = {"task_id": "shared", "goal": "same task", "direction": "min", "params": {}}
+    assert library.add({**base, "run_id": "run_local", "run_uid": "root-a", "metric": 0.1})
+    assert library.add({**base, "run_id": "run_local", "run_uid": "root-b", "metric": 0.2}) is False
+    # A reset/replay of root-a withdrew its old 0.1 result. Its worse replacement must not leave the
+    # stale champion active; root-b's retained contribution becomes the current case.
+    assert library.add({**base, "run_id": "run_local", "run_uid": "root-a", "metric": 0.4}) is False
+    assert [(row["run_uid"], row["metric"]) for row in library.all()] == [("root-b", 0.2)]
+    durable = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(durable) == 2 and sum(row["active"] is True for row in durable) == 1
+
+
 def test_past_cases_become_searchable_knowledge(tmp_path):
     """I19 retrieval: a stored case is indexed by KnowledgeTools so the Researcher can
     recall it via kb_search."""

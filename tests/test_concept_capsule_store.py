@@ -73,6 +73,24 @@ def test_upsert_by_run_id_replaces_not_duplicates(tmp_path):
     assert s.all()[0]["best_metric"] == 0.90
 
 
+def test_same_display_run_id_keeps_independent_run_incarnations(tmp_path):
+    p = tmp_path / "c.jsonl"
+    store = ConceptCapsuleStore(p)
+    first = build_concept_capsule(
+        run_id="run_local", run_uid="root-a:1", fingerprint=["a"], direction="max",
+        concepts=["concept-a"],
+    )
+    second = build_concept_capsule(
+        run_id="run_local", run_uid="root-b:1", fingerprint=["a"], direction="max",
+        concepts=["concept-b"],
+    )
+    assert store.add(first) and store.add(second)
+    assert {row["run_uid"] for row in store.all()} == {"root-a:1", "root-b:1"}
+    assert store.prior_concepts(
+        ["a"], min_sim=0, exclude_run_id="run_local", exclude_run_uid="root-a:1"
+    ) == {"concept-b"}
+
+
 def test_add_without_run_id_is_rejected(tmp_path):
     s = ConceptCapsuleStore(tmp_path / "c.jsonl")
     assert s.add(build_concept_capsule(run_id="", fingerprint=["a"], direction="max",

@@ -193,6 +193,9 @@ def test_all_cross_run_prompt_pushes_share_the_redaction_contract(tmp_path):
         [f"Authorization: Bearer {_SECRET}"],
         [(0, _lesson(f"password={_SECRET} improves retrieval"))],
         [], lambda _text: [],
+        {"complete": True, "invalid": 0, "source": 2, "truncated": False,
+         "unavailable": False, "notes_digest": "0" * 64,
+         "lessons_digest": "1" * 64},
     ), None)
 
     combined = proposal + strategy + prior

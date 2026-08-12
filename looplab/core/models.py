@@ -873,6 +873,10 @@ class RunState(BaseModel):
       4. read helpers                      — derived views, no mutation."""
     # --- core run state (selection-relevant) ---
     run_id: str = ""
+    # Globally unique incarnation identity. ``run_id`` is a display/root-local label and may be reused
+    # by independent run roots; cross-run stores key provenance and self-exclusion on this value.
+    # Empty on legacy logs, where readers retain the historical run_id fallback.
+    run_uid: str = ""
     task_id: str = ""
     goal: str = ""
     direction: str = "min"  # "min" | "max"

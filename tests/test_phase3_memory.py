@@ -228,6 +228,23 @@ def test_consolidate_dedups_evidence_by_run_id():
     assert consolidate_lessons(rows3)[0]["evidence_count"] == 3       # 3 (folded) + deduped fresh R (0) = 3
 
 
+def test_consolidate_preserves_bounded_cross_run_evidence_lineage():
+    rows = [
+        {"statement": "X", "outcome": "supported", "task_id": "t", "run_id": "same",
+         "run_uid": "root-a", "evidence": [1],
+         "evidence_sig": {"1": "v2:a=2:t=0:x=0:evaluated:0.9"}},
+        {"statement": "x", "outcome": "supported", "task_id": "t", "run_id": "same",
+         "run_uid": "root-b", "evidence": [3]},
+    ]
+    lesson = consolidate_lessons(rows)[0]
+    assert lesson["evidence_count"] == 2
+    assert {(ref["run_uid"], ref["node_id"]) for ref in lesson["evidence_refs"]} == {
+        ("root-a", 1), ("root-b", 3)}
+    assert lesson["evidence_refs"][0]["generation"] == 2
+    assert lesson["evidence_traceable_count"] == 2
+    assert lesson["evidence_untraceable_count"] == 0
+
+
 def test_consolidate_newest_verdict_wins():
     rows = [
         {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t"},
@@ -598,12 +615,14 @@ def test_lessons_route_by_role(tmp_path):
     mem = tmp_path / "memory"
     mem.mkdir()
     rows = [
-        {"task_id": "role-task", "fingerprint": [], "statement": "deeper trees help",
-         "outcome": "supported", "run_id": "r1", "role": LESSON_ROLE_RESEARCHER},
-        {"task_id": "role-task", "fingerprint": [], "statement": "guard empty input fixed the crash",
-         "outcome": "supported", "run_id": "r1", "role": LESSON_ROLE_DEVELOPER},
-        {"task_id": "role-task", "fingerprint": [], "statement": "a legacy shared lesson",
-         "outcome": "supported", "run_id": "r1"},                      # untagged -> shared
+            {"task_id": "role-task", "fingerprint": [], "statement": "deeper trees help",
+             "outcome": "supported", "run_id": "r1", "direction": "max",
+             "role": LESSON_ROLE_RESEARCHER},
+            {"task_id": "role-task", "fingerprint": [], "statement": "guard empty input fixed the crash",
+             "outcome": "supported", "run_id": "r1", "direction": "max",
+             "role": LESSON_ROLE_DEVELOPER},
+            {"task_id": "role-task", "fingerprint": [], "statement": "a legacy shared lesson",
+             "outcome": "supported", "run_id": "r1", "direction": "max"},  # untagged -> shared
     ]
     (mem / "lessons.jsonl").write_text("".join(json.dumps(o) + "\n" for o in rows))
     eng = Engine(tmp_path / "run", task=_T(), researcher=_R(), developer=_D(),

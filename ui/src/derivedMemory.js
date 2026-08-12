@@ -11,13 +11,12 @@
 //      "what did this experiment produce, at the time" EXACTLY, and it can never go stale — history
 //      does not change.
 //
-//   B. The CROSS-RUN STORE is mutable and consolidating. `engine/lesson_hygiene.py:122` merges a
-//      group with `merged = dict(newest)`: the survivor is ONE input row and every other row's
-//      `run_id`, `evidence`, `evidence_sig`, `concepts` and `fingerprint` are DROPPED — only the
-//      integer `evidence_count` accumulates. `_agentic_merge_lessons` goes further and replaces the
-//      statement with LLM-written text. The superseded rows are then physically deleted by
-//      `replace_jsonl_rows_atomic_preserving_quarantine`. There is no `merged_from`, no `supersedes`,
-//      no tombstone and no redirect — grep confirms none of those spellings exists. `compact_lessons`
+//   B. The CROSS-RUN STORE is mutable and consolidating. The survivor carries bounded
+//      `evidence_refs[{run_uid,run_id,node_id,generation}]` plus traceable/total counts, while its
+//      statement and verdict still come from one current base row. `_agentic_merge_lessons` can replace
+//      the statement with LLM-written text. Superseded rows are then physically deleted by
+//      `replace_jsonl_rows_atomic_preserving_quarantine`; the refs preserve evidence lineage, not a
+//      redirect between old and synthesized statements. `compact_lessons`
 //      additionally drops the oldest prefix past 4000 lines with no record at all, and
 //      `lessons_reconcile.py` RETIRES a run's lessons outright when a re-eval flips their outcome.
 //
@@ -53,10 +52,8 @@
 //     RUN level only, which is why `runMemory` below is a separate, weaker answer.
 //   • Cases carry no node id at all — only `task_id` and (for new rows) `run_id`.
 //   • Meta-notes carry no node id, and legacy/off-finalize-path notes carry no `run_id` either.
-//   • Knowledge notes (`LOOPLAB_KNOWLEDGE_DIR`) carry NO provenance whatsoever — the file is
-//     `<slug>-<sha1(title+note)[:8]>.md` holding title + note + tags. A knowledge note can never be
-//     attributed to a run or a node, and no amount of UI work changes that. It is deliberately absent
-//     from everything below rather than shown under a guess.
+//   • Modern Knowledge notes written by `remember` carry actor/surface/time metadata, but no run/node
+//     source ref. Legacy Markdown has no provenance at all. Neither is joined to an experiment here.
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const list = value => Array.isArray(value) ? value : []
@@ -145,15 +142,27 @@ export function nodeLessons(state, nodeId, attempt, store = null) {
  * attempt-matched would repeat the bug the fence exists to stop. So: `'exact' | 'other' | 'unrecorded'`,
  * with `'other'` filtered out (it is provably a different lifecycle) and `'unrecorded'` kept and marked.
  */
-export function liveLessonsForNode(store, nodeId, attempt) {
+export function liveLessonsForNode(store, nodeId, attempt, runId = '') {
   const id = Number(nodeId)
   if (!record(store) || !Number.isSafeInteger(id)) return []
   const out = []
   for (const row of list(store.lessons)) {
     if (!record(row)) continue
-    const evidence = list(row.evidence).filter(value => Number.isSafeInteger(value))
+    const lineage = list(row.evidence_refs).filter(ref => record(ref)
+      && Number.isSafeInteger(ref.node_id)
+      && (!runId || ref.run_id === runId || ref.run_uid === runId))
+    // The survivor's legacy `evidence` ids are local to its own run.  Never reinterpret them inside
+    // another run merely because both runs happened to allocate node 3.
+    const localEvidence = !runId || row.run_id === runId
+      ? list(row.evidence).filter(value => Number.isSafeInteger(value)) : []
+    const evidence = lineage.length
+      ? lineage.map(ref => ref.node_id)
+      : localEvidence
     if (!evidence.includes(id)) continue
-    const recorded = record(row.evidence_generations) ? row.evidence_generations[String(id)] : undefined
+    const lineageRef = lineage.find(ref => ref.node_id === id)
+    const recorded = Number.isSafeInteger(lineageRef?.generation) ? lineageRef.generation
+      : (!runId || row.run_id === runId) && record(row.evidence_generations)
+        ? row.evidence_generations[String(id)] : undefined
     const attemptMatch = !Number.isSafeInteger(recorded) ? 'unrecorded'
       : attempt == null || recorded === attempt ? 'exact' : 'other'
     if (attemptMatch === 'other') continue
@@ -164,11 +173,11 @@ export function liveLessonsForNode(store, nodeId, attempt) {
       outcome: text(row.outcome),
       claimStance: text(row.claim_stance),
       attemptMatch,
-      // `evidence_count` is the ONLY thing consolidation accumulates (`lesson_hygiene.py:146`), so a
-      // count larger than the credited ids is the visible fingerprint of a merge: other runs agreed
-      // and their own provenance was dropped. Surfacing it is how "3 agreeing observations, 2 of
-      // them no longer traceable" becomes sayable at all.
+      // A bounded lineage can still omit legacy or capped sources; show the durable denominator beside
+      // the refs rather than turning a retained subset into an exact claim.
       evidenceCount: Number.isSafeInteger(row.evidence_count) ? row.evidence_count : null,
+      evidenceTraceableCount: Number.isSafeInteger(row.evidence_traceable_count)
+        ? row.evidence_traceable_count : null,
       alsoFrom: evidence.filter(value => value !== id),
       concepts: list(row.concepts).filter(value => typeof value === 'string'),
     })

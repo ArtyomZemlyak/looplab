@@ -472,7 +472,7 @@ def valid_case_record(case) -> bool:
 class JsonlCaseLibrary:
     """THE case store the engine actually uses (I19, ADR-10) — `lessons.py::store_case` builds it.
 
-    Cases on disk as JSONL, keyed by task_id with retain-on-improvement. Loads existing cases on init
+    Cases on disk as JSONL, keyed by (task_id, direction) with retain-on-improvement. Loads existing cases on init
     so it accumulates across runs. `search` does a keyword/recency lookup (no embedding dependency).
 
     The vector-backed `CaseLibrary` above claims the same I19/ADR-10 role in its own docstring but is
@@ -522,7 +522,32 @@ class JsonlCaseLibrary:
         tid = case.get("task_id")
         direction = case.get("direction", "min")
         metric = case.get("metric")
-        prev = next((c for c in self.cases if c.get("task_id") == tid), None)
+        run_uid = case.get("run_uid")
+        if isinstance(run_uid, str) and run_uid:
+            # Modern rows are source contributions, not a destructive champion slot. Re-finalizing
+            # one run replaces that run's contribution even when reset/replay made it worse; retaining
+            # inactive siblings lets the next-best source become active after such a withdrawal.
+            group = [c for c in self.cases
+                     if c.get("task_id") == tid and c.get("direction", "min") == direction]
+            candidates = [c for c in group if c.get("run_uid") != run_uid] + [dict(case)]
+            measured = [c for c in candidates if c.get("metric") is not None]
+            if measured:
+                winner = (min(measured, key=lambda c: c["metric"]) if direction == "min"
+                          else max(measured, key=lambda c: c["metric"]))
+            else:
+                winner = candidates[-1]
+            projected = [{**c, "active": c is winner} for c in candidates]
+            replace_jsonl_rows_atomic_preserving_quarantine(
+                self.path, projected,
+                replace_if=lambda row: (
+                    valid_case_record(row) and row.get("task_id") == tid
+                    and row.get("direction", "min") == direction),
+                loads=json.loads, dumps=json.dumps,
+            )
+            self._reload()
+            return winner is candidates[-1]
+        prev = next((c for c in self.cases
+                     if c.get("task_id") == tid and c.get("direction", "min") == direction), None)
         if prev is not None:
             # Keep the old case only when both metrics are comparable and the new one is not better.
             # An UNMEASURED new case never displaces a MEASURED stored one: `valid_case_record`
@@ -542,7 +567,8 @@ class JsonlCaseLibrary:
         replace_jsonl_rows_atomic_preserving_quarantine(
             self.path, [case],
             replace_if=lambda row: (
-                valid_case_record(row) and row.get("task_id") == tid),
+                valid_case_record(row) and row.get("task_id") == tid
+                and row.get("direction", "min") == direction),
             loads=json.loads, dumps=json.dumps,
         )
         self._reload()
@@ -558,13 +584,14 @@ class JsonlCaseLibrary:
         q = set(query.lower().split())
         # `valid_case_record` admits an explicit `goal: null` row, so `c.get("goal")` can be None here;
         # `... or ""` degrades that to an empty string instead of raising TypeError on `None + " "`.
+        active = [c for c in self.cases if c.get("active") is not False]
         scored = [(len(q & set(((c.get("goal") or "") + " " + c.get("task_id", "")).lower().split())), c)
-                  for c in self.cases]
+                  for c in active]
         scored.sort(key=lambda t: -t[0])
         return [c for _, c in scored[:limit]]
 
     def all(self) -> list[dict]:
-        return list(self.cases)
+        return [c for c in self.cases if c.get("active") is not False]
 
 
 # Schema version for the durable capsule record — bump when the shape changes so a reader can migrate/

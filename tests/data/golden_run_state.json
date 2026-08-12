@@ -794,6 +794,7 @@
   "run_base_concept_receipt": null,
   "run_base_concepts": [],
   "run_id": "golden",
+  "run_uid": "",
   "run_setup_done": [],
   "rungs": [],
   "search_epoch": 0,

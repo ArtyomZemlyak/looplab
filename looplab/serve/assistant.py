@@ -1689,6 +1689,41 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     return CompositeTools(providers)
 
 
+FINAL_ANSWER_DIRECTIVE = (
+    "Now write your final answer to the user, in Markdown.\n"
+    "\n"
+    "Answer the LAST user message only, and report only the work you did in THIS turn — everything "
+    "after that message. The earlier turns above are context you may rely on; do not re-summarize "
+    "them, do not recap what you did in previous turns, and do not open with a summary of the "
+    "conversation so far. Be concise."
+)
+
+
+def final_answer_messages(convo: list, *, directive: str = FINAL_ANSWER_DIRECTIVE) -> list:
+    """The message list for the streamed FINAL answer.
+
+    The whole conversation stays as CONTEXT — a turn routinely depends on a file read or a decision
+    from three turns ago, and trimming it makes the model answer worse. What changed is the
+    directive: it used to say "based on everything above", so the model dutifully summarized the
+    entire dialog and every turn's answer re-narrated the session. The operator's report was exactly
+    that, and it is a prompt bug rather than a context bug.
+
+    The boundary is the LAST user message, which `run_turn` appends as this turn's instruction: the
+    work of this turn is everything after it. Marked explicitly rather than left implicit, because
+    "the last user message" is a thing the model has to FIND in a trace that may hold dozens of tool
+    results, and a trace with no user message at all (a subagent, a replayed fragment) must still
+    produce an answer rather than a broken pointer.
+    """
+    marked = list(convo)
+    last_user = next((i for i in range(len(marked) - 1, -1, -1)
+                      if (marked[i] or {}).get("role") == "user"), None)
+    if last_user is not None:
+        body = (marked[last_user] or {}).get("content") or ""
+        marked[last_user] = {**marked[last_user],
+                             "content": f"[current turn — answer this]\n{body}"}
+    return marked + [{"role": "user", "content": directive}]
+
+
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
@@ -1828,8 +1863,10 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         m = {**m, "tool_calls": kept} if kept else \
                             {k: v for k, v in m.items() if k != "tool_calls"}
                 base.append(m)
-            stream_msgs = base + [{"role": "user", "content": "Now write your final answer to the "
-                                   "user in Markdown, based on everything above. Be concise."}]
+            # SCOPED to this turn. The old directive pointed the model at the entire trace, so every
+            # turn's answer re-summarized the session — see `final_answer_messages`, which owns the
+            # directive and the current-turn boundary so both are statable and testable.
+            stream_msgs = final_answer_messages(base)
             streamed = []
             for piece in client.complete_text_stream(stream_msgs):
                 if cancel_check and cancel_check():   # stop honored mid-stream too

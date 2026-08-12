@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.serve.server import make_app  # noqa: E402
 import looplab.serve.routers.misc as misc_router  # noqa: E402
+from looplab.tools.memory_tools import MemoryTools  # noqa: E402
 
 
 def test_memory_endpoint_not_shadowed_by_kind(tmp_path):
@@ -114,6 +115,24 @@ def test_memory_endpoint_bounds_source_bytes_and_oversized_rows(tmp_path, monkey
 
     assert payload["lessons"][-1]["statement"] == "recent usable"
     assert receipt["source_window_truncated"] is True and receipt["skipped"] >= 1
+
+
+def test_human_and_agent_memory_receipts_name_the_same_source_snapshot(tmp_path):
+    memory_dir = tmp_path / "portfolio-memory"
+    memory_dir.mkdir()
+    (memory_dir / "lessons.jsonl").write_text(
+        json.dumps({"statement": "shared snapshot", "outcome": "supported"}) + "\n",
+        encoding="utf-8")
+    client = TestClient(make_app(tmp_path / "runs"))
+    assert client.put(
+        "/api/settings", json={"settings": {"memory_dir": str(memory_dir)}}).status_code == 200
+
+    receipt = client.get("/api/memory").json()["page"]["tiers"]["lessons"]
+    agent = MemoryTools(str(memory_dir)).execute(
+        "search_lessons", {"query": "shared snapshot"})
+    assert len(receipt["window_digest"]) == 64
+    assert f"sha256={receipt['window_digest']}" in agent
+    assert f"rows={receipt['source_rows']}" in agent
 
 
 def test_lesson_evidence_and_generations_reach_the_wire(tmp_path):

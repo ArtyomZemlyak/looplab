@@ -105,6 +105,11 @@ EXPECTED = {
     # `Engine(...)` must keep deferring to the process-wide `set_llm_capture` default, which is what
     # it did before the knob existed and what the tracing seam tests toggle.
     "trace_llm_io": (True, None),
+    # The run-level "nothing has ever worked, stop the run" bound. The product ships it ON (3)
+    # because an operator watching a UI must not have a run grind for 26 hours over the same
+    # environment defect. The library declares 0 = OFF: a bare `Engine(...)` must not acquire a
+    # NEW terminal it never had, and every embedding caller decides its own stopping policy.
+    "systemic_failure_stop": (3, 0),
 }
 # Divergent by SHAPE, not a scalar worth freezing: the product default is a non-trivial
 # structure; the library default is "off". Assert the shape relationship, not the payload.

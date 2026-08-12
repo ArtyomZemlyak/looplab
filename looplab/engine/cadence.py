@@ -82,3 +82,30 @@ def cadence_marks(records) -> int:
              if isinstance(record, dict) and type(record.get("at_node")) is int
              and record.get("at_node") >= 0]
     return max(marks, default=0)
+
+
+def seed_boundary_due(n: int, last: int, n_seeds: int) -> bool:
+    """The FIRST-EVER firing of a periodic phase: at or past the seed boundary, never fired yet.
+
+    `n == n_seeds` is what this used to be, in both consumers of the gate, and it is the exact defect
+    this module's header describes — an EQUALITY against a count that advances in strides of k > 1.
+    A fan-out or a speculative prefetch steps over the instant and the phase's first firing is lost;
+    for a phase whose ordinary interval is longer than the run, that means it never fires at all.
+
+    Measured 2026-08-11, concept tagging (`concept_retag_every=30`, longer than any real run here):
+
+      | run                        | nodes | n_seeds | node_concepts events |
+      | rubert-dr-0807             |    14 |       1 | 1  (n == 1 is hard to miss) |
+      | lt-recovery-0811           |     6 |       3 | 0  |
+      | rubertlite-dr-unified-v2   |     3 |       3 | 0  |
+
+    The 6-node run consulted its Strategist 28 times, so the shared `pending_nodes()`/`n == 0` guards
+    were passing constantly — only the equality was missed. Every downstream concept surface reads as
+    broken because of it: the run list's concept rollup, the memory shelf's per-record tags, the
+    global concept map.
+
+    `>=` rather than `==`, gated on `last == 0` so it can only ever fire ONCE. It cannot advance a
+    consumer that has already run — that is `cadence_due`'s job and its window stays the operator's
+    knob.
+    """
+    return n > 0 and last <= 0 and n >= max(1, int(n_seeds or 0))

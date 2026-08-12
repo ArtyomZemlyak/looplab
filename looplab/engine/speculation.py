@@ -798,18 +798,16 @@ class SpeculationMixin:
         try:
             self._reset_developer_footprint(developer)
             if kind == "draft":
-                code = developer.implement(
-                    self._directed_idea(idea.model_copy(deep=True), state)
-                )
+                code = self._implement(
+                    self._directed_idea(idea.model_copy(deep=True), state),
+                    developer=developer, state=state)
             elif kind == "merge":
                 parents = [state.nodes[node_id] for node_id in reservation.parent_ids]
-                implement_from = getattr(developer, "implement_from", None)
                 directed = self._directed_idea(idea.model_copy(deep=True), state)
-                code = (
-                    implement_from(directed, parents[0])
-                    if self._merge_mode == "ensemble" and callable(implement_from) and parents
-                    else developer.implement(directed)
-                )
+                code = self._implement(
+                    directed,
+                    parents[0] if self._merge_mode == "ensemble" and parents else None,
+                    developer=developer, state=state)
             elif kind == "debug":
                 parent = state.nodes[action["parent_id"]]
                 repair = getattr(developer, "repair", None)
@@ -825,6 +823,7 @@ class SpeculationMixin:
                         self._directed_idea(idea.model_copy(deep=True), state),
                         parent,
                         developer=developer,
+                        state=state,
                     )
             else:
                 parent = state.nodes[action["parent_id"]]
@@ -832,6 +831,7 @@ class SpeculationMixin:
                     self._directed_idea(idea.model_copy(deep=True), state),
                     parent,
                     developer=developer,
+                    state=state,
                 )
             idea, finalized = self._finalize_developer_footprint(idea, developer, code)
             files = dict(getattr(developer, "last_files", {}) or {})

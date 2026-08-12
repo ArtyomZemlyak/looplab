@@ -75,7 +75,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **164 of the 195 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **165 of the 196 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 164 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
@@ -163,6 +163,56 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |
 | `max_seconds` | `LOOPLAB_MAX_SECONDS` | — | Hard wall-clock ceiling for the whole run |
 | `max_eval_seconds` | `LOOPLAB_MAX_EVAL_SECONDS` | — | Hard ceiling on cumulative time *inside* evals (survives resume) |
+
+### One experiment per GPU — who decides, and what happens when two runs want the same cards
+
+The three facts above are spread across four table rows and are asked about often enough to be worth
+stating together.
+
+**Who decides the width.** Two independent knobs, both defaulting to `0` = AUTO, both settled ONCE at
+run start and then pinned into `run_started` (engine invariant #6, so a resume on a differently sized
+box continues the run's own width rather than re-deriving one):
+
+| axis | what it bounds | AUTO resolves to |
+|---|---|---|
+| `eval_parallel` | concurrent EVALUATIONS — the GPU/experiment consumer | **one experiment per detected GPU** (at least 1) |
+| `llm_parallel` | concurrent node BUILDS (and the shared provider budget) | the settled `eval_parallel`, so a build fan-out never outruns what can be evaluated |
+| `speculation_depth` (`-1` = AUTO) | speculative prefetch backlog | the settled `eval_parallel` |
+
+So on a two-GPU box, the shipped defaults already run **two experiments side by side, one per card**,
+and `engine/evaluate.py::_evaluate` pins each concurrent eval to a DISTINCT GPU through
+`CUDA_VISIBLE_DEVICES` — a framework left to see both cards typically pins itself to one and leaves
+the other idle, which is why the width alone would not parallelize anything.
+
+**One exception, deliberately.** AUTO means "let the BOX decide", so it only reads a GPU count where
+the box is the constraint: a task adapter that declares itself CPU-locked (`gpu_capable() -> False`)
+settles AUTO to serial `1`. Deriving a width from hardware that cannot serve the work is a category
+error, and it cost determinism — two concurrent toy evals finish in wall-clock order, so the offline
+smoke produced a different `node_evaluated` order run to run. An explicitly spelled number is always
+honoured, CPU-parallel evals included.
+
+**The width is NOT derived from the proposal.** It is settled from hardware at run start, once, for
+the whole run. A per-Card *footprint* (`{"gpus": N}` on the idea/Card) does affect that node's device
+reservation and admission, but nothing lets a Researcher proposal widen or narrow the run. Making the
+width follow what the proposals actually ask for is an open item — see
+[the operator backlog](../28-operator-backlog-2026-08-11.md).
+
+**Two runs, one box: the second one WAITS.** GPU admission is serialized by a single pool-wide lease,
+`/tmp/looplab-gpu-pool-<uid>.lock` — one file per OS user, exclusive across processes
+(`engine/resources.py`). So if run A is resumed while run B is mid-experiment:
+
+* run A **waits**, it does not fail, and it does not time out. `_wait_for_gpu_change` re-polls every
+  0.5 s for as long as B holds the pool — potentially hours.
+* The wait is announced at WARNING every 30 s, naming the lease path, the holding PID and how long it
+  has waited. Before that notice existed this was completely silent and was repeatedly misdiagnosed
+  as a deadlock: the run appends `setup_finished`, creates its nodes, and then nothing happens.
+* **`eval_parallel=1` does not keep you out of the queue.** A serial run still claims the whole pool
+  for a `gpu_capable` task. What keeps work out of it is declaring `{"gpus": 0}` on the idea/Card, or
+  fencing the whole run with `CUDA_VISIBLE_DEVICES=`.
+* The lease is per OS user and per filesystem namespace. Other users, containers and hosts need an
+  external scheduler — LoopLab does not coordinate across them.
+
+A plain repair/resume that needs no GPU is unaffected: a CPU-locked adapter never takes the lease.
 
 ### What blocked speculation from being the default (fixed 2026-08-05)
 
@@ -526,6 +576,7 @@ never touches.
 | `failure_reflection` | `LOOPLAB_FAILURE_REFLECTION` | `true` | Feed recent failed branches back into the proposal prompt (LATS-style); selective — only when recent failures exist |
 | `watchdog_reflection` | `LOOPLAB_WATCHDOG_REFLECTION` | `true` | Feed recent **live-watchdog** observations (train-monitor health verdicts + ASHA intermediate-rank flags) into the proposal prompt, so the proposer avoids re-proposing a configuration already seen training weakly; selective (only when a recent flag exists). Complements `failure_reflection` — surfaces the advisory flags on nodes that ran to completion (fold-ignored diagnostics the failure reflection never sees) |
 | `debug_depth` | `LOOPLAB_DEBUG_DEPTH` | `2` | T10: how many error-feedback repairs a failing lineage gets before it is abandoned |
+| `systemic_failure_stop` | `LOOPLAB_SYSTEMIC_FAILURE_STOP` | `3` | Stop the whole RUN when this many DISTINCT nodes have ended failed and **not one has ever produced a metric**. The run-level companion to `inline_repair_attempts`, which bounds ONE node's repairs and says nothing about a run whose every node fails for the same reason. The engine's other no-progress guard cannot cover it either: `node_failed` is a TERMINAL, so a run that only fails resets that guard every turn. Measured on `rubertlite-dr-unified-v2` (2026-08-11): **26 hours and 1,705 provider calls over 6 failed / 0 evaluated nodes**, every failure the same environment defect, re-diagnosed from scratch by a fresh Developer each time. Once ANY node is evaluated the environment, dependencies and data are proven and this is **off for the rest of the run** — a later failure is about that idea, so only that node and its direction stop and the search continues. The terminal names the failure reasons the triage already recorded. Node RESETS (`superseded`) and operator aborts are not counted; a node repaired five times and failed is one failed idea. `3` rather than `1` because a first node can fail on something a Developer really can repair. **0 disables it** |
 | `inline_repair_retrain_cap` | `LOOPLAB_INLINE_REPAIR_RETRAIN_CAP` | `2` | Max FULL multi-stage re-runs (re-trains) the inline-repair loop may do before abandoning to the inter-node debug operator. A late-stage fix (e.g. a broken `score` script that didn't touch `train`) reuses the completed train checkpoint and re-runs only from the failed stage — cheap, not counted. The reuse check is **fail-closed**: a full, counted re-train is forced not only when the repair changes earlier-stage code, but whenever reuse can't be *proven* safe — the repair deleted any file, changed a non-`.py` file (config/data inputs are invisible to import reachability), the eval runs under a non-default `cmd.cwd`, an earlier stage is opaque (`python -m`, a shell wrapper), or the failed stage is missing from the post-repair pipeline. Exception: a FIRST-stage failure (no completed earlier-stage work exists to discard) is an ordinary retry bounded by `inline_repair_attempts` and the triage model's stop decision, never this cap. **A stage ROLLBACK is charged to this same cap** — when a repair names an earlier, already-successful stage as the real cause (`rollback_stage` on its `done` emit), the engine re-runs the pipeline from there, which discards completed work exactly as a forced full re-train does; a second counter would let a repair alternate the two and pay neither. A rollback is *additionally* bounded to at most one per suspect stage per node (read back off the `stage_rollback` events, so a resume does not refund it), and is refused outright unless that repair also CHANGED something the suspect stage runs or imports. 0 = unlimited (legacy). It bounds COST, which neither of those two does: they bound how many repairs happen, not what each one costs |
 
 ## Strategist & meta-control
@@ -534,7 +585,7 @@ never touches.
 |---|---|---|---|
 | `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `agent` | Meta-controller: `off` / `rule` / `llm` (single-shot over aggregate stats) / `agent` (default — tool-using, READS run/data/siblings/KB/memory before deciding) |
 | `strategist_every` | `LOOPLAB_STRATEGIST_EVERY` | `3` | Consult cadence (created nodes) |
-| `concept_retag_every` | `LOOPLAB_CONCEPT_RETAG_EVERY` | `30` | PART V (F1) concept CLASSIFIER re-tag + consolidation cadence (created nodes), decoupled from `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on this sparser interval (and paces the `concept_pivot` coverage-snapshot). Researcher-authored `idea.concepts` still fold immediately at node_created — this only paces the classifier-evidence + consolidation refresh, so UI concept freshness is unaffected. Fires at the seed boundary too so short runs get one pass |
+| `concept_retag_every` | `LOOPLAB_CONCEPT_RETAG_EVERY` | `5` | PART V (F1) concept CLASSIFIER re-tag + consolidation cadence (created nodes), decoupled from `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on this sparser interval (and paces the `concept_pivot` coverage-snapshot). Researcher-authored `idea.concepts` still fold immediately at node_created — this only paces the classifier-evidence + consolidation refresh, so UI concept freshness is unaffected. Fires at the seed boundary too (at or past `n_seeds`, once) so short runs get one pass. **Was `30` until 2026-08-11**, which is longer than a real run here: after the seed firing there was never a second one, and `rubert-dr-0807` ended 14 nodes with tags on exactly ONE — the reason every concept surface reported `count: 1, best_metric: null`. A pass skips already-tagged nodes and is capped per cadence, so its cost scales with NEW nodes rather than with run length |
 | `budget_aware` | `LOOPLAB_BUDGET_AWARE` | `false` | Surface remaining eval-compute budget into the proposal prompt |
 | `agent_control` | `LOOPLAB_AGENT_CONTROL` | *(see below)* | Per-setting allow-list of which agent roles may change it at runtime |
 
@@ -614,7 +665,7 @@ are written by the candidate itself:
 | `holdout_fraction` | `LOOPLAB_HOLDOUT_FRACTION` | `0.25` | Fraction of the eval reserved as the holdout |
 | `archive_resolution` | `LOOPLAB_ARCHIVE_RESOLUTION` | `1.0` | Diversity-archive niche bucket width in parameter space |
 | `coverage_context` | `LOOPLAB_COVERAGE_CONTEXT` | `true` | Compute the run's breadth read-model (themes / param-niches / theme entropy / dominant-theme fraction) at the strategist cadence, record it as a `coverage_snapshot` audit event, and feed it into the Strategist's decision context (the narrowing signal). Deterministic; additive context only |
-| `concept_pivot` | `LOOPLAB_CONCEPT_PIVOT` | `true` | PART IV Phase 2a live steering. Record a concept-graph coverage + uncovered-region snapshot (`concept_coverage_snapshot`) at the `concept_retag_every` cadence (default 30 — the producer gates on `_should_consult_concepts`, not `strategist_every`), and on an `explore` stance make the Researcher's novelty hint name the exact uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead of the vague "broaden". The snapshot is built by the LLM agent when a reflect client is wired (universal — works on ANY task, no curated skeleton needed, with per-task LLM-derived importance), falling back to the deterministic heuristic over a curated skeleton otherwise; recorded once per cadence so replay stays deterministic. The snapshot and prompt cue do not rank metrics directly, but the resulting concept evidence feeds `graded_novelty` proposal admission and, when enabled, `capability_expansion`; it can therefore change which candidates reach evaluation and selection |
+| `concept_pivot` | `LOOPLAB_CONCEPT_PIVOT` | `true` | PART IV Phase 2a live steering. Record a concept-graph coverage + uncovered-region snapshot (`concept_coverage_snapshot`) at the `concept_retag_every` cadence (default 5 — the producer gates on `_should_consult_concepts`, not `strategist_every`), and on an `explore` stance make the Researcher's novelty hint name the exact uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead of the vague "broaden". The snapshot is built by the LLM agent when a reflect client is wired (universal — works on ANY task, no curated skeleton needed, with per-task LLM-derived importance), falling back to the deterministic heuristic over a curated skeleton otherwise; recorded once per cadence so replay stays deterministic. The snapshot and prompt cue do not rank metrics directly, but the resulting concept evidence feeds `graded_novelty` proposal admission and, when enabled, `capability_expansion`; it can therefore change which candidates reach evaluation and selection |
 | `graded_novelty` | `LOOPLAB_GRADED_NOVELTY` | `true` | PART IV Phase 2b (D3). Grade a fresh proposal over the concept graph in the LIVE novelty gate: a level-4 "same direction, DIFFERENT implementation" or level-5 "re-opens a wrongly-abandoned FAILED direction" proposal may pass the flat dedup gate and is recorded as `novelty_graded`. It uses the agentic tagger only with a complete classifier-receipt snapshot; otherwise it uses the curated deterministic graph/heuristic path or defers to the ordinary novelty gate. It changes proposal admission (never best-metric ranking). ON by default in product `Settings`; bare-library `EngineOptions` remains off, and conservative deployments can explicitly pin it false until workload-specific cost/quality validation is complete |
 | `fingerprint_universal` | `LOOPLAB_FINGERPRINT_UNIVERSAL` | `true` | PART IV cross-run Step 0 (§21.20). Universal task-fingerprint tokenization: drop the ASCII-only `[a-z0-9]` allowlist on goal keywords (`[^\W_]+`/`.casefold()`, any script) so a non-Latin goal (Russian, CJK, …) is not silently dropped from its cross-run fingerprint and can reach SIMILAR-task priors/lessons/cases. ON by default in the product Settings (ce4a379); the bare-library EngineOptions default stays off, so a run pinned to the library default is byte-identical and won't silently re-key a portfolio mid-flight |
 | `cross_run_concepts` | `LOOPLAB_CROSS_RUN_CONCEPTS` | `true` | PART IV cross-run Step 2 (§21.20). At run end write a per-run concept capsule; during `_graded_novelty_precheck`, separately surface overlapping earlier concepts as a `cross_run_prior` audit event. The prior is not fed into the gating grade and never rejects. **D8 research-claim persistence is independent of this flag:** whenever shared `memory_dir` is configured, finalize upserts memo-derived v3 claim rows with task/run/direction identity, run-qualified node references, source URLs and verifier verdict/method/note. Every explicitly processed v3 run records producer input/retained/omitted cardinality, including processed-empty and all-invalid sentinels; this receipt does not prove that every historical portfolio run executed D8. The mutable reader separately quarantines malformed, schema-invalid and unknown-future rows. Either an incomplete producer receipt or quarantined durable row makes claim absence/counts a lower bound and withholds one-sided verdicts. Legacy v0-v2 rows remain readable evidence, but their producer denominator is unknown. This remains a lean evidence contract rather than a complete applicability/comparison receipt, and stored memo text remains untrusted. Effective concept-prior surfacing requires a shared `memory_dir`, `graded_novelty` and concept tags produced through `concept_pivot`; use `fingerprint_universal` consistently for non-Latin portfolios. ON by default in the product Settings (ce4a379); the bare-library EngineOptions default stays off |

@@ -35,7 +35,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
 from looplab.core.config import parallelism_aliases
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import RunState
-from looplab.engine.cadence import cadence_due, cadence_marks
+from looplab.engine.cadence import cadence_due, cadence_marks, seed_boundary_due
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
@@ -337,12 +337,18 @@ class StrategyCadenceMixin:
         n = len(state.nodes)
         if n == 0:
             return False
-        if n == self.n_seeds:
+        last = cadence_marks(marks)
+        # `>=`, not `== self.n_seeds` — the seed boundary is a count that advances in strides, so an
+        # equality can be stepped over by a fan-out or a speculative prefetch. `strategist_every` is
+        # short enough that a missed boundary here only DELAYS the first consult, which is why this
+        # went unnoticed; the same equality in `_should_consult_concepts` cancelled that phase for the
+        # whole run. One spelling for both, in `cadence.seed_boundary_due`.
+        if seed_boundary_due(n, last, self.n_seeds):
             return True
         # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
         # this cadence is reused for coverage snapshots even with NO strategist wired
         # (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0` for that case.
-        return cadence_due(n, cadence_marks(marks), self.strategist_every)
+        return cadence_due(n, last, self.strategist_every)
 
     def _strategy_may(self, strat: dict, key: str) -> bool:
         """One governance verdict shared by Developer preparation and live strategy application."""

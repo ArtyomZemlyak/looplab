@@ -136,6 +136,10 @@ function _CardKanbanCard({
   // rather than the component having to branch on which host built it.
   const origin = _cardOrigin(card)
   const lessons = _cardLessons(state, card)
+  const beliefId = _cardText(card.belief_id)
+  const retryOf = _cardText(card.retry_of)
+  const claimRefs = [...new Set((Array.isArray(card.claim_refs) ? card.claim_refs : [])
+    .map(_cardText).filter(Boolean))].slice(0, 64)
   const statement = _cardText(card.statement) || `Card ${card.id}`
   const source = _cardText(card.source)
   const operator = _cardText(card.operator)
@@ -415,6 +419,11 @@ function _CardKanbanCard({
         {origin.aliases.length > 0
           ? `${origin.createdAtNode != null ? ' · ' : ''}absorbed ${origin.aliases.join(', ')}` : ''}</span>
     </div>}
+    {(beliefId || retryOf) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Belief lineage</span>
+      <span>{beliefId ? `belief ${beliefId}` : 'belief id unavailable'}
+        {retryOf ? ` · retry of ${retryOf}` : ''}</span>
+    </div>}
     {(lessons.lessons.length > 0 || lessons.unresolved.length > 0) && <div className="card-kanban-fact">
       {/* `.card-kanban-fact` is a 2-column grid whose third and later children span column 2, so
           each lesson is a DIRECT child rather than being nested in one wrapping span. */}
@@ -428,6 +437,12 @@ function _CardKanbanCard({
       {lessons.unresolved.length > 0 && <span className="muted">
         {lessons.unresolved.length} referenced {lessons.unresolved.length === 1 ? 'lesson was' : 'lessons were'} distilled
         outside this run and cannot be resolved to their text here.</span>}
+    </div>}
+    {claimRefs.length > 0 && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Research claims</span>
+      <span>{claimRefs.slice(0, 4).map(ref => <code key={ref}>{ref}</code>)}
+        {claimRefs.length > 4 ? ` · ${claimRefs.length - 4} more` : ''}
+        {' · '}<a href="#/atlas">Open Research Atlas</a></span>
     </div>}
     <div className="card-kanban-evidence">
       {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"

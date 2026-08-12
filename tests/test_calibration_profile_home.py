@@ -43,11 +43,14 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-05  - inline_repair_stuck_repeat (see the second history block below)
 #   2026-08-06  + concept_tidy               (cross-run concept ratification; see below)
 #   2026-08-09  + task_facets_finalize       (separate paid facet-steward schedule; see below)
+#   2026-08-11  + systemic_failure_stop      (run-level 'nothing has ever worked' stop; see below)
+#   2026-08-11  concept_retag_every 30 -> 5  (intentional cadence-default change; field set unchanged,
+#               but the complete settings envelope and therefore old receipts genuinely changed)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:bc8c15f18fe2aaea4e2f9b415c079b87afee71069ffc8c07a2cc1292b0210353"
+_EXPECTED_DIGEST = "sha256:f98e36587c5fa9aa5badad76658375eb6c1d96171931c198c9f70aa5c17a63c2"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -70,7 +73,12 @@ _EXPECTED_DIGEST = "sha256:bc8c15f18fe2aaea4e2f9b415c079b87afee71069ffc8c07a2cc1
 #               toy calibration run, just like `concept_tidy` above. It is nevertheless a real
 #               Settings/snapshot treatment field, and this digest intentionally binds the complete
 #               non-variant envelope. Both pins re-set rather than exempting one control ad hoc.
-_EXPECTED_FIELD_COUNT = 192
+#   2026-08-11  + systemic_failure_stop      (the run-level bound that stops a run in which NOTHING
+#               has ever produced a metric). The 'field set changed too' branch again, and here the
+#               knob is NOT inert: a calibration run whose every replicate crashed would now end on
+#               this terminal rather than grinding, which is a different envelope in the direction
+#               that matters — so previously-issued receipts SHOULD stop verifying. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 193
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
