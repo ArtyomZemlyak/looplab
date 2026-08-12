@@ -30,6 +30,12 @@ import hashlib
 import os
 from pathlib import Path
 
+# `FAILURE_REASONS` is the closed vocabulary `_failure_reason` below classifies into, and importing
+# it here re-exports it beside its classifier so the two read as one thing. It is DEFINED in
+# `core/models.py` rather than here because `core/config.py` needs it for the `inline_repair_reasons`
+# default, and core may not import from `engine`.
+from looplab.core.models import FAILURE_REASONS  # noqa: F401
+
 # Both fingerprinters shell out to `git rev-parse` and both run on setup AND on every resume, so
 # neither may block the run on a wedged mount. Short on purpose: a healthy repo answers in
 # milliseconds, and the fallback (stat/scandir) is a fine fingerprint on its own.

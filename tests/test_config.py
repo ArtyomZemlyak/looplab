@@ -15,6 +15,7 @@ from looplab.core.config import (
     migrate_config_snapshot,
     settings_from_snapshot,
 )
+from looplab.core.models import FAILURE_REASONS
 
 
 def test_config_lower_bounds():
@@ -78,7 +79,10 @@ def test_settings_roundtrip_through_snapshot():
     snap = s.masked_snapshot()
     # The persisted/runtime-scope snapshot is strict JSON-domain, not a Python-mode dump.  Tuple
     # schema fields must already be arrays before json.dumps or digest canonicalization sees them.
-    assert snap["inline_repair_reasons"] == ["crash", "timeout", "oom"]
+    # The VALUE is the shipped default (all of FAILURE_REASONS since 2026-08-12); what this test is
+    # about is the TYPE — a tuple field must already be a JSON array before json.dumps or digest
+    # canonicalization sees it. Bound to the registry so widening the default is not a red test here.
+    assert snap["inline_repair_reasons"] == list(FAILURE_REASONS)
     assert isinstance(snap["inline_repair_reasons"], list)
     json.dumps(snap, allow_nan=False)
     snap.pop("llm_api_key", None)

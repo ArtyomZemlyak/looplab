@@ -19,6 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single sources shared with the LLM resolver — see core/llm.py.
 from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
+from looplab.core.models import FAILURE_REASONS
 
 _LOG = logging.getLogger(__name__)
 
@@ -649,13 +650,30 @@ class Settings(BaseSettings):
     # ledgers with this one number. A budget is about time and money — a re-eval costs the same
     # whichever kind of mistake preceded it — so `repair_class` and its corroboration are gone.
     inline_repair_attempts: int = Field(default=12, ge=0)
-    # Which failure reasons (_failure_reason: crash|timeout|oom|setup|no_metric|drift) are eligible for
-    # inline repair. Default: mechanical crashes, timeouts AND OOM-kills — a timeout/OOM means the code
-    # was too slow / too memory-hungry for the budget (or the pod's cgroup limit), not that the idea is
-    # wrong, so the agent repairs it by reducing compute/memory (fewer estimators/epochs/folds/seeds, a
-    # lighter model, a smaller batch, subsampling) instead of letting the node die unrecovered. Env
-    # override expects a JSON array.
-    inline_repair_reasons: tuple[str, ...] = ("crash", "timeout", "oom")
+    # Which failure reasons (`engine/triage.py::FAILURE_REASONS`) are eligible for inline repair.
+    # Default: ALL of them, since 2026-08-12.
+    #
+    # It used to be `("crash", "timeout", "oom")` — the mechanical three — on the reasoning that a
+    # timeout or OOM means the code was too slow or too memory-hungry for the budget, not that the
+    # idea is wrong. That reasoning was right and the CONCLUSION was wrong, because the same is true
+    # of every other reason: `no_metric` is a script that ran and printed nothing where it was asked
+    # to, `setup` is a dependency that is not installed, `drift` is an implementation that wandered
+    # off its own declared spec. None of those is evidence that the HYPOTHESIS is wrong, which is the
+    # only thing that should end a node without a repair.
+    #
+    # The cost of the narrow default, measured: `rubertlite-dr-unified-v5` node 0 trained for 76
+    # minutes on two H200s, exited 0, wrote a complete checkpoint and computed recall@100 = 0.743 —
+    # then died with `reason: no_metric` and ZERO repair attempts, because the manifest declared the
+    # checkpoint one directory over from where the testbed writes it. The repair was a one-line path
+    # edit. The gate never opened, and the run lost the node.
+    #
+    # This is not "repair everything forever": three tighter bounds already govern the spend, and
+    # they are the ones doing the real work. `inline_repair_attempts` caps the COUNT,
+    # `inline_repair_retrain_cap` caps the EXPENSIVE ones (a repair that forces a full re-train), and
+    # the per-attempt triage judge can answer `abandon` at any point. A coarse filter on top of three
+    # calibrated ones was not protection — it was a way for a whole class of failure to be dropped
+    # without anyone deciding to drop it. Env override expects a JSON array.
+    inline_repair_reasons: tuple[str, ...] = FAILURE_REASONS
     # Cost ceiling for in-node repair of a MULTI-STAGE eval: the max number of FULL pipeline re-runs
     # (i.e. re-trains from the first stage) the inline-repair loop may do before abandoning to the
     # inter-node debug operator. A late-stage failure (a broken `score`/eval script that didn't touch

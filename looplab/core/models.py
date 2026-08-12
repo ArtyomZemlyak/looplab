@@ -574,6 +574,16 @@ def validate_direction(value, *, extra: tuple[str, ...] = ()):
 # `tests/test_developer_error_sentinel.py` pins that no consumer re-spells it.
 DEVELOPER_ERROR_PREFIX = "(developer error:"
 
+# Every reason an eval can produce no usable metric — the closed vocabulary
+# `engine/triage.py::_failure_reason` classifies into and `Settings.inline_repair_reasons` selects
+# from. It lives HERE, in core, because `core/config.py` needs it for that default and core may not
+# import from `engine`; `triage.py` re-exports it so the classifier and its vocabulary still read as
+# one thing. A registry rather than literals copied into the classifier, the setting, the engine
+# options and the settings docs — the failure mode of the copies is silent, and it has already
+# happened once: `no_metric` was in the classifier and absent from the default set, so that whole
+# class of failure was never repaired and nobody had decided it should not be.
+FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift")
+
 
 def is_developer_error(code) -> bool:
     """True when `code` is the in-band Developer-crash sentinel rather than real solution code."""
