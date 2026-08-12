@@ -1102,6 +1102,13 @@ def _card_projection_receipt(card, dto: dict) -> PublicCardProjectionReceipt:
     returned = 1
     exact_fields: dict[str, bool] = {"id": True}
     omissions: dict[str, PublicProjectionSlice] = {}
+    enrichment_complete = getattr(card, "_card_enrichment_complete", True) is not False
+    if not enrichment_complete:
+        # This is a source-projection omission, not a public Card field. Count one unavailable field
+        # so a cap-discarded applicable fallback can never be certified as a complete Card snapshot.
+        total += 1
+        omissions["card_enrichment"] = PublicProjectionSlice(
+            unit="fields", total=1, returned=0, omitted=1, complete=False)
     for name in _FIELDS[1:]:
         raw = _field(card, name)
         if raw is _SKIP or raw is None:

@@ -47,6 +47,7 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
 # alias shim exists to prevent for MODULES. Tests that reach for a ledger internal import it from
 # `looplab.events.card_ledger` directly.
 from looplab.events.card_ledger import (
+    CARD_ENRICHMENT_JOURNAL_MAX,
     _CARD_REPLAY_NODE_ID_MAX,
     _CARD_REPLAY_STATEMENT_MAX,
     _bounded_card_added_receipt,
@@ -280,6 +281,7 @@ class _FoldCtx:
         "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
+        "card_enrichment_index", "card_enrichment_omissions",
     )
 
     def __init__(self):
@@ -315,6 +317,10 @@ class _FoldCtx:
         # presence bit because RunState.run_base_concepts alone represents both states as ``[]``.
         self.run_base_seen = False
         self.event_index = -1
+        # Index retained enrichment candidates so an attacker-sized set of distinct owners remains
+        # O(events), and count rejected candidates so public completeness can fail closed.
+        self.card_enrichment_index: dict[tuple, int] = {}
+        self.card_enrichment_omissions: dict[tuple, int] = {}
 
 
 def _settle_folded_speculation_depth(st: RunState) -> None:
@@ -2812,30 +2818,24 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 for flag in ("_concept_tags_overflow", "_concept_tags_invalid"):
                     if flag in rec:
                         candidate[flag] = rec[flag]
-            replace_at = None
-            for index, prior in enumerate(st.cards_enriched):
-                prior_fence = (
-                    prior.get("id"), prior.get("node_id"), prior.get("generation"),
-                    (prior.get("proposal_ref") or {}).get("digest"),
+            candidate_key = (*fence, key)
+            replace_at = ctx.card_enrichment_index.get(candidate_key)
+            if replace_at is not None:
+                prior = st.cards_enriched[replace_at]
+                prior_order = (
+                    prior.get("_seq") if type(prior.get("_seq")) is int else -1,
+                    prior.get("_event_index")
+                    if type(prior.get("_event_index")) is int else -1,
                 )
-                if prior_fence == fence and key in prior:
-                    prior_order = (
-                        prior.get("_seq") if type(prior.get("_seq")) is int else -1,
-                        prior.get("_event_index")
-                        if type(prior.get("_event_index")) is int else -1,
-                    )
-                    if order >= prior_order:
-                        replace_at = index
-                    break
-            if replace_at is None:
-                if not any(
-                    (prior.get("id"), prior.get("node_id"), prior.get("generation"),
-                     (prior.get("proposal_ref") or {}).get("digest")) == fence and key in prior
-                    for prior in st.cards_enriched
-                ):
-                    st.cards_enriched.append(candidate)
+                if order >= prior_order:
+                    st.cards_enriched[replace_at] = candidate
+            elif len(st.cards_enriched) < CARD_ENRICHMENT_JOURNAL_MAX:
+                ctx.card_enrichment_index[candidate_key] = len(st.cards_enriched)
+                st.cards_enriched.append(candidate)
             else:
-                st.cards_enriched[replace_at] = candidate
+                # Handler-level LWW means repeated values for the same rejected window are still one
+                # missing projection candidate, not an ever-growing count of audit-log events.
+                ctx.card_enrichment_omissions.setdefault(candidate_key, 1)
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).
@@ -3821,7 +3821,8 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
-    _derive_cards(st)        # docs/23 Layer 1a: the card ledger (mirrors hypotheses); advisory, after best
+    _derive_cards(st, card_enrichment_omissions=ctx.card_enrichment_omissions)
+    # docs/23 Layer 1a: the card ledger (mirrors hypotheses); advisory, after best
     return st
 
 
