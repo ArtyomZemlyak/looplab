@@ -99,11 +99,45 @@ before the next stage runs, and has two halves:
   and the checker will not enforce it.
 
 A failed `expect` fails the stage the same way a non-zero exit does (same `failed_stage`, same repair
-path), so nothing new happens mid-loop. `expect` lives in the **manifest**, not in the script, which is
+path), so nothing new happens mid-loop — but see **metric salvage** below: a stage that failed its
+`files` contract *after* already computing the metric no longer loses it. `expect` lives in the
+**manifest**, not in the script, which is
 what makes it usable in both repo-task modes: the scorer is usually authored by the Developer, but when
 an operator `protect`s it the agent cannot add an assert to it at all — and then the manifest is the only
 place that stage's success condition can be stated. (An in-script `assert` is still the recommended belt
 where the agent owns the file; the two are not redundant.)
+
+**Metric salvage — a failed node does not have to lose a metric it already computed.** A real run
+(`rubertlite-dr-unified-v5` node 0) trained for 76 minutes on two H200s, exited 0, ran its scorer and
+printed `RECALL@100: 0.743250` — exactly what the run's declared reader matches — and was then failed
+with `reason: no_metric` because its manifest declared the checkpoint one directory name away from
+where the testbed wrote it. Since 2026-08-12 the engine asks the **operator's own declared metric
+reader** one more time, over that failed attempt's own stdout and workdir, before writing the node's
+single terminal event. If it finds a value, the node terminalizes as `node_evaluated` carrying it.
+
+What makes a salvaged metric admissible is narrow on purpose:
+
+* it comes out of `eval.metric` — the operator's spec, unchanged. Never an agent-authored one, and
+  never `kind: "adapter"` (that reader EXECs agent code, so salvage refuses it outright). **No model
+  reads the number**: an LLM extractor would let the agent, who writes the training script, write the
+  text the extractor reads, which is a scoring path around the protected `score` stage;
+* file readers are held to the same freshness gate as the primary read (this attempt's own output),
+  and a `file_json`/`file_regex` reader whose declared path is wrong is retried at the fresh
+  same-basename file the stage actually wrote — the same near-miss rule `expect.files` reports;
+* the failure must not be one of *measurement* or *trust*. A drift rejection, a hard timeout, a setup
+  failure, a non-zero exit (except the authenticated stall verdict) and a failed `expect.assert` /
+  `check` are all refused. A stage that genuinely produced nothing has no fresh value to find, so the
+  reader itself is the discriminator;
+* the terminal records `metric_provenance` (which rung, which reader, which stage, whether the cause
+  was then repaired), and under the default policy the node also carries a `metric_salvaged` violation
+  — so it is **evaluated and counted** (budget, UI, digest, lineage) but is not `feasible`, i.e. it
+  cannot be the reported champion or be bred from. A salvaged metric is never silently equal to a
+  measured one. Set the engine's `metric_salvage` to `"select"` to accept salvaged metrics as
+  selectable, or `"off"` for the pre-2026-08-12 behaviour;
+* **the cause is repaired in the same breath.** The Developer is asked to fix the declaration that
+  broke — committed through the ordinary `node_repaired` event, with `triage_action:
+  "salvage_cause_fix"` — and the node terminalizes on the metric it already has, without paying for a
+  second evaluation. A salvaged node does not carry a broken manifest into its next attempt.
 
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
 edit; default = the whole repo) minus `protect` (exceptions). The engine does **not** auto-protect the

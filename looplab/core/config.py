@@ -674,6 +674,24 @@ class Settings(BaseSettings):
     # calibrated ones was not protection — it was a way for a whole class of failure to be dropped
     # without anyone deciding to drop it. Env override expects a JSON array.
     inline_repair_reasons: tuple[str, ...] = FAILURE_REASONS
+    # METRIC SALVAGE (`engine/metric_salvage.py`): what happens when a node fails for something other
+    # than "the metric is absent" and the operator's OWN declared reader can still find the metric
+    # that eval already produced. The case it exists for: v5 node 0 trained 76 minutes, printed
+    # `RECALL@100: 0.743250`, and was discarded because its manifest named the checkpoint one
+    # directory over. Only DETERMINISTIC rungs are used — the operator's declared reader, re-asked;
+    # never a model, because the agent writes the training script and therefore writes the text an
+    # extractor would read, which is a route around the protected `score` stage.
+    #   "off"    — never (the behaviour before 2026-08-12)
+    #   "audit"  — salvage, record the provenance, and attach a `metric_salvaged` VIOLATION: the node
+    #              is evaluated and counted (budget, UI, lineage) but excluded from `feasible_nodes`,
+    #              so it can never become champion or be bred from on a value nobody measured.
+    #   "select" — a salvaged metric competes on equal terms.
+    # `audit` is the default deliberately, and the trade-off is real: a salvaged baseline is not bred
+    # from until the operator says so.
+    metric_salvage: str = "audit"
+    # Still fix the DECLARATION that broke, in the same attempt. Never re-evaluates — the whole point
+    # is that the experiment already succeeded.
+    metric_salvage_repair: bool = True
     # Cost ceiling for in-node repair of a MULTI-STAGE eval: the max number of FULL pipeline re-runs
     # (i.e. re-trains from the first stage) the inline-repair loop may do before abandoning to the
     # inter-node debug operator. A late-stage failure (a broken `score`/eval script that didn't touch
@@ -1640,6 +1658,7 @@ class Settings(BaseSettings):
     #     to keep `config` import-light.
     _ENUM_FIELDS: typing.ClassVar[tuple] = (
         ("trust_gate", ("audit", "gate", "block")),
+        ("metric_salvage", ("off", "audit", "select")),
         ("merge_mode", ("auto", "mean", "ensemble")),
         ("novelty_mode", ("off", "algo", "llm")),
         ("strategist_backend", ("off", "rule", "llm", "agent")),

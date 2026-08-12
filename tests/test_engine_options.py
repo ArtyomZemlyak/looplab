@@ -146,6 +146,10 @@ ATTR_BY_FIELD = {
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
     "systemic_failure_stop": "systemic_failure_stop",
+    # Metric salvage: the Engine attribute is public (the mixin declares it as a class attribute so
+    # a test or a resumed subclass can set it directly), so both names are the same.
+    "metric_salvage": "metric_salvage",
+    "metric_salvage_repair": "metric_salvage_repair",
 }
 
 

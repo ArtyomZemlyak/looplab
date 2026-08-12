@@ -925,6 +925,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
+            # Additive with a reader-side default: an old log has no such key and folds to None,
+            # which is what a measured metric means here.
+            _prov = d.get("metric_provenance")
+            n.metric_provenance = _prov if isinstance(_prov, dict) else None
             # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
             # best trial, set by the engine). Coerce defensively per trial so one malformed
             # entry in a hand-edited/bring-your-own-script log can't crash the whole fold.

@@ -582,7 +582,12 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # options and the settings docs — the failure mode of the copies is silent, and it has already
 # happened once: `no_metric` was in the classifier and absent from the default set, so that whole
 # class of failure was never repaired and nobody had decided it should not be.
-FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift")
+# `expect_failed` / `check_failed` are deliberately NOT folded into `no_metric`: the command did
+# not "run cleanly and print nothing", it ran and then failed a contract its own manifest
+# declared. Measured cost of the conflation — rubertlite-dr-unified-v5 node 0 died as
+# `no_metric` having printed its metric, and the operator was told the command printed none.
+FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
+                                    "expect_failed", "check_failed")
 
 
 def is_developer_error(code) -> bool:
@@ -687,6 +692,15 @@ class Node(BaseModel):
     extra_metrics: dict[str, float] = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
+    # WHERE THIS NODE'S METRIC CAME FROM, when it was not simply measured. `None` for every ordinary
+    # node — a measured metric needs no provenance, and defaulting it that way keeps every old log
+    # reading correctly (invariant 5: additive, reader-side default). Set by metric SALVAGE
+    # (`engine/metric_salvage.py`), which recovers a metric the eval already produced from a node
+    # that failed for some other reason. Folded so `looplab replay` and every read-model can see it:
+    # the enforcement rides on `violations` (a salvaged node carries `metric_salvaged` under the
+    # default policy and is therefore not `feasible`), but the enforcement is not the EXPLANATION,
+    # and a reader asking "why is this node infeasible with a metric" must not have to guess.
+    metric_provenance: Optional[dict] = None
 
     @field_validator("extra_metrics", mode="before")
     @classmethod

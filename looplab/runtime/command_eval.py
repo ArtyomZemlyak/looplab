@@ -1,4 +1,4 @@
-﻿"""Command-based evaluation (RepoTask, ADR-7) — generalizes the solution.py-prints-metric
+"""Command-based evaluation (RepoTask, ADR-7) — generalizes the solution.py-prints-metric
 model into "run an operator-declared command in a workdir, then read a metric from a
 declared source". The metric reader is pluggable:
 
@@ -16,6 +16,7 @@ Windows process-group flags, UTF-8 capture) so timeouts/tree-kill behave identic
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import posixpath
@@ -372,10 +373,23 @@ def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
     if mount_root:
         guard_root = Path(mount_root).resolve()
     if _is_within(labels_path, guard_root):
-        raise ValueError(
-            f"host_score labels path {labels_path} is inside the candidate workspace "
-            f"{guard_root} — it would be mounted/writable by the candidate. "
-            "Place the held-out labels outside the eval workspace.")
+        # FAIL THE NODE, NOT THE RUN. "Fail loud on a misconfiguration" was loud in the wrong
+        # direction: this raise escapes `read_metric`, `run_command_eval` AND `_run_eval` — measured
+        # — and `engine/evaluate.py`'s only handler around the eval worker is
+        # `except GpuPinUnenforceable`, while the orchestrator's dispatchers wrap `_evaluate` in
+        # try/FINALLY, not except. So an operator whose held-out labels happen to sit under the run
+        # root got NO TERMINAL EVENT and a run that re-died on every resume. That is exactly the
+        # failure class `READER_PATH_KEYS` exists to prevent, one reader over. Reachable from three
+        # call sites (the primary read, `_violations`, and the drift `cross_check`), and every other
+        # malformed-spec branch in this module returns None — this was the one that did not.
+        #
+        # The loudness belongs at SUBMIT time, where the operator can still fix it, not at score time
+        # inside a worker thread. Here it scores nothing and says so.
+        logging.getLogger(__name__).error(
+            "host_score labels path %s is inside the candidate workspace %s — it would be "
+            "mounted/writable by the candidate. Place the held-out labels outside the eval "
+            "workspace. This eval scores nothing.", labels_path, guard_root)
+        return None
     if not preds_path.is_file() or not labels_path.is_file():
         return None
     if not _file_is_fresh(preds_path, since):

@@ -128,6 +128,19 @@ def _failure_reason(res) -> str:
         if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
             return "oom"
         return "crash"
+    # A declared-contract failure is its OWN reason. Both contract branches in
+    # `runtime/command_eval.py::_run_stages` report `exit_code=0`, so without this they landed here
+    # and a stage that failed its artifact or assertion contract was reported as "the command
+    # printed no metric" — about a stage that had printed one. The literals are spelled out rather
+    # than returned through the variable so the registry cross-check in
+    # `tests/test_inline_repair_reason_coverage.py` can still derive this function's vocabulary from
+    # its own source.
+    _rows = [row for row in (getattr(res, "stages", None) or []) if isinstance(row, dict)]
+    _last = str(_rows[-1].get("status") or "") if _rows else ""
+    if _last == "expect_failed":
+        return "expect_failed"
+    if _last == "check_failed":
+        return "check_failed"
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 

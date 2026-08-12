@@ -43,6 +43,8 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, NodeStatus, coerce_node
                                  is_developer_error, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
+from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, cause_repair_context,
+                                           salvage as salvage_metric)
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
 
@@ -504,6 +506,17 @@ class EvaluateMixin:
     """The engine's eval-task cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
 
+    # METRIC SALVAGE policy — see `engine/metric_salvage.py::METRIC_SALVAGE_MODES` for the three
+    # rungs and for why the default is the conservative one.
+    #
+    # These stay CLASS attributes and are what `Engine.__init__` assigns the settled `_opt` values
+    # to — the same shape the mixin was written with, so a test or a resumed Engine subclass can
+    # still set them directly without going through Settings.
+    metric_salvage: str = DEFAULT_METRIC_SALVAGE
+    # Whether a salvaged node still asks the Developer to fix the CAUSE (the broken declaration).
+    # Rides on the inline-repair machinery and every one of its bounds; off when inline repair is off.
+    metric_salvage_repair: bool = True
+
     def _assert_speculative_selection_confirmed(self, state, node) -> None:
         """INVARIANT: a speculative build must never consume an evaluation before its selection
         is confirmed.
@@ -889,6 +902,126 @@ class EvaluateMixin:
             _text = f"[failed stage: {_failed}]\n{_text}"
         return _text
 
+    def _salvage_eval_metric(self, res, reason: str, workdir, since: Optional[float]):
+        """The metric this failed eval already produced, or None — see `engine/metric_salvage.py`.
+
+        A thin engine-side seam over the pure rule, for the two reasons the engine keeps such seams:
+        it binds the ONE reader spec salvage is allowed to use (`self._eval_spec["metric"]`, the
+        operator's own, never the agent's and never a widened one), and it is a single patchable
+        name for the tests that drive the property end to end.
+
+        Best-effort in the strict sense: a salvage read walks the candidate's workdir, and a
+        diagnostic must never be the thing that turns a failed node into a crashed RUN. Anything
+        raised here degrades to "nothing to salvage", which is exactly today's behaviour.
+        """
+        spec = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else None
+        if not spec:
+            return None                 # the solution.py path has no declared reader to salvage with
+        try:
+            return salvage_metric(res, reason, spec.get("metric"), str(workdir), since,
+                                  mode=getattr(self, "metric_salvage", DEFAULT_METRIC_SALVAGE))
+        except Exception:  # noqa: BLE001 — salvage may never be the thing that fails the eval
+            return None
+
+    async def _repair_salvaged_cause(self, node, state, workdir, generation: int,
+                                     salvaged, err: str, attempt: int, stamp) -> tuple:
+        """Ask the Developer to fix the CAUSE of a salvaged node's failure, WITHOUT re-evaluating it.
+
+        THE OTHER HALF OF THE ASK, and the half that stops salvage from becoming a second silent
+        failure. A node whose metric was recovered but whose `looplab_stages.json` still declares the
+        wrong path reads as successful and walks into the identical contract failure on its next
+        attempt — an operator `node_reset`, a stage-scoped re-run — having learnt nothing, and its
+        children inherit the same broken declaration.
+
+        WHY IT DOES NOT RE-EVALUATE. That is the entire point of having salvaged: the measured case
+        cost 76 GPU-minutes, and paying it again to confirm a one-line path fix is the expense this
+        whole design exists to avoid. So the repair is committed and the node terminalizes on the
+        metric it already has.
+
+        WHAT THAT COSTS, said plainly rather than left for a reader to discover: the node's recorded
+        CODE is then not byte-for-byte the code that produced its recorded METRIC. That is why the
+        prompt (`metric_salvage.SALVAGE_CAUSE_DIRECTIVE`) forbids touching anything that could alter
+        the result, and why the terminal's `metric_provenance` records `cause_repaired` — a reader
+        who cares can see that a correction landed after the measurement.
+
+        Every bound is the inline-repair loop's own, not a new one: the feature flag, a Developer
+        that can repair, the durable attempt ledger, and `_repair_provider_failure`'s verdict on
+        whether the call produced a repair at all. It appends the same `node_repaired` event, so a
+        resume reads this attempt back exactly like any other and cannot spend it twice.
+
+        Returns `(node, attempt, repaired)`. NEVER raises and never appends a terminal — the caller
+        owns the node's single terminal event (invariant #2).
+        """
+        if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
+                and callable(getattr(self.developer, "repair", None))
+                and (node.code or node.files or self._repo_spec)):
+            return node, attempt, False
+        with self.tracer.span("salvage_cause_repair", node_id=node.id, attempt=attempt + 1):
+            try:
+                new_code = self._repair(node, cause_repair_context(salvaged, err), state)
+            except BudgetExceeded:
+                raise      # the hard budget stop propagates, exactly as everywhere else in this file
+            except Exception:  # noqa: BLE001 — a failed cause fix must not cost the salvaged metric
+                return node, attempt, False
+        # Snapshot the developer's per-call audit state before the next `await`, for the reason the
+        # attempt loop does: the developer instance is SHARED across concurrent evals and the write
+        # lock below is a checkpoint, so a sibling's repair would otherwise be recorded as this
+        # node's edits.
+        repaired_files = dict(getattr(self.developer, "last_files", {}) or {})
+        repaired_deleted = list(getattr(self.developer, "last_deleted", []) or [])
+        # WAS THIS A REPAIR AT ALL? The same four answers as the attempt loop's, through the same
+        # rule. A dead provider must not be committed as the node's code here either — but unlike
+        # the loop, it does not pause the run: the node HAS its metric, the terminal is about to be
+        # written, and a run-level circuit breaker fired from a path that is not asking for a
+        # re-evaluation would stop a run over a fix it did not need.
+        _dev_err, _ = _repair_provider_failure(node.code, new_code, repaired_files,
+                                               repaired_deleted, 0)
+        if _dev_err is not None:
+            return node, attempt, False
+        prev_files = dict(getattr(node, "files", {}) or {})
+        prev_deleted = set(getattr(node, "deleted", []) or [])
+        changed, _new_deleted = _repair_change_set(prev_files, prev_deleted,
+                                                   repaired_files, repaired_deleted)
+        if not changed and not repaired_deleted and not (new_code or "").strip():
+            return node, attempt, False          # the model changed nothing; nothing to commit
+        attempt += 1
+        async with self._write_lock:
+            # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
+            # the commit rather than adopting it — the caller's terminal is already stale-generation
+            # and the fold will charge only its eval_seconds.
+            if fold(self.store.read_all()).nodes[node.id].attempt != generation:
+                return node, attempt - 1, False
+            _payload = {
+                "node_id": node.id, "generation": generation,
+                "attempt": attempt,
+                "files": repaired_files, "deleted": repaired_deleted,
+                "error_in": err,
+                # A DISTINCT verdict, not "repair". `triage_action` is what tells a later reader (and
+                # `_durable_repair_ledger`'s judge history) what each row was FOR, and a cause fix
+                # that was never re-evaluated is not the same event as a repair the loop then tested.
+                "triage_action": "salvage_cause_fix",
+                "rationale": (f"metric salvaged ({salvaged.source}); fixing the declaration that "
+                              f"failed, without re-evaluating"),
+                "changed": sorted(changed)[:12] or (["<whole-file solution>"] if new_code else []),
+                "stages_passed": None,
+                "salvaged_metric": salvaged.metric}
+            # `code` is OMITTED when the repair shipped its work in `files` — the multi-file/repo
+            # shape, which returns "". `replay._on_node_repaired` reads `d.get("code", n.code)`, so
+            # the attempt loop's unconditional `"code": new_code` would BLANK the node's whole-file
+            # artifact on any such repair. The loop can live with that (it re-evaluates, and a repo
+            # node's `code` is empty anyway); a cause fix cannot, because it runs AFTER the metric
+            # was measured and its one promise is that it does not alter the experiment the metric
+            # describes. Omitting the key is the fold's own "leave it alone" spelling.
+            if (new_code or "").strip():
+                _payload["code"] = new_code
+            self.store.append(EV_NODE_REPAIRED, _payload)
+        node = fold(self.store.read_all()).nodes[node.id]
+        if node.attempt != generation:
+            return node, attempt, False
+        self._write_node_files(node, workdir)
+        stamp(node)                      # the workdir now IS the corrected manifest
+        return node, attempt, True
+
     def _repaired_footprint(self, node, new_code, repaired_files, reservation):
         """The repaired artifact's resource declaration, clamped to the devices already held.
 
@@ -1130,6 +1263,12 @@ class EvaluateMixin:
                         "eval_seconds": total_eval})
                 _mark_superseded_workdir()
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
+            # THE SALVAGED METRIC, when this node's eval failed for something that is not "the
+            # metric is absent" and the operator's own declared reader can still find the value the
+            # eval produced. Loop-local because salvage is decided per ATTEMPT and consumed by the
+            # ONE terminal below — it never becomes a second terminal (invariant #2).
+            salvaged = None
+            salvage_cause_repaired = False
             err = ""
             reason = "crash"
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
@@ -1366,6 +1505,28 @@ class EvaluateMixin:
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
+                # METRIC SALVAGE. Asked HERE — after the eval has failed, before any repair is
+                # considered and long before the terminal — because this is the only point at which
+                # the answer can still change which terminal the node gets. `engine/metric_salvage.py`
+                # owns every rule; this is the call and its consequences.
+                #
+                # `_t0` is THIS attempt's wall-clock start, which is the freshness floor a FILE reader
+                # is held to: an artifact left by an earlier attempt in the deliberately-reused
+                # workdir is older than it, so it cannot be salvaged as this attempt's result.
+                #
+                # On a hit the loop BREAKS with `ok` true. It does not repair-and-re-evaluate, which
+                # is the whole point: the measured case cost 76 GPU-minutes and the number those
+                # minutes bought was already on disk. The CAUSE is still fixed — `_repair_salvaged_cause`
+                # commits the Developer's correction to the declaration through the ordinary
+                # `node_repaired` event, without paying for another evaluation to confirm it — so a
+                # salvaged node does not carry its broken manifest into its next attempt.
+                salvaged = self._salvage_eval_metric(res, reason, workdir, _t0)
+                if salvaged is not None:
+                    res.metric = salvaged.metric
+                    ok = True
+                    node, attempt, salvage_cause_repaired = await self._repair_salvaged_cause(
+                        node, state, workdir, generation, salvaged, err, attempt, _stamp_workdir)
+                    break
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
                 # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
@@ -1792,6 +1953,34 @@ class EvaluateMixin:
                     }
                     if _curve:                     # computed above, outside the write-lock (see the #7 note)
                         _eval_payload["resource_curve"] = _curve
+                    if salvaged is not None:
+                        # A SALVAGED METRIC IS NEVER SILENTLY EQUAL TO A MEASURED ONE. Two records,
+                        # because they answer two different questions and only one of them is read by
+                        # anything today:
+                        #   * `metric_provenance` is the ACCOUNT — which rung recovered the value,
+                        #     out of which declared reader, which stage had failed, and whether the
+                        #     cause was then corrected. Additive, so old logs and old readers are
+                        #     unaffected (invariant #5).
+                        #   * the `metric_salvaged` VIOLATION row is the ENFORCEMENT. The fold's rule
+                        #     is `feasible = not violations`, so under the default `audit` mode this
+                        #     node keeps its metric and its evaluated status — it counts, it is in the
+                        #     budget, the UI and the digest and the lineage all see it — while
+                        #     `RunState.feasible_nodes()` excludes it, which is what champion
+                        #     selection and breeding read. A provenance field alone would satisfy
+                        #     "the selection path CAN tell" and not "does": nothing on that path
+                        #     reads an unknown event key. `metric_salvage="select"` is the operator's
+                        #     opt-in to a salvaged metric competing on equal terms.
+                        _prov = salvaged.as_event()
+                        _prov["cause_repaired"] = bool(salvage_cause_repaired)
+                        _eval_payload["metric_provenance"] = _prov
+                        _eval_payload["violations"] = (
+                            list(_eval_payload["violations"])
+                            + salvaged.violation_rows(getattr(self, "metric_salvage",
+                                                              DEFAULT_METRIC_SALVAGE)))
+                        # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
+                        # A node that reads as evaluated must still be able to tell whoever looks
+                        # what went wrong, or the salvage has merely moved the silence.
+                        _eval_payload["salvaged_error"] = str(err)[:600]
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

@@ -154,6 +154,8 @@ class EngineOptions:
     # `core/config.py` for the run this default cost. Bound to the registry, not respelled:
     # this is the copy that would silently disagree with Settings.
     inline_repair_reasons: tuple = FAILURE_REASONS  # reasons eligible for inline repair
+    metric_salvage: str = "audit"        # off | audit | select — see core/config.py
+    metric_salvage_repair: bool = True   # fix the DECLARATION too; never re-evaluates
     inline_repair_retrain_cap: int = 2   # max FULL pipeline re-runs (re-trains) before abandoning
     auto_install_deps: bool = True       # pip-install a missing KNOWN lib + re-run (trusted_local only)
     dep_install_timeout: float = 900.0   # per-package install wall-clock budget (seconds)

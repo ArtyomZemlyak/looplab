@@ -82,8 +82,27 @@ export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
   )
 }
 
+export const SALVAGED_METRIC_VIOLATION = 'metric_salvaged'
+export const isSalvagedMetricViolation = v => v?.name === SALVAGED_METRIC_VIOLATION
+
 export function nodeFeasibilityStatus(node) {
-  if ((node?.violations || []).length || node?.feasible === false) return result(
+  const violations = node?.violations || []
+  // A SALVAGED metric is not a constraint violation and must not be shown as one. It rides on the
+  // violations list because that is what `feasible = not violations` reads and therefore what keeps
+  // an unmeasured value out of champion selection — but the operator reading "Constraint violation"
+  // about a node whose experiment SUCCEEDED, and whose metric was recovered by the run's own
+  // declared reader, is being told something false. The exclusion is real; the accusation is not.
+  if (violations.length && violations.every(isSalvagedMetricViolation)) {
+    const source = violations.find(isSalvagedMetricViolation)?.salvage
+    return result(
+      'warn',
+      'Metric salvaged, not measured',
+      'The experiment produced this metric and the run recovered it with its own declared reader'
+        + `${source?.stage ? ` after stage “${source.stage}” failed its contract` : ''}`
+        + '. It is excluded from winner selection until metric_salvage is set to “select”.',
+    )
+  }
+  if (violations.length || node?.feasible === false) return result(
     'alarm',
     'Constraint violation',
     'This result is infeasible and excluded from winner selection.',

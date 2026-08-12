@@ -48,6 +48,7 @@ from looplab.events.types import (
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
+from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
                                    settled_width_refusal)
 from looplab.engine.audit import AuditMixin
@@ -618,6 +619,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         inline_repair_attempts = _opt("inline_repair_attempts")
         inline_repair_reasons = _opt("inline_repair_reasons")
         inline_repair_retrain_cap = _opt("inline_repair_retrain_cap")
+        metric_salvage = _opt("metric_salvage")
+        metric_salvage_repair = _opt("metric_salvage_repair")
         auto_install_deps = _opt("auto_install_deps")
         dep_install_timeout = _opt("dep_install_timeout")
         agent_control = _opt("agent_control")
@@ -733,6 +736,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
+        # METRIC SALVAGE — settled through the same `_opt` ladder as every other policy, so a
+        # snapshot/resume carries the operator's choice (invariant 6) instead of the class default.
+        self.metric_salvage = settle_metric_salvage_mode(metric_salvage)
+        self.metric_salvage_repair = bool(metric_salvage_repair)
         # Environment self-prep (deps.py): auto-install a missing KNOWN library and re-run, instead
         # of letting the crash-triage agent reject the idea. Trusted_local tier ONLY — the Docker
         # tiers run --network none and must not mutate a shared image. `_dep_attempted` records every
@@ -4531,6 +4538,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 events, state, linked, parents=parents, parent_generations=parent_generations,
                 scored_against=state.best_node_id, source=source, at_node=prospective_node_id,
                 steering_context=steering_context,
+                # Must MATCH `_reserve_node_build`, which plans again under `_id_lock` and refuses
+                # the build when `idea.card_id != plan.card_id`. Planning the attach here and a
+                # fresh mint there (or the reverse) is that refusal, i.e. a silently dropped node.
+                retry_attach=True,
             )
             if plan.disposition == "invalid":
                 self._append_proposal_event(EV_NOVELTY_REJECTED, {
@@ -4539,7 +4550,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     "reason": "proposal cannot form a bounded native Card action",
                     "action": "dropped",
                 })
-            return plan.idea if plan.disposition in {"mint", "reuse"} else None
+            return plan.idea if plan.disposition in {"mint", "reuse", "attach"} else None
 
         if preproposed is not None:
             already_gated = False

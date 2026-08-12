@@ -11,7 +11,7 @@ import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
-import { nodeFeasibilityStatus } from './trustSemantics.js'
+import { nodeFeasibilityStatus, isSalvagedMetricViolation } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
@@ -2429,9 +2429,17 @@ function Trust({ n, drifts = [] }) {
       : <State tone="warn" label="Single-evaluation only" detail="This node is not multi-seed confirmed and could be seed-lucky." />}
     <div className="section-h">Feasibility</div>
     <State {...feasibility} />
+    {/* A salvaged metric has no BOUND — it is not a constraint at all — so rendering it in this
+        table produced a row reading "metric_salvaged | (blank) | (blank)". It gets its own row shape
+        naming where the number came from, which is the only question that row can usefully answer. */}
     {n.violations?.length
-      ? <DataTable caption="Constraint violations" card={false}><table className="tbl"><thead><tr><th>constraint</th><th>value</th><th>bound</th></tr></thead>
-        <tbody>{n.violations.map((v, i) => <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
+      ? <DataTable caption="Feasibility record" card={false}><table className="tbl"><thead><tr><th>reason</th><th>value</th><th>bound</th></tr></thead>
+        <tbody>{n.violations.map((v, i) => isSalvagedMetricViolation(v)
+          ? <tr key={i}><td className="flag">metric salvaged</td><td>{fmt(n.metric)}</td>
+            <td className="muted">recovered by {v.salvage?.source === 'declared_reader'
+              ? 'the run’s own declared reader' : (v.salvage?.source || 'the run')}
+              {v.salvage?.stage ? ` after stage “${v.salvage.stage}”` : ''}</td></tr>
+          : <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
       </DataTable>
       : null}
     <div className="section-h">Metric drift</div>
