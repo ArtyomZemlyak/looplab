@@ -64,7 +64,13 @@ const BLOCKER_LIFECYCLE = {
   card_terminal: 'closed',
   merged_work_items: 'merged into another work item',
   freshness_stale: 'superseded by a newer proposal',
-  identity_not_native: 'legacy work item',
+  // A RESEARCH IDEA, not a defect and not a legacy row. `identity_not_native` is the DEFAULT
+  // `selection_blockers` value (`core/cards.py`), carried by every pure-belief card the Researcher
+  // and deep research put on the board: it owns no action, so the Card queue cannot pick it up until
+  // something mints a work item for it. Measured on rubertlite-dr-unified-v6, ten of eleven cards
+  // were in exactly this state — and reading "legacy work item" (this label's first wording, mine)
+  // about the run's own live research would have been ten lies on one screen.
+  identity_not_native: 'a research idea, not yet a work item',
 }
 const BLOCKER_FAULT = {
   action_owner_missing: 'no ownership receipt',
@@ -73,6 +79,12 @@ const BLOCKER_FAULT = {
   freshness_unknown: 'provenance could not be read',
   work_owner_unknown: 'owner unknown',
 }
+// A pure belief carries all three of these TOGETHER and none of them is news: it owns no action, so
+// of course there is no ownership receipt and no action freshness to read. Reporting the pair as
+// FAULTS put an amber chip on every research idea on the board. The fault wording stays for a card
+// that is missing a receipt it should HAVE — i.e. one whose identity IS native.
+const BELIEF_ONLY_BLOCKERS = new Set(
+  ['identity_not_native', 'action_owner_missing', 'freshness_unknown'])
 
 /**
  * The chip for a card the queue will not pick up: `{tone, label, title}`, or null when it will.
@@ -84,7 +96,10 @@ const BLOCKER_FAULT = {
 export function cardSelectionBlock(card) {
   if (!isRecord(card) || card.selection_ready !== false) return null
   const blockers = Array.isArray(card.selection_blockers) ? card.selection_blockers : []
-  const faults = blockers.filter(name => BLOCKER_FAULT[name])
+  // A belief row's three blockers are one fact, not three problems.
+  const belief = blockers.length > 0 && blockers.every(name => BELIEF_ONLY_BLOCKERS.has(name))
+    && blockers.includes('identity_not_native')
+  const faults = belief ? [] : blockers.filter(name => BLOCKER_FAULT[name])
   const lifecycle = blockers.filter(name => BLOCKER_LIFECYCLE[name])
   const unmapped = blockers.filter(name => !BLOCKER_FAULT[name] && !BLOCKER_LIFECYCLE[name])
   const detail = blockers.length
@@ -99,7 +114,10 @@ export function cardSelectionBlock(card) {
   // No reason, or only reasons this build does not know: say the honest minimum rather than
   // inventing one. An unknown blocker is a FAULT — a card the queue refuses for a reason nothing can
   // name is exactly the case an operator must be able to see.
-  return { tone: 'fault', label: unmapped.length ? 'not selectable' : 'not selectable', title: detail }
+  // Distinguish the two in the LABEL, not only the tooltip: "we do not know why" and "nothing was
+  // recorded" send an operator to different places.
+  return { tone: 'fault', title: detail,
+    label: unmapped.length ? 'not selectable (unrecognised reason)' : 'not selectable' }
 }
 
 export const cardText = value => typeof value === 'string' && value.trim() ? value.trim() : null

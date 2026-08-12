@@ -62,10 +62,40 @@ test('the full reason list is always in the tooltip, whatever the chip says', ()
   assert.match(result.title, /merged_work_items/)
 })
 
+test('a research idea reads as one, not as a broken ledger', () => {
+  // MEASURED on rubertlite-dr-unified-v6: ten of eleven cards were pure BELIEF rows — deep research
+  // put them on the board — and every one carried this exact triple. The first version of this table
+  // (mine) called them `identity_not_native → "legacy work item"` and painted the other two amber,
+  // so the run's own live research read as ten broken records on one screen.
+  const belief = cardSelectionBlock(card({
+    selection_blockers: ['identity_not_native', 'action_owner_missing', 'freshness_unknown'] }))
+  assert.equal(belief.tone, 'lifecycle', 'a belief owning no action is not a ledger fault')
+  assert.equal(belief.label, 'a research idea, not yet a work item')
+  assert.match(belief.title, /action_owner_missing/, 'the full triple stays in the tooltip')
+})
+
+test('a NATIVE card missing its receipt is still a fault', () => {
+  // The exemption is for a card that owns no action by design. One that should own an action and
+  // does not is exactly what the amber chip is for, and the two must stay distinguishable.
+  const broken = cardSelectionBlock(card({
+    selection_blockers: ['action_owner_missing', 'freshness_unknown'] }))
+  assert.equal(broken.tone, 'fault')
+  assert.equal(broken.label, 'no ownership receipt')
+})
+
+test('a belief that ALSO carries a real fault is not exempted', () => {
+  const mixed = cardSelectionBlock(card({
+    selection_blockers: ['identity_not_native', 'action_owner_ambiguous'] }))
+  assert.equal(mixed.tone, 'fault')
+  assert.equal(mixed.label, 'two ownership receipts')
+})
+
 test('a blocker this build does not know is a FAULT, not a shrug', () => {
   // A card the queue refuses for a reason nothing can name is exactly what an operator must see.
   const unknown = cardSelectionBlock(card({ selection_blockers: ['some_future_blocker'] }))
   assert.equal(unknown.tone, 'fault')
+  assert.equal(unknown.label, 'not selectable (unrecognised reason)',
+    '"we cannot name the reason" and "no reason was recorded" send an operator to different places')
   assert.match(unknown.title, /some_future_blocker/)
 })
 
