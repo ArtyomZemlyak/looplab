@@ -292,7 +292,15 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   mean a successful empty read. Collection routes treat a missing span sidecar as known empty; a lookup for an
   absent individual span is unavailable. The Inspector and live Dock render unavailable, partial and honestly
   empty states separately. Full recorded span dictionaries remain only in `spans.jsonl` and are not downloadable
-  through these routes.
+  through these routes. While a node is working, the conversation poll retains one last-good response only in
+  memory and conditionally revalidates its opaque cursor for that exact run generation, node attempt and span
+  window. An unchanged poll is an empty HTTP 304, avoiding full-row reads, projection CPU and repeated JSON;
+  selected appends, rewrites, resets and a wider window invalidate it, while a receipt-proven append for
+  another node does not. After a process cold-loads its persisted accelerator, one verifying 200 source-row
+  read is required before that exact window can return a 304. A platform/filesystem that cannot provide the required descriptor mutation proof
+  conservatively rebuilds and may false-invalidate instead of risking a stale 304.
+  These private diagnostics remain `Cache-Control: no-store`; the UI performs the revalidation itself and uses
+  the existing abort/deadline and visibly-stale last-good behavior when a refresh cannot be confirmed.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
   launch snapshot for the next restart (not the global UI defaults). Seven run-start selection fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.

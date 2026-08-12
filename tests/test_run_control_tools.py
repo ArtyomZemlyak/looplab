@@ -295,7 +295,7 @@ def test_delete_node_purge_streams_root_attributed_trace_and_retires_derivatives
 
     from looplab.serve import trace_clear
 
-    real_guard = span_index.span_index_write_guard
+    real_guard = span_index.span_destructive_write_guard
     real_invalidate = span_index.invalidate
     real_replace = trace_clear._strict_replace_prepared_trace
     guard_calls = []
@@ -320,7 +320,7 @@ def test_delete_node_purge_streams_root_attributed_trace_and_retires_derivatives
         assert guard_active
         return real_replace(prepared, destination)
 
-    monkeypatch.setattr(span_index, "span_index_write_guard", tracked_guard)
+    monkeypatch.setattr(span_index, "span_destructive_write_guard", tracked_guard)
     monkeypatch.setattr(span_index, "invalidate", tracked_invalidate)
     monkeypatch.setattr(trace_clear, "_strict_replace_prepared_trace", tracked_replace)
 

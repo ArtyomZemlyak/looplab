@@ -25,7 +25,7 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
-from looplab.core.trace_files import open_private_trace_file
+from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
@@ -435,15 +435,22 @@ class AppState:
         # One no-follow/nonblocking descriptor supplies both the cache signature and readability
         # proof.  Path.stat()+plain open followed links, accepted hard-link aliases, and could block
         # forever on a FIFO before the hardened SpanIndex reader got a chance to reject it.
+        span_cacheable = True
         try:
             with open_private_trace_file(sp, open_file=open) as source:
-                span_sig = file_identity(os.fstat(source.fileno()))
+                source_stat = os.fstat(source.fileno())
+                change_token = trace_file_change_token(source.fileno(), source_stat)
+                span_sig = (file_identity(source_stat), change_token)
+                # On Windows an unavailable FILE_BASIC_INFO.ChangeTime leaves creation time as the
+                # only ctime-like value.  It cannot distinguish a same-size rewrite with restored
+                # mtime, so this observation may build a view but must never authorize cache reuse.
+                span_cacheable = change_token is not None
         except FileNotFoundError:
             span_sig = None
         sig = (span_sig, _sig(events_path), generation)
         with self._trace_view_lock:
             hit = self._trace_view_cache.get(key)
-        if hit is not None and hit[0] == sig:
+        if span_cacheable and hit is not None and hit[0] == sig:
             return hit[1]
         source_missing = span_sig is None
         idx = None if source_missing else get_index(sp)

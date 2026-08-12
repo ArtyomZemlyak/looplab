@@ -18,10 +18,9 @@ import tempfile
 import time
 from typing import TYPE_CHECKING
 
-import orjson
-
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.models import RunState
+from looplab.core.tracing import TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS
 from looplab.engine.costs import in_memory_cost_total, reconcile_cost_accountants
 from looplab.events.eventstore import EventStoreConcurrencyError
 # The finalize-SCOPE read side moved to `events/` so a policy module can import it downward
@@ -50,7 +49,8 @@ from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold, run_wall_clock_seconds
 from looplab.events.traceview import (
-    TRACE_VIEW_SPAN_CAP, build_trace_view, hydrate_inputs, load_span_tail)
+    TRACE_VIEW_SPAN_CAP, build_trace_view, hydrate_inputs, load_span_tail,
+    trace_projection_json_bytes)
 from looplab.events.types import (
     EV_BUDGET,
     EV_CARD_ENRICHED,
@@ -494,6 +494,17 @@ def _build_readmodel_atomic(events, path: Path) -> RunState:
                 pass
 
 
+def _flush_trace_exporter(engine: "Engine") -> bool:
+    """Barrier accepted async spans before any derived trace reader snapshots ``spans.jsonl``."""
+    flush = getattr(getattr(engine, "tracer", None), "force_flush", None)
+    if not callable(flush):
+        return True  # compatibility engines and the historical synchronous exporter
+    try:
+        return bool(flush(timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
+    except Exception:  # noqa: BLE001 - a derived diagnostic cannot undo a domain terminal
+        return False
+
+
 def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: str) -> tuple[list, RunState]:
     if _scope_is_effective_terminal(events, state, scope):
         mark_finish_report_complete(engine, scope)
@@ -912,6 +923,8 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     # same retained diagnostic conversation. `build_trace_view` then redacts/caps that material and marks
     # omissions explicitly: trace.json is a bounded, potentially partial projection, never a raw transcript.
     try:
+        if not _flush_trace_exporter(engine):
+            raise RuntimeError("trace exporter did not reach its flush barrier")
         trace_spans, trace_total = load_span_tail(
             engine.run_dir / "spans.jsonl", TRACE_VIEW_SPAN_CAP)
         trace_view = build_trace_view(
@@ -930,7 +943,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             return final
         raise  # compatibility for an in-flight legacy scope; its complete marker stays absent
     try:
-        atomic_write_bytes(engine.run_dir / "trace.json", orjson.dumps(trace_view))
+        atomic_write_bytes(engine.run_dir / "trace.json", trace_projection_json_bytes(trace_view))
     except Exception:  # noqa: BLE001 - independent rebuildable projection
         pass
     try:

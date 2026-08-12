@@ -1626,7 +1626,7 @@ class RunControlTools:
         from looplab.core.trace_append import SPAN_APPEND_JOURNAL_NAME
         from looplab.events.eventstore import EventStore, _interprocess_lock, iter_event_jsonl
         from looplab.events.replay import fold
-        from looplab.events.span_index import invalidate, span_index_write_guard
+        from looplab.events.span_index import invalidate, span_destructive_write_guard
 
         evp = rd / "events.jsonl"
         spans = rd / "spans.jsonl"
@@ -1637,7 +1637,7 @@ class RunControlTools:
         # the pre-purge inode behind this rewrite.
         with (_interprocess_lock(rd / "engine.lock"),
               _interprocess_lock(Path(str(evp) + ".lock")),
-              span_index_write_guard(spans, required=True)):
+              span_destructive_write_guard(spans, required=True)):
             self._commands._reject_unresolved_reset(rd, "purge nodes")
             source_store = EventStore(evp)
             events = source_store.read_all()

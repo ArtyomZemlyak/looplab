@@ -22,11 +22,14 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import io
 import math
 import os
+import sys
 import threading
 import time
 import weakref
+from collections import deque
 from contextlib import contextmanager
 from itertools import islice
 from pathlib import Path
@@ -39,7 +42,8 @@ from looplab.core.redact import (bounded_redacted_tree, is_secret_key_name,
 from looplab.core.trace_append import (
     SPAN_APPEND_JOURNAL_MAX_BYTES, SPAN_APPEND_JOURNAL_NAME,
     SPAN_APPEND_RECEIPT_SCHEMA)
-from looplab.core.trace_files import TRACE_JSONL_ROW_MAX_BYTES, open_private_trace_file
+from looplab.core.trace_files import (
+    TRACE_JSONL_ROW_MAX_BYTES, TRACE_WRITER_LOCK_NAME, open_private_trace_file)
 
 
 _TRACE_TEXT_CAP = 64_000
@@ -77,6 +81,26 @@ _TRACE_STRUCTURAL_CAPS = {
 }
 
 _OTEL_ENV_TRUE = frozenset({"1", "on", "t", "true", "y", "yes"})
+
+# The local files-as-truth exporter mirrors OTel's BatchSpanProcessor lifecycle, but keeps both an
+# item bound and a byte bound.  TRACE_JSONL_ROW_MAX_BYTES is 8 MiB, so an item-only queue would still
+# permit ``capacity * 8 MiB`` resident memory.  The worker stores the already-serialized physical row:
+# exact byte accounting and no unbounded deepcopy, at the deliberate cost of keeping JSON encoding on
+# the span-closing caller.  File open/heal/lock/flush/receipt I/O is what moves off that caller.
+TRACE_EXPORT_QUEUE_MAX_SPANS = 256
+TRACE_EXPORT_QUEUE_MAX_BYTES = 16 * 1024 * 1024
+TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS = 30_000
+_TRACE_EXPORT_WORKER_IDLE_S = 60.0
+_TRACE_EXPORT_LOSS_RECEIPT_INTERVAL_S = 1.0
+
+_TRACE_EXPORT_DROP_REASONS = (
+    "queue_full",
+    "queue_bytes",
+    "serialization_error",
+    "worker_start",
+    "shutdown",
+    "shutdown_timeout",
+)
 
 
 def _otel_sdk_disabled(env: Optional[Mapping[str, str]] = None) -> bool:
@@ -596,6 +620,15 @@ _EXPORT_LOCKS_GUARD = threading.Lock()
 # active; once the last exporter for a path goes away, the weak registry can shed the entry.
 _EXPORT_LOCKS: "weakref.WeakValueDictionary[str, object]" = weakref.WeakValueDictionary()
 _EXPORT_LOCKS_PID = os.getpid()
+# Every exporter-owned descriptor (writer fence, source, append receipt) is registered for the short
+# duration it is open. POSIX fork duplicates descriptors from ALL threads; without closing a worker's
+# inherited flock fd in the child, the vanished worker can leave the child locking itself forever.
+_EXPORT_OPEN_FDS_GUARD = threading.Lock()
+_EXPORT_OPEN_STREAMS: dict[int, object] = {}
+# Fallback-only child references for opaque custom streams whose raw layer could not be closed
+# directly. Their inherited fd is replaced by a /dev/null tombstone and the object is retained, so
+# a delayed destructor can neither append copied bytes nor close a subsequently reused fd number.
+_EXPORT_FORK_QUARANTINE: list[object] = []
 
 
 def _reset_export_locks_after_fork() -> None:
@@ -611,8 +644,76 @@ def _reset_export_locks_after_fork() -> None:
     _EXPORT_LOCKS_PID = os.getpid()
 
 
+def _before_export_fork() -> None:
+    # Serialize fork with the short descriptor open/register and unregister/close transitions. The
+    # guard is never held across healing, append, flush, receipt generation or advisory-lock waits.
+    _EXPORT_OPEN_FDS_GUARD.acquire()
+
+
+def _after_export_fork_parent() -> None:
+    _EXPORT_OPEN_FDS_GUARD.release()
+
+
+def _after_export_fork_child() -> None:
+    global _EXPORT_OPEN_FDS_GUARD, _EXPORT_OPEN_STREAMS, _EXPORT_FORK_QUARANTINE
+    # These descriptors belonged to exporter calls in the pre-fork process. No such worker survives
+    # in the child. Never call BufferedRandom.close(): it flushes bytes copied between write() and
+    # flush() and can double-commit the parent's row. Close the unbuffered raw layer instead.
+    for fd, stream in _EXPORT_OPEN_STREAMS.items():
+        try:
+            raw = getattr(stream, "raw", None)
+            if raw is None:
+                buffer = getattr(stream, "buffer", None)
+                raw = getattr(buffer, "raw", buffer)
+        except Exception:  # noqa: BLE001 - opaque test/storage wrappers take the fd fallback
+            raw = None
+        closed = False
+        # ``RawIOBase`` alone is not proof that ``close`` retires this OS descriptor without
+        # reaching a copied buffered owner: storage/test proxies may expose an arbitrary ``raw``
+        # object whose close delegates straight back to ``BufferedRandom.close``. Even a FileIO
+        # subclass is unsafe because IOBase.close dynamically dispatches its overridable flush.
+        # Only the exact built-in FileIO type is proof of the unbuffered close path. Verify it owns
+        # the descriptor registered before fork; otherwise tombstone that known fd below without
+        # invoking any proxy method.
+        if type(raw) is io.FileIO:
+            try:
+                if io.FileIO.fileno(raw) == fd:
+                    io.FileIO.close(raw)
+                    closed = True
+            except Exception:  # noqa: BLE001 - fall back to raw fd retirement below
+                pass
+        if not closed:
+            _EXPORT_FORK_QUARANTINE.append(stream)
+            try:
+                # Closing fd outright would make its number reusable while ``stream`` still believes
+                # it owns that number. A delayed proxy/finalizer could then flush or close an unrelated
+                # child descriptor. Replacing the inherited source with /dev/null releases its flock
+                # and open-file description while keeping the number occupied until the quarantined
+                # wrapper eventually closes it.
+                devnull_fd = os.open(
+                    os.devnull, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
+                try:
+                    os.dup2(devnull_fd, fd, inheritable=False)
+                finally:
+                    os.close(devnull_fd)
+            except Exception:  # noqa: BLE001 - child fork recovery must finish resetting all locks
+                # Last-resort quiescence if /dev/null is unavailable. The quarantine still prevents
+                # ordinary collection during the child lifetime; preserve fork progress over a lock.
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+    _EXPORT_OPEN_STREAMS = {}
+    _EXPORT_OPEN_FDS_GUARD = threading.Lock()
+    _reset_export_locks_after_fork()
+
+
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_export_locks_after_fork)
+    os.register_at_fork(
+        before=_before_export_fork,
+        after_in_parent=_after_export_fork_parent,
+        after_in_child=_after_export_fork_child,
+    )
 
 
 def _canonical_export_path(path: str | os.PathLike) -> str:
@@ -637,14 +738,15 @@ def _export_lock(path: str | os.PathLike):
 
 
 @contextmanager
-def _interprocess_export_guard(stream):
-    """Best-effort advisory serialization for cooperating exporters in different processes.
+def _interprocess_export_guard(stream, *, required: bool = False):
+    """Advisory serialization for cooperating exporters in different processes.
 
     The process-local canonical-path lock is always authoritative for threads/instances here.  This
     additional standard-library guard closes the truncate/append race between two engine processes
-    without a sidecar dependency.  Unsupported advisory locking degrades to the existing append-only
-    behavior: tracing is diagnostic and must not make the run fail.  Every exporter acquires locks in
-    the one order (path RLock, then this file lock), so there is no reverse-order deadlock path.
+    without a sidecar dependency. Data-file/custom-exporter locking stays best-effort for historical
+    compatibility. The Engine lifecycle sidecar passes ``required=True`` and fails before opening the
+    source if its destructive-write fence cannot be proved. Every exporter acquires locks in the one
+    order (path RLock, then lifecycle sidecar, then data file), so there is no reverse-order path.
     """
     locked = False
     try:
@@ -656,8 +758,9 @@ def _interprocess_export_guard(stream):
             import fcntl
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         locked = True
-    except (OSError, ImportError, AttributeError, NotImplementedError, ValueError):
-        pass
+    except (OSError, ImportError, AttributeError, NotImplementedError, ValueError) as exc:
+        if required:
+            raise OSError("required trace lifecycle writer lock is unavailable") from exc
     try:
         yield
     finally:
@@ -684,8 +787,48 @@ def _open_export_append(path: Path):
     replaced while bytes are buffered must be reported as unavailable, never accepted as a write to
     the current run-root name.
     """
-    with open_private_trace_file(path, "a+b", open_file=open) as stream:
+    manager = open_private_trace_file(path, "a+b", open_file=open)
+    with _EXPORT_OPEN_FDS_GUARD:
+        stream = manager.__enter__()
+        fd = stream.fileno()
+        _EXPORT_OPEN_STREAMS[fd] = stream
+    try:
         yield stream
+    except BaseException:
+        exc_info = sys.exc_info()
+        with _EXPORT_OPEN_FDS_GUARD:
+            _EXPORT_OPEN_STREAMS.pop(fd, None)
+            suppress = manager.__exit__(*exc_info)
+        if not suppress:
+            raise
+    else:
+        with _EXPORT_OPEN_FDS_GUARD:
+            _EXPORT_OPEN_STREAMS.pop(fd, None)
+            manager.__exit__(None, None, None)
+
+
+@contextmanager
+def _trace_writer_guard(path: Path, *, enabled: bool):
+    """Serialize canonical source appends with destructive reset/clear/archive.
+
+    Those paths own ``TRACE_WRITER_LOCK_NAME`` through ``span_destructive_write_guard``. Using the
+    same OS advisory byte/inode here closes the async late-writer race without importing the events
+    layer downward into core. Normal index refresh deliberately uses its own lock, so a cold rebuild
+    cannot fill this exporter's bounded queue. The enabled lifecycle sidecar is required and fails
+    before source open when lock capability/ownership cannot be proved; only the later data-file flock
+    retains the historical diagnostic best-effort behavior.
+
+    The lifecycle fence is an explicit Engine-owned capability, not a basename heuristic. Preserve
+    embedders that happen to call a custom target ``spans.jsonl``: a default exporter retains the
+    data-file flock and does not acquire/create a new sibling sidecar.
+    """
+    if not enabled:
+        yield
+        return
+    lock_path = path.with_name(TRACE_WRITER_LOCK_NAME)
+    with _open_export_append(lock_path) as stream, _interprocess_export_guard(
+            stream, required=True):
+        yield
 
 
 def _heal_torn_jsonl_tail(stream) -> int:
@@ -911,12 +1054,21 @@ def _span_jsonl_line(span) -> bytes:
     return line
 
 
+class _AsyncExportAbandoned(Exception):
+    """An async row lost the pre-commit race to a timed-out terminal shutdown."""
+
+
 class JsonlSpanExporter:
     """Default exporter: one JSON span per line in `spans.jsonl` (files-as-truth, offline)."""
 
-    def __init__(self, path: str | os.PathLike):
+    def __init__(
+        self, path: str | os.PathLike, *, lifecycle_fence: bool = False,
+    ):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Only Engine-owned canonical traces participate in reset/clear/archive fencing. Defaulting
+        # off preserves custom embedders, including ones whose unrelated file is named spans.jsonl.
+        self._lifecycle_fence = bool(lifecycle_fence)
         # The lock belongs to the canonical destination, not this Python object.  A run can construct
         # more than one Tracer/Exporter (resume, embedding, fan-out); with per-instance locks one healer
         # could inspect a torn EOF, another append a committed row, then the first truncate that row.
@@ -927,7 +1079,18 @@ class JsonlSpanExporter:
         # Small JSON-native spans stay byte-for-byte identical. Repeated generic instrumentation can
         # otherwise make one row arbitrarily large; preflight it allocation-free and commit a small
         # topology-preserving truncation receipt rather than poisoning this and every later record.
-        line = _span_jsonl_line(span)
+        self._export_line(_span_jsonl_line(span))
+
+    def _export_line(self, line: bytes, *, pre_commit=None) -> None:
+        """Commit one row prepared by this module's bounded serializer.
+
+        This private seam lets ``AsyncJsonlSpanExporter`` serialize once on submit for exact byte
+        accounting, then move only the file I/O to its worker.  It is deliberately not a generic raw
+        append API: callers cannot use it to bypass the one-row/newline/physical-size contract.
+        """
+        if (type(line) is not bytes or not line.endswith(b"\n")
+                or b"\n" in line[:-1] or len(line) > TRACE_JSONL_ROW_MAX_BYTES):
+            raise ValueError("prepared trace row violates the physical JSONL contract")
         # An exporter object can survive ``fork()``.  Never acquire the inherited process-local lock:
         # its owner may have been another thread that does not exist in the child.
         pid = os.getpid()
@@ -937,7 +1100,20 @@ class JsonlSpanExporter:
         # Serialize writes: child spans export from to_thread worker threads while the parent
         # span exports from the event-loop thread; without the lock concurrent appends from
         # distinct handles can interleave into a corrupt JSON line (eval_parallel fan-out).
-        with self._lock, _open_export_append(self.path) as f, _interprocess_export_guard(f):
+        with self._lock, _trace_writer_guard(
+                self.path, enabled=self._lifecycle_fence):
+            # A timed-out async owner may have released engine.lock while this row was waiting for
+            # the shared trace-writer guard. Recheck only AFTER that guard is ours: if clear/reset
+            # won it first, abandoning here prevents an attempt-A append behind its rewrite. If the
+            # row passed this point first, the destructive writer waits for the guard and rewrites
+            # after our append, so there is still no late data in the published generation.
+            if pre_commit is not None and not pre_commit():
+                raise _AsyncExportAbandoned()
+            self._export_line_guarded(line)
+
+    def _export_line_guarded(self, line: bytes) -> None:
+        """Commit while the canonical path lock and cross-plane writer guard are both held."""
+        with _open_export_append(self.path) as f, _interprocess_export_guard(f):
             # A killed writer can leave the final JSON record without its committing newline.  Every
             # forward reader correctly stops before that torn suffix, but appending blindly would glue
             # this record to it and turn the pair into one COMPLETE corrupt line; that line would then
@@ -967,6 +1143,494 @@ class JsonlSpanExporter:
                 "after_ctime_ns": after_stat.st_ctime_ns,
                 "append_sha256": hashlib.sha256(line).hexdigest(),
             })
+
+
+class AsyncJsonlSpanExporter:
+    """Bounded non-blocking queue in front of :class:`JsonlSpanExporter`.
+
+    ``export`` is the OTel ``on_end``-shaped path: it never waits for filesystem I/O and returns a
+    boolean acceptance receipt.  Backpressure is explicit drop-newest, preserving FIFO and at-most-one
+    delegate attempt for every accepted row.  Drops and delegate failures are never recursive queue
+    items: one coalesced diagnostic metric receipt bypasses the ordinary queue on the worker. It also
+    gets one attempt: an exception after append is ambiguous, so retrying its delta could over-count
+    loss in every postmortem summary. A missing receipt is preferable to false loss inflation.
+
+    The queue is bounded by BOTH row count and serialized bytes.  The currently-exporting row remains
+    charged to the byte budget until its delegate attempt finishes, so the resident prepared-row bound
+    is real rather than excluding the worker's largest object.  Serialization stays synchronous; this
+    is the price of exact accounting without an unbounded deepcopy of a mutable span record.
+
+    A worker exits when ``force_flush`` drains it, on shutdown, or after a calm empty idle period.
+    It is daemonized only so a forgotten explicit shutdown cannot wedge interpreter exit;
+    normal Engine/finalization paths call ``force_flush`` and retire it deterministically.
+    ``shutdown`` is one-shot and bounded, but—like OTel's processor timeout—it cannot interrupt a
+    Python thread already inside filesystem I/O.  A timed-out worker never gets replaced or retried,
+    preventing double export and unbounded thread accumulation.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike,
+        *,
+        run_id: str = "",
+        lifecycle_fence: bool = False,
+        max_queue_spans: int = TRACE_EXPORT_QUEUE_MAX_SPANS,
+        max_queue_bytes: int = TRACE_EXPORT_QUEUE_MAX_BYTES,
+        worker_idle_s: float = _TRACE_EXPORT_WORKER_IDLE_S,
+        loss_receipt_interval_s: float = _TRACE_EXPORT_LOSS_RECEIPT_INTERVAL_S,
+    ):
+        if type(max_queue_spans) is not int or max_queue_spans <= 0:
+            raise ValueError("max_queue_spans must be a positive int")
+        if type(max_queue_bytes) is not int or max_queue_bytes <= 0:
+            raise ValueError("max_queue_bytes must be a positive int")
+        try:
+            worker_idle_s = float(worker_idle_s)
+            loss_receipt_interval_s = float(loss_receipt_interval_s)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("exporter timing bounds must be finite numbers") from exc
+        if (not math.isfinite(worker_idle_s) or worker_idle_s <= 0
+                or not math.isfinite(loss_receipt_interval_s)
+                or loss_receipt_interval_s <= 0):
+            raise ValueError("exporter timing bounds must be positive finite numbers")
+
+        self.path = Path(path)
+        self._lifecycle_fence = bool(lifecycle_fence)
+        self._writer = JsonlSpanExporter(
+            self.path, lifecycle_fence=self._lifecycle_fence)
+        self._run_id = redact_persisted_identity(run_id, max_chars=_TRACE_RUN_ID_CAP)
+        self._max_queue_spans = max_queue_spans
+        self._max_queue_bytes = max_queue_bytes
+        self._worker_idle_s = worker_idle_s
+        self._loss_receipt_interval_s = loss_receipt_interval_s
+        self._pid = os.getpid()
+        self._instance_id = _hex(8)
+        self._reset_process_state(accepting=True)
+
+    def _reset_process_state(self, *, accepting: bool) -> None:
+        """Create process-local synchronization and discard inherited parent work after fork."""
+        self._condition = threading.Condition(threading.Lock())
+        self._queue: deque[bytes] = deque()
+        # Includes a row currently held by the worker until its delegate attempt returns.
+        self._buffered_bytes = 0
+        self._worker: Optional[threading.Thread] = None
+        self._active = False
+        self._retire_requested = False
+        self._abandon_active = False
+        self._accepting = accepting
+        self._shutdown = not accepting
+        self._accepted_spans = 0
+        self._exported_spans = 0
+        self._export_failures = 0
+        self._drop_counts = {reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
+        self._unreported_drops = {reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
+        self._unreported_export_failures = 0
+        self._loss_receipts = 0
+        self._loss_receipt_failures = 0
+        self._receipt_requested = False
+        self._next_receipt_at = 0.0
+
+    def _ensure_process(self) -> None:
+        """A fork child starts empty; parent-owned queued rows must never be exported twice."""
+        pid = os.getpid()
+        if pid == self._pid:
+            return
+        # Do not touch the inherited Condition: it may have been locked by a vanished parent thread.
+        accepting = self._accepting
+        self._pid = pid
+        self._instance_id = _hex(8)
+        self._writer = JsonlSpanExporter(
+            self.path, lifecycle_fence=self._lifecycle_fence)
+        self._reset_process_state(accepting=accepting)
+
+    @staticmethod
+    def _timeout_deadline(timeout_millis: Optional[float]) -> Optional[float]:
+        if timeout_millis is None:
+            return None
+        try:
+            timeout = float(timeout_millis)
+        except (TypeError, ValueError, OverflowError):
+            return time.monotonic()
+        if not math.isfinite(timeout) or timeout <= 0:
+            return time.monotonic()
+        return time.monotonic() + timeout / 1000.0
+
+    def _start_worker_locked(self) -> bool:
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            return True
+        try:
+            worker = threading.Thread(
+                target=self._worker_main,
+                name=f"looplab-trace-export-{self._instance_id}",
+                daemon=True,
+            )
+            self._worker = worker
+            worker.start()
+        except Exception:  # noqa: BLE001 - thread exhaustion must remain a non-throwing submit failure
+            if self._worker is not None and self._worker.is_alive():
+                return True  # defensive: never replace an ambiguously-started delegate
+            self._worker = None
+            return False
+        return True
+
+    def _record_drop_locked(
+        self, reason: str, count: int = 1, *, durable: bool = True,
+    ) -> None:
+        count = max(0, int(count))
+        if not count:
+            return
+        self._drop_counts[reason] += count
+        if not durable:
+            return
+        self._unreported_drops[reason] += count
+        # First loss is reported promptly. Later losses inside the receipt interval coalesce.
+        if self._next_receipt_at <= 0:
+            self._next_receipt_at = time.monotonic()
+
+    def export(self, span: dict) -> bool:
+        """Serialize and submit without waiting for the filesystem; False means explicitly dropped."""
+        self._ensure_process()
+        # Shutdown is a terminal writer boundary.  Check before caller-side serialization so an
+        # invalid post-shutdown value cannot enter the exception path and resurrect a worker/loss
+        # receipt behind reset.  The second check below closes the race with shutdown while a valid
+        # accepted-candidate is being serialized.
+        with self._condition:
+            if not self._accepting:
+                # A terminal exporter must never make a later idempotent shutdown resurrect a
+                # receipt writer. Keep misuse observable in process, but not pending for disk.
+                self._record_drop_locked("shutdown", durable=False)
+                return False
+        try:
+            line = _span_jsonl_line(span)
+        except Exception:  # noqa: BLE001 - the tracer's diagnostic boundary must stay non-throwing
+            with self._condition:
+                if not self._accepting:
+                    self._record_drop_locked("shutdown", durable=False)
+                else:
+                    self._record_drop_locked("serialization_error")
+                    self._start_worker_locked()
+                    self._condition.notify_all()
+            return False
+
+        with self._condition:
+            if not self._accepting:
+                self._record_drop_locked("shutdown", durable=False)
+                # Shutdown is one-shot: do not create a post-shutdown writer solely for misuse.
+                self._condition.notify_all()
+                return False
+            self._retire_requested = False
+            if len(self._queue) >= self._max_queue_spans:
+                self._record_drop_locked("queue_full")
+                self._start_worker_locked()
+                self._condition.notify_all()
+                return False
+            if len(line) > self._max_queue_bytes - self._buffered_bytes:
+                self._record_drop_locked("queue_bytes")
+                self._start_worker_locked()
+                self._condition.notify_all()
+                return False
+            self._queue.append(line)
+            self._buffered_bytes += len(line)
+            if not self._start_worker_locked():
+                # No live worker owns the just-appended tail.  Undo admission atomically so ``True``
+                # never means a row was stranded until an optional future call happens to retry.
+                assert self._queue and self._queue[-1] is line
+                self._queue.pop()
+                self._buffered_bytes = max(0, self._buffered_bytes - len(line))
+                self._record_drop_locked("worker_start")
+                self._condition.notify_all()
+                return False
+            self._accepted_spans += 1
+            self._condition.notify_all()
+            return True
+
+    def _loss_snapshot_locked(self) -> tuple[dict[str, int], int]:
+        return (
+            {reason: count for reason, count in self._unreported_drops.items() if count},
+            self._unreported_export_failures,
+        )
+
+    def _loss_receipt(self, drops: dict[str, int], export_failures: int) -> dict:
+        dropped = sum(drops.values())
+        now = time.time()
+        attributes = {
+            "looplab.exporter.metric": "loss",
+            "looplab.exporter.dropped_spans": dropped,
+            "looplab.exporter.export_failures": export_failures,
+            "looplab.exporter.queue_capacity_spans": self._max_queue_spans,
+            "looplab.exporter.queue_capacity_bytes": self._max_queue_bytes,
+            "looplab.exporter.instance_id": self._instance_id,
+            "looplab.exporter.pid": self._pid,
+        }
+        for reason, count in drops.items():
+            attributes[f"looplab.exporter.dropped.{reason}"] = count
+        return {
+            "name": "looplab.exporter.loss",
+            "kind": "internal",
+            "trace_id": _hex(16),
+            "span_id": _hex(8),
+            "parent_id": None,
+            "run_id": self._run_id,
+            "attributes": attributes,
+            "events": [],
+            "status": "ERROR",
+            "start": now,
+            "duration_s": 0.0,
+        }
+
+    def _worker_main(self) -> None:
+        while True:
+            item: Optional[bytes] = None
+            loss: Optional[tuple[dict[str, int], int]] = None
+            with self._condition:
+                while True:
+                    now = time.monotonic()
+                    # Terminal timeout fencing wins over EVERY queued payload, including the loss
+                    # receipt. Once engine.lock may be released, no old-process diagnostic may race
+                    # a clear/reset rewrite. An active writer that already crossed pre_commit still
+                    # owns TRACE_WRITER_LOCK_NAME; destructive work can only publish after it.
+                    if self._abandon_active:
+                        # Terminal ownership was released. No historical loss delta may cause a
+                        # later shutdown/export call to resurrect this process as a writer.
+                        self._unreported_drops = {
+                            reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
+                        self._unreported_export_failures = 0
+                        self._receipt_requested = False
+                        self._worker = None
+                        self._condition.notify_all()
+                        return
+                    pending_loss = (
+                        any(self._unreported_drops.values())
+                        or self._unreported_export_failures > 0
+                    )
+                    if pending_loss and (
+                            self._receipt_requested or now >= self._next_receipt_at):
+                        loss = self._loss_snapshot_locked()
+                        self._receipt_requested = False
+                        self._active = True
+                        break
+                    if self._queue:
+                        item = self._queue.popleft()
+                        # Keep its bytes charged until delegate export returns.
+                        self._active = True
+                        break
+                    if self._shutdown or self._retire_requested:
+                        self._worker = None
+                        self._condition.notify_all()
+                        return
+                    if pending_loss:
+                        self._condition.wait(max(
+                            0.001, self._next_receipt_at - now))
+                        continue
+                    self._condition.wait(self._worker_idle_s)
+                    if not self._queue and not any(self._unreported_drops.values()) \
+                            and self._unreported_export_failures == 0:
+                        self._worker = None
+                        self._condition.notify_all()
+                        return
+
+            if loss is not None:
+                drops, export_failures = loss
+                succeeded = False
+                try:
+                    # Direct delegate call: a loss receipt cannot be evicted by the queue it reports.
+                    receipt_line = _span_jsonl_line(
+                        self._loss_receipt(drops, export_failures))
+                    self._writer._export_line(
+                        receipt_line, pre_commit=self._active_may_commit)
+                    succeeded = True
+                except _AsyncExportAbandoned:
+                    pass
+                except Exception:  # noqa: BLE001 - retain the delta for a later export/flush attempt
+                    pass
+                with self._condition:
+                    self._active = False
+                    # Consume this exact delta after ONE delegate attempt whether it returned or
+                    # raised. The write may have committed before a descriptor/path post-validation
+                    # failed; retrying would make the durable summed metric count the same loss twice.
+                    for reason, count in drops.items():
+                        self._unreported_drops[reason] = max(
+                            0, self._unreported_drops[reason] - count)
+                    self._unreported_export_failures = max(
+                        0, self._unreported_export_failures - export_failures)
+                    if succeeded:
+                        self._loss_receipts += 1
+                        self._next_receipt_at = (
+                            time.monotonic() + self._loss_receipt_interval_s)
+                    else:
+                        self._loss_receipt_failures += 1
+                        self._next_receipt_at = (
+                            time.monotonic() + self._loss_receipt_interval_s)
+                        # Do not leave a daemon retrying forever on a dead filesystem. New deltas can
+                        # trigger a new receipt later; this ambiguous delta is never attempted twice.
+                        if not self._queue:
+                            self._worker = None
+                            self._condition.notify_all()
+                            return
+                    self._condition.notify_all()
+                continue
+
+            assert item is not None
+            succeeded = False
+            abandoned = False
+            try:
+                # Exactly one delegate attempt. Retrying after an exception could duplicate a row
+                # whose bytes committed before a post-write identity/visibility check failed.
+                self._writer._export_line(item, pre_commit=self._active_may_commit)
+                succeeded = True
+            except _AsyncExportAbandoned:
+                abandoned = True
+                with self._condition:
+                    self._record_drop_locked(
+                        "shutdown_timeout", durable=False)
+            except Exception:  # noqa: BLE001 - diagnostics never crash the observed operation
+                pass
+            with self._condition:
+                self._buffered_bytes = max(0, self._buffered_bytes - len(item))
+                self._active = False
+                if succeeded:
+                    self._exported_spans += 1
+                elif not abandoned:
+                    self._export_failures += 1
+                    if not self._abandon_active:
+                        self._unreported_export_failures += 1
+                        if self._next_receipt_at <= 0:
+                            self._next_receipt_at = time.monotonic()
+                self._condition.notify_all()
+
+    def _terminal_abandon_locked(self) -> None:
+        """Retire not-started work and all durable receipt intent before ownership release."""
+        pending = len(self._queue)
+        if pending:
+            pending_bytes = sum(map(len, self._queue))
+            self._queue.clear()
+            self._buffered_bytes = max(0, self._buffered_bytes - pending_bytes)
+            self._record_drop_locked(
+                "shutdown_timeout", pending, durable=False)
+        self._unreported_drops = {reason: 0 for reason in _TRACE_EXPORT_DROP_REASONS}
+        self._unreported_export_failures = 0
+        self._receipt_requested = False
+        self._abandon_active = True
+        self._condition.notify_all()
+
+    def _active_may_commit(self) -> bool:
+        """Rechecked only after the shared trace-writer guard is held (see `_export_line`)."""
+        with self._condition:
+            return not self._abandon_active
+
+    def metrics(self) -> dict[str, int | bool]:
+        """Return a process-local, race-consistent exporter health snapshot."""
+        self._ensure_process()
+        with self._condition:
+            return {
+                "accepted_spans": self._accepted_spans,
+                "exported_spans": self._exported_spans,
+                "dropped_spans": sum(self._drop_counts.values()),
+                "export_failures": self._export_failures,
+                **{f"dropped_{reason}": self._drop_counts[reason]
+                   for reason in _TRACE_EXPORT_DROP_REASONS},
+                "queued_spans": len(self._queue),
+                "buffered_bytes": self._buffered_bytes,
+                "loss_receipts": self._loss_receipts,
+                "loss_receipt_failures": self._loss_receipt_failures,
+                "worker_alive": bool(self._worker is not None and self._worker.is_alive()),
+                "shutdown": self._shutdown,
+            }
+
+    @property
+    def dropped_spans(self) -> int:
+        return int(self.metrics()["dropped_spans"])
+
+    def force_flush(
+        self,
+        timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,
+    ) -> bool:
+        """Wait for work accepted before/during the barrier and its loss receipt.
+
+        The timeout bounds only the caller's wait; Python cannot safely interrupt a worker already in
+        filesystem I/O.  False therefore never claims that the underlying call was cancelled.
+        """
+        self._ensure_process()
+        deadline = self._timeout_deadline(timeout_millis)
+        with self._condition:
+            baseline_receipt_failures = self._loss_receipt_failures
+            if any(self._unreported_drops.values()) or self._unreported_export_failures:
+                self._receipt_requested = True
+            self._retire_requested = True
+            if (self._queue or self._active or self._receipt_requested) \
+                    and not self._start_worker_locked():
+                return False
+            # Also wake a calm idle worker so this barrier retires it immediately instead of waiting
+            # for the long anti-churn idle timeout.
+            self._condition.notify_all()
+            while True:
+                pending_loss = (
+                    any(self._unreported_drops.values())
+                    or self._unreported_export_failures > 0
+                )
+                worker_alive = bool(self._worker is not None and self._worker.is_alive())
+                if not self._queue and not self._active and not pending_loss and not worker_alive:
+                    return self._loss_receipt_failures == baseline_receipt_failures
+                if (pending_loss and not worker_alive
+                        and self._loss_receipt_failures > baseline_receipt_failures):
+                    return False
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                else:
+                    remaining = None
+                self._condition.wait(remaining)
+
+    def shutdown(
+        self,
+        timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,
+    ) -> bool:
+        """Stop accepting, drain once, and join the one worker within the caller's wait budget."""
+        self._ensure_process()
+        deadline = self._timeout_deadline(timeout_millis)
+        with self._condition:
+            baseline_receipt_failures = self._loss_receipt_failures
+            self._accepting = False
+            self._shutdown = True
+            self._retire_requested = True
+            if any(self._unreported_drops.values()) or self._unreported_export_failures:
+                self._receipt_requested = True
+            if (self._queue or self._active or self._receipt_requested) \
+                    and not self._start_worker_locked():
+                self._terminal_abandon_locked()
+                return False
+            self._condition.notify_all()
+            while True:
+                pending_loss = (
+                    any(self._unreported_drops.values())
+                    or self._unreported_export_failures > 0
+                )
+                worker_alive = bool(self._worker is not None and self._worker.is_alive())
+                if not self._queue and not self._active and not pending_loss and not worker_alive:
+                    return self._loss_receipt_failures == baseline_receipt_failures
+                if (pending_loss and not worker_alive
+                        and self._loss_receipt_failures > baseline_receipt_failures):
+                    return False
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        # Pending rows have not started and can be definitely retired. The active row
+                        # is NOT counted/dropped here: its uninterruptible delegate attempt may still
+                        # succeed, and the worker remains the sole owner until it returns.
+                        self._terminal_abandon_locked()
+                        return False
+                else:
+                    remaining = None
+                self._condition.wait(remaining)
+
+    close = shutdown
+
+    def __enter__(self) -> "AsyncJsonlSpanExporter":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.shutdown()
 
 
 class SpanHandle:
@@ -1057,7 +1721,7 @@ class SpanHandle:
 
 
 class Tracer:
-    def __init__(self, exporter: JsonlSpanExporter, run_id: str = "",
+    def __init__(self, exporter: JsonlSpanExporter | AsyncJsonlSpanExporter, run_id: str = "",
                  capture_llm_io: Optional[bool] = None):
         # Optional providers are often configured by the embedding application after importing
         # LoopLab.  The import-time probe is only a fast path; retry once per Tracer construction
@@ -1081,6 +1745,37 @@ class Tracer:
         # to every span it opens so a concurrent run with the opposite policy cannot leak into it.
         # None => defer to the process-wide default, keeping a bare `Tracer(...)` byte-identical.
         self.capture_llm_io = None if capture_llm_io is None else bool(capture_llm_io)
+
+    def force_flush(
+        self,
+        timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,
+    ) -> bool:
+        """Make all accepted local spans visible before a reader/owner boundary.
+
+        The synchronous exporter has no pending work. Optional/custom exporters without the method
+        retain that compatibility behavior; an exporter implementation failure stays diagnostic and
+        returns False rather than perturbing domain control flow.
+        """
+        flush = getattr(self.exporter, "force_flush", None)
+        if not callable(flush):
+            return True
+        try:
+            return bool(flush(timeout_millis=timeout_millis))
+        except Exception:  # noqa: BLE001 - tracing must never become a domain failure
+            return False
+
+    def shutdown(
+        self,
+        timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,
+    ) -> bool:
+        """One-shot exporter shutdown for embedding applications that own the Tracer lifetime."""
+        shutdown = getattr(self.exporter, "shutdown", None)
+        if not callable(shutdown):
+            return True
+        try:
+            return bool(shutdown(timeout_millis=timeout_millis))
+        except Exception:  # noqa: BLE001 - tracing must never become a domain failure
+            return False
 
     @contextmanager
     def span(self, name: str, *, new_trace: bool = False, kind: str = "operation", **attributes):

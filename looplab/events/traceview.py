@@ -21,7 +21,7 @@ from looplab.core.redact import is_secret_key_name, redact_persisted_text
 from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES,
     iter_bounded_trace_jsonl_lines as _iter_bounded_trace_jsonl_lines,
-    open_private_trace_file)
+    open_private_trace_file, trace_file_change_token)
 
 
 _MAX_SPAN_ID_CHARS = 256
@@ -46,6 +46,91 @@ TRACE_NODE_SPAN_CAP = 512
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
+# Trace projections are already bounded by the span and per-field caps above.  This final aggregate
+# ceiling keeps both HTTP responses and the archived trace.json finite without imposing a topology
+# depth limit (a 4,096-deep valid tree is still part of the public projection contract).
+TRACE_PROJECTION_JSON_MAX_BYTES = 64 * 1024 * 1024
+
+
+def trace_projection_json_bytes(
+        value, *, max_bytes: int = TRACE_PROJECTION_JSON_MAX_BYTES) -> bytes:
+    """Encode one normalized trace projection without using the Python call stack.
+
+    FastAPI's generic encoder and common JSON encoders recurse through nested containers, so a valid
+    deep span chain can fail after the iterative tree builder has successfully preserved it.  Trace
+    projections contain only JSON-native containers/scalars; an explicit stack keeps their nested
+    wire shape byte-for-byte conventional while the aggregate byte ceiling bounds the result.
+    """
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+
+    output = bytearray()
+    active: set[int] = set()
+
+    def append(chunk: bytes) -> None:
+        if len(output) + len(chunk) > max_bytes:
+            raise ValueError("trace projection exceeds its JSON byte limit")
+        output.extend(chunk)
+
+    # Frames are (kind, value, ...). Iterator frames are resumed after each child, so memory grows
+    # with topology depth rather than with the total number of siblings.
+    stack: list[tuple] = [("value", value)]
+    while stack:
+        frame = stack.pop()
+        kind = frame[0]
+        if kind == "value":
+            current = frame[1]
+            current_type = type(current)
+            if current_type is dict:
+                identity = id(current)
+                if identity in active:
+                    raise ValueError("circular trace projection")
+                active.add(identity)
+                append(b"{")
+                stack.append(("dict", iter(current.items()), True, identity))
+            elif current_type in (list, tuple):
+                identity = id(current)
+                if identity in active:
+                    raise ValueError("circular trace projection")
+                active.add(identity)
+                append(b"[")
+                stack.append(("list", iter(current), True, identity))
+            elif current is None or current_type in (bool, int, float, str):
+                append(json.dumps(
+                    current, ensure_ascii=False, allow_nan=False,
+                    separators=(",", ":")).encode("utf-8"))
+            else:
+                raise TypeError(
+                    f"unsupported trace projection value: {current_type.__name__}")
+        elif kind == "dict":
+            iterator, first, identity = frame[1:]
+            try:
+                key, child = next(iterator)
+            except StopIteration:
+                append(b"}")
+                active.remove(identity)
+                continue
+            if type(key) is not str:
+                raise TypeError("trace projection object keys must be strings")
+            if not first:
+                append(b",")
+            append(json.dumps(key, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            append(b":")
+            stack.append(("dict", iterator, False, identity))
+            stack.append(("value", child))
+        else:
+            iterator, first, identity = frame[1:]
+            try:
+                child = next(iterator)
+            except StopIteration:
+                append(b"]")
+                active.remove(identity)
+                continue
+            if not first:
+                append(b",")
+            stack.append(("list", iterator, False, identity))
+            stack.append(("value", child))
+    return bytes(output)
 
 
 def settle_node_span_cap(limit, *, default: int) -> int:
@@ -80,12 +165,18 @@ def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
         # O_NONBLOCK can strand a server worker before clear even begins).
         with open_private_trace_file(path, open_file=open) as stream:
             source_stat = os.fstat(stream.fileno())
+            change_token = trace_file_change_token(stream.fileno(), source_stat)
     except FileNotFoundError:
         return hashlib.sha256(b"looplab:spans:missing:v1").hexdigest()
     except OSError:
         return None
+    if change_token is None:
+        # An opaque validator that cannot distinguish same-file rewrites is unsafe authority for
+        # destructive clear approval.  The caller must reject the operation and ask for a new,
+        # provable snapshot rather than accept Windows creation time as a mutation fence.
+        return None
     identity = (
-        int(source_stat.st_dev), int(source_stat.st_ino), int(source_stat.st_ctime_ns),
+        int(source_stat.st_dev), int(source_stat.st_ino), change_token,
         int(source_stat.st_size), int(source_stat.st_mtime_ns),
     )
     return hashlib.sha256(
@@ -150,10 +241,21 @@ _ATTRIBUTE_FIELDS = {
     "proxy_skipped", "eval_seconds", "metric", "ok", "repair_attempts", "violations",
     "drift", "error_reason", "feasible", "robust_metric", "materialized",
     "handoff_from", "handoff_to",
+    # Bounded internal exporter-health receipts.  These are diagnostic metrics, not domain events;
+    # retaining only their fixed schema lets the run summary expose loss without trusting arbitrary
+    # custom-exporter attributes or requiring clients to parse internal spans.
+    "looplab.exporter.metric", "looplab.exporter.dropped_spans",
+    "looplab.exporter.export_failures", "looplab.exporter.queue_capacity_spans",
+    "looplab.exporter.queue_capacity_bytes", "looplab.exporter.instance_id",
+    "looplab.exporter.pid", "looplab.exporter.dropped.queue_full",
+    "looplab.exporter.dropped.queue_bytes", "looplab.exporter.dropped.serialization_error",
+    "looplab.exporter.dropped.worker_start",
+    "looplab.exporter.dropped.shutdown", "looplab.exporter.dropped.shutdown_timeout",
 }
 _ATTR_TEXT_FIELDS = {
     "phase", "model", "op", "tool", "level", "stage", "reason", "package", "trigger",
     "operator", "error_reason", "materialized", "handoff_from", "handoff_to",
+    "looplab.exporter.metric", "looplab.exporter.instance_id",
 }
 _ATTR_BOOL_FIELDS = {
     "input_partial", "timed_out", "reused", "sandboxed", "proxy_skipped", "ok", "drift",
@@ -162,6 +264,12 @@ _ATTR_BOOL_FIELDS = {
 _ATTR_INT_FIELDS = {
     "generation", "input_carry", "exit_code", "seed", "blocks", "attempt",
     "repair_attempts", "violations",
+    "looplab.exporter.dropped_spans", "looplab.exporter.export_failures",
+    "looplab.exporter.queue_capacity_spans", "looplab.exporter.queue_capacity_bytes",
+    "looplab.exporter.pid", "looplab.exporter.dropped.queue_full",
+    "looplab.exporter.dropped.queue_bytes", "looplab.exporter.dropped.serialization_error",
+    "looplab.exporter.dropped.worker_start",
+    "looplab.exporter.dropped.shutdown", "looplab.exporter.dropped.shutdown_timeout",
 }
 _ATTR_FLOAT_FIELDS = {"proxy_score", "eval_seconds", "metric", "robust_metric"}
 _EVENT_FIELDS = {"error", "type", "message", "n", "count", "status", "stage", "step", "reason"}
@@ -810,6 +918,37 @@ def _rollup(spans: list[dict]) -> dict:
             "cost": round(cost, 6)}
 
 
+def _exporter_loss_rollup(spans: list[dict]) -> dict[str, int]:
+    """Sum the coalesced exporter-loss deltas retained in this projection window.
+
+    A receipt is deliberately an internal diagnostic span rather than a replay/domain event.  Each
+    receipt reports only the delta consumed by that one durable attempt, so the visible sum is exact
+    for the receipts actually present. It may still be a lower bound on process-local loss when a
+    receipt attempt failed ambiguously; retrying that delta would risk double-counting a committed
+    append. ``build_trace_view`` separately marks the result partial whenever older receipts may have
+    been omitted by its bounded tail.
+    """
+    dropped = failures = receipts = 0
+    for span in spans:
+        if span.get("name") != "looplab.exporter.loss":
+            continue
+        raw_attributes = span.get("attributes")
+        attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+        if attributes.get("looplab.exporter.metric") != "loss":
+            continue
+        dropped = min(
+            _MAX_TRACE_TOKENS,
+            dropped + _safe_token_count(attributes.get("looplab.exporter.dropped_spans")),
+        )
+        failures = min(
+            _MAX_TRACE_TOKENS,
+            failures + _safe_token_count(attributes.get("looplab.exporter.export_failures")),
+        )
+        receipts = min(_MAX_TRACE_TOKENS, receipts + 1)
+    return {"dropped_spans": dropped, "export_failures": failures,
+            "loss_receipts": receipts}
+
+
 # Trace-view I/O caps. A real repo-developer generation carries a 100KB+ prompt, and a long run
 # accumulates hundreds of them — the recorded trace of one such run was ~52 MB, which crashes the
 # browser (observed: a black screen). The browser VIEW applies an additional bounded/redacted
@@ -1300,6 +1439,7 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
 
     errors = [s for s in spans if s.get("status") == "ERROR"]
     run_roll = _rollup(spans)
+    exporter_loss = _exporter_loss_rollup(spans)
     truncated_spans = sum(
         1 for span in spans if (span.get("_projection") or {}).get("truncated") is True)
     projection = _response_projection(
@@ -1318,6 +1458,12 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
             "visible_spans": len(spans),
             "omitted_spans": projection["omitted_spans"],
             "rollup_partial": projection["omitted_spans"] > 0,
+            "dropped_spans": exporter_loss["dropped_spans"],
+            "export_failures": exporter_loss["export_failures"],
+            "exporter_loss_receipts": exporter_loss["loss_receipts"],
+            # Loss receipts are deltas.  A bounded tail cannot prove that an older receipt was not
+            # omitted, so never present the visible sum as a complete postmortem counter in that case.
+            "exporter_metrics_partial": projection["omitted_spans"] > 0,
             "errors": len(errors),
             "generations": run_roll["generations"],
             "tools": run_roll["tools"],

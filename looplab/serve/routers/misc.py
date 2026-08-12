@@ -40,7 +40,7 @@ from looplab.core.memory_window import (
 from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
-from looplab.serve.http import json_object, request_body_contract
+from looplab.serve.http import if_none_match, json_object, request_body_contract
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
     _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
@@ -90,7 +90,6 @@ _AUTHOR_RECEIPT_FIELDS = frozenset({
     "created_at", "updated_at",
 })
 _AUTHOR_THREAD_LOCK = threading.Lock()
-_ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
 _SECRET_KEY_PATTERN = rf"^(?:{'|'.join(re.escape(key) for key in sorted(_SECRET_API_FIELDS))})$"
 
 
@@ -1323,7 +1322,7 @@ def build_router(srv) -> APIRouter:
             "ETag": SETTINGS_UI_SCHEMA_ETAG,
             "X-LoopLab-Schema-Version": str(SETTINGS_UI_SCHEMA_VERSION),
         }
-        if _if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
+        if if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
             return Response(status_code=304, headers=headers)
         for name, value in headers.items():
             response.headers[name] = value

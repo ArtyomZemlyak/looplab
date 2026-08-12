@@ -125,7 +125,8 @@ from looplab.events.replay import fold
 from looplab.agents.roles import (Developer, Researcher, is_researcher_fallback,
                                   researcher_fallback_cause)
 from looplab.runtime.sandbox import Sandbox
-from looplab.core.tracing import JsonlSpanExporter, Tracer
+from looplab.core.tracing import (
+    TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS, AsyncJsonlSpanExporter, Tracer)
 
 # Re-export (back-compat): the engine sentinel lives in engine/options.py since the F3 knob
 # collapse (the signature takes **knobs now, so the orchestrator itself no longer needs it);
@@ -1033,7 +1034,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._advisory_lock = threading.Lock()
         # Tracing (I14): nested, correlated spans -> spans.jsonl (files-as-truth), bridged to
         # OpenTelemetry when the SDK is configured. Diagnostics only; never drives state.
-        self.tracer = Tracer(JsonlSpanExporter(self.run_dir / "spans.jsonl"),
+        self.tracer = Tracer(AsyncJsonlSpanExporter(
+                                 self.run_dir / "spans.jsonl", run_id=self.run_dir.name,
+                                 lifecycle_fence=True),
                              run_id=self.run_dir.name,
                              capture_llm_io=self._trace_llm_io)
         # Task assets (e.g. the dataset) materialized into each node's sandbox workdir.
@@ -1331,8 +1334,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         broker = getattr(self, "_llm_broker", None)
         if broker is None:  # defensive for test/library engines constructed through __new__
             broker = self._llm_broker = LLMConcurrencyBroker()
-        with llm_broker_scope(broker), llm_lane_scope("engine"):
-            return await self._run_with_llm_broker()
+        try:
+            with llm_broker_scope(broker), llm_lane_scope("engine"):
+                return await self._run_with_llm_broker()
+        finally:
+            # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
+            # a background span that closes after return must be rejected rather than append behind
+            # reset/clear. Shutdown drains accepted work and, on its bounded timeout, atomically
+            # abandons anything that has not crossed the lifecycle writer fence. Python still cannot
+            # interrupt an in-progress filesystem call; a crossed writer keeps the fence until done.
+            _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
+            if callable(_trace_shutdown):
+                try:
+                    _stopped = bool(_trace_shutdown(
+                        timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
+                except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
+                    _stopped = False
+                if not _stopped:
+                    _LOG.warning(
+                        "trace exporter did not stop before lifecycle release; pending rows were "
+                        "abandoned behind the trace-writer fence")
 
     def _enter_run(self) -> bool:
         """Authorize re-entry, recover, ACK and set up: everything before the first loop turn.
