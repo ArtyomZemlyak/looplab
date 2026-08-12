@@ -25,11 +25,19 @@ const collaboration = named('collaboration-support')
 // unactionable. Every new ceiling below is the measured acyclic graph plus narrow headroom.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Re-measured 2026-08-10 after the topology-complete virtual span tree and conditional trace
-    // transport: 508,941 B JS / 50,915 B CSS. 498/50 KiB leave 1,011/285 B; every per-chunk,
-    // route and forbidden closure below still enforces the existing lazy/security seams.
-    js: { gzip: 498 * KIB },
-    css: { gzip: 50 * KIB },
+    // Re-measured 2026-08-12: 514,490 B JS / 50,957 B CSS. The +5,549 B of JS since the 2026-08-10
+    // baseline is feature work that landed through the lazy graph, not eager code — the virtualized
+    // span tree and its pure model, the Card workspace view model, the run-operations model, the
+    // live phase-age readout, the Researcher/Card trace links, and the Atlas claim disclosure. Every
+    // per-chunk, route and forbidden closure below still passes, which is what proves the split
+    // graph held; only this SUM moved. 504/51 KiB leave 1,606/1,267 B.
+    //
+    // A total-bytes ceiling grows with every shipped feature, so it is re-baselined by measurement
+    // (as this comment records) rather than left permanently red — a gate nobody can satisfy stops
+    // constraining anything, which is exactly what the header above says happened to the old
+    // numbers. The structural gates are the closures, not this line.
+    js: { gzip: 504 * KIB },
+    css: { gzip: 51 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -129,9 +137,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Research Atlas preview increment',
       roots: [source('src/ResearchAtlas.jsx')],
       baselineRoots: [entry],
-      // Re-audited after the route gained the bounded metric-context/comparability disclosure:
-      // 9,890 B gzip. The 10 KiB target leaves 350 B of route headroom.
-      limits: { js: { gzip: 10 * KIB }, css: { gzip: 3 * KIB } },
+      // Re-measured 2026-08-12 at 10,348 B gzip, after `ab328ee4` added the `safeSource` URL guard
+      // (http/https only, credential-bearing URLs rejected) and the claim metric/polarity/decision
+      // and source disclosure. Both are route-local feature and security code, so the answer is a
+      // re-baseline, not a deferral. The 11 KiB target leaves 916 B of route headroom.
+      limits: { js: { gzip: 11 * KIB }, css: { gzip: 3 * KIB } },
     },
     {
       name: 'React Flow increment',
