@@ -40,7 +40,7 @@ import json
 import math
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from looplab.core.concepts import ConceptMaterializationReceipt
 # Aliased so the shared digest tail does not become part of this module's public namespace: historical
@@ -783,6 +783,10 @@ class Card(BaseModel):
     executability from the compatibility ``actionable`` flag. The seed/action receipt is immutable;
     display text, priority, configured resources, and lifecycle are explicit replay-derived overlays.
     """
+    # Fold-only loss fact for the bounded enrichment projection. A private attribute is deliberate:
+    # it reaches the public completeness receipt without creating a new Card DTO/RunState field.
+    _card_enrichment_complete: bool = PrivateAttr(default=True)
+
     id: str                                             # native engine-minted `card-{k}` or legacy statement hash
     statement: str                                      # the DISPLAY statement (operator-editable in L6)
     # Exact durable event that owns the current operator display edit. Public clients use this receipt

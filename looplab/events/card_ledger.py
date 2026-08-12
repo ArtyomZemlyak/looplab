@@ -68,6 +68,9 @@ _CARD_REPLAY_ACTION_MAP_MAX = 64
 _CARD_REPLAY_ACTION_LIST_MAX = 64
 _CARD_REPLAY_MERGE_ALIASES_MAX = 256
 _CARD_REPLAY_NODE_ID_MAX = (1 << 31) - 1
+# A field-level projection cache, not the audit log. Every row has already crossed the closed,
+# independently bounded ``card_enriched`` receipt boundary; full history remains in events.jsonl.
+CARD_ENRICHMENT_JOURNAL_MAX = 4_096
 
 
 def _card_replay_id(value) -> str | None:
@@ -1850,7 +1853,102 @@ def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dic
             c.status = "evaluated"
 
 
-def _apply_card_enrichment(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> None:
+def _card_enrichment_order(row: Mapping) -> tuple[int, int]:
+    return (
+        row.get("_seq") if type(row.get("_seq")) is int else -1,
+        row.get("_event_index") if type(row.get("_event_index")) is int else -1,
+    )
+
+
+def _card_enrichment_field(row: Mapping) -> str | None:
+    identity = {
+        "id", "node_id", "generation", "proposal_ref", "_seq", "_event_index", "_omitted",
+    }
+    fields = [key for key in row if key not in identity and not key.startswith("_concept_tags_")]
+    return fields[0] if len(fields) == 1 else None
+
+
+def _recompact_card_enrichment(
+    st: RunState,
+    ledger: _CardLedger,
+    aliases: _CardAliases,
+    node_to_card: Mapping[int, str],
+    cap_omissions: Mapping[tuple, int] | None,
+) -> set[str]:
+    """Collapse raw-id/fence windows at the final canonical Card boundary.
+
+    Handler-time compaction cannot use aliases or Node lifecycles: both can arrive in a later suffix.
+    Finalization runs on an isolated FoldCursor snapshot, so it can choose the newest candidate that is
+    applicable now while the cursor retains every admitted predecessor for a later lifecycle suffix.
+    Hard-cap loss is aggregated by canonical Card/field and surfaced on the surviving window.
+    """
+    cards = ledger.cards
+    winners: dict[tuple[str, str], tuple[bool, dict]] = {}
+    omitted: dict[tuple[str, str], int] = {}
+
+    def canonical(raw_id) -> str | None:
+        bounded = _card_id(raw_id)
+        if bounded is None:
+            return None
+        try:
+            return aliases.canon(bounded)
+        except Exception:  # noqa: BLE001 - malformed alias graphs remain non-fatal
+            return None
+
+    for source in st.cards_enriched:
+        if not isinstance(source, Mapping):
+            continue
+        field = _card_enrichment_field(source)
+        card_id = canonical(source.get("id"))
+        if field is None or card_id is None or card_id not in cards:
+            continue
+        row = dict(source)
+        row["id"] = card_id
+        modern = {"node_id", "generation", "proposal_ref"} <= set(row)
+        applicable = not modern
+        if modern:
+            subject = _card_sidecar_subject(st, row, node_to_card)
+            applicable = subject is not None and subject == card_id
+        group = (card_id, field)
+        previous = winners.get(group)
+        # Applicability outranks recency. Within one applicability class, envelope LWW applies.
+        if (previous is None or (applicable and not previous[0])
+                or (applicable == previous[0]
+                    and _card_enrichment_order(row) >= _card_enrichment_order(previous[1]))):
+            winners[group] = (applicable, row)
+        raw_omitted = source.get("_omitted")
+        if type(raw_omitted) is int and raw_omitted > 0:
+            omitted[group] = min((1 << 31) - 1, omitted.get(group, 0) + raw_omitted)
+
+    for raw_key, count in (cap_omissions or {}).items():
+        if not isinstance(raw_key, tuple) or len(raw_key) != 5 or type(count) is not int or count <= 0:
+            continue
+        card_id = canonical(raw_key[0])
+        field = raw_key[4]
+        if card_id is None or card_id not in cards or not isinstance(field, str):
+            continue
+        group = (card_id, field)
+        omitted[group] = min((1 << 31) - 1, omitted.get(group, 0) + count)
+
+    compacted: list[dict] = []
+    for group, (_applicable, row) in winners.items():
+        loss = omitted.get(group, 0)
+        if loss:
+            row["_omitted"] = loss
+        else:
+            row.pop("_omitted", None)
+        compacted.append(row)
+    st.cards_enriched = sorted(compacted, key=lambda row: (
+        row.get("id", ""), _card_enrichment_field(row) or "", *_card_enrichment_order(row)))
+    return {card_id for (card_id, _field), count in omitted.items() if count > 0}
+
+
+def _apply_card_enrichment(
+    st: RunState,
+    ledger: _CardLedger,
+    aliases: _CardAliases,
+    cap_omissions: Mapping[tuple, int] | None,
+) -> None:
     cards = ledger.cards
     _canon = aliases.canon
 
@@ -1862,6 +1960,11 @@ def _apply_card_enrichment(st: RunState, ledger: _CardLedger, aliases: _CardAlia
     for cid, c in cards.items():
         for nid in c.evidence:
             node_to_card.setdefault(nid, cid)   # first card claiming a node wins (evidence is per-card)
+
+    incomplete_cards = _recompact_card_enrichment(
+        st, ledger, aliases, node_to_card, cap_omissions)
+    for card_id in incomplete_cards:
+        cards[card_id]._card_enrichment_complete = False
 
     # Researcher-proposed footprint + research origin ride the linking node's Idea/Node (earliest wins).
     for c in cards.values():
@@ -1911,9 +2014,7 @@ def _apply_card_enrichment(st: RunState, ledger: _CardLedger, aliases: _CardAlia
     _ENRICH_DICT = {"novelty_verdict", "cross_run_prior", "footprint"}
     _ENRICH_REFS = {"lesson_refs", "claim_refs"}
     _ENRICH_STR = {"research_origin"}
-    for d in sorted(st.cards_enriched, key=lambda r: (
-            r.get("_seq") if type(r.get("_seq")) is int else -1,
-            r.get("_event_index") if type(r.get("_event_index")) is int else -1)):
+    for d in sorted(st.cards_enriched, key=_card_enrichment_order):
         try:
             raw_id = d.get("id")
             bounded_id = _card_id(raw_id)
@@ -2313,7 +2414,9 @@ def _publish_visible_cards(
     }
 
 
-def derive_cards(st: RunState) -> None:
+def derive_cards(
+    st: RunState, *, card_enrichment_omissions: Mapping[tuple, int] | None = None,
+) -> None:
     """Build the derived Card ledger from native receipts and compatibility shadows.
 
     Cards do not directly choose the metric champion, but the active Card queue consumes receipt-backed
@@ -2351,7 +2454,7 @@ def derive_cards(st: RunState) -> None:
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_ids = _card_building_ids(st, ledger, aliases)
     _apply_card_status(st, ledger, dropped, building_card_ids)
-    _apply_card_enrichment(st, ledger, aliases)
+    _apply_card_enrichment(st, ledger, aliases, card_enrichment_omissions)
     _apply_card_ranking(st, identity, ledger, aliases)
     _apply_card_operator_overlays(st, ledger, aliases)
     _apply_card_belief_lineage(st, ledger, aliases)
