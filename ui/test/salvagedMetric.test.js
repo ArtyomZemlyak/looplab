@@ -80,3 +80,35 @@ test('the UI name matches the engine name exactly', () => {
   assert.ok(engine.includes('"metric_salvaged"'),
     'the engine no longer emits the violation name this UI branches on')
 })
+
+test('under `select` the salvage is still visible — the rung with no violation row', () => {
+  // Everything above hangs off the violation ROW, and `metric_salvage: "select"` is precisely the
+  // rung that has none: the node is feasible, competes for champion, and read as a plain
+  // "Feasible" with nothing anywhere saying its number was recovered rather than measured. The
+  // operator who opted IN was the one shown least. `metric_provenance` is folded (a real field on
+  // the node, served with it) — the commit's own "a provenance field alone would be 'can tell' and
+  // not 'does'" argument applied to its own permissive rung.
+  const admitted = {
+    status: 'evaluated', metric: 0.74325, feasible: true, violations: [],
+    metric_provenance: { salvaged: true, source: 'declared_reader', stage: 'train',
+      producer: 'operator_stage' },
+  }
+  const status = nodeFeasibilityStatus(admitted)
+  assert.equal(status.tone, 'warn', 'it competes, but it is not a measured result')
+  assert.equal(status.label, 'Metric salvaged, admitted for selection')
+  assert.match(status.detail, /stage “train”/)
+  assert.match(status.detail, /competes for champion/)
+  // A measured node is untouched by the new read.
+  assert.equal(nodeFeasibilityStatus({ status: 'evaluated', feasible: true, violations: [],
+    metric_provenance: null }).tone, 'ok')
+})
+
+test('a node excluded for a real bound says the metric was salvaged too, if it was', () => {
+  const status = nodeFeasibilityStatus({
+    status: 'evaluated', feasible: false,
+    violations: [{ name: 'latency_ms', value: 900, max: 500 }],
+    metric_provenance: { salvaged: true, source: 'declared_reader' },
+  })
+  assert.equal(status.label, 'Constraint violation')
+  assert.match(status.detail, /SALVAGED rather than measured/)
+})

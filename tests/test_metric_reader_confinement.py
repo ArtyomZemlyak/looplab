@@ -17,11 +17,13 @@ enumerations of the reader kinds — this dict, `repo_task._valid_metric_kind`'s
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 
 import pytest
 
+from looplab.runtime import command_eval
 from looplab.runtime.command_eval import (METRIC_READERS, READER_PATH_KEYS,
                                            READERS_REQUIRING_PATH, _confined,
                                            metric_spec_path_error, read_metric)
@@ -164,9 +166,12 @@ def test_every_path_touching_reader_is_registered_and_routes_through_the_guard()
         assert "_confined(" in source, f"the {kind!r} reader builds a path without `_confined`"
     # ...and `_confined` is the only place the idiom is spelled out.
     module_source = inspect.getsource(command_eval)
-    assert module_source.count("_is_within(") == 3, (
-        "expected exactly three: the definition, `_confined`'s use, and host_score's labels-must-be-"
-        "OUTSIDE check, which is the inverse assertion and deliberately not `_confined`")
+    assert module_source.count("_is_within(") == 4, (
+        "expected exactly four: the definition, `_confined`'s use, and the TWO halves of host_score's "
+        "labels-must-be-OUTSIDE check — the score-time one (which scores nothing and logs) and the "
+        "submit-time `host_score_labels_error` (which refuses before the run starts). Both are the "
+        "inverse assertion and deliberately not `_confined`; they are two because the audiences "
+        "differ, and a reader inside an eval worker can only ever return None")
 
 
 # -------------------------------------------- a non-string path slot: a refusal, not a dead RUN
@@ -298,10 +303,12 @@ def test_the_submit_validator_reads_the_reader_table_not_a_local_copy():
         # literal here would be a fourth parallel enumeration, which is the finding this file pins.
         # (A `file_json` spec with no `path` reads no metric at all and is refused at submit; see
         # tests/test_silent_misconfiguration.py.)
-        EvalSpec.model_validate(
-            {"command": ["python", "main.py"],
-             "metric": {"kind": kind,
-                        **({"path": "m.json"} if kind in READERS_REQUIRING_PATH else {})}})
+        spec = {"kind": kind, **({"path": "m.json"} if kind in READERS_REQUIRING_PATH else {})}
+        # `host_score`'s held-out `labels` is the SECOND such requirement, and it is asked the same
+        # way: from the rule's own authority, not from a literal here.
+        if command_eval.host_score_labels_error(spec):
+            spec["labels"] = os.path.join(os.sep, "held-out", "labels.json")
+        EvalSpec.model_validate({"command": ["python", "main.py"], "metric": spec})
     with pytest.raises(Exception) as exc:
         EvalSpec.model_validate({"command": ["python", "main.py"],
                                  "metric": {"kind": "max"}})
@@ -336,15 +343,32 @@ def test_stdout_readers_never_touch_the_filesystem(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX path semantics")
-def test_host_score_still_refuses_labels_inside_the_candidate_workspace(tmp_path):
-    """The one place this module asserts the INVERSE of confinement, and it must stay loud rather
-    than becoming another silent None: labels inside the workspace are mounted and writable by the
-    candidate, which defeats held-out grading entirely."""
+def test_host_score_still_refuses_labels_inside_the_candidate_workspace(tmp_path, caplog):
+    """The one place this module asserts the INVERSE of confinement — and the one place the module's
+    own rule about WHERE to be loud bites the check itself.
+
+    Labels inside the workspace are mounted and writable by the candidate, which defeats held-out
+    grading entirely, so this must never become a silent None. It also must never RAISE here: this
+    function runs inside the eval worker, whose only handler is `except GpuPinUnenforceable` while
+    the dispatchers wrap `_evaluate` in try/FINALLY — measured, the raise reached the top and left
+    the node with no terminal event and the run re-dying on every resume. That is precisely the
+    failure class the `READER_PATH_KEYS` registry above exists to prevent, and this reader was
+    committing it deliberately.
+
+    So the refusal is SPLIT, and both halves are asserted: score time scores nothing and says so at
+    ERROR (a node fails, a run does not), and `host_score_labels_error` refuses the same spec before
+    the run starts, where an operator can still move the file. Neither alone is the property.
+    """
     workdir = tmp_path / "work"
     workdir.mkdir()
     (workdir / "predictions.json").write_text("[1.0]", encoding="utf-8")
     (workdir / "labels.json").write_text("[1.0]", encoding="utf-8")
-    with pytest.raises(ValueError) as exc:
-        read_metric("", str(workdir), {"kind": "host_score",
-                                       "labels": str(workdir / "labels.json")})
-    assert "inside the candidate workspace" in str(exc.value)
+    spec = {"kind": "host_score", "labels": str(workdir / "labels.json")}
+    with caplog.at_level(logging.ERROR, logger="looplab.runtime.command_eval"):
+        assert read_metric("", str(workdir), spec) is None
+    assert "inside the candidate workspace" in caplog.text
+    assert "INSIDE the candidate workspace" in command_eval.host_score_labels_error(
+        spec, workspace_root=workdir)
+    # The whole run root, not just the eval cwd: the untrusted tier bind-mounts it, so a labels file
+    # anywhere under it is reachable by the candidate. This is the shape the launch check refuses.
+    assert command_eval.host_score_labels_error(spec, workspace_root=tmp_path)

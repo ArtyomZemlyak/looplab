@@ -378,3 +378,37 @@ def test_default_options_reproduce_bare_engine(tmp_path):
                  "_inline_repair_attempts", "_track_hypotheses", "lessons_every",
                  "_debug_depth", "memory_dir", "_seed_mode"):
         assert getattr(bare, attr) == getattr(dflt, attr), attr
+
+
+def test_the_salvage_policy_reaches_the_engine_from_settings(tmp_path):
+    """THE WIRING, driven end to end — `Settings -> EngineOptions -> settle_mode -> Engine`.
+
+    Nothing asked the CONSTRUCTOR for a salvage mode: `tests/test_metric_salvage.py` set the
+    attribute after construction, and the differential above compares two engines that both take the
+    class default. Measured: commenting out the two assignments in `orchestrator.py::__init__` left
+    all 29 cases in those two files green while `Engine(metric_salvage="off")` silently ran `audit` —
+    i.e. an operator who switched the feature OFF still got salvaged nodes, and the run's own
+    config snapshot said otherwise.
+    """
+    for mode in ("off", "audit", "select"):
+        eng = _mk_engine(tmp_path / f"s-{mode}",
+                         options=EngineOptions.from_settings(Settings(metric_salvage=mode)))
+        assert eng.metric_salvage == mode, "the Settings value never reached the engine"
+    # The explicit keyword beats the bundle, like every other knob.
+    assert _mk_engine(tmp_path / "kw", metric_salvage="off",
+                      options=EngineOptions.from_settings(Settings(metric_salvage="select"))
+                      ).metric_salvage == "off"
+    # …and the repair half, which is a PAID Developer call per salvaged node.
+    assert _mk_engine(tmp_path / "rep-off",
+                      options=EngineOptions.from_settings(
+                          Settings(metric_salvage_repair=False))).metric_salvage_repair is False
+    assert _mk_engine(tmp_path / "rep-on").metric_salvage_repair is True
+
+
+def test_an_unrecognised_salvage_mode_settles_at_the_engine_boundary(tmp_path):
+    """`settle_mode` is applied by `Engine.__init__`, not by the reader — a library caller, a
+    resumed snapshot from a newer binary, or a Strategist can hand over junk, and junk must never
+    mean the PERMISSIVE rung. The bare `Engine(...)` path has no Settings validator in front of it,
+    so this is the only place that holds."""
+    assert _mk_engine(tmp_path / "junk", metric_salvage="SELECT").metric_salvage == "audit"
+    assert _mk_engine(tmp_path / "none", metric_salvage=None).metric_salvage == "audit"

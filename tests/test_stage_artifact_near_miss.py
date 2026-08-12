@@ -117,15 +117,50 @@ def test_a_scan_failure_degrades_to_the_plain_message_rather_than_crashing_the_e
 
 def test_the_stage_row_keeps_the_whole_answer(tmp_path):
     """The per-stage `concern` is where an operator reads this. At the old 300-character cap the row
-    lost its own remediation line, and would now lose the near-miss entirely."""
-    import inspect
+    lost its own remediation line, and would now lose the near-miss entirely.
 
-    from looplab.runtime import command_eval
+    DRIVEN, not pinned. This used to assert `'_artifact_problem)[:700]' in inspect.getsource(...)`,
+    which is one comment away from vacuous — deleting the slice and leaving `# [:700]` behind would
+    satisfy it while the row went back to being truncated. Run a real stage that exits 0, writes its
+    artifact one directory over, and read the `concern` the pipeline actually recorded.
+    """
+    from looplab.runtime.command_eval import run_command_eval
 
-    source = inspect.getsource(command_eval._run_stages)
-    assert '_artifact_problem)[:700]' in source
     _write(tmp_path, ACTUAL)
+    res = run_command_eval(
+        ["python", "-c", "print('RECALL@100: 0.743250')"], str(tmp_path), 60.0,
+        {"kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"},
+        stages=[{"name": "train", "command": ["python", "-c", "print('done')"],
+                 "timeout": 60.0, "expect": {"files": [DECLARED]}}])
+    row = res.stages[-1]
+    assert row["status"] == "expect_failed" and res.failed_stage == "train"
+    concern = row["concern"]
+    # The three things the row has to carry at once — and at the old 300-char cap it carried one.
+    assert "did NOT produce its declared artifact" in concern
+    assert ACTUAL in concern, "the near-miss is what tells the operator which repair to make"
+    assert "Do not delete the declaration" in concern, "the remediation line was the first casualty"
+    assert 300 < len(concern) <= 700, "a cap that truncates the answer is not a bound, it is a bug"
+
+
+def test_two_candidates_produce_a_stable_answer_rather_than_a_filesystem_order_one(tmp_path):
+    """`os.walk` yields directories in FILESYSTEM order (`os.scandir`), so "the first match" was not
+    a rule: with two fresh same-basename files the message — and, through
+    `metric_salvage._relocated`, the file a SALVAGED metric is read out of — could differ between two
+    reads of the identical workdir. The diagnostic half now shows the first in sorted order, which is
+    the same on every read; the salvage half refuses to choose at all."""
+    from looplab.runtime.command_eval import (_artifact_written_elsewhere,
+                                              _artifacts_written_elsewhere)
+
+    root = "vectorsearch/experiments"
+    for sub in ("zzz_last", "aaa_first"):
+        _write(tmp_path, f"{root}/{sub}/final/model.safetensors")
+    found = _artifacts_written_elsewhere(str(tmp_path), DECLARED, time.time() - 60)
+    assert found == sorted(found) and len(found) == 2
+    assert _artifact_written_elsewhere(str(tmp_path), DECLARED, time.time() - 60) == found[0]
+    assert "aaa_first" in found[0], "sorted, not whichever the filesystem yielded first"
+    # The operator still gets told SOMETHING — an ambiguous answer is more useful than none here,
+    # because a human can weigh two paths. (The salvage rung cannot: see
+    # tests/test_metric_salvage.py::test_two_fresh_same_basename_files_refuse_the_relocation…)
     problem = verify_stage_artifacts(
         {"files": [DECLARED]}, str(tmp_path), time.time() - 60, stage="train")
-    assert len(problem) <= 700, "the message must fit the cap it is given"
-    assert ACTUAL in problem[:700]
+    assert found[0] in problem

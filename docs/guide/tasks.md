@@ -128,12 +128,26 @@ What makes a salvaged metric admissible is narrow on purpose:
   failure, a non-zero exit (except the authenticated stall verdict) and a failed `expect.assert` /
   `check` are all refused. A stage that genuinely produced nothing has no fresh value to find, so the
   reader itself is the discriminator;
-* the terminal records `metric_provenance` (which rung, which reader, which stage, whether the cause
-  was then repaired), and under the default policy the node also carries a `metric_salvaged` violation
-  — so it is **evaluated and counted** (budget, UI, digest, lineage) but is not `feasible`, i.e. it
-  cannot be the reported champion or be bred from. A salvaged metric is never silently equal to a
-  measured one. Set the engine's `metric_salvage` to `"select"` to accept salvaged metrics as
-  selectable, or `"off"` for the pre-2026-08-12 behaviour;
+* the terminal records `metric_provenance` (which rung, which reader, which stage, **who wrote the
+  output it read**, the failure it overrode verbatim, and whether the cause was then repaired), and
+  under the default policy the node also carries a `metric_salvaged` violation — so it is
+  **evaluated and counted** (budget, UI, digest, lineage) but is not `feasible`, i.e. it cannot be
+  the reported champion or be bred from. A salvaged metric is never silently equal to a measured one.
+  Set the engine's `metric_salvage` to `"select"` to accept salvaged metrics as selectable, or
+  `"off"` for the pre-2026-08-12 behaviour;
+* **`select` applies only to output the operator's own pipeline produced.** The spec is always the
+  operator's; the OUTPUT is whatever the failing stage printed, and in Developer-manifest mode that
+  is a script the agent wrote — so a Developer whose training script prints `RECALL@100: 0.999` would
+  otherwise have it admitted every time one of its own stages failed a contract. The provenance
+  records `producer: operator_stage | agent_stage` (the protected `score` stage, an operator
+  `cmd.stages` entry and the single-command eval are the operator's), and agent-produced output keeps
+  the `metric_salvaged` violation under `select` too. It is still recovered, recorded and counted —
+  it just does not compete;
+* **the operator's constraints, extra readers and drift cross-check run on it**, exactly as they run
+  on a measured metric. A salvaged node that breaches a bound is infeasible for that bound, and a
+  salvaged value its cross-reader cannot corroborate is refused outright (the node fails and the
+  divergence is recorded as `spec_drift`) — re-admitting a metric the drift gate would have discarded
+  is the one thing salvage must never do;
 * **the cause is repaired in the same breath.** The Developer is asked to fix the declaration that
   broke — committed through the ordinary `node_repaired` event, with `triage_action:
   "salvage_cause_fix"` — and the node terminalizes on the metric it already has, without paying for a

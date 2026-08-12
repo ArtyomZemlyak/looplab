@@ -1090,6 +1090,11 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.extra_metrics = {}
         n.violations = []
         n.feasible = True
+        # WHERE THE OLD METRIC CAME FROM described the old metric, which this epoch just cleared.
+        # Left set, a node reset then failed read `metric=None, status=failed,
+        # metric_provenance={salvaged: True}` — a provenance record for a value that no longer
+        # exists, on the one field a reader consults to decide whether to trust the number.
+        n.metric_provenance = None
         n.trials = []
         n.confirmed_mean = None
         n.confirmed_std = None
@@ -1274,6 +1279,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.extra_metrics = {}
         n.violations = []
         n.feasible = True
+        # See the same line in `_requeue_partition_bound_results`: the provenance describes the metric this
+        # reset just cleared, and a stale `{salvaged: True}` on a failed node is a claim about a
+        # number that is gone.
+        n.metric_provenance = None
         n.trials = []
         n.confirmed_mean = None
         n.confirmed_std = None

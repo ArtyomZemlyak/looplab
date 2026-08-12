@@ -157,7 +157,9 @@ class CrashRepairMixin:
             from looplab.agents.roles import _state_brief
             from looplab.agents.hints import render_hint_directives
             try:
-                brief = _state_brief(state, None)
+                # NOT a proposal: this asks for a `TRIAGE_ACTIONS` verdict, not an `Idea`, so the
+                # board's claim contracts are instructions it cannot follow (see `_state_brief`).
+                brief = _state_brief(state, None, for_proposal=False)
             except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                 brief = ""
             # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is

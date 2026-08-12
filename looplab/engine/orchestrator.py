@@ -2048,6 +2048,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # bind the exact immutable statement/action.  The MAIN TASK serially commits
                 # card_added -> node_building for each idea, then workers only implement.
                 _reserved = [
+                    # `retry_attach` stays off (default): these Ideas came from the shared batch
+                    # proposal and never crossed `_prepare_node_idea._link`, so no earlier pass
+                    # planned an attach for this pass to agree with.
                     self._reserve_node_build(
                         _a, _idea, scored_against=state.best_node_id,
                         source="researcher",
@@ -3078,6 +3081,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # An implement-reset reuses the Node's existing Card. A propose-reset owns a newly
                 # minted Card whose marker id differs until node_created lands, so it must close just
                 # like a bare first build.
+                #
+                # `node is None` is NOT proof of a newly minted card, and reading it as one was the
+                # worst bug the attach disposition shipped: an interrupted repair has no Node either,
+                # and its marker names the PARENT's card. The intent below is unchanged and still
+                # right for what it can see; ownership is settled in `_fail_reserved_build` against
+                # the raw journal, which is the only place that CAN see it
+                # (`card_reservation.py::_reservation_minted_card`). This site deliberately does not
+                # re-derive that — one authority, one spelling.
                 drop_card=(node is None or (card_id is not None and card_id != current_card_id)),
             )
             recovered = True
@@ -4253,10 +4264,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         L5 node-budget refund is proven from.  It stays OPT-IN and defaults False: only a caller that
         can show, from the state it just folded, that no evaluation was ever dispatched for this exact
         lifecycle may claim it — an ordinary failed/aborted build keeps counting exactly as before.
+
+        ``drop_card`` is a caller's INTENT and is no longer sufficient on its own. Since the `attach`
+        disposition (2026-08-12) a reservation's ``card_id`` is not always one that reservation
+        minted, and every close path across `orchestrator`/`speculation`/`ablation` reaches here —
+        one of them `_recover_interrupted_builds`, which for an interrupted build has no Node to read
+        and so cannot see the difference at all. `_reservation_minted_card` is the ownership half,
+        and it is
+        checked HERE rather than at each site precisely because the sites do not know: the same
+        intent that is right for a bare first build ("close the work item nobody will ever own")
+        deleted the PARENT's card from the board after one interrupted repair.
         """
         # Fail closed first. If the process dies between these two appends, the still-live build marker
         # makes recovery retry the terminal, while the Card is already non-selectable. Skip an existing
         # drop receipt so that prefix recovery remains idempotent.
+        if card_id and drop_card and not self._reservation_minted_card(
+                self.store.read_all(), node_id, card_id):
+            # An attached repair, or a card another node's durable idea already names. The
+            # reservation still gets its terminal below; the work item it JOINED stays on the board.
+            drop_card = False
         if card_id and drop_card:
             self._drop_card_once(card_id, reason=reason)
         payload = {
@@ -4538,9 +4564,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 events, state, linked, parents=parents, parent_generations=parent_generations,
                 scored_against=state.best_node_id, source=source, at_node=prospective_node_id,
                 steering_context=steering_context,
-                # Must MATCH `_reserve_node_build`, which plans again under `_id_lock` and refuses
-                # the build when `idea.card_id != plan.card_id`. Planning the attach here and a
-                # fresh mint there (or the reverse) is that refusal, i.e. a silently dropped node.
+                # The proposal half of the build spine, matching `_create_node_scoped`'s
+                # `_reserve_node_build(retry_attach=True)`. This pass runs OUTSIDE `_id_lock`, so the
+                # two can genuinely disagree when a `card_dropped`/`card_merged`/terminal lands
+                # between them; the commit pass is the authority and now RESOLVES that race instead
+                # of returning None and losing the turn in silence (see the fence there).
                 retry_attach=True,
             )
             if plan.disposition == "invalid":
@@ -4700,7 +4728,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return
             reserved = self._reserve_node_build(
                 action, idea, scored_against=proposal_state.best_node_id,
-                source=source, steering_context=steering_context)
+                source=source, steering_context=steering_context,
+                # The ordinary build spine, and the ONE site that commits an attach. `_link` above
+                # planned with the same flag, so a `debug` re-attempt of a question card-N already
+                # asks becomes another node under card-N instead of a byte-identical twin. Spelled
+                # here rather than defaulted inside the reservation: four other callers reach that
+                # method and none of them may attach (see `_plan_native_card`).
+                retry_attach=True)
         if reserved is None:
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
             return
@@ -5245,6 +5279,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             scored_against=state.best_node_id,
             source="operator",
             implementation_ref=implementation_ref,
+            # NO ATTACH HERE, deliberately (`retry_attach` defaults off and this site keeps it off).
+            # An operator `debug` injection against a failed node whose card is live would otherwise
+            # attach — and an attach mints no `card_added`, so BOTH of the two receipts that make
+            # this an operator-authored experiment are silently discarded: `source="operator"` (the
+            # board would credit the Researcher's card) and `implementation_ref`, whose stated
+            # purpose is that folding two injections with ready-made code "would lose executable
+            # work". The human IS the researcher here; their work item is their own.
         )
         if reservation is None:
             raise ValueError("injected idea could not reserve one exact native Card")

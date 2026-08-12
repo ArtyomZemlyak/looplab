@@ -43,7 +43,8 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, NodeStatus, coerce_node
                                  is_developer_error, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
-from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, cause_repair_context,
+from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
+                                           cause_repair_context, salvage_gates,
                                            salvage as salvage_metric)
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
@@ -298,7 +299,17 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if not _durable_row_belongs(d, node_id, generation):
             continue
         n = _durable_int(d.get("attempt"), default=None)
-        attempts = max(attempts, n) if n is not None else attempts + 1
+        # A SALVAGE CAUSE FIX IS NOT AN ATTEMPT. It is one Developer call on a node whose metric was
+        # already recovered, it never re-ran anything, and the loop that wrote it broke immediately
+        # afterwards — so charging it here would take a repair away from a node on RESUME that the
+        # same node in-process never lost. The budget bounds re-evaluations (see the field comment on
+        # `inline_repair_attempts`: "a re-eval costs the same whichever kind of mistake preceded
+        # it"), and this row bought none. Its own bound is invariant #3 — once per lifecycle, gated
+        # on this very row by `_repair_salvaged_cause`.
+        # The ROW still goes into the judge history: "the declaration was corrected here" is real
+        # evidence about the node's trajectory, and hiding it would leave the judge reading a gap.
+        if str(d.get("triage_action") or "") != SALVAGE_CAUSE_TRIAGE_ACTION:
+            attempts = max(attempts, n) if n is not None else attempts + 1
         unparseable = max(unparseable, _durable_int(d.get("unparseable_repairs")))
         row = {"attempt": n if n is not None else attempts,
                "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
@@ -308,6 +319,28 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
             row["changed"] = list(d.get("changed") or [])
         rows.append(row)
     return attempts, rows, unparseable
+
+
+def _durable_salvage_cause_fix(events, node_id: int, generation: int) -> bool:
+    """Has this node's lifecycle ALREADY had its salvaged metric's cause fixed, per the log?
+
+    Invariant #3 for `_repair_salvaged_cause`: a paid side effect has to be gated on a durable event
+    or a resume repeats it. The window is small and completely ordinary — the `node_repaired` row is
+    appended, then the loop breaks, then the terminal is written under a different lock acquisition —
+    and a process that dies inside it leaves a node with the fix committed, no terminal, and (before
+    this) a resume that re-evaluated, re-salvaged and bought a SECOND Developer call to make the same
+    edit. The row is keyed exactly as the other durable ledgers key theirs (`_durable_row_belongs`),
+    so a `node_reset` genuinely earns a fresh fix for the new lifecycle.
+    """
+    for e in events or []:
+        if e.type != EV_NODE_REPAIRED:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        if str(d.get("triage_action") or "") == SALVAGE_CAUSE_TRIAGE_ACTION:
+            return True
+    return False
 from looplab.events.replay import fold
 # The fold's OWN generation rule, CALLED rather than re-derived — `_durable_row_belongs` above is
 # the single place the durable ledgers key a raw row, and it must agree with `replay` by
@@ -512,9 +545,19 @@ class EvaluateMixin:
     # These stay CLASS attributes and are what `Engine.__init__` assigns the settled `_opt` values
     # to — the same shape the mixin was written with, so a test or a resumed Engine subclass can
     # still set them directly without going through Settings.
+    #
+    # A CLASS DEFAULT IS ALSO WHAT MADE THE WIRING UNTESTABLE, which is worth saying beside it: a
+    # test that ASSIGNS the attribute after construction passes whether or not `__init__` ever reads
+    # `metric_salvage` — measured, commenting out those two assignments left 29 cases green while
+    # `Engine(metric_salvage="off")` silently ran `audit`. Drive the policy through the
+    # CONSTRUCTOR (`tests/test_engine_options.py::test_the_salvage_policy_reaches_the_engine_*`,
+    # `tests/test_metric_salvage.py::_drive`), never by setting the attribute.
     metric_salvage: str = DEFAULT_METRIC_SALVAGE
     # Whether a salvaged node still asks the Developer to fix the CAUSE (the broken declaration).
-    # Rides on the inline-repair machinery and every one of its bounds; off when inline repair is off.
+    # Its bounds are its OWN and are enumerated in `_repair_salvaged_cause` — the two feature flags,
+    # `inline_repair_reasons`, a repair-capable Developer, and once per lifecycle gated on its own
+    # event. It deliberately does NOT spend an inline-repair attempt: that budget bounds
+    # re-evaluations and this fix buys none.
     metric_salvage_repair: bool = True
 
     def _assert_speculative_selection_confirmed(self, state, node) -> None:
@@ -913,18 +956,65 @@ class EvaluateMixin:
         Best-effort in the strict sense: a salvage read walks the candidate's workdir, and a
         diagnostic must never be the thing that turns a failed node into a crashed RUN. Anything
         raised here degrades to "nothing to salvage", which is exactly today's behaviour.
+
+        It also binds the OPERATOR'S OWN stage list, which is what lets the record say whether the
+        bytes the reader read came from a stage the operator declared or from the Developer's
+        manifest — the difference `metric_salvage.violation_rows` enforces `select` on.
         """
         spec = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else None
         if not spec:
             return None                 # the solution.py path has no declared reader to salvage with
         try:
-            return salvage_metric(res, reason, spec.get("metric"), str(workdir), since,
-                                  mode=getattr(self, "metric_salvage", DEFAULT_METRIC_SALVAGE))
+            return salvage_metric(res, reason, spec.get("metric"),
+                                  self._salvage_reader_root(workdir), since,
+                                  mode=getattr(self, "metric_salvage", DEFAULT_METRIC_SALVAGE),
+                                  operator_stages=spec.get("stages") or ())
         except Exception:  # noqa: BLE001 — salvage may never be the thing that fails the eval
             return None
 
+    def _salvage_reader_root(self, workdir) -> str:
+        """The directory the operator's FILE readers are relative to, for a salvage read.
+
+        `run_command_eval` resolves every reader against its `cwd` — `_sandbox_cwd(workdir,
+        eval_spec["cwd"])` — not against the node workdir, and the two differ for any task whose
+        `cmd.cwd` is a subdirectory. Salvage handed the reader the node workdir, so on such a task a
+        declared `file_json` path was looked for one directory up from where the eval writes it: the
+        rung would abstain and the relocation scan would search a wider tree than the eval's own.
+
+        Falls back to the workdir when the engine has no workspace bound (the pure-rule tests
+        construct a bare stub), because a salvage that cannot resolve its root must degrade to
+        today's behaviour rather than raise.
+        """
+        spec = getattr(self, "_eval_spec", None)
+        cwd_spec = spec.get("cwd", ".") if isinstance(spec, dict) else "."
+        try:
+            return str(self._sandbox_cwd(workdir, cwd_spec))
+        except Exception:  # noqa: BLE001
+            return str(workdir)
+
+    def _salvage_qualifying_gates(self, salvaged, res, workdir, since: Optional[float]) -> dict:
+        """The operator's CONSTRAINTS / extra readers / drift cross-check, applied to a salvaged
+        metric — `engine/metric_salvage.py::salvage_gates` owns the rules; this binds the spec.
+
+        A salvaged metric is a metric, and these are the gates that decide whether a metric
+        qualifies. `run_command_eval` computes them in its tail, which every early return that
+        produces a salvageable failure skips — so before this a salvaged node reached its terminal
+        with an EMPTY `violations` list and, under `metric_salvage="select"`, could become champion
+        with the operator's hard constraints never applied and the drift cross-check never run.
+        """
+        spec = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else None
+        if not spec:
+            return {"violations": [], "extra_metrics": {}, "drift": None}
+        try:
+            return salvage_gates(
+                spec, salvaged.metric, getattr(res, "stdout", "") or "",
+                self._salvage_reader_root(workdir), since,
+                enforce_drift=(getattr(self, "eval_trust_mode", "") == "ratify_freeze_drift"))
+        except Exception:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
+            return {"violations": [], "extra_metrics": {}, "drift": None}
+
     async def _repair_salvaged_cause(self, node, state, workdir, generation: int,
-                                     salvaged, err: str, attempt: int, stamp) -> tuple:
+                                     salvaged, err: str, reason: str, attempt: int, stamp) -> tuple:
         """Ask the Developer to fix the CAUSE of a salvaged node's failure, WITHOUT re-evaluating it.
 
         THE OTHER HALF OF THE ASK, and the half that stops salvage from becoming a second silent
@@ -944,23 +1034,55 @@ class EvaluateMixin:
         the result, and why the terminal's `metric_provenance` records `cause_repaired` — a reader
         who cares can see that a correction landed after the measurement.
 
-        Every bound is the inline-repair loop's own, not a new one: the feature flag, a Developer
-        that can repair, the durable attempt ledger, and `_repair_provider_failure`'s verdict on
-        whether the call produced a repair at all. It appends the same `node_repaired` event, so a
-        resume reads this attempt back exactly like any other and cannot spend it twice.
+        WHAT ACTUALLY BOUNDS IT, stated as the list it is, because the first version of this
+        docstring claimed the inline-repair loop's bounds and the code checked none of them:
 
-        Returns `(node, attempt, repaired)`. NEVER raises and never appends a terminal — the caller
-        owns the node's single terminal event (invariant #2).
+          * `metric_salvage_repair` and `inline_repair` — the two feature flags;
+          * `inline_repair_reasons` — the operator's own answer to "may this failure class buy a
+            Developer call at all". A run narrowed to `("crash",)` was still paying for a cause fix
+            on an `expect_failed` node, which is precisely the spend that setting exists to refuse;
+          * a Developer that can repair, and something to repair;
+          * ONCE PER LIFECYCLE, gated on its own durable `node_repaired` row (invariant #3). A crash
+            between that row and the terminal made a resume pay for a SECOND identical Developer
+            call; now the row is read back first and the fix is reported as already landed.
+
+        AND NOT the inline-repair ATTEMPT budget, which is the one bound this deliberately does not
+        borrow. That budget bounds re-EVALUATIONS — "a re-eval costs the same whichever kind of
+        mistake preceded it" — and this fix buys none: it is one Developer call, at most once per
+        lifecycle, on a node that already has its number and is about to terminalize. Refusing it
+        because the re-evaluation allowance is spent would leave the broken declaration in place on
+        exactly the nodes that struggled most, which is the failure this whole half exists to
+        prevent. So `attempt` is neither read nor incremented here, and
+        `_durable_repair_ledger` excludes `salvage_cause_fix` rows from the attempt count for the
+        same reason — otherwise a resumed node silently lost one repair to a fix it never re-ran.
+
+        Returns `(node, attempt, repaired)`. NEVER raises — including on `BudgetExceeded`, which is
+        the one exception this method must swallow rather than propagate: `_evaluate`'s callers wrap
+        it in try/FINALLY, not except (`orchestrator.py`'s dispatchers), so a budget stop raised out
+        of an OPTIONAL best-effort fix leaves the node with NO TERMINAL AT ALL, discards the metric
+        the salvage just recovered, and the run re-dies on resume. A budget that has run out means
+        "stop spending", and returning here spends nothing; the loop's own budget checks stop the
+        run at the next decision point, one that owns no half-written node.
+        It never appends a terminal either — the caller owns the node's single terminal event
+        (invariant #2).
         """
         if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
+                and reason in self._inline_repair_reasons
                 and callable(getattr(self.developer, "repair", None))
                 and (node.code or node.files or self._repo_spec)):
             return node, attempt, False
+        # INVARIANT #3, and the cheapest possible spelling of it: the fix's own event. Read BEFORE
+        # the paid call, from the durable log rather than from a loop local, because the case it
+        # covers is a process that died between appending the row and writing the terminal.
+        if _durable_salvage_cause_fix(self.store.read_all(), node.id, generation):
+            return node, attempt, True
         with self.tracer.span("salvage_cause_repair", node_id=node.id, attempt=attempt + 1):
             try:
                 new_code = self._repair(node, cause_repair_context(salvaged, err), state)
             except BudgetExceeded:
-                raise      # the hard budget stop propagates, exactly as everywhere else in this file
+                # See the docstring: propagating this out of a best-effort fix costs the node its
+                # terminal, because the callers' handler is a `finally`, not an `except`.
+                return node, attempt, False
             except Exception:  # noqa: BLE001 — a failed cause fix must not cost the salvaged metric
                 return node, attempt, False
         # Snapshot the developer's per-call audit state before the next `await`, for the reason the
@@ -984,22 +1106,25 @@ class EvaluateMixin:
                                                    repaired_files, repaired_deleted)
         if not changed and not repaired_deleted and not (new_code or "").strip():
             return node, attempt, False          # the model changed nothing; nothing to commit
-        attempt += 1
         async with self._write_lock:
             # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
             # the commit rather than adopting it — the caller's terminal is already stale-generation
             # and the fold will charge only its eval_seconds.
             if fold(self.store.read_all()).nodes[node.id].attempt != generation:
-                return node, attempt - 1, False
+                return node, attempt, False
             _payload = {
                 "node_id": node.id, "generation": generation,
+                # The ORDINAL this row FOLLOWS, not a new one. It is not an inline-repair attempt —
+                # nothing re-ran — and the ledger keys the budget off `triage_action` rather than off
+                # this number, which stays so the judge history reads in order.
                 "attempt": attempt,
                 "files": repaired_files, "deleted": repaired_deleted,
                 "error_in": err,
                 # A DISTINCT verdict, not "repair". `triage_action` is what tells a later reader (and
                 # `_durable_repair_ledger`'s judge history) what each row was FOR, and a cause fix
                 # that was never re-evaluated is not the same event as a repair the loop then tested.
-                "triage_action": "salvage_cause_fix",
+                # It is also what the ledger and the resume gate key on — hence the shared constant.
+                "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
                 "rationale": (f"metric salvaged ({salvaged.source}); fixing the declaration that "
                               f"failed, without re-evaluating"),
                 "changed": sorted(changed)[:12] or (["<whole-file solution>"] if new_code else []),
@@ -1522,11 +1647,33 @@ class EvaluateMixin:
                 # salvaged node does not carry its broken manifest into its next attempt.
                 salvaged = self._salvage_eval_metric(res, reason, workdir, _t0)
                 if salvaged is not None:
-                    res.metric = salvaged.metric
-                    ok = True
-                    node, attempt, salvage_cause_repaired = await self._repair_salvaged_cause(
-                        node, state, workdir, generation, salvaged, err, attempt, _stamp_workdir)
-                    break
+                    # THE GATES THAT QUALIFY A METRIC, applied to this one before anything downstream
+                    # can treat it as measured. `run_command_eval` runs the operator's constraints,
+                    # extra readers and drift cross-check in its TAIL, which every early return that
+                    # produces a salvageable failure skips — so a salvaged node used to reach the
+                    # terminal with `violations == []` and, under `metric_salvage="select"`, could
+                    # become champion with the operator's hard bounds never applied.
+                    _gates = self._salvage_qualifying_gates(salvaged, res, workdir, _t0)
+                    if _gates["drift"]:
+                        # The cross-reader could not corroborate the salvaged value. `drift` is in
+                        # NEVER_SALVAGED_REASONS precisely because re-admitting a metric the trust
+                        # gate discarded is worse than losing it — the same fact, found one step
+                        # later, gets the same answer. The divergence is recorded (the terminal block
+                        # appends `spec_drift` from `res.drift`) and the node keeps failing.
+                        res.drift = _gates["drift"]
+                        err = (err + "\n[metric salvage refused: the drift cross-check could not "
+                                     f"corroborate the recovered metric {salvaged.metric!r}]")
+                        salvaged = None
+                    else:
+                        res.metric = salvaged.metric
+                        res.violations = list(res.violations or []) + _gates["violations"]
+                        res.extra_metrics = {**(res.extra_metrics or {}),
+                                             **_gates["extra_metrics"]} or None
+                        ok = True
+                        node, attempt, salvage_cause_repaired = await self._repair_salvaged_cause(
+                            node, state, workdir, generation, salvaged, err, reason, attempt,
+                            _stamp_workdir)
+                        break
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
                 # agent can reject the idea. This is what lets torch/XGBoost/CatBoost (e.g. a GRU
@@ -1972,15 +2119,23 @@ class EvaluateMixin:
                         #     opt-in to a salvaged metric competing on equal terms.
                         _prov = salvaged.as_event()
                         _prov["cause_repaired"] = bool(salvage_cause_repaired)
+                        # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
+                        # A node that reads as evaluated must still be able to tell whoever looks
+                        # what went wrong, or the salvage has merely moved the silence.
+                        #
+                        # INSIDE the provenance record, not beside it as its own event key. It was a
+                        # top-level `salvaged_error` and the fold ignores unknown keys — so the one
+                        # place it was meant to be read (a replayed `RunState`, which is what the UI,
+                        # the report and every read-model see) never had it, and `looplab replay`
+                        # silently dropped the only account of what the node's failure had been.
+                        # `metric_provenance` IS folded, so putting it here is what makes the promise
+                        # true rather than adding a second field for the fold to learn.
+                        _prov["salvaged_error"] = str(err)[:600]
                         _eval_payload["metric_provenance"] = _prov
                         _eval_payload["violations"] = (
                             list(_eval_payload["violations"])
                             + salvaged.violation_rows(getattr(self, "metric_salvage",
                                                               DEFAULT_METRIC_SALVAGE)))
-                        # The failure the salvage overrode, kept verbatim on the SUCCESS terminal.
-                        # A node that reads as evaluated must still be able to tell whoever looks
-                        # what went wrong, or the salvage has merely moved the silence.
-                        _eval_payload["salvaged_error"] = str(err)[:600]
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

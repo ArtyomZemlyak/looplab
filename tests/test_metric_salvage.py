@@ -162,14 +162,59 @@ def test_the_provenance_record_and_the_enforcement_row_are_two_different_things(
     """The record says HOW; the violation row is what any of it costs. Under `select` the operator
     has accepted salvaged metrics as selectable, so only the record remains."""
     s = ms.SalvagedMetric(metric=V5_VALUE, condition="artifact_contract", source="declared_reader",
-                          reader="stdout_regex", stage="train")
+                          reader="stdout_regex", stage="score", producer=ms.OPERATOR_PRODUCED)
     assert s.as_event() == {"salvaged": True, "condition": "artifact_contract",
-                            "source": "declared_reader", "reader": "stdout_regex", "stage": "train"}
+                            "source": "declared_reader", "reader": "stdout_regex", "stage": "score",
+                            "producer": "operator_stage"}
     rows = s.violation_rows("audit")
     assert [r["name"] for r in rows] == ["metric_salvaged"]
     assert rows[0]["value"] == V5_VALUE and rows[0]["salvage"]["salvaged"] is True
     assert s.violation_rows("select") == []
     assert s.violation_rows("off") == []
+
+
+# --------------------------------------------------------------------------------------------
+# WHOSE BYTES the operator's reader was asked about — the trust question the record must answer
+# --------------------------------------------------------------------------------------------
+
+def test_the_record_names_who_wrote_the_output_the_reader_read():
+    """The SPEC is the operator's; the OUTPUT is whatever the failing stage printed, and in
+    Developer-manifest mode that is a script the AGENT wrote. `run_command_eval`'s primary read runs
+    over the FINAL command's stdout (the protected `score` stage); the `expect_failed` early return
+    sets stdout to the failing stage's."""
+    operator = [{"name": "prep"}, {"name": "train"}]
+    assert ms.stage_producer(operator, "train") == ms.OPERATOR_PRODUCED
+    assert ms.stage_producer(operator, "score") == ms.OPERATOR_PRODUCED   # the protected stage
+    assert ms.stage_producer(operator, "") == ms.OPERATOR_PRODUCED        # single-command eval
+    # The Developer's own manifest stage, which is the v5 shape.
+    assert ms.stage_producer(operator, "mine") == ms.AGENT_PRODUCED
+    assert ms.stage_producer([], "train") == ms.AGENT_PRODUCED
+    # Total over junk, and conservative in the direction that matters.
+    assert ms.stage_producer(None, "train") == ms.AGENT_PRODUCED
+    assert ms.stage_producer([{"nope": 1}, "prep"], "prep") == ms.OPERATOR_PRODUCED
+
+
+def test_select_does_not_admit_a_number_the_agents_own_script_printed():
+    """`select` means "a metric MY declared reader recovered may compete". It never meant "a number
+    the Developer's training script printed may compete", which is what it silently bought whenever
+    the failing stage came out of the agent's manifest — a Developer whose script prints
+    `RECALL@100: 0.999` would have it admitted every time one of its own stages failed a contract.
+    The exclusion is the same `metric_salvaged` row; only its trigger is wider."""
+    agent = ms.SalvagedMetric(metric=0.999, condition="artifact_contract", source="declared_reader",
+                              reader="stdout_regex", stage="train", producer=ms.AGENT_PRODUCED)
+    assert [r["name"] for r in agent.violation_rows("select")] == ["metric_salvaged"]
+    assert [r["name"] for r in agent.violation_rows("audit")] == ["metric_salvaged"]
+    assert agent.violation_rows("off") == []
+    # …and the row explains itself: the provenance rides along, producer included.
+    assert agent.violation_rows("select")[0]["salvage"]["producer"] == "agent_stage"
+    # An operator-declared stage under the same rung competes, which is the setting's whole point.
+    operator = ms.SalvagedMetric(metric=0.999, condition="artifact_contract",
+                                 source="declared_reader", reader="stdout_regex", stage="score",
+                                 producer=ms.OPERATOR_PRODUCED)
+    assert operator.violation_rows("select") == []
+    # An unspecified producer is treated as the agent's, never as the operator's.
+    assert ms.SalvagedMetric(metric=1.0, condition="eval_failed", source="declared_reader",
+                             reader="stdout_regex").producer == ms.AGENT_PRODUCED
 
 
 def test_off_salvages_nothing_at_all(tmp_path):
@@ -223,26 +268,32 @@ def _manifest(declared):
     }]})
 
 
-def _drive(tmp_path, *, manifest, dev=None, name="run", salvage=None, cause_repair=True, **kw):
+def _drive(tmp_path, *, manifest, dev=None, name="run", salvage=None, cause_repair=True,
+           eval_spec=None, **kw):
     """Seed one node with a stage manifest and run the REAL `_evaluate` over it.
 
-    `salvage`/`cause_repair` are set as ATTRIBUTES rather than `Engine(...)` keywords: the policy
-    lives on `EvaluateMixin` as a class attribute until it is promoted to a `Settings` field (see
-    that attribute's comment), and `Engine.__init__` refuses an unknown keyword on purpose.
+    `salvage`/`cause_repair` go in as `Engine(...)` KEYWORDS, which is the whole
+    `Settings -> EngineOptions -> settle_mode -> Engine` chain this feature's policy actually
+    travels. They used to be assigned as attributes AFTER construction, and that made every case in
+    this file — 29 of them — pass with the wiring commented out: `Engine(metric_salvage="off")`
+    silently yielded `audit` and nothing went red, because no test ever asked the constructor for a
+    mode. `tests/test_engine_options.py::test_the_salvage_policy_reaches_the_engine_*` drives the
+    same chain from `Settings`; this keeps the end-to-end cases honest about where the value came
+    from.
     """
     run_dir = tmp_path / name
     dev = dev if dev is not None else _Dev()
     kw.setdefault("auto_install_deps", False)
     kw.setdefault("inline_repair", True)
+    if salvage is not None:
+        kw["metric_salvage"] = salvage
+    kw["metric_salvage_repair"] = cause_repair
     eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_Researcher(), developer=dev,
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1), **kw)
-    if salvage is not None:
-        eng.metric_salvage = salvage
-    eng.metric_salvage_repair = cause_repair
     # A command-eval run: the operator's `cmd` is the protected final `score` stage and the
     # Developer's `looplab_stages.json` supplies the preceding ones — exactly v5's shape.
-    eng._eval_spec = {"command": ["python", "-c", "print('score stage never runs')"],
-                      "cwd": ".", "metric": dict(V5_METRIC), "timeout": 120.0}
+    eng._eval_spec = eval_spec or {"command": ["python", "-c", "print('score stage never runs')"],
+                                   "cwd": ".", "metric": dict(V5_METRIC), "timeout": 120.0}
     eng.store.append("run_started",
                      {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
     eng.store.append("node_created", {
@@ -278,7 +329,14 @@ def test_the_v5_node_comes_out_evaluated_with_the_metric_it_had_already_computed
     # rewrite what happened.
     rows = [e for e in evs if e.type == "stage_finished" and e.data.get("node_id") == 0]
     assert [r.data["status"] for r in rows] == ["expect_failed"]
-    assert "did NOT produce its declared artifact" in terminals[0].data["salvaged_error"]
+    # The failure the salvage overrode, kept verbatim — INSIDE `metric_provenance`, which is the
+    # folded field. As a top-level `salvaged_error` key the fold ignored it, so the one reader it
+    # was written for (a replayed RunState: the UI, the report, `looplab replay`) never saw it.
+    assert "did NOT produce its declared artifact" in (
+        terminals[0].data["metric_provenance"]["salvaged_error"])
+    assert "salvaged_error" not in terminals[0].data, "a key the fold ignores is a key nobody reads"
+    assert "did NOT produce its declared artifact" in (
+        fold(evs).nodes[0].metric_provenance["salvaged_error"])
 
 
 def test_the_salvaged_metric_is_marked_as_salvaged_and_says_which_reader_found_it(tmp_path):
@@ -308,14 +366,36 @@ def test_the_selection_path_can_tell_a_salvaged_metric_from_a_measured_one(tmp_p
 
 
 def test_select_mode_lets_the_operator_accept_a_salvaged_metric_as_first_class(tmp_path):
-    """Same run, one setting different: the provenance survives, the exclusion does not."""
+    """Same run, one setting different: the provenance survives, the exclusion does not.
+
+    The stage is one the OPERATOR declared, which is what `select` can speak for — see
+    `test_select_never_admits_the_agents_own_stage_end_to_end` for the same run with the same
+    setting over a Developer-manifest stage."""
+    # The operator's OWN pipeline (`cmd.stages`), which wins over the Developer's manifest — the
+    # same `train` stage, declared by the person who owns the scoring path.
+    spec = {"command": ["python", "-c", "print('score stage never runs')"], "cwd": ".",
+            "metric": dict(V5_METRIC), "timeout": 120.0,
+            "stages": json.loads(_manifest(DECLARED))["stages"]}
     evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="sel",
-                             salvage="select", cause_repair=False)
+                             salvage="select", cause_repair=False, eval_spec=spec)
     st = fold(evs)
     assert st.nodes[0].metric == pytest.approx(V5_VALUE)
     assert st.nodes[0].violations == [] and st.nodes[0].feasible is True
     assert st.nodes[0] in st.feasible_nodes()
     assert _terminals(evs)[0].data["metric_provenance"]["salvaged"] is True
+    assert _terminals(evs)[0].data["metric_provenance"]["producer"] == "operator_stage"
+
+
+def test_select_never_admits_the_agents_own_stage_end_to_end(tmp_path):
+    """The v5 shape under `select`: the number was printed by the Developer's `train` script, so the
+    operator's opt-in does not reach it and the node stays out of champion selection."""
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="sel-agent",
+                             salvage="select", cause_repair=False)
+    st = fold(evs)
+    assert st.nodes[0].metric == pytest.approx(V5_VALUE)     # still recovered, still counted
+    assert [v["name"] for v in st.nodes[0].violations] == ["metric_salvaged"]
+    assert st.nodes[0].feasible is False and st.nodes[0] not in st.feasible_nodes()
+    assert _terminals(evs)[0].data["metric_provenance"]["producer"] == "agent_stage"
 
 
 def test_off_restores_the_old_behaviour_exactly(tmp_path):
@@ -416,3 +496,214 @@ def test_a_dead_provider_during_the_cause_fix_never_costs_the_salvaged_metric(tm
     assert terminals[0].data["metric_provenance"]["cause_repaired"] is False
     assert [e for e in evs if e.type == "node_repaired"] == []
     assert [e for e in evs if e.type == "pause"] == [], "a cause fix must not pause the run"
+
+
+# --------------------------------------------------------------------------------------------
+# THE CAUSE FIX'S OWN BOUNDS — it claimed the inline-repair loop's and honoured none of them
+# --------------------------------------------------------------------------------------------
+
+class _CountingDev(_Dev):
+    """Counts the Developer calls, which is the unit the bounds below are denominated in."""
+
+    def __init__(self, fixed_manifest=None):
+        super().__init__(fixed_manifest)
+        self.calls = 0
+
+    def repair(self, idea, code, error):
+        self.calls += 1
+        return super().repair(idea, code, error)
+
+
+def test_a_narrowed_inline_repair_reasons_is_honoured_by_the_cause_fix(tmp_path):
+    """`inline_repair_reasons` is the operator's answer to "may this failure class buy a Developer
+    call at all". A run narrowed to `("crash",)` still bought one for an `expect_failed` node,
+    because the cause fix checked the feature flag and nothing else — while its docstring claimed
+    "every bound is the inline-repair loop's own"."""
+    dev = _CountingDev(fixed_manifest=_manifest(ACTUAL))
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), dev=dev,
+                             inline_repair_reasons=("crash",))
+    terminals = _terminals(evs)
+    assert len(terminals) == 1 and terminals[0].type == "node_evaluated"
+    assert terminals[0].data["metric"] == pytest.approx(V5_VALUE)     # the metric is still salvaged
+    assert dev.calls == 0, "an excluded reason must not buy a Developer call"
+    assert [e for e in evs if e.type == "node_repaired"] == []
+    assert terminals[0].data["metric_provenance"]["cause_repaired"] is False
+
+
+def test_a_budget_stop_during_the_cause_fix_still_leaves_the_node_a_terminal(tmp_path):
+    """THE RUN-KILLER in the optional half. `_evaluate`'s callers wrap it in try/FINALLY, not except
+    (`orchestrator.py`'s dispatchers), so a `BudgetExceeded` raised out of this best-effort fix left
+    the node with NO terminal event at all — discarding the metric the salvage had just recovered
+    and re-dying on every resume. A budget that has run out means stop spending; returning here
+    spends nothing."""
+    from looplab.core.errors import BudgetExceeded
+
+    class _BrokeDev(_CountingDev):
+        def repair(self, idea, code, error):
+            self.calls += 1
+            raise BudgetExceeded("run budget exhausted")
+
+    dev = _BrokeDev()
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), dev=dev)
+    terminals = _terminals(evs)
+    assert dev.calls == 1, "the fix was attempted (else this proves nothing)"
+    assert len(terminals) == 1 and terminals[0].type == "node_evaluated"
+    assert terminals[0].data["metric"] == pytest.approx(V5_VALUE)
+    assert terminals[0].data["metric_provenance"]["cause_repaired"] is False
+
+
+def test_a_resume_after_the_fix_landed_does_not_pay_for_it_twice(tmp_path):
+    """INVARIANT #3, and the window is completely ordinary: the `node_repaired` row is appended,
+    the loop breaks, and the terminal is written under a later lock acquisition. A process that dies
+    in between left the fix committed and no terminal — and the resume re-evaluated, re-salvaged and
+    bought a SECOND identical Developer call. Nothing read the row back."""
+    dev = _CountingDev(fixed_manifest=_manifest(ACTUAL))
+    run_dir = tmp_path / "resumed"
+    run_dir.mkdir(parents=True)
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": "print('unused')\n",
+        "files": {"looplab_stages.json": _manifest(DECLARED)}})
+    # …the durable row a crashed process left behind.
+    store.append("node_repaired", {
+        "node_id": 0, "generation": 0, "attempt": 0, "files": {}, "deleted": [],
+        "error_in": "stage 'train' failed its declared artifact contract",
+        "triage_action": ms.SALVAGE_CAUSE_TRIAGE_ACTION, "rationale": "metric salvaged",
+        "changed": ["looplab_stages.json"], "stages_passed": None, "salvaged_metric": V5_VALUE})
+
+    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_Researcher(), developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True)
+    eng._eval_spec = {"command": ["python", "-c", "print('score stage never runs')"],
+                      "cwd": ".", "metric": dict(V5_METRIC), "timeout": 120.0}
+
+    async def _bounded() -> bool:
+        with anyio.move_on_after(300) as scope:
+            await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded), "the eval did not terminate"
+    evs = list(EventStore(run_dir / "events.jsonl").read_all())
+    assert dev.calls == 0, "the fix had already landed; a resume must not re-buy it"
+    assert len([e for e in evs if e.type == "node_repaired"]) == 1
+    terminals = _terminals(evs)
+    assert len(terminals) == 1 and terminals[0].type == "node_evaluated"
+    # …and the terminal still reports the fix as landed, because it did.
+    assert terminals[0].data["metric_provenance"]["cause_repaired"] is True
+
+
+def test_the_cause_fix_does_not_spend_one_of_the_nodes_repair_attempts(tmp_path):
+    """The ledger charges what a resume must not refund, and a cause fix is not in that class: it
+    re-evaluated nothing, so charging it takes a repair away from a resumed node that the same node
+    in-process never lost. The ROW still reaches the judge history — "the declaration was corrected
+    here" is real evidence about the trajectory."""
+    from looplab.engine.evaluate import _durable_repair_ledger
+
+    class _E:
+        def __init__(self, type_, data):
+            self.type, self.data = type_, data
+
+    events = [
+        _E("node_repaired", {"node_id": 0, "generation": 0, "attempt": 1, "error_in": "boom",
+                             "rationale": "fix the import", "triage_action": "repair"}),
+        _E("node_repaired", {"node_id": 0, "generation": 0, "attempt": 2, "error_in": "contract",
+                             "rationale": "metric salvaged; fixing the declaration",
+                             "triage_action": ms.SALVAGE_CAUSE_TRIAGE_ACTION}),
+    ]
+    attempts, rows, _unparseable = _durable_repair_ledger(events, 0, 0)
+    assert attempts == 1, "only the repair that bought a re-evaluation is charged"
+    assert len(rows) == 2, "the judge still sees the correction"
+
+
+# --------------------------------------------------------------------------------------------
+# THE GATES THAT QUALIFY A METRIC — skipped entirely for a salvaged node
+# --------------------------------------------------------------------------------------------
+
+def _operator_spec(**extra):
+    spec = {"command": ["python", "-c", "print('score stage never runs')"], "cwd": ".",
+            "metric": dict(V5_METRIC), "timeout": 120.0,
+            "stages": json.loads(_manifest(DECLARED))["stages"]}
+    spec.update(extra)
+    return spec
+
+
+def test_the_operators_constraints_are_applied_to_a_salvaged_metric(tmp_path):
+    """`run_command_eval` reads the constraints in its TAIL, which every early return that produces
+    a salvageable failure skips — so `res.violations` was EMPTY for every salvaged node. Under
+    `select` (advertised as "competes on equal terms") that read as "no bound was breached" when the
+    truth was "no bound was ever evaluated", and such a node could become champion."""
+    spec = _operator_spec(constraints=[{"name": "latency_ms", "kind": "stdout_regex",
+                                        "pattern": "LATENCY: ([0-9.]+)", "max": 100.0}])
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="cons",
+                             salvage="select", cause_repair=False, eval_spec=spec)
+    st = fold(evs)
+    node = st.nodes[0]
+    assert node.metric == pytest.approx(V5_VALUE)
+    # The stage never printed a latency, so the bound is unverifiable — which `_violations` counts
+    # as a violation ("never a silent pass"), exactly as it would for a measured metric.
+    assert [v["name"] for v in node.violations] == ["latency_ms"]
+    assert node.feasible is False and node not in st.feasible_nodes()
+
+
+def test_a_salvaged_metric_the_drift_reader_cannot_corroborate_is_refused(tmp_path):
+    """`drift` is in NEVER_SALVAGED_REASONS because re-admitting a metric the trust gate discarded is
+    worse than losing it. The cross-check never ran on the salvage path at all, so the same value
+    the gate would have thrown away was admitted one step later."""
+    spec = _operator_spec(cross_check={"kind": "stdout_regex", "pattern": "CROSS: ([0-9.]+)"})
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="drift",
+                             salvage="select", cause_repair=False, eval_spec=spec,
+                             eval_trust_mode="ratify_freeze_drift", inline_repair=False)
+    terminals = _terminals(evs)
+    assert len(terminals) == 1 and terminals[0].type == "node_failed"
+    assert "could not corroborate" in terminals[0].data["error"]
+    assert [e.data["primary"] for e in evs if e.type == "spec_drift"] == [pytest.approx(V5_VALUE)]
+    assert fold(evs).nodes[0].metric is None
+
+
+def test_the_extra_readers_still_report_on_a_salvaged_node(tmp_path):
+    """The same tail carries the audit-only `metrics` readers. They are not a gate, so a missing one
+    is simply absent — but a present one must not vanish because the eval failed."""
+    spec = _operator_spec(metrics={"recall": {"kind": "stdout_regex",
+                                              "pattern": "RECALL@100: ([0-9.]+)"}})
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="extra",
+                             salvage="select", cause_repair=False, eval_spec=spec)
+    assert fold(evs).nodes[0].extra_metrics == {"recall": pytest.approx(V5_VALUE)}
+
+
+def test_a_constraint_reader_that_execs_agent_code_is_never_run(tmp_path):
+    """`run_command_eval` REFUSES an `adapter` in metrics/constraints — in its tail, which a salvaged
+    eval never reaches. Skipping it here would be a silent pass on an operator's hard bound;
+    executing it would be the trust boundary. It counts as unverifiable."""
+    (tmp_path / "LOOPLAB_adapter.py").write_text("raise SystemExit('EXECUTED')\n", encoding="utf-8")
+    gates = ms.salvage_gates(
+        {"constraints": [{"name": "budget", "kind": "adapter", "path": "LOOPLAB_adapter.py",
+                          "max": 1.0}]},
+        0.5, "", str(tmp_path), None)
+    assert [v["name"] for v in gates["violations"]] == ["budget"]
+    assert "adapter" in gates["violations"][0]["unverifiable"]
+
+
+# --------------------------------------------------------------------------------------------
+# the relocation scan, when the workdir holds more than one candidate
+# --------------------------------------------------------------------------------------------
+
+def test_two_fresh_same_basename_files_refuse_the_relocation_rather_than_pick_one(tmp_path):
+    """`os.walk` yields directories in FILESYSTEM order, so "the first match" is not a rule — the
+    same workdir can answer differently on two reads. The diagnostic half can show a human the
+    nearest miss; a salvage promotes the NUMBER inside the file it names, so it abstains."""
+    for sub, value in (("a", 0.1), ("b", 0.9)):
+        d = tmp_path / "experiments" / sub
+        d.mkdir(parents=True)
+        (d / "metrics.json").write_text(json.dumps({"metric": value}), encoding="utf-8")
+    spec = {"kind": "file_json", "path": "experiments/declared/metrics.json", "key": "metric"}
+    assert ms.read_salvageable_metric(spec, "", str(tmp_path), time.time() - 60) is None
+    # One candidate is unambiguous and still salvages — the rule is about ambiguity, not about
+    # having refused the rung.
+    import shutil
+    shutil.rmtree(tmp_path / "experiments" / "b")
+    value, source, _reader, _detail = ms.read_salvageable_metric(spec, "", str(tmp_path),
+                                                                time.time() - 60)
+    assert (value, source) == (0.1, "relocated_file")

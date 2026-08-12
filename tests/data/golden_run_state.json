@@ -327,6 +327,7 @@
         "theme": null
       },
       "metric": 53.054167369999995,
+      "metric_provenance": null,
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -379,6 +380,7 @@
         "theme": null
       },
       "metric": 35.66064084999999,
+      "metric_provenance": null,
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -431,6 +433,7 @@
         "theme": null
       },
       "metric": 8.51019194,
+      "metric_provenance": null,
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
@@ -486,6 +489,7 @@
         "theme": null
       },
       "metric": 9.73679185,
+      "metric_provenance": null,
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -543,6 +547,7 @@
         "theme": null
       },
       "metric": 17.17538701,
+      "metric_provenance": null,
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -597,6 +602,7 @@
         "theme": null
       },
       "metric": 5.57026258,
+      "metric_provenance": null,
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -654,6 +660,7 @@
         "theme": null
       },
       "metric": 6.688963449999999,
+      "metric_provenance": null,
       "operator": "merge",
       "origin": null,
       "parent_ids": [
@@ -712,6 +719,7 @@
         "theme": null
       },
       "metric": 4.482711760000001,
+      "metric_provenance": null,
       "operator": "improve",
       "origin": null,
       "parent_ids": [
@@ -794,8 +802,8 @@
   "run_base_concept_receipt": null,
   "run_base_concepts": [],
   "run_id": "golden",
-  "run_uid": "",
   "run_setup_done": [],
+  "run_uid": "",
   "rungs": [],
   "search_epoch": 0,
   "select_verifier_contract": "selection-criteria:v1",

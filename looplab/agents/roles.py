@@ -15,7 +15,8 @@ import random
 from typing import Optional, Protocol
 
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
-                                 developer_artifact_footprint, normalize_researcher_footprint)
+                                 developer_artifact_footprint, hypothesis_statement_digest,
+                                 normalize_researcher_footprint)
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.core.validate import AgentReport, validate_agent_code
@@ -669,7 +670,19 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -
     binds the proposal to the card and restores its seed (`bind_idea_to_board_card`). These rows must
     never be claimable that way — their work item is already owned, and a claim would either be
     refused at the reservation fence or, worse, re-seed a fresh proposal with a statement someone
-    else's node is already testing. They are here to be READ.
+    else's node is already testing. They are here to be READ. `_state_brief` says so in exactly those
+    terms; see the position it takes there for why it does not offer a repair instead.
+
+    LIVE work only. The first version filtered on `research_cards()` alone, so a DROPPED or ABANDONED
+    card kept appearing under "do NOT propose one of these again as if it were new" — which reads a
+    deliberate operator drop as a claim on the direction and fences off the one question the
+    operator most likely wants re-scoped. A closed work item is history, and history is
+    `experiments_digest`'s job.
+
+    Grouped by BELIEF, like its sibling. `open_research_beliefs()` collapses two cards that share a
+    `belief_id` into one row; doing anything else here would let a repair's card and the card it
+    attached to render as two separate "already attempted" questions, which is precisely the
+    duplicate the attach exists to remove.
 
     Bounded like its sibling and by the same rule (whole items only, never a truncated statement), at
     half the character budget because this half is context rather than the actionable queue. Most
@@ -677,9 +690,22 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -
     newest work is the likeliest thing it is about to repeat.
     """
     already = {getattr(card, "id", None) for card in (shown or ())}
-    rows = [c for c in state.research_cards()
-            if c.id not in already and (c.seed_statement or "").strip()
-            and (c.evidence or c.status in {"building", "running", "evaluated"})]
+    shown_beliefs = {getattr(card, "belief_id", None) for card in (shown or ())} - {None}
+    rows = []
+    seen_beliefs: set = set()
+    for c in state.research_cards():
+        if c.id in already or not (c.seed_statement or "").strip():
+            continue
+        if not (c.evidence or c.status in {"building", "running", "evaluated"}):
+            continue
+        if (c.status in {"dropped", "gated"} or c.verdict == "abandoned"
+                or c.dropped_reason is not None):
+            continue
+        belief = c.belief_id or hypothesis_statement_digest(c.seed_statement)
+        if belief in shown_beliefs or belief in seen_beliefs:
+            continue
+        seen_beliefs.add(belief)
+        rows.append(c)
     selected: list = []
     used = 0
     for card in reversed(rows):
@@ -711,7 +737,8 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 
 
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
-                 hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None) -> str:
+                 hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
+                 *, for_proposal: bool = True) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -794,9 +821,15 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
             lines.append(
                 f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
                 f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
-        lines.append("If your next experiment tests one of these, return its CARD_ID in `card_id`. "
-                     "The engine restores the complete immutable seed; do not use display edits as "
-                     "semantic identity.")
+        if for_proposal:
+            # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
+            # also feeds the crash-triage judge (`engine/crash_repair.py`) and the macro-action
+            # chooser (`engine/node_build.py`), whose replies are a verdict string and an index —
+            # neither has a `card_id` field to return one in, so for them this sentence is an
+            # instruction that cannot be followed, competing with the one that can.
+            lines.append("If your next experiment tests one of these, return its CARD_ID in "
+                         "`card_id`. The engine restores the complete immutable seed; do not use "
+                         "display edits as semantic identity.")
     # …and the OTHER half of the board, which nothing showed until now: the questions that already
     # have an experiment against them. See `attempted_board_prompt_cards` for what it cost that a
     # card disappeared from this prompt the instant it got a node — including a node still RUNNING,
@@ -813,9 +846,27 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                 f"STATUS={card.status} VERDICT={card.verdict} "
                 f"NODES={sorted(card.evidence)} "
                 f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
-        lines.append("Propose a DIFFERENT question. If one of these genuinely needs another "
-                     "attempt, say so in `rationale` and name the CARD_ID — the engine decides "
-                     "whether that becomes a repair under the same card.")
+        if for_proposal:
+            # THE PROMISE THAT WAS MADE HERE AND NEVER EXISTED, removed rather than implemented, and
+            # the choice is deliberate. It read: "If one of these genuinely needs another attempt,
+            # say so in `rationale` and name the CARD_ID — the engine decides whether that becomes a
+            # repair under the same card." Nothing decides that. `bind_idea_to_board_card` is handed
+            # ONLY `next_board_prompt_cards`, so a CARD_ID from this block resolves to no visible
+            # card and is NULLED; no code path parses `rationale` for a card id; and the one thing
+            # that does attach a re-attempt (`card_reservation.py::_retry_attach_card`) fires on the
+            # POLICY's `debug` action against a failed node, never on a proposal. Driven: a
+            # byte-identical seed offered back through this block still minted a second card — the
+            # very card-0/card-3 shape this whole change removed, now reachable THROUGH the prompt
+            # that describes the fix.
+            #
+            # Making it true would mean letting a proposal claim an owned work item, which is the
+            # one thing the two-block split exists to prevent: an attach is only safe against a
+            # FAILED LEAF whose belief digest matches, and a model asking for "another attempt"
+            # cannot establish either — the engine can, and does, without being asked. So the block
+            # says what is true: these are context, the retry decision is not the proposer's.
+            lines.append("Propose a DIFFERENT question. These rows are NOT claimable — a CARD_ID "
+                         "from this list is ignored. A failed experiment is re-attempted by the "
+                         "engine itself, under the same card, without being asked.")
     return "\n".join(line for line in lines if line)
 
 

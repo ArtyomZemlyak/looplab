@@ -121,7 +121,11 @@ class NodeBuildMixin:
         from looplab.agents.roles import _state_brief
         from looplab.agents.hints import render_hint_directives
         try:
-            brief = _state_brief(state, None)
+            # NOT a proposal: this asks for an INDEX into `legal`, and the reply has no `card_id`
+            # field at all. `for_proposal=False` keeps the board's content (which is real context for
+            # choosing a macro action) and drops the two claim contracts that only a proposer can
+            # honour — see `_state_brief`.
+            brief = _state_brief(state, None, for_proposal=False)
         except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
             brief = ""
         # Signal-delivery (§1): the pilot picks the next macro action, so a standing operator

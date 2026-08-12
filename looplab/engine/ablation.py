@@ -191,6 +191,11 @@ class AblationMixin:
             idea,
             scored_against=state.best_node_id,
             source="engine",
+            # `retry_attach` stays OFF (its default). An ablation child is `refine_block`, which the
+            # attach resolver refuses anyway — but the flag is a per-call-site AUTHORITY, not a
+            # prediction about the operator, and a site that cannot commit an attach must never ask
+            # for one. Keeping it off here means renaming/widening the operator later cannot quietly
+            # file an engine-authored probe under the Researcher's card.
         )
         if reservation is None:
             self._discard_node_build_telemetry()

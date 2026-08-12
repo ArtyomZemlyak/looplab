@@ -50,7 +50,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:f98e36587c5fa9aa5badad76658375eb6c1d96171931c198c9f70aa5c17a63c2"
+_EXPECTED_DIGEST = "sha256:e0bcf7c9643c85ba57f35226a2824884c9531b93e21496fcffc2e770cc9e3c60"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -78,7 +78,15 @@ _EXPECTED_DIGEST = "sha256:f98e36587c5fa9aa5badad76658375eb6c1d96171931c198c9f70
 #               knob is NOT inert: a calibration run whose every replicate crashed would now end on
 #               this terminal rather than grinding, which is a different envelope in the direction
 #               that matters — so previously-issued receipts SHOULD stop verifying. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 193
+#   2026-08-12  + metric_salvage, metric_salvage_repair  (deterministic recovery of a metric the eval
+#               already produced, for a node that failed for some other reason). The 'field set
+#               changed too' branch, and this knob is emphatically NOT inert for calibration: a
+#               replicate whose stage failed its declared contract but had printed its metric now
+#               ends `node_evaluated` (infeasible, under the default `audit`) instead of
+#               `node_failed`, which changes the population a calibration pair is measured over.
+#               `speculation_quality` additionally refuses evidence containing a salvaged node, so a
+#               receipt issued before this could not describe the same envelope. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 195
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

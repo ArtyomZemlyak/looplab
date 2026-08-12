@@ -659,3 +659,79 @@ def test_winner_prompt_is_unchanged(tmp_path, monkeypatch):
     prompt = scripted.prompts[0]
     assert "\nWhat worked (best first):\n#0 draft metric=0.5 params={'lr': 0.1}" in prompt
     assert "NOTHING in this run reached a measured result" not in prompt
+
+
+# --------------------------------------------------------------------------------------------
+# SALVAGE must not leak into the prompt that writes a CROSS-RUN lesson
+# --------------------------------------------------------------------------------------------
+
+def _reflection_state(*, salvaged_feasible: bool):
+    """A run whose BEST number belongs to a node whose metric was salvaged, not measured."""
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+
+    st = RunState(goal="g", direction="max", task_id="t", run_id="r")
+    st.nodes[0] = Node(id=0, operator="draft", status=NodeStatus.evaluated, metric=0.50,
+                       idea=Idea(operator="draft", params={"lr": 0.1}, rationale="baseline"))
+    st.nodes[1] = Node(
+        id=1, operator="improve", status=NodeStatus.evaluated, metric=0.95,
+        idea=Idea(operator="improve", params={"lr": 0.3}, rationale="salvaged one"),
+        violations=[] if salvaged_feasible else [{"name": "metric_salvaged", "value": 0.95,
+                                                  "max": None, "min": None}],
+        feasible=salvaged_feasible,
+        metric_provenance={"salvaged": True, "source": "declared_reader", "stage": "train"})
+    st.best_node_id = 0
+    return st
+
+
+def _captured_causal_prompt(monkeypatch, state):
+    """Drive the REAL `causal_meta_note` and return the prompt it sent."""
+    from looplab.agents import agent as agent_module
+    from looplab.engine.lessons import LessonMemory
+
+    seen: dict = {}
+
+    def _fake_agentic_text(client, tools, messages, **kw):
+        seen["prompt"] = messages[-1]["content"]
+        return "because it did"
+
+    monkeypatch.setattr(agent_module, "agentic_text", _fake_agentic_text)
+    mem = LessonMemory.__new__(LessonMemory)
+    mem._e = type("_E", (), {"_reflect_client": lambda self: object()})()
+    mem._reflect_tools = lambda _state: []
+    mem._reflect_loop_opts = lambda: None
+    assert mem.causal_meta_note(state, state.nodes[state.best_node_id]) == "because it did"
+    return seen["prompt"]
+
+
+def test_an_excluded_salvaged_node_is_not_row_one_of_the_cross_run_lesson_prompt(monkeypatch):
+    """`final.evaluated_nodes()` sorted by metric is neither the population the champion comes from
+    nor one where every number means the same thing. Under the DEFAULT `metric_salvage: audit` the
+    salvaged node is deliberately NOT feasible — and it still topped the table the reflector was
+    asked "why did #0 win?" over, while `causal_meta_note` named #0 in the same breath. The lesson
+    that prompt authors is CROSS-RUN, and its `ev_ids`/`ev_sig` stamped the salvaged node as the
+    evidence a later run reuses."""
+    prompt = _captured_causal_prompt(monkeypatch, _reflection_state(salvaged_feasible=False))
+    assert "#1" not in prompt, "an unmeasured metric must not be shown as this run's best result"
+    assert "#0" in prompt and "The winner is #0" in prompt
+
+
+def test_a_salvaged_node_the_operator_admitted_stays_but_says_what_it_is(monkeypatch):
+    """Under `select` the operator accepted it as comparable, so hiding it would be the same silence
+    one layer up — but a model generalizing about a number must be told it was recovered rather than
+    measured."""
+    prompt = _captured_causal_prompt(monkeypatch, _reflection_state(salvaged_feasible=True))
+    assert "#1" in prompt and "metric SALVAGED, not measured" in prompt
+    # …and the MEASURED node carries no such annotation.
+    measured_row = [ln for ln in prompt.splitlines() if ln.startswith("#0")][0]
+    assert "SALVAGED" not in measured_row
+
+
+def test_the_lesson_evidence_ids_come_from_the_same_filtered_population(monkeypatch, tmp_path):
+    """The rank feeds `ev_ids`/`ev_sig`, which is what `reconcile_lessons` re-derives against. A
+    salvaged node stamped as evidence makes a cross-run lesson claim a number nobody measured."""
+    from looplab.engine.lessons_distill import _ranked_experiment_rows
+
+    excluded = _reflection_state(salvaged_feasible=False)
+    assert [n.id for n in _ranked_experiment_rows(excluded, 5)] == [0]
+    admitted = _reflection_state(salvaged_feasible=True)
+    assert [n.id for n in _ranked_experiment_rows(admitted, 5)] == [1, 0]

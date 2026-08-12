@@ -1580,6 +1580,50 @@ def test_zero_baseline_concept_coverage_is_not_a_vacuous_success(tmp_path):
     assert any("coverage must be nonzero" in error for error in _pair_errors(report))
 
 
+def _stamp_salvaged_provenance(run_dir: Path) -> None:
+    """Rewrite node 0's terminal so its metric reads as SALVAGED, and nothing else.
+
+    Done on the written log rather than through `_make_run` because that is exactly the shape being
+    modelled: a run that looks perfect by every other rule of the lane, whose one number was
+    recovered from an eval that failed instead of measured by the scoring path.
+    """
+    log = run_dir / "events.jsonl"
+    rows = [orjson.loads(line) for line in log.read_bytes().splitlines() if line.strip()]
+    for row in rows:
+        if row.get("type") == "node_evaluated" and row["data"].get("node_id") == 0:
+            row["data"]["metric_provenance"] = {
+                "salvaged": True, "condition": "artifact_contract", "source": "declared_reader",
+                "reader": "stdout_regex", "stage": "train", "producer": "agent_stage"}
+            break
+    else:                                        # pragma: no cover - the fixture changed shape
+        raise AssertionError("no node_evaluated row to stamp")
+    log.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+
+def test_a_salvaged_metric_invalidates_calibration_evidence(tmp_path):
+    """The lane compares MEASUREMENTS. `metric_salvage` is ON BY DEFAULT (`audit`) and the immutable
+    calibration profile is derived from the Settings defaults, so the benchmark cannot switch it off
+    — what keeps the shipped lane safe is that its toy task declares no metric reader at all. So a
+    salvaged node in evidence means the evidence did not come from the shipped lane.
+
+    Both rungs are checked here because they fail differently and only one of them failed at all:
+    under `audit` the node carries a `metric_salvaged` violation and was refused as "infeasible",
+    which sends the operator hunting a constraint the calibration task does not declare — after six
+    GPU runs. Under `select` it carries NO violation row and is feasible, so it passed the contract
+    in SILENCE and an unmeasured number went into the paired scoring.
+    """
+    run = _make_run(tmp_path / "salvaged", treatment=False, seed=0)
+    _stamp_salvaged_provenance(run)                       # the `select` rung: no violation row
+    with pytest.raises(ValueError, match="SALVAGED rather than measured"):
+        quality.analyze_speculation_run(run)
+
+    audited = _make_run(tmp_path / "salvaged-audit", treatment=False, seed=0,
+                        first_violations=["metric_salvaged"])
+    _stamp_salvaged_provenance(audited)                   # the default rung: named, not misnamed
+    with pytest.raises(ValueError, match="SALVAGED rather than measured"):
+        quality.analyze_speculation_run(audited)
+
+
 def test_infeasible_metric_path_invalidates_calibration_evidence(tmp_path):
     run = _make_run(
         tmp_path / "infeasible",

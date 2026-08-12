@@ -28,7 +28,7 @@ from looplab.engine.orchestrator import (
 )
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
-from looplab.adapters.repo_task import eval_reader_path_errors
+from looplab.adapters.repo_task import eval_reader_path_errors, eval_workspace_conflicts
 from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
@@ -545,6 +545,39 @@ def _missing_task_paths(task_dict: dict) -> list[tuple[str, str]]:
     return missing
 
 
+
+def _assert_run_startable(task, out) -> None:
+    """Every refusal that must happen once the run DIRECTORY is known and before any of it exists.
+
+    The two are here together because they share that one window and nothing else: after this line
+    `out.mkdir()` runs, and both refusals become things the operator can no longer act on cheaply.
+    Keeping them as two calls at the call site was a line of `run()` spent on sequencing, which is
+    what `test_cli_lifecycle_triage.py`'s length guard exists to push back on.
+    """
+    _assert_run_deletion_namespace_available(out)
+    _refuse_held_out_labels_inside_the_workspace(task, out)
+
+
+def _refuse_held_out_labels_inside_the_workspace(task, out) -> None:
+    """The half of the reader check that needs a RUN DIRECTORY, asked at the first moment one is
+    known and before any of it is created.
+
+    `host_score` labels that resolve inside the workspace are readable — and, under the untrusted
+    tier that bind-mounts the whole run root, writable — by the candidate, so held-out grading is not
+    held out at all. At score time the reader now refuses the spec and the node scores nothing (it
+    used to RAISE there and take the run down with no terminal event), which makes this the last
+    place an operator can be told while they can still move the file.
+
+    A REFUSAL, not a warning: unlike a missing input path, no later step can create a correctly
+    placed answer key, and every node of the run would fail `no_metric`.
+    """
+    errors = eval_workspace_conflicts(task, out)
+    if not errors:
+        return
+    for error in errors:
+        typer.echo(f"refusing to start: {error}", err=True)
+    raise typer.Exit(2)
+
 @app.command()
 def run(
     task_file: Optional[Path] = typer.Argument(
@@ -758,7 +791,7 @@ def run(
     for field, p in _missing_task_paths(task_dict):
         typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
     out = out or (Path(file_out) if file_out else Path("runs/run_local"))
-    _assert_run_deletion_namespace_available(out)
+    _assert_run_startable(task, out)
     out.mkdir(parents=True, exist_ok=True)
     store = EventStore(out / "events.jsonl")
     _require_healthy_log(store, out)   # fail closed on a mid-file corruption before appending (P0-4)

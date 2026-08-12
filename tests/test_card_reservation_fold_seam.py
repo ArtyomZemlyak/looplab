@@ -143,7 +143,13 @@ def test_the_engine_still_owns_every_moved_member():
                  "_mirror_hypothesis_card_merges", "_build_parent_snapshot", "_proposal_cue_fence",
                  "_implementation_ref", "_card_statement", "_card_action", "_card_added_payload",
                  "_card_event_matches", "_card_score_snapshot", "_card_claim_receipt_action",
-                 "_fixed_point_idea", "_rebuilt_claim_idea", "_engine_card_number"):
+                 "_fixed_point_idea", "_rebuilt_claim_idea", "_engine_card_number",
+                 # The two halves of the attach: which card a repair joins, and — because a claim
+                 # can now name a card its own reservation did not mint — whether a close path may
+                 # drop it. `_fail_reserved_build` lives in `orchestrator.py` and calls the second
+                 # one through `self`, so an uninherited mixin is an AttributeError on a FAILURE
+                 # path, i.e. exactly where nothing is watching.
+                 "_retry_attach_card", "_reservation_minted_card"):
         assert hasattr(orch.Engine, name), name
         # `getattr_static`, because a classmethod hands back a FRESH bound object on every plain
         # `getattr` — an identity check on that compares two wrappers, not two implementations.

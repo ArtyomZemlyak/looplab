@@ -655,19 +655,34 @@ and every Card-built node was created with no concepts.
 A **repair attaches to the card it repairs.** A card is a work item that can carry several nodes, so a
 `debug` re-attempt of a failed node claims that node's own card (one more `node_building`, no second
 `card_added`) instead of minting a new one. The rule is narrow and fails closed: only `debug`, only one
-parent, only a live singly-registered native owner, and only when the two seed statements share a
-`belief_id` — so a repair that genuinely re-scopes its question still gets its own card, and two
+parent, only a live singly-registered native owner, only a **failed leaf** (the parent node is
+terminally `failed`, and nothing else under that card is still pending or building — a question already
+being re-attempted does not need a second simultaneous owner), and only when the two seed statements
+share a `belief_id` — so a repair that genuinely re-scopes its question still gets its own card, and two
 different actions that merely reuse formulaic wording are never merged. Before 2026-08-12 a retry
 reused the parent's Idea verbatim with only `operator` flipped, which is a different action digest and
 therefore a second card whose statement was byte-identical to the first: the board showed one research
 question twice. `Card.belief_id` / `Card.retry_of` still name that relationship for any card that does
 mint, and every pre-existing log folds unchanged.
 
+Attaching is **opt-in at each build site**, and the ordinary build spine is the only one that opts in.
+An operator `inject_node` never attaches: an attach writes no `card_added`, so it would discard both the
+`source: "operator"` receipt and the `implementation_ref` that binds a human's ready-made code. Nor may
+an attach ever CLOSE the card it joined — its `node_building` claim records `card_attached: true`, and a
+reservation that is interrupted or fails drops its card only when it minted it. Without that, one
+process kill between `node_building` and `node_created` dropped the *parent's* card, evidence and all.
+
 The **proposal prompt shows both halves of the board.** Untested beliefs are the claimable queue (the
 model returns a `CARD_ID` and the engine restores the immutable seed); the questions that already have
-an experiment — running, failed or evaluated — are listed separately as read-only context, because
-their work item is already owned. Until 2026-08-12 only the first list existed, so a card disappeared
-from the Researcher's view the moment it got a node, including a node still running.
+a live experiment — running, failed or evaluated — are listed separately as read-only context, grouped
+by belief, because their work item is already owned. Dropped and abandoned cards are not listed: a
+deliberate abandonment is history, not a claim on the direction. That second list is explicitly **not
+claimable** — a `CARD_ID` returned from it is ignored, and the decision to re-attempt a failed
+experiment is the engine's own (the `debug` attach above), not something a proposal can ask for. The
+same brief also feeds the crash-triage judge and the macro-action chooser, whose replies are a verdict
+and an index; they see the board's content without either claim contract. Until 2026-08-12 only the
+first list existed, so a card disappeared from the Researcher's view the moment it got a node,
+including a node still running.
 
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions

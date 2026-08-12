@@ -84,9 +84,18 @@ export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
 
 export const SALVAGED_METRIC_VIOLATION = 'metric_salvaged'
 export const isSalvagedMetricViolation = v => v?.name === SALVAGED_METRIC_VIOLATION
+// The node's own folded `metric_provenance`, which is the ONLY record of a salvage under
+// `metric_salvage: "select"`. Everything the salvage UI knew used to hang off the violation ROW, and
+// `select` is precisely the rung that has no row — so the operator who opted a salvaged metric INTO
+// winner selection was the one shown nothing at all, on the node where it matters most. The
+// commit's own argument ("a provenance field alone would be 'can tell' and not 'does'") applies to
+// its own permissive rung: the field is folded and served, so read it.
+export const salvagedProvenance = node =>
+  (node?.metric_provenance?.salvaged ? node.metric_provenance : null)
 
 export function nodeFeasibilityStatus(node) {
   const violations = node?.violations || []
+  const provenance = salvagedProvenance(node)
   // A SALVAGED metric is not a constraint violation and must not be shown as one. It rides on the
   // violations list because that is what `feasible = not violations` reads and therefore what keeps
   // an unmeasured value out of champion selection — but the operator reading "Constraint violation"
@@ -105,7 +114,18 @@ export function nodeFeasibilityStatus(node) {
   if (violations.length || node?.feasible === false) return result(
     'alarm',
     'Constraint violation',
-    'This result is infeasible and excluded from winner selection.',
+    'This result is infeasible and excluded from winner selection.'
+      + (provenance ? ' Its metric was also SALVAGED rather than measured.' : ''),
+  )
+  // ADMITTED, and still not measured. `select` removes the exclusion, not the fact — this node
+  // competes for champion on a number recovered from an eval that failed, and a row reading plain
+  // "Feasible" is the same silence the violation row was added to break.
+  if (provenance) return result(
+    'warn',
+    'Metric salvaged, admitted for selection',
+    'The run recovered this metric with its own declared reader'
+      + `${provenance.stage ? ` after stage “${provenance.stage}” failed its contract` : ''}`
+      + '. metric_salvage is set to “select”, so it competes for champion like a measured result.',
   )
   if (node?.status === 'evaluated' && node?.feasible === true) return result(
     'ok',

@@ -248,6 +248,45 @@ def _spec_prefix(*, boundary: bool = True) -> list:
     ]
 
 
+def test_a_reset_clears_the_metrics_provenance_with_the_metric_it_describes():
+    """Every sibling terminal field is cleared by both lifecycle resets; this one was not.
+
+    A node that was reset and then FAILED read `metric=None, status=failed,
+    metric_provenance={salvaged: True}` — a provenance record for a value that no longer exists, on
+    the one field a reader consults to decide whether to trust the number. Both reset blocks are
+    driven: the `node_reset` lifecycle, and the holdout-epoch requeue that re-opens every incumbent.
+    """
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+    from looplab.events.replay import _requeue_partition_bound_results
+
+    prefix = _spec_prefix()
+    salvaged = {"salvaged": True, "condition": "artifact_contract", "source": "declared_reader"}
+    after_reset = fold(prefix + [
+        Event(type="node_evaluated", data={"node_id": 0, "generation": 0, "metric": 0.9,
+                                           "metric_provenance": dict(salvaged)}),
+        Event(type="node_reset", data={"node_id": 0, "generation": 0}),
+    ])
+    assert after_reset.nodes[0].metric is None and after_reset.nodes[0].metric_provenance is None
+    # …and it stays cleared through the failure that follows, which is where it was visible.
+    failed = fold(prefix + [
+        Event(type="node_evaluated", data={"node_id": 0, "generation": 0, "metric": 0.9,
+                                           "metric_provenance": dict(salvaged)}),
+        Event(type="node_reset", data={"node_id": 0, "generation": 0}),
+        Event(type="node_failed", data={"node_id": 0, "generation": 1, "error": "boom",
+                                        "reason": "crash"}),
+    ])
+    assert failed.nodes[0].status is NodeStatus.failed
+    assert failed.nodes[0].metric is None and failed.nodes[0].metric_provenance is None
+
+    # The OTHER block: the holdout-rotation requeue, which re-opens every surviving incumbent.
+    st = RunState(goal="g", direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", status=NodeStatus.evaluated, metric=0.9,
+                       idea=Idea(operator="draft"), metric_provenance=dict(salvaged))
+    _requeue_partition_bound_results(st, fresh_node_ids=set())
+    assert st.nodes[0].status is NodeStatus.pending
+    assert st.nodes[0].metric is None and st.nodes[0].metric_provenance is None
+
+
 def test_eval_start_boundary_folds_set_only_and_generation_keyed():
     """The durable eval-START boundary: order-tolerant by construction, cleared by a reset.
 

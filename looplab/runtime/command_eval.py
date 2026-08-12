@@ -384,7 +384,11 @@ def _read_host_score(stdout, workdir, spec, wrap, since) -> Optional[float]:
         # malformed-spec branch in this module returns None — this was the one that did not.
         #
         # The loudness belongs at SUBMIT time, where the operator can still fix it, not at score time
-        # inside a worker thread. Here it scores nothing and says so.
+        # inside a worker thread. Here it scores nothing and says so — and the submit-time refusal
+        # that makes "scores nothing" something an operator hears about is `host_score_labels_error`,
+        # asked by `adapters/repo_task.py::EvalSpec` before the run starts. This branch stays because
+        # that refusal cannot reach every spec that gets here: `_grandfathered` reloads a run's
+        # recorded `task.snapshot.json` without re-validating it (invariant #6).
         logging.getLogger(__name__).error(
             "host_score labels path %s is inside the candidate workspace %s — it would be "
             "mounted/writable by the candidate. Place the held-out labels outside the eval "
@@ -579,6 +583,67 @@ def metric_spec_path_error(spec, *, consequence: Optional[str] = None) -> Option
     return (f"metric reader {kind!r} needs a `path`: the file the eval writes, relative to the node's "
             f"eval workdir. e.g. {example} — `key` is the key INSIDE that file, not the file name. "
             + (consequence or _PATHLESS_COST))
+
+
+# The submit-time half of `_read_host_score`'s held-out-labels invariant, and the reason it has to
+# exist SEPARATELY from the runtime check. The runtime one used to RAISE, which killed the run (no
+# terminal event, re-dying on every resume — see `_read_host_score`); it now logs and scores nothing,
+# which is the only safe thing to do inside an eval worker. But "this eval scores nothing" is a
+# whisper: every node fails `no_metric` and the run finishes with no best node, exactly the shape
+# `_PATHLESS_COST` was written for. An operator has to hear about it while they can still move the
+# file, so the loudness moved HERE — asked once, before the run starts, by
+# `adapters/repo_task.py::EvalSpec`.
+_LABELS_REQUIRED = (
+    'metric reader \'host_score\' needs `labels`: the HOST-held answer key it scores the '
+    'candidate\'s predictions against, e.g. {"kind": "host_score", "predictions": '
+    '"predictions.json", "labels": "/held-out/labels.json", "scorer": "rmse"}. Without it the '
+    'reader scores nothing and every node fails no_metric.')
+_LABELS_RELATIVE = (
+    "host_score `labels`={path!r} is a RELATIVE path. It is resolved against whatever working "
+    "directory the ENGINE process happens to have — not the eval workdir — so which file is graded "
+    "depends on where the run was launched from, and a run started inside the run directory grades "
+    "against a file the candidate can write. Give the absolute host path to the held-out labels.")
+_LABELS_INSIDE = (
+    "host_score `labels`={path!r} resolves INSIDE the candidate workspace {root!r}. Held-out labels "
+    "are the one thing the candidate must not be able to read or rewrite — under the untrusted tier "
+    "the whole run root is bind-mounted into the container — so this defeats host-side grading "
+    "entirely. Place the labels outside the run directory. (At score time the reader refuses this "
+    "spec and the node gets NO metric, so the run would produce no best node either.)")
+
+
+def host_score_labels_error(spec, *, workspace_root=None) -> Optional[str]:
+    """Why this `host_score` spec's held-out labels are unusable — or None when they are fine.
+
+    The rule `_read_host_score` enforces at score time, stated once so a submit surface can refuse it
+    while the operator can still act. Three failures, and they are not the same failure:
+
+      * ABSENT `labels` — the reader returns None for every node, and nothing anywhere says why.
+      * RELATIVE `labels` — `Path(labels).resolve()` binds to the ENGINE process's cwd. Which file is
+        graded then depends on the launch directory, and this is also the most common way a labels
+        path ends up inside the workspace by accident.
+      * INSIDE the workspace — the invariant itself. `workspace_root` is the run directory (the
+        docker tier bind-mounts the whole of it, so it is the guard root a real eval uses); omit it
+        and only the two spec-local rules are checked, which is what a caller that does not yet know
+        where the run will live can honestly say.
+
+    Non-`host_score` specs are None: this is one reader's rule, asked of every reader slot.
+    """
+    if not isinstance(spec, dict) or spec_kind(spec) != "host_score":
+        return None
+    labels = spec.get("labels")
+    if labels is None or (isinstance(labels, str) and not labels.strip()):
+        return _LABELS_REQUIRED
+    if not isinstance(labels, str):
+        return None                       # `metric_spec_path_error` owns the non-string slot message
+    if not os.path.isabs(labels):
+        return _LABELS_RELATIVE.format(path=labels)
+    if workspace_root is None:
+        return None
+    try:
+        inside = _is_within(Path(labels).resolve(), Path(workspace_root).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return None                       # an unresolvable path is not evidence of a violation
+    return _LABELS_INSIDE.format(path=labels, root=str(workspace_root)) if inside else None
 
 
 def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
@@ -869,8 +934,8 @@ _NEARBY_SKIP = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"
                           ".pytest_cache", ".ipynb_checkpoints"})
 
 
-def _artifact_written_elsewhere(workdir: str, rel: str, since: Optional[float]) -> Optional[str]:
-    """Where a file with this basename was actually written during the stage, if anywhere.
+def _artifacts_written_elsewhere(workdir: str, rel: str, since: Optional[float]) -> list[str]:
+    """EVERY place a fresh file with this basename was written during the stage, sorted.
 
     Answers the question the operator asks first and the message could not: "did it not run, or did
     it write somewhere else?". Measured case that motivated it — `rubertlite-dr-unified-v5` node 0
@@ -882,17 +947,27 @@ def _artifact_written_elsewhere(workdir: str, rel: str, since: Optional[float]) 
     an earlier attempt or a foreign experiment would send the repair at the wrong file. Bounded, and
     best-effort — a scan that fails contributes nothing rather than turning a stage failure into an
     eval crash.
+
+    ALL of them, sorted, rather than the first `os.walk` hit, because the two callers need different
+    things from an AMBIGUOUS answer and neither may have "whichever the filesystem yielded first":
+    the diagnostic (`verify_stage_artifacts`) shows a human the nearest miss and a human can weigh a
+    second one; `engine/metric_salvage._relocated` promotes a NUMBER out of the file it names, and a
+    metric chosen by directory-walk order is a metric that can differ between two reads of the same
+    workdir. `os.walk` order is filesystem order (`os.scandir`), not lexical — two fresh
+    same-basename files are enough to make the choice unstable, so the ordering is imposed here and
+    the ambiguity is left visible to the caller.
     """
     name = os.path.basename(str(rel or ""))
     if not name:
-        return None
+        return []
     root = Path(workdir)
     visited = 0
+    found: list[str] = []
     try:
         for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
             visited += 1
             if visited > _NEARBY_MAX_DIRS:
-                return None
+                break
             dirnames[:] = [d for d in dirnames if d not in _NEARBY_SKIP and not d.startswith(".")]
             if name not in filenames:
                 continue
@@ -902,12 +977,22 @@ def _artifact_written_elsewhere(workdir: str, rel: str, since: Optional[float]) 
                     continue
             except OSError:
                 continue
-            found = candidate.relative_to(root) if candidate.is_relative_to(root) else candidate
-            if str(found) != str(rel):
-                return str(found)
+            here = candidate.relative_to(root) if candidate.is_relative_to(root) else candidate
+            if str(here) != str(rel):
+                found.append(str(here))
     except Exception:  # noqa: BLE001 — a diagnostic must never be the thing that fails the eval
-        return None
-    return None
+        return []
+    return sorted(found)
+
+
+def _artifact_written_elsewhere(workdir: str, rel: str, since: Optional[float]) -> Optional[str]:
+    """The nearest miss to SHOW, or None — the diagnostic half of `_artifacts_written_elsewhere`.
+
+    First in sorted order, so the message an operator reads is the same on every run over the same
+    workdir. A caller that must not choose between two candidates asks for the list instead.
+    """
+    found = _artifacts_written_elsewhere(workdir, rel, since)
+    return found[0] if found else None
 EXPECT_EMPTY = ("stage {stage!r} exited 0 but its declared artifact {path!r} is EMPTY (0 bytes). The "
                 "stage reported success while producing nothing — fix the code that writes it.")
 EXPECT_STALE = ("stage {stage!r} exited 0 but its declared artifact {path!r} was NOT written by this "

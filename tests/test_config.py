@@ -444,6 +444,51 @@ def test_legacy_snapshot_resume_does_not_switch_on_paid_work_the_run_never_did()
     assert "foresight_panel" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
 
 
+def test_a_resumed_legacy_run_does_not_silently_acquire_metric_salvage():
+    """METRIC SALVAGE meets both halves of this map's rule and was missing from it.
+
+    A resumed pre-2026-08-12 run would gain BOTH a different selection policy — a node that failed
+    its declared artifact contract becomes `evaluated`, counts against the node budget and joins the
+    lineage the search reads — and a PAID Developer call per salvaged node (`metric_salvage_repair`),
+    in the same event log as the first half of the run, which did neither. `off` is the exact
+    behaviour before the field existed, which its own field comment states.
+    """
+    from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, settings_from_snapshot
+
+    era_snapshot = {"max_nodes": 8, "direction": "min", "backend": "toy"}
+    resumed = settings_from_snapshot(era_snapshot)
+    assert resumed.metric_salvage == "off", "a legacy run resumed into a different selection policy"
+    assert resumed.metric_salvage_repair is False, "a legacy run resumed into a paid repair call"
+    # …while the product default is the opposite, which is what makes this a live gap and not a
+    # tautology.
+    assert Settings().metric_salvage == "audit" and Settings().metric_salvage_repair is True
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["metric_salvage"] == "off"
+    # A snapshot that CARRIES the key keeps its own choice — `setdefault`, never an override.
+    modern = Settings(metric_salvage="select").masked_snapshot()
+    assert settings_from_snapshot(modern).metric_salvage == "select"
+
+
+def test_a_mistyped_inline_repair_reason_is_refused_instead_of_matching_nothing():
+    """The engine's gate is `reason not in self._inline_repair_reasons`, so a member outside
+    `FAILURE_REASONS` never matches anything: `inline_repair_reasons=("typo",)` validated fine and
+    turned inline repair OFF for every failure class with nothing anywhere saying so. That is the
+    same silent-drop the 2026-08-12 widening of this default exists to end, one layer up — and the
+    env override takes a JSON array, which is exactly where a typo comes from."""
+    from pydantic import ValidationError
+
+    assert Settings(inline_repair_reasons=("crash", "timeout")).inline_repair_reasons == (
+        "crash", "timeout")
+    with pytest.raises(ValidationError) as exc:
+        Settings(inline_repair_reasons=("typo",))
+    assert "typo" in str(exc.value) and "failure reason" in str(exc.value)
+    # Near-misses of real reasons are the realistic typo, and each is refused by name.
+    with pytest.raises(ValidationError):
+        Settings(inline_repair_reasons=("crash", "no-metric"))
+    # Every member of the shipped default is admissible (the vocabulary is the registry itself).
+    assert Settings(inline_repair_reasons=tuple(FAILURE_REASONS)).inline_repair_reasons == tuple(
+        FAILURE_REASONS)
+
+
 def test_foresight_min_confidence_is_bounded_like_its_siblings():
     """The field is a 0..1 confidence, but was declared without a bound while every sibling knob
     (train_monitor_kill_confidence, asha_live_quantile) carries one. A typo'd 5.0 validated silently

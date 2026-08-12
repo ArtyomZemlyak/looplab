@@ -105,6 +105,35 @@ def test_report_champion_uses_concept_axis_when_legacy_theme_is_absent():
     assert "Champion: #0 metric=0.5 (draft, loss)" in _report_context(st)
 
 
+def test_the_report_does_not_accuse_a_salvaged_node_of_breaking_a_constraint():
+    """The server half of the rule `ui/src/trustSemantics.js` states in the browser, and the half the
+    GENERATED RUN REPORT reads. A salvaged node carries a `metric_salvaged` row in `violations`
+    because that is what makes `feasible` False and keeps an unmeasured number out of champion
+    selection — it breached no bound and its experiment did not misbehave. "N evaluated node(s)
+    violated a constraint" is an accusation about something that did not happen, in the one artifact
+    an operator reads when they cannot ask anyone."""
+    st = RunState(goal="g", direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", status=NodeStatus.evaluated, metric=0.5,
+                       idea=Idea(operator="draft"),
+                       violations=[{"name": "metric_salvaged", "value": 0.5,
+                                    "max": None, "min": None}],
+                       feasible=False,
+                       metric_provenance={"salvaged": True, "source": "declared_reader",
+                                          "stage": "train"})
+    context = _report_context(st)
+    assert "violated a constraint" not in context
+    assert "SALVAGED metric" in context and "excluded from best" in context
+
+    # A REAL constraint violation still reads exactly as it did.
+    st.nodes[1] = Node(id=1, operator="draft", status=NodeStatus.evaluated, metric=0.7,
+                       idea=Idea(operator="draft"),
+                       violations=[{"name": "latency_ms", "value": 900.0, "max": 100.0}],
+                       feasible=False)
+    both = _report_context(st)
+    assert "1 evaluated node(s) violated a constraint (excluded from best)" in both
+    assert "1 evaluated node(s) carry a SALVAGED metric" in both
+
+
 def test_report_generated_folds_latest_wins():
     evs = [
         Event(seq=0, type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),

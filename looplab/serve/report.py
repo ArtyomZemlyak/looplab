@@ -87,9 +87,27 @@ def _report_context(state: RunState) -> str:
         flags.append("a data-leakage scan flagged this run")
     if state.drifts:
         flags.append(f"{len(state.drifts)} metric-drift divergence(s) caught")
+    # WHY a node is excluded is two different facts, and the report is the artifact an operator reads
+    # when they cannot ask anyone. A node whose metric was SALVAGED
+    # (`engine/metric_salvage.py`) carries a `metric_salvaged` row in `violations` — that is what
+    # makes `feasible` False and keeps an unmeasured number out of champion selection — but it
+    # breached no bound and its experiment did not misbehave. Reporting it as "violated a constraint"
+    # accuses the run of something that did not happen, and it is the accusation the operator acts
+    # on. `ui/src/trustSemantics.js` draws exactly this distinction in the browser; this is the
+    # server half of the same rule, and the one the generated run report reads.
+    # A node can be BOTH (a salvaged metric that then failed a real bound — the constraint gates run
+    # on a salvaged metric too), so these are two overlapping counts read off the rows, not a split.
     infeasible = [n for n in state.evaluated_nodes() if not n.feasible]
-    if infeasible:
-        flags.append(f"{len(infeasible)} evaluated node(s) violated a constraint (excluded from best)")
+    salvaged = [n for n in infeasible if (n.metric_provenance or {}).get("salvaged")]
+    breached = [n for n in infeasible
+                if any((v or {}).get("name") != "metric_salvaged" for v in (n.violations or []))
+                or not n.violations]
+    if breached:
+        flags.append(f"{len(breached)} evaluated node(s) violated a constraint (excluded from best)")
+    if salvaged:
+        flags.append(f"{len(salvaged)} evaluated node(s) carry a SALVAGED metric — recovered by the "
+                     "run's own declared reader from an eval that failed, not measured by the "
+                     "scoring path (excluded from best)")
     if best is not None and best.confirmed_mean is None:
         flags.append("the champion is single-seed (not multi-seed confirmed)")
     if flags:

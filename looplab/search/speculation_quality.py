@@ -1847,6 +1847,40 @@ def _analyze_speculation_run(run_dir: str | Path) -> tuple[dict[str, Any], dict[
     for node in state.nodes.values():
         if node.status is NodeStatus.evaluated:
             _required_finite(node.metric, label=f"node {node.id} metric")
+            # A SALVAGED metric is not a measured one, and this lane compares MEASUREMENTS. The
+            # metric of a salvaged node was recovered by re-asking the run's declared reader over the
+            # output of an eval that FAILED (`engine/metric_salvage.py`), not produced by the
+            # protected scoring path — so it is not a value a baseline/treatment pair may be scored
+            # on, whatever rung the operator set.
+            #
+            # ASKED BEFORE the infeasibility check, and separately from it, because the two rungs of
+            # `metric_salvage` fail here in two different ways and neither answer was usable. Under
+            # the DEFAULT `audit` the node carries a `metric_salvaged` violation and already failed
+            # below — as "contains an infeasible calibration node", which sends the operator hunting
+            # a constraint the calibration task does not even declare, after six GPU runs. Under
+            # `select` it carries NO violation row and is `feasible`, so it passed this contract in
+            # silence and an unmeasured number went into the paired scoring. The second is why this
+            # is a check and not merely a better message.
+            #
+            # WHAT IT DOES NOT MEAN: "re-run with metric_salvage off". The immutable calibration
+            # profile is derived from the Settings DEFAULTS
+            # (`search/speculation_calibration.py::SPECULATION_CALIBRATION_PROFILE_SETTINGS`), so
+            # every calibration run pins `audit` and an operator cannot change it without changing
+            # the profile digest, which revokes every receipt ever issued. What makes the lane safe
+            # today is structural instead: it runs the offline toy task, which has no declared
+            # metric reader at all (`_salvage_eval_metric` returns None without one), so the shipped
+            # lane cannot produce this row. A salvaged node in evidence therefore says the evidence
+            # did not come from the shipped lane, which is exactly what this gate exists to detect.
+            #
+            # It cannot revoke an issued receipt either: `metric_provenance` did not exist before
+            # 2026-08-12 and folds to None for every log written before it, and an issued receipt is
+            # a body with no errors — so over the shipped corpus this branch is unreachable and
+            # `canonical_json(body)` is unchanged.
+            if (node.metric_provenance or {}).get("salvaged"):
+                raise ValueError(
+                    "quality evidence contains a node whose metric was SALVAGED rather than "
+                    "measured: metric_salvage recovered it from an eval that failed, which the "
+                    "offline calibration lane cannot do")
             if node.feasible is not True or node.violations:
                 raise ValueError("quality evidence contains an infeasible calibration node")
             if node.error or node.error_reason:

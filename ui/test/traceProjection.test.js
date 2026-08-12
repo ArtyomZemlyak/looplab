@@ -168,8 +168,12 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // the DEADLINE — the failure a widened read actually hits (17.3 s measured at the ceiling) — and
   // a second settle path there is how it went back to saying nothing. The behaviour itself is
   // driven in inspectorTracePager.test.js; this only holds the single-path shape.
+  //
+  // `commit` gained a fourth argument (the failure KIND: a superseded read is not an unreadable
+  // one). The shape this pin holds is unchanged — still one settle rule, still one `.catch` — so the
+  // match follows the call rather than the property being weakened.
   assert.match(inspector,
-    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const candidate = observation\?\.unchanged \? prior\?\.payload : observation\?\.data[\s\S]*?const payload = matchingTracePayload\([\s\S]*?commit\(!!payload, payload, etag\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
+    /const settled = settleTraceRead\(previous\?\.payload, \{ ok, payload \}\)[\s\S]*?if \(settled\.unavailable\) \{[\s\S]*?projection: \{ unavailable: true \}[\s\S]*?const candidate = observation\?\.unchanged \? prior\?\.payload : observation\?\.data[\s\S]*?const payload = matchingTracePayload\([\s\S]*?commit\(!!payload, payload, etag,[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) commit\(false, null\) \}\)/,
     'conversation failures route through the ONE settle rule: unavailable only with nothing in hand')
   // The order is the whole property, and it now lives in the ONE surface both tabs render:
   // unavailable beats every empty/partial shape, and a bounded window beats "nothing was recorded".
@@ -181,7 +185,11 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'the selected conversation view must load before raw-tree empty/unavailable branches')
   assert.match(inspector, /const request = traceDeadlineGet\([\s\S]*?runApiPath\(runId, `\/spans\/\$\{encodeURIComponent\(s\.span_id\)\}`\), expectedGeneration\)[\s\S]*?request\.promise\.then[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?onIo\(traceDetailState\(d\)\)[\s\S]*?\[open, io, runId, expectedGeneration, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => onIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
     'span detail unavailable must be retryable even after the first expansion')
-  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, subjectKey, working, reloadNonce, spanLimit\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+  // The MANUAL retry is still owed, and now so is an automatic one: a finished node polls once, so a
+  // single failure used to be a permanent receipt until the operator clicked. `retryNonce` is in the
+  // dependency list beside `reloadNonce` because the two take the same path — the scheduled re-read
+  // is not a second mechanism.
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, subjectKey, working, reloadNonce, retryNonce, spanLimit\][\s\S]*?<TraceUnavailable\s+label=\{traceFailureLabel\([\s\S]*?onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
   assert.match(inspector,
     /const scope = \[runId, expectedGeneration \|\| '', subjectKey, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?traceReadQuery\(expectedGeneration, subjectAttempt, spanLimit\)[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
@@ -193,7 +201,7 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit\), timeout\)/,
     'all bounded trace reads must retain the shared deadline and encoded query contract')
   assert.match(inspector,
-    /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?observation\.etag !== validator[\s\S]*?payload\.cursor === observation\.etag[\s\S]*?commit\(!!payload, payload, etag\)/,
+    /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?observation\.etag !== validator[\s\S]*?payload\.cursor === observation\.etag[\s\S]*?commit\(!!payload, payload, etag,/,
     'a fulfilled response for another run generation or node attempt must not settle here')
   assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry, onLoadMore,[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
   // The pager BUTTON is gone (2026-08-07): earlier steps arrive by scrolling. What must not be lost

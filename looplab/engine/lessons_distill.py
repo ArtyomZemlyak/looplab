@@ -28,6 +28,39 @@ from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
 
 
+# The rank the two reflection prompts show as "Experiments (best first)", and the one place the
+# SALVAGED nodes are dealt with. Both prompts used to sort `evaluated_nodes()` by metric, which is
+# neither the population the champion comes from nor a population where every number means the same
+# thing: a node whose metric was SALVAGED (`engine/metric_salvage.py`) is `evaluated`, carries a real
+# number, and under the DEFAULT `metric_salvage: audit` is deliberately NOT feasible — so it took row
+# #1 of the prompt that authors a CROSS-RUN lesson while `causal_meta_note`, one method over, named a
+# different node as the winner. The model was asked why #B won given a table topped by #A, and the
+# lesson's `ev_ids`/`ev_sig` then stamped the salvaged node as the evidence a later run reuses.
+#
+# TWO RULES, and they are deliberately different:
+#   * an EXCLUDED salvaged node is dropped. It is not one of this run's results — nothing on the
+#     selection path may use it, and a prompt is a selection path with a model in it.
+#   * an ADMITTED one (the operator set `metric_salvage: select` for operator-produced output) stays,
+#     ANNOTATED. It is comparable by the operator's own decision, and hiding the recovery from the
+#     model that generalizes about it would be the same silence one layer up.
+# Nothing else is filtered: a constraint-violating node has a MEASURED metric and its exclusion is a
+# fact about the bound, not about the number, so it keeps its historical place in these rows.
+_SALVAGED_ROW_NOTE = " [metric SALVAGED, not measured by the scoring path]"
+
+
+def _ranked_experiment_rows(final: RunState, limit: int) -> list:
+    """The run's experiments, best first, as the reflection prompts may show them."""
+    rev = (final.direction != "min")
+    usable = [n for n in final.evaluated_nodes()
+              if n.metric is not None
+              and not ((n.metric_provenance or {}).get("salvaged") and n.feasible is False)]
+    return sorted(usable, key=lambda n: n.metric, reverse=rev)[:limit]
+
+
+def _salvage_note(node) -> str:
+    return _SALVAGED_ROW_NOTE if (node.metric_provenance or {}).get("salvaged") else ""
+
+
 class LessonDistillMixin:
     """The lessons cluster's LLM-distillation half. See the module docstring for the mixin
     convention (`self` is the LessonMemory)."""
@@ -289,13 +322,12 @@ class LessonDistillMixin:
         # the docstring. Whether there is anything WORTH a call is decided below, from the evidence.
         if client is None:
             return _winner_lesson()
-        rev = (final.direction != "min")
-        ok = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
-                    key=lambda n: n.metric, reverse=rev)[:5]
+        ok = _ranked_experiment_rows(final, 5)   # salvage-aware — see `_ranked_experiment_rows`
         aborted = set(getattr(final, "aborted_nodes", None) or [])
         bad = [n for n in final.nodes.values()
                if n.status is NodeStatus.failed and not n.tombstoned and n.id not in aborted][:3]
-        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}" for n in ok]
+        rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
+                + _salvage_note(n) for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
         # PROVENANCE for reconciliation: the concrete nodes this whole-run reflection is grounded in
         # (the winning rows + the failure rows fed into the prompt). Stamped on every lesson below so a
@@ -441,9 +473,9 @@ class LessonDistillMixin:
         if client is None:
             return None
         rev = (final.direction != "min")
-        ev = sorted((n for n in final.evaluated_nodes() if n.metric is not None),
-                    key=lambda n: n.metric, reverse=rev)[:6]
+        ev = _ranked_experiment_rows(final, 6)   # salvage-aware — see `_ranked_experiment_rows`
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
+                + _salvage_note(n)
                 + (f" — {' '.join((n.idea.rationale or '').split())[:90]}" if n.idea.rationale else "")
                 for n in ev]
         prompt = (f"Task goal: {final.goal}\nObjective: {'maximize' if rev else 'minimize'} the metric.\n"

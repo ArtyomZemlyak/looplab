@@ -45,14 +45,32 @@ value so a salvaged-by-model metric is distinguishable from a salvaged-by-reader
 `SALVAGE_SOURCES`; nothing in this module calls a model.
 
 --------------------------------------------------------------------------------------------------
-WHAT MAKES A SALVAGED METRIC TRUSTWORTHY. Four conditions, all enforced below:
+WHAT MAKES A SALVAGED METRIC TRUSTWORTHY. Five conditions, all enforced below:
 
   * DECLARED READER. The value comes from `eval_spec["metric"]` — the operator's own spec, byte for
-    byte, the same object `run_command_eval` reads with. Never a spec the agent authored, never a
-    widened one. `kind == "adapter"` is REFUSED outright: it EXECs an agent-authored module, which
+    byte, the same SPEC OBJECT `run_command_eval` reads with (the same object; NOT the same input —
+    see the next condition, which is the half this sentence used to be read as covering). Never a
+    spec the agent authored, never a widened one. `kind == "adapter"` is REFUSED outright: it EXECs an agent-authored module, which
     is the same rule `run_command_eval` already applies to `metrics`/`constraints` readers and
     `validate_cross_check` applies to the drift reader. (Refusing it also means salvage never needs
     the docker `wrap`, since every remaining reader is in-process over host paths.)
+  * AND THE BYTES IT READ ARE ACCOUNTED FOR. The SPEC is the operator's; the OUTPUT it is asked
+    about is not necessarily. `run_command_eval`'s primary read runs over the FINAL command's stdout
+    — the operator's protected `score` stage — while the `expect_failed`/`check_failed` early return
+    sets `stdout` to the FAILING stage's output, which in Developer-manifest mode is a script the
+    AGENT wrote. Running the operator's regex over agent-authored text is not the same trust
+    statement as running it over the scorer's, and this module refused to say so until it recorded
+    which it was: a Developer whose training script prints `RECALL@100: 0.999` would otherwise have
+    it admitted every time one of its own stages failed a contract.
+    So `SalvagedMetric.producer` names the stage that produced the bytes (`stage_producer`), it
+    rides on the provenance record, and it is ENFORCED: `select` — the rung that lets a salvaged
+    metric compete on equal terms — is honoured only for OPERATOR-declared output. Agent-produced
+    bytes stay at the `audit` rung whatever the operator set, i.e. they keep the `metric_salvaged`
+    violation and stay out of champion selection and breeding.
+    The alternative was to restrict salvage to the protected `score` stage outright. That is
+    refused because it deletes the case this module exists for: v5's number was printed by the
+    `train` stage, and the `score` stage never ran. Recovering it and REFUSING to let it compete is
+    the honest position; recovering it silently is not, and not recovering it is the 76 GPU-minutes.
   * THIS ATTEMPT'S OWN FRESH OUTPUT. The stdout is the failing eval's captured stdout and the
     workdir is this node's; FILE readers get `since = this attempt's start`, so a prior attempt's
     artifact in a deliberately-reused workdir, or a foreign experiment's, cannot be salvaged. That
@@ -61,6 +79,12 @@ WHAT MAKES A SALVAGED METRIC TRUSTWORTHY. Four conditions, all enforced below:
   * THE FAILURE WAS NOT A FAILURE OF MEASUREMENT OR OF TRUST. A closed allow-list
     (`salvage_condition`), not "anything that is not no_metric". Drift, a timed-out eval and a
     failed `expect.assert`/`check` are refused, each for its own reason — see that function.
+  * THE GATES THAT QUALIFY A METRIC STILL RUN. A salvaged metric is a metric, so the operator's
+    CONSTRAINTS, extra readers and drift cross-check must be applied to it exactly as
+    `run_command_eval`'s tail applies them to a measured one — `salvage_gates` is that tail, re-asked
+    over the failed attempt's own output. Without it a salvaged node reached the terminal with an
+    EMPTY `violations` list, so under `select` it was `feasible=True` with the operator's hard
+    constraints never applied and the drift cross-check never run, and could become champion.
   * IT IS RECORDED AS SALVAGED. `SalvagedMetric.as_event()` rides on `node_evaluated` as
     `metric_provenance`, and under the default policy the node also carries a `metric_salvaged`
     VIOLATION row, which the fold turns into `feasible = False` — so `RunState.feasible_nodes()`,
@@ -112,6 +136,28 @@ SALVAGE_SOURCES = ("eval_result", "declared_reader", "relocated_file")
 # provenance record, so an operator reading a salvaged node learns which of these it was.
 SALVAGE_CONDITIONS = ("artifact_contract", "stage_failed", "eval_failed")
 
+# WHO WROTE THE BYTES the declared reader was asked about — a CLOSED two-value vocabulary, because
+# the answer decides whether `select` applies (see `violation_rows`).
+#
+#   operator_stage — the output of a stage the OPERATOR declared, or of the single-command eval,
+#                    which is the operator's own `cmd`. This is the same trust statement
+#                    `run_command_eval`'s primary read makes: the operator chose which command
+#                    scores, and the agent may not change that choice.
+#   agent_stage    — the output of a stage from the Developer's `looplab_stages.json`. The operator's
+#                    SPEC still selected the number, but the agent wrote the text it selected from.
+#
+# The distinction is not paranoia about a hypothetical: the reason the protected `score` stage
+# exists is that the agent authors the training script, and the `expect_failed` / `check_failed`
+# early returns hand salvage exactly that script's stdout.
+OPERATOR_PRODUCED = "operator_stage"
+AGENT_PRODUCED = "agent_stage"
+SALVAGE_PRODUCERS = (OPERATOR_PRODUCED, AGENT_PRODUCED)
+
+# The name `engine/eval_stages.py` appends the operator's protected scoring command under when the
+# Developer supplies the pipeline. `validate_stages(reserved=("score",))` keeps a Developer manifest
+# from claiming it, which is what makes the name a reliable owner marker here.
+OPERATOR_PROTECTED_STAGE = "score"
+
 # Failure REASONS (`engine/triage.py::_failure_reason`) a metric is never salvaged under. Each is a
 # separate argument, not a list of similar things:
 #
@@ -155,6 +201,37 @@ def settle_mode(mode) -> str:
     Anything not in the vocabulary settles to the conservative default rather than to `select`.
     """
     return mode if mode in METRIC_SALVAGE_MODES else DEFAULT_METRIC_SALVAGE
+
+
+def stage_producer(operator_stages, stage) -> str:
+    """Who produced the output a salvage read is about — an `SALVAGE_PRODUCERS` slug.
+
+    `operator_stages` is `eval_spec["stages"]` (the operator's own declared pipeline, dicts or bare
+    names); `stage` is `RunResult.failed_stage`, i.e. the stage whose captured stdout the failing
+    `RunResult` carries.
+
+    Total over junk and CONSERVATIVE in the one direction that matters: anything this cannot
+    positively attribute to the operator is `agent_stage`, because the consequence of the two
+    answers is asymmetric — calling agent output "operator" lets an agent-printed number compete for
+    champion, while calling operator output "agent" costs only that a salvaged node stays excluded
+    under `select`.
+
+    An EMPTY stage name is the single-command eval (`_run_single`), whose stdout is the operator's
+    own `cmd` — the same bytes `run_command_eval`'s primary read uses — and is attributed to the
+    operator for exactly that reason.
+    """
+    name = str(stage or "").strip()
+    if not name:
+        return OPERATOR_PRODUCED
+    if name == OPERATOR_PROTECTED_STAGE:
+        return OPERATOR_PRODUCED
+    declared = set()
+    for row in (operator_stages or ()):
+        if isinstance(row, dict):
+            declared.add(str(row.get("name") or ""))
+        elif isinstance(row, str):
+            declared.add(row)
+    return OPERATOR_PRODUCED if name in declared else AGENT_PRODUCED
 
 
 def salvage_condition(res, reason: str) -> Optional[str]:
@@ -223,6 +300,9 @@ class SalvagedMetric:
     reader: str               # the DECLARED reader kind the value came out of
     stage: str = ""           # the stage that failed, when the eval was staged
     detail: str = ""          # rung-specific evidence (the relocated path, …)
+    # WHO WROTE THE OUTPUT the reader read (a SALVAGE_PRODUCERS slug). Defaults to the conservative
+    # answer so a caller that does not know cannot accidentally buy `select`.
+    producer: str = AGENT_PRODUCED
 
     def as_event(self) -> dict:
         """The `metric_provenance` payload for `node_evaluated`.
@@ -232,7 +312,7 @@ class SalvagedMetric:
         because the natural next change is to write provenance for MEASURED metrics too.
         """
         row = {"salvaged": True, "condition": self.condition, "source": self.source,
-               "reader": self.reader}
+               "reader": self.reader, "producer": self.producer}
         if self.stage:
             row["stage"] = self.stage
         if self.detail:
@@ -250,8 +330,18 @@ class SalvagedMetric:
         `max`/`min` are None: this is not a numeric bound that was breached. The row exists to make
         `n.feasible` False — the fold's rule is `feasible = not violations`, so any row does it —
         and to say WHY in the same breath.
+
+        `select` IS NOT UNCONDITIONAL, and this is the one place that fact is enforced. The operator
+        setting it accepted "a metric recovered by MY declared reader may compete"; they did not
+        accept "a number the agent's own training script printed may compete", which is what the
+        setting silently bought whenever the failing stage came out of the Developer's manifest (the
+        `expect_failed` early return hands salvage that stage's stdout). So agent-produced output
+        keeps the row under every rung except `off` — see `OPERATOR_PRODUCED` and `stage_producer`.
         """
-        if settle_mode(mode) != "audit":
+        settled = settle_mode(mode)
+        if settled == "off":                 # `salvage` never returns a record under `off` at all
+            return []
+        if settled == "select" and self.producer == OPERATOR_PRODUCED:
             return []
         return [{"name": "metric_salvaged", "value": self.metric, "max": None, "min": None,
                  "salvage": self.as_event()}]
@@ -275,11 +365,18 @@ def _relocated(metric_spec: dict, workdir: str, since: Optional[float]) -> Optio
     v5 defect was a declared path that disagreed with disk by one directory name, and a run whose
     metric reader names a FILE has exactly the same exposure as one whose `expect.files` does. It
     stays inside the declaration in both senses that matter — it is still the operator's spec, still
-    the operator's basename, and `_artifact_written_elsewhere` searches only INSIDE the workdir, only
+    the operator's basename, and `_artifacts_written_elsewhere` searches only INSIDE the workdir, only
     files this attempt wrote, and only up to a bounded number of directories.
 
     Deliberately NOT extended to `stdout_*` readers: there is no path to relocate, and a stdout
     reader that found nothing found nothing.
+
+    AMBIGUITY IS A REFUSAL, not a coin toss. `_artifacts_written_elsewhere` returns every fresh
+    same-basename file it found, sorted; two of them means the workdir holds two candidate answers
+    and nothing deterministic says which one the declaration meant. The diagnostic half of this scan
+    (`verify_stage_artifacts`' near-miss line) can name the first and be useful, because a human
+    reads it; a salvage cannot, because it would promote a number chosen by directory-walk order —
+    the same value could be recovered differently on a re-run of the identical workdir.
     """
     from looplab.runtime import command_eval
     if command_eval.spec_kind(metric_spec) not in command_eval.READERS_REQUIRING_PATH:
@@ -287,10 +384,10 @@ def _relocated(metric_spec: dict, workdir: str, since: Optional[float]) -> Optio
     rel = metric_spec.get("path")
     if not isinstance(rel, str) or not rel.strip():
         return None
-    found = command_eval._artifact_written_elsewhere(workdir, rel, since)
-    if not found:
+    found = command_eval._artifacts_written_elsewhere(workdir, rel, since)
+    if len(found) != 1:
         return None
-    return dict(metric_spec, path=found), found
+    return dict(metric_spec, path=found[0]), found[0]
 
 
 def read_salvageable_metric(metric_spec, stdout: str, workdir: str,
@@ -299,6 +396,11 @@ def read_salvageable_metric(metric_spec, stdout: str, workdir: str,
 
     Returns `(value, source, reader_kind, detail)` or None. Pure with respect to the run: it reads
     the node's own workdir and the captured stdout and nothing else, and it appends nothing.
+
+    THE SPEC IS THE OPERATOR'S; `stdout` IS WHATEVER THE FAILING STAGE PRINTED. Those are two
+    different claims and this function makes only the first. Who wrote the bytes is decided by
+    `stage_producer` and enforced by `SalvagedMetric.violation_rows` — read the module docstring's
+    second condition before treating a value that comes back from here as measured.
 
     `wrap` is deliberately not a parameter. Every reader that survives the `adapter` refusal below
     parses HOST files or the already-captured stdout in-process — under the container tier the
@@ -332,7 +434,7 @@ def read_salvageable_metric(metric_spec, stdout: str, workdir: str,
 
 
 def salvage(res, reason: str, metric_spec, workdir: str, since: Optional[float],
-            mode: str = DEFAULT_METRIC_SALVAGE) -> Optional[SalvagedMetric]:
+            mode: str = DEFAULT_METRIC_SALVAGE, operator_stages=()) -> Optional[SalvagedMetric]:
     """THE salvage decision for one failed eval attempt: a `SalvagedMetric`, or None.
 
     Order is the argument. The CONDITION is settled first — from the eval's own record, with no
@@ -346,6 +448,11 @@ def salvage(res, reason: str, metric_spec, workdir: str, since: Optional[float],
     every PREVIOUS attempt of this node is older than it, because the workdir persists across
     attempts and each attempt stamps a fresh start. Threading the exact `_eval_started` out of
     `run_command_eval` would need a new `RunResult` field; the write-up in the report says so.
+
+    `operator_stages` is the operator's own `eval_spec["stages"]`, and it is what lets the record say
+    whether the salvaged bytes came from a stage the operator declared or from the Developer's
+    manifest. An omitted argument therefore settles to the CONSERVATIVE answer (`agent_stage`), not
+    to a permissive one.
     """
     if settle_mode(mode) == "off":
         return None
@@ -353,6 +460,7 @@ def salvage(res, reason: str, metric_spec, workdir: str, since: Optional[float],
     if condition is None:
         return None
     stage = str(getattr(res, "failed_stage", "") or "")
+    producer = stage_producer(operator_stages, stage)
     # The eval already carried a value (the last-stage crash salvage in `command_eval._run_stages`,
     # or a host grader that scored a failed run). Relabel rather than re-read: re-asking the reader
     # could answer differently, and the number the eval reported is the one the trace already shows.
@@ -367,13 +475,13 @@ def salvage(res, reason: str, metric_spec, workdir: str, since: Optional[float],
     carried = _usable(getattr(res, "metric", None))
     if carried is not None:
         return SalvagedMetric(metric=carried, condition=condition, source="eval_result",
-                              reader=_spec_kind(metric_spec), stage=stage)
+                              reader=_spec_kind(metric_spec), stage=stage, producer=producer)
     found = read_salvageable_metric(metric_spec, getattr(res, "stdout", "") or "", workdir, since)
     if found is None:
         return None
     value, source, reader, detail = found
     return SalvagedMetric(metric=value, condition=condition, source=source, reader=reader,
-                          stage=stage, detail=detail)
+                          stage=stage, detail=detail, producer=producer)
 
 
 def _spec_kind(metric_spec) -> str:
@@ -381,7 +489,103 @@ def _spec_kind(metric_spec) -> str:
     return command_eval.spec_kind(metric_spec)
 
 
+# The reason an operator-owned reader that would EXEC agent code cannot simply be skipped here.
+# `run_command_eval` RAISES on an `adapter` in `metrics`/`constraints`, but it raises in its TAIL —
+# the code path a salvaged eval never reached — so a spec salvage sees may still contain one. A
+# skipped constraint is a silent pass on an operator's hard bound; an EXECd one is the trust
+# boundary. Neither is acceptable, so it counts as unverifiable, which `_violations` already treats
+# as a violation ("an unverifiable constraint is a violation, never a silent pass").
+_ADAPTER_CONSTRAINT = "constraint reader is `adapter` (agent-authored code is never EXECd on a salvage)"
+
+
+def salvage_gates(eval_spec, metric: float, stdout: str, workdir: str,
+                  since: Optional[float], *, enforce_drift: bool = False) -> dict:
+    """The QUALIFYING reads `run_command_eval`'s tail would have made about this metric, re-asked.
+
+    Returns `{"violations": [...], "extra_metrics": {...}, "drift": {...}|None}`.
+
+    A salvaged metric is still a metric, and the operator's constraints, extra readers and drift
+    cross-check are the things that decide whether a metric qualifies. They are computed in
+    `run_command_eval`'s TAIL (`viol = _violations(...) if constraints and m is not None`), which the
+    `expect_failed` / `check_failed` / crashed-stage early returns skip entirely — so every salvaged
+    node reached its terminal with `violations == []`, and under `select` that read as
+    "no constraint was breached" when the truth was "no constraint was ever evaluated". A node like
+    that could become champion with the operator's hard bounds never applied.
+
+    THREE DELIBERATE DIFFERENCES from the tail, each because the situation is not the same:
+      * FAIL CLOSED ON FRESHNESS. `since` is this attempt's start for every reader, where the tail
+        relaxes secondary readers under a stage-scoped re-run (`_reader_since`). A stale constraint
+        file therefore reads as unverifiable -> violation. That is the safe direction: the node is
+        already excluded under the default rung, so the cost is confined to `select`, where the
+        alternative is admitting an unmeasured metric under an unchecked bound.
+      * NO `wrap`. Same argument as `read_salvageable_metric`: `adapter` is refused, and every other
+        reader parses host files or the captured stdout in-process.
+      * DRIFT IS A REFUSAL, NOT A RECORD. The caller must abandon the salvage when this returns a
+        `drift` — `NEVER_SALVAGED_REASONS` already refuses a metric the drift gate discarded, and a
+        salvaged value that its cross-reader cannot corroborate is the same fact discovered one step
+        later.
+
+    Best-effort in the same strict sense as the rest of this module: it never raises. A reader that
+    blows up contributes an unverifiable constraint (fail closed), never a dead eval worker.
+    """
+    from looplab.runtime import command_eval
+    spec = eval_spec if isinstance(eval_spec, dict) else {}
+    wd = str(workdir)
+    out: dict = {"violations": [], "extra_metrics": {}, "drift": None}
+
+    constraints = [c for c in (spec.get("constraints") or []) if isinstance(c, dict)]
+    safe: list = []
+    for c in constraints:
+        if command_eval.spec_kind(c) == "adapter":
+            out["violations"].append({"name": c.get("name", "constraint"), "value": None,
+                                      "max": c.get("max"), "min": c.get("min"),
+                                      "unverifiable": _ADAPTER_CONSTRAINT})
+        else:
+            safe.append(c)
+    if safe:
+        try:
+            out["violations"].extend(
+                command_eval._violations(stdout, wd, safe, None, since=since))
+        except Exception:  # noqa: BLE001 — an unreadable constraint is a violation, not a dead run
+            out["violations"].extend([{"name": c.get("name", "constraint"), "value": None,
+                                       "max": c.get("max"), "min": c.get("min"),
+                                       "unverifiable": "constraint reader raised"} for c in safe])
+
+    for name, reader in (spec.get("metrics") or {}).items():
+        if not isinstance(reader, dict) or command_eval.spec_kind(reader) == "adapter":
+            continue                      # audit-only values: a missing one is absent, not a gate
+        try:
+            value = command_eval.read_metric(stdout, wd, reader, wrap=None, since=since)
+        except Exception:  # noqa: BLE001
+            value = None
+        if value is not None:
+            out["extra_metrics"][str(name)] = value
+
+    cross = spec.get("cross_check")
+    if enforce_drift and isinstance(cross, dict):
+        tolerance = spec.get("drift_tolerance", 1e-6)
+        try:
+            tolerance = float(tolerance)
+        except (TypeError, ValueError):
+            tolerance = 1e-6
+        try:
+            command_eval.validate_cross_check(cross)
+            value = command_eval.read_metric(stdout, wd, cross, wrap=None, since=since)
+        except Exception:  # noqa: BLE001 — an unusable cross reader corroborates nothing
+            value = None
+        if command_eval._drift(metric, value, tolerance):
+            out["drift"] = {"primary": metric, "cross": value, "tolerance": tolerance}
+    return out
+
+
 # --- THE CAUSE, WHICH IS THE OTHER HALF OF THE ASK -----------------------------------------------
+# The `triage_action` a cause fix writes on its `node_repaired` row. A CONSTANT because two sites key
+# on it and they must agree: `engine/evaluate.py::_repair_salvaged_cause` writes it (and reads it
+# back to make the fix idempotent across a resume — invariant #3), and
+# `engine/evaluate.py::_durable_repair_ledger` reads it to keep a fix that bought no re-evaluation
+# out of the inline-repair ATTEMPT budget. A typo'd literal in either place is silent: the resume
+# pays for a second Developer call, or the node loses a repair attempt it never spent.
+SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 # Salvaging the metric and leaving the broken declaration in place would trade one silent failure
 # for another: the node reads as successful and its next attempt (an operator `node_reset`, a
 # stage-scoped re-run) walks into the identical contract failure, having learnt nothing. So the

@@ -117,6 +117,12 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
     `runtime/command_eval.metric_spec_path_error` — the authority that lives beside the reader table
     deciding the fact — about each one. Returns [] for a usable spec.
 
+    It asks `host_score_labels_error` in the same walk, and for the same reason the path rule is
+    asked of all four slots rather than only `metric`: a `host_score` in `constraints` holds the
+    operator's answer key exactly as much as one in `metric` does. Only that rule's SPEC-LOCAL halves
+    are decidable here (labels absent, labels relative) — "inside the workspace" needs a run
+    directory, which a spec being authored does not have yet, and is `eval_workspace_conflicts`.
+
     Accepts the TASK as well as the spec, and unwraps it HERE rather than at the call site: a
     getattr probe for `eval` on a task would read as a duck-typed TaskAdapter hook and trip the
     two-way `TASK_OPTIONAL_HOOKS` registry scan (tests/test_task_adapter_contract.py) — correctly,
@@ -126,13 +132,43 @@ def eval_reader_path_errors(task_or_spec) -> list[str]:
     Shared by the submit-time refusal below and `cli/run_cmds.py::resume`, which reports the SAME
     text as a warning for a run that was started before the refusal existed (see `_readers_usable`).
     """
-    from looplab.runtime.command_eval import metric_spec_path_error
+    from looplab.runtime.command_eval import host_score_labels_error, metric_spec_path_error
     spec = task_or_spec.eval if isinstance(task_or_spec, RepoTask) else task_or_spec
     if not isinstance(spec, EvalSpec):
         return []
     out: list[str] = []
     for label, slot, reader in spec.readers():
         err = metric_spec_path_error(reader, consequence=_PATHLESS_COST[slot])
+        if err:
+            out.append(f"{label}: {err}")
+        labels_err = host_score_labels_error(reader)
+        if labels_err:
+            out.append(f"{label}: {labels_err}")
+    return out
+
+
+def eval_workspace_conflicts(task_or_spec, workspace_root) -> list[str]:
+    """The reader problems that can only be seen once the RUN DIRECTORY is known, one per reader.
+
+    Today that is exactly one: a `host_score` answer key that resolves inside the workspace. It is
+    not checkable by `EvalSpec`'s own validator — a spec is authored before a run dir exists — and it
+    is not checkable at score time either, because the only safe thing a reader can do inside an eval
+    worker is score nothing (the raise it used to do left the node with no terminal event and the run
+    re-dying on every resume). So it is asked HERE, by the launch surface, on a directory that has
+    not been created yet.
+
+    Separate from `eval_reader_path_errors` rather than a mode of it: the two have different
+    AUDIENCES. That one is re-asked on `resume` as a warning for runs started before it existed;
+    this one is a launch-time refusal, and re-asking it on resume would refuse a run whose evidence
+    is already on disk.
+    """
+    from looplab.runtime.command_eval import host_score_labels_error
+    spec = task_or_spec.eval if isinstance(task_or_spec, RepoTask) else task_or_spec
+    if not isinstance(spec, EvalSpec) or workspace_root is None:
+        return []
+    out: list[str] = []
+    for label, _slot, reader in spec.readers():
+        err = host_score_labels_error(reader, workspace_root=workspace_root)
         if err:
             out.append(f"{label}: {err}")
     return out
@@ -362,7 +398,16 @@ class EvalSpec(BaseModel):
 
     @model_validator(mode="after")
     def _readers_usable(self, info: ValidationInfo):
-        """Refuse a reader that can never read anything, in ANY of the four slots, at SUBMIT time.
+        """Refuse a reader that can never read anything — or that grades against the wrong file — in
+        ANY of the four slots, at SUBMIT time.
+
+        The second half is `host_score`'s held-out labels (`host_score_labels_error`). It belongs
+        with the first because the SYMPTOM is identical: at score time the reader returns None, every
+        node fails `no_metric`, and the run finishes with no best node — the reader used to RAISE
+        there, which killed the run outright with no terminal event for the node, so the check had to
+        move somewhere it can refuse instead of crash. This validator sees a spec without a run
+        directory, so it applies only the two spec-local rules (labels absent, labels relative); the
+        "inside the workspace" half needs a run root and is asked by the launch surface that has one.
 
         Deliberately NOT inside `validate_cross_check`: that predicate is ALSO the runtime guard
         `run_command_eval` calls per eval, so a raise there would abort the eval worker mid-run with

@@ -159,13 +159,19 @@ def test_every_closed_vocabulary_field_is_validated():
     `LOOPLAB_NOVELTY_MODE=LLM` turned the novelty gate off with no diagnostic."""
     covered = {field for field, _ in Settings._ENUM_FIELDS}
     assert covered == {"trust_gate", "merge_mode", "novelty_mode", "strategist_backend",
-                       "eval_trust_mode", "seed_mode", "backend", "developer_backend", "llm_parser"}
+                       "eval_trust_mode", "seed_mode", "backend", "developer_backend", "llm_parser",
+                       # `metric_salvage` (off|audit|select) joined 2026-08-12. It decides whether a
+                       # metric the run recovered rather than measured may become champion, so an
+                       # out-of-set value silently falling through would be the loudest version of
+                       # exactly the failure this test exists for.
+                       "metric_salvage"}
 
 
 @pytest.mark.parametrize("field,bad", [
     ("trust_gate", "audits"), ("merge_mode", "Mean"), ("novelty_mode", "LLM"),
     ("strategist_backend", "Rule"), ("eval_trust_mode", "ratify"), ("seed_mode", "auto "),
     ("backend", "TOY"), ("developer_backend", "aidr"), ("llm_parser", "toolcall"),
+    ("metric_salvage", "Audit"),
 ])
 def test_a_near_miss_value_fails_loudly_and_names_the_vocabulary(field, bad):
     with pytest.raises(ValueError) as info:

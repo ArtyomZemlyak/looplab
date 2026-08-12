@@ -1676,8 +1676,33 @@ class Settings(BaseSettings):
             value = getattr(self, field)
             if value not in allowed:
                 raise ValueError(f"{field} must be {'|'.join(allowed)}, got {value!r}")
+        self._check_member_fields()
         self._check_llm_profiles()
         return self
+
+    # The SET-valued sibling of `_ENUM_FIELDS`: a field whose value is a collection every MEMBER of
+    # which must be in a closed vocabulary. The failure mode is the same one that table exists for
+    # and is if anything quieter — `inline_repair_reasons=("typo",)` was accepted in full, and the
+    # engine's gate is `reason not in self._inline_repair_reasons`, so the setting simply never
+    # matched anything and inline repair was OFF for every failure class with nothing anywhere
+    # saying so. That is not a hypothetical shape: the whole point of widening this default on
+    # 2026-08-12 was that a reason nobody had decided to drop was being dropped silently, and a
+    # mistyped narrowing re-creates it one layer up. Env override expects a JSON array, which is
+    # exactly where a typo comes from.
+    _MEMBER_FIELDS: typing.ClassVar[tuple] = (
+        ("inline_repair_reasons", lambda: FAILURE_REASONS),
+    )
+
+    def _check_member_fields(self) -> None:
+        for field, vocabulary in self._MEMBER_FIELDS:
+            allowed = vocabulary() if callable(vocabulary) else vocabulary
+            value = getattr(self, field)
+            unknown = [v for v in (value or ()) if v not in allowed]
+            if unknown:
+                raise ValueError(
+                    f"{field} contains {unknown!r}, which {'is' if len(unknown) == 1 else 'are'} "
+                    f"not {'a ' if len(unknown) == 1 else ''}failure reason"
+                    f"{'' if len(unknown) == 1 else 's'}; known: {'|'.join(allowed)}")
 
     def _check_llm_profiles(self) -> None:
         """Validate the connection-profile maps LOUDLY, at construction.
@@ -1875,6 +1900,18 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # (c) exactly (0 is pointable at every commit before this one) and satisfies (b) in the mirror
     # direction: re-entry must not silently REMOVE work the run was doing either.
     "inline_repair_attempts": 0,
+    # METRIC SALVAGE, both halves, and they satisfy (a)+(b)+(c) as cleanly as any entry here.
+    # (a) both fields were added 2026-08-12. (b) `audit` changes the SELECTION POLICY of a resumed
+    # run — a node that would have failed becomes `evaluated`, counts against the node budget, and
+    # joins the lineage the Researcher breeds and reports from — and `metric_salvage_repair` adds a
+    # PAID Developer call the original run never made. (c) the before-the-field behaviour is
+    # pointable at every commit before that date and is spelled exactly by `off`/False, which is what
+    # `metric_salvage: "off"`'s own comment means by "the behaviour before 2026-08-12".
+    # Without these two rows, resuming any of the 38 pre-versioning snapshots turned salvage on
+    # mid-run: the first half of the run discarded a node with an unreadable declaration and the
+    # second half admitted one, in the same event log, with nobody having chosen either.
+    "metric_salvage": "off",
+    "metric_salvage_repair": False,
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

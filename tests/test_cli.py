@@ -106,6 +106,40 @@ def test_run_refuses_a_different_task_in_an_existing_run_dir(tmp_path):
     ).exit_code == 0
 
 
+def test_run_refuses_held_out_labels_that_live_inside_the_run_directory(tmp_path):
+    """The submit-time half of `host_score`'s invariant that needs a RUN DIRECTORY to see.
+
+    At score time the reader can only refuse to score (it used to RAISE, which left the node with no
+    terminal event and the run re-dying on every resume), so an operator whose answer key sits under
+    the run root would learn about it as "every node failed no_metric" — after the run. Under the
+    untrusted tier the whole run root is bind-mounted into the candidate's container, so those labels
+    are readable AND writable by the code being graded.
+    """
+    import json
+    out = tmp_path / "runs" / "demo"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    task = tmp_path / "task.json"
+    task.write_text(json.dumps({
+        "id": "held_out", "kind": "repo", "goal": "g", "direction": "max",
+        "editable_path": str(repo),
+        "cmd": {"command": ["python", "-c", "print(1)"],
+                "metric": {"kind": "host_score", "predictions": "predictions.json",
+                           "labels": str(out / "labels.json"), "scorer": "accuracy"}}}))
+    res = runner.invoke(app, ["run", str(task), "--out", str(out), "--max-nodes", "1",
+                              "--backend", "toy", "--no-genesis"])
+    assert res.exit_code == 2, res.output
+    assert "refusing to start" in res.output and "INSIDE the candidate workspace" in res.output
+    assert not (out / "events.jsonl").exists(), "the refusal must precede any run artifact"
+
+    # The same task with the labels OUTSIDE the run dir is not refused by this check.
+    task.write_text(task.read_text().replace(str(out / "labels.json"),
+                                             str(tmp_path / "labels.json")))
+    ok = runner.invoke(app, ["run", str(task), "--out", str(out), "--max-nodes", "1",
+                             "--backend", "toy", "--no-genesis"])
+    assert "refusing to start" not in ok.output
+
+
 def test_version_flag():
     result = runner.invoke(app, ["--version"])
     assert result.exit_code == 0, result.output

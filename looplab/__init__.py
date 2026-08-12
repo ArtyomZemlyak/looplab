@@ -185,6 +185,9 @@ _LAYOUT = {
     "log_pages": "serve",
     "mcp_tools": "tools",
     "memora": "tools",
+    # deterministic recovery of a metric the eval already produced, for a node that failed for
+    # some other reason (doc: docs/guide/tasks.md "Metric salvage")
+    "metric_salvage": "engine",
     "memory_tools": "tools",
     # what of the cross-run memory is attributable to ONE run, and may go when that run is deleted
     "memory_cascade": "serve",

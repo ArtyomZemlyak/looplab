@@ -1714,6 +1714,24 @@ class SpeculationMixin:
             proposal_cue_fence=result.cue_fence,
         )
         if card_id is None:
+            if getattr(self, "_card_stage_attached_to", None) is not None:
+                # THE ONE REFUSAL THIS LANE CANNOT WAIT OUT. Every other `None` from
+                # `_stage_prepared_card` is a moved fence — the epoch, the best anchor, the tail —
+                # and re-proposing next turn is the right answer to all of them. An attach refusal is
+                # not: the proposal is a repair of a question a live Card already owns, staging can
+                # never publish it as inventory, and no amount of waiting changes that. What builds it
+                # is the outer boundary — `_card_phase_serve_raw_stage` yields there for any consumed
+                # result that staged nothing — i.e. `_handle_create_actions` -> `_create_node` ->
+                # `_reserve_node_build(retry_attach=True)`, the one site that can commit an attach.
+                #
+                # Its audit prefix is COMMITTED rather than dropped, and that is the difference
+                # between this branch and the fall-through below it. The proposal really happened and
+                # its novelty/governance receipts describe a real paid call; on a stale-fence refusal
+                # the whole proposal is being abandoned and re-made, so dropping them keeps the log
+                # honest, but here the work is being handed to the serial spine and the receipts are
+                # the only record that this lane paid for it at all.
+                for event_type, data, trace_id, span_id in result.audit_events:
+                    self.store.append(event_type, data, trace_id=trace_id, span_id=span_id)
             return True, False
         # the Card commit above and these proposal-audit events are separate appends. A crash
         # or append failure after EV_CARD_ADDED leaves an executable durable Card whose novelty/governance
@@ -1966,6 +1984,10 @@ class SpeculationMixin:
                 # Return to the outer selector instead of repeating a paid proposal.
                 session.yield_outer = True
         else:
+            # Nothing was staged. Yield rather than propose again — for a stale fence because the
+            # outer loop is where a fresh authority snapshot comes from, and for the PERMANENT
+            # attach refusal (`_stage_prepared_card`'s `attach` branch) because the outer loop is
+            # the only place that can build a repair at all.
             session.yield_outer = True
 
     async def _card_phase_drop_stale(self, session: CardSession) -> bool:
