@@ -87,6 +87,29 @@ budget slot than the inline repair that just gave up? Nobody has measured it. Th
 is already in the logs: for every node whose triage said `abandon`, did the debug child that followed
 reach a metric? Answer that before changing the operator.
 
+## F7 · The Research Atlas: what it uniquely holds, and what it duplicates
+
+**Asked:** "What is the Atlas even for?"
+
+**Today, measured 2026-08-12.** It has four sections, and they are not equal:
+
+| section | also available elsewhere? |
+|---|---|
+| Concepts seen across runs (+ "observed in one run") | YES — the run list's **Concepts** view is strictly richer: a full `is_a` forest, co-occurrence, a per-concept detail pane and, since this week, the lessons/cases/notes that carry each concept |
+| Mixed-evidence claim records | **NO** |
+| Claim records | **NO** — 30 rows live on this box; `/api/cross-run/claims` has no other reader |
+| Recent proposals + outcomes (the steward curation log) | **NO** |
+
+So three of its four sections are the ONLY home for research claims and for what the paid stewards
+proposed and what came of it. The one section that reads as redundant is its concepts list, which a
+different view outgrew.
+
+**Recommendation, for the owner to accept or reject.** Keep it and narrow it: drop the concepts
+section in favour of a link to the Concepts view, and rename the destination to what it uniquely
+holds — claims and curation. Deleting the Atlas outright would take the claim ledger and the steward
+outcomes offline with it, which is not what the question was about. Renaming is not cosmetic here:
+"Research Atlas" is what makes an operator expect the concept map and then find a worse one.
+
 ## F6 · Conversation trace: usability, and the generations that are invisible
 
 **Asked:** "make the conversation trace more convenient. You cannot see traces from earlier versions
