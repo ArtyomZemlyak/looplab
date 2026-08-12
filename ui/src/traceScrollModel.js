@@ -72,19 +72,40 @@ export const traceWidenStalled = (previous, next) => {
   return !traceWidenProgressed(previous, next)
 }
 
-// The client deadline for ONE windowed read. It has to scale with the window, because the server's
-// cost does: measured 2026-08-07 on runs/rubert-dr-0804 node 1, the conversation route answers in
-// 2.2 s at the 512 default, 4.3 s at 1024, 8.7 s at 2048 and 17.3 s at the 4096 ceiling — almost
-// exactly linear, because the dominant term is one random read per span. The Inspector's flat 8 s
-// deadline therefore aborted EVERY read above ~2048, and (before `settleTraceRead` below) an aborted
-// widen replaced the conversation the operator was reading with an "unavailable" receipt: asking for
-// more cost them what they already had. 4x headroom over the measured curve, hard-capped so a
-// pathological node cannot leave a request outstanding indefinitely.
-export const TRACE_READ_DEADLINE_MS = 8000
+// The client deadline for ONE windowed read. A trace read costs TWO things and only one of them
+// scales with the window, so the deadline is a sum, not a product:
+//
+//  * the WINDOW term. Measured 2026-08-07 on runs/rubert-dr-0804 node 1, the conversation route
+//    answers in 2.2 s at the 512 default, 4.3 s at 1024, 8.7 s at 2048 and 17.3 s at the 4096
+//    ceiling — almost exactly linear, because the dominant term there is one random read per span.
+//  * the FIXED term, which the first version of this rule did not model at all and which is what the
+//    operator has actually been hitting. Measured 2026-08-12 against the live server on
+//    runs/rubertlite-dr-unified-v5 (engine running, run root on a geesefs/S3 mount):
+//    `/nodes/1/trace?limit=512` answered in 4.3-15.6 s — for a 1.4 KB payload describing SIX spans.
+//    Nothing about that is span-bound: `light_spans_for_node` served it in 0.0 ms and the warm index
+//    cost 1-3 ms. The time went on FIVE absent-fence probes per request (`AppState.run_dir`'s
+//    deletion fence, plus the reset marker in `_assert_trace_reset_clear` and `_state_payload`,
+//    once each for the before- and after-read lifecycle CAS), which cost 721-2,923 ms together
+//    because a negative lookup on that mount is a round trip. `/nodes/{n}/conversation?limit=512`
+//    measured 20.4-22.3 s the same way, and a cold node trace on a FINISHED run 23.6 s.
+//
+// So a flat 8 s deadline was not "tight", it was WRONG about the shape of the cost: it aborted the
+// default-window read of a six-span node while leaving four doublings of genuine window headroom
+// unused. Every such abort is one of the "Trace unavailable" panels this rule exists to prevent, and
+// on a first read there is no last-good payload for `settleTraceRead` to keep.
+// (`looplab/core/fence.py` now warms the directory listing before each of those probes, which took
+// the five of them to an 11 ms median — but a browser cannot know which server it is talking to, so
+// the deadline stays honest about the slowest one that ships.)
+export const TRACE_READ_FIXED_MS = 24000
+export const TRACE_READ_WINDOW_MS = 8000
+// What the deadline is at the default window — the name every caller and test already used.
+export const TRACE_READ_DEADLINE_MS = TRACE_READ_FIXED_MS + TRACE_READ_WINDOW_MS
+// Hard-capped so a pathological node cannot leave a request outstanding indefinitely.
 export const TRACE_READ_DEADLINE_MAX_MS = 64000
 export const traceReadDeadlineMs = window => {
   const factor = positive(window) ? Math.max(1, window / NODE_TRACE_SPAN_WINDOW) : 1
-  return Math.min(Math.round(TRACE_READ_DEADLINE_MS * factor), TRACE_READ_DEADLINE_MAX_MS)
+  return Math.min(
+    Math.round(TRACE_READ_FIXED_MS + TRACE_READ_WINDOW_MS * factor), TRACE_READ_DEADLINE_MAX_MS)
 }
 
 // The ONE state rule both trace surfaces read. `view` is a `traceProjection.js` window record
@@ -144,3 +165,48 @@ export const settleTraceRead = (previous, outcome) => {
   if (previous == null) return { payload: null, reachFailed: false, unavailable: true }
   return { payload: previous, reachFailed: true }
 }
+
+// WHY a trace read did not produce a trace. Both mean "we do not have it", and that is exactly why
+// they were being printed with one sentence — but the operator's next move is opposite:
+//   * UNREADABLE — a deadline, a transport failure, a 5xx, an envelope that did not parse. The
+//     evidence still exists; waiting or retrying is the answer, and this is the one worth retrying
+//     automatically.
+//   * SUPERSEDED — the server answered about a DIFFERENT run generation / node / attempt than the
+//     one on screen. Every trace surface refuses such a payload before render (that fence is the
+//     point), but refusing it is not a read failure: the trace the operator asked for was replaced
+//     under them, and retrying this same scope will keep answering about the new one. Reloading the
+//     run is what actually helps, and a "Retry" button that cannot help is the dead control the
+//     bounded-projection vocabulary already exists to remove.
+// Distinct because "there is no evidence here" and "we could not read the evidence" being one word
+// is the confusion this whole module was written against; a superseded read is a third fact and had
+// been folded into the second.
+export const TRACE_FAILURE_UNREADABLE = 'unreadable'
+export const TRACE_FAILURE_SUPERSEDED = 'superseded'
+
+export const traceFailureLabel = (kind, { retrying = false } = {}) => {
+  if (kind === TRACE_FAILURE_SUPERSEDED) {
+    return 'This trace belongs to a run generation that was replaced; reload the run.'
+  }
+  return retrying ? 'Trace unavailable; retrying automatically.' : 'Trace unavailable.'
+}
+
+// Is this failure worth asking the same question again? Only an unreadable one — see above.
+export const traceFailureIsRetryable = kind => kind !== TRACE_FAILURE_SUPERSEDED
+
+// THE AUTOMATIC RETRY BUDGET for a ONE-SHOT trace read.
+//
+// The surfaces that poll (the live tail, a node that is currently building) recover on their own
+// tick. The one-shot reads — an expanded event row's node trace, an operation's trace by trace id —
+// did not: one failure parked them on a receipt with a manual Retry, for the rest of that row's
+// life. Against a route measured at 4-15 s per call behind an 8 s deadline that was not a rare
+// event, and it is precisely the shape of the operator's complaint: the trace is "unavailable"
+// until they click, and it works when they do.
+//
+// Bounded, because unbounded is the other failure: a route that is genuinely down must not be
+// re-asked forever at seconds per call (the same rule `armTraceScroll` holds for the scroll
+// loader). After the budget, the manual Retry is the honest control — and it refills the budget.
+export const TRACE_RETRY_MS = 5000
+export const TRACE_RETRY_MAX = 2
+export const traceRetryMs = (failures, kind = TRACE_FAILURE_UNREADABLE) =>
+  (traceFailureIsRetryable(kind) && Number.isSafeInteger(failures)
+    && failures > 0 && failures <= TRACE_RETRY_MAX ? TRACE_RETRY_MS : null)

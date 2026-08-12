@@ -226,7 +226,13 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'operation trace must retain the server projection envelope')
   assert.match(dock, /<NodeTrace spans=\{nodeSpans\}[\s\S]*?projection=\{nodeTrace\.projection\}/,
     'node trace must pass its projection metadata to the shared renderer')
-  assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?<TraceUnavailable label="Trace unavailable; retrying automatically\." \/>/,
+  // The live tail's receipt is now WORDED from the shared failure vocabulary
+  // (traceScrollModel.js::traceFailureLabel) rather than being a literal here, because "the run was
+  // replaced" and "we could not read the spans" were printing one sentence. What this pin holds is
+  // unchanged: the unavailable branch is driven off the PROJECTION and renders a receipt, so a read
+  // failure can never present as the empty "waiting for the next agent step…" feed below it. The
+  // wording of both branches is DRIVEN in dockTracePolling.test.js.
+  assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?<TraceUnavailable label=\{traceFailureLabel\(current\.failure, \{ retrying: true \}\)\} \/>/,
     'live tail transport/unavailable state must not look like an empty waiting feed')
   assert.match(dock, /3000, \[scope, active, open, limit\], \{ enabled: active && open \}/,
     'the open live tail must automatically recover from a transient unavailable state (limit paging keeps enabled intact)')
@@ -234,10 +240,19 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'an empty partial live tail must offer load-earlier / older-history, never a plain waiting feed')
   assert.match(dock, /const canLoadEarlier = partial && limit < TRACE_LIMIT_MAX[\s\S]*?setLimit\(value => Math\.min\(value \* 2, TRACE_LIMIT_MAX\)\)/,
     '"load earlier spans" must raise the tail limit toward the server ceiling')
-  assert.match(dock, /function OpTrace[\s\S]*?traceDeadlineGet\(runApiPath\([\s\S]*?expectedGeneration\)[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?\[scope, retryNonce\][\s\S]*?onRetry=\{retry\}/,
-    'operation trace must be generation-fenced and HTTP-200 unavailable must be retryable')
-  assert.match(dock, /const retryNodeTrace = \(\) => setNodeTraceNonce/,
+  // `traceReadDeadlineMs(0)` is load-bearing and not decoration: this read used to inherit
+  // `deadlineGet`'s flat 8 s, and the route behind it measured 4-15 s per call on the live server —
+  // so the abort, not the server, was manufacturing the "Trace unavailable" receipt two lines down.
+  assert.match(dock, /function OpTrace[\s\S]*?traceDeadlineGet\(runApiPath\([\s\S]*?expectedGeneration, null, 0, traceReadDeadlineMs\(0\)\)[\s\S]*?!traceGenerationMatches\(d, expectedGeneration\)[\s\S]*?\[scope, retryNonce\][\s\S]*?onRetry=\{retry\}/,
+    'operation trace must be generation-fenced, deadlined by the shared rule, and retryable')
+  assert.match(dock, /const retryNodeTrace = \(\) => \{[\s\S]*?setNodeTraceNonce\(value => value \+ 1\)/,
     'node trace retry must issue another request')
+  // Retry also REFILLS the automatic budget, so a surface that gave up can be brought back
+  // indefinitely — the keyboard-affordance rule from armTraceScroll, applied to the read itself.
+  // Driven in dockTracePolling.test.js; pinned here because a retry that only bumps the nonce would
+  // still pass that test's FIRST click and then never re-arm.
+  assert.match(dock, /const retryNodeTrace = \(\) => \{[\s\S]{0,240}?failures: 0/,
+    'the manual retry must refill the automatic budget, not just fire one read')
   assert.doesNotMatch(dock, /const retryNodeTrace = \(\)[\s\S]{0,160}setNodeTrace\(null\)/,
     'retry must not erase last-good spans while their replacement is in flight')
   assert.match(dock, /projection=\{nodeTrace\.projection\} runId=\{runId\}[\s\S]*?onRetry=\{retryNodeTrace\}[\s\S]*?expectedGeneration=\{expectedTraceGeneration\}/,

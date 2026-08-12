@@ -366,3 +366,78 @@ def test_the_owner_operation_still_passes_and_a_stranger_still_does_not(tmp_path
     assert run_reset.clear_run_reset_marker(run_dir, marker["operation_id"]) is True
     assert run_reset.load_run_reset_marker(run_dir) is None
     assert run_reset.assert_run_reset_write_allowed(run_dir) is None
+
+
+# ------------------------------------------------ the absent-marker probe, which is the hot path
+
+def test_the_absent_marker_probe_warms_the_directory_listing_before_it_lstats(monkeypatch):
+    """The negative lookup is what this protocol actually spends its time on.
+
+    A fence exists only while a reset or a delete is in flight, so nearly every call answers "no
+    marker" — and on the network mount a run root usually lives on, an `lstat` of an absent file is a
+    round trip while a `scandir` of its directory is not. Measured 2026-08-12 on the geesefs mount
+    holding `runs/rubertlite-dr-unified-v5` with that run's engine live: absent-marker `lstat`
+    105-950 ms, one `scandir` 1.4-1.8 ms, and the same `lstat` 0.1-0.9 ms afterwards. The five probes
+    `/api/runs/{run}/nodes/{n}/trace` makes went from a 1,714 ms median to 11 ms.
+
+    Driven as ORDER, not presence: a readdir issued after the `lstat` buys nothing at all, and that
+    is exactly the mutation a "does it call scandir" assertion cannot see.
+    """
+    from looplab.core import fence
+
+    calls: list[str] = []
+    real_scandir, real_lstat = os.scandir, Path.lstat
+    monkeypatch.setattr(fence.os, "scandir",
+                        lambda path: (calls.append("scandir"), real_scandir(path))[1])
+    monkeypatch.setattr(Path, "lstat", lambda self: (calls.append("lstat"), real_lstat(self))[1])
+    assert load_bounded_json_marker(
+        Path("/nonexistent-fence-dir/marker.json"), label="marker",
+        error_cls=RuntimeError, validate=lambda value: True) is None
+    assert calls[:2] == ["scandir", "lstat"], (
+        f"the listing must be warmed BEFORE the probe it exists to accelerate: {calls}")
+
+
+@FENCES
+def test_a_listing_that_omits_a_present_marker_still_reads_the_fence(tmp_path, build, monkeypatch):
+    """The prefetch is an accelerator and may never become authority.
+
+    This is the failure mode a directory-listing optimisation invites and the only one that would
+    matter: a stale/partial/lying listing that does not mention the marker must NOT make a run that
+    IS being reset read as unfenced. The listing is therefore never consulted — proved here by
+    handing the loader an empty one over a directory whose marker is really there.
+    """
+    from looplab.core import fence
+
+    run_dir, path, load, _error = build(tmp_path)
+    assert path.exists()
+
+    class _EmptyListing:
+        def __enter__(self):
+            return iter(())
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(fence.os, "scandir", lambda _path: _EmptyListing())
+    marker = load(run_dir)
+    assert marker is not None and FENCE_OPERATION_RE.fullmatch(marker["operation_id"])
+
+
+@FENCES
+def test_a_readdir_that_fails_leaves_the_fence_exactly_as_it_was(tmp_path, build, monkeypatch):
+    """Total by construction: an unreadable directory is not an unknown fence, it is just a probe
+    that costs what it always cost. Anything else would turn an accelerator into a new refusal."""
+    from looplab.core import fence
+
+    run_dir, path, load, error = build(tmp_path)
+
+    def _boom(_path):
+        raise OSError("readdir refused")
+
+    monkeypatch.setattr(fence.os, "scandir", _boom)
+    assert load(run_dir) is not None
+    path.unlink()
+    assert load(run_dir) is None
+    path.mkdir()
+    with pytest.raises(error, match="regular service-owned file"):
+        load(run_dir)

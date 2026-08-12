@@ -9,9 +9,12 @@ import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, conversationWindow, traceWindow,
 } from '../src/traceProjection.js'
 import {
-  TRACE_READ_DEADLINE_MAX_MS, TRACE_READ_DEADLINE_MS, TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING,
-  TRACE_SCROLL_REACHABLE, TRACE_SCROLL_SETTLED, armTraceScroll, settleTraceRead, shouldWidenOnReach,
-  traceReadDeadlineMs, traceScrollState, traceWidenProgressed, traceWidenStalled, traceWindowCanGrow,
+  TRACE_FAILURE_SUPERSEDED, TRACE_FAILURE_UNREADABLE, TRACE_READ_DEADLINE_MAX_MS,
+  TRACE_READ_DEADLINE_MS, TRACE_READ_FIXED_MS, TRACE_READ_WINDOW_MS, TRACE_RETRY_MAX, TRACE_RETRY_MS,
+  TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_REACHABLE, TRACE_SCROLL_SETTLED,
+  armTraceScroll, settleTraceRead, shouldWidenOnReach, traceFailureIsRetryable, traceFailureLabel,
+  traceReadDeadlineMs, traceRetryMs, traceScrollState, traceWidenProgressed, traceWidenStalled,
+  traceWindowCanGrow,
 } from '../src/traceScrollModel.js'
 
 test('the four states, over the SAME window records the two trace surfaces already build', () => {
@@ -144,20 +147,75 @@ test('a failed widen keeps what the operator had; only a first failure is unavai
   assert.equal(firstFailure.reachFailed, false)
 })
 
-test('the read deadline scales with the window, because the server cost does', () => {
-  // Measured 2026-08-07 on runs/rubert-dr-0804 node 1: 2.2 s at 512, 4.3 s at 1024, 8.7 s at 2048,
-  // 17.3 s at the 4096 ceiling. A flat 8 s deadline aborted every read above ~2048, which (before
-  // settleTraceRead) blanked the conversation the operator was reading.
+test('the read deadline is a FIXED term plus a window term, because the server cost is', () => {
+  // A trace read costs two things and only one of them scales with the window.
+  //
+  // The WINDOW term, measured 2026-08-07 on runs/rubert-dr-0804 node 1: 2.2 s at 512, 4.3 s at 1024,
+  // 8.7 s at 2048, 17.3 s at the 4096 ceiling — one random read per span, near-linear.
+  //
+  // The FIXED term, measured 2026-08-12 against the live server on runs/rubertlite-dr-unified-v5
+  // (engine running, run root on geesefs): `/nodes/1/trace?limit=512` took 4.3-15.6 s to return a
+  // 1.4 KB payload describing SIX spans, and `/nodes/{n}/conversation?limit=512` 20.4-22.3 s. None
+  // of that is span-bound — it is five absent-fence probes per request on a mount where a negative
+  // lookup is a round trip. The first version of this rule modelled ONLY the window term, so the
+  // default-window read of a six-span node was aborted at 8 s while four doublings of window
+  // headroom went unused, and every such abort is a "Trace unavailable" panel.
   assert.equal(traceReadDeadlineMs(NODE_TRACE_SPAN_WINDOW), TRACE_READ_DEADLINE_MS)
-  assert.equal(traceReadDeadlineMs(1024), TRACE_READ_DEADLINE_MS * 2)
-  assert.equal(traceReadDeadlineMs(NODE_TRACE_SPAN_WINDOW_MAX), TRACE_READ_DEADLINE_MS * 8)
-  // Every rung stays comfortably above the measured server time, which is the property that matters.
+  assert.equal(traceReadDeadlineMs(1024), TRACE_READ_FIXED_MS + TRACE_READ_WINDOW_MS * 2)
+  assert.equal(traceReadDeadlineMs(2048), TRACE_READ_FIXED_MS + TRACE_READ_WINDOW_MS * 4)
+  // The fixed term is what a small window buys, and it must not be swallowed by the window term:
+  // doubling the window may not double the deadline, or the base rung goes back under the measured
+  // per-request cost the moment anyone re-tunes the slope.
+  assert.ok(traceReadDeadlineMs(1024) < traceReadDeadlineMs(NODE_TRACE_SPAN_WINDOW) * 2)
+  // Every rung stays above BOTH measured terms — the window curve and the fixed per-request cost —
+  // which is the property that matters.
   for (const [window, measuredMs] of [[512, 2200], [1024, 4340], [2048, 8730], [4096, 17340]]) {
     assert.ok(traceReadDeadlineMs(window) > measuredMs * 2,
       `deadline for window ${window} must leave headroom over the measured ${measuredMs} ms`)
+    assert.ok(traceReadDeadlineMs(window) > 23600,
+      `deadline for window ${window} must clear the measured 23.6 s fixed per-request cost`)
   }
   // Never unbounded, and never BELOW the base for a nonsense window.
+  assert.equal(traceReadDeadlineMs(NODE_TRACE_SPAN_WINDOW_MAX), TRACE_READ_DEADLINE_MAX_MS)
   assert.equal(traceReadDeadlineMs(1 << 20), TRACE_READ_DEADLINE_MAX_MS)
   assert.equal(traceReadDeadlineMs(0), TRACE_READ_DEADLINE_MS)
   assert.equal(traceReadDeadlineMs(undefined), TRACE_READ_DEADLINE_MS)
+})
+
+test('a superseded read and an unreadable one are different facts with different words', () => {
+  // Both mean "we do not have it" and they were printed with one sentence. The operator's next move
+  // is opposite: wait/retry versus reload the run, because retrying the same scope will keep
+  // answering about the generation that replaced theirs.
+  assert.notEqual(traceFailureLabel(TRACE_FAILURE_SUPERSEDED),
+    traceFailureLabel(TRACE_FAILURE_UNREADABLE))
+  assert.match(traceFailureLabel(TRACE_FAILURE_SUPERSEDED), /reload the run/i)
+  assert.match(traceFailureLabel(TRACE_FAILURE_UNREADABLE), /unavailable/i)
+  // The retrying variant may only ever be claimed for a failure that IS being retried.
+  assert.match(traceFailureLabel(TRACE_FAILURE_UNREADABLE, { retrying: true }),
+    /retrying automatically/i)
+  assert.doesNotMatch(traceFailureLabel(TRACE_FAILURE_SUPERSEDED, { retrying: true }),
+    /retrying automatically/i)
+  // An unclassified failure degrades to the readable one — never to "the run was replaced", which
+  // would tell the operator to throw away a screen that is merely slow.
+  assert.equal(traceFailureLabel(undefined), traceFailureLabel(TRACE_FAILURE_UNREADABLE))
+  assert.equal(traceFailureIsRetryable(TRACE_FAILURE_SUPERSEDED), false)
+  assert.equal(traceFailureIsRetryable(TRACE_FAILURE_UNREADABLE), true)
+})
+
+test('the one-shot retry budget is bounded, refillable, and never spent on a superseded read', () => {
+  // The surfaces that poll recover on their own tick; the one-shot reads (an expanded event row's
+  // node trace, an operation trace by id) did not, so ONE failure parked them on a receipt with a
+  // manual Retry for the life of that row. Against a route measured at 4-15 s per call behind an
+  // 8 s deadline that is the operator's complaint verbatim.
+  assert.equal(traceRetryMs(0), null, 'a read that has not failed schedules nothing')
+  assert.equal(traceRetryMs(1), TRACE_RETRY_MS)
+  assert.equal(traceRetryMs(TRACE_RETRY_MAX), TRACE_RETRY_MS)
+  // Bounded, for the same reason `armTraceScroll` spends the budget on a FAILED widen: a route that
+  // is genuinely down must not be re-asked forever at seconds per call.
+  assert.equal(traceRetryMs(TRACE_RETRY_MAX + 1), null)
+  assert.equal(traceRetryMs(999), null)
+  // A superseded read is never retryable at all — this scope cannot produce the trace they wanted.
+  assert.equal(traceRetryMs(1, TRACE_FAILURE_SUPERSEDED), null)
+  // Malformed counters schedule nothing rather than defaulting into a loop.
+  for (const bad of [undefined, null, -1, 1.5, NaN, '1']) assert.equal(traceRetryMs(bad), null)
 })

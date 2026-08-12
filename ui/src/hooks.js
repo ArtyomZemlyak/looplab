@@ -191,6 +191,38 @@ export function useTraceScroll({ state, onReach, failed = false }) {
   }
 }
 
+// The choreography half of traceScrollModel.js's RETRY BUDGET: schedule ONE automatic re-read of a
+// one-shot trace, `delayMs` after the failure that armed it.
+//
+// The trace surfaces that poll (the live tail, a node the agent is currently working) recover on
+// their own tick. The one-shot reads — an expanded event row's node trace, an operation trace by id,
+// a FINISHED node's conversation — did not: one failure parked them on a receipt with a manual
+// Retry, for as long as the operator left that surface open. Measured 2026-08-12 against the live
+// server, `/nodes/{n}/trace?limit=512` answered in 4.3-15.6 s and `/cards/{id}/trace` in 2.2-10.1 s,
+// against client deadlines of 8 s — so losing that race was routine, and "I often get Trace
+// unavailable" is what it looks like from the outside.
+//
+// Deliberately NOT a poll interval. `usePoll` reads immediately whenever its dependencies change,
+// and arming a retry is the one restart that has to WAIT — otherwise the whole budget is spent in a
+// single frame against a route that is failing precisely because it is slow. The timer clears itself
+// on its first fire and is re-armed by the NEXT observed failure, so exactly one re-read is issued
+// per failure and a read that is merely slow is never cut short and re-issued underneath itself.
+//
+//   delayMs   — `traceScrollModel.js::traceRetryMs(failures, kind)`, or null for "nothing is owed":
+//               the budget is spent, or the failure was a superseded read that this scope can never
+//               answer. That null is what makes the loop provably terminating.
+//   failures  — the observed failure count. In the dependency list so each failure arms its own.
+//   bumpNonce — the caller's read-nonce setter, so the automatic retry and the operator's own Retry
+//               button take exactly the SAME path.
+export function useTraceRetry(delayMs, failures, bumpNonce) {
+  useEffect(() => {
+    if (delayMs == null) return
+    let timer = setInterval(() => { clearInterval(timer); bumpNonce(value => value + 1) }, delayMs)
+    return () => clearInterval(timer)
+    // `bumpNonce` is a setState updater — stable for the life of the component.
+  }, [delayMs, failures])
+}
+
 // The ONE durable-command status poll (doc 25 UI-01), replacing the two byte-identical effects Dock
 // and AssistantBar each carried for the run transport / direct commands. It owns exactly what was the
 // same on both sides: the accepted-or-executing gate, the per-effect `active` latch, the transient

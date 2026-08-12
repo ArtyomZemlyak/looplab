@@ -6,7 +6,7 @@ import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath,
   normalizeRunGeneration, traceDeadlineGet, traceGenerationMatches } from './util.js'
-import { useCommandStatusPoll, useNodeSpanWindow, usePoll } from './hooks.js'
+import { useCommandStatusPoll, useNodeSpanWindow, usePoll, useTraceRetry } from './hooks.js'
 import {
   commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
   foreignCommandLock, interruptedCommandRecovery, observeCommandError, protocolCommandRecord,
@@ -20,6 +20,10 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
+import {
+  TRACE_FAILURE_SUPERSEDED, TRACE_FAILURE_UNREADABLE, traceFailureLabel, traceReadDeadlineMs,
+  traceRetryMs,
+} from './traceScrollModel.js'
 import { NARR, GROUPS, GROUP_GLYPH, STATUS_NOISE, TYPE2GROUP, kindOf, isCuratedType,
   eventNarration, liveStatusAgeLabel } from './narration.js'
 import { buildingGenerations, buildingMarkers } from './buildingModel.js'
@@ -98,6 +102,18 @@ function collectThinking(trace, nid) {
 // reading a dead "projection is partial" notice. TRACE_LIMIT_MAX matches the /trace/tail server cap.
 const TRACE_LIMIT_DEFAULT = 40
 const TRACE_LIMIT_MAX = 400
+
+// A response that describes another run generation / node / attempt is refused before it renders —
+// that fence has always been here. What is new is that refusing it is reported as its own fact:
+// these three reads used to `throw 0` into the same `catch` as a dropped connection, so "the run was
+// replaced under you" and "we could not read the spans" printed one sentence. See
+// traceScrollModel.js for why those two need different words. The tag rides on the Error rather than
+// on a second promise channel so the existing single `catch` per read still settles everything.
+const supersededTraceRead = () =>
+  Object.assign(new Error('trace superseded'), { traceFailure: TRACE_FAILURE_SUPERSEDED })
+const traceFailureKind = error => (error?.traceFailure === TRACE_FAILURE_SUPERSEDED
+  ? TRACE_FAILURE_SUPERSEDED : TRACE_FAILURE_UNREADABLE)
+
 export function LiveTrace({ runId, generation, active }) {
   const expectedGeneration = normalizeRunGeneration(generation)
   const scope = expectedGeneration || runId
@@ -114,20 +130,24 @@ export function LiveTrace({ runId, generation, active }) {
     setLimit(TRACE_LIMIT_DEFAULT); stickRef.current = true; preserveRef.current = null
   }, [scope])
   usePoll((alive) => {
+    // The shared, MEASURED deadline (traceScrollModel.js), not `deadlineGet`'s flat 8 s default.
+    // The tail's own cost is small — 2.2 s at limit=200, 3.4 s at 400 on the live server — but it
+    // pays the same fixed per-request fence cost as every other trace route, which is what put
+    // these reads past 8 s and printed "Trace unavailable" over a feed that was merely slow.
     const request = traceDeadlineGet(runApiPath(runId, '/trace/tail'),
-      expectedGeneration, null, limit)
+      expectedGeneration, null, limit, traceReadDeadlineMs(limit))
     request.promise.then(r => {
       // A 200 envelope is still stale evidence when an old/proxied server serves another run
       // generation. Refuse it before state commit just like the backend's pre/post reset fence.
-      if (!traceGenerationMatches(r, expectedGeneration)) throw 0
+      if (!traceGenerationMatches(r, expectedGeneration)) throw supersededTraceRead()
       if (alive()) setTailState({
         scope, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {},
       })
-    }).catch(() => { if (alive()) setTailState(previous =>
+    }).catch(error => { const failure = traceFailureKind(error); if (alive()) setTailState(previous =>
       previous.scope === scope && previous.projection != null
         && !traceUnavailable(previous.projection)
-        ? { ...previous, stale: true }
-        : { scope, items: [], projection: { unavailable: true } }) })
+        ? { ...previous, stale: true, failure }
+        : { scope, items: [], projection: { unavailable: true }, failure }) })
     // usePoll owns this handle: dependency changes/unmount abort the old scope, and the deadline
     // settles even a transport that ignores AbortSignal so polling cannot remain wedged forever.
     return request
@@ -171,11 +191,16 @@ export function LiveTrace({ runId, generation, active }) {
         stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
       }}>
         {current.stale && <TraceUnavailable
-          label="Trace refresh failed; showing confirmed spans while retrying." />}
+          label={current.failure === TRACE_FAILURE_SUPERSEDED
+            ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
+            : 'Trace refresh failed; showing confirmed spans while retrying.'} />}
         {!loaded
           ? <div className="muted lt-empty" role="status">loading trace…</div>
           : unavailable
-          ? <TraceUnavailable label="Trace unavailable; retrying automatically." />
+          // This poll re-reads every 3 s, so an unreadable tail really is retrying; a SUPERSEDED one
+          // is not, and saying "retrying automatically" about it would promise a recovery that
+          // cannot arrive on this scope. Both sentences come from the one vocabulary.
+          ? <TraceUnavailable label={traceFailureLabel(current.failure, { retrying: true })} />
           : <>{partialControl}
             {!tail.length && !partial
               ? <div className="muted lt-empty">waiting for the next agent step…</div>
@@ -381,26 +406,56 @@ export function OpTrace({ runId, traceId, expectedGeneration }) {
   const scope = `${expectedGeneration || runId}:${traceId}`
   const [traceState, setTraceState] = useState(null)
   const [retryNonce, setRetryNonce] = useState(0)
+  const trace = traceState?.scope === scope ? traceState : null
+  // A ONE-SHOT read that failed used to stay failed until the operator clicked Retry — against a
+  // route measured at seconds per call, that is how a slow moment becomes a permanent "Trace
+  // unavailable". The budget, and the rule that a superseded read is never re-asked, are in
+  // traceScrollModel.js.
+  const autoRetryMs = traceRetryMs(trace?.failures, trace?.failure)
+  const failures = trace?.failures || 0
+  // Deliberately its own timer rather than a poll interval: `usePoll` reads IMMEDIATELY whenever its
+  // dependencies change, and arming a retry is the one restart that has to wait. It also clears
+  // itself on the first fire, so exactly one re-read is issued per observed failure — a read that is
+  // merely slow is never cut short and re-issued underneath itself.
+  useTraceRetry(autoRetryMs, failures, setRetryNonce)
   usePoll((alive) => {
     const request = traceDeadlineGet(runApiPath(
-      runId, `/trace/by_trace/${encodeURIComponent(traceId)}`), expectedGeneration)
+      runId, `/trace/by_trace/${encodeURIComponent(traceId)}`),
+      expectedGeneration, null, 0, traceReadDeadlineMs(0))
     request.promise.then(d => {
-      if (!traceGenerationMatches(d, expectedGeneration)) throw 0
+      if (!traceGenerationMatches(d, expectedGeneration)) throw supersededTraceRead()
       if (alive()) setTraceState({
         scope, spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {},
       })
-    }).catch(() => { if (alive()) setTraceState(previous =>
-      previous?.scope === scope && !traceUnavailable(previous.projection)
-        ? { ...previous, stale: true }
-        : { scope, spans: [], projection: { unavailable: true } }) })
+    }).catch(error => { const failure = traceFailureKind(error); if (alive()) setTraceState(previous => {
+      const failures = (previous?.scope === scope ? previous.failures || 0 : 0) + 1
+      return previous?.scope === scope && !traceUnavailable(previous.projection)
+        ? { ...previous, stale: true, failure, failures }
+        : { scope, spans: [], projection: { unavailable: true }, failure, failures }
+    }) })
     return request
   }, null, [scope, retryNonce])
-  const trace = traceState?.scope === scope ? traceState : null
-  const retry = () => setRetryNonce(value => value + 1)
+  // Retry REFILLS the budget: the operator asking again is a fresh gesture, exactly as it is for the
+  // scroll loader's `armTraceScroll('focus')`. It clears the COUNTER, never the payload — blanking
+  // last-good spans back to "loading…" while their replacement is in flight is the same defect the
+  // node-trace retry below is pinned against.
+  const retry = () => {
+    setTraceState(previous => (previous?.scope === scope ? { ...previous, failures: 0 } : previous))
+    setRetryNonce(value => value + 1)
+  }
   if (trace === null)
     return <div className="muted trace-loading" role="status">loading trace…</div>
+  const retrying = autoRetryMs != null
+  // The receipt is rendered HERE rather than delegated to NodeTrace's own default: only this
+  // component knows WHICH failure it was, and a surface that cannot name it prints one sentence for
+  // two facts. The Retry button stays enabled while a re-read is scheduled — the wait is in the
+  // label, and the operator must keep the option of asking now.
+  if (traceUnavailable(trace.projection)) return <TraceUnavailable
+    label={traceFailureLabel(trace.failure, { retrying })} onRetry={retry} />
   return <>{trace.stale && <TraceUnavailable
-    label="Trace refresh failed; showing confirmed spans." onRetry={retry} />}
+    label={trace.failure === TRACE_FAILURE_SUPERSEDED
+      ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
+      : 'Trace refresh failed; showing confirmed spans.'} onRetry={retry} />}
     <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId}
       expectedGeneration={expectedGeneration} treeKey={scope} onRetry={retry} /></>
 }
@@ -451,29 +506,51 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
   const currentNodeTrace = nodeTraceState?.scope === nodeTraceScope ? nodeTraceState : null
   const nodeTrace = currentNodeTrace?.payload
   const nodeTraceError = currentNodeTrace?.failed
+  const nodeTraceFailure = currentNodeTrace?.failure
   // `liveBuilding` is a plain object {nodeId: generation} of every concurrent build
   // (`buildingGenerations()` builds it with `const generations = {}`), so it is read with
   // BRACKETS, never `.get()`. This row live-polls its trace only when it IS one of those
   // exact building lifecycles (right node AND right generation).
   const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
     && liveBuilding[traceNid] === traceGeneration
+  // A node that is NOT currently building reads its trace ONCE (`ms = null`), so before the budget
+  // below one failure left this row on a dead receipt for as long as it stayed expanded. A live one
+  // already recovers on its own 4 s tick and must keep that cadence, so the budget only ever
+  // supplies the interval a one-shot read had none of.
+  const nodeAutoRetryMs = exactBuilding ? null
+    : traceRetryMs(currentNodeTrace?.failures, nodeTraceFailure)
+  useTraceRetry(nodeAutoRetryMs, currentNodeTrace?.failures || 0, setNodeTraceNonce)
   // Clear the error flag only on a SUCCESSFUL exact-attempt load (not eagerly at each poll tick).
   usePoll((alive) => {
     const request = traceDeadlineGet(runNodeApiPath(runId, traceNid, '/trace'),
-      expectedTraceGeneration, traceGeneration, nodeTraceLimit)
+      expectedTraceGeneration, traceGeneration, nodeTraceLimit,
+      // The shared measured deadline, not the flat 8 s default this read used to inherit: on the
+      // live server `/nodes/{n}/trace?limit=512` answered in 4.3-15.6 s for a SIX-span node, so the
+      // old bound aborted reads whose payload was 1.4 KB (see traceScrollModel.js).
+      traceReadDeadlineMs(nodeTraceLimit))
     request.promise.then(d => {
       if (d?.node_id !== traceNid || d?.attempt !== traceGeneration
-          || !traceGenerationMatches(d, expectedTraceGeneration)) throw 0
+          || !traceGenerationMatches(d, expectedTraceGeneration)) throw supersededTraceRead()
       if (alive()) setNodeTrace({ scope: nodeTraceScope, payload: d })
     })
-      .catch(() => { if (alive()) setNodeTrace(previous => previous?.scope === nodeTraceScope
-        ? { ...previous, failed: true } : { scope: nodeTraceScope, failed: true }) })
+      .catch(error => { const failure = traceFailureKind(error)
+        if (alive()) setNodeTrace(previous => {
+          const failures = (previous?.scope === nodeTraceScope ? previous.failures || 0 : 0) + 1
+          return previous?.scope === nodeTraceScope
+            ? { ...previous, failed: true, failure, failures }
+            : { scope: nodeTraceScope, failed: true, failure, failures }
+        }) })
     return request
   }, exactBuilding ? 4000 : null,
     [open, readOnly, runId, expectedTraceGeneration, traceNid, traceGeneration, exactBuilding,
       nodeTraceNonce, nodeTraceLimit],
     { enabled: open && !readOnly && traceNid != null && traceGeneration != null })
-  const retryNodeTrace = () => setNodeTraceNonce(value => value + 1)
+  // Refills the retry budget without touching last-good spans — see OpTrace's `retry`.
+  const retryNodeTrace = () => {
+    setNodeTrace(previous => (previous?.scope === nodeTraceScope
+      ? { ...previous, failures: 0 } : previous))
+    setNodeTraceNonce(value => value + 1)
+  }
   const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
   const hasTrace = !readOnly && traceNid != null && traceGeneration != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
@@ -513,8 +590,15 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
           {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
           {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">loading node trace…</div>}
+          {/* The Retry button stays ENABLED while an automatic re-read is scheduled: the wait is
+              announced in the label, and disabling the one control the operator has in order to
+              display a busy state would take away the ability to ask now. */}
           {hasTrace && nodeTraceError && <TraceUnavailable
-            label={nodeTrace == null ? 'Could not load node trace.'
+            label={nodeTraceFailure === TRACE_FAILURE_SUPERSEDED
+              ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
+              : nodeTrace == null
+              ? (nodeAutoRetryMs != null ? 'Could not load node trace; retrying automatically.'
+                : 'Could not load node trace.')
               : 'Node trace refresh failed; showing confirmed spans.'}
             onRetry={retryNodeTrace} />}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}

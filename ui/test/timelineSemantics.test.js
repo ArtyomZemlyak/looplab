@@ -84,8 +84,13 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
   const [dock, api] = await Promise.all([source('Dock.jsx'), source('api.js')])
+  // The deadline argument is part of this read's contract, not decoration: without it the read
+  // inherited `deadlineGet`'s flat 8 s while `/nodes/{n}/trace?limit=512` measured 4.3-15.6 s on the
+  // live server for a SIX-span node, so the client aborted a request the server was about to answer
+  // and printed "Could not load node trace." The rule is traceScrollModel.js's, shared with the
+  // Inspector, so the two node-trace readers cannot disagree about what "too slow" means.
   assert.match(dock,
-    /traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit\)/)
+    /traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit,[\s\S]*?traceReadDeadlineMs\(nodeTraceLimit\)\)/)
   assert.match(api,
     /export const traceReadQuery = \(expectedGeneration, attempt, limit\) => \{[\s\S]*?query\.set\('attempt', attempt\)[\s\S]*?query\.set\('limit', limit\)[\s\S]*?query\.set\('expected_generation', expectedGeneration\)/)
   assert.match(dock,

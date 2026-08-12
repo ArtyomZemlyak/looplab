@@ -24,6 +24,7 @@ UNKNOWN fence, never permission to mutate the run.
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 from pathlib import Path
@@ -38,6 +39,49 @@ FENCE_OPERATION_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 FENCE_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 FENCE_MAX_BYTES = 8 * 1024
+
+# The overwhelmingly common answer to "is there a fence here?" is NO — a marker exists only while a
+# reset or a delete is actually in flight. So the hot cost of this protocol is not reading a marker,
+# it is the NEGATIVE lookup that proves there is none, and on the network mounts a run root usually
+# lives on that lookup is not free.
+#
+# MEASURED 2026-08-12 against `runs/rubertlite-dr-unified-v5` on the geesefs/S3 mount, while that
+# run's engine was live (so the FUSE layer's cached directory listing kept being invalidated):
+#   * `lstat` of an ABSENT marker: 105-950 ms, median ~250 ms — a round trip, every time.
+#   * `lstat` of a PRESENT file in the same directory: 0.4 ms.
+#   * one `scandir` of the containing directory: 1.4-1.8 ms, after which the same absent-marker
+#     `lstat` costs 0.1-0.9 ms.
+# The FUSE layer answers a negative lookup out of a directory listing it already holds and otherwise
+# goes to the store; nothing forces it to hold one, so each absent-marker probe paid full price.
+#
+# `/api/runs/{run}/nodes/{n}/trace` performs FIVE of these per request (`AppState.run_dir`'s deletion
+# fence, then the reset marker inside `_assert_trace_reset_clear` and `_state_payload`, twice each
+# for the before/after lifecycle CAS) and the conversation twin performs more — measured 4-15 s and
+# 20-22 s respectively for payloads as small as 1.4 KB, i.e. far past the browser's trace-read
+# deadline, which is what the operator sees as "Trace unavailable".
+#
+# So warm the lookup before making it. This is a PREFETCH and nothing else: the authoritative `lstat`
+# below is unchanged and still decides, the listing is never consulted, and every failure is
+# swallowed. A stale or partial listing therefore cannot turn a present fence into an absent one —
+# the only thing that can happen is that the probe is as slow as it was before.
+_FENCE_LOOKUP_WARM_ENTRIES = 4096
+
+
+def _warm_directory_lookup(path: Path) -> None:
+    """Best-effort readdir of `path`'s directory, so the `lstat` below is served from a listing.
+
+    Bounded and total: any OSError (a vanished/renamed directory, a permission change, a platform
+    without readdir) leaves the probe exactly as it was. The entry cap keeps a pathologically large
+    directory from turning an accelerator into the slow path — the readdir has already been issued
+    by then, which is the whole effect being bought.
+    """
+    try:
+        with os.scandir(path.parent) as entries:
+            for seen, _entry in enumerate(entries, start=1):
+                if seen >= _FENCE_LOOKUP_WARM_ENTRIES:
+                    break
+    except OSError:
+        pass
 
 
 def load_bounded_json_marker(
@@ -54,6 +98,8 @@ def load_bounded_json_marker(
     False answer raises ``error_cls(f"{label} is malformed")``. Every other failure mode raises
     ``error_cls`` too, with the phase named — an unreadable marker must never read as "no fence".
     """
+    # Prefetch only — see `_warm_directory_lookup`. The `lstat` below remains the sole authority.
+    _warm_directory_lookup(path)
     try:
         before = path.lstat()
     except FileNotFoundError:

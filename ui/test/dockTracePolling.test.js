@@ -201,7 +201,13 @@ test('LiveTrace sends and validates the exact run generation before committing a
       assert.match(container.textContent, /generation-a evidence/,
         'last-good evidence remains until the correctly scoped generation returns')
       assert.doesNotMatch(container.textContent, /foreign evidence/)
-      assert.match(container.textContent, /showing confirmed spans/i)
+      // The refusal now says WHICH failure it was. It used to read "Trace refresh failed; showing
+      // confirmed spans while retrying" — the same sentence a dropped connection printed — so the
+      // operator was told to wait out a condition that waiting cannot clear. The evidence rule is
+      // unchanged and asserted above; only the words are.
+      assert.match(container.textContent, /run generation that was replaced; reload the run/i)
+      assert.doesNotMatch(container.textContent, /retrying/i,
+        'a superseded read must not promise a recovery that cannot arrive on this scope')
     })
 })
 
@@ -300,7 +306,11 @@ test('OpTrace refuses a fulfilled response from another run generation before co
   }, async ({ container }) => {
     assert.match(requests[0], new RegExp(`expected_generation=${generation}`))
     assert.doesNotMatch(container.textContent, /foreign-operation/)
-    assert.match(container.textContent, /Trace unavailable/i)
+    // Refusing a foreign-generation payload is not a read failure, and it stopped being reported as
+    // one: "Trace unavailable" told the operator the spans could not be read, when what happened is
+    // that the run they are looking at was replaced. Only reloading helps, so only that is offered.
+    assert.match(container.textContent, /run generation that was replaced; reload the run/i)
+    assert.doesNotMatch(container.textContent, /retrying automatically/i)
 
     const retry = [...container.querySelectorAll('button')]
       .find(button => button.textContent.trim() === 'Retry trace')
@@ -308,6 +318,68 @@ test('OpTrace refuses a fulfilled response from another run generation before co
       retry.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flush()
     })
     assert.match(container.textContent, /current-operation/)
-    assert.doesNotMatch(container.textContent, /Trace unavailable/i)
+    assert.doesNotMatch(container.textContent, /Trace unavailable|reload the run/i)
   })
+})
+
+test('a one-shot trace read recovers by itself, within a budget, and never for a superseded one', async () => {
+  // The operator's complaint, driven: the routes behind these two surfaces measured 4-15 s per call
+  // on the live server against an 8 s client deadline, and a ONE-SHOT read that lost that race
+  // parked on "Trace unavailable" until someone clicked. It now re-reads itself a bounded number of
+  // times (traceScrollModel.js::traceRetryMs) and only then hands the operator the manual control.
+  const attempts = []
+  const outcomes = [new Error('slow'), new Error('slow'), response({
+    spans: tracePayload('recovered-operation').nodes, projection: {},
+  })]
+  const fetchImpl = url => {
+    attempts.push(String(url))
+    const outcome = outcomes.shift()
+    return outcome instanceof Error ? Promise.reject(outcome) : Promise.resolve(outcome)
+  }
+  await renderDockExport('OpTrace', { runId: 'run-a', traceId: 'trace-a' }, fetchImpl,
+    async ({ browser, container }) => {
+      assert.equal(attempts.length, 1)
+      assert.match(container.textContent, /retrying automatically/i,
+        'a receipt that is about to re-read itself must say so')
+      // The retry WAITS. A restart that read on the spot would spend the whole budget in one frame
+      // and re-ask a route that is failing precisely because it is slow.
+      assert.equal(attempts.length, 1, 'arming a retry must not itself issue one')
+      await React.act(async () => { browser.tick(5000); await flush() })
+      assert.equal(attempts.length, 2)
+      await React.act(async () => { browser.tick(5000); await flush() })
+      assert.equal(attempts.length, 3)
+      assert.match(container.textContent, /recovered-operation/,
+        'the operator never had to touch anything')
+      // Recovery costs exactly the reads it took: no duplicate re-read as the retry machine disarms.
+      await React.act(async () => { browser.tick(5000); await flush() })
+      assert.equal(attempts.length, 3)
+    })
+})
+
+test('an exhausted retry budget parks on the manual control instead of hammering the route', async () => {
+  const attempts = []
+  const fetchImpl = () => { attempts.push(1); return Promise.reject(new Error('down')) }
+  await renderDockExport('OpTrace', { runId: 'run-a', traceId: 'trace-a' }, fetchImpl,
+    async ({ browser, container }) => {
+      for (const expected of [2, 3]) {
+        await React.act(async () => { browser.tick(5000); await flush() })
+        assert.equal(attempts.length, expected)
+      }
+      // TRACE_RETRY_MAX automatic re-reads, then it stops: a route that is genuinely down must not
+      // be re-asked forever at seconds per call — the same bound armTraceScroll holds for the
+      // scroll loader. What remains is the honest control, and it must still be usable.
+      await React.act(async () => { browser.tick(5000); browser.tick(5000); await flush() })
+      assert.equal(attempts.length, 3, 'the budget is spent and nothing is scheduled')
+      assert.doesNotMatch(container.textContent, /retrying automatically/i,
+        'a parked surface must not claim a retry that is not coming')
+      const retry = [...container.querySelectorAll('button')]
+        .find(button => button.textContent.trim() === 'Retry trace')
+      await React.act(async () => {
+        retry.dispatchEvent(new MouseEvent('click', { bubbles: true })); await flush()
+      })
+      assert.equal(attempts.length, 4, 'the operator can always ask now')
+      // …and asking REFILLS the budget, exactly as focusing the scroll affordance does.
+      await React.act(async () => { browser.tick(5000); await flush() })
+      assert.equal(attempts.length, 5)
+    })
 })

@@ -500,7 +500,10 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Dock building-trace poll: the O(node) callback receives alive, and every success/failure state
   // write is gated. A successful payload has no `failed` marker; only catch adds it, so each retry
   // keeps the banner stable until confirmed evidence replaces it.
-  assert.match(dock, /usePoll\(\(alive\) => \{[\s\S]*?traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit\)[\s\S]*?request\.promise\.then[\s\S]*?d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?if \(alive\(\)\) setNodeTrace\(\{ scope: nodeTraceScope, payload: d \}\)[\s\S]*?\.catch\(\(\) => \{ if \(alive\(\)\) setNodeTrace\(previous =>[\s\S]*?failed: true[\s\S]*?return request[\s\S]*?exactBuilding \? 4000 : null,[\s\S]*?enabled: open && !readOnly && traceNid != null && traceGeneration != null/)
+  // The catch now binds its rejection (`catch(error => …`) so a superseded response can be told
+  // apart from an unreadable one, and the read carries the shared measured deadline. Neither
+  // touches what this pin is FOR: both writes still sit behind `alive()`.
+  assert.match(dock, /usePoll\(\(alive\) => \{[\s\S]*?traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit,[\s\S]*?traceReadDeadlineMs\(nodeTraceLimit\)\)[\s\S]*?request\.promise\.then[\s\S]*?d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?if \(alive\(\)\) setNodeTrace\(\{ scope: nodeTraceScope, payload: d \}\)[\s\S]*?\.catch\(error => \{[\s\S]*?if \(alive\(\)\) setNodeTrace\(previous => \{[\s\S]*?failed: true[\s\S]*?return request[\s\S]*?exactBuilding \? 4000 : null,[\s\S]*?enabled: open && !readOnly && traceNid != null && traceGeneration != null/)
   assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{[\s\S]{0,120}failed: false/,
     'the trace error flag must clear only on a successful load, not eagerly each poll tick (no banner flicker)')
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,

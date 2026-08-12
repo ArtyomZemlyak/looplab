@@ -3,7 +3,7 @@ import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CO
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
   traceReadQuery } from './util.js'
-import { useNodeSpanWindow, usePoll, useScopedResource, useTraceScroll } from './hooks.js'
+import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -27,7 +27,9 @@ import {
 } from './traceSurfaceModel.js'
 import {
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
-  TRACE_SCROLL_SETTLED, settleTraceRead, traceReadDeadlineMs, traceScrollBoundedSuffix,
+  TRACE_FAILURE_SUPERSEDED, TRACE_FAILURE_UNREADABLE, TRACE_SCROLL_SETTLED,
+  settleTraceRead, traceFailureLabel, traceReadDeadlineMs, traceRetryMs,
+  traceScrollBoundedSuffix,
   traceScrollState, traceWidenStalled,
 } from './traceScrollModel.js'
 import { nodeTheme } from './conceptId.js'
@@ -1630,6 +1632,9 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   // derived without a second piece of state, and the visible count is what proves a widen actually
   // BOUGHT something — the auto-loader has to be provably terminating (traceScrollModel).
   const [read, setRead] = useState(null)
+  // Deliberately NOT part of `lifecycleScope`: a scheduled re-read must re-run the effect
+  // WITHOUT clearing the last-good payload, which is what a scope change does.
+  const [retryNonce, setRetryNonce] = useState(0)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   // A ref mirror of the settled read, so the outcome below is computed OUTSIDE a setState updater.
   // `usePoll` serializes ticks (one read unsettled at a time), so this is never behind; and an
@@ -1637,6 +1642,13 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   const readRef = useRef(null)
   const currentRead = read?.lifecycleScope === lifecycleScope ? read : null
   readRef.current = currentRead
+  // A finished node reads ONCE (`working` false ⇒ no poll interval), so one bad read used to
+  // be a permanent receipt until the operator clicked. The budget is bounded and lives in the
+  // model; a superseded read gets none, because retrying that scope keeps answering about the
+  // node that replaced it.
+  const autoRetryMs = working ? null
+    : traceRetryMs(currentRead?.failures, currentRead?.failure)
+  useTraceRetry(autoRetryMs, currentRead?.failures || 0, setRetryNonce)
   useEffect(() => {
     setRead(null)   // release the prior lifecycle after the render-time scope gate already hid it
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
@@ -1656,26 +1668,31 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
       + traceReadQuery(expectedGeneration, subjectAttempt, spanLimit))
     // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
     // cannot disagree about what a failure costs the operator.
-    const commit = (ok, payload, etag = null) => {
+    const commit = (ok, payload, etag = null, failure = TRACE_FAILURE_UNREADABLE) => {
       const previous = readRef.current
       const settled = settleTraceRead(previous?.payload, { ok, payload })
       const failedWiden = settled.reachFailed && spanLimit > previous.window
+      // Consecutive failures WITHIN one lifecycle scope. A new scope is a new question, so its
+      // budget starts full; carrying the count across would let an old node's bad minute silence the
+      // retry on the one the operator just opened.
+      const failures = ok ? 0
+        : (previous?.lifecycleScope === lifecycleScope ? previous.failures || 0 : 0) + 1
       if (settled.unavailable) {
         setRead({ lifecycleScope, payload: { stages: [], projection: { unavailable: true } },
-          window: spanLimit, visible: 0 })
+          window: spanLimit, visible: 0, failures, failure })
         return
       }
       // A kept payload keeps its OWN window: recording the window we failed to reach would read as
       // "that read landed", and the next widen would then look like no widen at all.
       if (settled.reachFailed) {
         setRead({ ...previous, reachFailed: failedWiden,
-          stale: failedWiden ? previous.stale : true })
+          stale: failedWiden ? previous.stale : true, failures, failure })
         return
       }
       const visible = settled.payload?.projection?.visible_turns
       const next = { lifecycleScope, payload: settled.payload, window: spanLimit,
         visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0,
-        scope, etag }
+        scope, etag, failures: 0 }
       setRead({ ...next, stalled: traceWidenStalled(previous, next) })
     }
     const readConversation = async signal => {
@@ -1711,7 +1728,12 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
       // Transport success is not enough: a delayed response for the previous lifecycle must never
       // settle this attempt's window. The server echoes both identity fields and independently rejects
       // an attempt change before/after its read; this client-side gate also contains proxy/schema drift.
-      commit(!!payload, payload, etag)
+      // A FULFILLED response the subject fence refused is a SUPERSEDED read, not an unreadable one:
+      // the server answered, about a node/attempt/generation that is no longer on screen. Retrying
+      // this scope will keep answering about the new one; only reloading the run helps. The two were
+      // indistinguishable, and both printed "Trace unavailable".
+      commit(!!payload, payload, etag,
+        observation && !payload ? TRACE_FAILURE_SUPERSEDED : TRACE_FAILURE_UNREADABLE)
       const logPayload = logs
         ? matchingNodePayload(logs, subject.nodeId, subjectAttempt, expectedGeneration)
         : null
@@ -1724,12 +1746,14 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
     }).catch(() => { if (alive()) commit(false, null) })
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
-  [runId, expectedGeneration, subjectKey, working, reloadNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
+  [runId, expectedGeneration, subjectKey, working, reloadNonce, retryNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
   if (currentRead === null) return <div className="muted trace-small" role="status">loading…</div>
   const conv = currentRead.payload || { stages: [] }
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
-  if (unavailable) return <TraceUnavailable onRetry={onRetry} />
+  if (unavailable) return <TraceUnavailable
+    label={traceFailureLabel(currentRead?.failure, { retrying: autoRetryMs != null })}
+    onRetry={onRetry} />
   // The operator's actual complaint lives here: this view is the DEFAULT one, it is where "N steps
   // hidden" is read, and until now it printed a count and then refused to pass it.
   // `conversationWindow` (not `traceWindow`) because what is hidden here is STAGES and TURNS, and the
@@ -2129,7 +2153,14 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     if (!researchOpen || research !== null || !cardId || !runId) return undefined
     let alive = true
     // `deadlineGet` returns a HANDLE, not a promise — see the same fix in CardBoard.
-    const request = deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`))
+    //
+    // MEASURED 2026-08-12 on the live run: this route answers in 2.2-10.1 s, so `deadlineGet`'s flat
+    // 8 s default aborted it MORE OFTEN THAN IT SUCCEEDED and the disclosure opened on "Trace
+    // unavailable for this work item" — a receipt the client manufactured about a read the server
+    // would have answered. The cost is not the spans (the light index serves a whole node in
+    // 0.03 ms); it is five absent-marker `lstat`s per request at 105-950 ms each on this FUSE mount.
+    const request = deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
+      traceReadDeadlineMs(0))
     request.promise
       .then(d => { if (alive) setResearch(d || {}) })
       .catch(() => { if (alive) setResearch({ projection: { unavailable: true } }) })

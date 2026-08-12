@@ -29,6 +29,7 @@ import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
+import { traceReadDeadlineMs } from './traceScrollModel.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
 // bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
@@ -631,7 +632,12 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
     // `.then` on it throws at runtime, which no test catches because none mounts this component and
     // the build compiles it happily.
     const request = deadlineGet(
-      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), PANEL_REQUEST_TIMEOUT_MS)
+      // The shared TRACE rule, not the generic panel timeout: this route pays the same fixed
+      // per-request fence cost every other trace read does. Measured 2026-08-12 on the live run —
+      // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
+      // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
+      // per request), not the spans.
+      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), traceReadDeadlineMs(0))
     request.promise
       .then(d => { if (alive) setPayload(d || {}) })
       .catch(() => { if (alive) setPayload({ projection: { unavailable: true } }) })
