@@ -29,6 +29,46 @@ event that RE-pins the width mid-run (`budget_extend` is the existing shape for 
 rule for what happens when the proposals ask for more cards than exist. Start there, not at the
 resolver.
 
+### F1b · Tell the Researcher what the per-experiment GPU budget IS
+
+**Asked:** "why is the current rubert run using 2 GPUs for one experiment instead of running them in
+parallel?"
+
+**Measured, 2026-08-12, on `rubertlite-dr-unified-v5`.** Nothing in the engine was wrong.
+`run_started` pins `eval_parallel: 2` — AUTO settled correctly off the two H200s — and the engine was
+in fact running card-1's build concurrently with node 0's eval. But `card_added` for BOTH cards
+carries `footprint: {"gpus": 2}`, so `_resource_request_for_node` took the declared value (declared
+beats AUTO, `engine/resources.py`), `_clamp_resource_footprint` clamped it to the POOL size rather
+than to the per-experiment share, and the reservation took `[0, 1]`. Confirmed at the process level:
+the eval launcher's `/proc/<pid>/environ` reads `CUDA_VISIBLE_DEVICES=0,1`, two ranks,
+`WORLD_SIZE=2`. The Developer then sized the stage to that envelope —
+`accelerate launch --multi_gpu --num_processes 2` — which is exactly what
+`roles.py::_developer_footprint_guidance` instructs it to do. So `eval_parallel=2` is real and
+currently unusable: node 0 holds both devices for its whole lifecycle, and card-1 will block on
+`_acquire_gpus(2)` until it terminates.
+
+**The gap.** `roles.py::_FOOTPRINT_GUIDANCE` asks the Researcher to declare `gpus` and never tells it
+the pool size or a per-experiment ceiling. The only channel that carries that today is the operator's
+goal prose — v5's said "two H200 GPUs are available", and the Researcher reasonably read it as "you
+may have both". A role asked to size a request against a budget it cannot see will get it wrong at
+some rate, and there is no reason for that rate to be non-zero.
+
+**What it would take.** Either (a) a hint carrying `max(1, pool // eval_parallel)` into both
+Researcher prompts — which means the `RESEARCHER_HINT_ATTRS` registry, both readers, every
+delegating wrapper and the forwarding tests, per the registry rule in CLAUDE.md; or (b) clamping
+the declared footprint to the per-experiment share instead of to the pool, which decides that the
+operator's `eval_parallel` outranks the Researcher's declaration. (b) is one line and a real policy
+change — it would fence a legitimately multi-GPU experiment onto one device — so it is a decision,
+not a fix. (a) is the honest one and is the larger job.
+
+**Today's workaround.** Pin the Card's resource request (`card_resource_pinned`, `{"gpus": 1}`) —
+`effective_card_footprint` merges the pin over the declaration at admission. **Caveat that matters:**
+the pin reaches the SCHEDULER, not the Developer prompt (`_developer_footprint_guidance` reads
+`idea.footprint`), so pinning after the code is written fences a `--num_processes 2` program onto one
+device. Pin before the build lands, or expect to repair the stage command. For the next run, say it
+as the contract the engine actually reads: *"each experiment gets exactly ONE GPU — declare
+`footprint: {"gpus": 1}` on every card and write single-GPU training code."*
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
