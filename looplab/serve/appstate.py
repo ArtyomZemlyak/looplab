@@ -27,6 +27,7 @@ from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.events.authoring_projection import card_authoring
 from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
 from looplab.serve.engine_proc import _engine_liveness
@@ -355,6 +356,15 @@ class AppState:
             incomplete_finalize_scope(evs) is not None or st.finalization_pending())
         d["finalization_incomplete"] = finalize_incomplete
         d["phase"] = self.phase(st, finalize_incomplete=finalize_incomplete)
+        # In-flight AUTHORING (derived, never folded — `events/authoring_projection.py`): the open
+        # card-build head, which the fold cannot express as `Card.status` (see
+        # `card_ledger.py::_card_building_ids` — folding the request would make the servicer of that
+        # very head unable to claim it, and every speculative build would return "stale"). Measured on
+        # rubertlite-dr-unified-v5: the board said "has not started" for 2,130 s of a 2,128 s build,
+        # i.e. the Building lane was occupied for 0.3 seconds of it. Derived from `evs`, so an
+        # `upto_seq` fold reports what was in flight THEN, and so it caches with the rest of the
+        # payload.
+        d["card_authoring"] = card_authoring(evs, st)
         # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.

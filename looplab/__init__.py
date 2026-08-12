@@ -101,6 +101,8 @@ _LAYOUT = {
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",
+    # the in-flight card-build head — derived, never folded, sibling of belief_projection
+    "authoring_projection": "events",
     "belief_projection": "events",   # derived belief view over the card board (doc 25 CO-11)
     "comment_projection": "events",
     "command_eval": "runtime",

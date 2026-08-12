@@ -57,13 +57,59 @@ export function cardStatusLabel(status) {
     .map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ') || 'Other'
 }
 
+// The in-flight AUTHORING overlay: `state.card_authoring`, produced by
+// `looplab/events/authoring_projection.py::card_authoring` — a derived, never-folded projection of
+// the open `card_build_requested` head(s). It is the answer to "does a card appear on the board when
+// work on it STARTS, or only once it is fully formed?" for the SPECULATIVE lane, where `node_building`
+// (the only thing `card_ledger.py::_card_building_ids` stamps `status:'building'` from) is appended
+// AFTER the Developer returns. Measured on runs/rubertlite-dr-unified-v5: card-0's build ran 2,128 s
+// and the fold said `proposed` for 2,130.7 s of it — the Building lane was occupied for 0.3 s.
+//
+// This is the bounded speculative owner state the CARD_COLUMNS comment above has been asking for, and
+// it is why `speculating` is in that table already: nothing in CardBoard.jsx changes, the optional
+// lane simply becomes occupied.
+export const AUTHORING_PHASES = new Set(['speculating', 'building'])
+
+export function cardAuthoring(state) {
+  // Same liveness rule as `buildingModel.js::withBuilding`, and for the same reason: a run whose
+  // engine died mid-build keeps its open head forever, so a "building…" card would breathe for work
+  // that will never finish. A PAUSED run deliberately still shows it — `speculation.py::_produce_card_build`
+  // runs the Developer under `abandon_on_cancel=False`, so pause/abort waits for the whole provider
+  // call and the code really is still being written.
+  if (!state || state.finished || state.engine_running === false) return new Map()
+  const rows = Array.isArray(state.card_authoring) ? state.card_authoring : []
+  const out = new Map()
+  for (const row of rows.slice(0, CARD_RENDER_LIMIT)) {
+    if (!isRecord(row)) continue
+    const cardId = cardText(row.card_id)
+    const phase = cardText(row.phase)
+    // Unknown phase = a newer server naming a lane this build has no column for. Drop the row rather
+    // than inventing a lane: `cardLanes` would happily render it, under a label nobody designed.
+    if (!cardId || !AUTHORING_PHASES.has(phase) || out.has(cardId)) continue
+    out.set(cardId, { phase, started: cardNumber(row.started), index: cardInt(row.index) })
+  }
+  return out
+}
+
 export function cardRows(state) {
   if (!isRecord(state?.cards)) return []
+  const authoring = cardAuthoring(state)
   return Object.entries(state.cards)
     .filter(([id, card]) => typeof id === 'string' && id && isRecord(card))
     .slice(0, CARD_RENDER_LIMIT)
     // The mapping key is authoritative. Never let a malformed/spoofed body id change joins or receipts.
-    .map(([id, card]) => ({ ...card, id }))
+    .map(([id, card]) => {
+      const live = authoring.get(id)
+      // THE FOLD WINS whenever it has anything to say. The overlay may only move a card OUT of
+      // `proposed` — the one lane that is a lie while a Developer is writing the card's code. It must
+      // never pull a card back out of building/running/evaluated/gated/dropped, because those are
+      // replay facts and this one is a statement about a process that is running right now.
+      if (!live || cardStatus(card) !== 'proposed') return { ...card, id }
+      // `status` is overlaid, `selection_ready` is NOT: it stays true on purpose while the head is
+      // open (see `card_ledger.py::_card_building_ids` — the servicer of that very head re-folds and
+      // requires it), so flipping it here would contradict the engine to make a chip look tidier.
+      return { ...card, id, status: live.phase, authoring: { ...live, folded_status: cardStatus(card) } }
+    })
 }
 
 export function cardLanes(cards) {
