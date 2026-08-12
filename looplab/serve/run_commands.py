@@ -1393,11 +1393,65 @@ class RunCommandService:
                 durable_intent = self._find_intent(rd, command_id, record) is not None
             if not durable_intent:
                 continue
+            if self._intent_spent(rd, record):
+                continue
             candidates.append((float(record.get("created_at") or 0), path.name, path, record))
         if not candidates:
             return None, None
         _created, _name, path, record = min(candidates, key=lambda item: (item[0], item[1]))
         return path, record
+
+    def _intent_spent(self, rd: Path, record: dict,
+                      observation: Optional[CommandObservation] = None) -> bool:
+        """Has this command's intent already been CONSUMED, so nothing can ever resolve it?
+
+        `_find_intent` proves the marked event is still IN THE LOG. That is not the same as still in
+        force, and the gap is what made a run permanently uncontrollable on 2026-08-11:
+
+          * an operator pauses; the `pause` lands within a second;
+          * the command's postcondition is `paused_and_stopped`, which also requires the engine
+            PROCESS to exit — impossible while a multi-hour evaluation is in flight — so ~20 minutes
+            later the record goes `timed_out`, retryable;
+          * the operator resumes; the run keeps going for another day;
+          * from then on `reject_if_active` refuses EVERY later control with `command_retry_required`,
+            because that spent pause is still "an unresolved intent with an intact durable event";
+          * and `/retry` cannot help, because it re-drives the SAME event, which the later `resume`
+            already consumed. Measured: `accepted` -> `executing` -> `timed_out`, no new `pause`
+            appended, run still in phase `search`.
+
+        A control plane that fails closed must still leave one path forward. This is the predicate
+        that says "that intent is spent history": its EFFECT is gone from the folded state, so no
+        retry could reach it and no later control should be held behind it.
+
+        Deliberately narrow — only the lifecycle intents whose effect is a folded, reversible FLAG
+        (`pause`), plus the universal terminal (a finished run cannot be steered). An additive intent
+        such as an inject or a budget extend is NOT spent merely because the run moved on: its event
+        may still need driving, which is exactly what the unresolved-record boundary exists for.
+        """
+        if str(record.get("event_type") or "") not in {EV_PAUSE}:
+            # …with one exception that is about the RUN, not the intent: once a run is finished, no
+            # control of any kind can still be driven, so holding new ones behind an old failure only
+            # blocks the operator from reading/reopening it.
+            if not self._run_finished(rd, observation):
+                return False
+            return True
+        state = (observation or self._observe(rd)).state()
+        return not bool(state.paused)
+
+    def _pause_is_folded(self, rd: Path,
+                         observation: Optional[CommandObservation] = None) -> bool:
+        """Is the run PAUSED right now? The half of `paused_and_stopped` the operator asked for."""
+        try:
+            return bool((observation or self._observe(rd)).state().paused)
+        except Exception:  # noqa: BLE001 — an unreadable log must not extend a deadline
+            return False
+
+    def _run_finished(self, rd: Path,
+                      observation: Optional[CommandObservation] = None) -> bool:
+        try:
+            return bool((observation or self._observe(rd)).state().finished)
+        except Exception:  # noqa: BLE001 — an unreadable log must not silently unblock controls
+            return False
 
     @staticmethod
     def _reject_unresolved_reset(rd: Path, operation: str) -> None:
@@ -2964,6 +3018,25 @@ class RunCommandService:
                 # startup window even if this is the monitor's first pass.
                 record["deadline_at"] = max(
                     float(record.get("deadline_at") or 0), now + self.command_timeout)
+                # THE PAUSE HAS LANDED AND THE ENGINE IS STILL WORKING — extend the ABSOLUTE bound
+                # too, not just the sliding one. `paused_and_stopped` is deliberately two effects:
+                # the run pauses (immediate) and the engine PROCESS releases its lock (only once the
+                # in-flight evaluation settles, because a pause must not abandon a running node).
+                # A GPU training stage runs for hours, so on exactly the runs where pausing matters
+                # the absolute ~20-minute bound expired while everything was working correctly, and
+                # the operator was told "paused_and_stopped was not observed in time" about a pause
+                # that had landed one second after they pressed the button (measured on
+                # `rubertlite-dr-unified-v2`, 2026-08-10).
+                #
+                # Gated on all three — the pause is FOLDED, the driver is ALIVE, and this is the
+                # pause postcondition — so it cannot become an unbounded wait on a dead or stalled
+                # engine: liveness is re-probed every pass and a driver that dies terminalizes on the
+                # very next one. What is bounded here is the WRONG ANSWER, not the wait.
+                if (record.get("postcondition") == "paused_and_stopped" and alive
+                        and self._pause_is_folded(rd, observation)):
+                    record["absolute_deadline_at"] = max(
+                        float(record.get("absolute_deadline_at") or 0),
+                        now + self.max_observation_timeout)
                 record["deadline_at"] = min(
                     float(record.get("absolute_deadline_at") or record["deadline_at"]),
                     float(record["deadline_at"]))
