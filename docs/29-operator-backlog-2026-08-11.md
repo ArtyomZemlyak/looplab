@@ -69,6 +69,51 @@ device. Pin before the build lands, or expect to repair the stage command. For t
 as the contract the engine actually reads: *"each experiment gets exactly ONE GPU — declare
 `footprint: {"gpus": 1}` on every card and write single-GPU training code."*
 
+## F1c · Catch a path that escapes the node's own workspace
+
+**Found by watching, 2026-08-12.** `rubertlite-dr-unified-v6` node 0 burned roughly 3.5 GPU-hours and
+produced no recorded metric. The train stage was correct throughout: it wrote its checkpoint to
+exactly the workdir-relative path its manifest declared. `vectorsearch/configs/config.yaml` carried
+
+```yaml
+checkpoint_path: /home/jovyan/data/vectorizer-unified/vectorsearch/experiments/<this node's name>/final
+```
+
+— an ABSOLUTE path into the editable SOURCE tree. The experiment name in it is this node's, so the
+Developer authored the line. A node runs in its own materialized copy, so a path into the source tree
+can never name a node's own output: `.exists()` fails on every node, on every attempt, forever.
+
+The commit `b0327182` closed the half that let this become expensive (the scorer is now protected, so
+a Developer can no longer "fix" it by teaching the scorer to retrain). It also ships a cheap advisory
+— a note on a successful write whose content hard-codes a path under an editable source root. What
+remains is the MECHANICAL detection, and it is deliberately not a blanket ban.
+
+**Why not a blanket ban.** An absolute source path is legitimately needed for a large untracked
+in-tree input that `seed_mode: auto` does not copy. The first-class answer there is a `data:` or
+`references:` mount, or `seed_mode: "all"` — but refusing a write the model cannot satisfy costs a
+repair attempt, and the STAGES phase's retries are the scarcest budget in the loop.
+
+**The false-positive-free version is a COLLISION check against the manifest.** For each declared
+`expect.files` entry `F` and each editable source root `R`, a staged file containing
+`R + "/" + <path overlapping F's directory chain>` is an unambiguous "this node writes it here and
+reads it there" contradiction, decidable from two artifacts LoopLab already owns. On v6,
+`F = vectorsearch/experiments/<name>/final/model.safetensors` and the config carried
+`<R>/vectorsearch/experiments/<name>/final` — a prefix of `F` under `R`.
+
+**Two things to decide before building it.** (a) ORDERING: `RepoWriteTools` has the manifest in
+`self.files["looplab_stages.json"]` after the STAGES phase but not DURING it, and not for a repair
+whose manifest arrives only in the seeded working set — so the check must degrade gracefully exactly
+where it matters most, and refuse-vs-bounce-vs-note is a real call. (b) A RUNTIME half would be
+stronger and is probably the better first build: "the score stage spawned a process running a stage
+command the pipeline already ran" is a fact the engine can assert, it cannot be evaded by the
+indirection any static check can, and there is already per-stage process supervision to hang it on
+(`engine/train_monitor.py`, `engine/asha_monitor.py`). It belongs beside `engine/eval_stages.py` with
+its own event type.
+
+**A third, orthogonal and trivial piece:** refuse an `eval.command` / `eval.cwd` that itself names the
+editable source root absolutely, at submit time. Cheap — but it catches an operator mistake, not this
+one.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
