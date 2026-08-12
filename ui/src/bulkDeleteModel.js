@@ -85,16 +85,28 @@ export function bulkOutcomeNotice(state) {
   const blocked = state.blocked?.length | 0
   const stopped = state.stoppedAt
   const tail = blocked ? ` ${plural(blocked, 'selected run')} could not be deleted.` : ''
+  // A half-purged memory store outranks everything else here. The runs are gone, their cards have
+  // left the list, and this notice is the only surface left that can carry a retry — so it takes
+  // the first unfinished purge's run id, and `retryRunId` is what renders the button.
+  const unfinished = (state.memoryFailures || [])[0]
+  const memoryTail = unfinished
+    ? ` Cross-run memory was only partly removed for ${plural(state.memoryFailures.length, 'run')}`
+      + ` (first: “${unfinished.runId}”).`
+    : ''
+  const retryRunId = unfinished ? String(unfinished.runId || '') : ''
   if (!stopped) {
-    if (!done) return blocked ? { kind: 'error', text: tail.trim() } : null
-    return { kind: 'status', text: `${plural(done, 'run')} permanently deleted.${tail}` }
+    if (!done) return blocked ? { kind: 'error', retryRunId: '', text: tail.trim() } : null
+    return { kind: unfinished ? 'error' : 'status', retryRunId,
+      text: `${plural(done, 'run')} permanently deleted.${tail}${memoryTail}` }
   }
   const why = String(stopped.reason || 'the deletion did not complete')
   if (!done) {
-    return { kind: 'error',
-      text: `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}${tail}` }
+    return { kind: 'error', retryRunId,
+      text: `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}.${tail}${memoryTail}` }
   }
-  return { kind: 'error', text:
-    `${plural(done, 'run')} deleted, then the batch stopped at “${stopped.runId}”: ${why}`
-    + ` The remaining ${plural(state.total - done - 1, 'run')} were not touched.${tail}` }
+  const untouched = Math.max(0, (state.total | 0) - done - 1)
+  return { kind: 'error', retryRunId, text:
+    `${plural(done, 'run')} deleted, then the batch stopped at “${stopped.runId}”: ${why}.`
+    + (untouched ? ` The remaining ${plural(untouched, 'run')} were not touched.` : '')
+    + `${tail}${memoryTail}` }
 }

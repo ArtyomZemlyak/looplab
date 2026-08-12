@@ -85,10 +85,32 @@ test('a batch that deleted nothing says so plainly, and names the run that stopp
 
 test('a clean batch is a plain confirmation, and blocked runs are still disclosed', () => {
   assert.deepEqual(bulkOutcomeNotice({ total: 2, done: ['a', 'b'], blocked: [], stoppedAt: null }),
-    { kind: 'status', text: '2 runs permanently deleted.' })
+    { kind: 'status', retryRunId: '', text: '2 runs permanently deleted.' })
   const withBlocked = bulkOutcomeNotice({
     total: 2, done: ['a', 'b'], blocked: [{ runId: 'x' }], stoppedAt: null })
   assert.match(withBlocked.text, /1 selected run could not be deleted/)
+})
+
+test('a half-purged memory store survives the batch and carries its retry', () => {
+  // THE defect: with the cascade ticked, `quiet` suppressed the per-run notice — and that notice is
+  // the only surface that can offer to finish the purge, because the run's card is already gone.
+  // Twenty runs, three locked stores, and the operator would never have learnt it happened.
+  const notice = bulkOutcomeNotice({
+    total: 3, done: ['a', 'b', 'c'], blocked: [], stoppedAt: null,
+    memoryFailures: [{ runId: 'b', memory: { ok: false } }, { runId: 'c', memory: { ok: false } }],
+  })
+  assert.equal(notice.kind, 'error', 'a clean-looking status would hide it')
+  assert.equal(notice.retryRunId, 'b', 'the retry handle is what renders the button')
+  assert.match(notice.text, /3 runs permanently deleted/)
+  assert.match(notice.text, /only partly removed for 2 runs/)
+  assert.match(notice.text, /first: “b”/)
+})
+
+test('a batch that stops on its LAST run does not claim 0 were left untouched', () => {
+  const notice = bulkOutcomeNotice({
+    total: 3, done: ['a', 'b'], blocked: [], stoppedAt: { runId: 'c', reason: 'it is active' } })
+  assert.ok(!/remaining 0 runs/.test(notice.text))
+  assert.match(notice.text, /stopped at “c”: it is active\./, 'the sentence must end before the next')
 })
 
 test('nothing selected, nothing to say', () => {

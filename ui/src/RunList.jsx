@@ -2224,7 +2224,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
     if (!dialog || bulkDeleteState?.running) return
     const cascade = dialog.cascade === true
     const state = { running: true, total: dialog.plan.ready.length, done: [], current: '',
-      blocked: dialog.plan.blocked, stoppedAt: null }
+      blocked: dialog.plan.blocked, stoppedAt: null, memoryFailures: [] }
     setBulkDeleteState({ ...state })
     for (const target of dialog.plan.ready) {
       // Re-resolve against the CURRENT list: the row we planned from is one deletion older.
@@ -2255,6 +2255,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
       const verdict = await runDeletionRequest(intent, { initialRequest: true, quiet: true })
       if (verdict?.outcome === 'deleted') {
         state.done.push(target.runId)
+        // A cascade that only partly ran is the ONE thing `quiet` must not swallow. The run is gone,
+        // its card has left the list, and `cascadeOutcome`'s retry handle is the only way back to
+        // the half-purged store — a batch that dropped it would leave the operator with no notice,
+        // no affordance and no way to learn it happened.
+        if (verdict.memory && verdict.memory.ok === false) {
+          state.memoryFailures.push({ runId: target.runId, memory: verdict.memory })
+        }
         setBulkDeleteState({ ...state })
         continue
       }
@@ -2270,6 +2277,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
     state.current = ''
     setBulkDeleteState({ ...state })
     setDeletionNotice(bulkOutcomeNotice(state))
+    // …and the batch drops the plan it has now spent, so a second press re-reads the CURRENT list
+    // instead of walking runs it already deleted (which reported "Nothing was deleted" about a
+    // batch that deleted eight).
+    setBulkDeleteDialog(current => current
+      ? { ...current, plan: bulkDeletionPlan([...compareIds].filter(id => !state.done.includes(id)),
+          runsRef.current || [], deletionRecoveries) }
+      : current)
     setCompareIds(current => {
       const next = new Set(current)
       for (const runId of state.done) next.delete(runId)

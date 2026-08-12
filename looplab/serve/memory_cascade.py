@@ -58,17 +58,125 @@ PRESERVED_TIERS: tuple[tuple[str, str], ...] = (
 # A row that was never this run's is not a "skip" — it is somebody else's row, and counting it as
 # kept would tell the operator the cascade refused thousands of rows it was never asked about.
 NOT_THIS_RUN = "written by another run"
+class _Everything(frozenset):
+    """A membership test that answers True for anything.
+
+    Returned when a governance log cannot be read. Both governance reads NARROW what the cascade may
+    delete — "these concepts were merged", "another run curated these task pools" — so an unreadable
+    log must protect EVERYTHING, not nothing. Returning an empty set there would have made every
+    concept look unmerged and every claim pool uncurated, i.e. an I/O error would silently WIDEN a
+    destructive operation. A sentinel value inside an ordinary frozenset does not do this: the
+    predicates ask "is this row's concept in the set", and a row's concepts are never the sentinel.
+    """
+
+    def __contains__(self, _item) -> bool:
+        return True
+
+
+# The one instance, so a caller can also test identity if it ever needs to distinguish
+# "everything is protected because we are blind" from "everything really was merged".
+_UNREADABLE_GOVERNANCE = _Everything()
+
+
+class RunIdentity:
+    """WHICH run a row belongs to — and `run_id` alone cannot answer it.
+
+    `run_id` is the run DIRECTORY NAME (`orchestrator.py`: `self.run_dir.name`). It is reused the
+    moment a run is deleted and re-created, it is `demo`/`baseline` on half the corpus, and it is
+    identical across two checkouts sharing the default `~/.looplab/memory`.
+    `engine/concept_capsules.py` states the rule outright: "`run_id` is only a run-root-local label…
+    key by a persisted globally unique run-incarnation UID". Every writer already does —
+    `memory.py`, `concept_capsules.py`, `claims.py`, `lesson_hygiene.py` all carry `run_uid`.
+
+    Keying the cascade on `run_id` therefore meant deleting a DIFFERENT, still-existing run's memory,
+    which is the one outcome this feature exists to prevent. So: match on `run_uid` whenever the row
+    has one, and fall back to `run_id` ONLY for rows written before that field existed — where it is
+    the best identity there is, and where the ambiguity is disclosed rather than hidden.
+    """
+
+    def __init__(self, run_id: str, run_uid: str = "") -> None:
+        self.run_id = _text(run_id)
+        self.run_uid = _text(run_uid)
+
+    def owns(self, row: dict) -> bool:
+        row_uid = _text(row.get("run_uid"))
+        if row_uid:
+            # A row that names its incarnation is matched ONLY on that. Falling back to `run_id` here
+            # is what destroyed the other run's rows: two incarnations named `demo` are two runs.
+            return bool(self.run_uid) and row_uid == self.run_uid
+        return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
+
+    @property
+    def legacy_only(self) -> bool:
+        """True when we could not learn this run's uid, so every match is by directory name alone."""
+        return not self.run_uid
 
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -> dict:
+    """The run's own `{run_id, run_uid, memory_dir}`, read from the run directory.
+
+    MUST be called BEFORE the run is deleted, and that is the whole reason it exists as a separate
+    step. Both facts live in the run and nowhere else:
+
+    * `run_uid` is stamped once into `run_started` and is the only globally unique name for this
+      incarnation (see `RunIdentity`);
+    * `memory_dir` is a per-RUN `Settings` field recorded in `config.snapshot.json`. Reading the
+      SERVER's current global instead means a run launched with `--memory-dir`, or one predating a
+      settings change, has its rows in a store the cascade never opens — while the cascade rewrites
+      the current store, deleting whatever happens to match there.
+
+    Returns the fallback memory dir when the snapshot names none, and an empty `run_uid` when the log
+    predates the field — both disclosed, never guessed at.
+    """
+    rd = Path(run_dir)
+    identity = {"run_id": _text(rd.name), "run_uid": "", "memory_dir": _text(fallback_memory_dir)}
+    try:
+        cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+        if isinstance(cfg, dict) and _text(cfg.get("memory_dir")):
+            identity["memory_dir"] = _text(cfg["memory_dir"])
+    except Exception:  # noqa: BLE001 — a missing/damaged snapshot falls back, it does not refuse
+        pass
+    try:
+        with open(rd / "events.jsonl", "rb") as handle:
+            for raw in handle:
+                if b'"run_started"' not in raw:
+                    continue
+                event = json.loads(raw.decode("utf-8"))
+                if event.get("type") == "run_started":
+                    identity["run_uid"] = _text((event.get("data") or {}).get("run_uid"))
+                    break
+    except Exception:  # noqa: BLE001 — same: no uid means legacy matching, not a refusal
+        pass
+    return identity
+
+
+class StoreUnreadable(Exception):
+    """The store exists and could not be read. NOT the same as "it holds nothing of ours"."""
+
+
 def _rows(path: Path, *, loads=json.loads) -> list[dict]:
+    """Every store is read with the STDLIB parser, deliberately.
+
+    `read_jsonl_lenient`'s contract is that a store must be parsed with the parser it was written
+    with — and the two are not interchangeable in one direction only: stdlib accepts the
+    `NaN`/`Infinity` literals stdlib emits and orjson rejects. For a pass that CLASSIFIES rows,
+    stdlib is therefore the strictly safer choice: it can misread a row as understood, never as
+    quarantine, and a row misread as quarantine is one this cascade silently fails to delete while
+    reporting success. (Measured: `research_claims.jsonl` and `concept_capsules.jsonl` are
+    stdlib-written — `claims.py`, `concept_capsules.py` — and were being read with orjson.)
+
+    An OSError is RAISED, not swallowed. An unreadable store returning `[]` reads as "nothing of ours
+    here" and the purge reports a clean success having done nothing — routing straight around the
+    `failures[]` and the retry that exist for exactly this.
+    """
     try:
         return [row for row in read_jsonl_lenient(path, loads=loads) if isinstance(row, dict)]
-    except Exception:  # noqa: BLE001 — an unreadable store contributes nothing and blocks nothing
-        return []
+    except OSError as exc:
+        raise StoreUnreadable(f"{type(exc).__name__}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------------------------
@@ -76,7 +184,7 @@ def _rows(path: Path, *, loads=json.loads) -> list[dict]:
 # kept, phrased for the operator.
 # ---------------------------------------------------------------------------------------------
 
-def lesson_keep_reason(row: dict, run_id: str) -> str:
+def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
     """A lesson is this run's alone only if consolidation never folded another run into it.
 
     `evidence_count` counts DISTINCT contributing runs (`lesson_hygiene._accumulated_evidence`), so
@@ -84,7 +192,7 @@ def lesson_keep_reason(row: dict, run_id: str) -> str:
     directly when the lineage is traceable; `evidence_untraceable_count` records support whose
     lineage predates the field — support we cannot attribute, and therefore must not discard.
     """
-    if _text(row.get("run_id")) != run_id:
+    if not run.owns(row):
         return NOT_THIS_RUN
     try:
         evidence = int(row.get("evidence_count", 1) or 1)
@@ -97,8 +205,17 @@ def lesson_keep_reason(row: dict, run_id: str) -> str:
         for ref in refs:
             if not isinstance(ref, dict):
                 continue
-            other = _text(ref.get("run_id")) or _text(ref.get("run_uid"))
-            if other and other != run_id and other != _text(row.get("run_uid")):
+            # `run_uid` FIRST. `lesson_hygiene._evidence_lineage` writes BOTH on every ref precisely
+            # so a reader can use the durable one, and reading `run_id` first meant a ref naming a
+            # SURVIVING run by uid — but sharing this run's directory name — compared equal and the
+            # row was deleted. That is "destroy corroboration earned by runs that still exist,
+            # silently", i.e. the exact outcome the predicate exists to prevent.
+            other = _text(ref.get("run_uid")) or _text(ref.get("run_id"))
+            if not other:
+                continue
+            if other in {run.run_uid, run.run_id} and other == _text(row.get("run_uid") or run.run_uid):
+                continue
+            if other not in {run.run_uid, run.run_id}:
                 return "consolidated: it carries evidence from other runs"
     try:
         if int(row.get("evidence_untraceable_count", 0) or 0) > 0:
@@ -108,12 +225,12 @@ def lesson_keep_reason(row: dict, run_id: str) -> str:
     return ""
 
 
-def note_keep_reason(row: dict, run_id: str) -> str:
+def note_keep_reason(row: dict, run: "RunIdentity") -> str:
     """A meta-note is one run's account of finishing. Nothing merges into it."""
-    return "" if _text(row.get("run_id")) == run_id else NOT_THIS_RUN
+    return "" if run.owns(row) else NOT_THIS_RUN
 
 
-def case_keep_reason(row: dict, run_id: str) -> str:
+def case_keep_reason(row: dict, run: "RunIdentity") -> str:
     """A case row is one run's contribution to a task's champion group.
 
     Modern rows are per-`run_uid` contributions with an `active` winner chosen across the group
@@ -121,31 +238,31 @@ def case_keep_reason(row: dict, run_id: str) -> str:
     champion — `purge_attributable_memory` re-elects it rather than leaving a group with no active
     case.
     """
-    return "" if _text(row.get("run_id")) == run_id else NOT_THIS_RUN
+    return "" if run.owns(row) else NOT_THIS_RUN
 
 
-def claim_keep_reason(row: dict, run_id: str, *, curated_tasks: frozenset[str]) -> str:
+def claim_keep_reason(row: dict, run: "RunIdentity", *, curated_tasks: frozenset[str]) -> str:
     """A claim row is this run's, unless another run has already curated the shared pool it is in.
 
     Claim curation adjudicates every claim for a `task_id` at once and stores only a digest of its
     input (`claim_curation_log.input_digest`). Removing a claim another run's decision was computed
     over would leave that decision unverifiable against the store it claims to describe.
     """
-    if _text(row.get("run_id")) != run_id:
+    if not run.owns(row):
         return NOT_THIS_RUN
     if _text(row.get("task_id")) in curated_tasks:
         return "another run's curation decision was computed over this claim pool"
     return ""
 
 
-def capsule_keep_reason(row: dict, run_id: str, *, merged_concepts: frozenset[str]) -> str:
+def capsule_keep_reason(row: dict, run: "RunIdentity", *, merged_concepts: frozenset[str]) -> str:
     """A concept capsule is this run's account of its own concepts — until governance merges them.
 
     Once a curation decision folds one concept id into another, the capsules holding those ids stop
     being a single run's private summary: the alias family they now belong to is shared, and the
     portfolio other runs read is computed from it.
     """
-    if _text(row.get("run_id")) != run_id:
+    if not run.owns(row):
         return NOT_THIS_RUN
     concepts = row.get("concepts")
     if isinstance(concepts, list):
@@ -163,7 +280,13 @@ def merged_concept_ids(memory_dir: str | Path) -> frozenset[str]:
     the same reason.
     """
     ids: set[str] = set()
-    for row in _rows(Path(memory_dir) / "concept_curation_log.jsonl"):
+    try:
+        rows = _rows(Path(memory_dir) / "concept_curation_log.jsonl")
+    except StoreUnreadable:
+        # Same fail-closed rule: if we cannot see which concepts were merged, we must not conclude
+        # that none were.
+        return _UNREADABLE_GOVERNANCE
+    for row in rows:
         proposals = row.get("proposals")
         if not isinstance(proposals, dict):
             continue
@@ -181,44 +304,61 @@ def merged_concept_ids(memory_dir: str | Path) -> frozenset[str]:
     return frozenset(ids)
 
 
-def _tasks_curated_by_other_runs(memory_dir: str | Path, run_id: str) -> frozenset[str]:
+def _tasks_curated_by_other_runs(memory_dir: str | Path, run: "RunIdentity") -> frozenset[str]:
+    """Task ids some OTHER run has curated. A governance log that cannot be read makes every task
+    look uncurated, which would widen what the cascade deletes — so an unreadable log fails closed
+    by returning nothing deletable rather than nothing protected."""
+    try:
+        rows = _rows(Path(memory_dir) / "claim_curation_log.jsonl")
+    except StoreUnreadable:
+        rows = None
+    if rows is None:
+        return _UNREADABLE_GOVERNANCE
     return frozenset(
         _text(row.get("task_id"))
-        for row in _rows(Path(memory_dir) / "claim_curation_log.jsonl")
-        if _text(row.get("task_id")) and _text(row.get("run_id")) != run_id)
+        for row in rows
+        if _text(row.get("task_id")) and not run.owns(row))
 
 
 # ---------------------------------------------------------------------------------------------
 # Survey and purge
 # ---------------------------------------------------------------------------------------------
 
-def _tier_rules(memory_dir: str | Path, run_id: str) -> list[tuple[str, str, Callable, Any]]:
-    """(store file, label, keep-reason predicate, json loader) for every cascaded tier.
+# (store file, operator label). One list, so the survey and the purge cannot walk different tiers.
+CASCADED_TIERS: tuple[tuple[str, str], ...] = (
+    ("lessons.jsonl", "lessons"),
+    ("meta_notes.jsonl", "notes"),
+    ("cases.jsonl", "cases"),
+    ("research_claims.jsonl", "claims"),
+    ("concept_capsules.jsonl", "concept capsules"),
+)
 
-    The loader is not decoration: `read_jsonl_lenient`'s docstring is explicit that a store must be
-    parsed with the parser it was WRITTEN with. Cases are stdlib-written (`JsonlCaseLibrary` passes
-    `json.loads`/`json.dumps`); the rest are orjson-written. Parsing one with the other can classify
-    a readable row as quarantine and vice versa.
+
+def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, str, Callable]]:
+    """(store file, label, keep-reason predicate) for every cascaded tier.
+
+    The two governance reads are done HERE, once, and are deliberately passed down rather than
+    re-read per tier: they decide what is off-limits, and re-reading them mid-purge would let a
+    curation decision landing between two tiers apply to one and not the other.
     """
-    import orjson
-
     merged = merged_concept_ids(memory_dir)
-    curated = _tasks_curated_by_other_runs(memory_dir, run_id)
-    return [
-        ("lessons.jsonl", "lessons", lesson_keep_reason, orjson.loads),
-        ("meta_notes.jsonl", "notes", note_keep_reason, orjson.loads),
-        ("cases.jsonl", "cases", case_keep_reason, json.loads),
-        ("research_claims.jsonl", "claims",
-         lambda row, rid: claim_keep_reason(row, rid, curated_tasks=curated), orjson.loads),
-        ("concept_capsules.jsonl", "concept capsules",
-         lambda row, rid: capsule_keep_reason(row, rid, merged_concepts=merged), orjson.loads),
-    ]
+    curated = _tasks_curated_by_other_runs(memory_dir, run)
+    predicates = {
+        "lessons.jsonl": lesson_keep_reason,
+        "meta_notes.jsonl": note_keep_reason,
+        "cases.jsonl": case_keep_reason,
+        "research_claims.jsonl":
+            lambda row, ident: claim_keep_reason(row, ident, curated_tasks=curated),
+        "concept_capsules.jsonl":
+            lambda row, ident: capsule_keep_reason(row, ident, merged_concepts=merged),
+    }
+    return [(filename, label, predicates[filename]) for filename, label in CASCADED_TIERS]
 
 
-def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run_id: str) -> dict:
+def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity") -> dict:
     deletable, kept, reasons = 0, 0, {}
     for row in rows:
-        reason = keep_reason(row, run_id)
+        reason = keep_reason(row, run)
         if not reason:
             deletable += 1
         elif reason != NOT_THIS_RUN:
@@ -228,7 +368,7 @@ def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run_id: str) -> di
             "reasons": [{"reason": r, "rows": n} for r, n in sorted(reasons.items())]}
 
 
-def attributable_memory(memory_dir: str | Path | None, run_id: str) -> dict:
+def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str = "") -> dict:
     """Read-only survey: what a cascade WOULD delete, and what it would keep and why.
 
     Read without the store locks on purpose. This is a preview shown before a confirmation, not a
@@ -237,24 +377,32 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str) -> dict:
     under the lock and re-applies the same predicates, so the preview being a moment stale can only
     change the NUMBER the operator saw, never what the purge is allowed to touch.
     """
-    run = _text(run_id)
+    run = RunIdentity(run_id, run_uid)
     base = Path(memory_dir) if memory_dir else None
-    empty = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run, "available": False,
-             "deletable": 0, "kept": 0, "stores": [],
+    empty = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
+             "identity": "run_id" if run.legacy_only else "run_uid", "available": False,
+             "deletable": 0, "kept": 0, "stores": [], "unreadable": [],
              "preserved": [{"store": s, "reason": r} for s, r in PRESERVED_TIERS]}
-    if not run or base is None or not base.is_dir():
+    if not run.run_id or base is None or not base.is_dir():
         return empty
-    stores, total_deletable, total_kept = [], 0, 0
-    for filename, label, keep_reason, loads in _tier_rules(base, run):
+    stores, unreadable, total_deletable, total_kept = [], [], 0, 0
+    for filename, label, keep_reason in _tier_rules(base, run):
         path = base / filename
         if not path.exists():
             continue
-        tier = _survey_tier(_rows(path, loads=loads), keep_reason, run)
+        try:
+            rows = _rows(path)
+        except StoreUnreadable as exc:
+            # SAY SO. A store we could not read is not a store with nothing of ours in it, and the
+            # difference decides whether the operator's "N rows" number means anything.
+            unreadable.append({"store": label, "file": filename, "error": str(exc)[:200]})
+            continue
+        tier = _survey_tier(rows, keep_reason, run)
         total_deletable += tier["deletable"]
         total_kept += tier["kept"]
         stores.append({"store": label, "file": filename, **tier})
     return {**empty, "available": True, "deletable": total_deletable, "kept": total_kept,
-            "stores": stores}
+            "stores": stores, "unreadable": unreadable}
 
 
 def _reelect_active_cases(rows: list[dict]) -> list[dict]:
@@ -275,16 +423,20 @@ def _reelect_active_cases(rows: list[dict]) -> list[dict]:
             continue
         measured = [row for row in group if isinstance(row.get("metric"), (int, float))
                     and not isinstance(row.get("metric"), bool)]
-        if not measured:
-            continue
+        # No measured survivor still elects one — `JsonlCaseLibrary._add_locked` takes
+        # `candidates[-1]` in exactly this case, because `valid_case_record` admits `metric=None`.
+        # Leaving the group with nobody active makes it invisible to `search()`/`all()`, which filter
+        # `active is not False` — i.e. the task reads as never solved, which is the precise outcome
+        # this whole function exists to prevent.
         winner = (min(measured, key=lambda c: c["metric"]) if direction == "min"
-                  else max(measured, key=lambda c: c["metric"]))
+                  else max(measured, key=lambda c: c["metric"])) if measured else group[-1]
         winner["active"] = True
         changed.append(winner)
     return changed
 
 
-def purge_attributable_memory(memory_dir: str | Path | None, run_id: str) -> dict:
+def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
+                              run_uid: str = "") -> dict:
     """Delete exactly the rows `attributable_memory` reports as deletable. Idempotent.
 
     Each store is rewritten under its own interprocess lock — the one its own writers take — with
@@ -294,27 +446,28 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str) -> dic
 
     Per-store failures are reported, not raised: the run itself is already gone by the time this
     runs, and a locked store is a reason to try again later, not a reason to report the deletion as
-    failed.
+    failed. An UNREADABLE store is one of those failures — it used to read as "nothing of ours here"
+    and produce a clean success having done nothing.
     """
-    run = _text(run_id)
+    run = RunIdentity(run_id, run_uid)
     base = Path(memory_dir) if memory_dir else None
-    result = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run, "ok": True,
+    result = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
+              "identity": "run_id" if run.legacy_only else "run_uid", "ok": True,
               "deleted": 0, "kept": 0, "stores": [], "failures": []}
-    if not run or base is None or not base.is_dir():
+    if not run.run_id or base is None or not base.is_dir():
         result["ok"] = False
         result["failures"].append({"store": "memory_dir", "error": "no cross-run memory directory"})
         return result
 
     from looplab.events.eventstore import _interprocess_lock
 
-    for filename, label, keep_reason, loads in _tier_rules(base, run):
+    for filename, label, keep_reason in _tier_rules(base, run):
         path = base / filename
         if not path.exists():
             continue
-        dumps = json.dumps if loads is json.loads else None
         try:
             with _interprocess_lock(Path(f"{path}.lock"), required=True):
-                rows = _rows(path, loads=loads)
+                rows = _rows(path)
                 tier = _survey_tier(rows, keep_reason, run)
                 if not tier["deletable"]:
                     result["kept"] += tier["kept"]
@@ -327,11 +480,10 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str) -> dic
                 superseded = {id(row) for row in rewritten}
                 kept_identity = {_row_identity(row) for row in survivors
                                  if id(row) not in superseded}
-                codec = {"loads": loads} if dumps is None else {"loads": loads, "dumps": dumps}
                 replace_jsonl_rows_atomic_preserving_quarantine(
                     path, rewritten,
                     replace_if=lambda row: _row_identity(row) not in kept_identity,
-                    **codec)
+                    loads=json.loads, dumps=json.dumps)
             result["deleted"] += tier["deletable"]
             result["kept"] += tier["kept"]
             result["stores"].append({"store": label, "file": filename,

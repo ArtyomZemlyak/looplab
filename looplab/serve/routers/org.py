@@ -11,7 +11,8 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
     validate_deletion_request)
-from looplab.serve.memory_cascade import attributable_memory, purge_attributable_memory
+from looplab.serve.memory_cascade import (attributable_memory, purge_attributable_memory,
+                                          run_memory_identity)
 from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
@@ -222,6 +223,23 @@ def build_router(srv) -> APIRouter:
     def _memory_dir() -> str:
         return getattr(srv.global_settings(), "memory_dir", "") or ""
 
+    def _identity(run_id: str) -> dict:
+        """The run's OWN memory identity, read from the run directory while it still exists.
+
+        Both halves matter and neither is available afterwards. `run_uid` is what distinguishes this
+        incarnation from the next run to reuse the directory name — matching on the name alone
+        deleted a different, still-existing run's rows. `memory_dir` is a per-RUN setting, so the
+        server's current global can be a store this run never wrote to.
+        """
+        return run_memory_identity(_plain_run_dir(run_id), fallback_memory_dir=_memory_dir())
+
+    def _plain_run_dir(run_id: str):
+        """The run directory, through the SAME containment guard the deletion transaction uses —
+        reserved names, traversal, control characters and Windows device names all refused there,
+        and a second spelling of that guard is a second thing to get wrong."""
+        from looplab.serve.deletion_service import _plain_run_path
+        return _plain_run_path(srv, run_id)
+
     @router.get("/api/runs/{run_id}/memory-attribution")
     async def run_memory_attribution(run_id: str):
         """What a cascading delete WOULD remove from cross-run memory, and what it would keep.
@@ -230,21 +248,53 @@ def build_router(srv) -> APIRouter:
         be able to see the answer BEFORE agreeing to it, and a number that only appears in a receipt
         is a number nobody consented to.
         """
-        return await anyio.to_thread.run_sync(
-            lambda: attributable_memory(_memory_dir(), run_id))
+        def _survey():
+            ident = _identity(run_id)
+            return {**attributable_memory(ident["memory_dir"], ident["run_id"], ident["run_uid"]),
+                    "memory_dir": ident["memory_dir"]}
+        return await anyio.to_thread.run_sync(_survey)
 
     @router.post("/api/runs/{run_id}/memory-purge")
-    async def run_memory_purge(run_id: str):
-        """Purge a run's solely-owned cross-run memory, with or without the run still existing.
+    async def run_memory_purge(run_id: str, request: Request):
+        """Finish a cascade whose store was locked at the moment the run was deleted.
 
-        This exists because the cascade's only unrecoverable failure would otherwise be a store that
-        was locked at the moment the run was deleted: the run is gone, its card has left the list,
-        and with it every affordance that could finish the job. The purge is keyed by run id and is
-        idempotent, so it needs no run directory and no fence — there is nothing here a second call
-        can do that the first did not.
+        It takes the IDENTITY in the body — `run_uid` and `memory_dir` as returned by the deletion
+        receipt — because by the time this is worth calling the run directory is gone and neither can
+        be recovered from the run id alone. That is also why it is not "keyed by run id and needs no
+        fence": a bare run id names a directory NAME, which the next run reuses, and this endpoint
+        irreversibly rewrites five shared stores. It refuses without an identity rather than guessing
+        one, and when the run still exists it re-reads the identity from the run and requires the
+        body to agree.
         """
-        return await anyio.to_thread.run_sync(
-            lambda: purge_attributable_memory(_memory_dir(), run_id))
+        body = await json_object(request)
+        extra = set(body) - {"run_uid", "memory_dir"}
+        if extra:
+            raise HTTPException(400, {"code": "invalid_memory_purge_request",
+                                      "message": "memory-purge accepts only run_uid and memory_dir."})
+        run_uid = str(body.get("run_uid") or "")
+        memory_dir = str(body.get("memory_dir") or "")
+
+        def _purge():
+            ident = _identity(run_id)
+            live = _plain_run_dir(run_id).is_dir()
+            if live:
+                # The run is still here, so its own record outranks the body — and a body that
+                # disagrees is a client acting on a stale identity, which is the case that would
+                # purge the wrong incarnation.
+                if run_uid and ident["run_uid"] and run_uid != ident["run_uid"]:
+                    raise HTTPException(409, {
+                        "code": "memory_purge_identity_changed",
+                        "message": "This run id now names a different run incarnation."})
+                return purge_attributable_memory(
+                    ident["memory_dir"], ident["run_id"], ident["run_uid"])
+            if not run_uid and not memory_dir:
+                raise HTTPException(400, {
+                    "code": "memory_purge_identity_required",
+                    "message": ("This run no longer exists, so its identity cannot be read back. "
+                                "Pass the run_uid and memory_dir from the deletion receipt.")})
+            return purge_attributable_memory(memory_dir or _memory_dir(), run_id, run_uid)
+
+        return await anyio.to_thread.run_sync(_purge)
 
     @router.post("/api/runs/{run_id}/deletions")
     async def create_run_deletion(run_id: str, request: Request):
@@ -252,6 +302,7 @@ def build_router(srv) -> APIRouter:
         body = await json_object(request)
         operation_id, generation, expected_seq = validate_deletion_request(body)
         cascade = deletion_cascade_requested(body)
+        identity = (await anyio.to_thread.run_sync(lambda: _identity(run_id))) if cascade else {}
         result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
             srv, run_id, operation_id=operation_id,
             expected_generation=generation, expected_seq=expected_seq))
@@ -261,8 +312,11 @@ def build_router(srv) -> APIRouter:
         # idempotent ("remove every row attributable solely to R"), so running it on a retry of an
         # already-succeeded operation costs nothing and repairs a partial first attempt.
         if cascade and result.get("status") == "succeeded":
+            # Read BEFORE the deletion, used after: `run_uid` and the run's own `memory_dir` live in
+            # the run directory, which no longer exists by the time the purge runs.
             result = {**result, "memory": await anyio.to_thread.run_sync(
-                lambda: purge_attributable_memory(_memory_dir(), run_id))}
+                lambda: purge_attributable_memory(
+                    identity["memory_dir"], identity["run_id"], identity["run_uid"]))}
         return JSONResponse(
             status_code=200 if result.get("status") == "succeeded" else 202,
             content=result)
