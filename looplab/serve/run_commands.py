@@ -263,6 +263,16 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
+# How many times a `paused_and_stopped` observation may extend its own absolute deadline while the
+# pause is folded and the driver is alive. The wait is legitimate — the engine finishes an in-flight
+# evaluation before it stops, and a GPU stage runs for hours — but it cannot be UNBOUNDED, because an
+# `executing` record is what `_active_record` returns and that refuses every other control command
+# with 409. Bounded, the worst case is a long-but-finite window; unbounded, the operator loses
+# resume/abort/hint/inject entirely, with no cancel endpoint to recover. Twelve extensions is ~4h at
+# the shipped 20-minute `max_observation_timeout`, which covers the long-eval case this exists for.
+PAUSE_OBSERVATION_MAX_EXTENSIONS = 12
+
+
 class RunCommandService:
     def __init__(self, srv, *, engine_alive: Callable[[Path], bool] = _engine_alive,
                  engine_liveness: Optional[Callable[[Path], Optional[bool]]] = None,
@@ -1437,6 +1447,34 @@ class RunCommandService:
             return True
         state = (observation or self._observe(rd)).state()
         return not bool(state.paused)
+
+    def _extend_landed_pause_observation(self, record: dict, rd: Path, observation,
+                                         alive: bool, now: float) -> bool:
+        """Give a pause that HAS landed more observation time — a bounded number of times.
+
+        The engine finishes an in-flight evaluation before it stops, so on the runs where pausing
+        matters most `paused_and_stopped` is not observable for hours and the absolute bound expired
+        on a pause that folded a second after the operator pressed the button.
+
+        The cap is the other half of that. Re-arming on every pass made the deadline unreachable —
+        the loop's only exit compares against a value this had just pushed forward — so the record
+        stayed `executing` for the whole evaluation. `_active_record` returns exactly that record,
+        and it refuses `POST /commands`, `POST /control` and `POST /resume` with 409
+        `command_in_progress`; there is no cancel endpoint. An operator who paused a long eval then
+        could not resume, abort, hint or inject until it ended. A wrong message is recoverable; a
+        frozen control plane is not, so the wait is long but finite.
+        """
+        if record.get("postcondition") != "paused_and_stopped" or not alive:
+            return False
+        extensions = int(record.get("pause_observation_extensions") or 0)
+        if extensions >= PAUSE_OBSERVATION_MAX_EXTENSIONS:
+            return False
+        if not self._pause_is_folded(rd, observation):
+            return False
+        record["pause_observation_extensions"] = extensions + 1
+        record["absolute_deadline_at"] = max(
+            float(record.get("absolute_deadline_at") or 0), now + self.max_observation_timeout)
+        return True
 
     def _pause_is_folded(self, rd: Path,
                          observation: Optional[CommandObservation] = None) -> bool:
@@ -3032,11 +3070,7 @@ class RunCommandService:
                 # pause postcondition — so it cannot become an unbounded wait on a dead or stalled
                 # engine: liveness is re-probed every pass and a driver that dies terminalizes on the
                 # very next one. What is bounded here is the WRONG ANSWER, not the wait.
-                if (record.get("postcondition") == "paused_and_stopped" and alive
-                        and self._pause_is_folded(rd, observation)):
-                    record["absolute_deadline_at"] = max(
-                        float(record.get("absolute_deadline_at") or 0),
-                        now + self.max_observation_timeout)
+                self._extend_landed_pause_observation(record, rd, observation, alive, now)
                 record["deadline_at"] = min(
                     float(record.get("absolute_deadline_at") or record["deadline_at"]),
                     float(record["deadline_at"]))
