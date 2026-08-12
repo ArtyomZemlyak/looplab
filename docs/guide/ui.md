@@ -361,7 +361,7 @@ about *that run's event log*, and every panel behind it reads `/api/runs/<id>/�
 
 | Hub | Panels |
 |---|---|
-| **Progress** | Queue · Cards · Research · Operations · Failures |
+| **Progress** | Queue · Research · Failures |
 | **Trust** | Trust · Pareto / diversity · Data quality |
 | **Analysis** | Compare · Sensitivity · Importance · Cross-run |
 | **Lab** | Files · Registry · Comments & sharing · Events |

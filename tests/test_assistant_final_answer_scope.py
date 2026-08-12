@@ -82,3 +82,50 @@ def test_the_call_site_uses_the_helper_rather_than_a_second_copy_of_the_directiv
     source = inspect.getsource(assistant.run_turn)
     assert "final_answer_messages(base)" in source
     assert "based on everything above" not in source
+
+
+class _CapturingStreamFake:
+    """Answers the loop, then records the messages the streamed final answer is actually asked with."""
+
+    def __init__(self):
+        self.seen: list[list[dict]] = []
+        self.scripted = [{"content": "", "tool_calls": [
+            {"id": "c1", "function": {"name": "final_answer",
+                                      "arguments": '{"reply": "loop reply (fallback)"}'}}]}]
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        return self.scripted.pop(0)
+
+    def complete_text_stream(self, messages):
+        self.seen.append([dict(m) for m in messages])
+        yield "Streamed answer."
+
+    def complete_text(self, messages):
+        self.seen.append([dict(m) for m in messages])
+        return "Streamed answer."
+
+
+def test_the_streamed_final_answer_is_really_asked_with_the_scoped_directive(tmp_path):
+    """Drives the wire instead of pinning the call site's TEXT.
+
+    The sibling above reads `run_turn`'s source for `final_answer_messages(base)`. That is the
+    mutation CLAUDE.md names as cheapest: comment the call out, leave the literal in the comment, and
+    inline an unscoped directive — the pin still passes. Verified: it does. So assert what the model
+    is actually handed.
+    """
+    from looplab.serve.assistant import run_turn
+
+    client = _CapturingStreamFake()
+    run_turn(client, tmp_path, [{"role": "user", "content": "an older turn"},
+                                {"role": "assistant", "content": "an older answer"}],
+             "what did you just do?", "plan", reply_sink=lambda _chunk: None)
+
+    assert client.seen, "the final answer never reached the model"
+    messages = client.seen[-1]
+    assert messages[-1]["content"] == FINAL_ANSWER_DIRECTIVE, (
+        "the streamed answer must be asked with the SCOPED directive, not an inlined copy")
+    marked = [m for m in messages[:-1] if str(m.get("content", "")).startswith("[current turn")]
+    assert len(marked) == 1, (
+        f"exactly one boundary marker names what the answer is about; saw {len(marked)}")
+    assert any("an older turn" in str(m.get("content", "")) for m in messages), (
+        "the whole conversation must stay as CONTEXT — only the directive is scoped")

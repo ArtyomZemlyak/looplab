@@ -194,3 +194,41 @@ def test_a_landed_pause_waiting_on_a_live_engine_does_not_time_out_as_a_failure(
     broken.mkdir(parents=True)
     (broken / "events.jsonl").write_bytes(b"\x00\xffnot json\n")
     assert commands._pause_is_folded(broken) is False
+
+
+def test_a_landed_pause_extends_its_observation_a_bounded_number_of_times(tmp_path):
+    """The other half of the extension: it has to END.
+
+    The sibling above proves the ingredient — a folded pause on a live driver earns more time. It
+    does not prove the wait terminates, and the first version of that extension re-armed the absolute
+    deadline on EVERY pass, so the loop's own exit condition compared against a value it had just
+    pushed forward and the record stayed `executing` for the whole evaluation. `_active_record`
+    returns exactly that record and refuses `POST /commands`, `/control` and `/resume` with 409, and
+    there is no cancel endpoint — so an operator who paused a multi-hour eval lost resume, abort,
+    hint and inject until it finished.
+
+    Drive the grant itself past its budget rather than asserting the predicate: ask far more times
+    than the cap allows and require that the grants stop.
+    """
+    from looplab.serve.run_commands import PAUSE_OBSERVATION_MAX_EXTENSIONS
+
+    commands, rd = _service(tmp_path, alive=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"goal": "g", "direction": "min"})
+    store.append(EV_PAUSE, {"_command_id": PAUSE_ID})
+    observation = commands._observe(rd)
+
+    record = {"postcondition": "paused_and_stopped", "absolute_deadline_at": 0.0}
+    granted = sum(
+        bool(commands._extend_landed_pause_observation(record, rd, observation, True, float(turn)))
+        for turn in range(PAUSE_OBSERVATION_MAX_EXTENSIONS + 25))
+    assert granted == PAUSE_OBSERVATION_MAX_EXTENSIONS, (
+        "the observation window must be long but FINITE — an unbounded one freezes every other "
+        "control command behind 409 command_in_progress")
+    assert record["pause_observation_extensions"] == PAUSE_OBSERVATION_MAX_EXTENSIONS
+
+    # …and the gates that must refuse it outright, whatever the budget says.
+    assert commands._extend_landed_pause_observation(
+        {"postcondition": "paused_and_stopped"}, rd, observation, False, 0.0) is False, "dead driver"
+    assert commands._extend_landed_pause_observation(
+        {"postcondition": "stopped"}, rd, observation, True, 0.0) is False, "other postcondition"
