@@ -195,7 +195,7 @@ honoured, CPU-parallel evals included.
 the whole run. A per-Card *footprint* (`{"gpus": N}` on the idea/Card) does affect that node's device
 reservation and admission, but nothing lets a Researcher proposal widen or narrow the run. Making the
 width follow what the proposals actually ask for is an open item — see
-[the operator backlog](../28-operator-backlog-2026-08-11.md).
+[the operator backlog](../29-operator-backlog-2026-08-11.md).
 
 **Two runs, one box: the second one WAITS.** GPU admission is serialized by a single pool-wide lease,
 `/tmp/looplab-gpu-pool-<uid>.lock` — one file per OS user, exclusive across processes

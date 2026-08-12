@@ -2,14 +2,15 @@
 
 **Project:** LoopLab — an open, backend-flexible **autonomous ML/DS research engine** (an LLM agent that invents → implements → tests → improves ML solutions in a loop, returning the best *verified* result).
 **Status:** current documentation authority map · **Created:** 2026-06-20 ·
-**Validated/consistency-checked:** 2026-08-09 · **Runtime authority:** current `master` source and tests
+**Validated/consistency-checked:** 2026-08-10 · **Runtime authority:** current `master` source and tests
 
 > 📖 **Looking for how to *use* LoopLab?** This index covers the design and historical review record.
 > For practical install, quickstart, CLI, configuration and task documentation, use the
 > **[User Guide](guide/index.md)** and [README](https://github.com/ArtyomZemlyak/looplab/blob/master/README.md).
 
-> **Authority rule (2026-08-08).** Current source and tests decide runtime behavior; README and
-> `docs/guide/` are the maintained user contract. [Doc 27](27-agent-system-mega-review-2026-08-09.md)
+> **Authority rule (2026-08-10).** Current source and tests decide runtime behavior; README and
+> `docs/guide/` are the maintained user contract. [Doc 28](28-deep-research-sota-roadmap-2026-08-10.md)
+> is the current Deep Research proposal ledger, not proof that a proposal ships. [Doc 27](27-agent-system-mega-review-2026-08-09.md)
 > is the current dated agent-system/SOTA review. [Doc 24](24-ui-phase3-validation.md) is the current
 > Phase-3 UI acceptance contract, while [doc 25](25-architecture-modularity-review-2026-08-01.md) is a
 > dated 188-finding architecture baseline whose per-finding status was reconciled against current
@@ -23,8 +24,9 @@
 
 | # | Doc | Authority and scope |
 |---|-----|---------------------|
+| 29 | **[29-operator-backlog-2026-08-11.md](29-operator-backlog-2026-08-11.md)** | Feature-sized operator asks that are NOT bugs, each with what the code does today and what building it would take, plus the verified-but-unfixed bugs from the same session. Statuses read off the tree on 2026-08-11 (unlike BACKLOG.md, which says of itself that it is stale). |
+| 28 | **[28-deep-research-sota-roadmap-2026-08-10.md](28-deep-research-sota-roadmap-2026-08-10.md)** | Current Deep Research SOTA review and proposal ledger at published baseline `2c36b7ed`. It explicitly separates the shipped P0 foundation from proposed durable episodes, exact-span evidence, verifier-directed revision, crash recovery, parallel specialists and evaluation work. Proposals do not change runtime behavior. |
 | 27 | **[27-agent-system-mega-review-2026-08-09.md](27-agent-system-mega-review-2026-08-09.md)** | Current dated production-agent/capability inventory, business-contract audit, compatible fixes and primary-source SOTA comparison. Its forward architecture is a recommendation; shipped behavior remains source/tests/guide. |
-| 28 | **[28-operator-backlog-2026-08-11.md](28-operator-backlog-2026-08-11.md)** | Feature-sized operator asks that are NOT bugs, each with what the code does today and what building it would take, plus the verified-but-unfixed bugs from the same session. Statuses read off the tree on 2026-08-11 (unlike BACKLOG.md, which says of itself that it is stale). |
 | 26 | **[26-ouroboros-airi-analysis-2026-08-02.md](26-ouroboros-airi-analysis-2026-08-02.md)** | Dated external-works analysis of Ouroboros/AIRI. Research input; it does not flip defaults or prove integration. |
 | 25 | **[25-architecture-modularity-review-2026-08-01.md](25-architecture-modularity-review-2026-08-01.md)** | 188-finding structural-debt baseline at `756ad13`, with per-finding dispositions reconciled through current `master` on 2026-08-08: **147 resolved, 37 partial, 2 deferred, 2 open**. The baseline evidence remains historical; the explicit status on each finding is current. |
 | 24 | **[24-ui-phase3-validation.md](24-ui-phase3-validation.md)** | Current Phase-3 UI product and automated-acceptance contract, including 2026-08-08 bundle measurements. Browser-matrix and moderated-usability gates remain separately unevidenced until artifacts exist. |
