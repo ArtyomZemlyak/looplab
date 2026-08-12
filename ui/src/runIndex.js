@@ -315,3 +315,33 @@ export function sortRuns(runs = [], key = 'time', order = 'desc') {
     return bestFirst ? objective : -objective
   })
 }
+
+// SELECTION IS NOT COMPARISON. The run list capped SELECTION at 8 because comparison is what it fed,
+// so an operator who wanted to pick twenty runs — to compare the first few, or to act on all of them
+// — was refused at the ninth checkbox with "Compare is limited to 8 runs". The limit is real, but it
+// belongs to the comparison, not to the act of choosing.
+//
+// So: select as many as you like; the comparison takes the first `COMPARE_MAX` of them and says so
+// out loud. A bound that silently drops the rest would be worse than the refusal it replaces.
+export const COMPARE_MAX = 8
+// Selection still needs SOME ceiling — it round-trips through the saved-view record and the URL — but
+// one far above any real list rather than one shaped by a different feature's limit.
+export const SELECTION_MAX = 500
+
+/** The runs a comparison will actually draw, and what it had to leave out. */
+export function comparisonScope(selectedRuns = [], max = COMPARE_MAX) {
+  const rows = Array.isArray(selectedRuns) ? selectedRuns : []
+  const shown = rows.slice(0, Math.max(0, max))
+  return { shown, omitted: Math.max(0, rows.length - shown.length), total: rows.length }
+}
+
+/** One line for the selection bar: how many are picked, and what comparison will do with them. */
+export function selectionNotice(scope) {
+  if (!scope || !scope.total) return ''
+  if (scope.total < 2) return 'Select one more run to compare.'
+  if (scope.omitted) {
+    return `Comparison shows the first ${scope.shown.length} of ${scope.total}; `
+      + `${scope.omitted} more stay selected.`
+  }
+  return 'Ready to compare run details.'
+}

@@ -11,8 +11,9 @@ import DensityToggle from './DensityToggle.jsx'
 import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import {
-  ALL_RUNS as ALL, UNASSIGNED_RUNS as UNASSIGNED, filterRuns, indexProjects,
-  effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, sortRuns,
+  ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED, comparisonScope, filterRuns,
+  indexProjects, effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, selectionNotice,
+  sortRuns,
 } from './runIndex.js'
 import { defaultCollapsedClusters } from './runMapModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
@@ -258,7 +259,7 @@ function normalizeListNavigation(value) {
   const text = (candidate, fallback) => typeof candidate === 'string' ? candidate : fallback
   const task = text(saved.task, ALL)
   const compare = Array.isArray(saved.compare)
-    ? [...new Set(saved.compare.filter(id => typeof id === 'string' && id).slice(0, 8))] : []
+    ? [...new Set(saved.compare.filter(id => typeof id === 'string' && id).slice(0, SELECTION_MAX))] : []
   const mapCollapse = Array.isArray(saved.mapCollapse)
     ? saved.mapCollapse.filter(entry => Array.isArray(entry) && typeof entry[0] === 'string'
       && typeof entry[1] === 'boolean').slice(0, 500) : []
@@ -1777,8 +1778,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
       }
       setCompareIds(next); return
     }
-    if (next.size >= 8) {
-      setViewMessage('Compare is limited to 8 runs. Remove one before adding another.')
+    // No comparison-shaped cap here. Selecting is not comparing: an operator picking twenty runs —
+    // to compare the first few, or to act on all of them — used to be refused at the ninth checkbox.
+    // `SELECTION_MAX` exists only because the set round-trips through the saved view and the URL.
+    if (next.size >= SELECTION_MAX) {
+      setViewMessage(`Selection is limited to ${SELECTION_MAX} runs.`)
       return
     }
     next.add(runId); setViewMessage(''); setCompareIds(next)
@@ -2336,11 +2340,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
             </div>
           </div>}
           {!projectScopeBlocked && compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
-            <b>{compareRuns.length}/8 selected</b>
-            <span className="muted">{compareRuns.length < 2
-              ? 'Select one more run to compare.' : 'Ready to compare run details.'}</span>
+            <b>{compareRuns.length} selected</b>
+            <span className="muted">{selectionNotice(comparisonScope(compareRuns))}</span>
             <button className="btn sm primary" disabled={compareRuns.length < 2}
-              onClick={event => openComparison(event.currentTarget)}>Compare runs</button>
+              onClick={event => openComparison(event.currentTarget)}>
+              Compare{comparisonScope(compareRuns).omitted
+                ? ` first ${comparisonScope(compareRuns).shown.length}` : ' runs'}</button>
             <button className="btn sm ghost"
               onClick={event => clearComparison(event.currentTarget)}>Clear</button>
           </div>}
@@ -2438,9 +2443,16 @@ export default function RunList({ onOpen, onGlobalNavigate,
                   : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))}
                 onOpenRun={id => { if (!navigationBusy) openRun(id) }} />
             </LazyBoundary>}
+          {/* The comparison — and ONLY the comparison — is bounded. It draws the first COMPARE_MAX of
+              the selection and says how many it left out; the rest stay selected for whatever else
+              the operator picked them for. */}
           {view === 'compare' && !projectScopeBlocked && compareRuns.length > 1 && <LazyBoundary label="run comparison"
-            resetKey={compareRuns.map(run => run.run_id).join(':')}>
-            <RunCompare runs={compareRuns} columns={compareColumns}
+            resetKey={comparisonScope(compareRuns).shown.map(run => run.run_id).join(':')}>
+            {comparisonScope(compareRuns).omitted > 0 && <div className="notice compact" role="status">
+              Comparing the first {comparisonScope(compareRuns).shown.length} of {compareRuns.length}
+              {' '}selected runs. The other {comparisonScope(compareRuns).omitted} stay selected.
+            </div>}
+            <RunCompare runs={comparisonScope(compareRuns).shown} columns={compareColumns}
               names={{ projects: projName, supertasks: stName }}
               onColumns={setCompareColumns} onRemove={toggleCompare}
               headingRef={setCompareHeadingRef}
