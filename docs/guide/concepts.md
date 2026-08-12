@@ -641,6 +641,17 @@ membership on the `Idea` with an explicit contract:
   event is the raw audit source. Replay materializes the effective full set in `RunState.node_concepts`
   after the complete DAG has folded.
 
+When `card_driven_selection` is on (the default), a proposal reaches its node through a **native Card**
+rather than straight to `node_created`, and the Idea the build executes is rebuilt from the durable
+`card_added` action alone. So the authored membership rides along on that row: `card_added.idea.concepts`
+carries a `concept_mode="full"` set, replay decodes it into `Card.concept_tags` with a
+`kind="card_added"` concept source, and the claim rebuilds the Idea with it. It sits **outside** the card
+ownership digest (`CARD_ACTION_DIGEST_V2_FIELDS`), so tagging never changes an action's identity. A
+**delta** proposal carries nothing here — `concept_mode`/`concepts_added`/`concepts_removed` are not
+action fields, and writing them into that block would make replay read the whole action as a lossy
+future schema and stop the Card being selectable. Until 2026-08-12 the row carried no membership at all
+and every Card-built node was created with no concepts.
+
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
 `concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
 **before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and

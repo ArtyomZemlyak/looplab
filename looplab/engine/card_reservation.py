@@ -307,6 +307,55 @@ class CardReservationMixin:
             return idea
 
     @staticmethod
+    def _authored_card_concepts(idea: Idea) -> Optional[list[str]]:
+        """The proposal-time concept membership a `card_added` row carries, or None for "no claim".
+
+        The Researcher authors `idea.concepts` and the whole Part IV/V subsystem — the run's concept
+        tree, the board's `Card.concept_tags`, the cross-run shelf, `concept_run_base`'s seed — reads
+        it from `node_created`. The Card lane used to lose it: `_card_added_payload`'s idea block is
+        deliberately narrow (a durable action the ownership digest covers), and `_rebuilt_claim_idea`
+        reconstructs the executed Idea from exactly that block, so a node BUILT FROM A CARD was born
+        with no concepts at all. Measured across the run corpus 2026-08-12, and the split is total:
+
+          | run                        | nodes | built from a Card | node_created carrying concepts |
+          | rubertlite-dr-unified-v4   |    11 |                 0 |                             11 |
+          | rubert-dr-0807             |    14 |                14 |                              0 |
+          | rubertlite-dr-unified-v2   |     7 |                 7 |                              0 |
+          | rubertlite-dr-unified-v5   |     1 |                 1 |                              0 |
+
+        v5 node 0's Researcher emitted `concept_mode="full"` with three ids (`spans.jsonl`, the
+        `emit` tool call); the `card_added` row it minted recorded five idea keys and none of them
+        was `concepts`.
+
+        FULL memberships only. `concept_mode`/`concepts_added`/`concepts_removed` are NOT in
+        `card_ledger.py::_CARD_ADDED_ACTION_FIELDS`, so writing them into the idea block would make
+        replay read the action as a lossy future schema and the Card would stop being
+        `selection_ready` — a far worse regression than the missing tags. A DELTA proposal therefore
+        carries nothing here (unchanged behaviour) rather than a membership that is not one.
+
+        Returning the RAW list is deliberate: the fold bounds it through `bounded_raw_concept_values`
+        and stamps its own overflow/invalid flags, so an over-long or malformed membership records as
+        an honestly incomplete `CardConceptSource` instead of a silently truncated exact one.
+        """
+        if getattr(idea, "concept_mode", None) == "delta":
+            return None
+        concepts = list(getattr(idea, "concepts", None) or [])
+        return concepts or None
+
+    @classmethod
+    def _claim_concept_envelope(cls, concepts) -> dict:
+        """The `Idea` concept kwargs a Card claim rebuilds with, from a persisted membership.
+
+        `concepts` is exactly what `_authored_card_concepts` wrote into the durable `card_added` idea
+        block. `concept_mode="full"` is what makes `replay.py::_on_node_created` treat it as an exact
+        replacement and stamp `NODE_CONCEPT_PROVENANCE_AUTHORED` — a bare list folds the same way
+        today, but only because a truthy `idea.concepts` is a second, weaker branch of that gate.
+        """
+        if not isinstance(concepts, list) or not concepts:
+            return {}
+        return {"concept_mode": "full", "concepts": [str(c) for c in concepts]}
+
+    @staticmethod
     def _rebuilt_claim_idea(card_id: str, statement: str, action: dict, rationale: str,
                             concepts: Optional[dict] = None) -> Idea:
         """Rebuild the Idea a claim will execute, from the immutable action its digest covers.
@@ -379,7 +428,14 @@ class CardReservationMixin:
         # disposition (`_plan_native_card`) or a declined reuse (`_card_event_matches`). A `params`
         # that the digest itself rejects (NaN, inf, 65 keys, an oversized key) is already refused by
         # `card_ownership_receipt` above and never reaches this rebuild.
-        rebuilt = cls._rebuilt_claim_idea(card_id, statement, action, rationale)
+
+        # The membership the durable row will carry, resolved ONCE and handed to both halves of the
+        # round trip below, exactly as `action` already is. Proving the mint against a rebuild that
+        # skipped the concept envelope is what let the claim quietly execute a different Idea.
+        card_concepts = cls._authored_card_concepts(idea)
+        rebuilt = cls._rebuilt_claim_idea(
+            card_id, statement, action, rationale,
+            concepts=cls._claim_concept_envelope(card_concepts))
         rebuilt_action = cls._card_action(
             rebuilt, list(action.get("parent_ids") or []),
             dict(action.get("parent_generations") or {}),
@@ -404,16 +460,20 @@ class CardReservationMixin:
             "rationale": rationale,
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
-            # the production writer also drops Idea.concepts, while novelty/card-enriched
-            # signals gain a Card subject only after a Node exists. Such a Card is then work-owned and
-            # no longer selection-ready, so real selectable Cards reach novelty/coverage scoring empty.
-            # Persist bounded proposal-time scoring receipts, or remove these terms from live ranking.
+            # `concepts` is the ONE member here the ownership digest does not cover, and it is not an
+            # exception invented at this call site: `CARD_ACTION_DIGEST_V2_FIELDS` excludes it (so the
+            # receipt and every already-minted Card's digest are byte-identical either way), while
+            # `card_ledger.py::_CARD_ADDED_ACTION_FIELDS` admits it and `_card_added_snapshot` already
+            # decodes it into `Card.concept_tags` + a `kind="card_added"` `CardConceptSource`. That
+            # reader shipped with nothing writing to it — see `_authored_card_concepts` for the
+            # measured cost of the missing half.
             "idea": {
                 "operator": action["operator"],
                 "params": action["params"],
                 "space": action["space"],
                 "eval_profile": action["eval_profile"],
                 "eval_timeout": action["eval_timeout"],
+                **({"concepts": card_concepts} if card_concepts is not None else {}),
             },
             "parent_id": action["parent_id"],
             "parent_ids": action["parent_ids"],
@@ -1020,6 +1080,14 @@ class CardReservationMixin:
             return None
 
         try:
+            # The claim half of the concept round trip (`_authored_card_concepts`). `registrations[0]`
+            # is the single mint row whose `ownership_receipt` was just proved equal to the one this
+            # Card's action digest mints, so it is the exact writer row — but the digest deliberately
+            # does NOT cover `concepts`, and that is fine here rather than merely tolerated: replay
+            # stamps the rebuilt membership `NODE_CONCEPT_PROVENANCE_AUTHORED`, which
+            # `classifier_verified_node_concepts` already refuses as independent evidence. It reaches
+            # display read-models and `concept_run_base`'s seed, never admission or cross-run trust.
+            # Calibration keeps precedence: its synthetic envelope is part of a byte-stable fixture.
             calibration_concepts = ({
                 "concept_mode": "full",
                 "concepts": [
@@ -1027,7 +1095,9 @@ class CardReservationMixin:
                     "objective/quadratic",
                     "space/two-dimensional",
                 ],
-            } if self._speculation_gate_calibration else {})
+            } if self._speculation_gate_calibration else self._claim_concept_envelope(
+                (registrations[0].data.get("idea") or {}).get("concepts")
+                if isinstance(registrations[0].data.get("idea"), dict) else None))
             # THE rebuild — and the same one `_card_added_payload` proves the mint against, by
             # construction rather than by hand-syncing two copies of this constructor. `receipt_action`
             # is `_card_claim_receipt_action(card)`, i.e. exactly the action shape the mint digested.
