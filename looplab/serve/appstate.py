@@ -573,7 +573,15 @@ class AppState:
             return PHASE_SPEC_APPROVAL
         if st.proposed_spec is not None and not st.spec_confirmed:
             return PHASE_ONBOARDING
-        if not st.nodes and st.data_profile is None and st.run_id:
+        # GROUNDING means "setup is still running", and it is folded from `setup_finished` — not
+        # derived from the ABSENCE of a data profile, which is what it used to be. That derivation
+        # was true only for the task kinds that have a `columns()` hook: a `RepoTask` has none, so
+        # `data_profiled` never fires, `data_profile` stays None, and the phase stayed "grounding"
+        # until the first node existed. Measured on rubertlite-dr-unified-v5: setup finished at
+        # 6.5 s and the UI said "Setting up task and data…" for the next 40 minutes, across a
+        # 13-minute proposal and a 23-minute build. A phase derived from what has NOT happened
+        # names the wrong thing as soon as one task kind stops emitting it.
+        if st.run_id and not st.setup_done:
             return PHASE_GROUNDING
         return PHASE_SEARCH
 

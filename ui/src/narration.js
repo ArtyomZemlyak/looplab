@@ -193,6 +193,46 @@ export const NARR = {
     validate: d => ownValue(d, 'statement'),
     render: (d) => `hypothesis added${d.source ? ' (' + d.source + ')' : ''} — ${String(d.statement || '').slice(0, 90)}`,
   },
+  // THE CARD LIFECYCLE. These were folded, durable and in the log — and invisible, because the feed
+  // is an allow-list (`isCuratedType`) and none of them had an entry. Measured on
+  // rubertlite-dr-unified-v5: the feed's last row was `setup_finished` at t=6.6 s, while `card_added`
+  // (t=820 s), `card_build_requested` and `card_build_attempted` (t=822 s) all landed and were
+  // dropped. Forty minutes of a run that had, as far as the operator could see, done nothing.
+  card_added: {
+    validate: d => ownValue(d, 'id'),
+    render: (d) => `card ${d.id}${d.source ? ' (' + d.source + ')' : ''}${note(d.statement, 90)}`,
+  },
+  card_build_requested: {
+    validate: d => ownValue(d, 'card_id'),
+    render: (d) => `build requested for ${d.card_id} — the Developer is starting`,
+  },
+  card_build_attempted: {
+    validate: d => ownValue(d, 'card_id'),
+    render: (d) => `${d.card_id} build attempt${d.generation ? ` (generation ${d.generation})` : ''}`,
+  },
+  card_build_done: {
+    validate: d => ownValue(d, 'card_id'),
+    render: (d) => `${d.card_id} built${d.node_id != null ? ` → node #${d.node_id}` : ''}`
+      + `${d.speculative ? ' (prefetched)' : ''}`,
+  },
+  card_enriched: {
+    validate: d => ownValue(d, 'id'),
+    render: (d) => `${d.id} enriched from node #${d.node_id}`,
+  },
+  card_ranked: {
+    validate: d => ownValue(d, 'order'),
+    render: (d) => `cards re-ranked — ${(d.order || []).slice(0, 4).join(', ')}`
+      + `${(d.order || []).length > 4 ? ` +${d.order.length - 4} more` : ''}`,
+  },
+  // The START of deep research. `research_completed` was narrated and this was not, so a multi-minute
+  // web+LLM investigation announced itself only once it was over.
+  research_attempted: {
+    render: (d) => `deep research started (${d.trigger || 'auto'})${d.manual ? ' — requested' : ''}`,
+  },
+  speculation_depth_settled: {
+    validate: d => ownValue(d, 'depth'),
+    render: (d) => `prefetch depth ${d.previous ?? '?'} → ${d.depth}${note(d.reason, 90)}`,
+  },
   hypothesis_merged: {
     validate: d => ownValue(d, 'statement'),
     render: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
@@ -402,10 +442,12 @@ export const NARR = {
 // the legend, the row, and the filter all agree.
 // [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
 export const GROUPS = [
-  ['proposal', 'proposals', 'node_building node_created'],
+  // The card lifecycle is a PROPOSAL fact, not a lifecycle one: it is the run choosing what to
+  // test and then handing it to the Developer, which is exactly what this chip filters for.
+  ['proposal', 'proposals', 'node_building node_created card_added card_build_requested card_build_attempted card_build_done card_enriched card_ranked'],
   ['eval', 'results', 'node_eval_started node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
-  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot'],
-  ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
+  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot speculation_depth_settled'],
+  ['research', 'research', 'research_completed research_attempted deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
   ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
@@ -492,6 +534,13 @@ export function eventNarration(event) {
 export const STATUS_NOISE = new Set([
   'coverage_snapshot', 'llm_cost', 'reflection_note', 'diversity_archive',
   'lessons_distilled', 'lessons_refreshed', 'budget', 'node_building', 'command_ack',
+  // `llm_usage` is the PER-CALL accounting row and it was missing here while its aggregate sibling
+  // `llm_cost` was present. That one omission defeated the clock below completely: a long agentic
+  // stage writes one `llm_usage` per provider call — 163 of them during
+  // rubertlite-dr-unified-v5's silent 40 minutes — so `liveStatusStartedAt` restarted every few
+  // seconds and never reached the 20-second floor. The clock this file exists to provide rendered
+  // nothing at all for exactly the wait it was built for.
+  'llm_usage',
 ])
 
 const STATUS_AGE_MIN_S = 20      // below this the clock is noise, and a blinking number reads as churn
