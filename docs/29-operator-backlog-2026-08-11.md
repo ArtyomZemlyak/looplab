@@ -114,6 +114,38 @@ its own event type.
 editable source root absolutely, at submit time. Cheap — but it catches an operator mistake, not this
 one.
 
+## F1d · A repo task cannot declare ENVIRONMENT for its stages
+
+**Found by watching, 2026-08-12.** `rubertlite-dr-unified-v6` node 0 crashed on its first attempt with
+`botocore ClientError: InvalidAccessKeyId … ListObjects` — the data loader reached for S3 because
+`VS_LOCAL_DATA_ROOT` was unset. The repair was correct and took three minutes: it added
+
+```python
+os.environ.setdefault("VS_LOCAL_DATA_ROOT", "/home/jovyan/data/dr-local")
+```
+
+to `vectorsearch/config.py`, at import, so both the train and the score stage see it.
+
+Then **node 1 hit the identical error**, because a node is seeded from the SOURCE repo, not from a
+sibling node's workdir. Every node in the run rediscovers the same fact and spends one repair attempt
+on it. With `inline_repair_attempts: 12` that is affordable but wasteful, and it is not the agent's
+mistake: `EvalSpec` has no `env` field and a stage accepts only
+`{name, command, timeout, check, expect}`, so **code is the only surface the Developer has** for an
+environment variable. It did the best available thing.
+
+**The workaround, for now:** export the variable in the ENGINE's environment at launch —
+`VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local python -m looplab.cli run …` — and every node inherits
+it with no repair spent. The goal text asking the agent to "set VS_LOCAL_DATA_ROOT" is asking for
+something the operator can supply once instead.
+
+**What building it would take.** A `stages[].env` map, and/or an `eval.env` applied to every stage, is
+the obvious shape — the runner already builds a per-stage environment (`_resource_eval_env` composes
+`CUDA_VISIBLE_DEVICES` there). Two things to decide: whether the values are part of the run's pinned
+treatment (they change what the code does, so probably yes — `run_started` and the config snapshot),
+and whether the Developer may DECLARE env in `declare_stages` or only the operator may set it. I lean
+operator-only: an agent that can set arbitrary environment for its own scoring stage has another route
+around the trust boundary that `b0327182` just closed for the scorer's code.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
