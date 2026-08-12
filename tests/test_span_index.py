@@ -956,6 +956,47 @@ def test_windows_growth_tops_up_only_with_a_proven_change_token_chain(
         assert scanned == [(0, source.stat().st_size)], "a rebuild re-reads the whole source"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="FILE_BASIC_INFO.ChangeTime is a Windows-only authority")
+def test_the_real_windows_change_time_sees_a_rewrite_that_size_mtime_and_ctime_cannot(tmp_path):
+    """The one Windows guard here that stubs NOTHING.
+
+    Every other Windows assertion in this file monkeypatches `_windows_change_time`, so they prove the
+    reader's logic given a token and say nothing about whether the platform actually supplies one that
+    moves. The whole schema-2 receipt rests on that: if ChangeTime did not witness an in-place rewrite,
+    the incremental path would be trusting a constant. Drive it against the real filesystem instead —
+    rewrite in place at the SAME size and put mtime back, which is precisely the shape that size/mtime
+    cannot see and that Windows `st_ctime_ns` cannot see either, because there it is creation time.
+    """
+    from looplab.core.trace_files import trace_file_change_token
+
+    source = tmp_path / "spans.jsonl"
+    source.write_bytes(b'{"span_id":"a"}\n')
+    before = source.stat()
+    with open(source, "rb") as stream:
+        token_before = trace_file_change_token(stream.fileno(), os.fstat(stream.fileno()))
+
+    with open(source, "r+b") as stream:
+        stream.seek(0)
+        stream.write(b'{"span_id":"b"}\n')      # same length, different bytes
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    after = source.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns), (
+        "the rewrite must be invisible to size and mtime, or this proves nothing")
+    assert after.st_ctime_ns == before.st_ctime_ns, (
+        "Windows st_ctime_ns is creation time — blind to this rewrite. That blindness is the reason "
+        "the receipt needs a separate mutation token at all")
+
+    with open(source, "rb") as stream:
+        token_after = trace_file_change_token(stream.fileno(), os.fstat(stream.fileno()))
+    assert token_before is not None and token_after is not None, (
+        "no token available on this filesystem: the incremental path must then fail closed, which is "
+        "what `require_change_token` does — but this host cannot exercise the proven path at all")
+    assert token_after != token_before, "ChangeTime must witness the rewrite the other stamps missed"
+
+
 @pytest.mark.parametrize("cold_reload", [False, True], ids=["warm-cache", "persisted-cold"])
 def test_same_inode_prefix_rewrite_plus_growth_rebuilds_instead_of_stitching(
         tmp_path, cold_reload):
