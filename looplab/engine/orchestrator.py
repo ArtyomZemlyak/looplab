@@ -364,6 +364,38 @@ class CreationRunawayCounters:
 _NON_EVIDENCE_FAILURE_REASONS = frozenset({"superseded"})
 
 
+def stamp_proposal_span(span, idea, *, node_id=None) -> None:
+    """Bind a Researcher `propose` operation to the CARD it produced.
+
+    THE LINK DID NOT EXIST. The product model is that the Researcher works per CARD (a hypothesis)
+    while the Developer works per NODE, and one card can carry several nodes. Nothing recorded that:
+    measured on `runs/rubert-dr-0807` (2026-08-11), all 15 `propose` spans carry an EMPTY attribute
+    map, no span anywhere in the run carries a card id, and every `card_added` / `card_build_*` /
+    `card_enriched` event has `trace_id: None`. So "show me the research behind this card" had no
+    join to answer it — not through the spans, not through the events — and the only reason it was
+    not noticed is that no surface had ever tried to ask.
+
+    `_link` has resolved the writer-owned Card id onto the Idea by the time this runs, so the id is
+    simply there to be written down.
+
+    `proposed_for_node` is deliberately NOT spelled `node_id`. `node_id` is the attribution key
+    `traceview.effective_node_id` projects the WHOLE trace by, so using it here would move every
+    Researcher trace into one node's per-node view — and a card's research belongs to all of its
+    nodes, not to whichever one happened to be prepared first. The node this proposal was prepared
+    for is still worth recording; it is context, not ownership.
+    """
+    if span is None or idea is None:
+        return
+    card_id = getattr(idea, "card_id", None)
+    if isinstance(card_id, str) and card_id.strip():
+        span.set("card_id", card_id.strip())
+    if isinstance(node_id, int) and not isinstance(node_id, bool) and node_id >= 0:
+        span.set("proposed_for_node", node_id)
+    operator = getattr(idea, "operator", None)
+    if isinstance(operator, str) and operator.strip():
+        span.set("operator", operator.strip())
+
+
 def systemic_failure_stop_reason(state, threshold: int) -> Optional[str]:
     """Should the whole run stop because nothing has EVER worked? The reason, or None.
 
@@ -4529,8 +4561,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         if kind == "draft":
             self._set_complexity_hint(state, None, researcher=researcher)
-            with self.tracer.span("propose"):
+            with self.tracer.span("propose") as _span:
                 idea = _link(self._canonicalize_draft_idea(researcher.propose(state, None)))
+                stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None:
                 return None
             final = self._apply_novelty_gate(
@@ -4556,9 +4589,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._set_complexity_hint(state, parent, researcher=researcher)
             # A repair proposal should not be pushed toward an unrelated direction.
             self._stamp_novelty_hint(state, "balanced", researcher=researcher)
-            with self.tracer.span("propose"):
+            with self.tracer.span("propose") as _span:
                 idea = self._canonicalize_idea_operator(
                     researcher.propose(state, parent), "debug")
+                stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             return _link(idea)
 
         # improve / capability-expand
@@ -4570,9 +4604,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             from looplab.search.lock_in import capability_expansion_due
             if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
                 authoritative_operator = KIND_EXPAND
-        with self.tracer.span("propose"):
+        with self.tracer.span("propose") as _span:
             idea = _link(self._canonicalize_idea_operator(
                 researcher.propose(state, parent), authoritative_operator))
+            stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
         final = self._apply_novelty_gate(
@@ -4951,8 +4986,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Re-proposal changes immutable work-item meaning. Finish the Idea first, then replace
                 # the old Card with one exact native receipt while keeping the operator-requested node id.
                 self._set_complexity_hint(state, parent)
-                with self.tracer.span("propose"):
+                # RE-PROPOSAL: the card id genuinely is not knowable while this span is open —
+                # the point of a re-proposal is that the old Card is DROPPED and a replacement is
+                # minted afterwards, under `_id_lock`, from `_plan_native_card`. So this site stamps
+                # the node context only. The card link is still derivable and still durable: this
+                # span is nested in this node's `create_node` trace, and the `node_created` event
+                # that trace ends with carries both that `trace_id` and the replacement `card_id`.
+                with self.tracer.span("propose") as _span:
                     proposed = self.researcher.propose(state, parent)
+                    stamp_proposal_span(_span, node.idea, node_id=node.id)
                 idea = self._canonicalize_idea_operator(proposed, node.operator)
                 if idea is None:
                     self._fail_reserved_build(
