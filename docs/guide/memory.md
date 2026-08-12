@@ -173,7 +173,18 @@ a human writes them. Three concrete facts sit behind "why aren't they there":
    safe relative display names and are read-only. Symlinks/path escapes are skipped. A directory,
    entry or depth cap is disclosed independently from the known lower bound of omitted files, so a
    partial inventory is never treated as proof that a retained file was deleted.
-3. **Auto-distilled skills have no first-party review surface** (see above). Their read path does
+3. **A claim only becomes a skill if it could transfer.** The promotion gate used to ask three
+   things — is the card supported, did it move the metric, is the statement non-empty — and none of
+   them is "does this generalize". Measured 2026-08-12 over the 27 auto-skills a real store had
+   accumulated, **every one was instance-specific**: `perturb best node 8 (metric=5.4404437)`,
+   `perturb node 9 (params={'x': 3.7898})`, `mean-merge of nodes 0,1` — the same operation five
+   times under five node numbers, as five separate "skills".
+   `memory.py::promotable_skill_statement` now refuses a statement that names a node id, embeds a
+   metric value, or embeds a parameter literal. It is deliberately conservative and shaped by that
+   corpus rather than by taste: a false negative silently loses procedural memory, which is the
+   whole point of the tier. Refusing a SKILL never refuses the LESSON — the claim keeps its row and
+   its evidence; only the procedural tier is gated.
+4. **Auto-distilled skills have no first-party review surface** (see above). Their read path does
    enforce the promotion lifecycle: `write_auto_skill` keeps a candidate on disk and accumulates
    task fingerprints under an interprocess lock; production `SkillTools` hides that candidate until
    a later fingerprint with Jaccard similarity `< 0.6` to stored evidence promotes the same file.

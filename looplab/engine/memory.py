@@ -348,6 +348,47 @@ def _stored_skill_fingerprints(raw: str) -> list[list[str]]:
     return value
 
 
+# A SKILL IS A TECHNIQUE, NOT A FACT ABOUT ONE NODE. The promotion gate asked three things —
+# supported, positive delta, non-empty statement — and never whether the statement generalizes. So
+# every auto-distilled skill in the shipped store was instance-specific. Measured 2026-08-12 over the
+# 27 files this had written:
+#
+#     perturb best node 8 (metric=5.4404437)
+#     perturb node 9 (params={'x': 3.7898})
+#     mean-merge of nodes 0,1
+#
+# Twenty-seven of twenty-seven. Not one is a technique a later run could apply: they name a node id
+# from one run's tree and a float from one run's objective, and the same operation appears five times
+# under five node numbers as five separate "skills". That is the operator's "the auto classifier is
+# rubbish" in full — the classifier is not bad at ranking, it never asked the question.
+#
+# Deliberately CONSERVATIVE, and shaped by that corpus rather than by imagination: it rejects only
+# what demonstrably cannot transfer — a node id, an embedded parameter literal, an embedded metric
+# value. Anything else still promotes, because a false negative here silently loses procedural memory
+# and the whole point of the tier is to accumulate it.
+_INSTANCE_SPECIFIC_SKILL = (
+    re.compile(r"\bnodes?\s+\d", re.I),          # "perturb node 9", "mean-merge of nodes 0,1"
+    re.compile(r"\bmetric\s*=\s*[-+0-9.]"),      # "(metric=5.4404437)"
+    re.compile(r"\bparams?\s*=?\s*[{(]"),        # "params={'x': 3.7898}"
+    re.compile(r"[{\[]\s*['\"]\w+['\"]\s*:"),   # a bare parameter dict anywhere in the text
+)
+
+
+def promotable_skill_statement(statement) -> bool:
+    """Can this claim become a SKILL — something a later run could apply?
+
+    See `_INSTANCE_SPECIFIC_SKILL` for the measured corpus this is shaped by. Returning False is not
+    a judgement about the claim's truth: the lesson tier still keeps it with its evidence. It is a
+    judgement about whether the sentence says anything a different run could act on.
+    """
+    text = str(statement or "").strip()
+    if len(text) < 12:
+        # Shorter than "use dropout" — there is no technique in it, and the store's own titles are
+        # derived from this text, so an empty-ish claim also mints an unreadable file name.
+        return False
+    return not any(pattern.search(text) for pattern in _INSTANCE_SPECIFIC_SKILL)
+
+
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str) -> Optional[Path]:
     """Draft/refresh an auto-distilled skill. New claim -> status: candidate. If a candidate

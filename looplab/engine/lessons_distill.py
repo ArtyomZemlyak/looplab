@@ -181,7 +181,7 @@ class LessonDistillMixin:
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
-        from looplab.engine.memory import write_auto_skill
+        from looplab.engine.memory import promotable_skill_statement, write_auto_skill
         sk_dir = base / "skills"
         skills: list[str] = []
         # Distil skills from canonical Card work items. Several retry cards may share one belief; the
@@ -191,8 +191,14 @@ class LessonDistillMixin:
         # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
         # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
         # belief text here. The `h.statement` guard mirrors the fold's old empty-statement skip.
+        # …and it must be a TECHNIQUE. The three conditions below asked whether the claim was
+        # supported, whether it moved the metric, and whether it was non-empty — never whether a
+        # different run could act on it. Every one of the 27 auto-skills in the shipped store was
+        # instance-specific as a result ("perturb best node 8 (metric=5.4404437)"), including the
+        # same operation five times under five node numbers. See `promotable_skill_statement`.
         for h in final.research_cards():
-            if h.verdict == "supported" and (h.best_delta or 0) > 0 and h.statement:
+            if (h.verdict == "supported" and (h.best_delta or 0) > 0
+                    and promotable_skill_statement(h.statement)):
                 ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
                 write_auto_skill(sk_dir, h.statement,
                                  self._e._distill_skill_body(final, h, ev), fp, final.task_id)
