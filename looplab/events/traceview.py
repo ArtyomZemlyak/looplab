@@ -232,6 +232,12 @@ _SPAN_FIELDS = {
 _ATTRIBUTE_FIELDS = {
     # topology / conversation reconstruction
     "node_id", "generation", "phase", "phase_span", "input_from", "input_carry", "input_partial",
+    # The Researcher's CARD binding (orchestrator.stamp_proposal_span). `card_id` is the join that
+    # makes a card's own research reachable; `proposed_for_node` is the node the proposal was
+    # prepared for and is deliberately NOT `node_id`, which would re-attribute the whole trace to
+    # one node. Both must be on this allowlist or the projection silently drops them — which is
+    # exactly what happened the first time, and made the stamp look like it had never run.
+    "card_id", "proposed_for_node",
     # generation / tool observation
     "model", "op", "model_parameters", "tool", "tool_calls", "input", "output",
     "thinking", "usage", "cost", "level",
@@ -254,7 +260,7 @@ _ATTRIBUTE_FIELDS = {
 }
 _ATTR_TEXT_FIELDS = {
     "phase", "model", "op", "tool", "level", "stage", "reason", "package", "trigger",
-    "operator", "error_reason", "materialized", "handoff_from", "handoff_to",
+    "operator", "error_reason", "materialized", "handoff_from", "handoff_to", "card_id",
     "looplab.exporter.metric", "looplab.exporter.instance_id",
 }
 _ATTR_BOOL_FIELDS = {
@@ -263,7 +269,7 @@ _ATTR_BOOL_FIELDS = {
 }
 _ATTR_INT_FIELDS = {
     "generation", "input_carry", "exit_code", "seed", "blocks", "attempt",
-    "repair_attempts", "violations",
+    "repair_attempts", "violations", "proposed_for_node",
     "looplab.exporter.dropped_spans", "looplab.exporter.export_failures",
     "looplab.exporter.queue_capacity_spans", "looplab.exporter.queue_capacity_bytes",
     "looplab.exporter.pid", "looplab.exporter.dropped.queue_full",
@@ -1556,4 +1562,95 @@ def project_operations(spans: list[dict], *, cap: int = OPERATIONS_CAP,
             total_spans=len(spans), visible_spans=len(spans), light=True,
             total_operations=len(rows), visible_operations=len(visible),
             omitted_operations=max(0, len(rows) - len(visible))),
+    }
+
+
+# THE CARD IS THE UNIT OF RESEARCH. A Card is one hypothesis; the Researcher proposes it and the
+# Developer builds one or more NODES under it. Before `orchestrator.stamp_proposal_span` there was no
+# join between the two halves at all (no span carried a card id, no card event carried a trace id),
+# so the two were only ever reachable from different screens — which is what made an operator hunt
+# around the UI for work that belongs to one story.
+#
+# This assembles that story in the order it happened: the proposal(s) first, then each node the card
+# produced. Sections are LIGHT rows, not trees: each names its trace so the reader opens only the one
+# they want, through `/trace/by_trace/{trace_id}` and `/nodes/{n}/trace`, both already bounded.
+def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
+                       node_trace_ids: Optional[dict] = None,
+                       _normalized: bool = False) -> dict:
+    """Ordered sections for ONE card: its research, then its nodes.
+
+    `node_ids` and `node_trace_ids` come from the folded event log — the fold is the only place that
+    knows which nodes a card owns (`idea.card_id`) and which trace each node's build ran in
+    (`node_created.trace_id`). Passing them in keeps this function pure over spans, and keeps the
+    ownership question answered by the one component that can answer it.
+
+    RESEARCH is matched two ways, because the engine can only stamp one of them:
+      * directly — a `propose` span carrying this `card_id` (the draft/debug/improve paths);
+      * by trace — a `propose` span sharing a trace with one of this card's `node_created` events,
+        which is how a node reset's RE-proposal is reachable: that path drops the old card and mints
+        the replacement after the span closes, so the span cannot name it, but the trace can.
+    Never by time or by adjacency: a guessed link would put another hypothesis's reasoning under this
+    card, which is worse than showing none.
+    """
+    spans = spans if _normalized else _normalize_spans(spans)
+    owned_traces = {str(tid) for tid in (node_trace_ids or {}).values() if tid}
+    wanted_nodes = {str(n) for n in node_ids}
+
+    research: list[dict] = []
+    by_trace: dict[str, list[dict]] = defaultdict(list)
+    for span in spans:
+        by_trace[span.get("trace_id")].append(span)
+    for tid, trace_spans in by_trace.items():
+        for root in (s for s in trace_spans if not s.get("parent_id") and s.get("name") == "propose"):
+            attributes = root.get("attributes") or {}
+            stamped = str(attributes.get("card_id") or "")
+            if stamped != str(card_id) and str(tid) not in owned_traces:
+                continue
+            roll = _rollup(trace_spans)
+            research.append({
+                "name": "propose",
+                "trace_id": tid,
+                "span_id": root.get("span_id"),
+                "start": _finite_number(root.get("start"), nonnegative=True),
+                "duration_s": _finite_number(root.get("duration_s"), nonnegative=True),
+                "status": root.get("status"),
+                # How this row was matched, so the reader is never left guessing which rule applied.
+                "link": "card_id" if stamped == str(card_id) else "shared_trace",
+                "proposed_for_node": attributes.get("proposed_for_node"),
+                "operator": attributes.get("operator"),
+                "spans": len(trace_spans),
+                "generations": roll["generations"],
+                "tools": roll["tools"],
+                "tokens": roll["tokens"],
+            })
+    research.sort(key=lambda row: (row["start"], str(row["trace_id"])))
+
+    nodes = []
+    for node_id in sorted(wanted_nodes, key=lambda value: (len(value), value)):
+        # `str(_node_id_of(s) or "")` is the bug this codebase already has a whole test file about:
+        # node 0's id is FALSY, so that spelling silently gives node 0 an empty section while every
+        # other node renders. Compare the resolved value against None instead.
+        node_spans = [s for s in spans
+                      if (lambda own: own is not None and str(own) == node_id)(_node_id_of(s))]
+        roll = _rollup(node_spans)
+        nodes.append({
+            "node_id": node_id,
+            "trace_id": (node_trace_ids or {}).get(node_id)
+            or (node_trace_ids or {}).get(int(node_id) if node_id.isdigit() else node_id),
+            "spans": len(node_spans),
+            "generations": roll["generations"],
+            "tools": roll["tools"],
+            "tokens": roll["tokens"],
+            "errors": sum(1 for s in node_spans if s.get("status") == "ERROR"),
+        })
+
+    return {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "card_id": str(card_id),
+        "research": research,
+        "nodes": nodes,
+        "projection": _response_projection(
+            total_spans=len(spans), visible_spans=len(spans), light=True,
+            total_research=len(research), visible_research=len(research),
+            total_nodes=len(nodes), visible_nodes=len(nodes)),
     }

@@ -545,6 +545,37 @@ class AppState:
             return project_operations([], cap=settled)
         return project_operations(idx.light_spans(), cap=settled, _normalized=True)
 
+    def card_trace_view(self, rd: Path, card_id: str) -> dict:
+        """The whole story of ONE card: its research, then every node it produced.
+
+        The fold is the only component that knows which nodes a card owns (`idea.card_id`) and which
+        trace each node's build ran in (`node_created.trace_id`), so this resolves both here and hands
+        them to the pure projection rather than letting it guess from spans.
+        """
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import project_card_trace
+
+        events = self.events(rd)
+        state = fold(events)
+        node_ids, trace_ids = [], {}
+        for node in state.nodes.values():
+            if str(getattr(node.idea, "card_id", None) or "") != str(card_id):
+                continue
+            node_ids.append(node.id)
+        for event in events:
+            if event.type != "node_created":
+                continue
+            data = event.data or {}
+            node_id = data.get("node_id")
+            if node_id in node_ids and event.trace_id:
+                # LAST wins: a node reset re-builds under a new trace, and the story an operator
+                # opens is the one that is live now.
+                trace_ids[str(node_id)] = event.trace_id
+        idx = get_index(rd / "spans.jsonl")
+        spans = idx.light_spans() if idx is not None else []
+        return project_card_trace(spans, card_id=str(card_id), node_ids=node_ids,
+                                  node_trace_ids=trace_ids, _normalized=idx is not None)
+
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write
         # run_finished, and complete the wrap-up. Surface this before paused because finalize-after-

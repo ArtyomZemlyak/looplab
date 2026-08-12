@@ -3104,6 +3104,30 @@ def build_router(srv) -> APIRouter:
         generation = _finish_trace_read(rd, before_generation, expected_generation)
         return {**payload, "run_id": run_id, "run_generation": generation or None}
 
+    @router.get("/api/runs/{run_id}/cards/{card_id}/trace")
+    def card_trace(run_id: str, card_id: str,
+                   expected_generation: Optional[str] = Query(default=None)):
+        """One CARD's whole story: the research that proposed it, then every node it produced.
+
+        A Card is one hypothesis; the Researcher proposes it and the Developer builds one or more
+        nodes under it. Those two halves lived on different screens because no join existed between
+        them — see `orchestrator.stamp_proposal_span`. This is the surface that join was for.
+
+        Sections are LIGHT rows naming their traces, not trees: the reader opens the one they want
+        through `/trace/by_trace/{trace_id}` for a proposal and `/nodes/{n}/trace` for a node, both of
+        which already bound their own I/O. A card whose research cannot be matched returns an empty
+        `research` list rather than a guessed one — a mis-attributed hypothesis is worse than none.
+        """
+        rd = _run_dir(run_id)
+        _assert_trace_reset_clear(rd)
+        before_generation = _begin_trace_read(rd, expected_generation)
+        try:
+            payload = srv.card_trace_view(rd, card_id)
+        except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
+            payload = _trace_unavailable(card_id=card_id, research=[], nodes=[])
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return {**payload, "run_id": run_id, "run_generation": generation or None}
+
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str,
                        expected_generation: Optional[str] = Query(default=None)):
