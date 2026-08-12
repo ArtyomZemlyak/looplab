@@ -43,7 +43,8 @@ from looplab.core.trace_append import (
     SPAN_APPEND_JOURNAL_MAX_BYTES, SPAN_APPEND_JOURNAL_NAME,
     SPAN_APPEND_RECEIPT_SCHEMA)
 from looplab.core.trace_files import (
-    TRACE_JSONL_ROW_MAX_BYTES, TRACE_WRITER_LOCK_NAME, open_private_trace_file)
+    TRACE_JSONL_ROW_MAX_BYTES, TRACE_WRITER_LOCK_NAME, open_private_trace_file,
+    trace_file_change_token)
 
 
 _TRACE_TEXT_CAP = 64_000
@@ -1122,6 +1123,11 @@ class JsonlSpanExporter:
             # while holding the exporter's writer lock, leaving every committed byte untouched.
             before_size = _heal_torn_jsonl_tail(f)
             before_stat = os.fstat(f.fileno())
+            # Read the mutation token through the SAME descriptor that is about to be appended to, so
+            # the proof and the bytes cannot belong to two generations of the path. `None` here (an
+            # unsupported filesystem or an API failure) keeps the receipt honest: the reader then has
+            # no token to check and falls back to rebuilding rather than trusting a blank.
+            before_change_token = trace_file_change_token(f.fileno(), before_stat)
             # An update stream must be repositioned between reading/truncating and writing.  O_APPEND
             # also pins the write to the healed EOF, but the seek keeps the Python buffering contract
             # explicit and portable.
@@ -1138,9 +1144,11 @@ class JsonlSpanExporter:
                 "before_size": before_size,
                 "before_mtime_ns": before_stat.st_mtime_ns,
                 "before_ctime_ns": before_stat.st_ctime_ns,
+                "before_change_token": before_change_token,
                 "after_size": after_stat.st_size,
                 "after_mtime_ns": after_stat.st_mtime_ns,
                 "after_ctime_ns": after_stat.st_ctime_ns,
+                "after_change_token": trace_file_change_token(f.fileno(), after_stat),
                 "append_sha256": hashlib.sha256(line).hexdigest(),
             })
 
