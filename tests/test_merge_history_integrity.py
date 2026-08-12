@@ -77,7 +77,8 @@ def _walk(repo: Path) -> dict[str, _Commit]:
     """Every commit reachable from HEAD as {sha: _Commit}, in one `git log`."""
     result = subprocess.run(
         ["git", "-C", str(repo), "log", "--date=short", f"--format={_FORMAT}", "HEAD"],
-        capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=_GIT_TIMEOUT_S)
     if result.returncode != 0:
         pytest.skip(f"git log unavailable: {result.stderr.strip()[:200]}")
     commits = {}
@@ -144,7 +145,8 @@ def history() -> dict[str, _Commit]:
         pytest.skip("not a git checkout")
     shallow = subprocess.run(
         ["git", "-C", str(REPO), "rev-parse", "--is-shallow-repository"],
-        capture_output=True, text=True, timeout=_GIT_TIMEOUT_S)
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=_GIT_TIMEOUT_S)
     if shallow.stdout.strip() == "true":
         # `actions/checkout` clones depth=1 by default, which leaves no history to check. The guard
         # is a no-op there rather than a false pass on an empty walk; give CI `fetch-depth: 0` to
@@ -222,6 +224,7 @@ def _git(repo: Path, *args: str) -> str:
            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
            "HOME": str(repo)}
     result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
                             timeout=_GIT_TIMEOUT_S, env=env)
     assert result.returncode == 0, f"git {' '.join(args)}: {result.stderr}"
     return result.stdout.strip()

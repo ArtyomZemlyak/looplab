@@ -450,37 +450,6 @@ class AuthoringOperationResponse(BaseModel):
     replayable: bool
 
 
-def _if_none_match(value: str | None, current: str) -> bool:
-    """Use RFC 9110 weak comparison for an If-None-Match validator list."""
-    if not isinstance(value, str) or not value.strip():
-        return False
-    value = value.strip()
-    if value == "*":
-        return True
-    target = current[2:] if current.startswith("W/") else current
-    matched = False
-    position = 0
-    while position < len(value):
-        while position < len(value) and value[position] in " \t,":
-            position += 1
-        if position == len(value):
-            break
-        match = _ETAG_TOKEN.match(value, position)
-        if match is None:
-            return False
-        candidate = match.group(0)
-        if candidate.startswith("W/"):
-            candidate = candidate[2:]
-        if candidate == target:
-            matched = True
-        position = match.end()
-        while position < len(value) and value[position] in " \t":
-            position += 1
-        if position < len(value) and value[position] != ",":
-            return False
-    return matched
-
-
 _MEMORY_ROW_BYTES = MEMORY_SOURCE_ROW_BYTES
 
 
