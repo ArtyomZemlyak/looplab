@@ -59,10 +59,30 @@ def test_junk_never_reaches_a_durable_span():
     assert span.attributes["card_id"] == "card-1"
 
 
-def test_a_missing_span_or_idea_is_a_no_op_not_a_crash():
+def test_a_missing_span_is_a_no_op_not_a_crash():
     """This runs inside the proposal path; a stamp must never be able to fail a run."""
     stamp_proposal_span(None, Idea(operator="draft", params={}, card_id="card-1"))
-    stamp_proposal_span(_Span(), None)
+
+
+def test_no_idea_still_records_the_node_and_never_invents_a_card():
+    """The re-proposal path passes None ON PURPOSE. Its `node.idea.card_id` is the card that path is
+    about to DROP (it is handed to `_plan_native_card` as `superseded_card_id`), so stamping it would
+    file the research that REPLACED a card as the research that produced it — the one mis-attribution
+    a card trace must never make."""
+    span = _Span()
+    stamp_proposal_span(span, None, node_id=6)
+    assert span.attributes == {"proposed_for_node": 6}
+
+
+def test_the_re_proposal_site_passes_no_idea():
+    import inspect
+
+    from looplab.engine import orchestrator
+
+    source = inspect.getsource(orchestrator)
+    assert "stamp_proposal_span(_span, None, node_id=node.id)" in source
+    assert "stamp_proposal_span(_span, node.idea" not in source, (
+        "stamping the node's CURRENT idea there files a re-proposal under the card it replaced")
 
 
 def test_every_propose_span_site_stamps():
@@ -80,8 +100,8 @@ def test_every_propose_span_site_stamps():
     assert unbound == 0, "a `propose` span opened without binding its handle cannot be stamped"
     assert opened == 4, f"{opened} propose spans found; every one must bind its handle"
     assert source.count("stamp_proposal_span(_span,") == 4, "a site opened a span and forgot to stamp"
-    # Three sites know the card while the span is open; the RE-PROPOSAL site cannot, because it
-    # drops the old card and mints the replacement afterwards under `_id_lock`. It stamps the node
-    # instead, and its card stays derivable through the `node_created` event that shares its trace.
+    # Three sites know the card while the span is open; the RE-PROPOSAL site must pass NO idea —
+    # the one it holds names the card this path is about to drop. Its card stays derivable through
+    # the `node_created` event that shares its trace.
     assert source.count("stamp_proposal_span(_span, idea") == 3
-    assert source.count("stamp_proposal_span(_span, node.idea") == 1
+    assert source.count("stamp_proposal_span(_span, None, node_id=node.id)") == 1

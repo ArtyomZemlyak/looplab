@@ -1837,14 +1837,6 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                 "applied": _collect("applied"), "proposals": _collect("proposals"),
                 "todos": _collect("todos"), "refs": refs, "mode": mode}
     reply = reply or box.get("reply") or "(no reply)"
-    if budget_box:
-        kind = budget_box.get("kind")
-        limit = ("wall-clock budget" if kind == "time" else "turn budget")
-        reply = (f"{reply}\n\n---\n_This turn hit its {limit} after "
-                 f"{budget_box.get('turns')} tool turns ({budget_box.get('seconds')}s) and was cut "
-                 f"short — the answer above is the best I could assemble from what I had gathered, "
-                 f"not a finished investigation. Ask me to continue, or raise "
-                 f"`agent_time_budget_s`._")
     # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
     # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
     # (One extra call; reuses the context the loop built. The loop's emit reply is the fallback.)
@@ -1894,6 +1886,17 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                 reply = "".join(streamed)
         except Exception:  # noqa: BLE001 - streaming is an enhancement; keep the loop's reply
             pass
+    # AFTER the streaming block, never before it: that block REPLACES `reply` wholesale with the
+    # streamed answer, so a notice appended earlier is silently dropped on the ordinary path (a
+    # reply_sink is present, the turn was not cancelled, the trace is intact). The envelope key
+    # survived and the sentence the operator reads did not — which is the entire point of it.
+    if budget_box:
+        limit = "wall-clock budget" if budget_box.get("kind") == "time" else "turn budget"
+        reply = (f"{reply}\n\n---\n_This turn hit its {limit} after "
+                 f"{budget_box.get('turns')} tool turns ({budget_box.get('seconds')}s) and was cut "
+                 f"short — the answer above is the best I could assemble from what I had gathered, "
+                 f"not a finished investigation. Ask me to continue, or raise "
+                 f"`agent_time_budget_s`._")
     return {"ok": True, "reply": reply, "steps": steps,
             "applied": _collect("applied"), "proposals": _collect("proposals"),
             "todos": _collect("todos"), "refs": refs, "mode": mode,

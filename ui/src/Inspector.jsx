@@ -1947,10 +1947,12 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   useEffect(() => {
     if (!researchOpen || research !== null || !cardId || !runId) return undefined
     let alive = true
-    deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`))
+    // `deadlineGet` returns a HANDLE, not a promise — see the same fix in CardBoard.
+    const request = deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`))
+    request.promise
       .then(d => { if (alive) setResearch(d || {}) })
       .catch(() => { if (alive) setResearch({ projection: { unavailable: true } }) })
-    return () => { alive = false }
+    return () => { alive = false; request.controller.abort() }
   }, [researchOpen, research, cardId, runId])
   const researchRows = research
     ? (cardTraceSections(research).find(section => section.kind === 'research')?.rows || [])

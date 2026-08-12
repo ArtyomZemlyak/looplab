@@ -378,20 +378,27 @@ def stamp_proposal_span(span, idea, *, node_id=None) -> None:
     `_link` has resolved the writer-owned Card id onto the Idea by the time this runs, so the id is
     simply there to be written down.
 
+    `idea` may be None, and the re-proposal path passes None ON PURPOSE. Its `node.idea.card_id` is
+    the card this very path is about to DROP (`_drop_card_once(..., reason="reproposed")`, and it is
+    handed to `_plan_native_card` as `superseded_card_id`), so stamping it would file the research
+    that REPLACED a card as the research that produced it — the one mis-attribution a card trace must
+    never make. The replacement is minted afterwards under `_id_lock`; the link survives through the
+    `node_created` event that shares this span's trace.
+
     `proposed_for_node` is deliberately NOT spelled `node_id`. `node_id` is the attribution key
     `traceview.effective_node_id` projects the WHOLE trace by, so using it here would move every
     Researcher trace into one node's per-node view — and a card's research belongs to all of its
     nodes, not to whichever one happened to be prepared first. The node this proposal was prepared
     for is still worth recording; it is context, not ownership.
     """
-    if span is None or idea is None:
+    if span is None:
         return
-    card_id = getattr(idea, "card_id", None)
+    card_id = getattr(idea, "card_id", None) if idea is not None else None
     if isinstance(card_id, str) and card_id.strip():
         span.set("card_id", card_id.strip())
     if isinstance(node_id, int) and not isinstance(node_id, bool) and node_id >= 0:
         span.set("proposed_for_node", node_id)
-    operator = getattr(idea, "operator", None)
+    operator = getattr(idea, "operator", None) if idea is not None else None
     if isinstance(operator, str) and operator.strip():
         span.set("operator", operator.strip())
 
@@ -4998,7 +5005,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # that trace ends with carries both that `trace_id` and the replacement `card_id`.
                 with self.tracer.span("propose") as _span:
                     proposed = self.researcher.propose(state, parent)
-                    stamp_proposal_span(_span, node.idea, node_id=node.id)
+                    # `None`, not `node.idea`: that idea still carries the card this path is
+                    # about to drop, and stamping it would file this re-proposal under the card it
+                    # REPLACED. See `stamp_proposal_span`.
+                    stamp_proposal_span(_span, None, node_id=node.id)
                 idea = self._canonicalize_idea_operator(proposed, node.operator)
                 if idea is None:
                     self._fail_reserved_build(

@@ -115,3 +115,61 @@ def test_run_turn_puts_the_notice_in_both_the_envelope_and_the_answer():
     assert '"budget_exhausted": dict(budget_box)' in source
     assert "was cut" in source and "not a finished investigation" in source
     assert "agent_time_budget_s" in source, "the notice must name the knob that raises the limit"
+
+
+class _StreamingFake:
+    """A model that never emits, then streams a final answer — the ORDINARY assistant path."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tool_specs, tool_choice="auto"):
+        self.calls += 1
+        time.sleep(0.03)
+        return {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{self.calls}", "type": "function",
+             "function": {"name": "read_file", "arguments": "{}"}}]}
+
+    def complete_text_stream(self, messages):
+        yield "Streamed answer."
+
+    def complete_text(self, messages):
+        return "Streamed answer."
+
+
+def test_the_notice_survives_the_streamed_final_answer(tmp_path):
+    """DRIVES THE TURN instead of pinning the source, because the source pin passed while the
+    feature did not work: the streaming block REPLACES `reply` wholesale, so a notice appended
+    before it was silently dropped on the ordinary path — sink present, not cancelled, trace intact.
+    The envelope key survived; the sentence the operator reads did not."""
+    from looplab.core.config import Settings
+    from looplab.serve.assistant import run_turn
+
+    result = run_turn(_StreamingFake(), tmp_path, [], "go", "plan",
+                      settings=Settings(agent_time_budget_s=0.05),
+                      reply_sink=lambda _chunk: None)
+
+    assert result["ok"] is True
+    assert "budget_exhausted" in result, "the envelope must still carry the machine-readable fact"
+    assert "Streamed answer." in result["reply"], "the streamed answer must still be the answer"
+    assert "was cut" in result["reply"], (
+        "the notice must survive the streamed answer — this is the assertion the source pin could "
+        "not make")
+    assert "agent_time_budget_s" in result["reply"]
+
+
+def test_an_ordinary_streamed_turn_carries_no_notice(tmp_path):
+    from looplab.core.config import Settings
+    from looplab.serve.assistant import run_turn
+
+    class _Emitter(_StreamingFake):
+        def chat(self, messages, tool_specs, tool_choice="auto"):
+            return {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "e1", "type": "function",
+                 "function": {"name": "final_answer", "arguments": '{"reply": "done"}'}}]}
+
+    result = run_turn(_Emitter(), tmp_path, [], "go", "plan",
+                      settings=Settings(agent_time_budget_s=60.0),
+                      reply_sink=lambda _chunk: None)
+    assert "budget_exhausted" not in result
+    assert "was cut" not in result["reply"]

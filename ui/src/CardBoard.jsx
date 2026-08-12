@@ -609,11 +609,15 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode }) {
     setPayload(null); setOpen(null)
     if (!cardId || !runId) return undefined
     let alive = true
-    deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
-      PANEL_REQUEST_TIMEOUT_MS)
+    // `deadlineGet` returns a HANDLE — `{controller, promise, timedOut}` — not a promise. Calling
+    // `.then` on it throws at runtime, which no test catches because none mounts this component and
+    // the build compiles it happily.
+    const request = deadlineGet(
+      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), PANEL_REQUEST_TIMEOUT_MS)
+    request.promise
       .then(d => { if (alive) setPayload(d || {}) })
       .catch(() => { if (alive) setPayload({ projection: { unavailable: true } }) })
-    return () => { alive = false }
+    return () => { alive = false; request.controller.abort() }
   }, [cardId, runId, expectedGeneration])
   const sections = useMemo(() => cardTraceSections(payload), [payload])
   const notice = cardTraceNotice(payload)
