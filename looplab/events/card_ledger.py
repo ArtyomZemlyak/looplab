@@ -1860,11 +1860,24 @@ def _card_enrichment_order(row: Mapping) -> tuple[int, int]:
     )
 
 
+_CARD_ENRICHMENT_IDENTITY = frozenset({
+    "id", "node_id", "generation", "proposal_ref", "_seq", "_event_index", "_omitted",
+})
+
+
+def _card_enrichment_fields(row: Mapping) -> list[str]:
+    """Every semantic field this row carries, in row order.
+
+    Handler-time compaction emits ONE field per row, so this is normally a single name. A journal
+    written by an older reader carries them together on one row, and that shape has to keep deriving
+    the same Card — the derive seam is additive/back-compatible even though the fold now compacts.
+    """
+    return [key for key in row
+            if key not in _CARD_ENRICHMENT_IDENTITY and not key.startswith("_concept_tags_")]
+
+
 def _card_enrichment_field(row: Mapping) -> str | None:
-    identity = {
-        "id", "node_id", "generation", "proposal_ref", "_seq", "_event_index", "_omitted",
-    }
-    fields = [key for key in row if key not in identity and not key.startswith("_concept_tags_")]
+    fields = _card_enrichment_fields(row)
     return fields[0] if len(fields) == 1 else None
 
 
@@ -1898,27 +1911,33 @@ def _recompact_card_enrichment(
     for source in st.cards_enriched:
         if not isinstance(source, Mapping):
             continue
-        field = _card_enrichment_field(source)
         card_id = canonical(source.get("id"))
-        if field is None or card_id is None or card_id not in cards:
+        fields = _card_enrichment_fields(source)
+        if card_id is None or card_id not in cards or not fields:
             continue
-        row = dict(source)
-        row["id"] = card_id
-        modern = {"node_id", "generation", "proposal_ref"} <= set(row)
+        modern = {"node_id", "generation", "proposal_ref"} <= set(source)
         applicable = not modern
         if modern:
-            subject = _card_sidecar_subject(st, row, node_to_card)
+            subject = _card_sidecar_subject(st, dict(source, id=card_id), node_to_card)
             applicable = subject is not None and subject == card_id
-        group = (card_id, field)
-        previous = winners.get(group)
-        # Applicability outranks recency. Within one applicability class, envelope LWW applies.
-        if (previous is None or (applicable and not previous[0])
-                or (applicable == previous[0]
-                    and _card_enrichment_order(row) >= _card_enrichment_order(previous[1]))):
-            winners[group] = (applicable, row)
         raw_omitted = source.get("_omitted")
-        if type(raw_omitted) is int and raw_omitted > 0:
-            omitted[group] = min((1 << 31) - 1, omitted.get(group, 0) + raw_omitted)
+        # One candidate PER FIELD. A handler-compacted row has exactly one and this is a plain
+        # rename; a legacy multi-field row splits here, which is what keeps its Card derivation
+        # byte-equivalent instead of dropping the whole row as ambiguous.
+        for field in fields:
+            row = {key: source[key] for key in source
+                   if key in _CARD_ENRICHMENT_IDENTITY or key.startswith("_concept_tags_")}
+            row["id"] = card_id
+            row[field] = source[field]
+            group = (card_id, field)
+            previous = winners.get(group)
+            # Applicability outranks recency. Within one applicability class, envelope LWW applies.
+            if (previous is None or (applicable and not previous[0])
+                    or (applicable == previous[0]
+                        and _card_enrichment_order(row) >= _card_enrichment_order(previous[1]))):
+                winners[group] = (applicable, row)
+            if type(raw_omitted) is int and raw_omitted > 0:
+                omitted[group] = min((1 << 31) - 1, omitted.get(group, 0) + raw_omitted)
 
     for raw_key, count in (cap_omissions or {}).items():
         if not isinstance(raw_key, tuple) or len(raw_key) != 5 or type(count) is not int or count <= 0:
