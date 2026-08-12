@@ -261,6 +261,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
+- **From a concept into what the lab learned** — picking a concept in the global Concepts view now
+  shows the lessons, cases and notes that carry it, beside the runs that are evidence for it. Subtree
+  matching is shared with the Memory panel's own filter, so selecting `loss` answers with everything
+  under `loss/contrastive/…` — two definitions of "about this concept" would give the operator
+  different answers to one question from two screens. The section always states how many memory rows
+  carry **no** concept at all: "2 lessons" without "and 147 carry no concept" invites the reader to
+  conclude the lab has learned almost nothing about everything else. `Knowledge` is never a group
+  there — it is human-authored and carries no run concepts, so an empty group would imply it could.
 - **Which kind of memory is which** — the Memory panel's four tabs each say what they ARE, because
   the tiers have different writers and different readers and four counts alone did not convey that.
   **Lessons** are what a run CONCLUDED (one transferable claim per row, with its evidence);

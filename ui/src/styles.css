@@ -3289,3 +3289,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 /* One line under the memory tabs saying what the selected tier IS. The tiers have different writers
    and different readers, and four tabs with counts alone did not say that. */
 .memory-tier-blurb { margin: -4px 0 12px; max-width: 78ch; font-size: 12px; line-height: 1.5; }
+
+/* Concept -> memory: the lessons, cases and notes that carry the selected concept, in the concept
+   detail rather than one screen away. */
+.pc-memory-group { margin-bottom: 10px; }
+.pc-memory-group .pc-detail-runs li { display: block; margin-bottom: 6px; line-height: 1.4; }

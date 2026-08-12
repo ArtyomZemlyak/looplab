@@ -5,6 +5,7 @@ import {
   forestCoverage, forestPathTo,
   partnersOf, visibleForestRows,
 } from './conceptForest.js'
+import { conceptMemory, conceptMemoryNotice } from './conceptMemoryModel.js'
 import './portfolio-concepts.css'
 
 // The GLOBAL concept view — the run list's `Concepts` representation, beside List / Lineage / Compare.
@@ -101,7 +102,32 @@ function Partners({ cooccurrence, node }) {
   </>
 }
 
-function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose }) {
+// What the lab LEARNED about this concept — the lessons, cases and notes that carry it, straight
+// here rather than one screen away. Subtree matching is `conceptShelf`'s, so `loss` answers with
+// everything under `loss/contrastive/…`; two definitions of "about this concept" would drift.
+function _ConceptMemory({ memory, id }) {
+  const result = useMemo(() => conceptMemory(memory, id), [memory, id])
+  if (memory === null) return <><h4>What the lab learned</h4>
+    <p className="muted" role="status">loading cross-run memory…</p></>
+  const notice = conceptMemoryNotice(result)
+  return <>
+    <h4>What the lab learned</h4>
+    {result.groups.map(group => <div key={group.key} className="pc-memory-group">
+      <div className="section-h">{group.label} · {group.rows.length}</div>
+      <ul className="pc-detail-runs">
+        {group.rows.slice(0, MAX_DETAIL_RUNS).map((row, index) => <li key={`${group.key}-${index}`}>
+          <span>{String(row._text || '').slice(0, 220) || '(no text)'}</span>
+          <span className="muted">{row.task_id || 'task unknown'}</span>
+        </li>)}
+      </ul>
+      {group.rows.length > MAX_DETAIL_RUNS
+        && <p className="muted">+{group.rows.length - MAX_DETAIL_RUNS} more not listed.</p>}
+    </div>)}
+    {notice && <p className="muted" role="status">{notice}</p>}
+  </>
+}
+
+function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose, memory = null }) {
   const node = id && forest.nodes[id]
   if (!node) return null
   const shown = node.runIds.slice(0, MAX_DETAIL_RUNS)
@@ -148,6 +174,7 @@ function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose 
     </ul>
     {node.runIds.length > shown.length
       && <p className="muted">+{node.runIds.length - shown.length} more runs not listed.</p>}
+    <_ConceptMemory memory={memory} id={id} />
     <Partners cooccurrence={cooccurrence} node={node} />
   </aside>
 }
@@ -161,6 +188,10 @@ export default function PortfolioConcepts({
   const [query, setQuery] = useState('')
   const [pairFloor, setPairFloor] = useState(PAIR_FLOORS[0].value)
   const [policyState, setPolicyState] = useState({ status: 'loading', policy: null })
+  // WHAT THE LAB LEARNED, not just which runs touched it. The Memory panel already indexes lessons,
+  // cases and notes by these very concept ids; this view could only ever answer "which runs", and the
+  // path between the two did not exist. One bounded read, shared by every concept the operator clicks.
+  const [memory, setMemory] = useState(null)
   const rowRefs = useRef(new Map())
 
   useEffect(() => {
@@ -171,6 +202,15 @@ export default function PortfolioConcepts({
       .catch(error => {
         if (error?.name !== 'AbortError') setPolicyState({ status: 'unavailable', policy: null })
       })
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    fetch('/api/memory', { signal: controller.signal })
+      .then(response => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+      .then(payload => setMemory(payload))
+      .catch(error => { if (error?.name !== 'AbortError') setMemory({}) })
     return () => controller.abort()
   }, [])
 
@@ -421,9 +461,9 @@ export default function PortfolioConcepts({
 
       {selected
         ? <ConceptDetail forest={forest} cooccurrence={cooccurrence} id={selected} runsById={runsById}
-            onOpenRun={onOpenRun} onClose={() => setSelected('')} />
+            onOpenRun={onOpenRun} onClose={() => setSelected('')} memory={memory} />
         : <aside className="pc-detail pc-detail-idle">
-            <p className="muted">Pick a concept to see which runs are evidence for it.</p>
+            <p className="muted">Pick a concept to see which runs are evidence for it, and what the lab has learned about it.</p>
           </aside>}
     </div>
   </div>
