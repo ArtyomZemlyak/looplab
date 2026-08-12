@@ -642,10 +642,18 @@ def validate_deletion_request(body: Any) -> tuple[str, str, int]:
     if not isinstance(body, dict):
         raise HTTPException(400, _detail(
             "invalid_delete_request", "Deletion body must be a JSON object."))
-    if set(body) != {"operation_id", "expected_generation", "expected_seq"}:
+    # `delete_memory` is the ONLY optional key, and it stays inside this strict set rather than being
+    # read loosely off the body: an unknown key here is a client speaking a contract this server does
+    # not have, and admitting it silently is how a misspelled `delete_memories` would read as False.
+    extra = set(body) - {"operation_id", "expected_generation", "expected_seq", "delete_memory"}
+    if extra or not {"operation_id", "expected_generation", "expected_seq"} <= set(body):
         raise HTTPException(400, _detail(
             "invalid_delete_request",
-            "Deletion requires exactly operation_id, expected_generation, and expected_seq."))
+            "Deletion requires exactly operation_id, expected_generation, and expected_seq, "
+            "with an optional delete_memory flag."))
+    if "delete_memory" in body and not isinstance(body["delete_memory"], bool):
+        raise HTTPException(400, _detail(
+            "invalid_delete_memory", "delete_memory must be a boolean."))
     operation_id = body.get("operation_id")
     generation = body.get("expected_generation")
     expected_seq = body.get("expected_seq")
@@ -663,6 +671,19 @@ def validate_deletion_request(body: Any) -> tuple[str, str, int]:
     return operation_id, generation, expected_seq
 
 
+def deletion_cascade_requested(body: Any) -> bool:
+    """Whether this exact request also asked to purge the run's own cross-run memory.
+
+    Deliberately a SECOND reader over the same validated body rather than a fourth element of the
+    tuple above: `validate_deletion_request` returns the run-deletion IDENTITY, which is what the
+    durable transaction is fenced on, and the cascade is not part of that identity. A retry that
+    changes this flag must still be the same deletion operation — the purge is idempotent and runs
+    after the transaction succeeds, so the operator can add it on a retry and cannot double-apply it.
+    """
+    return bool(isinstance(body, dict) and body.get("delete_memory") is True)
+
+
 __all__ = [
-    "begin_or_resume_run_deletion", "get_run_deletion", "validate_deletion_request",
+    "begin_or_resume_run_deletion", "deletion_cascade_requested", "get_run_deletion",
+    "validate_deletion_request",
 ]

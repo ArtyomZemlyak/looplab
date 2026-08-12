@@ -455,6 +455,13 @@ Consequences that have repeatedly been reported as bugs and are not:
   memory-owned store outside configured Authoring: candidates are hidden from production agents until
   cross-task promotion, and neither panel yet provides a first-party candidate review workflow.
 
+**Deleting a run leaves all three panels untouched by default.** The Delete dialog offers an opt-in
+*“Also delete this run’s own cross-run memory”* that removes only what is attributable to that run
+alone — a consolidated lesson, a claim pool another run has curated, or a capsule whose concepts were
+merged into a shared family all stay, and the dialog says how many stayed and why before you confirm.
+Skills and the curation logs are never cascaded. See
+[Memory & knowledge](memory.md#deleting-a-run-does-not-delete-what-it-taught-the-lab).
+
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer
 supported; use the Concepts filter instead.”** New links must encode the Concepts selection when that

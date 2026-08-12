@@ -11,12 +11,17 @@ const INTENT_KEYS = new Set([
   'schema', 'runId', 'expectedGeneration', 'expectedSeq', 'operationId',
   'phase', 'serverPhase', 'updatedAt',
 ])
+// The cross-run memory cascade the operator agreed to, carried on the record so a RECOVERY does
+// what they consented to rather than what the retry happens to send. Optional rather than a schema
+// bump: a record written by the previous build is not corrupt, and reading it as corrupt would lock
+// a run mid-deletion for anyone whose tab outlived a deploy.
+const OPTIONAL_INTENT_KEYS = new Set(['deleteMemory'])
 
 const storageKey = runId => STORAGE_PREFIX + encodeURIComponent(String(runId || ''))
 const safeRunId = value => typeof value === 'string' && value.length > 0 && value.length <= 512
   && !/[\u0000-\u001f\u007f]/.test(value)
-const exactKeys = value => Object.keys(value).length === INTENT_KEYS.size
-  && Object.keys(value).every(key => INTENT_KEYS.has(key))
+const exactKeys = value => [...INTENT_KEYS].every(key => key in value)
+  && Object.keys(value).every(key => INTENT_KEYS.has(key) || OPTIONAL_INTENT_KEYS.has(key))
 const browserStorage = storage => {
   if (storage !== undefined) return storage
   try { return typeof sessionStorage === 'undefined' ? null : sessionStorage }
@@ -33,11 +38,12 @@ export function validRunDeletionIntent(value, runId = value?.runId) {
     && LOCAL_PHASES.has(value.phase)
     && (value.serverPhase === null || SERVER_PHASES.has(value.serverPhase))
     && Number.isSafeInteger(value.updatedAt) && value.updatedAt > 0
+    && (!('deleteMemory' in value) || typeof value.deleteMemory === 'boolean')
 }
 
 export function createRunDeletionIntent(
   runId, expectedGeneration, expectedSeq, operationId,
-  phase = 'submitting', serverPhase = null, now = Date.now(),
+  phase = 'submitting', serverPhase = null, now = Date.now(), deleteMemory = false,
 ) {
   const intent = {
     schema: SCHEMA,
@@ -48,6 +54,7 @@ export function createRunDeletionIntent(
     phase,
     serverPhase: serverPhase == null ? null : String(serverPhase).toLowerCase(),
     updatedAt: Math.trunc(now),
+    deleteMemory: deleteMemory === true,
   }
   return validRunDeletionIntent(intent, runId) ? intent : null
 }

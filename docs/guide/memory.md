@@ -492,6 +492,43 @@ not fold the whole workspace. When the run list cannot be read at all the shelf 
 whatever durable tags the rows carry, and `concept_index.runs_indexed: 0` says why the rest is
 untagged.
 
+## Deleting a run does not delete what it taught the lab
+
+Run deletion removes the run directory — events, experiments, traces, chat, reports. It does **not**
+touch cross-run memory: the lessons, cases, notes, claims and concept capsules that run contributed
+live in `LOOPLAB_MEMORY_DIR`, and the whole point of that store is that it outlives the run. The
+knowledge base (`LOOPLAB_KNOWLEDGE_DIR`) is human-authored and is never involved.
+
+The cost of that default is provenance: memory rows carry the `run_id` that wrote them, so after the
+run is gone the lesson still applies but nothing can be traced back to the experiments behind it, and
+the [concept shelf](#the-concept-shelf-memory-indexed-by-the-concept-tree) can no longer give those
+rows their run-level tags.
+
+So the Delete dialog offers an opt-in cascade — *“Also delete this run’s own cross-run memory”* —
+under one rule: **delete only what is attributable to this run alone.** These stores merge, and the
+obvious implementation would be wrong. A consolidated lesson keeps the newest contributor's `run_id`
+while carrying other runs' support in `evidence_count`/`evidence_refs`; deleting it on the strength
+of that `run_id` would destroy corroboration earned by runs that still exist. `serve/memory_cascade.py`
+states one predicate per store, and everything that fails a predicate is kept **and counted with a
+reason** shown in the dialog before you agree:
+
+| Store | Deleted when | Kept when |
+|---|---|---|
+| `lessons.jsonl` | this run wrote it and nothing merged into it | `evidence_count > 1`, lineage naming another run, or untraceable support |
+| `meta_notes.jsonl` | this run wrote it | — |
+| `cases.jsonl` | this run wrote it (the group's `active` champion is re-elected over what survives) | — |
+| `research_claims.jsonl` | this run wrote it | another run's curation decision was computed over that claim pool |
+| `concept_capsules.jsonl` | this run wrote it | any of its concepts was merged into a shared concept family |
+| `skills/` | never | an auto-skill is promoted only across two differently-fingerprinted tasks, so it is cross-run by construction |
+| `*_curation_log.jsonl` | never | append-only governance audit |
+
+The purge runs **after** the run is durably gone, never before: a deletion that then refuses would
+otherwise have destroyed the evidence of a run you still have. It is idempotent (“remove every row
+attributable solely to R”), so a store that was locked at the moment of deletion can be finished
+later — the notice offers a retry, and `POST /api/runs/{run_id}/memory-purge` does the same thing
+without needing the run to exist. `GET /api/runs/{run_id}/memory-attribution` is the read-only
+preview the dialog is drawn from.
+
 ## Configuration
 
 - `LOOPLAB_MEMORY_DIR` — cross-run memory home (default `~/.looplab/memory`; `""` disables).

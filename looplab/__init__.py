@@ -184,6 +184,8 @@ _LAYOUT = {
     "mcp_tools": "tools",
     "memora": "tools",
     "memory_tools": "tools",
+    # what of the cross-run memory is attributable to ONE run, and may go when that run is deleted
+    "memory_cascade": "serve",
     "memory": "engine",
     "metrics_adapters": "serve",
     "mlebench": "adapters",

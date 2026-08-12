@@ -1,6 +1,6 @@
 import React, { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
-  createIdempotencyKey, submitRunDeletion,
+  createIdempotencyKey, submitRunDeletion, getRunMemoryAttribution, purgeRunMemory,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask,
   storageGet, storageSet } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
@@ -29,6 +29,9 @@ import {
   clearRunDeletionIntent, createRunDeletionIntent, listRunDeletionRecoveries,
   loadRunDeletionIntent, saveRunDeletionIntent,
 } from './runDeletionRecovery.js'
+import {
+  cascadeKeptNotice, cascadeLabel, cascadeOutcome, cascadeStores,
+} from './memoryCascadeModel.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
@@ -43,6 +46,9 @@ const LIST_READ_TIMEOUT_MS = 12_000
 const LIST_PAGE_SIZE = 200
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const RUN_DELETION_TIMEOUT_MS = 12_000
+// The cascade survey scans every cross-run store. Shorter than the deletion's own deadline on
+// purpose: it is a preview, and a slow one must leave the dialog usable rather than hold it open.
+const MEMORY_ATTRIBUTION_TIMEOUT_MS = 8_000
 const RUN_DELETION_POLL_MS = 2_500
 const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
 // The run list's four representations of ONE scoped run set. `map` is the KEY, `Lineage` is the label
@@ -735,6 +741,9 @@ const exactRunDeletionReceipt = (value, intent) => {
     operationId: value.operation_id,
     expectedGeneration: value.expected_generation,
     expectedSeq: value.expected_seq,
+    // Present only when a cascade was requested AND the deletion succeeded. Carried through rather
+    // than validated field-by-field: it reports an outcome, and nothing is fenced on it.
+    memory: value.memory && typeof value.memory === 'object' ? value.memory : null,
   }
 }
 
@@ -796,7 +805,29 @@ const runDeletionProgress = recovery => {
     || 'The server preserved this exact deletion request. Checking its current phase automatically.'
 }
 
-function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm }) {
+function RunMemoryCascade({ report, checked, disabled, onToggle }) {
+  // The survey is a preview, so a slow or failed read must not block the deletion — the checkbox
+  // simply stays off and says it does not know yet. Consent to a number nobody could show is not
+  // consent, so an unknown survey never arrives pre-checked.
+  const unavailable = report && report.available === false
+  const nothing = !!report && report.available !== false && !(report.deletable | 0)
+  const kept = cascadeKeptNotice(report)
+  return <div className="run-delete-cascade">
+    <label className="run-delete-cascade-row">
+      <input type="checkbox" checked={checked} disabled={disabled || !report || unavailable
+        || nothing} onChange={event => onToggle(event.target.checked)} />
+      <span>{report ? cascadeLabel(report) : 'Checking this run’s cross-run memory…'}</span>
+    </label>
+    {kept && <p className="run-delete-cascade-kept">{kept}</p>}
+    {checked && <ul className="run-delete-cascade-stores">
+      {cascadeStores(report).filter(store => store.deletable > 0).map(store =>
+        <li key={store.store}>{store.deletable} {store.store}</li>)}
+    </ul>}
+  </div>
+}
+
+function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm,
+  memoryReport, cascade, onCascadeToggle }) {
   const dialogRef = useRef(null)
   const errorRef = useRef(null)
   useDialogFocus(dialogRef, busy ? null : onClose, true,
@@ -828,6 +859,8 @@ function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm }
           <div><dt>Sequence</dt><dd><code>{Number.isSafeInteger(target.expectedSeq) ? target.expectedSeq : 'unavailable'}</code></dd></div>
         </dl>
         <p id="run-delete-warning" className="run-delete-warning">This cannot be undone.</p>
+        <RunMemoryCascade report={memoryReport} checked={cascade} disabled={busy}
+          onToggle={onCascadeToggle} />
         {(!targetValid || identityChanged) && <div className="flag run-delete-error" role="alert">
           {!targetValid
             ? 'The exact generation or sequence is unavailable. Refresh the list before deleting.'
@@ -1082,6 +1115,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const [deleteDialog, setDeleteDialog] = useState(null)
   const [deleteDialogBusy, setDeleteDialogBusy] = useState(false)
   const [deleteDialogError, setDeleteDialogError] = useState('')
+  const [deleteCascade, setDeleteCascade] = useState(false)
+  const [memoryRetryBusy, setMemoryRetryBusy] = useState(false)
+  const [deleteMemoryReport, setDeleteMemoryReport] = useState(null)
   const deleteDialogFocusRef = useRef(null)
   const deleteConfirmLockRef = useRef(false)
   const deletionFallbacksRef = useRef(new Map())
@@ -1226,6 +1262,23 @@ export default function RunList({ onOpen, onGlobalNavigate,
       deletionRequestRef.current.clear()
     }
   }, [])
+  // The cascade preview. `deadlineRequest` returns a HANDLE, not a promise — awaiting it directly
+  // throws inside the effect and the section renders as a permanent "Checking…", which is exactly
+  // the defect the card-trace fetches shipped with. Read `.promise`, abort through `.controller`.
+  const deleteDialogRunId = deleteDialog?.runId || ''
+  useEffect(() => {
+    if (!deleteDialogRunId) { setDeleteMemoryReport(null); return undefined }
+    let live = true
+    const request = deadlineRequest(
+      signal => getRunMemoryAttribution(deleteDialogRunId, { signal }),
+      MEMORY_ATTRIBUTION_TIMEOUT_MS)
+    request.promise.then(
+      value => { if (live) setDeleteMemoryReport(value && typeof value === 'object' ? value : null) },
+      // A failed survey leaves the checkbox disabled rather than guessing. Offering a cascade whose
+      // extent we could not read would be asking for consent to an unknown deletion.
+      () => { if (live) setDeleteMemoryReport({ available: false, deletable: 0, kept: 0 }) })
+    return () => { live = false; request.controller.abort() }
+  }, [deleteDialogRunId])
   const updateDeletionRecovery = recovery => {
     if (!deletionMountedRef.current) return
     setDeletionRecoveries(current => {
@@ -1252,7 +1305,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const persistDeletionPhase = (intent, phase, serverPhase = intent.serverPhase) => {
     const next = createRunDeletionIntent(
       intent.runId, intent.expectedGeneration, intent.expectedSeq, intent.operationId,
-      phase, serverPhase)
+      phase, serverPhase, undefined, intent.deleteMemory === true)
     if (!next) return null
     const saved = saveRunDeletionIntent(next, undefined, intent.operationId)
     if (!saved) {
@@ -1893,6 +1946,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
     }
     setRunMenu(null)
     setDeleteDialogError(''); setDeleteDialogBusy(false)
+    // Every open starts with the cascade OFF and the survey unread. A checkbox that remembered its
+    // last answer would carry consent from one run to another.
+    setDeleteCascade(false); setDeleteMemoryReport(null)
     setDeleteDialog({
       runId: String(r.run_id), label: String(r.label || ''),
       expectedGeneration: deletionGenerationOf(r), expectedSeq: r.seq,
@@ -1941,8 +1997,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
     }
     const restoreFocus = fromDialog || shouldRestoreFocus()
     const cleared = clearDeletionRecovery(intent)
+    // When a cascade ran, its outcome IS the deletion's outcome as far as the operator is concerned
+    // — and a partly-failed purge has to say so here, because the run's card is already gone and
+    // this notice is the last surface that can carry the retry.
+    const cascade = cascadeOutcome(receipt.memory, intent.runId)
     setDeletionNotice(cleared
-      ? { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` }
+      ? (cascade || { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` })
       : { kind: 'error', text:
           'The deletion operation is resolved, but this tab could not clear its recovery record safely.' })
     if (fromDialog) {
@@ -1968,7 +2028,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
     // the exact persisted POST identity, which is idempotent and resumes the server state machine.
     const timed = deadlineRequest(signal => submitRunDeletion(
       intent.runId, intent.expectedGeneration, intent.expectedSeq,
-      intent.operationId, { signal }), RUN_DELETION_TIMEOUT_MS)
+      intent.operationId, { signal, deleteMemory: intent.deleteMemory === true }),
+    RUN_DELETION_TIMEOUT_MS)
     const request = { controller: timed.controller, intent }
     deletionRequestRef.current.set(intent.operationId, request)
     setDeletionBusyFor(intent.runId, true)
@@ -2046,8 +2107,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
     }
     deleteConfirmLockRef.current = true
     const operationId = createIdempotencyKey().toLowerCase()
+    // The cascade travels ON the persisted intent, so a recovery retry does what the operator
+    // agreed to in this dialog rather than what a later retry happens to send.
     const intent = createRunDeletionIntent(
-      deleteDialog.runId, deleteDialog.expectedGeneration, deleteDialog.expectedSeq, operationId)
+      deleteDialog.runId, deleteDialog.expectedGeneration, deleteDialog.expectedSeq, operationId,
+      undefined, undefined, undefined, deleteCascade === true)
     if (!intent || !saveRunDeletionIntent(intent)) {
       deleteConfirmLockRef.current = false
       const restored = loadRunDeletionIntent(deleteDialog.runId)
@@ -2068,6 +2132,24 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const retryRunDeletion = recovery => {
     if (recovery.kind !== 'active') return
     runDeletionRequest(recovery.intent)
+  }
+  const retryMemoryPurge = async runId => {
+    if (!runId || memoryRetryBusy) return
+    setMemoryRetryBusy(true)
+    const request = deadlineRequest(
+      signal => purgeRunMemory(runId, { signal }), RUN_DELETION_TIMEOUT_MS)
+    try {
+      const memory = await request.promise
+      // Reuse the one outcome vocabulary. A second phrasing here would let the retry report success
+      // in words the first attempt never used, for the same result.
+      setDeletionNotice(cascadeOutcome(memory, runId)
+        || { kind: 'status', text: 'The memory purge finished.' })
+    } catch {
+      setDeletionNotice({ kind: 'error', retryRunId: runId, text:
+        'The memory purge did not finish. Nothing further was removed; this can be retried.' })
+    } finally {
+      if (deletionMountedRef.current) setMemoryRetryBusy(false)
+    }
   }
   const pendingDeletionRecoveries = [...deletionRecoveries.values()]
     .filter(recovery => recovery.kind === 'active' && recovery.intent.phase !== 'unknown'
@@ -2179,6 +2261,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
       {deletionNotice && <div className={`notice run-deletion-notice ${deletionNotice.kind}`}
         role={deletionNotice.kind === 'error' ? 'alert' : 'status'}>
         <span>{deletionNotice.text}</span>
+        {deletionNotice.retryRunId && <button type="button" className="btn sm"
+          disabled={memoryRetryBusy} onClick={() => retryMemoryPurge(deletionNotice.retryRunId)}>
+          {memoryRetryBusy ? 'Finishing…' : 'Finish memory purge'}</button>}
         <button type="button" className="btn sm" onClick={() => setDeletionNotice(null)}>Dismiss</button>
       </div>}
       {missingDeletionRecoveries.map(recovery => {
@@ -2596,7 +2681,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
 
       {deleteDialog && <RunDeleteDialog target={deleteDialog}
         currentRun={deleteDialogCurrentRun} busy={deleteDialogBusy} error={deleteDialogError}
-        onClose={() => closeDeleteDialog(true)} onConfirm={confirmRunDeletion} />}
+        onClose={() => closeDeleteDialog(true)} onConfirm={confirmRunDeletion}
+        memoryReport={deleteMemoryReport} cascade={deleteCascade}
+        onCascadeToggle={setDeleteCascade} />}
 
       {projModal && <PromptModal
         title={projModal.parent_id ? 'New sub-project' : 'New project'}

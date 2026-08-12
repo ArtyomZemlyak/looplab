@@ -1181,6 +1181,20 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .run-delete-warning { margin: 12px 0 0; padding: 9px 10px;
   border: 1px solid color-mix(in srgb, var(--fail) 50%, var(--line-2)); border-radius: 8px;
   background: color-mix(in srgb, var(--fail) 8%, var(--bg-2)); color: var(--fail); font-weight: 650; }
+/* The opt-in cross-run memory cascade. Deliberately quieter than `.run-delete-warning` above it:
+   the irreversible act is deleting the run, and a second alarm-coloured block would flatten the
+   difference between "this cannot be undone" and "and also take its own memory rows". */
+.run-delete-cascade { margin: 12px 0 0; padding: 10px 11px; border: 1px solid var(--line-2);
+  border-radius: 8px; background: var(--bg-2); }
+.run-delete-cascade-row { display: flex; gap: 9px; align-items: flex-start; line-height: 1.45;
+  cursor: pointer; }
+.run-delete-cascade-row input { margin-top: 3px; flex: 0 0 auto; }
+.run-delete-cascade-row input:disabled { cursor: not-allowed; }
+.run-delete-cascade-row:has(input:disabled) { cursor: not-allowed; color: var(--fg-mut); }
+.run-delete-cascade-kept { margin: 8px 0 0; color: var(--fg-mut); font-size: 12px;
+  line-height: 1.45; }
+.run-delete-cascade-stores { margin: 8px 0 0; padding-left: 20px; color: var(--fg-mut);
+  font-size: 12px; line-height: 1.6; }
 .run-delete-error { margin-top: 10px; line-height: 1.45; }
 .run-delete-error:focus { outline: 2px solid var(--fail); outline-offset: 2px; }
 .run-delete-dialog .modal-actions .btn { min-height: 44px; }

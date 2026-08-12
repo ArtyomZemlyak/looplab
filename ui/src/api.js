@@ -784,12 +784,25 @@ export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operat
       code: 'delete_operation_invalid',
     })
   }
-  return post(runApiPath(runId, '/deletions'), {
+  // `delete_memory` is sent ONLY when true. The server's body validator is a strict key set, and an
+  // always-present `false` would make every existing deletion request a different shape for no gain.
+  const body = {
     operation_id: String(operationId).toLowerCase(),
     expected_generation: expectedGeneration,
     expected_seq: expectedSeq,
-  }, options)
+  }
+  if (options.deleteMemory === true) body.delete_memory = true
+  return post(runApiPath(runId, '/deletions'), body, options)
 }
+
+/** What a cascading delete would remove from cross-run memory. Read-only; deletes nothing. */
+export const getRunMemoryAttribution = (runId, options = {}) => get(
+  runApiPath(runId, '/memory-attribution'), options)
+
+// Finishes a cascade whose store was locked when the run was deleted. Idempotent and keyed by run
+// id alone, so it works after the run — and its card — are gone, which is the only case it serves.
+export const purgeRunMemory = (runId, options = {}) => post(
+  runApiPath(runId, '/memory-purge'), {}, options)
 
 export function getRunDeletion(runId, operationId, options = {}) {
   if (!UUID_V4_RE.test(operationId || '')) {

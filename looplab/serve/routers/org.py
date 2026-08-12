@@ -9,7 +9,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from looplab.serve.deletion_service import (
-    begin_or_resume_run_deletion, get_run_deletion, validate_deletion_request)
+    begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
+    validate_deletion_request)
+from looplab.serve.memory_cascade import attributable_memory, purge_attributable_memory
 from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
@@ -217,14 +219,50 @@ def build_router(srv) -> APIRouter:
                 run_id, body.get("label"), expected_current=expected_label)))
         return {"ok": True}
 
+    def _memory_dir() -> str:
+        return getattr(srv.global_settings(), "memory_dir", "") or ""
+
+    @router.get("/api/runs/{run_id}/memory-attribution")
+    async def run_memory_attribution(run_id: str):
+        """What a cascading delete WOULD remove from cross-run memory, and what it would keep.
+
+        Read-only, and deliberately a separate route from the deletion itself: the operator has to
+        be able to see the answer BEFORE agreeing to it, and a number that only appears in a receipt
+        is a number nobody consented to.
+        """
+        return await anyio.to_thread.run_sync(
+            lambda: attributable_memory(_memory_dir(), run_id))
+
+    @router.post("/api/runs/{run_id}/memory-purge")
+    async def run_memory_purge(run_id: str):
+        """Purge a run's solely-owned cross-run memory, with or without the run still existing.
+
+        This exists because the cascade's only unrecoverable failure would otherwise be a store that
+        was locked at the moment the run was deleted: the run is gone, its card has left the list,
+        and with it every affordance that could finish the job. The purge is keyed by run id and is
+        idempotent, so it needs no run directory and no fence — there is nothing here a second call
+        can do that the first did not.
+        """
+        return await anyio.to_thread.run_sync(
+            lambda: purge_attributable_memory(_memory_dir(), run_id))
+
     @router.post("/api/runs/{run_id}/deletions")
     async def create_run_deletion(run_id: str, request: Request):
         """Delete one exact run generation through an operation-bound durable transaction."""
-        operation_id, generation, expected_seq = validate_deletion_request(
-            await json_object(request))
+        body = await json_object(request)
+        operation_id, generation, expected_seq = validate_deletion_request(body)
+        cascade = deletion_cascade_requested(body)
         result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
             srv, run_id, operation_id=operation_id,
             expected_generation=generation, expected_seq=expected_seq))
+        # ORDER IS THE POINT: the cross-run purge runs only once the run itself is durably gone. A
+        # deletion that fails after its memory was purged would leave the operator with a run whose
+        # evidence had been destroyed on its behalf — the one outcome no retry can undo. The purge is
+        # idempotent ("remove every row attributable solely to R"), so running it on a retry of an
+        # already-succeeded operation costs nothing and repairs a partial first attempt.
+        if cascade and result.get("status") == "succeeded":
+            result = {**result, "memory": await anyio.to_thread.run_sync(
+                lambda: purge_attributable_memory(_memory_dir(), run_id))}
         return JSONResponse(
             status_code=200 if result.get("status") == "succeeded" else 202,
             content=result)
