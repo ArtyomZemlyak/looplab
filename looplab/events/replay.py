@@ -28,7 +28,8 @@ from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, fi
                                   is_usable_metric,
                                   verifier_evidence_digest)
 from looplab.core.jsonutil import valid_digest_ref
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_STATEMENT_MAX_BYTES,
+                     NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
@@ -2569,17 +2570,34 @@ def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     # P1+: engine-written agentic merge — fold alias beliefs into a canonical. Collected
     # here, APPLIED deterministically in `_derive_cards` (no LLM in the fold). A malformed
     # entry is tolerated there; unknown on old logs -> skipped by the outer dispatch.
-    if d.get("canonical") and d.get("aliases"):
-        st.hypotheses_merged.append(d)
+    receipt = _bounded_card_merge_receipt(d)
+    if receipt is not None:
+        receipt["_event_index"] = ctx.event_index
+        st.hypotheses_merged.append(receipt)
 
 def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
     # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
-    if d.get("statement"):
-        st.hypotheses_added.append(d)
+    statement = d.get("statement")
+    clean_statement = statement.strip() if isinstance(statement, str) else ""
+    try:
+        statement_bytes = len(clean_statement.encode("utf-8"))
+    except UnicodeError:
+        statement_bytes = _CARD_REPLAY_STATEMENT_MAX_BYTES + 1
+    if (clean_statement and len(clean_statement) <= _CARD_REPLAY_STATEMENT_MAX
+            and statement_bytes <= _CARD_REPLAY_STATEMENT_MAX_BYTES):
+        receipt = {"statement": clean_statement}
+        for key, limit in (("id", 256), ("source", 64), ("rationale", 400)):
+            value = d.get(key)
+            if isinstance(value, str) and value.strip() and len(value.strip()) <= limit:
+                receipt[key] = value.strip()
+        at_node = d.get("at_node")
+        if type(at_node) is int and 0 <= at_node <= (1 << 31) - 1:
+            receipt["at_node"] = at_node
+        st.hypotheses_added.append(receipt)
         # Re-adding an abandoned statement reopens it (last write wins).
         try:
-            hid = str(d.get("id") or hypothesis_id(str(d["statement"])))
+            hid = str(receipt.get("id") or hypothesis_id(receipt["statement"]))
             if hid in st.hypotheses_abandoned:
                 st.hypotheses_abandoned.remove(hid)
         except Exception:
@@ -2627,6 +2645,7 @@ def _on_card_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if receipt is not None:
         # aliases are identity-bearing, so cap the durable prefix before RunState owns it;
         # unknown merge metadata has no replay semantics and remains only in the append-only log.
+        receipt["_event_index"] = ctx.event_index
         st.cards_merged.append(receipt)
 
 def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2637,6 +2656,7 @@ def _on_card_dropped(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if receipt is not None:
         # keep a typed lifecycle receipt, not the raw control payload. This also prevents
         # arbitrary objects from becoming enormous strings later in `_derive_cards`.
+        receipt["_event_index"] = ctx.event_index
         st.cards_dropped.append(receipt)
 
 
@@ -2776,11 +2796,46 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # legacy/default envelopes. Assign both after copying so payload fields can never spoof ordering.
         rec["_seq"] = e.seq if type(e.seq) is int else -1
         rec["_event_index"] = ctx.event_index if type(ctx.event_index) is int else -1
-        # each delta is bounded, but this journal is not. Every FoldCursor snapshot deep
-        # copies the full history and _derive_cards sorts/replays it although only last-write-per-field
-        # affects the projection. Retain a bounded per-Card/per-field LWW receipt in RunState and leave
-        # full audit history in events.jsonl.
-        st.cards_enriched.append(rec)
+        # Keep one LWW candidate per raw Card id, exact lifecycle fence, and semantic field. Full
+        # history remains in events.jsonl; RunState/FoldCursor retain only projection candidates.
+        identity_keys = {"id", "node_id", "generation", "proposal_ref", "_seq", "_event_index"}
+        semantic_keys = [key for key in rec if key not in identity_keys and not key.startswith("_concept_tags_")]
+        fence = (
+            rec["id"], rec.get("node_id"), rec.get("generation"),
+            (rec.get("proposal_ref") or {}).get("digest"),
+        )
+        order = (rec["_seq"], rec["_event_index"])
+        for key in semantic_keys:
+            candidate = {name: rec[name] for name in identity_keys if name in rec}
+            candidate[key] = rec[key]
+            if key == "concept_tags":
+                for flag in ("_concept_tags_overflow", "_concept_tags_invalid"):
+                    if flag in rec:
+                        candidate[flag] = rec[flag]
+            replace_at = None
+            for index, prior in enumerate(st.cards_enriched):
+                prior_fence = (
+                    prior.get("id"), prior.get("node_id"), prior.get("generation"),
+                    (prior.get("proposal_ref") or {}).get("digest"),
+                )
+                if prior_fence == fence and key in prior:
+                    prior_order = (
+                        prior.get("_seq") if type(prior.get("_seq")) is int else -1,
+                        prior.get("_event_index")
+                        if type(prior.get("_event_index")) is int else -1,
+                    )
+                    if order >= prior_order:
+                        replace_at = index
+                    break
+            if replace_at is None:
+                if not any(
+                    (prior.get("id"), prior.get("node_id"), prior.get("generation"),
+                     (prior.get("proposal_ref") or {}).get("digest")) == fence and key in prior
+                    for prior in st.cards_enriched
+                ):
+                    st.cards_enriched.append(candidate)
+            else:
+                st.cards_enriched[replace_at] = candidate
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).

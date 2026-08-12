@@ -48,6 +48,7 @@ from looplab.core.concepts import (
 )
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
+    CARD_STATEMENT_MAX_CHARS,
     Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
 )
 from looplab.core.redact import redact_secrets
@@ -827,7 +828,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
 
 def _normalize_hypothesis_added(ctx: _ControlIntake) -> dict:
     data = ctx.data
-    data["statement"] = ctx.text("statement")
+    data["statement"] = ctx.text("statement", limit=CARD_STATEMENT_MAX_CHARS)
     if data.get("id") is not None:
         data["id"] = ctx.hypothesis_id()
     if data.get("source") is not None:

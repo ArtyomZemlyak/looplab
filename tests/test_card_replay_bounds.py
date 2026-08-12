@@ -77,8 +77,10 @@ def test_card_replay_journals_are_allowlisted_and_size_bounded():
     assert added["_steering_context_invalid"] is True
     assert "steering_context" not in added
 
-    assert state.cards_merged == [{"canonical": "card-safe", "aliases": aliases[:256]}]
-    assert state.cards_dropped == [{"id": "card-safe"}]
+    assert state.cards_merged == [{
+        "canonical": "card-safe", "aliases": aliases[:256], "_event_index": 2,
+    }]
+    assert state.cards_dropped == [{"id": "card-safe", "_event_index": 3}]
     card = state.cards["card-safe"]
     assert card.status == "dropped" and card.dropped_reason is None and card.dropped_by == "engine"
     assert card.concept_source is not None and card.concept_source.complete is False
@@ -120,7 +122,7 @@ def test_card_receipts_detach_from_mutable_event_payloads():
     assert state.cards_added[0]["idea"]["params"] == {"lr": 0.1}
     assert state.cards_merged[0]["aliases"] == ["alias-1"]
     assert state.cards_dropped[0] == {
-        "id": "card-1", "reason": "duplicate", "dropped_by": "operator",
+        "id": "card-1", "reason": "duplicate", "dropped_by": "operator", "_event_index": 2,
     }
 
 
@@ -150,14 +152,14 @@ def test_card_receipts_fail_closed_and_prefix_replay_matches_full_fold():
         }}], [], []),
         ([{"id": "card-kept", "idea": {
             "_concept_tags_overflow": False, "_concept_tags_invalid": True,
-        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"]}], []),
+        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"], "_event_index": 2}], []),
         ([{"id": "card-kept", "idea": {
             "_concept_tags_overflow": False, "_concept_tags_invalid": True,
-        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"]}], []),
+        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"], "_event_index": 2}], []),
         ([{"id": "card-kept", "idea": {
             "_concept_tags_overflow": False, "_concept_tags_invalid": True,
-        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"]}],
-         [{"id": "alias-ok", "dropped_by": "operator"}]),
+        }}], [{"canonical": "card-kept", "aliases": ["alias-ok"], "_event_index": 2}],
+         [{"id": "alias-ok", "dropped_by": "operator", "_event_index": 4}]),
     ]
 
     cursor = FoldCursor()
@@ -214,5 +216,7 @@ def test_bounded_receipts_preserve_legacy_empty_profile_and_by_fallback():
     card = state.cards["card-1"]
     assert state.cards_added[0]["idea"] == {"eval_profile": ""}
     assert card.eval_profile == "" and card.operator is None
-    assert state.cards_dropped == [{"id": "card-1", "dropped_by": "operator"}]
+    assert state.cards_dropped == [{
+        "id": "card-1", "dropped_by": "operator", "_event_index": 2,
+    }]
     assert card.dropped_by == "operator"

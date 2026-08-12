@@ -1271,43 +1271,44 @@ class CardReservationMixin:
         Accepted batch Cards are committed first, so this fresh id cannot invalidate their preplanned ids.
         """
         with self._id_lock:
-            events = self.store.read_all()
-            state = _fold(events)
-            # Same funnel rule as `_plan_native_card`: this writer builds a real action and a real
-            # receipt (it pops the receipt only at the end, so the closed Card cannot be resurrected as
-            # executable work), so its Idea must reach `_card_added_payload` as a fixed point too or
-            # the round-trip proof there would silently cost every rejected proposal its audit Card.
-            clean = self._fixed_point_idea(idea).model_copy(deep=True, update={"card_id": None})
-            statement = self._card_statement(clean)
-            score_snapshot = self._card_score_snapshot(state, state.best_node_id)
-            bounded_steering = normalize_steering_context(steering_context)
-            if statement is None or score_snapshot is None or bounded_steering is None:
-                return None
-            score_id, score_generation, score_empty = score_snapshot
-            card_id = self._next_available_card_id(events, state)
-            reserved = clean.model_copy(deep=True, update={"card_id": card_id})
-            action = self._card_action(
-                reserved, [], {}, score_id, score_generation,
-                scored_against_empty=score_empty,
-            )
-            try:
-                payload = self._card_added_payload(
-                    card_id, statement, action, reserved, source=source,
-                    at_node=self._node_id_ceiling(events, state),
-                    steering_context=bounded_steering,
+            def _plan(events, tail):
+                state = _fold(events)
+                # Same funnel rule as `_plan_native_card`: this writer builds a real action and a real
+                # receipt, so its Idea must reach `_card_added_payload` as a fixed point too or the
+                # round-trip proof there would silently cost every rejected proposal its audit Card.
+                clean = self._fixed_point_idea(idea).model_copy(deep=True, update={"card_id": None})
+                statement = self._card_statement(clean)
+                score_snapshot = self._card_score_snapshot(state, state.best_node_id)
+                bounded_steering = normalize_steering_context(steering_context)
+                if statement is None or score_snapshot is None or bounded_steering is None:
+                    return None
+                score_id, score_generation, score_empty = score_snapshot
+                card_id = self._next_available_card_id(events, state)
+                reserved = clean.model_copy(deep=True, update={"card_id": card_id})
+                action = self._card_action(
+                    reserved, [], {}, score_id, score_generation,
+                    scored_against_empty=score_empty,
                 )
-            except (TypeError, ValueError, OverflowError):
-                return None
-            # This Card is rejected before it can ever own a Node. If the process dies after the first
-            # append, an otherwise-valid receipt would resurrect it as a selectable proposal with no
-            # recovery marker. Reserve the id with an intrinsically non-executable registration, then
-            # append the normal terminal override. The full two-event prefix remains visible/auditable.
-            payload.pop("ownership_receipt", None)
-            self.store.append(EV_CARD_ADDED, payload)
-            self.store.append(EV_CARD_AUTO_DROPPED, {
-                "id": card_id, "reason": reason, "dropped_by": "engine",
-            })
-            return card_id
+                try:
+                    payload = self._card_added_payload(
+                        card_id, statement, action, reserved, source=source,
+                        at_node=self._node_id_ceiling(events, state),
+                        steering_context=bounded_steering,
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                self.store.append_many([
+                    (EV_CARD_ADDED, payload),
+                    (EV_CARD_AUTO_DROPPED, {
+                        "id": card_id, "reason": reason, "dropped_by": "engine",
+                    }),
+                ], expected_last_seq=tail)
+                return card_id
+
+            def _exhausted():
+                raise RuntimeError("could not append node-less Card after concurrent log movement")
+
+            return retry_tail_cas(self.store, _plan, on_exhaust=_exhausted)
 
     def _mirror_hypothesis_card_merges(self, state: RunState) -> RunState:
         """Main-task durable Card receipts for background-safe Hypothesis consolidations.

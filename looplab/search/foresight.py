@@ -33,7 +33,9 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from looplab.agents.roles import WrapsResearcher, forward_hints
+from looplab.agents.roles import (
+    WrapsResearcher, bind_idea_to_board_card, forward_hints, next_board_prompt_cards,
+)
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
@@ -113,7 +115,9 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
     items = items[:_MAX_ITEMS]
     try:
         msgs = [{"role": "system", "content": _rank_system(prompts, kind)},
-                {"role": "user", "content": _rank_user_msg(report, items, goal, direction)}]
+                {"role": "user", "content": _rank_user_msg(
+                    report, items, goal, direction,
+                    item_cap=4_020 if kind == "hypothesis" else _ITEM_CAP)}]
         out = parse_structured(client, msgs, _Ranking, parser or "tool_call")
     except Exception:  # noqa: BLE001 — advisory predictor: fall back on ANY error (parse/transport)
         return None
@@ -149,10 +153,12 @@ def _sanitize_ranking(out, n: int) -> Optional[tuple[list[int], float, str]]:
     return order, max(0.0, min(1.0, conf)), (getattr(out, "reason", "") or "").strip()[:600]
 
 
-def _rank_user_msg(report: str, items: list[str], goal: str, direction: str) -> str:
+def _rank_user_msg(
+    report: str, items: list[str], goal: str, direction: str, *, item_cap: int = _ITEM_CAP,
+) -> str:
     """The ONE user-message template shared by `rank` and `rank_agentic` (they used to carry
     byte-identical inline twins that could desync silently)."""
-    blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:_ITEM_CAP]}" for i, c in enumerate(items))
+    blocks = "\n\n".join(f"--- CANDIDATE {i} ---\n{c[:item_cap]}" for i, c in enumerate(items))
     rep = (report or "").strip()
     return ((("VERIFIED DATA ANALYSIS REPORT\n" + rep + "\n\n") if rep else "")
             + f"Goal: {goal or '(unspecified)'} | optimize direction: {direction}.\n\n"
@@ -183,7 +189,9 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
             "parameters": _Ranking.model_json_schema()}}
         msgs = [{"role": "system", "content": _rank_system(prompts, kind)
                  + " You MAY consult tools to check actual results before deciding; then call `emit`."},
-                {"role": "user", "content": _rank_user_msg(report, items, goal, direction)}]
+                {"role": "user", "content": _rank_user_msg(
+                    report, items, goal, direction,
+                    item_cap=4_020 if kind == "hypothesis" else _ITEM_CAP)}]
         box: dict = {}
 
         def _finalize(args):
@@ -357,6 +365,7 @@ class ForesightPanelResearcher(WrapsResearcher):
         self.tools = tools
         self.last_foresight: Optional[dict] = None       # telemetry: last idea ranking + confidence
         self.last_hyp_priority: Optional[dict] = None     # telemetry: last board prioritization
+        self._board_attempt_cursor = 0
 
     def _rank(self, report: str, items: list[str], *, goal: str, direction: str, kind: str = "idea"):
         """Dispatch to the agentic ranker when tools are wired, else the one-shot predictor. Runs in its
@@ -423,33 +432,50 @@ class ForesightPanelResearcher(WrapsResearcher):
         # two work-item cards that reuse the exact wording into one, so the model does not rank
         # indistinguishable duplicates; the representative card's id is what `_hyp_order` (read back by
         # roles._state_brief) and the audit receipt carry. Card fields shadow the old Hypothesis.
-        hyps = state.open_research_beliefs()
+        hyps = list(state.open_research_beliefs())
         if len(hyps) < 2:
             setattr(self.base, "_hyp_order", None)
             return
-        # Rank on the CURRENT display `statement` — the SAME text the audit receipt records below
-        # (peer review). The order is by card id (`ids` below), so the text only informs the model's
-        # judgment; ranking the immutable `seed_statement` while recording `statement` made the telemetry
-        # claim the model saw text it never received after a card_edited/merge. (Unlike the proposal feed
-        # in roles._state_brief, which must keep showing the seed so a copied hypothesis links by hash —
-        # foresight does no evidence-linking, only ordering.)
+        # Rank and execute the same immutable semantics. Display edits are presentation-only; a semantic
+        # revision must mint a new Card identity rather than making prioritization and execution disagree.
+        start = self._board_attempt_cursor % len(hyps)
+        self._board_attempt_cursor += 1
+        rotated = hyps[start:] + hyps[:start]
+        window = []
+        considered_chars = 0
+        for card in rotated:
+            size = len(card.seed_statement or "")
+            if size and size <= 4_000 and considered_chars + size <= 21_000:
+                window.append(card)
+                considered_chars += size
+            if len(window) == 20:
+                break
+        if len(window) < 2:
+            setattr(self.base, "_hyp_order", [card.id for card in rotated])
+            return
         r = self._rank(
                  verified_report(data_profile=state.data_profile, memory=_memory_brief(state, parent)),
-                 ["Hypothesis: " + h.statement for h in hyps],
+                 ["Hypothesis: " + h.seed_statement for h in window],
                  goal=state.goal, direction=state.direction, kind="board")
         if r is None:
             setattr(self.base, "_hyp_order", None)
             return
         order, conf, reason = r
-        ids = [hyps[i].id for i in order]
+        predicted = [window[i].id for i in order]
+        tail = [card.id for card in rotated if card.id not in predicted]
+        ids = predicted + tail
         setattr(self.base, "_hyp_order", ids)
         # Telemetry the ENGINE reads after propose() to emit the `hypothesis_ranked` audit event
         # (engine = sole event writer): the predicted board order + confidence + the model's analysis
         # trace (`reason`). `ranked` pairs id->statement so the event/UI needn't re-resolve ids.
         _tid, _sid = getattr(self, "_last_rank_ids", (None, None))
         self.last_hyp_priority = {
-            "order": ids, "confidence": conf, "reason": reason, "n": len(hyps),
-            "ranked": [{"id": hyps[i].id, "statement": hyps[i].statement} for i in order],
+            "order": ids[:256], "confidence": conf, "reason": reason, "n": len(hyps),
+            "ranked": [{"id": window[i].id, "statement": window[i].seed_statement} for i in order],
+            "considered": [card.id for card in window],
+            "considered_chars": considered_chars,
+            "predicted_order": predicted,
+            "next_considered": tail[0] if tail else None,
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the hypothesis_ranked event by the engine
 
     def _verifier_confidence(self, state, idea, report: str) -> Optional[float]:
@@ -495,13 +521,24 @@ class ForesightPanelResearcher(WrapsResearcher):
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
         self._forward_hints()
         if self.client is None:
-            return self.base.propose(state, parent)     # transparent pass-through
+            visible_cards = next_board_prompt_cards(
+                state, getattr(self.base, "_hyp_order", None),
+                attempt=self._board_attempt_cursor)
+            self._board_attempt_cursor += 1
+            return bind_idea_to_board_card(self.base.propose(state, parent), visible_cards)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
+        visible_cards = next_board_prompt_cards(
+            state, getattr(self.base, "_hyp_order", None),
+            attempt=max(0, self._board_attempt_cursor - 1))
         if self.k == 1:
-            return self.base.propose(state, parent)      # board prioritized; single proposal
-        ideas = [self.base.propose(state, parent) for _ in range(self.k)]
+            return bind_idea_to_board_card(
+                self.base.propose(state, parent), visible_cards)
+        ideas = [
+            bind_idea_to_board_card(self.base.propose(state, parent), visible_cards)
+            for _ in range(self.k)
+        ]
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one

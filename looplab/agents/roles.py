@@ -622,8 +622,55 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     return idea
 
 
+def next_board_prompt_cards(
+    state: RunState, hyp_order: Optional[list[str]] = None, *, attempt: int = 0,
+) -> list:
+    """Return a fair, whole-item Card prompt window (five Cards / 20k seed characters)."""
+    cards = list(state.open_research_beliefs())
+    if not cards:
+        return []
+    if hyp_order:
+        position = {card_id: index for index, card_id in enumerate(hyp_order)}
+        cards.sort(key=lambda card: (position.get(card.id, len(position)), card.id))
+        if len(cards) > 5:
+            leaders, tail = cards[:4], cards[4:]
+            offset = attempt % len(tail)
+            cards = leaders + tail[offset:] + tail[:offset]
+    elif len(cards) > 1:
+        offset = attempt % len(cards)
+        cards = cards[offset:] + cards[:offset]
+    selected = []
+    used = 0
+    for card in cards:
+        seed = card.seed_statement or ""
+        if not seed or len(seed) > 4_000 or used + len(seed) > 20_000:
+            continue
+        selected.append(card)
+        used += len(seed)
+        if len(selected) == 5:
+            break
+    return selected
+
+
+def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
+    """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
+    by_id = {card.id: card for card in cards}
+    chosen = by_id.get(idea.card_id) if idea.card_id else None
+    if chosen is None and idea.hypothesis:
+        matches = [card for card in cards if card.seed_statement == idea.hypothesis]
+        chosen = matches[0] if len(matches) == 1 else None
+    if chosen is not None:
+        return idea.model_copy(update={
+            "card_id": chosen.id,
+            "hypothesis": chosen.seed_statement,
+        })
+    if idea.card_id is not None:
+        return idea.model_copy(update={"card_id": None})
+    return idea
+
+
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
-                 hyp_order: Optional[list[str]] = None) -> str:
+                 hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -690,7 +737,8 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # display/analysis edit, not a re-seed of the linkable research direction.
     # Distinct untested BELIEFS, not raw work-item cards (peer review): two cards that reuse the exact
     # hypothesis wording are ONE belief, surfaced once so the model does not re-read a duplicate.
-    open_hyps = state.open_research_beliefs()
+    open_hyps = board_cards if board_cards is not None else next_board_prompt_cards(
+        state, hyp_order=hyp_order)
     if open_hyps:
         # FOREAGENT predict-before-execute (search/foresight.py): when the world model has ranked the
         # board by expected payoff (`hyp_order` = hypothesis ids best-first), surface the batch of
@@ -698,16 +746,16 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         # predicted-value order, so the search tests the most promising one first and the [:5] cap now
         # drops the LOWEST-payoff cards, not arbitrary insertion-order ones. No ranking -> insertion
         # order (unchanged). Replay-safe: only the resulting node's `idea.hypothesis` is recorded.
-        if hyp_order:
-            pos = {hid: i for i, hid in enumerate(hyp_order)}
-            open_hyps.sort(key=lambda h: pos.get(h.id, len(hyp_order)))
         lines.append("Untested hypotheses on the board (registered by the operator or deep research"
                      + (", ordered by predicted payoff — best first" if hyp_order else "")
                      + " — none has evidence yet):")
-        lines.extend(f'- "{" ".join(h.seed_statement.split())[:200]}"' for h in open_hyps[:5])
-        lines.append("If your next experiment tests one of these, copy its statement EXACTLY "
-                     "(verbatim, unchanged wording) into `hypothesis` so the evidence links to "
-                     "the board card.")
+        for card in open_hyps:
+            lines.append(
+                f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+        lines.append("If your next experiment tests one of these, return its CARD_ID in `card_id`. "
+                     "The engine restores the complete immutable seed; do not use display edits as "
+                     "semantic identity.")
     return "\n".join(line for line in lines if line)
 
 
@@ -748,6 +796,10 @@ class LLMResearcher:
         #   (EXPLORE a new theme / EXPLOIT the leader). Empty when stance is "balanced" (today).
         cues = collect_hint_cues(self, RESEARCHER_PROMPT_CUES)
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
+        prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
+        self._board_prompt_attempt = prompt_attempt + 1
+        visible_cards = next_board_prompt_cards(
+            state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
         messages = [
             {"role": "system",
              # Part V/P6: the explicit concept-mode contract, capability suffix (sweep offer — gated on
@@ -767,7 +819,8 @@ class LLMResearcher:
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
-                                                     hyp_order=getattr(self, "_hyp_order", None))
+                                                     hyp_order=getattr(self, "_hyp_order", None),
+                                                     board_cards=visible_cards)
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "
@@ -817,7 +870,7 @@ class LLMResearcher:
             # exact prefix and refuses to turn a non-proposal into a Card/node. Byte-identical text.
             idea = Idea(operator="draft", params={},
                         rationale=researcher_fallback_rationale("parse failed", last))
-        return _clamp_fill(idea, self.bounds)
+        return _clamp_fill(bind_idea_to_board_card(idea, visible_cards), self.bounds)
 
 
 class LLMDeveloper:

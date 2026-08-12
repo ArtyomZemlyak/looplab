@@ -17,12 +17,13 @@ import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
 import {
   CARD_COLUMNS as _CARD_COLUMNS, CARD_FROZEN_STATUSES as _CARD_FROZEN_STATUSES,
   CARD_OPTIONAL_STATUSES as _CARD_OPTIONAL_STATUSES, CARD_RENDER_LIMIT as _CARD_RENDER_LIMIT,
-  cardAttemptSummary, cardAttempts, cardInt as _cardInt, cardLanes as _cardLanes,
+  cardAttemptSummary, cardInt as _cardInt, cardLanes as _cardLanes,
   cardNodes as _cardNodes, cardNumber as _cardNumber, cardOrder as _cardOrder,
   cardRows as _cardRows, cardStatus as _cardStatus, cardStatusLabel as _cardStatusLabel,
   cardText as _cardText, cardLessons as _cardLessons, cardOrigin as _cardOrigin,
   resolveSelectedCard,
 } from './cardBoardModel.js'
+import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
@@ -127,7 +128,8 @@ function _CardProjectionNotice({ projection, cards }) {
 // a presentation; duplicating them is how a control silently stops reflecting its own fold.
 function _CardKanbanCard({
   card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
-  presentation = 'full', selected = false, onOpen = null, attempts = null, state = null,
+  presentation = 'full', selected = false, onOpen = null, attempts = null,
+  attemptCoverage = null, onRecover = null, state = null,
 }) {
   // Item 6's two derivations. `state` is optional on purpose: a lane card is a summary, and the
   // legacy pre-Card fallback board has no run state to pass — both then simply render nothing extra
@@ -277,7 +279,8 @@ function _CardKanbanCard({
     return <article className={'card-kanban-card card-lane-card' + (selected ? ' on' : '')}
       data-card-id={card.id} aria-busy={ownPending ? 'true' : undefined}>
       <button type="button" className="card-lane-open" aria-pressed={selected}
-        aria-label={`Open Card ${card.id}: ${statement}`} onClick={() => onOpen?.(card.id)}>
+        aria-label={`Open Card ${card.id}: ${statement}`}
+        onClick={event => onOpen?.(card.id, event.currentTarget)}>
         <span className="card-kanban-stmt">
           <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
             <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />
@@ -296,7 +299,7 @@ function _CardKanbanCard({
               ? 'no experiment has run for this work item yet'
               : `${roll.total} experiment${roll.total === 1 ? '' : 's'} tested this work item`
                 + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')}>
-            {roll.total} exp</span>}
+            {(attemptCoverage?.label ?? roll.total)} exp</span>}
           {card.selection_ready === false && <span className="chip xs warn"
             title="not eligible for Card-driven selection">blocked</span>}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
@@ -322,6 +325,10 @@ function _CardKanbanCard({
     </div>
     <div className="card-kanban-meta">
       <span className="chip xs" title="durable Card identity">{card.id}</span>
+      {_cardText(card.belief_id) && <span className="chip xs" title="research belief identity">
+        belief {card.belief_id}</span>}
+      {_cardText(card.retry_of) && <span className="chip xs" title="retry of work item">
+        retry of {card.retry_of}</span>}
       {verdict && verdict !== 'open' && <span
         className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
         title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
@@ -502,7 +509,18 @@ function _CardKanbanCard({
     {isRecord(controlState?.notice) && <div
       className={'card-control-feedback ' + (controlState.notice.tone || '')}
       role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
-      {controlState.notice.text}</div>}
+      {controlState.notice.text}
+      {ownPending && onRecover && <span className="card-control-recovery">
+        {ownPending.commandId && <button type="button" className="btn xs ghost"
+          disabled={ownPending.phase === 'checking' || ownPending.phase === 'retrying'}
+          onClick={() => onRecover(card.id, 'check')}>Check</button>}
+        {ownPending.retryable && <button type="button" className="btn xs ghost"
+          disabled={ownPending.phase === 'checking' || ownPending.phase === 'retrying'}
+          onClick={() => onRecover(card.id, 'retry')}>Retry exact command</button>}
+        <button type="button" className="btn xs ghost"
+          onClick={() => onRecover(card.id, 'dismiss')}>Dismiss locally</button>
+      </span>}
+      </div>}
     {controlError && <div className="card-control-feedback error" role="alert">{controlError}</div>}
   </article>
 }
@@ -515,11 +533,11 @@ function _CardKanbanCard({
 // experiment (its operator, its params, its footprint, its delta) and offered its evidence node ids
 // as a row of bare `#7` buttons. That reads as "this card IS node 7". It is not: node 7 is one
 // attempt at the question the card asks, and a retry, a debug child or a repeat is another.
-function _CardAttempts({ attempts, selectedNodeId, onOpenNode }) {
+function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null }) {
   const roll = cardAttemptSummary(attempts)
   return <section className="card-attempts" aria-label="Experiments for this work item">
     <h3 className="card-attempts-h">
-      Experiments <span className="muted">{roll.total}</span>
+      Experiments <span className="muted">{coverage?.label ?? roll.total}</span>
       {roll.missing > 0 && <span className="chip xs warn"
         title="these attempts are not present in the snapshot being displayed (a historical fold, or trimmed live state)">
         {roll.missing} unavailable</span>}
@@ -576,7 +594,7 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode }) {
 // pane says which one you are looking at instead of blurring them into one column.
 function _CardDetailPane({
   card, receipt, attempts, selectedNodeId, onOpenNode, onSelect, onControl, controlState,
-  controlsLocked, renderInspector, state,
+  controlsLocked, renderInspector, state, onRecover,
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
@@ -597,10 +615,11 @@ function _CardDetailPane({
     </div>
   }
   return <div className="card-detail">
-    <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode} />
+    <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
+      coverage={cardAttemptCoverage(attempts, receipt)} />
     <_CardKanbanCard card={card} receipt={receipt} presentation="full" state={state}
       controlState={controlState} controlsLocked={controlsLocked} onControl={onControl}
-      onSelect={onSelect} onClose={null} />
+      onRecover={onRecover} onSelect={onSelect} onClose={null} />
   </div>
 }
 
@@ -614,6 +633,7 @@ function _CardKanban({
   // mutation gate instead of failing.
   layout = 'panel', selectedCardId = null, onSelectCard = null,
   selectedNodeId = null, onSelectNode = null, renderInspector = null, pane = null,
+  readOnly = false,
 }) {
   const [optim, setOptim] = useState({})
   const [addDraft, setAddDraft] = useState('')
@@ -627,6 +647,8 @@ function _CardKanban({
   // success ack before the SSE fold arrives), so a chained extend edit can baseline against the prior
   // in-flight submission instead of a stale fold — see the editBaseline capture in cardControl.
   const sentEditRef = useRef({})
+  const detailCloseRef = useRef(null)
+  const detailReturnFocusRef = useRef(null)
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
   cardsByIdRef.current = cardsById
@@ -671,10 +693,11 @@ function _CardKanban({
   // it DID land, that effect clears it normally). Because it can hang indefinitely, it must not count
   // toward the board-wide lock, or one uncertain command would freeze the controls on EVERY Card until
   // reload. The real concurrency guard is `inFlight` (released in the finally), and the stuck Card still
-  // shows its own 'waiting for the live fold' notice via its own pending. Only genuinely-progressing
-  // pendings gate the rest of the board.
+  // shows its own 'waiting for the live fold' notice via its own pending. Only an active transport
+  // operation gates the rest of the board; an offline/delayed fold must not freeze unrelated Cards.
   const globalPending = Object.values(optim).some(
-    entry => isRecord(entry?.pending) && entry.pending.phase !== 'confirmation-unknown')
+    entry => isRecord(entry?.pending)
+      && ['submitting', 'checking', 'retrying'].includes(entry.pending.phase))
   const cardControl = async (card, kind, data, patch) => {
     const labels = {
       edit: { saving: 'Saving Card display text…', success: 'Card display text updated', failure: 'Could not edit Card' },
@@ -728,17 +751,15 @@ function _CardKanban({
         const updates = { ...(entry.updates || {}) }
         const rawCard = cardsByIdRef.current.get(card.id)
         const editEventSeq = recordEditSeq ?? entry.editEventSeq
-        // Clear the optimistic override once the command DEFINITIVELY settles (success/noop/error) — not
-        // only on an exact fold reflection: the server may clip/redact the value, so waiting for a
-        // byte-equal fold would leave the card stuck showing operator text with its controls disabled.
-        // Only a 'pending' (accepted, engine will apply later) settle keeps the override until the fold.
-        const settled = ['error', 'success', 'noop'].includes(feedback.kind)
-        if (settled || cardControlReflected(
-          rawCard, kind, patch, entry.editBaseline, editEventSeq)) {
+        const reflected = cardControlReflected(
+          rawCard, kind, patch, entry.editBaseline, editEventSeq)
+        if (reflected) {
           delete updates[kind]
         }
-        const pending = feedback.kind === 'pending' && updates[kind]
-          ? { kind, phase: 'waiting-for-fold' } : null
+        if (feedback.kind === 'error') delete updates[kind]
+        const commandId = typeof record?.id === 'string' ? record.id : null
+        const pending = updates[kind] && feedback.kind !== 'error'
+          ? { kind, phase: 'waiting-for-fold', commandId } : null
         const notice = feedback.kind === 'error'
           ? { tone: 'error', text: feedback.message }
           : { tone: feedback.kind === 'pending' ? 'pending' : 'success', text: feedback.message }
@@ -765,13 +786,64 @@ function _CardKanban({
         return { ...current, [card.id]: {
           ...entry, updates,
           ...(commandEditSeq == null ? {} : { editEventSeq: commandEditSeq }),
-          pending: uncertain ? { kind, phase: 'confirmation-unknown' } : null,
+          pending: uncertain ? {
+            kind, phase: 'confirmation-unknown',
+            commandId: typeof error?.commandRecord?.id === 'string'
+              ? error.commandRecord.id : (typeof error?.commandId === 'string' ? error.commandId : null),
+            retryable: ['failed', 'timed_out'].includes(error?.commandRecord?.status),
+          } : null,
           notice: { tone: uncertain ? 'pending' : 'error', text: message },
         } }
       })
       return { kind: uncertain ? 'pending' : 'error', message }
     } finally {
       inFlight.current.delete(card.id)
+    }
+  }
+  const recoverCardControl = async (cardId, action) => {
+    const entry = optim[cardId]
+    const pending = entry?.pending
+    if (!pending) return
+    if (action === 'dismiss') {
+      setOptim(current => { const next = { ...current }; delete next[cardId]; return next })
+      return
+    }
+    if (!pending.commandId) return
+    setOptim(current => ({ ...current, [cardId]: {
+      ...current[cardId], pending: { ...pending, phase: action === 'retry' ? 'retrying' : 'checking' },
+    } }))
+    try {
+      const record = action === 'retry'
+        ? await retryRunCommand(runId, pending.commandId, { requestTimeoutMs: PANEL_REQUEST_TIMEOUT_MS })
+        : await getRunCommand(runId, pending.commandId, { requestTimeoutMs: PANEL_REQUEST_TIMEOUT_MS })
+      const feedback = commandFeedback(record, {
+        success: 'Command succeeded — waiting for the live fold',
+        noop: 'Command is already current — waiting for the live fold',
+        executing: 'Command is still executing', failure: 'Command failed',
+      })
+      setOptim(current => {
+        const latest = current[cardId]
+        if (!latest || latest.pending?.commandId !== pending.commandId) return current
+        const failed = ['failed', 'timed_out', 'rejected'].includes(record?.status)
+        const retryable = ['failed', 'timed_out'].includes(record?.status)
+        return { ...current, [cardId]: {
+          ...latest,
+          pending: {
+            ...latest.pending, phase: retryable ? 'retryable' : failed ? 'failed' : 'waiting-for-fold',
+            retryable,
+          },
+          notice: { tone: failed ? 'error' : 'pending', text: feedback.message },
+        } }
+      })
+    } catch (error) {
+      setOptim(current => {
+        const latest = current[cardId]
+        if (!latest || latest.pending?.commandId !== pending.commandId) return current
+        return { ...current, [cardId]: {
+          ...latest, pending: { ...latest.pending, phase: 'confirmation-unknown' },
+          notice: { tone: 'pending', text: `Exact command could not be verified: ${error?.message || error}` },
+        } }
+      })
     }
   }
   const projection = isRecord(state.cards_projection) ? state.cards_projection : null
@@ -798,15 +870,33 @@ function _CardKanban({
   // Compute the Card -> Node join ONCE per render for the whole board rather than per lane card:
   // it walks `state.nodes` for the mint stamp, so doing it inside each card would be O(cards x nodes)
   // on a board the wire already lets reach 256 cards.
-  const attemptsByCard = view
-    ? new Map(visibleCards.map(card => [card.id, cardAttempts(state, card)])) : null
+  const attemptsByCard = view ? cardAttemptIndex(state, visibleCards) : null
   const selectedCard = view ? resolveSelectedCard(visibleCards, selectedCardId) : null
+  const closeDetails = () => {
+    onSelectCard?.(null)
+    window.requestAnimationFrame(() => detailReturnFocusRef.current?.focus?.())
+  }
+  const openDetails = (cardId, trigger) => {
+    detailReturnFocusRef.current = trigger || detailReturnFocusRef.current
+    onSelectCard?.(cardId)
+  }
+  const detailOpen = view && (!pane?.compact || !!selectedCard)
+  useEffect(() => {
+    if (!pane?.compact || !selectedCard) return undefined
+    detailCloseRef.current?.focus?.()
+    const onKeyDown = event => {
+      if (event.key === 'Escape') { event.preventDefault(); closeDetails() }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [pane?.compact, selectedCard?.id])
   const addBar = canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
-    <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
+    <input className="text" style={{ flex: 1 }} aria-label="New hypothesis" disabled={readOnly}
       placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
       value={addDraft} onChange={e => setAddDraft(e.target.value)}
       onKeyDown={e => { if (e.key === 'Enter') addCard() }} />
-    <button className="btn sm primary" onClick={addCard} disabled={!addDraft.trim()}>+ Add</button>
+    <button className="btn sm primary" onClick={addCard}
+      disabled={readOnly || !addDraft.trim()}>+ Add</button>
   </div>
   const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
@@ -819,11 +909,14 @@ function _CardKanban({
         </h3>
         {rows.map(card => <_CardKanbanCard key={card.id} card={card}
           receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
-          controlState={optim[card.id]} controlsLocked={globalPending && !optim[card.id]?.pending}
+          controlState={optim[card.id]}
+          controlsLocked={readOnly || (globalPending && !optim[card.id]?.pending)}
           onSelect={onSelect} onClose={onClose} onControl={control}
           presentation={view ? 'lane' : 'full'} state={view ? null : state}
-          selected={view && selectedCardId === card.id} onOpen={onSelectCard}
-          attempts={attemptsByCard?.get(card.id) || null} />)}
+          selected={view && selectedCardId === card.id} onOpen={openDetails}
+          attempts={attemptsByCard?.get(card.id) || null}
+          attemptCoverage={cardAttemptCoverage(
+            attemptsByCard?.get(card.id) || [], receipts[card.id])} />)}
         {rows.length === 0 && <div className="muted card-empty">—</div>}
       </section>
     })}
@@ -844,16 +937,21 @@ function _CardKanban({
         {addBar}
         {board}
       </div>
-      {pane?.splitter}
-      <aside className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
+      {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
+        tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
+      {detailOpen && !pane?.compact && pane?.splitter}
+      {detailOpen && <aside className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
         style={pane?.width ? { width: pane.width } : undefined}
+        tabIndex={pane?.compact ? -1 : undefined}
+        data-route-focus-guard={pane?.compact ? 'true' : undefined}
         role={pane?.compact ? 'dialog' : 'complementary'} aria-label="Work item details">
         <div className="pane-grip">
           <span className="muted">{selectedCard ? selectedCard.id : 'work item'}</span>
           <span className="spacer" style={{ flex: 1 }} />
-          {selectedCard && <button className="btn sm ghost" title="close details"
+          {selectedCard && <button ref={detailCloseRef} className="btn sm ghost" title="close details"
+            data-dialog-initial-focus={pane?.compact ? true : undefined}
             aria-label={`Close details for ${selectedCard.id}`}
-            onClick={() => onSelectCard?.(null)}>⟩</button>}
+            onClick={closeDetails}>⟩</button>}
         </div>
         <_CardDetailPane card={selectedCard}
           receipt={selectedCard && isRecord(receipts[selectedCard.id]) ? receipts[selectedCard.id] : null}
@@ -861,8 +959,9 @@ function _CardKanban({
           selectedNodeId={selectedNodeId} onOpenNode={onSelectNode} onSelect={onSelect}
           onControl={control} renderInspector={renderInspector} state={state}
           controlState={selectedCard ? optim[selectedCard.id] : null}
-          controlsLocked={globalPending && !(selectedCard && optim[selectedCard.id]?.pending)} />
-      </aside>
+          controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
+          onRecover={recoverCardControl} />
+      </aside>}
     </div>
   }
   // `size="board"`, not `wide`: `wide` is a READING width (~1100px) and the kanban's intrinsic
@@ -1633,6 +1732,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
 export function CardWorkspace({
   state, runId, runGeneration, onSelect, onToast,
   selectedCardId, onSelectCard, selectedNodeId, onSelectNode, renderInspector, pane,
+  readOnly = false,
 }) {
   const [, setRecoveryEpoch] = useState(0)
   const cards = _cardRows(state)
@@ -1647,7 +1747,7 @@ export function CardWorkspace({
       layout="view" onSelect={onSelect} onClose={null} onToast={onToast}
       selectedCardId={selectedCardId} onSelectCard={onSelectCard}
       selectedNodeId={selectedNodeId} onSelectNode={onSelectNode}
-      renderInspector={renderInspector} pane={pane} />
+      renderInspector={renderInspector} pane={pane} readOnly={readOnly} />
   }
   return <div className="main card-workspace-legacy">
     <PanelPresentationContext.Provider value="page">

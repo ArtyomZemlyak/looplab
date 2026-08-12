@@ -39,14 +39,14 @@ export const CARD_COLUMNS = [
 ]
 export const CARD_FROZEN_STATUSES = new Set(
   ['proposed', 'building', 'coded', 'running', 'evaluated', 'gated', 'dropped'])
-export const CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit'])
+export const CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit', 'coded'])
 export const CARD_RENDER_LIMIT = 256 // mirrors PUBLIC_CARD_MAX_COUNT at the wire boundary
 
 export const cardText = value => typeof value === 'string' && value.trim() ? value.trim() : null
 export const cardNumber = value => typeof value === 'number' && Number.isFinite(value) ? value : null
 export const cardInt = value => Number.isSafeInteger(value) && value >= 0 ? value : null
 export const cardNodes = value => Array.isArray(value)
-  ? value.filter(item => Number.isSafeInteger(item) && item >= 0).slice(0, 32) : []
+  ? value.filter(item => Number.isSafeInteger(item) && item >= 0).slice(0, 4096) : []
 
 export function cardStatus(card) {
   return cardText(card?.status) || 'unknown'
