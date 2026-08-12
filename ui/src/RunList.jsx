@@ -30,8 +30,11 @@ import {
   loadRunDeletionIntent, saveRunDeletionIntent,
 } from './runDeletionRecovery.js'
 import {
-  cascadeKeptNotice, cascadeLabel, cascadeOutcome, cascadeStores,
+  bulkCascadeLabel, cascadeKeptNotice, cascadeLabel, cascadeOutcome, cascadeStores,
 } from './memoryCascadeModel.js'
+import {
+  bulkDeletionPlan, bulkDeletionSummary, bulkOutcomeNotice, bulkProgressLabel,
+} from './bulkDeleteModel.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
@@ -805,18 +808,22 @@ const runDeletionProgress = recovery => {
     || 'The server preserved this exact deletion request. Checking its current phase automatically.'
 }
 
-function RunMemoryCascade({ report, checked, disabled, onToggle }) {
+function RunMemoryCascade({ report, checked, disabled, onToggle, bulk = 0 }) {
   // The survey is a preview, so a slow or failed read must not block the deletion — the checkbox
   // simply stays off and says it does not know yet. Consent to a number nobody could show is not
   // consent, so an unknown survey never arrives pre-checked.
   const unavailable = report && report.available === false
   const nothing = !!report && report.available !== false && !(report.deletable | 0)
   const kept = cascadeKeptNotice(report)
+  // A batch states the rule rather than a count — see `bulkCascadeLabel` — so it needs no survey and
+  // is never disabled for the absence of one.
+  const blocked = bulk ? disabled : (disabled || !report || unavailable || nothing)
   return <div className="run-delete-cascade">
     <label className="run-delete-cascade-row">
-      <input type="checkbox" checked={checked} disabled={disabled || !report || unavailable
-        || nothing} onChange={event => onToggle(event.target.checked)} />
-      <span>{report ? cascadeLabel(report) : 'Checking this run’s cross-run memory…'}</span>
+      <input type="checkbox" checked={checked} disabled={blocked}
+        onChange={event => onToggle(event.target.checked)} />
+      <span>{bulk ? bulkCascadeLabel(bulk)
+        : report ? cascadeLabel(report) : 'Checking this run’s cross-run memory…'}</span>
     </label>
     {kept && <p className="run-delete-cascade-kept">{kept}</p>}
     {checked && <ul className="run-delete-cascade-stores">
@@ -872,6 +879,56 @@ function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm,
             onClick={onClose}>Cancel</button>
           <button type="button" className="btn sm danger" disabled={blocked}
             onClick={onConfirm}>{busy ? 'Submitting exact request…' : 'Delete permanently'}</button>
+        </div>
+      </div>
+    </section>
+  </div>
+}
+
+function RunBulkDeleteDialog({ dialog, state, onClose, onConfirm, onCascadeToggle }) {
+  const dialogRef = useRef(null)
+  const running = state?.running === true
+  useDialogFocus(dialogRef, running ? null : onClose, true,
+    { priority: DIALOG_PRIORITY.DESTRUCTIVE })
+  const { ready, blocked } = dialog.plan
+  const outcome = !running && state ? bulkOutcomeNotice(state) : null
+  return <div className="overlay run-delete-overlay"
+    onMouseDown={event => { if (!running && event.target === event.currentTarget) onClose() }}>
+    <section ref={dialogRef} className="modal run-delete-dialog run-bulk-delete-dialog"
+      role="alertdialog" aria-modal="true" aria-labelledby="run-bulk-delete-title"
+      aria-describedby="run-bulk-delete-warning" aria-busy={running} tabIndex={-1}>
+      <div className="modal-h"><b id="run-bulk-delete-title">
+        {bulkDeletionSummary(dialog.plan)}</b></div>
+      <div className="modal-b">
+        <p className="run-delete-copy">
+          Each run is deleted through its own exact transaction, one after another. This removes
+          their events, experiments, traces, chat, reports and review access.
+        </p>
+        {/* The LIST, not a count. Twenty runs is exactly the size at which a number stops being
+            something the operator can check against what they meant to select. */}
+        {ready.length > 0 && <ul className="run-bulk-delete-list">
+          {ready.map(target => <li key={target.runId}
+            className={state?.done?.includes(target.runId) ? 'done' : ''}>
+            <code>{target.runId}</code>{target.label ? <span> — {target.label}</span> : null}
+          </li>)}
+        </ul>}
+        {blocked.length > 0 && <div className="run-bulk-delete-blocked">
+          <b>{blocked.length} cannot be deleted right now:</b>
+          <ul>{blocked.map(item => <li key={item.runId}>
+            <code>{item.runId}</code> — {item.reason}</li>)}</ul>
+        </div>}
+        <p id="run-bulk-delete-warning" className="run-delete-warning">This cannot be undone.</p>
+        <RunMemoryCascade report={null} checked={dialog.cascade} disabled={running}
+          onToggle={onCascadeToggle} bulk={ready.length} />
+        {running && <div className="flag" role="status">{bulkProgressLabel(state)}</div>}
+        {outcome && <div className={`flag run-delete-error`} role="alert">{outcome.text}</div>}
+        <div className="modal-actions">
+          <button type="button" className="btn sm" data-dialog-initial-focus disabled={running}
+            onClick={onClose}>{state && !running ? 'Close' : 'Cancel'}</button>
+          <button type="button" className="btn sm danger"
+            disabled={running || !ready.length || (state && !running && !state.stoppedAt)}
+            onClick={onConfirm}>
+            {running ? 'Deleting…' : `Delete ${ready.length} permanently`}</button>
         </div>
       </div>
     </section>
@@ -1117,6 +1174,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const [deleteDialogError, setDeleteDialogError] = useState('')
   const [deleteCascade, setDeleteCascade] = useState(false)
   const [memoryRetryBusy, setMemoryRetryBusy] = useState(false)
+  const [bulkDeleteDialog, setBulkDeleteDialog] = useState(null)
+  const [bulkDeleteState, setBulkDeleteState] = useState(null)
+  // The batch reads the run list between deletions, so it needs the LATEST rows, not the ones its
+  // closure captured when the operator pressed the button.
+  const runsRef = useRef(null)
   const [deleteMemoryReport, setDeleteMemoryReport] = useState(null)
   const deleteDialogFocusRef = useRef(null)
   const deleteConfirmLockRef = useRef(false)
@@ -1254,6 +1316,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
   }
   const closeRunRename = () => { setRunRename(null); restoreRunModalFocus() }
   const closeSuperTasks = () => { setStModal(false); restoreRunModalFocus() }
+  useEffect(() => { runsRef.current = runs }, [runs])
   useEffect(() => {
     deletionMountedRef.current = true
     return () => {
@@ -1961,22 +2024,27 @@ export default function RunList({ onOpen, onGlobalNavigate,
     deleteDialogFocusRef.current = null
     focusDeletionRecovery(intent.runId)
   }
+  // Returns a VERDICT — 'deleted' | 'pending' | 'rejected' | 'unknown' — for the batch runner, which
+  // has to decide whether to submit the next run. Every existing caller ignores it, and must: for a
+  // single deletion the notice and the recovery record already say everything.
   const finishRunDeletionReceipt = async (intent, receipt, {
-    fromDialog = false, shouldRestoreFocus = () => false,
+    fromDialog = false, shouldRestoreFocus = () => false, quiet = false,
   } = {}) => {
     if (receipt.status === 'pending') {
       persistDeletionPhase(intent, 'pending', receipt.phase)
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
-      return
+      return { outcome: 'pending', reason:
+        'the server accepted it and is still working — it has a saved recovery' }
     }
     const listRead = await loadRuns()
     if (!listRead?.ok) {
       persistDeletionPhase(intent, 'pending', receipt.phase)
-      setDeletionNotice({ kind: 'error', text: receipt.status === 'succeeded'
+      const unread = receipt.status === 'succeeded'
         ? 'Deletion is confirmed, but the current run list could not be refreshed. The exact recovery remains locked.'
-        : 'The deletion operation is resolved, but the current run list could not be refreshed.' })
+        : 'The deletion operation is resolved, but the current run list could not be refreshed.'
+      if (!quiet) setDeletionNotice({ kind: 'error', text: unread })
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
-      return
+      return { outcome: 'unknown', reason: 'the refreshed run list could not be read' }
     }
     const exactTargetStillVisible = (listRead.value || []).some(run =>
       run.run_id === intent.runId
@@ -1984,10 +2052,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
       && run.seq === intent.expectedSeq)
     if (receipt.status === 'succeeded' && exactTargetStillVisible) {
       persistDeletionPhase(intent, 'pending', receipt.phase)
-      setDeletionNotice({ kind: 'error', text:
+      if (!quiet) setDeletionNotice({ kind: 'error', text:
         'Deletion is confirmed, but the deleted generation is still present in the refreshed list. Recovery remains locked.' })
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
-      return
+      return { outcome: 'unknown', reason:
+        'the deleted generation is still present in the refreshed list' }
     }
     if (receipt.status === 'succeeded') {
       setCompareIds(current => {
@@ -2001,7 +2070,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
     // — and a partly-failed purge has to say so here, because the run's card is already gone and
     // this notice is the last surface that can carry the retry.
     const cascade = cascadeOutcome(receipt.memory, intent.runId)
-    setDeletionNotice(cleared
+    if (!quiet) setDeletionNotice(cleared
       ? (cascade || { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` })
       : { kind: 'error', text:
           'The deletion operation is resolved, but this tab could not clear its recovery record safely.' })
@@ -2015,11 +2084,17 @@ export default function RunList({ onOpen, onGlobalNavigate,
     } else if (restoreFocus) {
       focusDeletionRecovery(intent.runId, fromDialog ? undefined : shouldRestoreFocus)
     }
+    return receipt.status === 'succeeded' && cleared
+      ? { outcome: 'deleted', reason: '', memory: receipt.memory }
+      : { outcome: 'unknown', reason: 'its recovery record could not be cleared safely' }
   }
+  // Also returns the verdict, for the same reason `finishRunDeletionReceipt` does. `undefined` means
+  // the request was never made (a duplicate operation id, or an abort) — distinct from 'unknown',
+  // which means it WAS made and the outcome is not established.
   const runDeletionRequest = async (intent, {
-    initialRequest = false, fromDialog = false,
+    initialRequest = false, fromDialog = false, quiet = false,
   } = {}) => {
-    if (!intent || deletionRequestRef.current.has(intent.operationId)) return
+    if (!intent || deletionRequestRef.current.has(intent.operationId)) return undefined
     const focusContext = fromDialog ? 'dialog'
       : deletionFocusOwned(intent.runId) ? 'recovery' : ''
     const shouldRestoreFocus = () => focusContext === 'dialog'
@@ -2037,19 +2112,21 @@ export default function RunList({ onOpen, onGlobalNavigate,
     else if (focusContext === 'recovery') {
       focusDeletionRecovery(intent.runId, shouldRestoreFocus)
     }
+    let verdict
     try {
       const rawReceipt = await timed.promise
-      if (deletionRequestRef.current.get(intent.operationId) !== request) return
+      if (deletionRequestRef.current.get(intent.operationId) !== request) return undefined
       const receipt = exactRunDeletionReceipt(rawReceipt, intent)
       if (!receipt) {
         const protocol = new Error('Invalid deletion receipt')
         protocol.code = 'delete_protocol_error'
         throw protocol
       }
-      await finishRunDeletionReceipt(intent, receipt, { fromDialog, shouldRestoreFocus })
+      verdict = await finishRunDeletionReceipt(
+        intent, receipt, { fromDialog, shouldRestoreFocus, quiet })
     } catch (error) {
       if (deletionRequestRef.current.get(intent.operationId) !== request
-          || error?.name === 'AbortError') return
+          || error?.name === 'AbortError') return undefined
       const status = Number(error?.status)
       // Every continuation is the same idempotent POST. A definitive 4xx means that exact operation
       // was rejected; access failures remain unknown after a prior timeout because auth can stop the
@@ -2068,7 +2145,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
           setDeleteDialogError(rejectionMessage)
           setDeleteDialogBusy(false)
         } else {
-          setDeletionNotice({ kind: 'error', text: rejectionMessage })
+          if (!quiet) setDeletionNotice({ kind: 'error', text: rejectionMessage })
           const listRead = await loadRuns()
           const followFocus = restoreFocus && shouldRestoreFocus()
           if (followFocus && ![404, 410].includes(status) && listRead?.ok) {
@@ -2080,11 +2157,14 @@ export default function RunList({ onOpen, onGlobalNavigate,
             })
           }
         }
+        verdict = { outcome: 'rejected', reason: rejectionMessage }
       } else {
         persistDeletionPhase(intent, 'unknown')
-        setDeletionNotice({ kind: 'error', text:
+        if (!quiet) setDeletionNotice({ kind: 'error', text:
           'Deletion outcome is not confirmed. Retry only the exact saved deletion before changing this run.' })
         if (fromDialog) leaveDeleteDialogForRecovery(intent)
+        verdict = { outcome: 'unknown', reason:
+          'the outcome is not confirmed — only the exact saved deletion may be retried' }
       }
     } finally {
       if (deletionRequestRef.current.get(intent.operationId) === request) {
@@ -2132,6 +2212,82 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const retryRunDeletion = recovery => {
     if (recovery.kind !== 'active') return
     runDeletionRequest(recovery.intent)
+  }
+  // THE BATCH. A queue of the existing one-run transaction, drained strictly in order.
+  //
+  // Sequential is not a simplification: each deletion's receipt is validated against a REFRESHED run
+  // list, and two deletions in flight would race that refresh — one's confirmation read observing
+  // the other's half-applied state. And the fence for run N+1 must be read AFTER run N landed, which
+  // is why the plan is recomputed from `runsRef` on every iteration rather than captured up front.
+  const runBulkDeletion = async () => {
+    const dialog = bulkDeleteDialog
+    if (!dialog || bulkDeleteState?.running) return
+    const cascade = dialog.cascade === true
+    const state = { running: true, total: dialog.plan.ready.length, done: [], current: '',
+      blocked: dialog.plan.blocked, stoppedAt: null }
+    setBulkDeleteState({ ...state })
+    for (const target of dialog.plan.ready) {
+      // Re-resolve against the CURRENT list: the row we planned from is one deletion older.
+      const fresh = (runsRef.current || []).find(run => run.run_id === target.runId)
+      if (!fresh) {
+        state.stoppedAt = { runId: target.runId, reason: 'it left the run list before its turn' }
+        break
+      }
+      const generation = deletionGenerationOf(fresh)
+      if (!RUN_GENERATION_RE.test(generation)
+          || !Number.isSafeInteger(fresh.seq) || fresh.seq < -1) {
+        state.stoppedAt = { runId: target.runId, reason: 'its exact deletion identity is unavailable' }
+        break
+      }
+      state.current = fresh.label || target.runId
+      setBulkDeleteState({ ...state })
+      const intent = createRunDeletionIntent(
+        target.runId, generation, fresh.seq, createIdempotencyKey().toLowerCase(),
+        undefined, undefined, undefined, cascade)
+      if (!intent || !saveRunDeletionIntent(intent)) {
+        // Same refusal as the single dialog: without a durable recovery record this tab cannot
+        // identify the operation it is about to start, so it does not start it.
+        state.stoppedAt = { runId: target.runId, reason:
+          'this tab could not preserve an exact recovery record' }
+        break
+      }
+      updateDeletionRecovery({ runId: intent.runId, kind: 'active', intent })
+      const verdict = await runDeletionRequest(intent, { initialRequest: true, quiet: true })
+      if (verdict?.outcome === 'deleted') {
+        state.done.push(target.runId)
+        setBulkDeleteState({ ...state })
+        continue
+      }
+      state.stoppedAt = { runId: target.runId,
+        reason: verdict?.reason || 'the deletion did not complete' }
+      break
+    }
+    // STOP AT THE FIRST FAILURE, deliberately. Whatever refused one deletion — an active engine, a
+    // stale fence, an unavailable lock — is far more likely to be a property of the moment than of
+    // that one run, and grinding through nineteen more refusals would bury the reason under
+    // nineteen identical notices.
+    state.running = false
+    state.current = ''
+    setBulkDeleteState({ ...state })
+    setDeletionNotice(bulkOutcomeNotice(state))
+    setCompareIds(current => {
+      const next = new Set(current)
+      for (const runId of state.done) next.delete(runId)
+      return next
+    })
+    if (!state.stoppedAt) closeBulkDelete()
+  }
+  const closeBulkDelete = () => {
+    if (bulkDeleteState?.running) return
+    setBulkDeleteDialog(null)
+    requestAnimationFrame(() => runsMainRef.current?.focus?.({ preventScroll: true }))
+  }
+  const openBulkDelete = () => {
+    setBulkDeleteState(null)
+    setBulkDeleteDialog({
+      plan: bulkDeletionPlan([...compareIds], runs || [], deletionRecoveries),
+      cascade: false,
+    })
   }
   const retryMemoryPurge = async runId => {
     if (!runId || memoryRetryBusy) return
@@ -2431,6 +2587,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
               onClick={event => openComparison(event.currentTarget)}>
               Compare{comparisonScope(compareRuns).omitted
                 ? ` first ${comparisonScope(compareRuns).shown.length}` : ' runs'}</button>
+            <button className="btn sm danger" disabled={listBusy || !!bulkDeleteDialog}
+              onClick={openBulkDelete}>Delete {compareRuns.length}…</button>
             <button className="btn sm ghost"
               onClick={event => clearComparison(event.currentTarget)}>Clear</button>
           </div>}
@@ -2684,6 +2842,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
         onClose={() => closeDeleteDialog(true)} onConfirm={confirmRunDeletion}
         memoryReport={deleteMemoryReport} cascade={deleteCascade}
         onCascadeToggle={setDeleteCascade} />}
+      {bulkDeleteDialog && <RunBulkDeleteDialog dialog={bulkDeleteDialog} state={bulkDeleteState}
+        onClose={closeBulkDelete} onConfirm={runBulkDeletion}
+        onCascadeToggle={value => setBulkDeleteDialog(
+          current => current ? { ...current, cascade: value === true } : current)} />}
 
       {projModal && <PromptModal
         title={projModal.parent_id ? 'New sub-project' : 'New project'}

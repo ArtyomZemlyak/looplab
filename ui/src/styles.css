@@ -1195,6 +1195,20 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   line-height: 1.45; }
 .run-delete-cascade-stores { margin: 8px 0 0; padding-left: 20px; color: var(--fg-mut);
   font-size: 12px; line-height: 1.6; }
+/* The batch lists every run it is about to delete. Twenty is exactly the size at which a COUNT
+   stops being checkable against what the operator meant to select, so the list is the control and
+   it scrolls rather than pushing the confirm button off the screen. */
+.run-bulk-delete-dialog { max-width: 640px; }
+.run-bulk-delete-list { margin: 12px 0 0; padding: 8px 10px 8px 26px; max-height: 34vh;
+  overflow-y: auto; border: 1px solid var(--line-2); border-radius: 8px; background: var(--bg-2);
+  line-height: 1.7; }
+.run-bulk-delete-list code { word-break: break-all; }
+/* A run the batch has already deleted stays in the list, struck through: watching rows leave a
+   shrinking list makes it impossible to tell progress from a mis-selection. */
+.run-bulk-delete-list li.done { color: var(--fg-mut); text-decoration: line-through; }
+.run-bulk-delete-blocked { margin: 10px 0 0; color: var(--fg-mut); font-size: 12px;
+  line-height: 1.55; }
+.run-bulk-delete-blocked ul { margin: 4px 0 0; padding-left: 22px; }
 .run-delete-error { margin-top: 10px; line-height: 1.45; }
 .run-delete-error:focus { outline: 2px solid var(--fail); outline-offset: 2px; }
 .run-delete-dialog .modal-actions .btn { min-height: 44px; }

@@ -57,6 +57,17 @@ export function cascadeKeptNotice(report) {
 }
 
 /**
+ * The batch has no survey behind it, on purpose: previewing N runs means N scans of every store
+ * before the operator has agreed to anything, and the numbers would be stale by the second
+ * deletion anyway. So the batch checkbox states the RULE instead of a count — which is the part
+ * that governs what happens, and the part a count was only ever standing in for.
+ */
+export function bulkCascadeLabel(runCount = 0) {
+  return `Also delete each run’s own cross-run memory — rows that merge evidence or concepts with `
+    + `runs that still exist are kept${runCount ? ` (${runCount} run${runCount === 1 ? '' : 's'})` : ''}`
+}
+
+/**
  * The result after a cascade ran, from the deletion receipt's `memory` block.
  *
  * Returns `{kind, text, retryRunId}`. `retryRunId` is the whole reason this is a record and not a

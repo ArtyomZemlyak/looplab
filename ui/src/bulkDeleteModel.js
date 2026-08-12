@@ -1,0 +1,100 @@
+// Deleting many runs at once — which is a QUEUE of the existing one-run transaction, not a new one.
+//
+// Run deletion is an operation-bound durable transaction: an idempotency key, a generation+seq fence
+// read from the exact row the operator inspected, a receipt, and a recovery record that survives the
+// tab. None of that can be skipped for a batch, and a bulk endpoint that took a list of ids would
+// have to reinvent every part of it. So the batch is a SEQUENCE of single deletions, and this module
+// owns the two things a sequence needs and a single deletion did not:
+//
+//   * a PLAN — which of the selected runs can actually be deleted, and why the rest cannot, computed
+//     before anything is submitted so the operator agrees to a real list rather than a count;
+//   * a RUNNING TALLY that stays true when the batch stops early, because "8 of 20 deleted, stopped
+//     at run-9" is the only honest thing to say and "deletion failed" is not.
+//
+// Sequential, never parallel: each deletion's receipt is validated against a REFRESHED run list, and
+// concurrent deletions would race that refresh — one deletion's confirmation read would observe
+// another's half-applied state. The cost is wall-clock; the alternative is a confirmation that means
+// nothing.
+import { RUN_GENERATION_RE } from './panelPrimitives.js'
+
+/** Runs are deleted oldest-selection-first; a batch that stops early has then done the ones the
+ *  operator has been looking at longest. Nothing depends on it, but an arbitrary order would make
+ *  "stopped at run-9" impossible to predict. */
+export function bulkDeletionPlan(selectedIds = [], runs = [], recoveries = new Map()) {
+  const byId = new Map((Array.isArray(runs) ? runs : []).map(run => [run?.run_id, run]))
+  const ready = []
+  const blocked = []
+  for (const id of Array.isArray(selectedIds) ? selectedIds : []) {
+    const runId = String(id || '')
+    if (!runId) continue
+    const run = byId.get(runId)
+    if (!run) {
+      blocked.push({ runId, reason: 'not in the current run list' })
+      continue
+    }
+    if (recoveries?.has?.(runId)) {
+      // An unresolved deletion owns this run already. Submitting a SECOND operation against it is
+      // exactly what the durable record exists to prevent.
+      blocked.push({ runId, reason: 'an unfinished deletion already owns it' })
+      continue
+    }
+    const generation = String(run.deletion_generation || run.generation || '')
+    const seq = run.seq
+    if (!RUN_GENERATION_RE.test(generation)
+        || !Number.isSafeInteger(seq) || seq < -1) {
+      blocked.push({ runId, reason: 'its exact deletion identity is unavailable' })
+      continue
+    }
+    ready.push({ runId, label: String(run.label || ''), expectedGeneration: generation,
+      expectedSeq: seq })
+  }
+  return { ready, blocked }
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/** The line on the confirm button and in the dialog header. */
+export function bulkDeletionSummary(plan) {
+  const ready = plan?.ready?.length | 0
+  const blocked = plan?.blocked?.length | 0
+  if (!ready && !blocked) return ''
+  if (!ready) return `None of the ${plural(blocked, 'selected run')} can be deleted right now.`
+  return `Delete ${plural(ready, 'run')}`
+    + (blocked ? `; ${blocked} cannot be deleted right now.` : '.')
+}
+
+/** Live progress while the queue drains. Names the run in flight — a bare count during a slow
+ *  deletion is indistinguishable from a stall. */
+export function bulkProgressLabel(state) {
+  if (!state || !state.running) return ''
+  const at = (state.done?.length | 0) + 1
+  const total = state.total | 0
+  return `Deleting ${at} of ${total}${state.current ? ` — ${state.current}` : ''}…`
+}
+
+/**
+ * The result. Three outcomes, kept apart on purpose:
+ *   everything went   -> a plain confirmation
+ *   nothing went      -> the reason, with the run it stopped on
+ *   some went         -> BOTH, because a batch that half-succeeded and reports only its failure
+ *                        leaves the operator believing runs still exist that do not.
+ */
+export function bulkOutcomeNotice(state) {
+  if (!state) return null
+  const done = state.done?.length | 0
+  const blocked = state.blocked?.length | 0
+  const stopped = state.stoppedAt
+  const tail = blocked ? ` ${plural(blocked, 'selected run')} could not be deleted.` : ''
+  if (!stopped) {
+    if (!done) return blocked ? { kind: 'error', text: tail.trim() } : null
+    return { kind: 'status', text: `${plural(done, 'run')} permanently deleted.${tail}` }
+  }
+  const why = String(stopped.reason || 'the deletion did not complete')
+  if (!done) {
+    return { kind: 'error',
+      text: `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}${tail}` }
+  }
+  return { kind: 'error', text:
+    `${plural(done, 'run')} deleted, then the batch stopped at “${stopped.runId}”: ${why}`
+    + ` The remaining ${plural(state.total - done - 1, 'run')} were not touched.${tail}` }
+}
