@@ -114,14 +114,17 @@ index and per-node/-span detail views seek to exact offsets. Each index row also
 its exact full source bytes; every full-row seek rehashes those bytes and reports a mismatch as
 unavailable rather than silently returning altered/incomplete evidence. A persisted source epoch is
 bound to POSIX `st_ctime_ns` or Windows `FILE_BASIC_INFO.ChangeTime` read from the already-open source
-descriptor. It rotates on replacement/rewrite but remains stable across a receipt-proven POSIX append
+descriptor. It rotates on replacement/rewrite but remains stable across a receipt-proven append
 chain, so a node/window revision can be computed from selected-row membership and digests without
 re-reading the heavy rows. An append for another node therefore leaves this revision stable on that
 fast path, while a selected append, in-place rewrite, replacement, attempt or window change invalidates
-it. Windows append receipts currently contain creation time rather than ChangeTime, so Windows growth
-conservatively rebuilds instead of incrementally trusting them; if ChangeTime itself is unavailable,
-every observation rebuilds with a volatile revision and neither warm nor persisted validators are
-reused. Built incrementally where the mutation proof is complete (mirrors `EventStore`'s incremental
+it. Schema-2 append receipts carry that same descriptor-bound mutation token on BOTH sides of the
+append, so the chain proves "the prefix was not rewritten" on Windows too, where `st_ctime_ns` is a
+creation stamp and could never witness it. Windows requires that proof: a schema-1 receipt, or one
+whose writer could not read the token, is refused and the observation rebuilds — the conservative
+answer that platform previously gave to ALL growth. Both receipt versions stay readable, with an exact
+key set per version. If ChangeTime itself is unavailable, every observation rebuilds with a volatile
+revision and neither warm nor persisted validators are reused. Built incrementally where the mutation proof is complete (mirrors `EventStore`'s incremental
 read), persisted atomically, and STRICTLY an
 accelerator: any identity/size/corruption mismatch rebuilds from `spans.jsonl`, producing the same safe
 projection as the un-indexed path — never a second source of truth, worst case as slow as before. (Index/payload
