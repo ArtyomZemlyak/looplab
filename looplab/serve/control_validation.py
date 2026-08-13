@@ -1527,7 +1527,17 @@ assert set(_CONTROL_DECISIONS) == set(CONTROL_EVENTS), (
 # or an ENSURE_RUNNING command quietly never spawning one).
 _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_RUN_ABORT: (EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP, "finished_and_stopped"),
-    EV_PAUSE: (EnginePolicy.NO_SPAWN, "paused_and_stopped"),
+    # `paused`, NOT `paused_and_stopped`. The postcondition must observe THE EFFECT THE OPERATOR
+    # ASKED FOR. A pause is a folded, reversible flag; the engine PROCESS then finishes its in-flight
+    # evaluation before releasing engine.lock, which on a GPU stage takes hours. Requiring the
+    # process exit meant that on exactly the runs where pausing matters the command could only ever
+    # time out — measured on `rubertlite-dr-unified-v2`: the pause landed in under a second and the
+    # command reported "not observed in time" twenty minutes later, after which the run could not be
+    # controlled at all. The process half is still reported, as `engine_stopped` on the succeeded
+    # record; it is an observation, never a gate. `paused_and_stopped` remains a live postcondition
+    # value in `RunCommandService._postcondition` because durable records written before this change
+    # carry it.
+    EV_PAUSE: (EnginePolicy.NO_SPAWN, "paused"),
     EV_RESTART: (EnginePolicy.RESTART_AFTER_EXIT, "restart_served"),
     EV_RESUME: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_RUN_REOPENED: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),

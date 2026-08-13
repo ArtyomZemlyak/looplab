@@ -1272,6 +1272,15 @@ class RunCommandService:
             # durable; a pre-append validation/spawn failure is safe to correct under a new payload.
             if status in {"accepted", "executing"} or record.get("event_seq") is not None \
                     or self._find_intent(rd, str(record.get("id") or ""), record):
+                # …and a durable intent whose EFFECT is already gone blocks nothing. This is the last
+                # rung of the 2026-08-11 wedge, and the one `_intent_spent` did not reach: a fresh
+                # `pause` (its payload is empty, so every pause has the same semantic digest) matched
+                # the spent one and was refused with `retry_existing_command`, pointing the operator
+                # at a command whose retry could only time out — 409 and timeout in a closed loop,
+                # with `kill` on the engine PID as the only remaining move. A spent record is history;
+                # it must not name itself as the way forward.
+                if status in {"failed", "timed_out"} and self._intent_spent(rd, record):
+                    continue
                 candidates.append((float(record.get("created_at") or 0), path.name, path, record))
         if candidates:
             _created, _name, path, record = min(candidates, key=lambda item: (item[0], item[1]))
@@ -1447,6 +1456,54 @@ class RunCommandService:
             return True
         state = (observation or self._observe(rd)).state()
         return not bool(state.paused)
+
+    @staticmethod
+    def _intent_marker(record: Optional[dict], command_id: str = "") -> str:
+        """The `_command_id` string THIS record's intent is stamped with.
+
+        Normally the command id itself. It becomes a distinct token only after `_safe_retry` re-issues
+        a SUPERSEDED intent (see `_intent_superseded`): the log then holds the spent event under the
+        old marker and the live one under the new, and every reader of this record — `_find_intent`,
+        the `engine_ack` postcondition, the append in `_admit` — must agree on which. They cannot
+        share the marker: `command_observation._apply_delta` maps a second event carrying an
+        already-seen `_command_id` to `_DUPLICATE_INTENT`, so re-using it would make BOTH intents
+        unfindable and turn the retry into `command_intent_missing`.
+        """
+        marker = (record or {}).get("intent_marker")
+        if isinstance(marker, str) and marker:
+            return marker
+        return command_id or str((record or {}).get("id") or "")
+
+    def _intent_superseded(self, rd: Path, record: dict,
+                           observation: Optional[CommandObservation] = None) -> bool:
+        """May this command's intent be RE-ISSUED, rather than re-driven, on retry?
+
+        `_intent_spent` says the effect is gone. That alone does not license a second append: for an
+        ADDITIVE intent (a hint, an inject, a budget extend) re-appending would apply the operator's
+        request twice. It is licensed only where re-issuing is exactly what a fresh command with the
+        same payload would do — a reversible lifecycle FLAG that has been reverted.
+
+        Today that is `pause` and only `pause`, and it is what closes the third fault of the
+        2026-08-11 incident: `/retry` re-drove an `event_seq` pointing at a pause a later `resume` had
+        already consumed, so it re-observed a superseded event, appended nothing, and returned
+        `accepted` -> `executing` -> `timed_out` forever. A run whose pause has been lifted has
+        nothing left to observe; what the operator asked for is a NEW pause.
+
+        A FINISHED run is deliberately excluded even though `_intent_spent` covers it: nothing can
+        drive a control there, so a fresh intent would only add an un-drivable event, and re-issuing
+        it would also make a later `run_reopened` apply it. That case's way forward is a new command
+        (`_unresolved_equivalent` no longer holds one behind a spent record) and `retry` says so.
+        """
+        if str(record.get("event_type") or "") != EV_PAUSE:
+            return False
+        if record.get("attached") or record.get("event_seq") is None:
+            return False
+        observation = observation or self._observe(rd)
+        try:
+            state = observation.state()
+        except Exception:  # noqa: BLE001 — an unreadable log must not authorize a second append
+            return False
+        return not bool(state.paused) and not bool(state.finished)
 
     def _extend_landed_pause_observation(self, record: dict, rd: Path, observation,
                                          alive: bool, now: float) -> bool:
@@ -1740,6 +1797,14 @@ class RunCommandService:
         # Release only this command's lease so an immediate next command/finalize-resume is not held
         # behind a stale Popen claim; external/reset and other-command leases remain untouched.
         self._clear_spawn_claim(rd, str(record.get("id") or ""))
+        if record.get("postcondition") == "paused":
+            # The half that is no longer a GATE is still worth REPORTING: a pause that has folded
+            # while the engine is finishing a multi-hour evaluation is a different situation from one
+            # whose driver has already released engine.lock, and the operator acts differently on the
+            # two (only the second can be reset/deleted). Observation, not a precondition — a false
+            # here never keeps the command out of `succeeded`.
+            record = dict(record)
+            record["engine_stopped"] = self._engine_state(rd) is False
         return self._terminal(path, record, "succeeded")
 
     def _reconcile_observation(
@@ -1792,7 +1857,19 @@ class RunCommandService:
         return record
 
     def _safe_retry(self, rd: Path, path: Path, record: dict) -> dict:
-        """Re-arm the SAME command id/key; never mint or append a second logical intent."""
+        """Re-arm the SAME command id/key.
+
+        It never mints a second logical command, and for every intent whose effect may still arrive
+        it re-drives the SAME durable event, so an additive budget/fork/inject request cannot be
+        double-applied.
+
+        The ONE exception is an intent the run has already SUPERSEDED (`_intent_superseded`): a pause
+        that a later resume consumed. Re-driving that is the third fault of the 2026-08-11 incident —
+        there is nothing left in the log for the postcondition to observe, so the retry could only
+        report `timed_out` again, forever, which is what the operator measured. Such a retry issues a
+        FRESH intent under a fresh marker instead; the spent event stays in the log as history and its
+        seq is kept on the record so the substitution is auditable.
+        """
         observation = self._observe(rd)
         record = self._reconcile_observation(rd, path, record, observation)
         if record.get("status") not in {"failed", "timed_out"}:
@@ -1805,6 +1882,20 @@ class RunCommandService:
         updated["absolute_deadline_at"] = time.time() + self.max_observation_timeout
         updated["observe_after_seq"] = observation.latest_seq
         updated["retry_count"] = int(updated.get("retry_count", 0)) + 1
+        if self._intent_superseded(rd, record, observation):
+            spent = record.get("event_seq")
+            superseded = list(updated.get("superseded_event_seqs") or [])
+            if spent is not None:
+                superseded.append(spent)
+            updated["superseded_event_seqs"] = superseded[-8:]
+            # A DISTINCT marker, not the command id: two events sharing one `_command_id` resolve to
+            # `_DUPLICATE_INTENT` in the observation index and neither would ever be found again.
+            updated["intent_marker"] = f"{str(record.get('id') or '')}.r{updated['retry_count']}"
+            # Dropping these is what puts `_admit` back on its append path: with no `event_seq` it
+            # re-runs the engine decision and writes a new intent, instead of concluding
+            # "already_appended" about an event the run consumed.
+            updated.pop("event_seq", None)
+            updated.pop("baseline_seq", None)
         # A prior spawn no longer proves this retry has a driver.  Recovery must observe fresh domain
         # progress or claim a new spawn under the per-run sequencer.
         updated["spawned_by_command"] = False
@@ -2237,6 +2328,23 @@ class RunCommandService:
                     "message": "Only retryable failed/timed_out commands can be retried.",
                     "remediation": f"GET /commands/{command_id} and observe its current status.",
                 })
+            if self._intent_spent(rd, record) and not self._intent_superseded(rd, record):
+                # Settled history that cannot be re-issued either (an additive intent on a finished
+                # run). Re-driving it appends nothing and observes nothing, so it would return
+                # `timed_out` again on every attempt — the shape the operator hit for a day. Refuse
+                # with the move that DOES work, and it works because `_unresolved_equivalent` no
+                # longer holds an identical fresh command behind a spent record.
+                raise HTTPException(409, {
+                    "code": "command_intent_spent",
+                    "existing_command_id": command_id,
+                    "current_status": record.get("status"),
+                    "message": (
+                        "This command's intent is settled history — its effect is no longer in "
+                        "force, so re-driving it cannot change anything."),
+                    "remediation": (
+                        "Submit a NEW command with a new idempotency key; this record no longer "
+                        "blocks admission."),
+                })
             # retry preserves the same concurrency contract as first admission. A
             # collaboration append may overtake a live driver command, but a driver retry may not.
             if record.get("event_type") not in COLLABORATION_EVENTS:
@@ -2479,7 +2587,7 @@ class RunCommandService:
         folded-intent postcondition or make a stale command_ack look causal.
         """
         observation = observation or self._observe(rd)
-        event = observation.marked_intent(command_id)
+        event = observation.marked_intent(self._intent_marker(record, command_id))
         if event is None:
             return None
         if record is None:
@@ -2583,7 +2691,19 @@ class RunCommandService:
                 return False
             observation.state()  # prove the complete log, including the marked intent, still folds
             return True
+        if kind == "paused":
+            # THE EFFECT THE OPERATOR ASKED FOR, observed on its own. The pause is a folded flag, so
+            # this is satisfied the moment the intent is durable — which is the point: the engine
+            # PROCESS exit is a second, much later effect (it finishes the in-flight evaluation
+            # first) and gating on it is what made `pause` unobservable on every long run. Whether
+            # the driver has released engine.lock yet is reported as `engine_stopped` on the
+            # succeeded record by `_succeeded`.
+            return bool(observation.state().paused)
         if kind == "paused_and_stopped":
+            # LEGACY durable records only — every pause admitted before 2026-08-13 persisted this
+            # postcondition, including the one that wedged `rubertlite-dr-unified-v2`, and a record
+            # on disk is never rewritten. Keep observing it exactly as it was admitted; `retry` is
+            # what gives such a record a way forward (see `_intent_superseded`).
             state = observation.state()
             return bool(state.paused and self._engine_state(rd) is False)
         if kind == "restart_served":
@@ -2627,9 +2747,11 @@ class RunCommandService:
             return (record.get("event_type") == EV_RUN_ABORT
                     and observation.has_non_error_finish_after(baseline))
         if kind == "engine_ack":
-            command_id = str(record.get("id") or "")
+            # The ack is keyed by the marker the engine READ off the intent, not by the record id —
+            # they differ once a superseded intent has been re-issued under a fresh marker.
+            marker = self._intent_marker(record, str(record.get("id") or ""))
             event_seq = record.get("event_seq")
-            return observation.has_ack(command_id, event_seq)
+            return observation.has_ack(marker, event_seq)
         return False
 
     def _try_restart_claim(self, rd: Path, path: Path, record: dict) -> bool:
@@ -2856,7 +2978,7 @@ class RunCommandService:
             if decision == "append" and intent is None:
                 record["baseline_seq"] = decision_baseline
                 event_data = dict(record.get("data") or {})
-                event_data["_command_id"] = command_id
+                event_data["_command_id"] = self._intent_marker(record, command_id)
                 if event_type in COLLABORATION_EVENTS:
                     intent, decision_baseline, append_error = self._append_collaboration_intent(
                         rd, record, event_data)
