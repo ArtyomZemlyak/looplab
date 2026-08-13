@@ -1461,6 +1461,27 @@ class Settings(BaseSettings):
     # model that never emits `done` fails cleanly with the code it wrote so far, instead of looping.
     developer_session_max_turns: int = 500
     developer_session_time_budget_s: float = 1200.0  # 20 min wall-clock per developer session
+    # F2 · The Developer's PROBE (`tools/dev_probe.py`): may it RUN a short Python program against
+    # the real environment while it authors? ON by default, because the failure it closes is the
+    # Developer inventing a workaround for a question it could have answered — the observed shape
+    # was "Since I have no shell/install ability, the cleanest repair is a small loguru shim module",
+    # i.e. a fake library written instead of one line checking whether the real one imports.
+    #
+    # It is safe to have ON because of what the probe is, not because of what it is allowed to run:
+    # the process cannot write a file anywhere (audit hook + RLIMIT_FSIZE 0), cannot start another
+    # program, cannot see a GPU, and cannot read the editable source tree (it carries the same read
+    # fence an eval does, always at `deny` — turning `read_fence` off must not open a second door).
+    # Its whole world is a temporary directory the engine deletes when the call returns, which is
+    # also why it needs no domain event: there is no side effect for invariant #3 to gate.
+    # Set False to remove the tool from the Developer's toolset entirely.
+    developer_probe: bool = True
+    # Per-probe wall clock. Deliberately short: a probe is a QUESTION ("does this import", "does this
+    # CSV parse"), and anything that needs longer is a declared eval stage — the surface that has a
+    # metric contract, a live log and a repair loop attached. Hard-capped at 300 s in the tool.
+    # There is deliberately NO probe COUNT budget: the developer session already carries a finite
+    # wall-clock ceiling (`developer_session_time_budget_s`), which a probe spends like any other
+    # turn, and a second fixed counter is the shape doc 36 names as the category error.
+    developer_probe_timeout_s: float = 60.0
     # Phase-handoff summaries. Each LLM phase in a node build (Researcher·propose → Developer·stages →
     # plan → implement) ends with ONE extra LLM call that distills its transcript — the repo structure
     # it mapped, files/data confirmed, decisions made — into a brief injected into the NEXT phase (even

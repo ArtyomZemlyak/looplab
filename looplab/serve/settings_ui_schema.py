@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 170
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 172
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -40,6 +40,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # fence is: it is the operator-visible knob that decides whether a long chat turn gets cut off,
 # and until it existed the chat silently ignored the neighbouring row's documented "0 = no cap"
 # and applied a five-minute ceiling nothing could name.
+# 170 rows since the DEVELOPER PROBE joined Agent loop & models, beside the Developer session
+# budgets — `developer_probe` and `developer_probe_timeout_s` (F2). They are rows rather than an
+# uncurated omission for the same reason `read_fence` is: the probe is an EXECUTION surface inside
+# the engine process, so an operator must be able to see that it exists and close it, and its
+# timeout is the bound between "a question" and "a job that belongs in an eval stage".
 # (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
@@ -50,13 +55,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-# (170 since two curated rows landed together on 2026-08-13: `assistant_time_budget_s`, the chat's
-# own wall clock, split out of the engine-wide budget it used to borrow; and `eval_deadline_grace_s`,
-# the one-shot judge-granted extension a stage may get at its deadline. The second is a row rather
-# than an uncurated omission for the reason the reconciliation message states: it is an LLM-JUDGED
-# switch, it is OFF by default, and turning it on lets a judge reading the candidate's own live log
-# spend GPU time. An operator paying for that has to be able to see the number they set.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "d8181c3b71073812a1ec3b976edf3d48dbadea78290d4a907a3a77dd1e5dd000"
+# (172 since four curated rows landed together on 2026-08-13: `assistant_time_budget_s` gave the
+# chat its own wall clock; `eval_deadline_grace_s` is the one-shot judge-granted extension a stage
+# may get at its deadline; `developer_probe` and `developer_probe_timeout_s` are the Developer's
+# read-only interpreter probe. All four are rows rather than uncurated omissions for the same
+# reason: each is a switch an operator pays for - GPU time for the grace, provider time for the
+# probe - and a knob that spends money has to be visible to whoever is spending it.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5d67ce771436d9b0fd5b693ec166f77f44e4a70dd71fefc0c7e865f45875d277"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

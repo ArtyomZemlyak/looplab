@@ -18,8 +18,6 @@ a manifest look thorough, and a declared stage that re-does settled work costs t
 """
 from __future__ import annotations
 
-import re
-
 from looplab.adapters.repo_developer import LLMRepoDeveloper
 
 
@@ -30,8 +28,17 @@ def _guidance() -> str:
 
     blobs = [v for v in vars(mod).values()
              if isinstance(v, str) and "TRAIN-THEN-SCORE PIPELINE" in v]
-    assert len(blobs) == 1, f"expected exactly one pipeline guidance blob, found {len(blobs)}"
-    return blobs[0]
+    assert blobs, "the pipeline guidance is gone from the developer module"
+    # The system body is now COMPOSED (head + an execution clause chosen by `Settings.developer_probe`
+    # + tail), so the guidance legitimately appears in three module globals: the tail that owns it and
+    # the two assembled bodies that contain the tail. A flat "exactly one" count would fail on that
+    # while a SECOND, independently-worded copy — the drift this guard was actually written against —
+    # would still slip past a count of two. So the rule is stated properly instead: one blob owns the
+    # text, and every other carrier must literally CONTAIN it.
+    owner = min(blobs, key=len)
+    derived = [b for b in blobs if owner not in b]
+    assert not derived, f"{len(derived)} independent copies of the pipeline guidance"
+    return owner
 
 
 def test_it_asks_for_the_boundaries_a_repair_can_restart_from():
@@ -82,19 +89,29 @@ def test_the_two_rules_are_adjacent_so_neither_can_be_read_alone():
 
 
 def test_the_guidance_still_reaches_the_developer_that_writes_the_code():
-    """Content pins above are worth nothing if the blob stops being sent. `_implement_system` is what
-    the model is actually handed."""
-    import inspect
+    """Content pins above are worth nothing if the blob stops being sent.
 
-    import looplab.adapters.repo_developer as mod
+    DRIVEN, not matched against the assembly's source text (CLAUDE.md tier 1). The body is composed
+    now, and which execution clause it carries depends on `Settings.developer_probe` — so a regex
+    over `_run` could only ever see one of the two prompts a Developer can actually be handed, and
+    would go green while the other lost the guidance. Build BOTH and look in each; that is the
+    property, and it survives the next refactor of how the body is assembled.
+    """
+    from _source_scan import called_names
+    from looplab.core.prompts import render
 
-    # The blob is a PromptStore default, so the assembly renders it under a key. Both halves matter:
-    # the key must still resolve to THIS text (an override replaces it, which is intended), and the
-    # call must still be in the assembly at all.
-    name = next(k for k, v in vars(mod).items()
-                if isinstance(v, str) and "TRAIN-THEN-SCORE PIPELINE" in v)
-    source = inspect.getsource(mod)
-    assert re.search(rf'render\(self\.prompts, "[a-z_]+", {name}\)', source), (
-        "the pipeline guidance is no longer rendered into the developer's system prompt")
     text = _guidance()
+    for probe in (True, False):
+        dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+        dev._probe, dev.prompts = probe, None
+        assert text in dev._system_body(render), (
+            f"the pipeline guidance is missing from the system prompt with developer_probe={probe}")
+    # The PromptStore key is still an override point in both configurations — replacing the body is
+    # the operator's business, dropping it silently is not.
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    dev._probe, dev.prompts = True, {"repo_developer_system_body": "OPERATOR BODY"}
+    assert dev._system_body(render) == "OPERATOR BODY"
+    # ...and the assembly must still ASK for the body. AST, not a substring: a commented-out call
+    # would satisfy a regex while the model received no guidance at all.
+    assert "self._system_body" in called_names(LLMRepoDeveloper._run)
     assert len(text) > 500 and "declare_stages" in text

@@ -97,6 +97,7 @@ stack(660,300,DY,[
  {id:"d_plan",h:66,t:"② Plan phase",tag:"C4",c:C.d,sub:["read-only · propose_plan → atomic steps","2–8 steps · developer_plan_decompose"]},
  {id:"d_impl",h:80,t:"③ Implement phase",tag:"D",c:C.d,sub:["write the code the stages run · per-step","repair = 1 session (no stages/plan)","write gate: edit_surface − protect − the cmd's OWN entrypoint file when the repo ships it (cmd.protect_entrypoint)"]},
  {id:"i_env",h:82,t:"Env inspector",tag:"D",c:C.d,sub:["ground API in the REAL installed env","pkg_info · py_api · read/grep_installed · gpu_info","read-only inspector · ALL phases (write tools only in implement) · paginates"]},
+ {id:"i_probe",h:126,t:"Probe (run_probe)",tag:"D",c:C.d,sub:["developer_probe (ON) · run a short PYTHON program against the REAL env, ALL phases — \u201Cdoes this import HERE\u201D, \u201Cdoes this CSV parse\u201D, \u201Cdoes my staged code get this API right\u201D. It exists because a Developer that cannot check works AROUND the question: the observed shape was \u201CSince I have no shell/install ability, the cleanest repair is a small loguru shim module\u201D \u2014 a FAKE library","NOT a shell, on purpose: the read fence is a CPython audit hook, so `cat`/`cp`/`bash` would be an execution surface it cannot reach. The probe surface IS the interpreter \u2014 a boundary, not an allow-list of commands","cannot read the editable SOURCE tree (same read_fence.fence_inputs/render the eval fence uses, ALWAYS deny \u2014 read_fence=off must not open a second door) \u00B7 cannot write a file anywhere (audit hook = existence; RLIMIT_FSIZE 0 = content) \u00B7 cannot start another program (fork inherits the hook, exec replaces it) \u00B7 cannot see a GPU (CUDA_VISIBLE_DEVICES=\u201C\u201D)","no side effect \u2192 nothing for invariant #3 to gate: recorded as a `tool` SPAN in spans.jsonl, never a folded event. Runs in a disposable replica of the staged files, deleted on return; bound by developer_probe_timeout_s (60s, max 300) inside the session budget \u2014 no probe COUNT limit"]},
  {id:"i_val",h:58,t:"Auto-validate",tag:"gate",c:C.d,sub:["compile after every edit → error flies back"]},
  {id:"i_bon",h:78,t:"Best-of-N",tag:"off",c:C.d,sub:["N impls · score∈[−1,3.5] (compile+1/valid+2/metric+.5)","tie: foresight → listwise LLM pick"]},
 ]);
@@ -230,6 +231,7 @@ edge("implement","b","d_stages","t",{c:C.d,thin:1});
 edge("d_stages","b","d_plan","t",{c:C.d,thin:1});   // ordered phases: stages → plan → implement
 edge("d_plan","b","d_impl","t",{c:C.d,thin:1});
 edge("d_impl","b","i_env","t",{c:C.d,thin:1});
+edge("i_env","b","i_probe","t",{c:C.d,thin:1});   // static answers → "does it actually work HERE"
 edge("evaluate","b","e_box","t",{c:C.ev,thin:1});
 edge("score","b","t_rh","t",{c:C.trust,thin:1});
 edge("refine","b","r_gt","t",{c:C.r,thin:1});

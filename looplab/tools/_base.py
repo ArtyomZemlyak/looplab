@@ -92,6 +92,33 @@ def clip(text: str, cap: int, *, keep: str = "head", note: str = "", reserve: in
     return cut + note.format(n=len(text) - len(cut))
 
 
+# Per-STREAM tail budgets for a two-stream (stdout/stderr) command result. The agent loop caps the
+# COMBINED result at RESULT_CAP (head-keep), so giving each stream ~RESULT_CAP alone let a verbose
+# stdout push the whole stderr section — the traceback, i.e. the REASON the command failed — past the
+# cap, where the loop silently dropped it. The MINIMUM below holds even when both streams are long;
+# when one stream is short, its unused budget flows to the other (a stderr-only failure gets ~the
+# whole cap for its traceback, not half — a fixed 50/50 split truncated exactly the frames the repair
+# needed). Headroom (-400) covers the exit-code head + section labels + notes.
+STDOUT_TAIL = RESULT_CAP // 2 - 200
+# stderr's own guaranteed minimum is DERIVED in `stream_tails` as `avail - STDOUT_TAIL`,
+# deliberately not a second constant that could drift away from it.
+
+
+def stream_tails(out: str, err: str) -> tuple[int, int]:
+    """Per-call tail budgets: each stream is guaranteed its minimum share, and whatever one stream
+    leaves unused flows to the other (stderr first — the exception lives there). Sum always fits
+    under RESULT_CAP with the -400 label/head headroom.
+
+    Lives HERE, beside `clip`/`fit_rows`, rather than in `shell_tools`: the assistant's `run_command`
+    and the Developer's `run_probe` are two surfaces reporting the SAME two-stream shape, and a
+    second copy is how the two would come to disagree about which half of a failure survives
+    (doc 25 TO-08 — five providers had written `clip` separately before it moved here)."""
+    avail = RESULT_CAP - 400
+    err_take = min(len(err), avail - min(len(out), STDOUT_TAIL))
+    out_take = min(len(out), avail - err_take)
+    return out_take, err_take
+
+
 def fn_spec(name: str, description: str, props: dict, required: Optional[list] = None) -> dict:
     """Build one OpenAI-format function/tool schema. Shared by every tool provider so the
     schema shape lives in one place."""

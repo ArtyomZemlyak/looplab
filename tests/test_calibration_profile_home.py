@@ -46,11 +46,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-11  + systemic_failure_stop      (run-level 'nothing has ever worked' stop; see below)
 #   2026-08-11  concept_retag_every 30 -> 5  (intentional cadence-default change; field set unchanged,
 #               but the complete settings envelope and therefore old receipts genuinely changed)
+#   2026-08-13  + developer_probe, developer_probe_timeout_s  (F2, the Developer's probe)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:404154c6f6e9f6fb6c05059ea5862227907c6e450d28ce95fe88564cb6a49a0a"
+_EXPECTED_DIGEST = "sha256:6c593301d84dcfd7528fa1594085bf00681fe810c9cc35c1db1b79efe9165abf"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -104,7 +105,22 @@ _EXPECTED_DIGEST = "sha256:404154c6f6e9f6fb6c05059ea5862227907c6e450d28ce95fe885
 #               a replicate may run — which is exactly the kind of difference a paired calibration is
 #               measuring. A knob that can change a replicate's wall clock does not get to be
 #               invisible to the envelope just because its default is off.
-_EXPECTED_FIELD_COUNT = 197
+#   2026-08-13  + developer_probe (ON) and developer_probe_timeout_s — the Developer's PROBE (F2,
+#               tools/dev_probe.py). INERT for a calibration replicate, like `concept_tidy` and
+#               `task_facets_finalize` above and unlike `read_fence`: the profile's workload scope
+#               is `quadratic_toy`, which declares no editable source tree, and `make_roles` only
+#               builds the `LLMRepoDeveloper` that carries the probe when `repo_spec()` names one —
+#               so the tool cannot be composed, cannot be called, and cannot change what a
+#               replicate does. Both pins are re-set anyway rather than exempting the two knobs:
+#               the profile is a COMPLETE settings map and this digest binds the whole non-variant
+#               envelope, which is exactly the rule that keeps the guard from needing to be clever
+#               about which knobs are reachable from which workload.
+#   2026-08-13  MERGE: eval_deadline_grace_s and the developer_probe pair landed on separate
+#               branches, each re-pinning against a tree without the other, so both pins were
+#               measured over an incomplete settings map. Re-measured once over the merged map:
+#               200 fields. Neither branch's digest was ever correct for the shipped tree, which is
+#               why this is re-derived here rather than picked from one side.
+_EXPECTED_FIELD_COUNT = 200
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
