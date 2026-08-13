@@ -336,7 +336,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 167 of the 198 direct
+- **Settings page** — a versioned, server-owned editor catalogue with 168 of the 199 direct
   `Settings` fields in 10 groups (the live counts are
   `serve/settings_ui_schema.py::SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` /
   `…_SETTINGS_FIELD_COUNT`; note the docs↔code parity test `tests/test_config_docs_sync.py` pins

@@ -685,6 +685,13 @@ class Settings(BaseSettings):
     #   "audit"  — salvage, record the provenance, and attach a `metric_salvaged` VIOLATION: the node
     #              is evaluated and counted (budget, UI, lineage) but excluded from `feasible_nodes`,
     #              so it can never become champion or be bred from on a value nobody measured.
+    #              ONE ESCAPE HATCH, and it is not this field's: `metric_salvage_repair` (below,
+    #              default True) can buy a Developer fix for the failing declaration and RE-CHECK the
+    #              artifact contract against the corrected one. A node that PASSES that re-check is
+    #              no longer salvaged — the value was measured after all — so the violation and the
+    #              exclusion go with it. That path is restricted to OPERATOR-produced output
+    #              (`metric_salvage.recheckable_salvage`), which is what keeps it from being more
+    #              permissive than `select`. Set `metric_salvage_repair: false` for the flat rule.
     #   "select" — a salvaged metric competes on equal terms.
     # `audit` is the default deliberately, and the trade-off is real: a salvaged baseline is not bred
     # from until the operator says so.
