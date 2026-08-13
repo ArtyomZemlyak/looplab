@@ -1009,10 +1009,17 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                     deadline = _time.monotonic() + _grace
                     granted[0] += _grace
                     if logf is not None:
+                        # UNDER `lock`, unlike the two watchdog markers at the bottom of this
+                        # function: those are written after `t_out`/`t_err` have joined, so nothing
+                        # else can be in `logf`. This one is written while BOTH pump threads are
+                        # still live and writing to the same handle, so an unlocked write here
+                        # interleaves into the middle of a training log line.
                         try:
-                            logf.write(f"\n‼ LOOPLAB deadline: the stage reached its time budget and "
-                                       f"a live-log judge granted ONE extension of {int(_grace)}s.\n")
-                            logf.flush()
+                            with lock:
+                                logf.write(f"\n‼ LOOPLAB deadline: the stage reached its time budget "
+                                           f"and a live-log judge granted ONE extension of "
+                                           f"{int(_grace)}s.\n")
+                                logf.flush()
                         except (OSError, ValueError):
                             pass
                     continue
