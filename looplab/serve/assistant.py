@@ -1580,7 +1580,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 client=None, subagents: bool = False, mcp: bool = False, settings=None,
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
-                mutation_journal_path=None, mutation_recovery: bool = False):
+                mutation_journal_path=None, mutation_recovery: bool = False, watches=None):
     """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
     memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
     in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
@@ -1672,6 +1672,13 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns())]
     providers.append(TodoTools(on_todos=on_todos))
+    # Standing watches (BACKLOG §F4) — present in EVERY mode including read-only plan, because
+    # arming one takes no action; it records an instruction to run LATER at this chat's already-
+    # pinned mode. Deliberately NOT on the `mutation_recovery` path above: a recovered dangling turn
+    # lost the model trace that would prove which watches the first attempt already armed, and a
+    # second copy of a standing watch is a second copy of every wake-up it will ever pay for.
+    if watches is not None:
+        providers.append(WatchTools(watches, run_root=run_root))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
                                        cancel_check=cancel_check))
@@ -1808,7 +1815,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
              on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
              on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
              command_service=None, command_key_namespace: str = "",
-             mutation_journal_path=None, mutation_recovery: bool = False) -> dict:
+             mutation_journal_path=None, mutation_recovery: bool = False, watches=None) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -1824,7 +1831,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         command_service=command_service,
                         command_key_namespace=command_key_namespace,
                         mutation_journal_path=mutation_journal_path,
-                        mutation_recovery=mutation_recovery)
+                        mutation_recovery=mutation_recovery, watches=watches)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -2027,6 +2034,102 @@ class TodoTools:
                 pass
         done = sum(1 for t in items if t["status"] == "completed")
         return f"(todos updated: {done}/{len(items)} done)"
+
+
+class WatchTools:
+    """Arm a STANDING watch that outlives this turn, this request and this browser (BACKLOG §F4).
+
+    The operator's three asks — "infinite assistant mode; waiting on statuses; monitoring every N" —
+    reach the model as two verbs, because they are two conditions over one mechanism: wait for a run
+    to reach a state, or wake on a schedule. Everything durable about it lives in
+    `serve/assistant_watch.py`; this is only the vocabulary the model speaks.
+
+    Present in EVERY mode, read-only plan included. Arming a watch takes no action on anything — it
+    records an intention to run a turn later, at the mode this chat is already in (pinned at arm
+    time by `SessionWatches`, never re-derived), with exactly the toolset that mode already grants.
+    So it widens what the assistant can DO across time without widening what it is trusted WITH,
+    which is the distinction doc 36 asks every such change to make explicitly.
+    """
+
+    def __init__(self, watches, run_root=None):
+        self.watches = watches          # a `SessionWatches` — session-scoped, mode-pinned
+        self.run_root = run_root
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        from looplab.serve.assistant_watch import (
+            WATCH_MAX_INTERVAL_S, WATCH_MIN_INTERVAL_S, WATCH_RUN_STATES)
+        from looplab.tools._base import fn_spec
+        states = ", ".join(WATCH_RUN_STATES)
+        return [
+            fn_spec(
+                "watch_run",
+                "Wait for a run to reach a state, then carry out an instruction — even if the user "
+                "closes the browser. Use this instead of polling in a loop: your turn ends now and "
+                "a fresh turn wakes when the state is actually observed. Tell the user you armed "
+                "it and what it is waiting for.",
+                {"run": {"type": "string", "description": "the run id to watch"},
+                 "until": {"type": "array", "items": {"type": "string"},
+                           "description": f"any of: {states}"},
+                 "instruction": {"type": "string",
+                                 "description": "what to do when it fires — a complete, standalone "
+                                                "instruction, since nobody will be there to clarify"}},
+                ["run", "until", "instruction"]),
+            fn_spec(
+                "watch_every",
+                "Run an instruction on a repeating schedule until its budget runs out — the "
+                "'monitor every N' mode. Each wake-up is a fresh turn appended to this chat.",
+                {"every_s": {"type": "number",
+                             "description": f"seconds between wake-ups "
+                                            f"({WATCH_MIN_INTERVAL_S:g}–{WATCH_MAX_INTERVAL_S:g})"},
+                 "instruction": {"type": "string", "description": "the standing instruction"},
+                 "max_wakeups": {"type": "integer",
+                                 "description": "stop after this many wake-ups (optional)"}},
+                ["every_s", "instruction"]),
+            fn_spec("list_watches", "List this chat's standing watches and what each is waiting for.",
+                    {}, []),
+            fn_spec("stop_watch", "Stop one of this chat's standing watches.",
+                    {"id": {"type": "string", "description": "the watch id from list_watches"}},
+                    ["id"]),
+        ]
+
+    def execute(self, name: str, args: dict) -> str:
+        from looplab.serve.assistant_watch import WatchRefusal, describe_trigger
+        args = args or {}
+        try:
+            if name == "watch_run":
+                until = args.get("until")
+                trigger = {"kind": "run_state", "run": args.get("run"), "until": until}
+                rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
+                                       trigger=trigger)
+            elif name == "watch_every":
+                trigger = {"kind": "schedule", "every_s": args.get("every_s")}
+                rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
+                                       trigger=trigger, max_wakeups=args.get("max_wakeups"))
+            elif name == "list_watches":
+                rows = self.watches.list()
+                if not rows:
+                    return "(no standing watches on this chat)"
+                return "\n".join(
+                    f"{r['id']}  [{r['status']}]  waiting for {r.get('waiting_for')}  "
+                    f"({r.get('wakeups', 0)}/{r.get('max_wakeups')} wake-ups)" for r in rows)
+            elif name == "stop_watch":
+                stopped = self.watches.cancel(str(args.get("id") or ""))
+                if stopped is None:
+                    return "(no such watch on this chat)"
+                return f"(watch {stopped['id']} stopped)"
+            else:
+                return f"(unknown tool: {name})"
+        except WatchRefusal as exc:
+            # The refusal SENTENCE is the point: this is read by a model that can fix the call.
+            return f"(watch refused: {exc})"
+        except Exception as exc:  # noqa: BLE001 - never crash a turn over a standing-watch failure
+            return f"(could not arm the watch: {type(exc).__name__})"
+        return (f"(watch {rec['id']} armed — waiting for "
+                f"{rec.get('waiting_for') or describe_trigger(rec['trigger'])}; it survives a page "
+                f"reload and a server restart. Tell the user it is armed and what it waits for.)")
 
 
 class SubagentTools:
