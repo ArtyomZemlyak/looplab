@@ -183,25 +183,83 @@ def _improvement(child_metric: float, parent_metric: float, direction: str) -> f
             else (parent_metric - child_metric))
 
 
+def unreliable_metric_ids(state) -> set:
+    """Node ids whose METRIC may not ground a CROSS-RUN claim — the knowledge-side twin of
+    `events/replay.py::promotion_eligible_nodes`.
+
+    WHY THIS IS NOT THE SAME PREDICATE AS PROMOTION ELIGIBILITY, which is the whole reason it is a
+    separate rule rather than a call to that one. Promotion eligibility asks "may this node be
+    CHAMPION"; this asks the weaker question "is this node's number a measurement at all". The two
+    disagree on exactly one population and the disagreement is deliberate: a node that breached one
+    of the operator's hard CONSTRAINTS is infeasible and so ineligible for promotion, but its metric
+    was measured by the scoring path and its exclusion is a fact about the bound, not about the
+    number — `engine/lessons_distill.py` has said so since the first salvage fix ("nothing else is
+    filtered") and it keeps its historical place in every reflection population. Routing this
+    through `promotion_eligible_nodes` would silently retire that stance.
+
+    TWO MEMBERS, each a node the run has already decided may not be selected ON ITS NUMBER:
+
+      * SALVAGED AND NOT ADMITTED (`metric_salvage.metric_unmeasured`). Nobody measured the value —
+        it was recovered from a failed eval by the operator's declared reader. This is the leak this
+        function was written for: the `metric_salvaged` violation gated BREEDING and not KNOWLEDGE,
+        so a node barred from champion selection still supplied both sides of an M6 comparison pair,
+        and the credit-assignment lesson that came out of it ("changing lr 0.1->0.3 improved the
+        metric by 0.45") went into the shared `lessons.jsonl` with that node's id as its evidence.
+      * TRUST-FLAGGED under `gate`/`block` (`events/replay.py::flagged_node_ids`). A high-precision
+        reward-hack or leakage signal, in a run whose operator asked for it to be enforced. The
+        number may be a number nobody EARNED, which for a credit-assignment lesson is the same
+        defect one step over: the lesson would credit whatever difference produced the cheat. Empty
+        under `audit`, exactly as the selection path is — this function never enforces a gate the
+        operator turned off, it only refuses to publish across runs what THIS run already refuses to
+        select on.
+
+    Deliberately NOT included: tombstoned/aborted nodes (every caller already drops those on its own
+    lifecycle grounds) and unevaluated ones (no number to be unreliable).
+
+    Not wrapped in a containment `except`: both halves are total by construction —
+    `metric_unmeasured` reads one list and `flagged_node_ids` is the same helper the fold itself
+    calls on every replay — and swallowing an error here would return the EMPTY set, i.e. would
+    answer "everything is reliable" for a state nobody could read. That is the one wrong answer.
+    """
+    from looplab.engine.metric_salvage import metric_unmeasured
+    from looplab.events.replay import flagged_node_ids
+    ids = {n.id for n in (getattr(state, "nodes", None) or {}).values() if metric_unmeasured(n)}
+    return ids | set(flagged_node_ids(state))
+
+
 def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
     """Deterministically pick the most informative parent→child pairs to distill from. Two kinds:
     `solution` (both evaluated — the biggest |Δ| wins and regressions are as informative as wins;
     exact ties are skipped: the outcome vocabulary has no 'no effect', so a Δ=0 pair could only be
     mislabeled) and `debug` (parent FAILED, child evaluated — what fixed it). `exclude` = (child,
     parent) id tuples already distilled (later firings must not re-spend LLM budget on the same
-    pair). Sorted debug-first then by |Δ| then by ids, so the output is stable under replay."""
+    pair). Sorted debug-first then by |Δ| then by ids, so the output is stable under replay.
+
+    EVERY PAIR IS A CLAIM ABOUT THE METRIC, which is why `unreliable_metric_ids` bars a node from
+    BOTH sides. A `solution` pair's entire content is the Δ between two numbers and the lesson
+    credits whichever difference produced it; a `debug` pair's prompt states that the repair
+    "reached metric=X". So a node whose number nobody measured (a salvaged node under the default
+    `audit` rung) or whose number the run's own trust gate refuses cannot be one half of a pair
+    without the lesson asserting precisely what that exclusion denies — and unlike a champion pick,
+    the assertion LEAVES the run: it is appended to the shared `lessons.jsonl` and retrieved by
+    later runs as evidence. This is the knowledge half of the boundary
+    `engine/metric_salvage.py::metric_unmeasured` documents; what such a node observed that is
+    INDEPENDENT of its metric is still recorded (its concept tags in the run's capsule, its failure
+    in the reflection prompt's observation rows) — only the metric claim is refused."""
     from looplab.core.models import NodeStatus
     excl = {tuple(p) for p in (exclude or [])}
     aborted = set(getattr(state, "aborted_nodes", None) or [])
+    unreliable = unreliable_metric_ids(state)
     pairs: list[dict] = []
     for n in state.nodes.values():
-        if n.metric is None or n.tombstoned or n.id in aborted:
+        if n.metric is None or n.tombstoned or n.id in aborted or n.id in unreliable:
             continue
         for pid in n.parent_ids:
             p = state.nodes.get(pid)
             # deleted/aborted attempts are audit history, never live evidence from which a
-            # reusable comparative lesson may be distilled or re-derived.
-            if (p is None or p.tombstoned or pid in aborted
+            # reusable comparative lesson may be distilled or re-derived; a node whose METRIC this
+            # run refuses to select on is the same rule one field over (see the docstring).
+            if (p is None or p.tombstoned or pid in aborted or pid in unreliable
                     or (n.id, pid) in excl):
                 continue
             if p.metric is not None:
