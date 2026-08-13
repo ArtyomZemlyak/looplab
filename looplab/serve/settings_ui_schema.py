@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 170
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -35,7 +35,13 @@ SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
 # tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
 # fields" sentence honest.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
-# 168 rows since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
+# 170 rows since METRIC PROVENANCE joined Safety & trust beside the read fence: `metric_subject`
+# (off|audit|require, default audit) — what a recorded number is a claim ABOUT — and `landlock`
+# (off|enforce, default OFF) — the kernel read allow-list. Both are rows rather than uncurated
+# omissions for the same reason the fence is: each can REFUSE a running eval or change which
+# nodes are selectable, and each has a default the operator is expected to move only on stated
+# evidence (one repo run where every node binds; one real GPU eval under `enforce`).
+# (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
 # uncurated omission because it is an operator-visible policy that can REFUSE a running eval, and
@@ -45,7 +51,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "68fcf2e159dba79f1c4775892dc43291493f85350cf4510bc83305ce85f6e431"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "6e385b2d7080288476b36aa3b1a083a3cece92e803763a94901e33253862c36d"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
