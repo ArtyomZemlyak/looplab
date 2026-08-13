@@ -241,28 +241,59 @@ contained nothing but `llm_usage`, `train_monitor_alert`, and four `research_com
 No `card_build_requested`, no `node_building`, no `card_added`. Node 5 was at step 4415/7060 with
 2:09 remaining, so the idle window is ~4 hours on one device.
 
-**Why.** `Engine._dispatch_evals` takes `evals` — the batch ONE turn produced — and runs it under
-`async with anyio.create_task_group() as tg:`. The slot semaphore lets that batch's members overlap,
-but the task group **joins every member** before `_dispatch_evals` returns, and the next turn's node
-creation happens after it returns. So the concurrency width applies WITHIN a turn and never across
-turns: with heterogeneous node durations (86 min vs ~6 h here) the fast slot sits idle until the
-slowest member of its own batch finishes.
+**Why — CORRECTED 2026-08-13, the first answer named the wrong code.** The measurements above stand;
+the mechanism below replaces what this entry originally said.
 
-The repeating deep research is in the OUTER `bg_tg` and keeps running on its own timer, which is
-exactly why the run looks alive from the event log while no experiment is being built — four rounds
-of research directions were produced into an idle GPU.
+*What it said, and why it was wrong.* It blamed `Engine._dispatch_evals`, which does join its whole
+task group before returning. But v6's `run_started` pins `card_driven_selection: true` and
+`speculation_depth: 2`, so `_speculation_enabled()` is true and every eval goes through
+`Engine._run_card_session` (`engine/speculation.py`) — which delegates to `_dispatch_evals` ONLY when
+speculation is off. There are two dispatchers with two different barriers, and the one this entry
+described is in the path no run on this box uses. A second claim was wrong the same way: nodes 5 and
+6 were NOT "dispatched from the same turn" — node 5 was created 04:01:08, card-7's build was
+requested 04:01:11, and node 6 was admitted 04:46:13, i.e. while node 5 was already training.
 
-**What it would take.** Continuous dispatch across turns: the producer admits a new node whenever a
-slot frees, rather than the loop awaiting the whole batch. That is not a small change and it is not
-mine to make unilaterally — it moves node CREATION into (or alongside) the dispatch loop, and engine
-invariant #1 says only the main task appends folded events, with the `llm_parallel` build fan-out
-already carving out a carefully-bounded own-node-only exception. The turn structure is also what
-makes `_proposal_authority_seq`'s position fence and the Card build-request CAS reason about a
-stable window. Decide the shape first; do not incrementally loosen the join.
+*What actually happens.* The continuous cross-turn dispatcher this entry asked to be built ALREADY
+EXISTS. The Card session admits from `state.pending_nodes()` — the whole folded board, not a per-turn
+batch — refills a freed slot on the next poll, runs its own producer, and already commits
+`node_created` from the main task inside the dispatch loop. It is switched off by two booleans:
+`CardSession.consumer_completed`, set in the `finally` of EVERY eval child, and `yield_outer`. Either
+makes `open_for_new_work()` false for ALL slots, and `_card_phase_decide_exit` then will not let the
+session return until the LAST eval drains. So the run stops starting work at the FIRST terminal and
+still cannot reach the outer boundary until the slowest eval lands. That asymmetry is the defect, and
+the code carries its own unresolved `CODEX AGENT` TODO at that line.
+
+Verified on a bounded toy-backend run, not inferred: at the idle moment the probe reads width 2, one
+slot free, `terminal`/`budget`/`outer_rebuild` all False, `consumer_completed=True`,
+`yield_outer=True`, `open_for_new_work=False`, and `admissible_pending: [2]` — a prefetched,
+committed node the engine itself judged admissible, sitting unstarted.
+`tests/test_card_budget_refund.py:488` independently documents the same latch.
+
+**The cost, measured across the six width-2 runs on this box.** 115.6 GPU-h of barrier idle against
+164.4 GPU-h of work actually done — **82.6% of all second-slot time available while the box was busy
+went unused**. Worst single window: `rubert-dr-0807`, 41.8 h at occupancy 1 after having been at 2.
+v6 reached width 2 for 1.55 h out of 17.31; v5 never ran two evals at once at all. A SECOND and
+larger cost sits beside it — 167.7 GPU-h with no eval running at all, same root (`yield_outer` latches
+the producer off during a long eval because the board is only refilled by outer-loop cadences), and
+it deserves its own entry.
+
+**What it would take.** The full option table is `docs/32-cross-turn-dispatch-options-2026-08-13.md`.
+The recommended shape hoists the eval task group to run scope and needs NO new invariant-#1
+exception: eval children are already engine-loop tasks, all eight terminal appends in `evaluate.py`
+are lexically inside `async with self._write_lock`, `_record_eval_start_boundary` stays at the
+dispatch decision, and resume is already written — `EV_NODE_EVAL_STARTED` exists precisely to rebuild
+the inflight set. The real cost is honest and specific: `_proposal_authority_seq`'s quiet window is
+lost for the outer `creates` branch, and the recommended answer is to keep that branch gated on
+quiescence rather than widen the fence, because a node terminal genuinely does carry selection
+authority.
+
+**Do first regardless of the option chosen:** the regression the code's own TODO asks for — an
+unequal-duration refill test driving a real engine. Nothing in an 8,900-test suite currently fails
+when the second GPU goes dark for two hours.
 
 **Cheap mitigation available today, no code:** an `eval_timeout` closer to the real training cost
-bounds the worst-case idle, and `eval_parallel: 1` at least makes the serialization honest rather
-than advertising a width the loop cannot sustain. Neither is a fix.
+bounds the worst-case idle. `eval_parallel: 1` is the honest floor but costs the 1.55 h v6 did use
+and forecloses the prefetch design's justification. Neither is a fix.
 
 **Related, and worth stating because it made this window worse:** node 5's batch size was 8192 as
 proposed and is 256 as it runs — three repair rounds shrank it 32x chasing an OOM that never
