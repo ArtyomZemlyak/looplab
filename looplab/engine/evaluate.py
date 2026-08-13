@@ -50,7 +50,8 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
                                            declaration_only_repair, declaration_repair_provenance,
                                            declared_pipeline_completed, recheck_floor,
                                            recheckable_expect, recheckable_salvage,
-                                           salvage as salvage_metric)
+                                           salvage as salvage_metric,
+                                           unbound_subject_violation_rows)
 from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due,
                                             developer_stuck_contract, repair_floor_stop)
@@ -2456,6 +2457,39 @@ class EvaluateMixin:
                         # recorded metric, and the only way an operator sees that every MERGE node
                         # in a run needed the same correction.
                         _eval_payload["metric_provenance"] = declaration_repaired
+                    # THE SUBJECT — what this number is a claim ABOUT. Folded onto the SAME
+                    # `metric_provenance` dict rather than beside it, for the reason `salvaged_error`
+                    # records one branch up: the fold ignores unknown top-level keys, so a second
+                    # event key would be invisible in every replayed `RunState` — which is what the
+                    # UI, the report and every read-model see.
+                    #
+                    # It MERGES with whatever the salvage/declaration-repair branches already put
+                    # there. Those answer "which rung produced this number"; this answers "about
+                    # what", and a salvaged number still has a subject. Merging also means a reader
+                    # keeps one key to look at, which is the property `metric_provenance` was folded
+                    # for in the first place.
+                    #
+                    # `.get`, not truthiness: `res.metric_subject` is None on the `off` rung and on
+                    # every path that never reached a metric read, and an old log has no key at all —
+                    # invariant #5's additive-with-reader-side-defaults rule, which is not optional
+                    # here because EVERY existing run's log has no provenance.
+                    _subject_prov = getattr(res, "metric_subject", None)
+                    if isinstance(_subject_prov, dict):
+                        _eval_payload["metric_provenance"] = {
+                            **(_eval_payload.get("metric_provenance") or {}), **_subject_prov}
+                        # THE ENFORCEMENT, under `require`: an UNBOUND metric gets the EXISTING
+                        # `metric_salvaged` violation row, so the fold's `feasible = not violations`
+                        # keeps it out of `feasible_nodes()` — counted, in the budget, in the UI and
+                        # the lineage, and never champion and never bred from. A provenance field
+                        # alone would satisfy "the selection path CAN tell" and not "does": nothing
+                        # on that path reads an unknown event key. No second exclusion vocabulary is
+                        # minted — see `unbound_subject_violation_rows` for why the row is the same
+                        # name and what a new slug would silently cost.
+                        _eval_payload["violations"] = (
+                            list(_eval_payload["violations"])
+                            + unbound_subject_violation_rows(
+                                _subject_prov, res.metric,
+                                str(getattr(self, "metric_subject", "audit") or "audit")))
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

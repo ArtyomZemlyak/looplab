@@ -27,6 +27,7 @@ from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
+from looplab.runtime import landlock as _landlock
 
 # THE secret screen — MOVED to `core/envsafe.py`, re-exported here and NOT copied. Every existing
 # `from looplab.runtime.sandbox import is_secret_env` (eight modules, `tests/test_secret_env_pattern.py`)
@@ -312,6 +313,16 @@ class RunResult:
     # time. A watchdog kill is the ENGINE's own verdict about the run; it must never be inferred from
     # the exit code the engine itself caused.
     diverged: bool = False
+    # METRIC SUBJECT (`runtime/metric_subject.py`): the identity of the artifact this number is a
+    # claim ABOUT — `{subject_bound, subjects:[{path, identity, digest, digest_mode, producer}],
+    # unbound_reason?, subject_stage?}` — captured at the SCORE stage's start.
+    #
+    # It exists because a `float` has no referent: measured across the six repo runs with an event
+    # log, 82 of 83 recorded metrics carry NO provenance at all, and 2 of 83 are provably about bytes
+    # the node did not produce. The reader functions in `command_eval` build a `Path`, `stat` it and
+    # DISCARD it; this is the field that stops discarding it. None on the `metric_subject="off"` rung
+    # and on every path that never reached a metric read.
+    metric_subject: Optional[dict] = None
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's
@@ -580,6 +591,29 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # container that the run had a fence.
     if not _docker_run:
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
+        # KERNEL READ ALLOW-LIST (runtime/landlock.py), the rung the audit hook above cannot reach:
+        # `safetensors`, a Rust `File::open`, a child `cat` and a `torchrun` rank raise no `open`
+        # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK`
+        # (engine/resources.py); absent — which is the default, `Settings.landlock="off"` — nothing
+        # here changes and the launch is byte-identical.
+        #
+        # Wrapped as a LAUNCHER, not a `preexec_fn`, for the reason `_RLIMIT_LAUNCHER` records: evals
+        # run from `anyio.to_thread` workers and a `preexec_fn` under a threaded parent is exactly
+        # the deadlock shape that pattern exists to avoid. Applied OUTERMOST, after any rlimit wrap,
+        # so the ruleset is in force for everything downstream; Landlock is inherited across `exec`
+        # by the kernel, so one application covers the whole process tree.
+        #
+        # The launch's own workdir is added here rather than by the engine: `wd` is the one path that
+        # is per-LAUNCH (the node workdir, the repo root for `setup`, a stage's cwd) and a process
+        # that cannot write its own cwd cannot run. Skipped for a `docker run` argv on the same
+        # reasoning as the fence — the container never sees these host paths, and the untrusted tiers
+        # are bounded by the bind set instead.
+        _ll = full_env.get(_landlock.LANDLOCK_ENV) or ""
+        if _ll:
+            argv = _landlock.launch_argv(
+                sys.executable,
+                _landlock.format_env([(str(wd), "readwrite")] + _landlock.parse_env(_ll)),
+                argv)
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
     # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted

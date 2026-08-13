@@ -229,6 +229,11 @@ _LAYOUT = {
     "public_cards": "serve",
     "reachability": "agents",  # task-aware inventory of reachable LLM consumers at run start
     "read_fence": "runtime",   # the source-tree read fence: the generated per-run sitecustomize
+    "metric_subject": "runtime",   # what a recorded metric is a claim ABOUT: the subject
+    #                              binding the eval captures at the score stage's start
+    "read_allowlist": "runtime",   # the ONE derivation of what an eval may read, from the
+    #                              operator's declared mounts
+    "landlock": "runtime",         # the kernel read allow-list applied at the launch
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",

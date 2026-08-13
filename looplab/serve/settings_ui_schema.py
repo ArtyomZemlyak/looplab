@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 173
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 175
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -51,6 +51,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # defaults to 0, and this is the knob that says when the second model gets its veto. Note what it is
 # NOT — it cannot extend a repair loop, only end one — and the help text says so, because a reader
 # who mistakes it for a budget will set it wrong in the expensive direction.
+# 170 rows since METRIC PROVENANCE joined Safety & trust beside the read fence: `metric_subject`
+# (off|audit|require, default audit) — what a recorded number is a claim ABOUT — and `landlock`
+# (off|enforce, default OFF) — the kernel read allow-list. Both are rows rather than uncurated
+# omissions for the same reason the fence is: each can REFUSE a running eval or change which
+# nodes are selectable, and each has a default the operator is expected to move only on stated
+# evidence (one repo run where every node binds; one real GPU eval under `enforce`).
 # (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
@@ -67,7 +73,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # the Nth on) — and one, `assistant_time_budget_s`, gave the chat the wall clock it used to borrow
 # from every engine role. Each branch pinned this digest against a tree without the others, so it is
 # re-derived over the merged keyset rather than taken from any side.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "e9bb0d22b6889e97cb08d6449475ddac1bfb1e728beaaa25767c56459b5e4d9e"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "cf33fc434b6d30c40c941e0d4ce8056794101bb25332ef01637b4f788353bf1c"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

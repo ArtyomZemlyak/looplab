@@ -493,6 +493,39 @@ class EvalSpec(BaseModel):
                     "task's `direction`, not here.")
         return v
 
+    @field_validator("metric")
+    @classmethod
+    def _valid_metric_subject(cls, v):
+        """`metric.subject` — WHAT THE NUMBER IS ABOUT — validated by the shared path-shape rule.
+
+        The operator's field, on the operator's protected `score` stage, and deliberately not
+        something the agent authors: the subject is what the metric MEANS, and the trust boundary
+        `engine/metric_salvage.py` states is that the agent writes the training script and therefore
+        writes the very text an extractor would read.
+
+        Same `_validate_rel_paths` that `expect.files` and `needs` already go through, so a path
+        shape one declaration accepts is never a shape another silently reinterprets — and the
+        containment is re-decided at eval time against the REAL workdir by `_confined`, because a
+        symlink the candidate plants at eval time is invisible from a manifest.
+
+        Absent is ACCEPTED here and is not a submit-time refusal. Whether an unbound metric is a
+        violation is `Settings.metric_subject`'s rung, and refusing at submit would make every task
+        file written before this shipped unloadable — including the `task.snapshot.json` of a run
+        being RESUMED, which `_grandfathered` reloads without re-validating precisely because a
+        recorded run must keep reaching the treatment it had.
+        """
+        from looplab.runtime.command_eval import _validate_rel_paths
+        if isinstance(v, dict) and v.get("subject") is not None:
+            clean, err = _validate_rel_paths("score", "subject", v["subject"])
+            if err is not None:
+                raise ValueError(
+                    err.replace("stage 'score'", "eval.metric")
+                    + " `subject` names the artifact the metric is a CLAIM ABOUT (the checkpoint, "
+                      "the predictions file), relative to the node's eval workdir.")
+            v = dict(v)
+            v["subject"] = clean
+        return v
+
     @field_validator("cross_check")
     @classmethod
     def _cross_check_not_adapter(cls, v):

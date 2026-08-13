@@ -376,3 +376,97 @@ def tensorboard(
         subprocess.run(cmd)
     except KeyboardInterrupt:
         pass
+
+
+@app.command(name="landlock-check")
+def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
+                   probe: bool = typer.Option(
+                       True, help="Also fork a child, apply the ruleset, and prove that a read "
+                                  "inside the allow-list succeeds and one outside it is refused.")):
+    """Print the KERNEL read allow-list this run would grant, and prove the ruleset applies.
+
+    THIS IS THE VALIDATION PATH FOR `Settings.landlock`, which ships `off`. The one unretired unknown
+    in the design it belongs to is whether a real GPU eval survives a Landlock ruleset at all: the
+    enforcement and the +2.1 %/open cost are measured, but only on `open`/`read` microbenchmarks —
+    torch, CUDA, NCCL, `/dev/nvidia*`, `/dev/shm`, `/sys/class` and the geesefs read surfaces were
+    never exercised, and a ruleset missing one of those does not degrade, it refuses mid-training.
+
+    So the procedure before anyone flips the default is: run this against a real run directory, read
+    the allow-list it prints, confirm `skipped: 0`, then run ONE real eval with
+    `LOOPLAB_LANDLOCK=enforce` and check it completed. The evidence that justifies the flip is that
+    eval, not this command — this command only tells you the ruleset is well-formed and applies.
+
+    Read-only: it derives the list from the run's own `task.snapshot.json` and touches nothing.
+    """
+    import json
+    import os
+
+    from looplab.runtime import landlock, read_allowlist
+
+    abi = landlock.abi_version()
+    typer.echo(f"landlock ABI: {abi if abi is not None else 'UNAVAILABLE'}")
+    reason = landlock.unavailable_reason()
+    if reason:
+        typer.echo(f"unavailable: {reason}")
+        raise typer.Exit(2)
+    snap = run_dir / "task.snapshot.json"
+    spec = None
+    if snap.exists():
+        try:
+            task = json.loads(snap.read_text(encoding="utf-8"))
+            spec = task.get("repo") if isinstance(task, dict) else None
+        except (OSError, ValueError):
+            spec = None
+    if spec is None:
+        # Not an error: a toy/dataset run has no repo spec and therefore no declared mounts, and the
+        # default tiers are still worth printing — that IS the allow-list such a run would get.
+        typer.echo("no repo spec in task.snapshot.json — showing the default tiers only")
+    allow = read_allowlist.derive(workdir=None, run_dir=str(run_dir), repo_spec=spec)
+    typer.echo(f"allow-list ({len(allow)} rules; the node workdir is added per launch):")
+    for path, mode in allow:
+        typer.echo(f"  {mode:<9} {path}")
+    fd, added, skipped = landlock.build_ruleset(allow)
+    os.close(fd)
+    typer.echo(f"added: {len(added)}   skipped: {len(skipped)}")
+    for path, why in skipped:
+        # A skipped rule is a DENIAL under an allow-list, never a no-op — this is the half that must
+        # never be silent (211 candidate rules produced 55 accepted ones in the measurement that
+        # motivated the derived list).
+        typer.echo(f"  SKIPPED {path}: {why}  <- this path would be DENIED")
+    if skipped:
+        raise typer.Exit(1)
+    if not probe:
+        return
+    # The probe forks so the irreversible `restrict_self` cannot touch this CLI process.
+    #
+    # The OUTSIDE path is the user's home DIRECTORY, chosen because it is the one path that is
+    # reliably not in the list while a subpath of it (`~/.cache`) is — which also proves the rules are
+    # path-BENEATH grants and not a prefix match on a string. A run directory that IS the home
+    # directory would make the probe vacuous, so it says so instead of reporting a pass.
+    home = os.path.realpath(os.path.expanduser("~"))
+    granted = {p for p, _m in allow}
+    if home in granted or home == os.path.realpath(os.sep):
+        typer.echo("probe: skipped — the home directory is itself allow-listed here, so there is no "
+                   "outside path to test against")
+        return
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            landlock.apply(allow)
+            inside = os.path.isdir(str(run_dir))
+            try:
+                os.listdir(home)
+                denied = False
+            except OSError:
+                denied = True
+            os.write(w, f"inside_ok={inside} outside_refused={denied} (outside={home})".encode())
+        except BaseException as exc:            # noqa: BLE001 — report, never traceback from a fork
+            os.write(w, f"probe failed: {type(exc).__name__}: {exc}".encode()[:500])
+        finally:
+            os._exit(0)
+    os.close(w)
+    with os.fdopen(r, "rb") as fh:
+        typer.echo("probe: " + fh.read().decode("utf-8", "replace"))
+    os.waitpid(pid, 0)

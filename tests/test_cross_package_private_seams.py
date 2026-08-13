@@ -44,6 +44,13 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
                                    "_set_role_client", "_shared_providers"),
         "looplab.runtime.sandbox": ("_last_json_dict",),
         "looplab.tools.reposcout": ("_SKIP_DIRS",),
+        # `EvalSpec.metric["subject"]` is validated by the SAME rule as `expect.files` and `needs`
+        # — one definition of "a workdir-relative declaration path" (doc 35's whole point is that
+        # these are projections of one relation, not three lints). Declared rather than promoted:
+        # the name is private because `command_eval` owns the rule and nothing outside the
+        # declaration family should be reaching for it, and this registry is what makes a future
+        # rename a red test instead of a submit-time validator that silently stops running.
+        "looplab.runtime.command_eval": ("_validate_rel_paths",),
     },
     "agents": {
         "looplab.core.llm": ("_reasoning_of",),

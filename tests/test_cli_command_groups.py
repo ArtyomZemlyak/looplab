@@ -28,7 +28,12 @@ _CLI = Path(__file__).resolve().parents[1] / "looplab" / "cli"
 # HERE, in the group whose contract it actually matches — which is the decision the old module let
 # everyone skip.
 GROUPS = {
-    "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "tensorboard"},
+    # `landlock-check` is a pure read of one run's own task snapshot plus a forked probe that
+    # touches nothing — the same "fold/inspect a single run's sidecars" contract as `inspect`, and
+    # the reason it is not in `governance_cmds` (it writes nothing and spends no money) or a new
+    # group of its own (one command).
+    "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "tensorboard",
+                     "landlock-check"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",

@@ -52,7 +52,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:76627b5817a9d2636861e7134ae971cf7f969ae943ca9b6b0a1c91f762ce2812"
+_EXPECTED_DIGEST = "sha256:5a3fcc8c24b6038cc0cd2eb77be6b037e0df4b9ac938ec785fc565c742b27801"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -148,7 +148,16 @@ _EXPECTED_DIGEST = "sha256:76627b5817a9d2636861e7134ae971cf7f969ae943ca9b6b0a1c9
 #               necessary is what the field IS: a value that changes what every eval process in the
 #               run can read. An envelope that can no longer state that is not the envelope a later
 #               receipt would be compared against. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 202
+#   2026-08-13  + metric_subject, landlock  (metric PROVENANCE: what a recorded number is a claim
+#               ABOUT, and the kernel read allow-list that bounds what produced it). The 'field set
+#               changed too' branch. `landlock` IS inert for a calibration replicate — it ships
+#               `off` and the toy profile declares no mounts — but `metric_subject` is not: at its
+#               `audit` default every replicate's `node_evaluated` now carries a
+#               `metric_provenance` record, which is folded state a receipt describes, and the
+#               protected `score` stage's `needs` is derived from the declared subject, so a
+#               replicate can now fail `needs_failed` where it used to run. Old receipts SHOULD stop
+#               verifying. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 204
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

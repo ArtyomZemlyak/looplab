@@ -22,7 +22,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
-from looplab.runtime import read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
@@ -38,8 +38,10 @@ _LEASE_NOTICE_INTERVAL_S = 30.0
 # Bounded read of the holder stamp below.  Only this module writes a lease file, so anything longer is
 # a foreign/stale file and is reported as an unknown holder instead of being echoed back.
 _LEASE_STAMP_BYTES = 64
-# "`_read_fence_dir` has not run yet", distinct from its real `None` result ("this run has no
-# fence") — the difference decides whether the memo is a hit or a miss.
+# "this has not been resolved yet", distinct from a real `None` result ("this run has no fence" /
+# "this run has no allow-list") — the difference decides whether the memo is a hit or a miss. Shared
+# by `_read_fence_dir` and `_landlock_allow`, which memoize the same way for the same reason: both
+# are asked once per eval from concurrent workers and both legitimately resolve to None.
 _UNRESOLVED_FENCE = object()
 
 
@@ -841,8 +843,45 @@ class ResourceSchedulingMixin:
         still satisfies) but it would rewrite a sentinel three other modules read, for nothing on a
         run that has no fence. So the dict is materialized only when there is a fence to carry."""
         fence = self._read_fence_dir()
-        if not fence:
+        allow = self._landlock_allow()
+        if not fence and not allow:
             return env
         out = dict(env or {})
-        out[read_fence.FENCE_DIR_ENV] = fence
+        if fence:
+            out[read_fence.FENCE_DIR_ENV] = fence
+        if allow:
+            out[landlock.LANDLOCK_ENV] = allow
         return out
+
+    def _landlock_allow(self) -> Optional[str]:
+        """This run's KERNEL read allow-list as the `LOOPLAB_LANDLOCK` env string, or None.
+
+        None whenever the rung is `off` — which is the DEFAULT, so on every run today this method
+        returns None and `_fenced_env` is byte-identical to what it was. See `Settings.landlock` for
+        why off is the default and for the exact evidence that would move it: the enforcement and the
+        +2.1 %/open cost are verified on this box, and nobody has run an allow-list through a real
+        GPU eval, which is the single largest unretired unknown in this design.
+
+        DERIVED, never hand-written (`runtime/read_allowlist.py`): the operator's declared `data:` /
+        `references:` mounts are part of the answer, because a legitimate outside read is exactly
+        what a mount IS — measured, 1/116 corpus nodes distils from a teacher checkpoint that lives
+        inside the editable root, and an allow-list that forgets the mounts kills that node.
+
+        The node WORKDIR is deliberately absent from this run-level list and is added per launch by
+        `runtime/sandbox.py::run_argv`, which is the only place that knows which workdir a given
+        launch has (a node's, the repo root for `setup`, a stage's cwd).
+
+        Memoized like `_read_fence_dir` and for the same reason: `_resource_eval_env` is called once
+        per eval from concurrent workers, and the derivation walks the repo spec and `realpath`s
+        every entry.
+        """
+        cached = getattr(self, "_landlock_cache", _UNRESOLVED_FENCE)
+        if cached is not _UNRESOLVED_FENCE:
+            return cached
+        resolved = None
+        if str(getattr(self, "_landlock", "off") or "off") == "enforce":
+            allow = read_allowlist.derive(workdir=None, run_dir=str(self.run_dir),
+                                          repo_spec=getattr(self, "_repo_spec", None))
+            resolved = landlock.format_env(allow) or None
+        self._landlock_cache = resolved
+        return resolved

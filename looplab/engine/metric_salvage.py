@@ -173,6 +173,47 @@ SALVAGE_PRODUCERS = (OPERATOR_PRODUCED, AGENT_PRODUCED)
 # from claiming it, which is what makes the name a reliable owner marker here.
 OPERATOR_PROTECTED_STAGE = "score"
 
+
+# The violation row an UNBOUND metric contributes — an unsalvaged, fully measured node whose number
+# has no proven referent (`runtime/metric_subject.py`, `Settings.metric_subject="require"`).
+#
+# IT IS THE SAME `metric_salvaged` ROW, ON PURPOSE, and inventing a second exclusion vocabulary here
+# would be the mistake. The enforcement is `feasible = not violations`, so any row excludes the node;
+# what a second NAME would cost is every reader that already knows this one — `metric_unmeasured`
+# (the cross-run knowledge boundary), `serve/report.py`'s salvaged panel, `lessons_distill`'s row
+# note, `speculation_quality`'s calibration filter. A new slug would silently stop being recognised
+# by all four while still excluding the node, which is the exact half-wired shape this module's own
+# `SALVAGE_VIOLATION` comment warns about.
+#
+# The two cases are also genuinely the same claim: "this node has a number that nobody has shown to
+# be a measurement of what it says it measures". Salvage reaches it because the eval failed and the
+# number was recovered; this reaches it because the eval succeeded and nothing binds the number to an
+# artifact. `condition` distinguishes them for anyone who needs to.
+UNBOUND_SUBJECT_CONDITION = "metric_subject_unbound"
+
+
+def unbound_subject_violation_rows(prov, metric, mode: str) -> list:
+    """The `violations` rows an unbound metric contributes under the `metric_subject` rung.
+
+    `[]` under `off`/`audit` — those rungs RECORD and do not enforce; `[]` when the subject bound.
+    Under `require`, one `metric_salvaged` row carrying the provenance, shaped exactly like
+    `SalvagedMetric.violation_rows`' ({name, value, max, min} + the account) so the fold, the UI and
+    every existing reader need to learn nothing.
+
+    Note there is no `select`-shaped escape hatch here and there must not be. `select` exists because
+    an operator can look at a salvaged value's provenance and decide the recovery was sound; there is
+    nothing to look at for an unbound one — the whole content of the finding is that the record does
+    not say what the number is about. The escape hatch is declaring a subject.
+    """
+    if str(mode or "") != "require" or not isinstance(prov, dict) or prov.get("subject_bound"):
+        return []
+    from looplab.runtime.metric_subject import unbound_message
+    account = {"salvaged": False, "condition": UNBOUND_SUBJECT_CONDITION,
+               "unbound_reason": str(prov.get("unbound_reason") or "unreadable"),
+               "detail": unbound_message(prov)[:300]}
+    return [{"name": SALVAGE_VIOLATION, "value": metric, "max": None, "min": None,
+             "salvage": account}]
+
 # Failure REASONS (`engine/triage.py::_failure_reason`) a metric is never salvaged under. Each is a
 # separate argument, not a list of similar things:
 #

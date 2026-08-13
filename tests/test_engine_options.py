@@ -157,6 +157,12 @@ ATTR_BY_FIELD = {
     # a test or a resumed subclass can set it directly), so both names are the same.
     "metric_salvage": "metric_salvage",
     "metric_salvage_repair": "metric_salvage_repair",
+    # Metric provenance. `metric_subject` is public for the same reason `metric_salvage` is — three
+    # mixins read it as a plain attribute and a test or a resumed subclass sets it directly — while
+    # `landlock` is private beside `_read_fence`, its sibling boundary: nothing outside
+    # `engine/resources.py` reads it, and it is settled at construction.
+    "metric_subject": "metric_subject",
+    "landlock": "_landlock",
 }
 
 

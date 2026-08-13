@@ -198,6 +198,48 @@ before the next stage runs, and has two halves:
   **work**, never the result quality — `"recall beats 0.85"` is the search's judgement, not a stage's,
   and the checker will not enforce it.
 
+**The metric must say what it is ABOUT — `eval.metric.subject`.** `expect` and `needs` describe a
+stage's files; `subject` describes the *number*. It names the workdir-relative artifact the metric is a
+claim about, and the engine binds the recorded number to that artifact's content identity at the score
+stage's start:
+
+```jsonc
+"eval": {
+  "cmd": ["python", "score.py"],
+  "metric": { "kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)",
+              "subject": ["outputs/final/model.safetensors"] }
+}
+```
+
+`node_evaluated.metric_provenance` then carries, per subject, the `(dev, ino, size, mtime_ns, ctime_ns)`
+identity tuple, a sha256 (full under 256 MiB, **sampled** above it — the mode is on the record), and the
+stage whose `expect` promised the path. It is the operator's field, on the operator's protected stage,
+for the same reason scoring is: the agent writes the training script and therefore writes the very text
+an extractor would read.
+
+Why it exists, in numbers: across the six repo runs that have an event log, **82 of 83 recorded metrics
+carry no provenance at all** — the one exception is the salvage path, i.e. provenance is written only
+once something has already failed — and **2 of 83 are provably about bytes the node did not produce**.
+Those two are the same number, `0.224975`, recorded by two independently authored nodes three weeks
+apart from the same foreign checkpoint. The node's own checkpoint and the foreign one are byte-identical
+in *size* (92,174,712), so `exists` / `non-empty` / `fresh` — every predicate the artifact contract owns
+— are satisfied by both. Only content or inode identity separates them.
+
+What binding does and does not buy, stated plainly:
+
+* it gives the number a **referent**, so a replayed run can answer "what is this about?" — which,
+  before this, no run could;
+* under `metric_subject: "require"` an **unbound** metric (no subject declared, or one that is missing,
+  empty, stale, or escapes the workdir) carries the existing `metric_salvaged` violation, so the node is
+  counted and visible and is never selectable;
+* it does **not** prove the score stage read the subject. Neither does `needs` — measured against the
+  preserved node-4 workdir, `verify_stage_inputs` with a perfectly correct `needs` naming the node's own
+  checkpoint returns "no problem", because the node really did write that file and the scorer read
+  somewhere else anyway. `needs` is a *presence* check and the engine now derives the protected `score`
+  stage's `needs` from `subject`, which buys **latency** (the refusal fires before the scorer runs) and
+  not coverage. What makes "read elsewhere" impossible is the read boundary — `read_fence` (on by
+  default) and, opt-in, the kernel allow-list `landlock`.
+
 A failed `expect` fails the stage the same way a non-zero exit does (same `failed_stage`, same repair
 path), so nothing new happens mid-loop — but see **metric salvage** below: a stage that failed its
 `files` contract *after* already computing the metric no longer loses it. `expect` lives in the

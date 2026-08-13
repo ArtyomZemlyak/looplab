@@ -167,6 +167,33 @@ class EvalStagesMixin:
                      "command": list(score_cmd) if score_cmd is not None
                                 else command_eval.expand_params(list(es.get("command") or []), params),
                      "timeout": score_timeout if score_timeout is not None else es.get("timeout", 600.0)}
+            # THE SCORE STAGE'S INPUT CONTRACT, derived from the metric's declared SUBJECT.
+            #
+            # `needs` has shipped since 2026-08-13 — `validate_stages` accepts it, `verify_stage_inputs`
+            # implements it, `_run_stages` calls it and emits a `needs_failed` row. The ONE missing
+            # wire was here: the engine-appended protected stage was built as {name, command, timeout},
+            # so the only stage the operator owns was the only stage that could not declare what it
+            # reads. The operator has no other place to put it — this stage is appended BY the engine
+            # precisely so the agent cannot rewrite scoring.
+            #
+            # Derived rather than a second declaration: the subject IS what the scorer reads, so
+            # asking the operator to write it twice is how the two come to disagree. What this buys is
+            # LATENCY, not coverage — the check fires before the scorer runs, with a message naming
+            # the fix, instead of after. It is measured NOT to catch the incident this whole design
+            # exists for (doc 35 §3a: `verify_stage_inputs` against the preserved v6 node-4 workdir,
+            # with a perfectly correct `needs` naming the node's own checkpoint, returns `None` — the
+            # node really did write that file and the stage read somewhere else anyway). `needs` is a
+            # PRESENCE check and must stop being described as a provenance gate.
+            #
+            # `str` filter: on the `_grandfathered` reload path a recorded snapshot's `subject` was
+            # never re-validated, and a non-string entry reaches `_confined` -> `Path(wd) / 123` ->
+            # an uncaught TypeError out of the eval worker (no node terminal, re-dying on every
+            # resume — the failure class `READER_PATH_KEYS` exists to prevent).
+            if str(getattr(self, "metric_subject", "audit") or "audit") != "off":
+                _subject = (es.get("metric") or {}).get("subject") if isinstance(es.get("metric"), dict) else None
+                _needs = [s for s in (_subject or []) if isinstance(s, str) and s.strip()]
+                if _needs:
+                    final["needs"] = _needs
             return _expand(preceding) + [final]
         return None
 
