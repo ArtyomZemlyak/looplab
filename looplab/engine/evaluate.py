@@ -2025,9 +2025,13 @@ class EvaluateMixin:
                 # eval's own authenticated failure classification exactly as an `abandon` does, so no
                 # metric, champion, selectability or violation moves on this verdict. Doc 36's line.
                 if critic_due(attempt, self._repair_critic_after):
-                    critic = await anyio.to_thread.run_sync(
-                        self._repair_critic, state, node, repair_log[-_JUDGE_HISTORY_ROWS:],
-                        attempt + 1)
+                    # Called DIRECTLY, exactly like `_triage_crash` and `_repair` above rather than
+                    # through `to_thread`. Not an oversight: all three are `@in_llm_lane` methods
+                    # whose lane admission is selected through a ContextVar, and the two that already
+                    # exist establish the convention. A third call shape here would make this the one
+                    # place in the loop where the lane's propagation has to be reasoned about.
+                    critic = self._repair_critic(
+                        state, node, repair_log[-_JUDGE_HISTORY_ROWS:], attempt + 1)
                     if critic.get("action") == CRITIC_STOP:
                         triage_outcome = ("abandon", (
                             "the repair critic stopped this chain — "
