@@ -277,7 +277,7 @@ larger cost sits beside it — 167.7 GPU-h with no eval running at all, same roo
 the producer off during a long eval because the board is only refilled by outer-loop cadences), and
 it deserves its own entry.
 
-**What it would take.** The full option table is `docs/32-cross-turn-dispatch-options-2026-08-13.md`.
+**What it would take.** The full option table is `docs/33-cross-turn-dispatch-options-2026-08-13.md`.
 The recommended shape hoists the eval task group to run scope and needs NO new invariant-#1
 exception: eval children are already engine-loop tasks, all eight terminal appends in `evaluate.py`
 are lexically inside `async with self._write_lock`, `_record_eval_start_boundary` stays at the
