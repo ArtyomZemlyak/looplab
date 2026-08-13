@@ -199,6 +199,31 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   them as omitted rather than certifying data the response no longer carries. Within-run provenance
   such as `research_origin` is unaffected, so a reviewer still sees an imported experiment — just not
   which run it came from.
+- **Standing watches (always-on assistant)** — ask the chat to *"tell me when run X finishes"* or
+  *"check the run every 10 minutes"* and it arms a **watch**: a durable record under
+  `<runs>/assistant/.watches/` holding your own instruction, its condition, its mode and its budget.
+  It survives a page reload, a closed tab and a server restart, because the wake-up carries
+  everything the servicing process needs — which is exactly what a longer request timeout cannot do.
+  Two conditions: **wait for a run state** (`finished`, `paused`, `finalizing`, `engine_stopped`, …)
+  and **every N seconds**. The server evaluates the condition itself, over the same folded run
+  projection the dashboard reads, backing off toward a **60 s** ceiling; an unmet condition costs no
+  model call at all, so a run that finishes overnight is a `stat` a minute rather than a bill.
+  Each wake-up appends a normal assistant turn to the same chat, tagged with what it was waiting for
+  and what the server observed, so the monitoring shows up where you already are. A watch runs at the
+  mode the chat was in when you armed it — never a wider one — and it always yields to you: if you
+  are mid-turn it waits rather than interleaving. Every watch carries a wake-up budget and a lifetime
+  (defaults 24 wake-ups / 24 h, 8 active watches per chat), and both are visible on the record.
+  Routes: `GET/POST /api/assistant/watches`, `DELETE /api/assistant/watches/{id}`; the agent's own
+  verbs are `watch_run` / `watch_every` / `list_watches` / `stop_watch`. After a server restart a
+  read-only watch is re-armed automatically; one that could have MUTATED is left `interrupted` with
+  the reason, because its turn may have applied half a change and re-entering it would apply the
+  other half twice.
+- **A cut-short turn says so** — a long turn can end for five reasons that are not "the model
+  finished": the wall clock, the turn budget, stuck-detection, a model that will not emit, and the
+  convergence ceiling. All five now append a notice naming which one and how far it got, and set
+  `budget_exhausted` on the reply (persisted, and on the SSE `done` event). The chat's own wall clock
+  is `assistant_time_budget_s` — blank = 300 s, `0` = no cap. Pair `0` with a watch rather than with
+  hope: an unbounded turn still dies with its browser, and a watch does not.
 - **Read-only chat share links** — the Assistant's **⤴ create snapshot** button mints a link with its own secret (not
   the chat's id), an expiry, and a **⤫ unshare** that revokes every link for that chat while keeping
   the conversation. A link is **frozen** at the messages that existed when it was created, so

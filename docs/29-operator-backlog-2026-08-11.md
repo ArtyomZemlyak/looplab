@@ -334,16 +334,39 @@ source repo. Measure the seed cost before paying for that coupling.
 
 **Asked:** "infinite assistant mode; waiting on statuses; monitoring every N."
 
-**Today.** An assistant turn is bounded twice: `agent_max_turns` (default `0` = unlimited) and a hard
-wall-clock `agent_time_budget_s`, which falls back to **300 s** when unset
-(`serve/assistant.py::run_turn`). The 300 s floor is the strong suspect behind "the assistant hangs
-around 40 tool uses and then a bare tool use arrives as the reply" — on budget exhaustion the loop
-returns whatever it has. That part is a bug to confirm and fix.
+**SHIPPED 2026-08-13.** Both halves. The bug was reproduced before it was fixed, and the
+reproduction found a second, larger defect than the one suspected.
 
-The three asks on top of it are a different thing: a turn that *waits* for a run to reach a state, and
-a turn that wakes on a schedule, both need the turn to outlive its HTTP request. That is a job
-(`serve/jobs.py`) plus a durable wake-up record, not a longer timeout — otherwise a browser refresh
-silently ends the monitoring the operator asked for.
+**The bug, as suspected.** `run_turn` read the engine-wide `agent_time_budget_s` and then applied
+`or 300.0`, so the settings table's documented "0 = no cap" silently meant five minutes for the
+chat, with no way to raise it without also raising every engine role's. `Settings.assistant_time_
+budget_s` is now the chat's OWN wall clock — unset = inherit, else 300 s; `0` = genuinely no cap —
+and `serve/assistant.py::assistant_time_budget` states the rule with a truth table.
+
+**The bug, as found.** `drive_tool_loop` has FIVE exits that end a turn without the model choosing
+to emit, and only two of them reported anything. Driven against a scripted client that starts
+repeating itself, the whole reply was `"Let me look at the next file."` — a bare interstitial
+narration, no notice, no `budget_exhausted` key. That is the operator's report verbatim, and it was
+the half nobody had looked at: the wall-clock exit had already been given a notice on 2026-08-12,
+and the three that fall through to `fallback(messages)` had not. `tool_loop.LOOP_CUTOFF_KINDS` is
+now the closed vocabulary of all five and `assistant.cutoff_notice` gives each one a sentence. The
+machine-readable fact is also persisted with the turn and rides the SSE `done` payload, whose fixed
+key list had been dropping it — i.e. the envelope half of the earlier fix reached nobody, because
+the UI uses the streaming endpoint.
+
+**The feature.** `serve/assistant_watch.py` — a durable **watch** record plus a lazily-started
+scheduler, deliberately NOT a `serve/jobs.py` job: that registry is process-local, capacity-capped
+and evicts a completed receipt after eleven minutes, all correct for "a slow request the browser is
+waiting on" and all wrong for "monitoring that must outlive the process". A watch waits on a run
+state or on a schedule; the SERVER evaluates the condition over the folded run projection with a
+bounded backoff to a 60 s ceiling (an unmet condition costs no model call), and the wake-up carries
+the operator's own instruction, so it is re-enterable by a process that did not arm it. Each
+wake-up appends a normal assistant turn to the chat. Per doc 36: the agent is woken *because* a
+state was observed, never because it said one was; a wake-up runs at the mode pinned when the watch
+was armed, with exactly the toolset that mode already grants; the module appends no event and names
+no control intent; a wake-up may not arm further watches; and every watch carries a recorded
+wake-up budget and lifetime. After a restart a read-only watch is re-armed and a mutating one is
+left `interrupted` with its reason, because its turn may have applied half a change.
 
 ## F5 · Debug nodes: keep, scope, or remove
 
