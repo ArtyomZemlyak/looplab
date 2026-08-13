@@ -38,6 +38,7 @@ remedy table below.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -678,5 +679,51 @@ def test_a_retry_that_could_only_time_out_again_refuses_and_names_the_way_out(tm
         # …and the named way out is real: a spent record does not hold a fresh command at the door.
         assert srv.commands._unresolved_equivalent(
             rd, EV_PAUSE, srv.commands._payload(EV_PAUSE, {})[1]) == (None, None)
+    finally:
+        world.close()
+
+
+def test_an_unreadable_command_record_has_a_confirmed_escape(tmp_path):
+    """The same hazard one layer up, and it had no escape at all.
+
+    `_active_record` treats a record it cannot parse as `executing` — fail closed, deliberately,
+    because destructive mutation must not erase the evidence of a command whose state is unknown —
+    and `_active_command_ids` counts it too. So ONE corrupt `cmd_*.json` refuses every later command
+    with `command_in_progress`, refuses reset and delete through `refuse_unless_quiescent`, and
+    answers 503 to the very GET its own refusal names. Nothing clears it and nothing expires it.
+
+    This is the shape the operator's requirement allows an absorbing state to have and no other: it
+    is reachable only through an explicit confirmation, and the refusal NAMES that escape.
+    """
+    world = _World(tmp_path / "runs")
+    rd = world.seed("corrupt", alive=True)
+    commands = world.commands
+    try:
+        damaged = rd / ".commands" / ("cmd_" + "ab" * 16 + ".json")
+        damaged.parent.mkdir(parents=True, exist_ok=True)
+        damaged.write_text("{not json at all")
+        os.utime(damaged, (time.time() - 600, time.time() - 600))
+
+        # Wedged, in both directions, and the refusal names its own way out.
+        assert _drive(commands, rd, EV_PAUSE, {})["code"] == "command_in_progress"
+        with pytest.raises(HTTPException) as caught:
+            commands.reject_if_active(rd, "pause the run")
+        assert caught.value.detail["code"] == "command_in_progress"
+        assert "resolve-activity-claims" in caught.value.detail["remediation"]
+
+        # The escape is gated: an unconfirmed call refuses, and says the exact phrase it wants.
+        with pytest.raises(HTTPException) as gate:
+            commands.resolve_active_claims(rd)
+        assert gate.value.detail["code"] == "active_claim_confirmation_required"
+
+        resolved = commands.resolve_active_claims(
+            rd, "I verified no LoopLab command or run activity is active")
+        assert resolved["resolved"] is True and resolved["count"] == 1
+
+        # QUARANTINED, not deleted: the plane is free and the bytes are still on disk.
+        assert not damaged.exists()
+        kept = list((rd / ".commands").glob("cmd_*.json.quarantined-*"))
+        assert len(kept) == 1 and kept[0].read_text() == "{not json at all"
+        assert _drive(commands, rd, EV_PAUSE, {})["status"] == "succeeded"
     finally:
         world.close()

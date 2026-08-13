@@ -401,7 +401,20 @@ new Operations panel.
 
 Kept here so they are not lost; each is a fix, not a feature.
 
-* **A timed-out control command makes a run PERMANENTLY uncontrollable.** Reproduced end to end on
+* **A timed-out control command makes a run PERMANENTLY uncontrollable.** FIXED 2026-08-13 (fault 2
+  had already been fixed on 2026-08-12); the record below is kept as written because the mechanism is
+  the reason the fix looks the way it does. What was still live on 2026-08-13, measured by driving
+  the real service: fault 1 (the pause postcondition) and fault 3 (retry re-driving a consumed
+  event). The loop was also TIGHTER than recorded here — a fresh `pause` with a new idempotency key
+  was refused `409 retry_existing_command` naming the spent command, whose `/retry` could only time
+  out, so both doors were closed and each named the other. `pause` now completes on the FOLD (with
+  the engine-process half reported as `engine_stopped`, never gating), `/retry` mints a fresh intent
+  under a fresh marker when the run has superseded the old one, a spent record no longer blocks
+  admission, and the legacy `paused_and_stopped` records already on disk are read under the new rule
+  so the runs wedged today are freed rather than only future ones. `tests/test_control_plane_liveness.py`
+  is the general guard: it searches the reachable state space with real commands and requires every
+  refusal to name a remedy that leads somewhere. It found the legacy-record wedge itself.
+  Reproduced end to end on
   `rubertlite-dr-unified-v2`, 2026-08-11, and it is worse than a dead chip in the timeline. Three
   compounding faults:
 

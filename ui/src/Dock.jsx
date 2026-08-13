@@ -9,8 +9,8 @@ import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
 import { useCommandStatusPoll, useNodeSpanWindow, usePoll, useTraceRetry } from './hooks.js'
 import {
   commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
-  foreignCommandLock, interruptedCommandRecovery, observeCommandError, protocolCommandRecord,
-  restoredCommandRecord, settledCommandFailure,
+  foreignCommandLock, interruptedCommandRecovery, observeCommandError, pendingCommandRemedy,
+  protocolCommandRecord, restoredCommandRecord, settledCommandFailure,
 } from './runCommandMachine.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
@@ -1126,6 +1126,10 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     onFailed: (error, kind, command) =>
       failTransport(polledAction, polledKey, polledGeneration, error, command),
   })
+  // A pending command that has stopped looking instantaneous owes the operator an account of itself.
+  // Recomputed on the status poll's own cadence (each poll replaces `transportPending`), so the chip
+  // stops being a bare label without a second timer of its own.
+  const pendingRemedy = pendingCommandRemedy(transportPending?.record, transportPending?.action)
   const canRetryTransport = commandCanRetry(transportFailure?.record)
   const failedCommandId = transportFailure?.record?.id
   const conflictingCommandId = transportFailure?.record?.error?.existing_command_id
@@ -1339,6 +1343,17 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                   Check command</button>
                 {transportPending.protocolInvalid && <button className="btn sm ghost"
                   onClick={dismissProtocolTransport}>Dismiss</button>}
+              </>}
+              {!transportPending.statusUnavailable && pendingRemedy && <>
+                <span className="transport-detail">
+                  {`Waiting ${Math.round(pendingRemedy.elapsedMs / 1000)}s. ${pendingRemedy.waitingFor} `}
+                  {pendingRemedy.boundedMs == null
+                    ? 'This server does not report when the command stops waiting.'
+                    : `It stops waiting on its own in about ${Math.max(1, Math.round(pendingRemedy.boundedMs / 1000))}s, and then says why.`}
+                </span>
+                {pendingRemedy.canCheck && <button className="btn sm ghost" onClick={onCheckTransport}
+                  aria-label={`Check the pending ${transportPending.action} command now`}>
+                  Check now</button>}
               </>}
             </div>}
             {!transportPending && externalTransportPending && <div className="transport-message" role="status"

@@ -625,6 +625,17 @@ class RunCommandService:
         remains the guarded escape hatch for pre-upgrade, malformed, inaccessible-owner, or
         hard-link-fallback claims.  It is intentionally explicit because ambiguity is not evidence
         that a suspended worker died.
+
+        It also resolves an UNREADABLE `cmd_*.json` record, which is the same hazard one layer up and
+        had no escape at all.  `_active_record` treats a record it cannot parse as `executing` — fail
+        closed, deliberately, because destructive mutation must not erase evidence of a command whose
+        state is unknown — and `_active_command_ids` counts it too.  So a single corrupt or planted
+        record file refuses every later command with `command_in_progress`, refuses reset and delete
+        through `refuse_unless_quiescent`, and answers 503 to the very GET its own refusal names.
+        There is no state of the system that clears it and no timeout that expires it: an absorbing
+        state, reachable without any operator mistake.  Such a record is QUARANTINED rather than
+        deleted — renamed out of the `cmd_*.json` glob, so the plane is free while the bytes remain on
+        disk for whoever has to explain them.
         """
         phrase = "I verified no LoopLab command or run activity is active"
         root = self.srv.root.resolve()
@@ -637,7 +648,11 @@ class RunCommandService:
                 *directory.glob(".cmd_*.executing"),
                 *directory.glob(".activity_*.json"),
             ] if directory.exists() else []
-            if not claims:
+            # A record whose bytes cannot be parsed has no owner to prove alive or dead, so it can
+            # never leave the ambiguous tier: it goes straight to the confirmation gate below.
+            damaged = [path for path, record in self._scan_command_records(
+                canonical, on_symlink="unreadable") if record is None]
+            if not claims and not damaged:
                 return {"ok": True, "resolved": False, "count": 0,
                         "reason": "no_active_claims"}
 
@@ -665,18 +680,20 @@ class RunCommandService:
                     })
                 unresolved.append(claim)
 
-            if not unresolved:
+            if not unresolved and not damaged:
                 return {"ok": True, "resolved": bool(retired), "count": retired,
                         "reason": "owners_definitively_gone"}
             now = time.time()
             minimum_age = max(5.0, self.startup_timeout * 2 + 1)
-            for claim in unresolved:
+            for claim in unresolved + damaged:
                 try:
                     created_at = float((self._load(claim) or {}).get("created_at")
                                        or claim.stat().st_mtime)
                 except (OSError, TypeError, ValueError, OverflowError):
                     created_at = now
                 if now - created_at < minimum_age:
+                    # A record can also be briefly unreadable simply because it is BEING written —
+                    # `_read_existing` heals that case itself — so the same safety window applies.
                     raise HTTPException(409, {
                         "code": "active_claim_uncertain",
                         "message": "An unknown command/activity claim is still inside its safety window.",
@@ -699,6 +716,20 @@ class RunCommandService:
                     retired += 1
                 except OSError as exc:
                     raise HTTPException(503, f"could not resolve active claim: {exc}") from exc
+            for record_path in damaged:
+                # QUARANTINE, never unlink. The record is the only account of a command whose outcome
+                # nobody knows; what has to stop is its hold on the control plane, not its existence.
+                # `.quarantined-<ts>` leaves the `cmd_*.json` glob every scanner uses.
+                target = record_path.with_name(f"{record_path.name}.quarantined-{int(now)}")
+                try:
+                    if record_path.is_symlink():
+                        record_path.unlink()   # a planted link owns no bytes worth preserving
+                    else:
+                        os.replace(record_path, target)
+                    retired += 1
+                except OSError as exc:
+                    raise HTTPException(
+                        503, f"could not quarantine an unreadable command record: {exc}") from exc
             return {"ok": True, "resolved": True, "count": retired,
                     "reason": "operator_verified_unknown_claims"}
 
@@ -1606,7 +1637,14 @@ class RunCommandService:
                 "existing_command_id": command_id,
                 "current_status": active.get("status"),
                 "message": f"Cannot {operation} while another run command is in progress.",
-                "remediation": f"GET /commands/{command_id} to a terminal status first.",
+                # GET is not merely an observation here: a nonterminal record whose worker died is
+                # re-driven from it, and the monitor's deadlines are finite, so this always resolves.
+                # The one shape it cannot resolve is a record this server cannot READ, which
+                # `_active_record` counts as active on purpose — hence the second sentence.
+                "remediation": (
+                    f"GET /commands/{command_id} to a terminal status first; if that record cannot "
+                    f"be read at all, POST /api/runs/{{run}}/resolve-activity-claims with its "
+                    f"confirmation phrase."),
             })
         unresolved_path, unresolved = self._unresolved_terminal_record(rd)
         if unresolved is not None:
@@ -1626,7 +1664,15 @@ class RunCommandService:
             raise HTTPException(409, {
                 "code": "engine_start_uncertain",
                 "message": f"Cannot {operation} while an engine start is unresolved.",
-                "remediation": "Wait for engine_running or definitive child exit; do not start another driver.",
+                # NAME THE ESCAPE. Waiting is the ordinary answer, but a claim whose PID cannot be
+                # judged (an inaccessible process, a legacy identity-less row) never becomes
+                # definitive on its own, and an operator told only to "wait" has no next move at all.
+                # `POST /api/start/{run}/resolve-claim` is that move; it is deliberately gated behind
+                # an exact confirmation phrase, which the endpoint itself supplies on refusal.
+                "remediation": (
+                    "Wait for engine_running or definitive child exit; if neither ever arrives, "
+                    "inspect the process table and POST /api/start/{run}/resolve-claim. Do not "
+                    "start another driver."),
             })
 
     @contextmanager
@@ -2157,8 +2203,10 @@ class RunCommandService:
                             "code": "engine_start_uncertain",
                             "message": "An earlier engine start has not exposed its lock or exited.",
                             "remediation": (
-                                "Wait for engine_running or definitive child exit; do not submit "
-                                "another state-changing command."),
+                                "Wait for engine_running or definitive child exit; if neither ever "
+                                "arrives, inspect the process table and POST "
+                                "/api/start/{run}/resolve-claim. Do not submit another "
+                                "state-changing command."),
                         })
                     # A fresh key must not double-apply any unresolved control intent. Unlike
                     # finalize recovery above, the caller must name and explicitly retry the original
@@ -2329,7 +2377,10 @@ class RunCommandService:
                     "existing_command_id": command_id,
                     "current_status": record.get("status"),
                     "message": "The prior detached engine may still be starting without a live lock.",
-                    "remediation": "Wait for engine_running or definitive child exit; retry must not Popen yet.",
+                    "remediation": (
+                        "Wait for engine_running or definitive child exit; if neither ever arrives, "
+                        "inspect the process table and POST /api/start/{run}/resolve-claim. Retry "
+                        "must not Popen yet."),
                 })
             if (record.get("status") not in {"failed", "timed_out"}
                     or not bool((record.get("error") or {}).get("retryable"))):
