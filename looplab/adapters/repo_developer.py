@@ -77,15 +77,45 @@ _REPO_DEV_SYSTEM_INTRO = (
 # `read_file("looplab_eval.py")` returned the file, and its two `write_file("looplab_eval.py")`
 # attempts were both refused by the write gate — the loop had no move left. If seeding ever stops
 # covering `protect`, this sentence becomes a lie again and the repair loop becomes unbounded.
-_REPO_DEV_SYSTEM_BODY = (
+_REPO_DEV_SYSTEM_BODY_HEAD = (
     "The repository's key source files are PREVIEWED below (each is TRUNCATED to save space). This is "
     "a preview, NOT the full code — to read a whole file or find an exact symbol/flag/signature, use "
     "the read-only repo scouts: read_file(path) for full content (repo-relative, e.g. train.py), "
     "grep(pattern) to find where something is defined across the repo, find_files(root, pattern) / "
-    "list_dir(path) to see what exists. Do NOT write helper/'cat'/'check' scripts. "
+    "list_dir(path) to see what exists. ")
+
+# The ONE clause that depends on whether the PROBE is wired (F2, `Settings.developer_probe`). Kept as
+# two alternatives spliced at the SAME position rather than a paragraph appended at the end, so a run
+# with the probe off gets a byte-identical system prompt to the one this feature found — the composed
+# `_REPO_DEV_SYSTEM_BODY` below is still the PromptStore default for `repo_developer_system_body`.
+_REPO_DEV_NO_EXECUTION = (
+    "Do NOT write helper/'cat'/'check' scripts. "
     "There is NO shell / bash / run-command tool — you CANNOT execute anything yourself: your ONLY "
     "actions are write_file/edit_file (author code) and the read-only scouts below. The eval runs your "
-    "code afterwards. (Calling a 'bash'/'run' tool just wastes a turn — it does not exist.) "
+    "code afterwards. (Calling a 'bash'/'run' tool just wastes a turn — it does not exist.) ")
+
+# The replacement when the probe IS wired. The sentence it replaces is the one that produced the
+# defect F2 exists to close — a Developer told "you cannot execute anything" concluded, verbatim,
+# "Since I have no shell/install ability, the cleanest repair is a small loguru shim module", and
+# wrote a fake library rather than spending one line finding out the real one was importable. So the
+# WORK-AROUND instruction is the load-bearing half here, not the tool announcement.
+_REPO_DEV_PROBE_EXECUTION = (
+    "Do NOT write helper/'cat'/'check' scripts into the repo — that is what run_probe is for. "
+    "There is still NO shell / bash tool and you cannot run your node's pipeline yourself; the eval "
+    "runs your code afterwards. What you DO have is run_probe(code): a short PYTHON program, run "
+    "against the REAL environment, to CHECK anything you would otherwise have to guess — whether a "
+    "package actually imports HERE, whether a data file parses, what a config resolves to, whether "
+    "the code you just staged gets an API right. "
+    "PROBE BEFORE YOU WORK AROUND SOMETHING: if you are about to write a shim, a stub, a vendored "
+    "copy or a try/except ImportError fallback because you are not sure something exists, probe it "
+    "first — it usually does exist, and a shim that shadows a real library is a defect this run pays "
+    "for later. A probe OBSERVES and changes nothing: it cannot write files, install packages (there "
+    "is no pip here — a genuinely missing dependency is something to REPORT in your summary, not to "
+    "work around), start other programs, or use a GPU, and it runs in a copy of the files you have "
+    "staged, never in the operator's source tree. Anything that must PRODUCE a file belongs in your "
+    "node's files and its declared stages. ")
+
+_REPO_DEV_SYSTEM_BODY_TAIL = (
     "ALWAYS use REPO-RELATIVE paths for the scouts (e.g. read_file('train.py'), not an absolute "
     "'/home/…/…' path — those are refused). If a grep/read keeps returning the same content, you "
     "already have it: STOP re-reading and act on what you know. "
@@ -260,6 +290,13 @@ _REPO_DEV_SYSTEM_BODY = (
     "lr), not just the objective; point its log dir at a STABLE path under the workdir so the "
     "curves persist (viewable via `looplab tensorboard <run_dir>`). Also print readable progress "
     "(epoch/step + current metrics) to stdout — it streams to the live eval log.\n\n")
+
+# The PromptStore default for `repo_developer_system_body`, composed so the no-probe run's prompt is
+# byte-identical to what it has always been. `_system_body()` swaps only the middle clause.
+_REPO_DEV_SYSTEM_BODY = (_REPO_DEV_SYSTEM_BODY_HEAD + _REPO_DEV_NO_EXECUTION
+                         + _REPO_DEV_SYSTEM_BODY_TAIL)
+_REPO_DEV_SYSTEM_BODY_WITH_PROBE = (_REPO_DEV_SYSTEM_BODY_HEAD + _REPO_DEV_PROBE_EXECUTION
+                                    + _REPO_DEV_SYSTEM_BODY_TAIL)
 _REPO_DEV_COMMANDS_HEADER = (
     "=== CANONICAL COMMANDS (from the repo README — adapt paths to absolute + your "
     "hyperparameters) ===\n")
@@ -322,7 +359,8 @@ class LLMRepoDeveloper:
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
-                 prompts=None, cross_run_read_tools: bool = False, memory_dir=None):
+                 prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
+                 probe: bool = False, probe_timeout_s: float = 60.0):
         self.client = client
         self.task = task
         self.parser = parser
@@ -341,6 +379,17 @@ class LLMRepoDeveloper:
         self._plan_max_steps = max(1, int(plan_max_steps))
         self._session_max_turns = int(session_max_turns)
         self._session_time_budget_s = float(session_time_budget_s)
+        # F2 · the PROBE (tools/dev_probe.py). The ctor default is OFF while `Settings.developer_probe`
+        # is ON, deliberately: `make_roles` is the operator's knob and passes the setting, and the ~170
+        # direct `LLMRepoDeveloper(...)`/`__new__` constructions in the suite are not asking for a live
+        # execution surface. A default of True here would silently add a subprocess-launching tool to
+        # every one of them.
+        self._probe = bool(probe)
+        self._probe_timeout_s = float(probe_timeout_s)
+        # The probe's read fence is derived from the task's OWN repo spec, by the same
+        # `read_fence.fence_inputs` the engine hands its eval fence — kept here so the derivation
+        # reads one spec per node build rather than one per phase.
+        self._probe_repo_spec = task.repo_spec() if probe else None
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -566,6 +615,20 @@ class LLMRepoDeveloper:
                                             "the same budget a forced full re-train does, so use it "
                                             "when you have evidence, not on a hunch."}}, [])
 
+    def _system_body(self, render) -> str:
+        """The system body, with the one clause that depends on whether the PROBE is wired.
+
+        SAME PromptStore key either way (`repo_developer_system_body`), different DEFAULT — so an
+        operator's `prompt_dir` override still replaces the whole body exactly as it always did, and
+        a run with `developer_probe=False` gets a byte-identical prompt to the one this feature
+        found. The clause is spliced at its original position rather than appended, because the text
+        it replaces asserts the opposite ("you CANNOT execute anything yourself") and two paragraphs
+        contradicting each other is worse than either one alone: that assertion is what the observed
+        failure quoted back at itself before writing a fake loguru."""
+        default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
+                   else _REPO_DEV_SYSTEM_BODY)
+        return render(self.prompts, "repo_developer_system_body", default)
+
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
         a model that keeps writing/exploring without ever emitting `done` fails cleanly with the code
@@ -678,8 +741,24 @@ class LLMRepoDeveloper:
         secret-filtered), bound to the editable repo roots with repo-relative paths (the SAME paths as
         write_file/edit_file). `write.files` is passed as the STAGED overlay so read/grep see the code
         the Developer is currently writing — not the pristine on-disk repo (reading a parent/merge
-        source is a separate, secondary concern)."""
+        source is a separate, secondary concern).
+
+        F2 — this is also where the PROBE joins, and it joins HERE rather than at the four phase call
+        sites for the same reason the scouts do: every phase asks the same kind of question. A stages
+        or plan phase that cannot check whether a library imports declares a pipeline around a
+        library that isn't there, which is the same defect one phase later. The probe carries no
+        write capability of its own, so adding it to the two READ-ONLY phases does not make them
+        writing phases — that is a property of the boundary, not of the toolset it is composed into
+        (`tools/dev_probe.py`)."""
         extra = []
+        if getattr(self, "_probe", False):
+            from looplab.tools.dev_probe import DevProbeTools
+            # `write` is the live RepoWriteTools: the probe replicates its staged `files` into its own
+            # disposable cwd, so a probe can import/parse what this node has written so far. One-way —
+            # the probe cannot write, so nothing it does can flow back into the build.
+            extra.append(DevProbeTools(getattr(self, "_probe_repo_spec", None),
+                                       timeout_s=getattr(self, "_probe_timeout_s", 60.0),
+                                       staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
         if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
@@ -1009,7 +1088,7 @@ class LLMRepoDeveloper:
         system = (
             render(self.prompts, "repo_developer_system_intro", _REPO_DEV_SYSTEM_INTRO)
             + self.brief + "\n\n"
-            + render(self.prompts, "repo_developer_system_body", _REPO_DEV_SYSTEM_BODY)
+            + self._system_body(render)
             + operational_attention_points() + "\n\n"
             + _REPO_DEV_COMMANDS_HEADER + self._recipes() + "\n\n"
             + ((_REPO_DEV_RESULTS_HEADER + _results + "\n\n")

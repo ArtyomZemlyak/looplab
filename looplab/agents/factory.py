@@ -356,7 +356,12 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             session_max_turns=getattr(settings, "developer_session_max_turns", 500),
             session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
             cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
-            memory_dir=getattr(settings, "memory_dir", None))
+            memory_dir=getattr(settings, "memory_dir", None),
+            # F2 · the PROBE (tools/dev_probe.py). Passed as two plain values rather than the whole
+            # Settings object, like every other knob above: `make_roles` is the ONE place a setting
+            # becomes a role's behaviour, and a role that reads Settings itself is a second place.
+            probe=getattr(settings, "developer_probe", True),
+            probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

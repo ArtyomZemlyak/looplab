@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 170
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -35,7 +35,12 @@ SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
 # tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
 # fields" sentence honest.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
-# 168 rows since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
+# 170 rows since the DEVELOPER PROBE joined Agent loop & models, beside the Developer session
+# budgets — `developer_probe` and `developer_probe_timeout_s` (F2). They are rows rather than an
+# uncurated omission for the same reason `read_fence` is: the probe is an EXECUTION surface inside
+# the engine process, so an operator must be able to see that it exists and close it, and its
+# timeout is the bound between "a question" and "a job that belongs in an eval stage".
+# (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
 # uncurated omission because it is an operator-visible policy that can REFUSE a running eval, and
@@ -45,7 +50,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "68fcf2e159dba79f1c4775892dc43291493f85350cf4510bc83305ce85f6e431"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "fd95071e5a00f81ad7f54a1da94d24c956322b93491446e06152a614c9c9b7f4"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

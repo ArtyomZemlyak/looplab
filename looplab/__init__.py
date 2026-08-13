@@ -127,6 +127,7 @@ _LAYOUT = {
     "deps": "runtime",
     "deletion_service": "serve",
     "deletion_transaction": "serve",
+    "dev_probe": "tools",      # F2: the Developer's bounded probe (no write, no exec, fenced)
     "digest": "events",
     "durable_op": "serve",     # the shared reset/deletion receipt + quiescence kit (doc 25 SC-06)
     "edit_match": "tools",
