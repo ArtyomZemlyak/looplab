@@ -167,11 +167,13 @@ def test_the_developer_is_actually_told_it_may_decline():
     and charges the provider-failure counter instead of stopping the node)."""
     contract = developer_stuck_contract(DEVELOPER_STUCK_PREFIX)
     assert DEVELOPER_STUCK_PREFIX in contract
-    # And it is reachable from the engine's own repair ask, not just defined.
-    from looplab.engine import evaluate
-    src = inspect.getsource(evaluate.EvaluateMixin._evaluate) if hasattr(
-        evaluate, "EvaluateMixin") else inspect.getsource(evaluate)
-    assert "developer_stuck_contract(DEVELOPER_STUCK_PREFIX)" in src
+    # And it is reachable from the engine's own repair ask, not just defined. Scoped to `_evaluate`
+    # rather than the whole module so a definition sitting unused elsewhere cannot satisfy it — the
+    # behavioural half is `test_the_declaration_reaches_the_developer_in_the_repair_ask` above, which
+    # reads the string the Developer was actually handed.
+    from looplab.engine.evaluate import EvaluateMixin
+    assert "developer_stuck_contract(DEVELOPER_STUCK_PREFIX)" in inspect.getsource(
+        EvaluateMixin._evaluate)
 
 
 def test_a_developer_that_declares_itself_stuck_ends_the_node_and_spends_nothing(tmp_path):
