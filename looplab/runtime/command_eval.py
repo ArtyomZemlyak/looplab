@@ -1484,6 +1484,94 @@ class _EvalRun:
     early: Optional[RunResult] = None
 
 
+# --- The inter-stage checker's VERDICT vocabulary ----------------------------------------------
+# WHETHER THIS STAGE PHYSICALLY FAILED. Until 2026-08-13 the checker had exactly two things it could
+# say — the literal "OK", or anything else, which failed the node — and the fixed rule that read it
+# was `startswith("OK")`. That collapses three different facts into the most expensive one, and the
+# corpus says so: `stage_finished.status == "check_failed"` discarded **46.6 GPU-hours across 21
+# stages**, more than every crash, timeout and artifact-contract failure in `runs/` put together, and
+# 43 % of all the compute that ever produced a usable metric (109 h). Two of those stages —
+# `rubert-dr-0807` nodes 1 and 3 — were 14.7 h and 14.9 h of training that exited 0.
+#
+# The three facts, and why only the first may kill a stage:
+#   * the stage physically failed — a traceback, a NaN/inf loss, no checkpoint, a silent fallback to
+#     a stale model, a loss literally unchanged from step one. Naming one of these is a claim about
+#     MECHANISM that the log either shows or does not.
+#   * the checker judged QUALITY, which the prompt has forbidden since the incident where it failed
+#     the run's BEST model. It kept doing it: `rubertlite-dense-retrieval` node 21 was killed with
+#     "validation recall (0.79) is below previous best (0.8491)" — the banned comparison, verbatim,
+#     in the concern that ended the node. The prompt rung is SPENT; a rule is needed.
+#   * the checker COULD NOT TELL — "No output provided for stage 'prep', cannot confirm success"
+#     (`rubertlite-dr-unified-v4` nodes 1, 4 and 8). An absence of evidence is not evidence of
+#     failure, and a silent-but-successful data-prep stage produces the identical bytes. No wording
+#     could separate those two, which is exactly the shape doc 36 names.
+#
+# So the LINE IS MECHANICAL, NOT DESCRIPTIVE, the same way `triage.py`'s two engine-minted verdicts
+# are: a stage dies only when the checker names a member of this CLOSED set. Everything else — an
+# out-of-enum kind, prose, a quality comparison, an empty answer — coerces to `inconclusive`, which
+# is RECORDED on the stage row and does not fail anything. Fail-OPEN is right here and is not a
+# weakening, because this decision is "what happens NEXT" and nothing about the RECORD rests on it:
+# the deterministic `expect.files` artifact contract has ALREADY run and passed before the checker is
+# ever consulted, the metric still comes from the operator's own reader over the protected `score`
+# stage, and `metric_salvage.VETO_STAGE_STATUSES` still refuses to salvage anything the checker DID
+# condemn. What a wrong `inconclusive` costs is one more stage's runtime; what a wrong `check_failed`
+# costs is measured above.
+STAGE_CHECK_INCONCLUSIVE = "inconclusive"
+# The kind an UNSTRUCTURED answer carries. It is HARD, on purpose and only for back-compat: a
+# `check_fn` that returns a bare string is the historical contract (a library caller, and the doubles
+# throughout the suite), and silently downgrading those to advisory would retire the gate for every
+# caller that never migrated. The engine's own checker never produces it.
+STAGE_CHECK_UNSTRUCTURED = "unstructured"
+# The physical-failure classes a checker may kill a stage with. `declared_condition_violated` is the
+# one non-physical member and is admissible only because the condition was DECLARED — see
+# `engine/eval_stages.py`, which refuses that kind outright when the stage declared no `expect.assert`
+# (a checker may not invoke a contract that does not exist).
+STAGE_CHECK_HARD_KINDS = ("crash", "nan_or_inf_loss", "no_artifact_written", "silent_fallback",
+                          "loss_unchanged_from_first_step", "declared_condition_violated",
+                          STAGE_CHECK_UNSTRUCTURED)
+
+
+@dataclass(frozen=True)
+class StageCheckVerdict:
+    """A structured answer from the inter-stage checker: `kind` decides, `concern` explains.
+
+    Returned INSTEAD of a bare concern string by a checker that speaks the vocabulary. `_run_stages`
+    accepts both shapes forever — the string path is byte-for-byte what it always was."""
+    kind: str
+    concern: str
+
+
+def coerce_stage_check_kind(value) -> str:
+    """Normalize a checker-supplied failure kind to a member of `STAGE_CHECK_HARD_KINDS`, failing
+    to `STAGE_CHECK_INCONCLUSIVE`.
+
+    The one place "did the checker name a hard failure?" is spelled. It refuses
+    `STAGE_CHECK_UNSTRUCTURED` off this path deliberately: that kind marks the legacy string return
+    and is minted by `_stage_check_outcome` alone, so a model that emits the literal word cannot
+    borrow the back-compat branch's authority to kill a node."""
+    v = str(value or "").strip().lower()
+    if v == STAGE_CHECK_UNSTRUCTURED:
+        return STAGE_CHECK_INCONCLUSIVE
+    return v if v in STAGE_CHECK_HARD_KINDS else STAGE_CHECK_INCONCLUSIVE
+
+
+def _stage_check_outcome(verdict) -> tuple:
+    """`(kind, concern)` for whatever the duck-typed `check_fn` returned. Total — never raises.
+
+    Three accepted shapes: falsy => the stage passed; a `StageCheckVerdict` (or anything carrying
+    `.kind`/`.concern`) => the structured path; anything else => the historical bare concern string,
+    which stays HARD so no existing caller silently loses the gate."""
+    if not verdict:
+        return "", ""
+    kind = getattr(verdict, "kind", None)
+    if kind is not None:
+        concern = str(getattr(verdict, "concern", "") or "")
+        if not concern:
+            return "", ""          # a verdict with nothing to say is not a failure
+        return coerce_stage_check_kind(kind), concern
+    return STAGE_CHECK_UNSTRUCTURED, str(verdict)
+
+
 def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
     """Call the inter-stage checker, handing it the stage's DECLARED success condition when it has
     one and the callee can take it.
@@ -1690,14 +1778,25 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 _concern = _call_stage_check(check_fn, _sname, run.out[-4000:], _assertion)
             except Exception:  # noqa: BLE001 — a checker failure must not crash the eval
                 _concern = None
-            if _concern:
+            # THE VERDICT, not the string. `_stage_check_outcome` is the one rule that decides
+            # whether what came back may end a node — see `STAGE_CHECK_HARD_KINDS` for the 46.6
+            # GPU-hours that motivated splitting "this stage failed" from "I cannot tell".
+            _kind, _text = _stage_check_outcome(_concern)
+            if _text and _kind != STAGE_CHECK_INCONCLUSIVE:
                 stage_results[-1]["status"] = "check_failed"
-                stage_results[-1]["concern"] = str(_concern)[:300]
+                stage_results[-1]["concern"] = str(_text)[:300]
                 run.early = RunResult(
                     exit_code=0, stdout=run.out, metric=None, timed_out=False,
-                    stderr=f"stage '{_sname}' failed verification: {_concern}",
+                    stderr=f"stage '{_sname}' failed verification: {_text}",
                     stages=stage_results, failed_stage=_sname)
                 return run
+            if _text:
+                # INCONCLUSIVE. The pipeline continues, and the row says the checker looked and could
+                # not tell — a separate key from `concern`, which is read as "this is why the stage
+                # FAILED" by the repair loop and by `metric_salvage`. Recorded rather than dropped so
+                # the operator (and a later reader of the trace) can see the doubt that was raised
+                # and, if it turns out to matter, declare an `expect` that states it as a contract.
+                stage_results[-1][STAGE_CHECK_INCONCLUSIVE] = str(_text)[:300]
     # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
     return run
 

@@ -157,10 +157,23 @@ def test_stage_check_is_sanity_only_and_names_the_objective(tmp_path, monkeypatc
     assert "SANITY" in blob and "MAGNITUDE" in blob      # loss magnitude explicitly not a failure signal
     assert "QUALITY" in blob or "RANKING" in blob        # must not judge quality / beat-the-best
 
-    boom = Fake("no checkpoint saved — silent fallback to the pretrained model")
+    # A HARD failure still stops the pipeline — but since 2026-08-13 it must be NAMED from
+    # `command_eval.STAGE_CHECK_HARD_KINDS`, not merely asserted in prose. The prose spelling this
+    # test used to send is now `inconclusive`, which is the point of the change and is driven both
+    # ways in `tests/test_stage_check_verdict.py`: the prompt-only tightening this very test was
+    # written for did not hold, and the same checker went on killing 15-hour trainings with
+    # "recall (0.79) is below previous best".
+    from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE
+    boom = Fake("FAIL silent_fallback: no checkpoint saved — fell back to the pretrained model")
     monkeypatch.setattr(eng, "_reflect_client", lambda: boom)
     res2 = eng._stage_check_fn(node)("train", "Traceback (most recent call last): ...")
-    assert res2 and "checkpoint" in res2                 # a HARD failure still stops the pipeline
+    assert res2 is not None and res2.kind == "silent_fallback"
+    assert "checkpoint" in res2.concern
+
+    prose = Fake("no checkpoint saved — silent fallback to the pretrained model")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: prose)
+    res3 = eng._stage_check_fn(node)("train", "Traceback (most recent call last): ...")
+    assert res3 is not None and res3.kind == STAGE_CHECK_INCONCLUSIVE
 
 
 def test_stage_reuse_refuses_a_workdir_that_is_not_the_folded_manifest(tmp_path):

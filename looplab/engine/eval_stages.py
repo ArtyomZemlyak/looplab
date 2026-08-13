@@ -21,6 +21,57 @@ from pathlib import Path
 
 from looplab.core.llm_broker import in_llm_lane
 
+# The reply protocol the inter-stage checker answers in, and the ONLY three things it can mean. The
+# vocabulary itself lives in `runtime/command_eval.py` beside the code that acts on it; this is the
+# wire format and its parser. See `command_eval.STAGE_CHECK_HARD_KINDS` for the 46.6 GPU-hours that
+# made a vocabulary necessary — until 2026-08-13 the rule reading this reply was `startswith("OK")`
+# and everything else ended the node.
+_STAGE_CHECK_OK = "OK"
+_STAGE_CHECK_FAIL = "FAIL"
+_STAGE_CHECK_UNSURE = "INCONCLUSIVE"
+_STAGE_CHECK_REPLY_RE = re.compile(
+    r"^\s*(?P<verb>OK|FAIL|INCONCLUSIVE)\b[ \t]*(?P<kind>[a-z_]+)?[ \t]*[:\-—]?[ \t]*(?P<rest>.*)",
+    re.IGNORECASE | re.DOTALL)
+
+
+def parse_stage_check_reply(text: str, *, declared: bool):
+    """The checker's reply -> `StageCheckVerdict | None` (None = the stage passed). Pure and TOTAL.
+
+    Hoisted to module level with a truth table (`tests/test_stage_check_verdict.py`) rather than left
+    inside the closure, because it is the rule that decides whether a 15-hour training is thrown
+    away, and a rule nobody can state is a rule nobody reviews.
+
+    Every answer that is not an explicit, in-vocabulary `FAIL <kind>` becomes `inconclusive` — prose,
+    an out-of-enum kind, a bare `FAIL`, an empty reply. That is the same mechanical enforcement
+    `triage.py::coerce_triage_action` applies for the same reason: "nobody could read this" is its
+    own fact, and resolving it to the most expensive action is how a checker that was told twice not
+    to judge quality went on killing nodes with "recall (0.79) is below previous best (0.8491)".
+
+    `declared` is whether the stage carried an `expect.assert`. Without one,
+    `declared_condition_violated` is refused and degrades to `inconclusive` — a checker may not
+    invoke a contract that does not exist, and that comparison against "previous best" is precisely
+    what an undeclared contract looks like from the inside."""
+    from looplab.runtime.command_eval import (STAGE_CHECK_INCONCLUSIVE, StageCheckVerdict,
+                                              coerce_stage_check_kind)
+    raw = (text or "").strip()
+    if not raw:
+        return None                      # nothing said is not a failure — historical behaviour
+    m = _STAGE_CHECK_REPLY_RE.match(raw)
+    if m is None:
+        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE, raw[:300])
+    verb = m.group("verb").upper()
+    rest = (m.group("rest") or "").strip()
+    kind_word = (m.group("kind") or "").strip().lower()
+    if verb == _STAGE_CHECK_OK:
+        return None
+    detail = (f"{kind_word}: {rest}" if (kind_word and rest) else (rest or kind_word or raw))[:300]
+    if verb == _STAGE_CHECK_UNSURE:
+        return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE, detail)
+    kind = coerce_stage_check_kind(kind_word)
+    if kind == "declared_condition_violated" and not declared:
+        kind = STAGE_CHECK_INCONCLUSIVE
+    return StageCheckVerdict(kind, detail)
+
 
 class EvalStagesMixin:
     """The engine's staged-eval cluster. See the module docstring for the mixin convention
@@ -379,7 +430,8 @@ class EvalStagesMixin:
     STAGE_CONTRACT_CLAUSE = (
         " THIS STAGE ALSO DECLARED A SUCCESS CONDITION — the sentence under DECLARED CONDITION "
         "below, written by whoever declared the pipeline. Check the stage's output against THAT "
-        "sentence and FAIL the stage when the output shows the condition was not met (e.g. it "
+        "sentence and answer `FAIL declared_condition_violated: …` when the output shows the "
+        "condition was not met (e.g. it "
         "declares coverage of at least 90% of the training queries and the log reports 9,364 of "
         "764,676). This is NOT the quality judgement forbidden above and does not relax it: you are "
         "not ranking this result against any other run, you are checking whether the stage did the "
@@ -522,7 +574,7 @@ class EvalStagesMixin:
         return None, self.ROLLBACK_NO_CHANGE.format(**_fmt)
 
     def _stage_check_fn(self, node):
-        """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> concern|None that
+        """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> verdict|None that
         asks an LLM whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a
         checkpoint, no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a
         quality/ranking judgment: it must fail a stage ONLY on a hard, unambiguous failure — never because
@@ -538,8 +590,17 @@ class EvalStagesMixin:
         (`runtime/command_eval.py::_validate_expect`), passed by `_call_stage_check` when the manifest
         carries one. It is the ONE thing the checker may fail a stage for beyond a hard failure, and the
         reason the ban above is not simply wrong: with no contract, "did this work?" and "is this good?"
-        are the same question and the checker answered the wrong one. Empty `expect` reproduces the
-        historical prompt byte-for-byte, so a stage using only `check: true` is unaffected."""
+        are the same question and the checker answered the wrong one. Empty `expect` narrows the
+        vocabulary rather than the prompt: `declared_condition_violated` is not offered and is refused
+        on the way back in (`parse_stage_check_reply`), so a stage using only `check: true` can be
+        failed for physical failure and nothing else.
+
+        WHAT IT RETURNS is a `StageCheckVerdict`, not a concern string, and that is the 2026-08-13
+        change: the tightening above was PROMPT-ONLY and did not hold. `rubertlite-dense-retrieval`
+        node 21 was killed after the tightening with "validation recall (0.79) is below previous best
+        (0.8491)" — the banned comparison, verbatim. Prose can no longer end a node; only a named
+        member of `command_eval.STAGE_CHECK_HARD_KINDS` can. Everything else is `inconclusive` and
+        the pipeline continues."""
         try:
             client = self._reflect_client()
         except Exception:  # noqa: BLE001
@@ -574,8 +635,19 @@ class EvalStagesMixin:
                      "ranks and selects downstream, never you. Loss MAGNITUDE is NOT a failure signal (it "
                      "depends on the loss function and temperature; a loss around 14 can be perfectly "
                      "healthy). A present, non-trivial validation metric is strong evidence the stage "
-                     "SUCCEEDED. Reply EXACTLY 'OK' if the stage succeeded, otherwise a ONE-LINE concern "
-                     "naming the HARD failure."
+                     "SUCCEEDED. Answer in ONE line, in one of exactly three forms:\n"
+                     "  OK — the stage succeeded.\n"
+                     "  FAIL <kind>: <one-line evidence> — where <kind> is EXACTLY one of "
+                     "crash, nan_or_inf_loss, no_artifact_written, silent_fallback, "
+                     "loss_unchanged_from_first_step"
+                     + (", declared_condition_violated" if expect else "") + ".\n"
+                     "  INCONCLUSIVE: <what you would need to see> — when the output does not let "
+                     "you tell. USE THIS FREELY. A stage that printed little or nothing is "
+                     "INCONCLUSIVE, not a failure: many stages legitimately do their work quietly, "
+                     "and this pipeline has already verified on disk that the stage produced every "
+                     "artifact it declared. FAIL only when the evidence for one of the kinds above "
+                     "is actually IN the output; if your reason would not fit one of those kinds, "
+                     "it is INCONCLUSIVE."
                      + (EvalStagesMixin.STAGE_CONTRACT_CLAUSE if expect else "")},
                     {"role": "user", "content":
                      f"The run's objective metric is `{objective}` — ignore other scalars when judging "
@@ -586,6 +658,6 @@ class EvalStagesMixin:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
                 return None
-            return None if (not out or out.upper().startswith("OK")) else out[:300]
+            return parse_stage_check_reply(out, declared=bool(expect))
 
         return _check
