@@ -263,14 +263,13 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
-# How many times a `paused_and_stopped` observation may extend its own absolute deadline while the
-# pause is folded and the driver is alive. The wait is legitimate — the engine finishes an in-flight
-# evaluation before it stops, and a GPU stage runs for hours — but it cannot be UNBOUNDED, because an
-# `executing` record is what `_active_record` returns and that refuses every other control command
-# with 409. Bounded, the worst case is a long-but-finite window; unbounded, the operator loses
-# resume/abort/hint/inject entirely, with no cancel endpoint to recover. Twelve extensions is ~4h at
-# the shipped 20-minute `max_observation_timeout`, which covers the long-eval case this exists for.
-PAUSE_OBSERVATION_MAX_EXTENSIONS = 12
+# NOTE (2026-08-13): `PAUSE_OBSERVATION_MAX_EXTENSIONS` / `_extend_landed_pause_observation` /
+# `_pause_is_folded` lived here. They existed to keep a `paused_and_stopped` command from timing out
+# while the pause had landed and the engine was still working — a bounded number of extra observation
+# windows, because an unbounded one froze every other control behind 409 `command_in_progress`.
+# Both halves are gone because the thing they compensated for is gone: `pause` no longer waits for
+# the engine PROCESS at all, so its postcondition is satisfied at the append and there is nothing
+# left to extend. Keeping the machinery would have been a guard over a branch no command can reach.
 
 
 class RunCommandService:
@@ -1267,6 +1266,18 @@ class RunCommandService:
             status = record.get("status")
             if status not in {"accepted", "executing", "failed", "timed_out"}:
                 continue
+            if status in {"failed", "timed_out"}:
+                # RECONCILE before blocking, exactly as `_unresolved_terminal_record` does — the
+                # caller holds `sequence(rd)`, which is what makes that safe here too. Without it a
+                # record whose postcondition has since been satisfied still refuses a fresh command,
+                # and the operator has to POST a `/retry` whose only effect is the promotion this
+                # line performs. That is not hypothetical: it is every run wedged before 2026-08-13,
+                # whose `paused_and_stopped` record is satisfied the moment the rule is read the new
+                # way, and it turns "the fix reaches you after N retries" into "the next pause works".
+                record = self._reconcile_observation(rd, path, record)
+                status = record.get("status")
+                if status not in {"failed", "timed_out"}:
+                    continue
             # accepted/executing is already one reserved logical command even in the tiny
             # reserve→append window. Failed/timed-out only block a new key if their intent became
             # durable; a pre-append validation/spawn failure is safe to correct under a new payload.
@@ -1505,41 +1516,31 @@ class RunCommandService:
             return False
         return not bool(state.paused) and not bool(state.finished)
 
-    def _extend_landed_pause_observation(self, record: dict, rd: Path, observation,
-                                         alive: bool, now: float) -> bool:
-        """Give a pause that HAS landed more observation time — a bounded number of times.
-
-        The engine finishes an in-flight evaluation before it stops, so on the runs where pausing
-        matters most `paused_and_stopped` is not observable for hours and the absolute bound expired
-        on a pause that folded a second after the operator pressed the button.
-
-        The cap is the other half of that. Re-arming on every pass made the deadline unreachable —
-        the loop's only exit compares against a value this had just pushed forward — so the record
-        stayed `executing` for the whole evaluation. `_active_record` returns exactly that record,
-        and it refuses `POST /commands`, `POST /control` and `POST /resume` with 409
-        `command_in_progress`; there is no cancel endpoint. An operator who paused a long eval then
-        could not resume, abort, hint or inject until it ended. A wrong message is recoverable; a
-        frozen control plane is not, so the wait is long but finite.
-        """
-        if record.get("postcondition") != "paused_and_stopped" or not alive:
-            return False
-        extensions = int(record.get("pause_observation_extensions") or 0)
-        if extensions >= PAUSE_OBSERVATION_MAX_EXTENSIONS:
-            return False
-        if not self._pause_is_folded(rd, observation):
-            return False
-        record["pause_observation_extensions"] = extensions + 1
-        record["absolute_deadline_at"] = max(
-            float(record.get("absolute_deadline_at") or 0), now + self.max_observation_timeout)
-        return True
-
-    def _pause_is_folded(self, rd: Path,
+    def _retry_is_futile(self, rd: Path, record: dict,
                          observation: Optional[CommandObservation] = None) -> bool:
-        """Is the run PAUSED right now? The half of `paused_and_stopped` the operator asked for."""
-        try:
-            return bool((observation or self._observe(rd)).state().paused)
-        except Exception:  # noqa: BLE001 — an unreadable log must not extend a deadline
+        """Can re-driving this exact command only ever produce the SAME timeout again?
+
+        Deliberately much narrower than `_intent_spent`, which answers a different question ("may a
+        LATER control overtake this one?") and answers it True for every intent on a finished run.
+        Retrying is not futile there: a finalize whose terminal projections are still incomplete is
+        `_intent_spent` on both counts and is exactly the command an operator must be able to re-drive
+        — `tests/test_run_command_service.py::
+        test_finalize_error_is_not_success_reload_reattaches_and_retry_preserves_stop` drives that,
+        and this predicate was `_intent_spent` for about ten minutes, which broke it.
+
+        What IS futile is a durable PAUSE the run has left behind and that may not be re-issued
+        either: the intent it points at is consumed, the run is finished so no driver will ever fold a
+        new one, and every attempt therefore ends in `postcondition_timeout`. The way forward is a new
+        command, and the refusal says so.
+        """
+        if str(record.get("event_type") or "") != EV_PAUSE:
             return False
+        if record.get("event_seq") is None:
+            # No durable intent yet — the retry's whole job is to append one.
+            return False
+        observation = observation or self._observe(rd)
+        return (self._intent_spent(rd, record, observation)
+                and not self._intent_superseded(rd, record, observation))
 
     def _run_finished(self, rd: Path,
                       observation: Optional[CommandObservation] = None) -> bool:
@@ -1896,6 +1897,17 @@ class RunCommandService:
             # "already_appended" about an event the run consumed.
             updated.pop("event_seq", None)
             updated.pop("baseline_seq", None)
+            # A RE-ISSUED intent is a new intent, so it is observed under the CURRENT contract, not
+            # the one its record was admitted under. This is what actually reaches the runs wedged
+            # today: a durable record is never rewritten, so a run stuck under the old build still
+            # carries `postcondition: paused_and_stopped`, and re-minting alone would append a
+            # perfectly good pause and then go on waiting for a process exit that a pause cannot
+            # deliver. An ordinary (non-superseding) retry deliberately keeps its admitted contract —
+            # it is re-driving the SAME event and must be judged by the same rule.
+            spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
+            if spec is not None:
+                updated["postcondition"] = spec.postcondition
+                updated["engine_policy"] = spec.engine_policy.value
         # A prior spawn no longer proves this retry has a driver.  Recovery must observe fresh domain
         # progress or claim a new spawn under the per-run sequencer.
         updated["spawned_by_command"] = False
@@ -2328,12 +2340,12 @@ class RunCommandService:
                     "message": "Only retryable failed/timed_out commands can be retried.",
                     "remediation": f"GET /commands/{command_id} and observe its current status.",
                 })
-            if self._intent_spent(rd, record) and not self._intent_superseded(rd, record):
-                # Settled history that cannot be re-issued either (an additive intent on a finished
-                # run). Re-driving it appends nothing and observes nothing, so it would return
-                # `timed_out` again on every attempt — the shape the operator hit for a day. Refuse
-                # with the move that DOES work, and it works because `_unresolved_equivalent` no
-                # longer holds an identical fresh command behind a spent record.
+            if self._retry_is_futile(rd, record):
+                # Settled history that cannot be re-issued either. Re-driving it appends nothing and
+                # observes nothing, so it would return `timed_out` again on every attempt — the shape
+                # the operator hit for a day. Refuse with the move that DOES work, and it works
+                # because `_unresolved_equivalent` no longer holds an identical fresh command behind
+                # a spent record.
                 raise HTTPException(409, {
                     "code": "command_intent_spent",
                     "existing_command_id": command_id,
@@ -2691,21 +2703,24 @@ class RunCommandService:
                 return False
             observation.state()  # prove the complete log, including the marked intent, still folds
             return True
-        if kind == "paused":
+        if kind in {"paused", "paused_and_stopped"}:
             # THE EFFECT THE OPERATOR ASKED FOR, observed on its own. The pause is a folded flag, so
             # this is satisfied the moment the intent is durable — which is the point: the engine
             # PROCESS exit is a second, much later effect (it finishes the in-flight evaluation
             # first) and gating on it is what made `pause` unobservable on every long run. Whether
             # the driver has released engine.lock yet is reported as `engine_stopped` on the
             # succeeded record by `_succeeded`.
+            #
+            # `paused_and_stopped` is the LEGACY spelling and is read the same way ON PURPOSE. A
+            # durable record is never rewritten, so every run wedged before 2026-08-13 still carries
+            # one, and re-pointing only new commands would leave those runs exactly as stuck as they
+            # are today: their record blocks an identical fresh pause with `retry_existing_command`,
+            # and its `/retry` re-drives a postcondition that never arrives while the engine works.
+            # `tests/test_control_plane_liveness.py`'s search finds that state and it is real —
+            # planting the record a pre-2026-08-13 server left behind is one of its moves. Reading
+            # the old spelling under the new rule is what lets `_reconcile_observation` promote such
+            # a record to `succeeded`: the effect its operator asked for DID land.
             return bool(observation.state().paused)
-        if kind == "paused_and_stopped":
-            # LEGACY durable records only — every pause admitted before 2026-08-13 persisted this
-            # postcondition, including the one that wedged `rubertlite-dr-unified-v2`, and a record
-            # on disk is never rewritten. Keep observing it exactly as it was admitted; `retry` is
-            # what gives such a record a way forward (see `_intent_superseded`).
-            state = observation.state()
-            return bool(state.paused and self._engine_state(rd) is False)
         if kind == "restart_served":
             state = observation.state()
             event_seq = record.get("event_seq")
@@ -3168,7 +3183,8 @@ class RunCommandService:
             # and the driver-liveness half of the condition (`alive`) is untouched, so a live
             # engine still slides its own deadline whether or not it has appended yet.
             progress_seq = observation.max_non_control_seq
-            if ((record.get("postcondition") in {"paused_and_stopped", "finished_and_stopped"}
+            if ((record.get("postcondition") in {"paused", "paused_and_stopped",
+                                                 "finished_and_stopped"}
                  or spec.engine_policy is not EnginePolicy.NO_SPAWN)
                     and (alive or observation.has_domain_progress(last_progress_seq))):
                 last_progress_seq = progress_seq
@@ -3178,21 +3194,13 @@ class RunCommandService:
                 # startup window even if this is the monitor's first pass.
                 record["deadline_at"] = max(
                     float(record.get("deadline_at") or 0), now + self.command_timeout)
-                # THE PAUSE HAS LANDED AND THE ENGINE IS STILL WORKING — extend the ABSOLUTE bound
-                # too, not just the sliding one. `paused_and_stopped` is deliberately two effects:
-                # the run pauses (immediate) and the engine PROCESS releases its lock (only once the
-                # in-flight evaluation settles, because a pause must not abandon a running node).
-                # A GPU training stage runs for hours, so on exactly the runs where pausing matters
-                # the absolute ~20-minute bound expired while everything was working correctly, and
-                # the operator was told "paused_and_stopped was not observed in time" about a pause
-                # that had landed one second after they pressed the button (measured on
-                # `rubertlite-dr-unified-v2`, 2026-08-10).
-                #
-                # Gated on all three — the pause is FOLDED, the driver is ALIVE, and this is the
-                # pause postcondition — so it cannot become an unbounded wait on a dead or stalled
-                # engine: liveness is re-probed every pass and a driver that dies terminalizes on the
-                # very next one. What is bounded here is the WRONG ANSWER, not the wait.
-                self._extend_landed_pause_observation(record, rd, observation, alive, now)
+                # The ABSOLUTE bound is never extended here. It used to be, for a landed pause on a
+                # live engine, because `paused_and_stopped` could not be observed until the engine
+                # released its lock hours later — and the operator was told the pause "was not
+                # observed in time" about one that had folded a second after they pressed the button
+                # (measured on `rubertlite-dr-unified-v2`, 2026-08-10). Since 2026-08-13 a pause is
+                # satisfied by the fold itself, so there is nothing left to wait out and nothing left
+                # to extend; the sliding deadline above is the whole rule again.
                 record["deadline_at"] = min(
                     float(record.get("absolute_deadline_at") or record["deadline_at"]),
                     float(record["deadline_at"]))

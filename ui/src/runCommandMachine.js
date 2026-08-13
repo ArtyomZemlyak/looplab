@@ -1,4 +1,4 @@
-import { COMMAND_FAILED, isTransientCommandReadError } from './api.js'
+import { COMMAND_FAILED, COMMAND_PENDING, isTransientCommandReadError } from './api.js'
 
 // The RULES of the durable run-command lifecycle, shared by the two surfaces that own one: Dock's run
 // transport ('dock') and the Assistant's direct /commands ('assistant'). api.js already parameterizes
@@ -89,6 +89,54 @@ export function restoredCommandRecord(saved) {
     ? { id: saved.commandId, status: 'accepted' }
     : { status: 'submitting' })
   return saved?.commandId && !stored.id ? { ...stored, id: saved.commandId } : stored
+}
+
+// A PENDING COMMAND MUST NEVER READ AS FROZEN.
+//
+// On 2026-08-11 an operator watched `Stop requested…` for twenty minutes, then for a day. The
+// server side of that is fixed — a pause now succeeds when the pause FOLDS, which is the effect the
+// button asked for — but the chip itself was the other half of the report: a bare label with no
+// elapsed time, no bound and no move. Anything the operator cannot act on and cannot see the end of
+// is indistinguishable from a hang, which is how this got debugged as one.
+//
+// The bound comes from the SERVER's own record (`absolute_deadline_at`), not a client timer: the
+// command monitor terminalizes against that value, so it is the real answer to "when does this stop
+// waiting", and it survives a reload, a second tab, and a page that was closed for an hour. A record
+// without one (a pre-upgrade server) is reported as unbounded rather than guessed at — `boundedMs`
+// is null and the surface says the wait is not observable, which is itself actionable.
+export const COMMAND_STALL_NOTICE_MS = 15000
+
+// What a still-pending command owes the operator once it stops looking instantaneous. `null` while
+// it still does: a stop that lands in 300 ms must not flash a stall notice.
+//
+// `waitingFor` is per ACTION because the honest answer differs: a stop waits on the fold (immediate)
+// and then on the engine finishing the node it is on, a finalize waits on the whole wrap-up, a
+// resume on the engine's acknowledgement. Naming what is being waited for is what turns "frozen"
+// into "working".
+export function pendingCommandRemedy(record, action, nowMs = Date.now()) {
+  if (!record || !COMMAND_PENDING.has(record.status)) return null
+  const createdSec = Number(record.created_at)
+  if (!Number.isFinite(createdSec) || createdSec <= 0) return null
+  const elapsedMs = Math.max(0, nowMs - createdSec * 1000)
+  if (elapsedMs < COMMAND_STALL_NOTICE_MS) return null
+  const absoluteSec = Number(record.absolute_deadline_at)
+  const boundedMs = Number.isFinite(absoluteSec) && absoluteSec > 0
+    ? Math.max(0, absoluteSec * 1000 - nowMs) : null
+  const waitingFor = {
+    stop: 'The pause is recorded as soon as it is written; the engine then finishes the node it is evaluating before it releases the run.',
+    finalize: 'The engine is completing the report, lessons and cost write-out.',
+    resume: 'Waiting for the engine to acknowledge the resume.',
+  }[action] || 'Waiting for the engine to acknowledge this command.'
+  return {
+    elapsedMs,
+    boundedMs,
+    waitingFor,
+    // The move that is ALWAYS available while a command is pending: force an observation. It is the
+    // same request the poller makes, offered as an explicit control so that a poller stalled behind
+    // a lost tab, a suspended laptop or a dropped connection is not the end of the operator's
+    // options.
+    canCheck: true,
+  }
 }
 
 // Status-poll cadence, identical on both surfaces: first read one second after the command is

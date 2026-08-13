@@ -1993,29 +1993,38 @@ def test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause(tmp
     assert _terminal(client, command, timeout=_TERMINAL_SETTLE_TIMEOUT_S)["status"] == "succeeded"
     assert len(driver.calls) == 1
 
-    # A long live pause keeps one execution owner and refreshes its claim; repeated GET cannot start
-    # a duplicate worker, and destructive mutation is excluded until the postcondition lands.
+    # A long UNACKNOWLEDGED command keeps one execution owner and refreshes its claim; repeated GET
+    # cannot start a duplicate worker, and destructive mutation is excluded until the postcondition
+    # lands.
+    #
+    # This half used to be driven with `pause`, because pause WAS the longest command there was: its
+    # postcondition `paused_and_stopped` waited for the engine PROCESS to exit. That is the defect
+    # fixed on 2026-08-13 — a pause now succeeds when the pause FOLDS, which is the effect the
+    # operator asked for — so pause is no longer a command that stays `executing` and cannot carry
+    # this property any more. The property itself is unchanged and is re-pointed at a command that
+    # legitimately waits: an `engine_ack` intent no driver has acknowledged yet.
     driver.calls.clear()
     driver.on_spawn = None
     driver.alive = True
-    pause = _post(client, "pause", key="long-pause").json()
-    _wait_for_intent(rd, pause["id"])
-    claim = rd / ".commands" / f".{pause['id']}.executing"
+    slow = _post(client, "set_strategy", {"strategy": {"policy": "mcts"}},
+                 key="long-unacked").json()
+    _wait_for_intent(rd, slow["id"])
+    claim = rd / ".commands" / f".{slow['id']}.executing"
     deadline = time.time() + _WORKER_START_TIMEOUT_S
     while not claim.exists() and time.time() < deadline:
         time.sleep(0.005)
     assert claim.exists()
     first_mtime = claim.stat().st_mtime_ns
     for _ in range(4):
-        client.get(f"/api/runs/demo/commands/{pause['id']}")
+        client.get(f"/api/runs/demo/commands/{slow['id']}")
         time.sleep(0.04)
     assert claim.stat().st_mtime_ns > first_mtime
     with pytest.raises(Exception) as blocked:
         with srv.commands.destructive_guard(rd, "delete run"):
             pass
     assert getattr(blocked.value, "status_code", None) == 409
-    driver.alive = False
-    assert _terminal(client, pause)["status"] == "succeeded"
+    _ack_marked(rd, slow["id"])
+    assert _terminal(client, slow)["status"] == "succeeded"
 
 
 def test_stale_execution_claim_needs_owner_death_not_just_age(tmp_path):
@@ -2396,14 +2405,19 @@ def test_delete_is_excluded_by_active_command_then_permitted_after_terminal(tmp_
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
     client, _srv = _client(tmp_path, driver, timeout=0.10)
-    pause = _post(client, "pause", key="delete-guard").json()
-    _wait_for_intent(rd, pause["id"])
+    # An `engine_ack` command, not `pause`: since 2026-08-13 a pause SUCCEEDS the moment it folds
+    # (the effect the operator asked for), so it no longer holds an `executing` record open long
+    # enough to be the active command a delete must be excluded by. The property under test —
+    # delete is refused while a command is active, and permitted once it is terminal — is unchanged.
+    active = _post(client, "set_strategy", {"strategy": {"policy": "mcts"}},
+                   key="delete-guard").json()
+    _wait_for_intent(rd, active["id"])
 
     blocked = _delete(client, rd=rd)
-    assert blocked.status_code == 409 and pause["id"] in str(blocked.json()["detail"])
+    assert blocked.status_code == 409 and active["id"] in str(blocked.json()["detail"])
     assert rd.exists()
-    driver.alive = False
-    assert _terminal(client, pause)["status"] == "succeeded"
+    _ack_marked(rd, active["id"])
+    assert _terminal(client, active)["status"] == "succeeded"
     deleted = _delete(client, rd=rd, op="2" * 8)
     assert deleted.status_code == 200 and not rd.exists()
     time.sleep(0.05)
