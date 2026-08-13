@@ -20,7 +20,8 @@ between Authoring and Memory".
 |---|---|---|---|---|
 | **Authoring** | Lab → Authoring | `prompts`, `skills`, `knowledge` — three directories of Markdown | **You** (and, for `knowledge`, the assistant's `remember` tool) | yes |
 | **Memory** | Lab → Memory | Lessons, Cases, Notes (+ a read-only view of the same `knowledge` notes) | **The runs**, at run end | no |
-| **Research Atlas** | Runs → Atlas preview | Concepts and claims rolled up over *every* run in the memory dir | Derived at read time from what the runs wrote, plus your governance decisions | no (governance is CLI/HTTP) |
+| **Claims & Curation** | Lab → Claims & Curation | Claims (all of them, and the mixed-evidence subset) rolled up over *every* run in the memory dir, plus what the paid stewards proposed and what came of it | Derived at read time from what the runs wrote, plus your governance decisions | no (governance is CLI/HTTP) |
+| **Concepts** | Runs → Concepts | The cross-run concept map: an `is_a` forest, co-occurrence, and the lessons/cases/notes carrying each concept | Derived from the run rows' own concept rollup | no |
 
 Three consequences worth stating plainly, because each of them has been read as a bug:
 
@@ -28,9 +29,9 @@ Three consequences worth stating plainly, because each of them has been read as 
   human writes them. They are just as durable as a lesson.
 - **`knowledge` appears on both panels.** It is the one kind both you and the agents write, so
   Authoring shows it writable and Memory shows it read-only. Same directory, same files.
-- **A claim in the Atlas will not appear in Memory under that name.** Claims are not a fourth store:
+- **A claim on Claims & Curation will not appear in Memory under that name.** Claims are not a fourth store:
   `engine/claims.py` groups the *same* `lessons.jsonl` rows by normalized statement and joins them
-  with the deep-research memo claims in `research_claims.jsonl`. The Atlas is a view, not a tier.
+  with the deep-research memo claims in `research_claims.jsonl`. That screen is a view, not a tier.
 
 ## The types (what each is *for*)
 
@@ -209,7 +210,7 @@ Written durably, at cost, and consumed by no prompt and no decision:
   provenance only. None is returned to a reasoning role; `status` gates visibility and
   `provenance` labels the skill read path as described above.
 
-## Current cross-run boundary and the Research Atlas target
+## Current cross-run boundary and the research-index target
 
 The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.
 LoopLab also ships an **experimental Part-IV slice enabled by default in product `Settings`** (the
@@ -236,10 +237,15 @@ coverage denominator, evidence/taxonomy
 release identity, assignment backfill or independent evidence-family accounting. Typed owner HTTP concept
 actions now validate live canonical merge/purge sources and merge targets; split may introduce provisional
 children, but this is not a versioned taxonomy/entity release. Typed
-claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/atlas`
+claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/claims`
 **Experimental portfolio diagnostic** now renders the bounded read models. Its claim/evidence slices carry
 coherent source identity, but the four independently fetched projections are not the complete canonical
-Research Atlas. The home Runs Lineage view and a
+cross-run research index. That screen shipped as the *Research Atlas* and was renamed **Claims & Curation**
+by doc 29 F7, which also dropped its concepts section: the run list's **Concepts** view is strictly richer
+(a full `is_a` forest, co-occurrence, a per-concept detail pane, and the lessons/cases/notes carrying each
+concept), and the old name is what made an operator expect a concept map and then find a worse one. The
+`/api/cross-run/*` routes did NOT move — `/api/cross-run/atlas` still serves the mixed-evidence claim
+records the screen reads. The home Runs Lineage view and a
 run's theme grouping are different surfaces (see [Web UI](ui.md#which-graph-am-i-looking-at)).
 
 Concept capsule v2 has additive bounded-source receipts for its applicability fingerprint and both stored
@@ -305,7 +311,7 @@ segments with D8 producer completeness and binds the combined snapshot with a di
 remains visible and citable, but a quarantined lesson/research row, a partial/unknown D8 source or an unknown
 combined receipt cannot produce either exact one-sided state (`supported`/`refuted`) because omitted evidence
 may make it mixed. It also cannot produce an agentic `ratified` proposal. Context packs, retrieval receipts,
-the claims endpoint/CLI, and the Atlas preview disclose the lower bound. The producer-prefixed receipt remains
+the claims endpoint/CLI, and the Claims & Curation screen disclose the lower bound. The producer-prefixed receipt remains
 additive: read health refines overall D8 completeness without redefining what the producer-cap fields mean.
 
 ### Operator-governance ledger health
@@ -341,7 +347,7 @@ success is acknowledged. A sync/capability failure returns the same content-free
 boundary. An idempotent retry re-syncs the existing receipt before returning it; it does not append a
 second revision merely because the first acknowledgement failed.
 
-The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
+The broader Part-IV design specifies the production **cross-run research index** and its UI.
 Its core distinction is:
 
 - a faceted applicability profile says **where** evidence may transfer (application, entities/modalities,
@@ -405,8 +411,8 @@ The source tuple is trigger provenance, not a fallback paid-work identity. Reade
 `action` and key shape; in particular, they must not treat v1 rows or diagnostic v2 rows as portfolio-wide
 semantic receipts.
 
-The Research Atlas preview reads bounded concept/claim projections plus recent tails of the two curation
-ledgers. It displays proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to
+The Claims & Curation preview reads bounded claim projections plus recent tails of the two curation
+ledgers (it still reads `/api/cross-run/atlas`, for the mixed-evidence records only). It displays proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to
 generic proposal copy.
 It neither fetches the task-facets ledger nor exposes the semantic key, input digest/schema, source key, model
 or parser, so the UI is not a billing audit surface. Each read does expose one opaque, replacement-sensitive

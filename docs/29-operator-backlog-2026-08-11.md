@@ -371,9 +371,27 @@ a new node" into "give up", which is strictly worse than today.
 
 Design principle behind both: [`36-agent-driven-decisions-2026-08-13.md`](36-agent-driven-decisions-2026-08-13.md).
 
-## F7 · The Research Atlas: what it uniquely holds, and what it duplicates
+## F7 · The Research Atlas: what it uniquely holds, and what it duplicates — **SHIPPED**
 
 **Asked:** "What is the Atlas even for?"
+
+**Shipped.** The recommendation below was accepted and built. The screen is now **Claims & Curation**
+at `#/claims` (`ui/src/ClaimsCuration.jsx` / `claimsCurationModel.js`); `#/atlas` and
+`#/research-atlas` are canonicalized aliases so every existing bookmark and doc link still lands.
+The concepts section is gone — the header now links to `#/concepts`, a new deep link that opens the
+run list ON its Concepts view, because a link that landed on the List tab would have been a worse
+answer than the section it replaced. The name is the deliverable: the three remaining sections are a
+claim ledger (every claim record, and the mixed-evidence subset) and the steward curation log, and
+"Claims & Curation" is those two things said out loud, where "Research Atlas" named the one thing the
+screen no longer has.
+
+The HTTP contract deliberately did **not** move. `/api/cross-run/atlas` still serves the
+mixed-evidence claim records the screen reads, `/api/cross-run/claims` still serves the ledger, and
+the `looplab atlas` CLI is untouched — renaming a route whose only production reader is this one
+client would have cost a contract change and bought nothing. What did change on the client is what it
+keeps: the atlas envelope's `explored`/`thin_coverage` sections and the concept-capsule read receipt
+are no longer projected into React state, and the "Evidence source incomplete" notice no longer fires
+on a partial capsule store the screen does not touch.
 
 **Today, measured 2026-08-12.** It has four sections, and they are not equal:
 

@@ -42,7 +42,7 @@ def test_current_module_guide_names_canonical_part_iv_v_paths():
     required = {
         "core/models.py", "events/replay.py", "engine/cross_run_index.py", "engine/claims.py",
         "engine/governance_health.py", "engine/steward_invocation.py", "tools/cross_run_tools.py",
-        "serve/routers/cross_run.py", "ui/src/ResearchAtlas.jsx",
+        "serve/routers/cross_run.py", "ui/src/ClaimsCuration.jsx",
     }
     assert not (required - set(module_map.split("`")))
     assert "| `models.py` |" not in module_map
@@ -50,7 +50,7 @@ def test_current_module_guide_names_canonical_part_iv_v_paths():
     architecture = _ARCHITECTURE_GUIDE.read_text(encoding="utf-8")
     architecture_required = {
         "core/concepts.py", "engine/cross_run_index.py", "engine/governance_health.py",
-        "engine/steward_invocation.py", "serve/routers/cross_run.py", "ui/src/researchAtlasModel.js",
+        "engine/steward_invocation.py", "serve/routers/cross_run.py", "ui/src/claimsCurationModel.js",
     }
     assert not (architecture_required - set(architecture.split("`")))
 

@@ -2065,13 +2065,14 @@ export function MemoryPanel({ onClose }) {
         </MemoryCompletenessNotice>}
       {/* Orientation shown on every tab. The three durable-knowledge surfaces are easy to mistake for
           each other, so each one says what the OTHER two are: this panel is what the RUNS wrote,
-          Authoring is what YOU write, the Atlas is the portfolio roll-up over several runs. */}
+          Authoring is what YOU write, Claims & Curation is the portfolio roll-up over several runs. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {tab === 'knowledge'
           ? <>Written by <b>operators or agents</b> through the Knowledge authoring tools; no run
               provenance is inferred for legacy notes. Edit these in Lab → <b>Authoring</b>.</>
-          : <>Written <b>by runs</b> during cadence/finalization and read-only here. Concepts and claims
-              rolled up across the portfolio are the <b>Research Atlas</b> (Runs → Atlas preview).</>}
+          : <>Written <b>by runs</b> during cadence/finalization and read-only here. Claims rolled up
+              across the portfolio are <b>Claims &amp; Curation</b> (Lab → Claims &amp; Curation);
+              the cross-run concept map is Runs → <b>Concepts</b>.</>}
       </div>
       {/* Per-tab purpose: the four tiers differ in who reads them back, which is the only difference
           an operator can act on. */}
@@ -2312,7 +2313,7 @@ export function HyperImportancePanel({ state, onClose }) {
 
 // Same-task IDs are an operational lookup key, not a ComparisonContract. Keep this
 // legacy panel useful for navigation without ranking raw objectives whose metric unit, dataset/eval
-// identity, and protocol are absent from /api/runs. The Research Atlas owns contract-bound comparison.
+// identity, and protocol are absent from /api/runs. The claim ledger owns contract-bound comparison.
 const CROSS_RUN_OBSERVATION_LIMIT = 100
 
 export function CrossRunPanel({ state, onClose }) {

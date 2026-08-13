@@ -930,13 +930,13 @@ those revisions, so a concurrent HTTP/CLI edit rejects the stale action. Clearin
 high-risk transition and therefore still asks in Auto, while clearing an ordinary merge/split remains the
 normal consequential edit. The remaining heuristic
 scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
-families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
+families mean it is not yet the production 50–500-run system. The wired owner `#/claims` route is explicitly a
 bounded read-only preview of these projections, not that full system.
 The advisory `concept_card` lookup reuses exact/fuzzy slugs, keeps scoped track record separate from the global
 observation count and frames persisted text as untrusted. It is not a prose-paper generator, verifier,
 governance mutation or complete applicability receipt.
 The target CR0–CR3 design adds the full applicability/coverage frame, durable derivation contracts,
-incremental summaries and interactive Research Atlas; see
+incremental summaries and an interactive research index; see
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 
 The per-run `cross_run_prior` timeline signal remains an audit-only preview. Its v2 receipt separates a
@@ -1039,8 +1039,8 @@ Where each concept lives in the code:
 | Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |
 | Cross-run index, claims + agent reads | `engine/cross_run_index.py`, `engine/claims.py`, `tools/cross_run_tools.py` |
 | Portfolio governance + paid steward lifecycle | `engine/concept_registry.py`, `engine/governance_health.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
-| Research Atlas / typed owner governance HTTP | `serve/routers/cross_run.py` |
-| Research Atlas UI + evidence validation | `ui/src/ResearchAtlas.jsx`, `ui/src/researchAtlasModel.js` |
+| Claim/curation projections + typed owner governance HTTP | `serve/routers/cross_run.py` |
+| Claims & Curation UI + evidence validation | `ui/src/ClaimsCuration.jsx`, `ui/src/claimsCurationModel.js` |
 | Trace span exporter | `core/tracing.py` |
 | Search policies | `search/policy.py` |
 | Static HTML lineage tree | `events/htmlview.py` |

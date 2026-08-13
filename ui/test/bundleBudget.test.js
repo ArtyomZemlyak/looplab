@@ -110,7 +110,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
   const sources = [
     'RunList.jsx', 'RunCompare.jsx', 'OwnerChrome.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'ConceptChipBar.jsx', 'ConceptView.jsx', 'panels.jsx',
-    'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
+    'SharedAssistant.jsx', 'Report.jsx', 'ClaimsCuration.jsx',
   ]
   const graph = {
     'index.html': {

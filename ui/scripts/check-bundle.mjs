@@ -66,9 +66,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       limits: { js: { gzip: 4 * KIB } },
     },
     {
-      name: 'owner Atlas preview route',
+      name: 'owner Claims & Curation route',
       roots: [
-        entry, source('src/ResearchAtlas.jsx'),
+        entry, source('src/ClaimsCuration.jsx'),
         ownerChrome,
       ],
       limits: { js: { gzip: 210 * KIB }, css: { gzip: 40 * KIB } },
@@ -134,8 +134,8 @@ export const DEFAULT_BUDGETS = Object.freeze({
       limits: { js: { gzip: 20 * KIB } },
     },
     {
-      name: 'Research Atlas preview increment',
-      roots: [source('src/ResearchAtlas.jsx')],
+      name: 'Claims & Curation increment',
+      roots: [source('src/ClaimsCuration.jsx')],
       baselineRoots: [entry],
       // Re-measured 2026-08-12 at 10,348 B gzip, after `ab328ee4` added the `safeSource` URL guard
       // (http/https only, credential-bearing URLs rejected) and the claim metric/polarity/decision
@@ -148,7 +148,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       roots: [named('vendor-flow')],
       // The graph is an interaction after the app shell has loaded. Rolldown keeps React/runtime in
       // explicit shared chunks, so measure only bytes newly fetched for the graph, just like the
-      // panel and Atlas interaction budgets above.
+      // panel and claim-ledger interaction budgets above.
       baselineRoots: [entry],
       limits: { js: { gzip: 80 * KIB } },
     },
@@ -169,9 +169,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       requireTargets: true,
     },
     {
-      name: 'Atlas preview defers graph and panel code',
+      name: 'Claims & Curation defers graph and panel code',
       roots: [
-        entry, source('src/ResearchAtlas.jsx'),
+        entry, source('src/ClaimsCuration.jsx'),
         ownerChrome,
       ],
       targets: [

@@ -144,7 +144,7 @@ const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 // sit in `Lab` and did not: Memory (`/api/memory` + `/api/knowledge`), Authoring (`/api/{kind}` —
 // the prompts/skills/knowledge every run shares) and GPU (`/api/gpu` — this host's cards). None of
 // them takes a run id, so opening them from a run implied a scope they never had. They now live in
-// the LoopLab menu (globalNav.js::GLOBAL_DESTINATIONS) beside Runs, Atlas and Settings, which is
+// the LoopLab menu (globalNav.js::GLOBAL_DESTINATIONS) beside Runs, Claims & Curation and Settings, which is
 // reachable from this header too — the split is about which QUESTION each menu answers, not about
 // making the operator leave the run to ask it. The panel components still mount below for old
 // `?panel=memory|authoring|gpu` links.

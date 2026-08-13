@@ -24,8 +24,11 @@ test('every LoopLab destination is a distinct, labelled, canonical hash', () => 
     assert.match(entry.hash, /^#\/[a-z-]*$/, `${entry.key} must be a plain owner hash route`)
     assert.ok(entry.label && entry.title, `${entry.key} needs a label and an explanation`)
   }
-  // The legacy alias is canonicalized by App; the menu must only ever emit the canonical form.
+  // The legacy aliases are canonicalized by App; the menu must only ever emit the canonical form.
+  // `#/atlas` joined `#/research-atlas` on that list when doc 29 F7 renamed the surface to
+  // Claims & Curation, so BOTH old spellings have to stay out of the menu.
   assert.ok(!hashes.includes('#/research-atlas'))
+  assert.ok(!hashes.includes('#/atlas'))
 })
 
 test('the installation route views round-trip to their panels and back', () => {
