@@ -328,6 +328,16 @@ class RunResult:
     # time. A watchdog kill is the ENGINE's own verdict about the run; it must never be inferred from
     # the exit code the engine itself caused.
     diverged: bool = False
+    # METRIC SUBJECT (`runtime/metric_subject.py`): the identity of the artifact this number is a
+    # claim ABOUT — `{subject_bound, subjects:[{path, identity, digest, digest_mode, producer}],
+    # unbound_reason?, subject_stage?}` — captured at the SCORE stage's start.
+    #
+    # It exists because a `float` has no referent: measured across the six repo runs with an event
+    # log, 82 of 83 recorded metrics carry NO provenance at all, and 2 of 83 are provably about bytes
+    # the node did not produce. The reader functions in `command_eval` build a `Path`, `stat` it and
+    # DISCARD it; this is the field that stops discarding it. None on the `metric_subject="off"` rung
+    # and on every path that never reached a metric read.
+    metric_subject: Optional[dict] = None
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's

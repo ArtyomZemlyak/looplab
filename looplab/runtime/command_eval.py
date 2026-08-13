@@ -1482,6 +1482,10 @@ class _EvalRun:
     signals: dict = field(default_factory=dict)
     stage_results: Optional[list] = None
     early: Optional[RunResult] = None
+    # The METRIC SUBJECT binding, captured at the FINAL stage's start (see `_bind_subject`). It is
+    # on this object rather than returned separately for the reason every other field here is: the
+    # tail must never read a name the branch that ran happened not to bind.
+    metric_subject: Optional[dict] = None
 
 
 def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
@@ -1516,8 +1520,28 @@ def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
     return check_fn(stage, tail)
 
 
+def bind_metric_subject(subject, workdir, *, since: Optional[float], stages=None,
+                        upto: Optional[int] = None, stage: str = "") -> dict:
+    """The `metric_provenance` subject record for this eval — `runtime/metric_subject.bind`, called
+    with THIS module's containment rule and THIS module's producer map.
+
+    One wrapper rather than four call sites so the two facts that make the record trustworthy are
+    stated once: containment is `_confined` (the same guard every metric-source path goes through,
+    which resolves symlinks and `..` against the REAL workdir at eval time), and the producer map is
+    `stage_output_producers` (which stage's `expect` promised this path). Given both, `expect` and
+    `needs` stop being two unrelated lints and become two projections of one relation — this stage
+    produced / that stage consumed THIS artifact — which is the asymmetry doc 35 §1 names as the
+    actual defect behind "the contract is write-only".
+    """
+    from looplab.runtime import metric_subject as _ms
+    producers = stage_output_producers(stages, upto if upto is not None else len(stages or []))
+    return _ms.bind(subject, workdir, since=since, producers=producers, confine=_confined,
+                    stage=stage)
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
-                metric: dict, eval_started: float, check_fn) -> _EvalRun:
+                metric: dict, eval_started: float, check_fn,
+                subject: Optional[list] = None) -> _EvalRun:
     """Run the declared stage pipeline in order; the LAST stage's output feeds the metric read.
 
     Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
@@ -1583,8 +1607,19 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared input contract: {_input_problem}",
-                stages=stage_results, failed_stage=_sname)
+                stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
+        # THE METRIC SUBJECT, bound at the SCORE stage's start — i.e. the identity the artifact had
+        # at the instant the stage that produces the number began looking at it. Deliberately not
+        # after the pipeline: a score stage that rewrites its own input would then be recorded
+        # against bytes that postdate the measurement, and "the identity the scorer saw" is the only
+        # reading that makes the record a claim about the number rather than about the workdir.
+        #
+        # It is a READ, not a side effect (invariant #3): one `stat` plus a bounded digest, no event,
+        # nothing gated on it here. The enforcement lives at the terminal, in `engine/evaluate.py`.
+        if subject and _i == len(stages) - 1:
+            run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=eval_started,
+                                                     stages=stages, upto=_i, stage=_sname)
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
         # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
@@ -1639,7 +1674,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 exit_code=run.rc, stdout=run.out, stderr=f"stage '{_sname}' failed:\n{run.err}",
                 metric=_salvaged, timed_out=run.timed_out, stages=stage_results,
                 failed_stage=_sname, stalled=_salvageable_stall(run.signals),
-                diverged=bool(run.signals.get("diverged")))
+                diverged=bool(run.signals.get("diverged")), metric_subject=run.metric_subject)
             return run
         # THE SUCCESS CONTRACT, technical half. Runs on every stage that declared `expect`, needs no
         # model, and fails the stage exactly the way a non-zero exit does — same `failed_stage`, same
@@ -1673,7 +1708,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
-                stages=stage_results, failed_stage=_sname)
+                stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
         # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
         # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
@@ -1696,7 +1731,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 run.early = RunResult(
                     exit_code=0, stdout=run.out, metric=None, timed_out=False,
                     stderr=f"stage '{_sname}' failed verification: {_concern}",
-                    stages=stage_results, failed_stage=_sname)
+                    stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
                 return run
     # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
     return run
@@ -1746,7 +1781,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      start_stage: Optional[str] = None,
                      stall_timeout: Optional[float] = None,
                      stall_cap: Optional[float] = None,
-                     check_fn=None) -> RunResult:
+                     check_fn=None,
+                     subject: Optional[list] = None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -1758,6 +1794,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     reader; if it can't corroborate the primary within `drift_tolerance`, the metric is
     discarded (set to None) and `RunResult.drift` records the divergence. This catches a
     metric faked through the eval workdir even when the adapter file itself is frozen.
+
+    `subject` (metric provenance): the operator's workdir-relative declaration of what the metric is
+    a claim ABOUT (`EvalSpec.metric["subject"]`). The returned `RunResult.metric_subject` carries the
+    artifact's content identity at the score stage's start — the referent a bare `float` does not
+    have. `None`/`[]` records nothing here; whether an unbound metric is then a VIOLATION is the
+    engine's rung (`Settings.metric_subject`), never this function's, because this is also the
+    library entry point tests and a future non-engine caller use.
 
     `wrap` (untrusted tier): a `wrap(argv, host_cwd) -> argv` from `make_docker_wrap` that
     runs each command inside a container. The host cwd is still passed to the subprocess (the
@@ -1828,10 +1871,19 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # ONE object carries what either path produced into the metric read below, so the tail can never
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,
-                        eval_started=_eval_started, check_fn=check_fn)
+                        eval_started=_eval_started, check_fn=check_fn, subject=subject)
             if stages else _run_single(command, _ex, timeout=timeout))
     if _run.early is not None:
         return _run.early
+    # THE SUBJECT BINDING for the single-command path, and the backstop for a staged one that never
+    # reached its final stage. The staged path binds at the SCORE stage's start (see `_run_stages`),
+    # which is the reading that makes the record a claim about the number; a single command is BOTH
+    # the producer and the scorer, so there is no earlier instant to bind at and "as it stands at the
+    # metric read" is the only honest one. `since=_eval_started` either way: an artifact that predates
+    # this attempt cannot be what this attempt's number is about.
+    if subject and _run.metric_subject is None:
+        _run.metric_subject = bind_metric_subject(subject, str(wd), since=_eval_started,
+                                                  stages=stages, stage="")
     rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
     stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
@@ -1878,5 +1930,5 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
-                     diverged=bool(_sig.get("diverged")))
+                     diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
 
