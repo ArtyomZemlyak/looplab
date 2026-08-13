@@ -2002,16 +2002,8 @@ export function TraceSurface({
     onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
   // Unavailable takes precedence over every empty/partial shape: a failed observation is never
   // evidence that the subject recorded nothing.
-  //
-  // REVIEW (mega-review 2026-08-13): the rule above has a hole for detail-less subjects (any
-  // op-trace, or a node at a historical attempt): when the ONLY paged read fails, usePagedTrace
-  // settles `{payload: null, stale: true}`, `traceUnavailable(undefined)` is false, and
-  // `traceWindow(undefined)` reads as complete — so the fall-through below renders the positive
-  // empty claim ("No observations were recorded…") about a read that merely timed out, under a
-  // header notice claiming "showing confirmed spans" with zero spans ever confirmed. The span
-  // path also gets no useTraceRetry budget (only the conversation path does), so the false empty
-  // state is permanent until a manual gesture. A stale settle with a null payload should render
-  // TraceUnavailable, not the empty notice.
+  // (`unavailable` above already folds in the detail-less subject's failed sole read, which used
+  // to fall through to the positive empty claim.)
   if (unavailable)
     return shell(<TraceUnavailable onRetry={onRetry || retryRead} pending={retryPending} />)
   if (!spans.length) {
