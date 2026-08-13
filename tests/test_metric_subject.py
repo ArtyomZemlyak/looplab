@@ -354,3 +354,25 @@ def test_needs_alone_does_not_catch_the_incident_and_this_is_why_it_is_not_the_g
     (tmp_path / "out" / "model.bin").write_bytes(b"the node's own, correct, fresh checkpoint")
     assert verify_stage_inputs(["out/model.bin"], str(tmp_path), stage="score",
                                since=time.time()) is None
+
+
+def test_the_run_report_names_an_unbound_node_rather_than_silently_excluding_it(tmp_path):
+    """It rides the `metric_salvaged` row, so without its own branch it falls out of BOTH of the
+    report's exclusion lists — excluded and unmentioned, which is the failure this mechanism is
+    against."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_NODE_CREATED, EV_NODE_EVALUATED, EV_RUN_STARTED
+    from looplab.serve.report import _report_context
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r1", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append(EV_NODE_CREATED, {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {"x": 1.0}}, "code": ""})
+    prov = {"subject_bound": False, "unbound_reason": "not_declared", "subjects": []}
+    store.append(EV_NODE_EVALUATED, {
+        "node_id": 0, "metric": 0.9, "metric_provenance": prov,
+        "violations": unbound_subject_violation_rows(prov, 0.9, "require")})
+    text = _report_context(fold(store.read_all()))
+    assert "bound to NO subject" in text and "eval.metric.subject" in text
+    # …and it must NOT be reported as a constraint breach, which would accuse the run of something
+    # that did not happen.
+    assert "violated a constraint" not in text

@@ -108,6 +108,23 @@ def _report_context(state: RunState) -> str:
         flags.append(f"{len(salvaged)} evaluated node(s) carry a SALVAGED metric — recovered by the "
                      "run's own declared reader from an eval that failed, not measured by the "
                      "scoring path (excluded from best)")
+    # A THIRD exclusion, and it needs its own sentence for the same reason the first two do. An
+    # UNBOUND metric (`runtime/metric_subject.py`, `metric_subject="require"`) rides the SAME
+    # `metric_salvaged` row on purpose — inventing a second exclusion vocabulary would silently cost
+    # it every existing reader — but it is neither of the two facts above: the eval SUCCEEDED and the
+    # number was measured by the scoring path; what is missing is any record of what the number is
+    # ABOUT. Without this branch such a node falls out of both lists (its provenance is not
+    # `salvaged`, and its only row IS named `metric_salvaged`) and the report says nothing at all
+    # about a node it has excluded — which is the counted-but-invisible failure this whole mechanism
+    # exists to end.
+    unbound = [n for n in infeasible
+               if any((v or {}).get("name") == "metric_salvaged"
+                      and ((v or {}).get("salvage") or {}).get("condition") == "metric_subject_unbound"
+                      for v in (n.violations or []))]
+    if unbound:
+        flags.append(f"{len(unbound)} evaluated node(s) recorded a metric that is bound to NO "
+                     "subject — nothing says which artifact the number is about, so it cannot be "
+                     "checked and is excluded from best. Declare `eval.metric.subject`")
     if best is not None and best.confirmed_mean is None:
         flags.append("the champion is single-seed (not multi-seed confirmed)")
     if flags:
