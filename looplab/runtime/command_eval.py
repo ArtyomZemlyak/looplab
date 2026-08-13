@@ -1543,10 +1543,19 @@ class _EvalRun:
 # stage with the declaration silently dropped is how the two tiers would stop agreeing, and the
 # failure that would produce (a loader reaching S3 because VS_LOCAL_DATA_ROOT is unset) is exactly the
 # one this field exists to prevent, except now with a declaration in the manifest saying it can't happen.
+#
+# It is phrased for the OPERATOR, and says so, for the same reason `eval_stages.PROTECTED_SCRIPT_MISSING`
+# does: it exits non-zero, so `triage._failure_reason` classifies it as `crash` and the inline-repair
+# loop would otherwise spend its whole budget asking the Developer to fix something no edit can reach —
+# the declaration is the operator's and so is the wrap.
 STAGE_ENV_UNSUPPORTED = ("stage {stage!r} declares `env` but this run's container wrap cannot forward "
                          "environment into the container, so the declared variables would silently "
                          "not be set. Refusing rather than running the stage in an environment the "
-                         "task did not declare.")
+                         "task did not declare. This is NOT a repairable code error and the agent "
+                         "must not be asked to fix it: the declaration belongs to the operator and "
+                         "so does the sandbox tier. Fix the TASK — drop the stage's `env` (and set it "
+                         "through `eval_env` / `cmd.env` instead), or run on a tier whose wrap can "
+                         "carry it.")
 
 
 def _stage_wrap(ex: "_EvalExec", stage_env: dict):
