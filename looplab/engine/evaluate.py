@@ -45,6 +45,9 @@ from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
+                                           declaration_only_repair, declaration_repair_provenance,
+                                           declared_pipeline_completed, recheck_floor,
+                                           recheckable_expect, recheckable_salvage,
                                            salvage as salvage_metric)
 from looplab.engine.options import _UNSET
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
@@ -1019,6 +1022,61 @@ class EvaluateMixin:
         except Exception:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
             return {"violations": [], "extra_metrics": {}, "drift": None}
 
+    def _recheck_repaired_contract(self, res, node, workdir, salvaged, fix, err: str):
+        """The artifact CHECK, re-asked against the CORRECTED declaration — the `metric_provenance`
+        of a node that PASSES it, or None.
+
+        BACKLOG F1e, and the engine-side half of `engine/metric_salvage.py`'s RE-CHECK section, which
+        owns every rule — read its four admission rules and, in particular, the note on what they
+        jointly admit today. This binds the four things only the engine has: the stage the eval
+        failed, the pipeline RE-RESOLVED from the workdir the repair just corrected, the root the
+        operator's own declarations resolve against, and the freshness floor the original check used.
+
+        It re-checks, it does not re-run: `verify_stage_artifacts` is a handful of `stat` calls
+        against a file that is already on disk, which is the entire economic argument — the measured
+        case cost 76 GPU-minutes and re-running the stage to confirm a one-line path fix would spend
+        them again.
+
+        Best-effort in the same strict sense as the salvage reads beside it: this walks the
+        candidate's own workdir and re-resolves an agent-authored manifest, and neither may ever be
+        the thing that turns a failed node into a crashed RUN. Anything raised here degrades to "no
+        promotion", i.e. exactly the salvage behaviour that shipped before it.
+        """
+        from looplab.runtime.command_eval import verify_stage_artifacts
+        try:
+            stage = str(getattr(res, "failed_stage", "") or "")
+            # RE-RESOLVED, not the chain this attempt ran: `_resolved_stages` re-reads
+            # `looplab_stages.json` out of the workdir, which `_repair_salvaged_cause` has just
+            # re-materialized with the correction. That is what makes this a different question from
+            # the one the eval already answered — and when the OPERATOR declared the stages
+            # (`eval_spec["stages"]` wins over the manifest), the corrected file is not what the eval
+            # reads, the same failing declaration comes back, and the check fails again as it should.
+            chain = self._resolved_stages(node, workdir)
+            # FIRST, and the most categorical: a node is its WHOLE pipeline. A contract failure
+            # aborts the run, so on v6 node 3 the declared `merge` stage and the operator's appended
+            # `score` never executed and the recovered number is a plain training run's. A corrected
+            # path cannot speak for stages that never ran.
+            if not declared_pipeline_completed(chain, getattr(res, "stages", None) or (), stage):
+                return None
+            if not recheckable_salvage(salvaged):
+                return None
+            changed = (fix or {}).get("changed") or ()
+            if not declaration_only_repair(changed, (fix or {}).get("deleted") or (),
+                                           (fix or {}).get("code") or ""):
+                return None
+            since = recheck_floor(res, stage)
+            if since is None:
+                return None
+            expect = recheckable_expect(chain, stage, changed)
+            if not expect.get("files"):
+                return None
+            if verify_stage_artifacts(expect, self._salvage_reader_root(workdir), since,
+                                      stage=stage) is not None:
+                return None
+            return declaration_repair_provenance(salvaged, expect["files"], err)
+        except Exception:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
+            return None
+
     async def _repair_salvaged_cause(self, node, state, workdir, generation: int,
                                      salvaged, err: str, reason: str, attempt: int, stamp) -> tuple:
         """Ask the Developer to fix the CAUSE of a salvaged node's failure, WITHOUT re-evaluating it.
@@ -1062,7 +1120,18 @@ class EvaluateMixin:
         `_durable_repair_ledger` excludes `salvage_cause_fix` rows from the attempt count for the
         same reason — otherwise a resumed node silently lost one repair to a fix it never re-ran.
 
-        Returns `(node, attempt, repaired)`. NEVER raises — including on `BudgetExceeded`, which is
+        Returns `(node, attempt, repaired, fix)`, where `fix` describes WHAT was committed —
+        `{"changed": [...], "deleted": [...], "code": "..."}`, and `{}` on every path that committed
+        nothing. The caller needs all three because which files a cause fix touched decides whether
+        its artifact contract may be re-CHECKED or must be re-RUN (`metric_salvage
+        .declaration_only_repair`), and because a declared artifact that is itself a file the REPAIR
+        wrote must be refused (`metric_salvage.recheckable_expect`). It is returned rather than
+        re-derived from the log because the answer must be about THIS call: a resumed node whose fix
+        already landed (the invariant #3 early return below) reports `{}` — nothing was corrected in
+        this process, so this attempt may claim no re-check on the strength of it. Its next eval runs
+        the corrected manifest for real, which is the stronger answer anyway.
+
+        NEVER raises — including on `BudgetExceeded`, which is
         the one exception this method must swallow rather than propagate: `_evaluate`'s callers wrap
         it in try/FINALLY, not except (`orchestrator.py`'s dispatchers), so a budget stop raised out
         of an OPTIONAL best-effort fix leaves the node with NO TERMINAL AT ALL, discards the metric
@@ -1076,7 +1145,7 @@ class EvaluateMixin:
                 and reason in self._inline_repair_reasons
                 and callable(getattr(self.developer, "repair", None))
                 and (node.code or node.files or self._repo_spec)):
-            return node, attempt, False
+            return node, attempt, False, {}
         # INVARIANT #3, and the cheapest possible spelling of it: the fix's own event. Read BEFORE
         # the paid call, from the durable log rather than from a loop local, because the case it
         # covers is a process that died between appending the row and writing the terminal.
@@ -1084,18 +1153,19 @@ class EvaluateMixin:
         if _prior is not None:
             # Already paid for on an earlier pass. Whether it REPAIRED anything is a separate fact,
             # read back off the row: a receipt written for a call that proposed no change must not
-            # resume as "the declaration was corrected".
+            # resume as "the declaration was corrected". The fix payload is empty either way — the
+            # re-check below is about THIS pass's edits, and there are none to re-check on a resume.
             return node, attempt, bool(_prior.get("changed") or _prior.get("code")
-                                       or _prior.get("files") or _prior.get("deleted"))
+                                       or _prior.get("files") or _prior.get("deleted")), {}
         with self.tracer.span("salvage_cause_repair", node_id=node.id, attempt=attempt + 1):
             try:
                 new_code = self._repair(node, cause_repair_context(salvaged, err), state)
             except BudgetExceeded:
                 # See the docstring: propagating this out of a best-effort fix costs the node its
                 # terminal, because the callers' handler is a `finally`, not an `except`.
-                return node, attempt, False
+                return node, attempt, False, {}
             except Exception:  # noqa: BLE001 — a failed cause fix must not cost the salvaged metric
-                return node, attempt, False
+                return node, attempt, False, {}
         # Snapshot the developer's per-call audit state before the next `await`, for the reason the
         # attempt loop does: the developer instance is SHARED across concurrent evals and the write
         # lock below is a checkpoint, so a sibling's repair would otherwise be recorded as this
@@ -1110,7 +1180,7 @@ class EvaluateMixin:
         _dev_err, _ = _repair_provider_failure(node.code, new_code, repaired_files,
                                                repaired_deleted, 0)
         if _dev_err is not None:
-            return node, attempt, False
+            return node, attempt, False, {}
         prev_files = dict(getattr(node, "files", {}) or {})
         prev_deleted = set(getattr(node, "deleted", []) or [])
         changed, _new_deleted = _repair_change_set(prev_files, prev_deleted,
@@ -1141,13 +1211,13 @@ class EvaluateMixin:
                                       f"no change to the failing declaration"),
                         "changed": [], "stages_passed": None,
                         "salvaged_metric": salvaged.metric})
-            return node, attempt, False
+            return node, attempt, False, {}   # billed, receipted, nothing to commit
         async with self._write_lock:
             # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
             # the commit rather than adopting it — the caller's terminal is already stale-generation
             # and the fold will charge only its eval_seconds.
             if fold(self.store.read_all()).nodes[node.id].attempt != generation:
-                return node, attempt, False
+                return node, attempt, False, {}
             _payload = {
                 "node_id": node.id, "generation": generation,
                 # The ORDINAL this row FOLLOWS, not a new one. It is not an inline-repair attempt —
@@ -1178,10 +1248,12 @@ class EvaluateMixin:
             self.store.append(EV_NODE_REPAIRED, _payload)
         node = fold(self.store.read_all()).nodes[node.id]
         if node.attempt != generation:
-            return node, attempt, False
+            return node, attempt, False, {}
         self._write_node_files(node, workdir)
         stamp(node)                      # the workdir now IS the corrected manifest
-        return node, attempt, True
+        return node, attempt, True, {"changed": sorted(changed),
+                                    "deleted": list(repaired_deleted),
+                                    "code": new_code or ""}
 
     def _repaired_footprint(self, node, new_code, repaired_files, reservation):
         """The repaired artifact's resource declaration, clamped to the devices already held.
@@ -1430,6 +1502,11 @@ class EvaluateMixin:
             # ONE terminal below — it never becomes a second terminal (invariant #2).
             salvaged = None
             salvage_cause_repaired = False
+            # …and the OTHER outcome of the same block: the node whose repaired declaration then
+            # PASSED its artifact re-check, which is not a salvage at all (F1e). Its provenance
+            # record carries no violation and is consumed by the same single terminal; the two are
+            # mutually exclusive by construction — `salvaged` is cleared the moment this is set.
+            declaration_repaired = None
             err = ""
             reason = "crash"
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
@@ -1706,9 +1783,36 @@ class EvaluateMixin:
                         res.extra_metrics = {**(res.extra_metrics or {}),
                                              **_gates["extra_metrics"]} or None
                         ok = True
-                        node, attempt, salvage_cause_repaired = await self._repair_salvaged_cause(
-                            node, state, workdir, generation, salvaged, err, reason, attempt,
-                            _stamp_workdir)
+                        node, attempt, salvage_cause_repaired, _fix = (
+                            await self._repair_salvaged_cause(
+                                node, state, workdir, generation, salvaged, err, reason, attempt,
+                                _stamp_workdir))
+                        # THE CONTRACT, RE-ASKED AGAINST THE CORRECTED DECLARATION (backlog F1e).
+                        # Measured on `rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE
+                        # its checkpoint, printed the number, and failed its declared artifact
+                        # contract because the declaration missed the testbed's composed
+                        # `<run_name>_<model>` suffix. The best number the run had (0.728113) then
+                        # carried a `metric_salvaged` violation, was excluded from
+                        # `feasible_nodes()`, and could neither become champion nor be bred from.
+                        # ONE node — see `metric_salvage.py`'s RE-CHECK section for why this is
+                        # deliberately not a claim about any operator.
+                        #
+                        # The metric was never actually unmeasured: the pipeline DID write the
+                        # artifact, and the fix above has just corrected the sentence that named it.
+                        # So the CHECK is re-asked — never the stage, which is the whole economy of
+                        # this design — and if it passes the node is recorded as MEASURED. It is
+                        # asked HERE, before the terminal constitutes the salvage, so a node that
+                        # passes carries no `metric_salvaged` violation, no salvage provenance and
+                        # no `salvaged_error`: it never enters the salvage path at all.
+                        # `metric_salvage.py`'s RE-CHECK section owns every admission rule, and what
+                        # the promotion does NOT prove is written down there too.
+                        declaration_repaired = self._recheck_repaired_contract(
+                            res, node, workdir, salvaged, _fix, err)
+                        if declaration_repaired is not None:
+                            # NOT a salvage. `res.metric` and the qualifying gates' violations stay
+                            # exactly as computed above — a re-checked contract says nothing about
+                            # the operator's CONSTRAINTS, which still ran and still bind.
+                            salvaged = None
                         break
                 # Environment self-prep (deps.py): a crash that is purely a missing KNOWN library is
                 # not a bad idea — install it (trusted_local only) and re-run BEFORE the crash-triage
@@ -2172,6 +2276,21 @@ class EvaluateMixin:
                             list(_eval_payload["violations"])
                             + salvaged.violation_rows(getattr(self, "metric_salvage",
                                                               DEFAULT_METRIC_SALVAGE)))
+                    elif declaration_repaired is not None:
+                        # A MEASURED metric with provenance — the F1e case. The declared contract
+                        # failed, the Developer's fix corrected the declaration, and the artifact
+                        # check then PASSED against it, so the pipeline is known to have produced
+                        # what it declared and nothing about the number was ever in doubt. NO
+                        # violation row and nothing on the selection path: this node competes for
+                        # champion and can be bred from, which is the entire point.
+                        #
+                        # The record is still written (decision (d) in `metric_salvage.py`'s
+                        # `declaration_repair_provenance`): "the manifest was wrong and we fixed it"
+                        # is worth knowing even when the number is sound — it is the only durable
+                        # trace that the node's recorded code is not byte-for-byte what produced its
+                        # recorded metric, and the only way an operator sees that every MERGE node
+                        # in a run needed the same correction.
+                        _eval_payload["metric_provenance"] = declaration_repaired
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

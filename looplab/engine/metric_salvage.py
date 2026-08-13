@@ -94,6 +94,14 @@ WHAT MAKES A SALVAGED METRIC TRUSTWORTHY. Five conditions, all enforced below:
 
 `METRIC_SALVAGE_MODES` is the operator's lever over that last condition, defaulting to the
 conservative rung.
+
+--------------------------------------------------------------------------------------------------
+AND ONE CASE THAT IS NOT A SALVAGE AT ALL. When the failure was an artifact CONTRACT, the Developer's
+cause fix corrected the manifest, and the artifact check then PASSES against the corrected
+declaration, the metric was never unmeasured — the pipeline produced the artifact and only the
+sentence describing where it lived was wrong. Such a node is recorded as MEASURED: no violation, no
+salvage provenance. See the RE-CHECK section at the bottom of this module for the three admission
+rules and for what that promotion does NOT prove.
 """
 from __future__ import annotations
 
@@ -635,3 +643,271 @@ SALVAGE_CAUSE_DIRECTIVE = (
 def cause_repair_context(salvaged: SalvagedMetric, error: str) -> str:
     """The repair prompt for a node whose metric was salvaged. See `SALVAGE_CAUSE_DIRECTIVE`."""
     return SALVAGE_CAUSE_DIRECTIVE.format(metric=salvaged.metric, error=(error or "").strip())
+
+
+# --- THE RE-CHECK: A CORRECTED DECLARATION IS RE-ASKED, NOT RE-RUN (backlog F1e) -----------------
+# THE CASE THIS EXISTS FOR, measured on `runs/rubertlite-dr-unified-v6` node 3 on 2026-08-13. Its
+# Developer authored a fresh config with a new `run_name` and declared the checkpoint at a path
+# missing the testbed's composed `<run_name>_<model>` suffix. The stage exited 0, WROTE the
+# checkpoint, printed the number, and failed its declared artifact contract on the path alone — the
+# near-miss diagnostic named the exact file it had written. The metric (0.728113) was recovered from
+# its stdout, and under the default `audit` rung a salvaged metric carries a `metric_salvaged`
+# violation and is excluded from `feasible_nodes()`, so the best number the run had at that point
+# could neither become champion nor be bred from.
+#
+# ONE NODE, NOT A PATTERN, and the distinction is load-bearing because the first write-up of this
+# claimed otherwise. "Every DRAFT is measured, every MERGE is salvaged" was n=1 plus a prediction
+# that turned out wrong: node 4 was another merge, declared `unified-baseline_rubert-tiny-lite/
+# final/...`, the repo composed exactly that, and it measured normally. So nothing here — and
+# nothing anywhere else — may special-case an operator or assume merges get paths wrong more often.
+# The change stands on the single honest case: a manifest-only repair that makes an artifact the
+# pipeline ALREADY produced satisfy its contract. Let the frequency be whatever it turns out to be.
+#
+# WHY THIS IS NOT ANSWERED BY `select`. That rung admits agent-produced bytes wholesale, which is
+# the boundary salvage exists to keep (see the module docstring's second condition). The answer here
+# is narrower and is a fact about THIS eval rather than a policy: the metric was never actually
+# unmeasured. The pipeline DID produce the artifact — `command_eval._artifact_written_elsewhere`
+# proves it and names the exact file in the failure `concern` — and `metric_salvage_repair` already
+# corrects the manifest in the SAME attempt. So once the declaration is corrected, the artifact
+# CHECK is re-asked against it (`verify_stage_artifacts`, a handful of stats, no stage re-run); if it
+# now passes, the contract is satisfied by the artifact the pipeline really produced and the node is
+# recorded as MEASURED — no violation, no salvage provenance — because nothing about the number was
+# ever in doubt, only the sentence describing where it lived.
+#
+# WHAT THE RE-CHECK STILL DOES NOT PROVE, stated because promoting a number is exactly the place to
+# say what the promotion is not. The failing stage is usually the Developer's `train`, so the
+# operator's protected `score` stage never ran: the value comes out of the operator's DECLARED
+# reader over an AGENT-authored stage's output, which a fully successful staged eval would have read
+# from the score stage instead. The re-check answers "did this stage produce what it declared", not
+# "did the operator's scorer run". That is why the record this returns keeps `producer` and says the
+# contract was RE-checked rather than satisfied first time — a reader who weighs those differently
+# still has both facts.
+#
+# FOUR ADMISSION RULES, each with its own argument and each fail-closed:
+#   * THE DECLARED PIPELINE MUST HAVE RUN (`declared_pipeline_completed`) — first, because it is the
+#     cheapest and the most categorical. A contract failure ABORTS the pipeline, so on v6 node 3 the
+#     manifest declared `train` → `merge`, `train` failed its contract, and `merge` and the
+#     operator's appended `score` never executed at all (`nodes/node_3/` has `train.log` and no
+#     `score.log`). The recovered 0.728113 is therefore a plain training run's number filed under a
+#     node whose declared pipeline was train-then-merge-then-score. Promoting it on the strength of a
+#     corrected path would put a train-only result into champion selection wearing that node's label,
+#     which is strictly worse than leaving it salvaged — salvage at least MARKS it. A corrected
+#     declaration says one stage's output was where it said; it says nothing about the stages that
+#     never ran. So: every stage of the resolved chain must have run, and the contract failure must be
+#     on the LAST of them.
+#   * FRESHNESS — the re-check keeps `since` at the STAGE's own start (`recheck_floor`), the same
+#     floor the original check used. An earlier attempt's leftover in the deliberately-reused workdir
+#     must not be able to satisfy the corrected path.
+#   * WHICH REPAIRS QUALIFY — only a repair that touched EXACTLY the stage manifest
+#     (`declaration_only_repair`). A repair that touched CODE changed what the stage would produce,
+#     so its artifact must be re-RUN, not re-checked.
+#   * WHICH SALVAGES QUALIFY — only an `artifact_contract` failure whose value came out of the
+#     operator's spec UNMODIFIED (`recheckable_salvage`). A `relocated_file` rung already tells us a
+#     second declaration (the metric reader's own path) is still wrong, which is not a node whose
+#     only defect has been corrected.
+# The re-check is asked BEFORE the salvage is constituted on the terminal, so a node that passes
+# carries no provenance of salvage, no `metric_salvaged` violation and no `salvaged_error` at all.
+#
+# WHAT THE FOUR RULES TOGETHER ADMIT, AND WHY NOTHING SHIPPED REACHES IT YET — measured against
+# `engine/eval_stages.py::_resolve_stages`, and stated here because a rule set nobody can reach is a
+# thing a reader must be TOLD, not left to discover:
+#   * completion + "the failure is on the last stage" leaves exactly one admissible shape — a
+#     pipeline that ran end to end whose FINAL stage exited 0, printed the number, and misnamed its
+#     own artifact;
+#   * in Developer-manifest mode the final stage is the operator's APPENDED `score`, which
+#     `_resolve_stages` builds with `name`/`command`/`timeout` and no `expect` at all, so it cannot
+#     fail an artifact contract;
+#   * in operator `cmd.stages` mode the final stage CAN declare `expect.files`, but that declaration
+#     lives in the task spec and `looplab_stages.json` is ignored entirely — so the manifest-only
+#     repair the second rule requires cannot be what corrected it.
+# So today the two halves are mutually exclusive and no live node is promoted; v6 node 3 stays
+# salvaged, which is the intended answer for it. Making the promotion reachable is a DESIGN decision
+# with an owner — letting the appended `score` stage carry an operator-declared `expect` and deciding
+# who may repair it — not something this module should route around.
+
+# The Developer's stage manifest — the ONE file a re-checkable repair may touch. `engine/eval_stages
+# .py::_resolve_stages` reads it at exactly this name in the workdir ROOT, which is why this is an
+# exact match and not the BASENAME rule `_safe_reuse_start` uses one file over: there, matching more
+# paths refuses more reuse (the conservative direction); here, matching more paths would admit more
+# re-checks, so the same looseness would point the wrong way.
+DECLARATION_MANIFEST = "looplab_stages.json"
+
+# The salvage rungs whose value may be promoted by a re-check. `declared_reader` only: the operator's
+# spec read exactly what it declared, so the corrected manifest is the last broken sentence about
+# this node. `relocated_file` found the number somewhere other than where the operator's own metric
+# path says it lives — a second wrong declaration the manifest fix did not touch — and `eval_result`
+# is a relabelling of a value the eval carried, not a contract this check can speak for.
+RECHECKABLE_SALVAGE_SOURCES = ("declared_reader",)
+
+
+def _decl_key(path) -> str:
+    """A repair's changed-file key as the manifest name would be spelled. `_repair_change_set` keys
+    are workdir-relative; the `./` prefix is the one spelling difference that shows up in practice
+    (`_safe_reuse_start` strips exactly the same one)."""
+    text = str(path or "")
+    return text[2:] if text.startswith("./") else text
+
+
+def declaration_only_repair(changed, deleted=(), code: str = "") -> bool:
+    """Did this repair touch ONLY the stage manifest — i.e. is it a repair to the DECLARATION?
+
+    THE RULE DECISION F1e NAMES, as a rule with a truth table rather than a condition buried in the
+    attempt loop. A repair that touched CODE has changed what the stage would produce, so what it
+    declares must be re-RUN and never re-checked against an artifact the OLD code wrote: re-checking
+    it would attach the previous code's number to a node whose recorded code is different, which is
+    the one thing the whole salvage-cause design refuses (`SALVAGE_CAUSE_DIRECTIVE`).
+
+    FAIL CLOSED on everything ambiguous, and each clause is a real shape rather than a defensive
+    reflex:
+      * a DELETION is invisible in `changed` and can remove a module an earlier stage trained
+        through — the same blind spot `_safe_reuse_start` refuses reuse over;
+      * a whole-file `code` artifact IS the experiment's code;
+      * an EMPTY change set means nothing was corrected, so there is no corrected declaration to
+        re-check and a pass would be the ORIGINAL contract passing on a second look;
+      * anything beside the manifest — a config, a data file, a second manifest under a subdirectory
+        the eval does not read — is not a declaration fix this can speak for.
+    """
+    if deleted:
+        return False
+    if (code or "").strip():
+        return False
+    return {_decl_key(c) for c in (changed or ())} == {DECLARATION_MANIFEST}
+
+
+def declared_pipeline_completed(stages, rows, stage) -> bool:
+    """Did EVERY stage the resolved pipeline declares actually RUN, with the contract failure on the
+    LAST of them? The first and most categorical of the four admission rules.
+
+    A NODE IS ITS WHOLE PIPELINE, not its first stage. `runs/rubertlite-dr-unified-v6` node 3
+    declared `train` → `merge` (plus the operator's appended `score`); `train` failed its artifact
+    contract, `_run_stages` returned early, and `merge` and `score` never executed — the workdir has
+    `train.log` and no `score.log`. Its recovered metric is a plain training run's number. Correcting
+    the path proves the file was where the fixed declaration says; it proves nothing about two stages
+    that never ran, and promoting on it would file a train-only result under a node claiming to be
+    something else. A pipeline that aborted early has not produced the thing the node claims to be,
+    whatever the contract now says about one stage's output.
+
+    `stages` is the resolved chain (`Engine._resolved_stages`) and `rows` is `RunResult.stages` — the
+    per-stage records the run really produced, where `reused` is a genuine "ran on an earlier attempt
+    and its artifacts are on disk" (the stage-scoped re-run) and therefore counts.
+
+    FAIL CLOSED on every shape it cannot establish: an empty or unresolvable chain, a stage with no
+    name, a duplicate name (two rows could not be told apart), a declared stage with no record at
+    all, and any status that is not `ok`/`reused` on a stage before the last.
+    """
+    names = [str(s.get("name") or "") for s in (stages or ()) if isinstance(s, dict)]
+    if not names or "" in names or len(names) != len(set(names)):
+        return False
+    if str(stage or "") != names[-1]:
+        return False                     # the failure aborted the pipeline somewhere before the end
+    status = {str(r.get("name") or ""): str(r.get("status") or "")
+              for r in (rows or ()) if isinstance(r, dict)}
+    if any(status.get(n) not in ("ok", "reused") for n in names[:-1]):
+        return False
+    return status.get(names[-1]) == "expect_failed"
+
+
+def recheckable_salvage(salvaged) -> bool:
+    """May this recovered value be PROMOTED by a re-check, if the contract now passes?
+
+    The condition must be `artifact_contract` — the only failure class in which a declared contract
+    is what failed, and therefore the only one a re-check of that contract can answer. See
+    `RECHECKABLE_SALVAGE_SOURCES` for the rung rule.
+    """
+    return (salvaged is not None
+            and getattr(salvaged, "condition", "") == "artifact_contract"
+            and getattr(salvaged, "source", "") in RECHECKABLE_SALVAGE_SOURCES)
+
+
+def recheck_floor(res, stage: str) -> Optional[float]:
+    """The freshness floor a re-check of `stage`'s corrected contract must use, or None to REFUSE.
+
+    DECISION (a) OF F1e. It is the stage's OWN wall-clock start, recorded by the writer that ran the
+    original check (`command_eval.EXPECT_SINCE_KEY`) rather than re-derived here — the two must be
+    the same number or the re-check is answering a different question from the check it replaces.
+    The looser floors in reach are both wrong in the direction that matters: the ATTEMPT's start
+    (what `salvage` itself uses) precedes every stage in the attempt, so an artifact an EARLIER stage
+    of this same attempt wrote could satisfy a corrected path that names a LATER stage's output.
+
+    None when the row is missing, is not this stage's, did not fail its artifact contract, or carries
+    an unusable floor — a re-check with no floor would degrade to existence-only, which is precisely
+    how a leftover from a previous attempt gets promoted.
+    """
+    from looplab.runtime import command_eval
+    name = str(stage or "")
+    if not name:
+        return None
+    for row in (getattr(res, "stages", None) or []):
+        if not isinstance(row, dict) or str(row.get("name") or "") != name:
+            continue
+        if str(row.get("status") or "") != "expect_failed":
+            return None                  # some other stage outcome; there is no contract to re-ask
+        floor = row.get(command_eval.EXPECT_SINCE_KEY)
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+            return None
+        return float(floor) if math.isfinite(floor) and floor > 0 else None
+    return None
+
+
+def recheckable_expect(stages, stage: str, changed) -> dict:
+    """The CORRECTED `expect` for `stage` out of the re-resolved chain, or `{}` to refuse.
+
+    `stages` is `Engine._resolved_stages(node, workdir)` re-run AFTER the repair landed in the
+    workdir, so its `expect` is the corrected declaration — the whole point of the exercise is that
+    the check is re-asked against a different sentence, not against the one that already failed.
+
+    THE ONE ADVERSARIAL CASE, refused here rather than left to trust: a declared artifact that is
+    itself one of the files the REPAIR wrote. `_write_node_files` materializes the corrected manifest
+    AFTER the stage start, so a "fix" that declared `looplab_stages.json` as the stage's own output
+    would pass the freshness gate on a file the stage never produced. An artifact the repair wrote is
+    not an artifact the stage produced, and the repair is authored by the agent whose declaration was
+    wrong in the first place.
+    """
+    name = str(stage or "")
+    if not name:
+        return {}
+    written = {_decl_key(c) for c in (changed or ())}
+    for row in (stages or ()):
+        if not isinstance(row, dict) or str(row.get("name") or "") != name:
+            continue
+        expect = row.get("expect") if isinstance(row.get("expect"), dict) else {}
+        files = [f for f in (expect.get("files") or []) if isinstance(f, str) and f.strip()]
+        if not files:
+            return {}                    # nothing declared any more: a dropped contract is not a fix
+        if any(_decl_key(f) in written for f in files):
+            return {}
+        return {"files": files}
+    return {}
+
+
+def declaration_repair_provenance(salvaged, expect_files, error: str) -> dict:
+    """The `metric_provenance` for a node whose repaired contract PASSED the re-check.
+
+    DECISION (d), taken deliberately: the node is measured — no violation row, nothing on the
+    selection path — and it STILL records that its declaration was repaired. "The manifest was wrong
+    and we fixed it" is worth knowing even when the number is sound: it is the difference between a
+    node that ran cleanly and one that needed a correction after the fact, it is the only durable
+    trace that the node's recorded code is not byte-for-byte what produced its recorded metric (the
+    cost `_repair_salvaged_cause` documents), and it is the evidence an operator would need to notice
+    that every MERGE node in a run has been through this. A provenance field with no violation says
+    exactly that and nothing more.
+
+    `salvaged: False` is spelled out rather than omitted for the reason `SalvagedMetric.as_event`
+    already gives — a reader that checks one key must not have to know the dict only ever exists for
+    salvaged metrics, and this IS the "provenance for a MEASURED metric" that docstring anticipated.
+    Every reader in the tree keys on its truthiness (`serve/report.py`, `engine/lessons_distill.py`,
+    `search/speculation_quality.py`), so a False here reads as measured everywhere.
+    """
+    return {"salvaged": False,
+            "declaration_repaired": True,
+            "stage": getattr(salvaged, "stage", "") or "",
+            "reader": getattr(salvaged, "reader", "") or "",
+            # WHO WROTE THE BYTES the declared reader read, kept verbatim from the recovery record.
+            # The re-check says the stage produced what it declared; it does not say the operator's
+            # protected scorer ran, and this is the field that keeps those two apart.
+            "producer": getattr(salvaged, "producer", AGENT_PRODUCED),
+            "expect_files": [str(f) for f in (expect_files or [])][:12],
+            # The contract failure that was corrected, kept on the SUCCESS terminal for the same
+            # reason `salvaged_error` is kept on a salvaged one: a node that reads as measured must
+            # still be able to tell whoever looks what had been wrong.
+            "declaration_error": str(error or "")[:600]}

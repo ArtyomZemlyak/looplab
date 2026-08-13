@@ -23,6 +23,7 @@ from looplab.core.models import (
     NodeStatus,
     RunState,
     _durable_speculative_lifecycle,
+    card_score_fence_state,
     effective_card_footprint,
     is_unevaluated_speculative_discard,
     node_counts_toward_card_budget,
@@ -448,7 +449,14 @@ def _strictly_selection_ready(card: Card) -> bool:
 
 
 def _card_generation_fences_current(state: RunState, card: Card) -> bool:
-    """Recheck the receipt's exact parent/best lifecycle fences on the fresh state copy."""
+    """Recheck the receipt's exact parent/score lifecycle fences on the fresh state copy.
+
+    This is the Layer-5 twin of the fold's ``_card_action_freshness``: the fold decides
+    ``selection_ready`` on the state it folded, and the producer/freshness gate re-decides it on the
+    fresh copy it is about to elect from.  The score half is the SAME rule, spelled once in
+    ``card_score_fence_state`` — narrowing only the fold would leave every prefetch election still
+    refusing a card whose champion had moved, and the freshness drain still terminalizing it.
+    """
 
     parents = _card_parent_ids(card)
     if parents is None or card.parent_generations is None:
@@ -465,21 +473,19 @@ def _card_generation_fences_current(state: RunState, card: Card) -> bool:
         ):
             return False
 
-    if card.scored_against is None:
-        return bool(
-            card.scored_against_empty
-            and card.scored_against_generation is None
-            and state.best_node_id is None
-        )
-    scored = state.nodes.get(card.scored_against)
-    return bool(
-        scored is not None
-        and not scored.tombstoned
-        and card.scored_against not in state.aborted_nodes
-        and state.best_node_id == card.scored_against
-        and type(card.scored_against_generation) is int
-        and card.scored_against_generation == scored.attempt
-    )
+    scored = None if card.scored_against is None else state.nodes.get(card.scored_against)
+    return card_score_fence_state(
+        card.scored_against,
+        card.scored_against_generation,
+        card.scored_against_empty,
+        anchor_live=(
+            scored is not None
+            and not scored.tombstoned
+            and card.scored_against not in state.aborted_nodes
+        ),
+        anchor_attempt=None if scored is None else scored.attempt,
+        board_empty=state.best_node_id is None,
+    ) == "current"
 
 
 def _live_card_action(

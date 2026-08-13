@@ -12,6 +12,7 @@ from pydantic import (BaseModel, ConfigDict, Field, field_serializer, field_vali
 from looplab.core.cards import (
     CARD_ACTION_DIGEST_V1_FIELDS as _CARD_ACTION_DIGEST_V1_FIELDS,
     CARD_ACTION_DIGEST_V2_FIELDS as _CARD_ACTION_DIGEST_V2_FIELDS,
+    CARD_IDEA_CONCEPT_FIELDS as _CARD_IDEA_CONCEPT_FIELDS,
     CARD_STEERING_CONTEXT_FIELDS as _CARD_STEERING_CONTEXT_FIELDS,
     CARD_STATEMENT_MAX_CHARS as _CARD_STATEMENT_MAX_CHARS,
     CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_STATEMENT_MAX_UTF8_BYTES,
@@ -25,6 +26,7 @@ from looplab.core.cards import (
     _card_action_digest as __card_action_digest,
     card_action_digest as _card_action_digest_v2,
     card_ownership_receipt as _card_ownership_receipt,
+    card_score_fence_state as _card_score_fence_state,
     developer_artifact_footprint as _developer_artifact_footprint,
     durable_idea_payload as _durable_idea_payload,
     effective_card_footprint as _effective_card_footprint,
@@ -65,6 +67,7 @@ from looplab.core.fitness import is_better as _is_better, is_usable_metric
 # SAME object, so every existing import site and monkeypatch seam keeps resolving.
 CARD_ACTION_DIGEST_V1_FIELDS = _CARD_ACTION_DIGEST_V1_FIELDS
 CARD_ACTION_DIGEST_V2_FIELDS = _CARD_ACTION_DIGEST_V2_FIELDS
+CARD_IDEA_CONCEPT_FIELDS = _CARD_IDEA_CONCEPT_FIELDS
 CARD_STEERING_CONTEXT_FIELDS = _CARD_STEERING_CONTEXT_FIELDS
 CARD_STATEMENT_MAX_CHARS = _CARD_STATEMENT_MAX_CHARS
 CARD_STATEMENT_MAX_UTF8_BYTES = _CARD_STATEMENT_MAX_UTF8_BYTES
@@ -76,6 +79,7 @@ DEVELOPER_FOOTPRINT_MARKER = _DEVELOPER_FOOTPRINT_MARKER
 IDEA_PROPOSAL_DIGEST_V1_FIELDS = _IDEA_PROPOSAL_DIGEST_V1_FIELDS
 card_action_digest = _card_action_digest_v2
 card_ownership_receipt = _card_ownership_receipt
+card_score_fence_state = _card_score_fence_state
 developer_artifact_footprint = _developer_artifact_footprint
 durable_idea_payload = _durable_idea_payload
 effective_card_footprint = _effective_card_footprint
@@ -584,12 +588,24 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # options and the settings docs — the failure mode of the copies is silent, and it has already
 # happened once: `no_metric` was in the classifier and absent from the default set, so that whole
 # class of failure was never repaired and nobody had decided it should not be.
+# `needs_failed` is the INPUT contract's twin of `expect_failed` and is separate for the same kind of
+# reason: the stage never RAN, so nothing about its own code is implicated — the repair is either an
+# earlier stage that wrote its output elsewhere or a declaration that names the wrong path, and
+# telling the Developer "your stage crashed" would send it to read code that never executed.
 # `expect_failed` / `check_failed` are deliberately NOT folded into `no_metric`: the command did
 # not "run cleanly and print nothing", it ran and then failed a contract its own manifest
 # declared. Measured cost of the conflation — rubertlite-dr-unified-v5 node 0 died as
 # `no_metric` having printed its metric, and the operator was told the command printed none.
+# `diverged` and `stalled` are the two WATCHDOG verdicts, and they are separate members for the same
+# reason: both are tree-kills the ENGINE issued, so both exit -9 with no traceback — byte-identical to
+# the kernel OOM signature `_failure_reason` recognises. Measured cost of that conflation on
+# rubertlite-dr-unified-v6 node 5: the DIVERGE watchdog stopped a training whose loss went 1.2e+25
+# then NaN, the classifier called it `oom`, and the Developer spent three repair rounds halving the
+# batch size (8192 -> 2048 -> 512 -> 256) at ~3 GPU-minutes each while the actual instability went
+# untouched. "Reduce memory" and "stabilise the numerics" are opposite directives.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
-                                    "expect_failed", "check_failed")
+                                    "expect_failed", "check_failed", "diverged", "stalled",
+                                    "needs_failed")
 
 
 def is_developer_error(code) -> bool:

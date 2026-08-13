@@ -48,10 +48,19 @@ currently unusable: node 0 holds both devices for its whole lifecycle, and card-
 `_acquire_gpus(2)` until it terminates.
 
 **The gap.** `roles.py::_FOOTPRINT_GUIDANCE` asks the Researcher to declare `gpus` and never tells it
-the pool size or a per-experiment ceiling. The only channel that carries that today is the operator's
-goal prose — v5's said "two H200 GPUs are available", and the Researcher reasonably read it as "you
-may have both". A role asked to size a request against a budget it cannot see will get it wrong at
-some rate, and there is no reason for that rate to be non-zero.
+a per-experiment ceiling. The operator's goal prose is the only channel that names a number the
+Researcher can act on — v5's said "two H200 GPUs are available", and the Researcher reasonably read
+it as "you may have both". A role asked to size a request against a budget it cannot see will get it
+wrong at some rate, and there is no reason for that rate to be non-zero.
+
+**CORRECTION (2026-08-13).** The first version of this entry said the goal prose was the ONLY channel
+carrying GPU information at all. That was wrong: `engine/proposal_cues.py::_cue_gpu_contract` already
+spliced "GPU RESOURCE CONTRACT — this pool exposes at most {pool} GPU(s)". So the engine did speak —
+and what it announced was the POOL SIZE, which if anything invited the `{"gpus": 2}` declaration this
+entry is about. A pool announcement and a per-experiment ceiling are different facts, and only the
+second one answers "how much may THIS card ask for". The fix therefore splices the ceiling LAST, so
+it is the final device number the model reads; the pool line is left untouched because prompt strings
+are contracts.
 
 **What it would take.** Either (a) a hint carrying `max(1, pool // eval_parallel)` into both
 Researcher prompts — which means the `RESEARCHER_HINT_ATTRS` registry, both readers, every
@@ -60,6 +69,25 @@ the declared footprint to the per-experiment share instead of to the pool, which
 operator's `eval_parallel` outranks the Researcher's declaration. (b) is one line and a real policy
 change — it would fence a legitimately multi-GPU experiment onto one device — so it is a decision,
 not a fix. (a) is the honest one and is the larger job.
+
+**BUILT, 2026-08-13 — option (a).** A new registry hint `_gpu_budget_hint`
+(`agents/roles.py::RESEARCHER_HINT_ATTRS` + `RESEARCHER_PROMPT_CUES`, so it reaches BOTH readers
+through the shared `collect_hint_cues` and all four wrappers through the shared `forward_hints`),
+stamped per proposal by `engine/proposal_cues.py::_stamp_gpu_budget_hint` off the rule
+`engine/widths.py::per_experiment_gpu_budget`. The proposed `max(1, pool // eval_parallel)` was
+adopted with three edges decided against it: pool 0 yields **0** (a positive `gpus` is
+`required_unavailable` and fails admission closed, so "you may have one" would produce exactly the
+declaration that cannot be served); a CPU-locked task (`gpu_capable() -> False`) is told **nothing**;
+a width above the pool still yields **1**, never the floor's 0. The stamp is per-proposal rather than
+at construction so it reads the width AFTER `_repin_settled_widths` and after any `budget_extend` —
+computing it in `Engine.__init__` beside the width settling would quote a resumed box's own AUTO
+resolution instead of the pin. The POOL half stays live, because the reservation clamps against the
+live pool. `_FOOTPRINT_GUIDANCE` was also reworded: it said "`gpus=1` only when the experiment
+specifically needs one GPU", which read as discouraging the common case; it now says a stated ceiling
+is a ceiling and that exceeding it serialises the run instead of buying hardware.
+`tests/test_researcher_gpu_budget_hint.py` drives it end to end (both real prompts, a real wrapper
+chain, and a real resume onto a bigger box). Option (b) — clamping the declaration to the share — was
+NOT taken; a declared footprint is still authoritative at admission.
 
 **Today's workaround.** Pin the Card's resource request (`card_resource_pinned`, `{"gpus": 1}`) —
 `effective_card_footprint` merges the pin over the declaration at admission. **Caveat that matters:**
@@ -157,9 +185,15 @@ around the trust boundary that `b0327182` just closed for the scorer's code.
 | 1 | draft | 0.715142 | measured |
 | 2 | draft | 0.727991 | measured |
 | 3 | **merge** | **0.728113** | **salvaged** |
-| 4 | **merge** | — | declares the wrong path again |
+| 4 | merge | 0.224975 | measured |
 
-Every DRAFT is measured; every MERGE is salvaged. A merge node's Developer authors a fresh config
+**CORRECTION (same night).** The first version of this entry read "every DRAFT is measured, every
+MERGE is salvaged" and predicted node 4 would fail the same way. It did not: node 4 set
+`run_name: unified-baseline`, the repo composed `unified-baseline_rubert-tiny-lite`, and the
+declaration named exactly that — a correct path, a fresh checkpoint, a measured metric. (Its 0.2249
+is a real negative result: mean-merging the two models' weights destroyed them.) So the sample is
+ONE salvaged merge, not a systematic bias against the merge operator, and the claim was n=1 plus a
+prediction. What follows stands on the single honest case and should not special-case merges. A merge node's Developer authors a fresh config
 with a new `run_name` and gets the testbed's composed `<run_name>_<model>` directory wrong, so the
 `train` stage exits 0, fails its declared artifact contract, and metric salvage recovers the number
 from the stage's stdout. Node 4 declares `unified-baseline_rubert-tiny-lite/final/…` — the OLD HUMAN
@@ -168,9 +202,8 @@ experiment's name, not its own.
 **The consequence is the part that matters.** Under the default `metric_salvage: audit` a salvaged
 metric carries a `metric_salvaged` violation and is excluded from `feasible_nodes()`, so it can never
 become champion or be bred from. Node 3 produced the best number in the run (0.728113 vs the
-champion's 0.727991) and cannot win. So the search operator whose whole job is to COMBINE the best
-results is structurally disqualified, on every merge, by a path typo. That is a far worse outcome
-than the salvage itself, and neither `audit` nor `select` is the right answer to it — `select` would
+champion's 0.727991) and cannot win — on the strength of a path typo, not of anything about the
+number. Neither `audit` nor `select` is the right answer to that — `select` would
 admit agent-produced bytes wholesale, which is the boundary salvage exists to keep.
 
 **The fix is specific and cheap: the metric was never actually unmeasured.** The pipeline DID produce

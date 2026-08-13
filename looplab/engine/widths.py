@@ -44,6 +44,45 @@ def settle_width(raw, upper: int) -> Optional[int]:
     return max(1, value)
 
 
+def per_experiment_gpu_budget(pool, eval_parallel) -> Optional[int]:
+    """How many GPUs ONE experiment may claim while ``eval_parallel`` of them still run at once.
+
+    Stated here, beside the width settler, because it is a fact ABOUT the settled width — and
+    because the alternative was for `agents/roles.py::_FOOTPRINT_GUIDANCE` to ask the Researcher for
+    a `footprint.gpus` sized against a budget the prompt never named. Measured on
+    `rubertlite-dr-unified-v5` (docs/29 F1b): the goal prose said "two H200 GPUs are available", both
+    Cards declared `{"gpus": 2}`, `_resource_request_for_node` honoured the declaration (declared
+    beats AUTO), and a run with `eval_parallel: 2` went serial at double the per-node cost.
+
+    This is the SAME share `engine/resources.py::_resource_request_for_node` already gives an
+    UNDECLARED footprint, generalized: that branch reads "pool and parallel > 1 -> one device, else
+    the whole box", which is exactly ``pool // eval_parallel`` at the AUTO widths those two branches
+    were written for. A declared footprint is still authoritative — this is what the Researcher is
+    TOLD, not a clamp — so the two can never disagree about a value one of them refuses.
+
+    ``None`` means "not knowable, say nothing": a caller with no settled width or no probed pool must
+    print no number at all rather than a plausible wrong one. The three edge cases, each decided
+    rather than inherited:
+
+    * **pool == 0** -> ``0``, NOT ``max(1, 0 // p)``. On a GPU-less host a positive `gpus` is
+      `required_unavailable` in `_resource_request_for_node` and fails admission closed; telling the
+      Researcher it may have one device would produce exactly the declaration that cannot be served.
+    * **eval_parallel > pool** (an explicitly spelled width the box cannot serve) -> ``1``, not the
+      floor's ``0``. There ARE devices; they are oversubscribed, and the scheduler QUEUES rather than
+      refusing. ``0`` would read as "CPU-only", which is a different and wrong instruction.
+    * **an unsettled width** (0, a bool, a non-int, a partially built Engine with no
+      ``_eval_parallel``) -> ``None``. Launch-time AUTO is spelled ``0`` and is resolved off the box
+      in `Engine.__init__`; a caller that reads a ``0`` here is reading the width BEFORE it settled,
+      and the fix is to move the read, never to guess.
+    """
+    for value, floor in ((pool, 0), (eval_parallel, 1)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < floor:
+            return None
+    if pool == 0:
+        return 0
+    return max(1, pool // eval_parallel)
+
+
 # The two bounds, named so a call site reads as the axis it settles rather than as a magic number.
 EVAL_WIDTH_MAX = 1024        # concurrent EVALS: bounded by the box, not by provider concurrency
 LLM_WIDTH_MAX = 64           # concurrent BUILDS / provider calls: bounded by the shared LLM broker

@@ -5,7 +5,8 @@ import pytest
 
 from looplab.core.models import Card, Event, card_ownership_receipt, hypothesis_id
 from looplab.events.replay import fold
-from looplab.search.card_selection import card_action, eligible_cards
+from looplab.search.card_selection import (_card_generation_fences_current, card_action,
+                                           eligible_cards)
 from looplab.search.policy import GreedyTree
 from looplab.serve.public_cards import public_cards, public_cards_projection
 
@@ -96,6 +97,171 @@ def _native_operator_card_added(
         "scored_against_empty": False,
         "ownership_receipt": receipt,
     })
+
+
+def _card_against(
+    card_id: str,
+    statement: str,
+    *,
+    operator: str,
+    parent_ids: tuple[int, ...],
+    scored_against: int,
+    generations: dict[int, int] | None = None,
+):
+    """One receipt-bound Card whose score anchor is named INDEPENDENTLY of its parents.
+
+    `_native_card_added` and `_native_operator_card_added` both hard-code `scored_against=1`, which
+    cannot express the question this file's champion tests ask: two cards proposed under DIFFERENT
+    champions.
+    """
+    attempts = generations or {}
+    idea = {"operator": operator, "params": {}, "eval_timeout": None}
+    action = {
+        "operator": operator,
+        "params": {},
+        "space": None,
+        "eval_profile": None,
+        "eval_timeout": None,
+        "parent_id": parent_ids[0] if parent_ids else None,
+        "parent_ids": list(parent_ids),
+        "parent_generations": {str(parent): attempts.get(parent, 0) for parent in parent_ids},
+        "scored_against": scored_against,
+        "scored_against_generation": attempts.get(scored_against, 0),
+        "scored_against_empty": False,
+        "footprint": None,
+    }
+    receipt = card_ownership_receipt(card_id, statement, action)
+    assert receipt is not None
+    return ("card_added", {
+        "id": card_id,
+        "statement": statement,
+        "source": "researcher",
+        "idea": idea,
+        "parent_id": action["parent_id"],
+        "parent_ids": action["parent_ids"],
+        "parent_generations": action["parent_generations"],
+        "scored_against": scored_against,
+        "scored_against_generation": action["scored_against_generation"],
+        "scored_against_empty": False,
+        "ownership_receipt": receipt,
+    })
+
+
+def _evaluated_node(node_id: int, metric: float):
+    return [
+        ("node_created", {
+            "node_id": node_id,
+            "operator": "draft",
+            "idea": {"operator": "draft", "hypothesis": f"seed {node_id}"},
+        }),
+        ("node_evaluated", {"node_id": node_id, "metric": metric}),
+    ]
+
+
+def test_two_cards_proposed_under_different_champions_are_both_selectable():
+    """The property `eval_parallel > 1` needs and could never have: a queue of depth two.
+
+    Until 2026-08-13 the score fence also demanded `state.best_node_id == card.scored_against`, so a
+    Card proposed while node 1 was champion went permanently `freshness_stale` the moment node 2 beat
+    it — and with one proposer minting one Card at a time, two fresh selectable Cards could never
+    coexist. Measured on `runs/rubertlite-dr-unified-v6`: `card-3 scored_against=1 blockers=
+    ['freshness_stale']` beside `card-5 scored_against=2 status=running`, with the second H200 idle
+    for the whole run. See `core/cards.py::card_score_fence_state`.
+
+    Both halves are asserted, because they are two different gates on two sides of the layer cut: the
+    FOLD's `selection_ready` receipt (Layer 3's queue) and the selection-time recheck
+    `_card_generation_fences_current` (the Layer-5 producer/freshness gate). Narrowing only one would
+    leave the other refusing the same Card.
+    """
+    rows = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        *_evaluated_node(1, 0.5),
+        _card_against("under-champion-1", "improve on the first champion",
+                      operator="improve", parent_ids=(1,), scored_against=1),
+        *_evaluated_node(2, 0.9),
+        _card_against("under-champion-2", "improve on the second champion",
+                      operator="improve", parent_ids=(2,), scored_against=2),
+    ]
+    state = fold(_events(rows))
+    assert state.best_node_id == 2
+
+    older = state.cards["under-champion-1"]
+    newer = state.cards["under-champion-2"]
+    # The superseded Card's anchor is untouched: alive, un-reset, at the exact attempt it was scored
+    # on. Nothing about it changed except that some OTHER node scored higher.
+    assert older.scored_against == 1 and older.scored_against_generation == 0
+    assert state.nodes[1].attempt == 0 and not state.nodes[1].tombstoned
+    for card in (older, newer):
+        assert card.selection_provenance.freshness == "current"
+        assert card.selection_blockers == []
+        assert card.selection_ready is True
+        assert _card_generation_fences_current(state, card) is True
+
+    assert [card.id for card in eligible_cards(state, GreedyTree())] == [
+        "under-champion-1", "under-champion-2",
+    ]
+
+
+def test_a_dead_score_anchor_is_still_refused_after_the_champion_clause_was_narrowed():
+    """The control for the test above: what the score fence actually protects still bites.
+
+    The fence's job is that the node a proposal was scored against is still the SAME experiment.
+    Losing that node — tombstoned, aborted, or re-run under a new attempt — is exactly the case it
+    exists for, and narrowing the champion clause must not have touched it.
+    """
+    base = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        *_evaluated_node(1, 0.5),
+        *_evaluated_node(2, 0.9),
+        _card_against("anchored-on-1", "improve on the first champion",
+                      operator="improve", parent_ids=(2,), scored_against=1),
+    ]
+    fresh = fold(_events(base)).cards["anchored-on-1"]
+    assert fresh.selection_provenance.freshness == "current" and fresh.selection_ready is True
+
+    for killer in (
+        ("node_tombstoned", {"node_ids": [1]}),
+        ("node_abort", {"node_id": 1, "generation": 0}),
+        ("node_reset", {"node_id": 1, "generation": 0, "from_stage": "eval"}),
+    ):
+        state = fold(_events([*base, killer]))
+        card = state.cards["anchored-on-1"]
+        assert card.selection_provenance.freshness == "stale", killer[0]
+        assert "freshness_stale" in card.selection_blockers, killer[0]
+        assert card.selection_ready is False, killer[0]
+        assert _card_generation_fences_current(state, card) is False, killer[0]
+        assert eligible_cards(state, GreedyTree()) == [], killer[0]
+
+
+def test_a_merge_whose_parents_left_the_top_two_is_still_refused():
+    """The property the champion clause was a (crude, unsound) proxy for.
+
+    A merge Card binds the two nodes that were the policy top-2 when it was proposed.  "The champion
+    is unchanged" neither implies nor is implied by "the top-2 is unchanged", so removing that clause
+    cannot be what keeps a merge honest — `search/card_selection.py::_live_card_action` rechecks the
+    top-2 by METRIC, and it is what must still refuse this Card.  Asserted through the FOLD's own
+    verdict too, so the test shows WHICH gate holds the line: the receipt is still `selection_ready`,
+    and the live anchor recheck is what drops it out of the queue.
+    """
+    rows = [
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        *_evaluated_node(1, 0.5),
+        *_evaluated_node(2, 0.9),
+        _card_against("merge-of-the-old-top-two", "merge the two leaders",
+                      operator="merge", parent_ids=(2, 1), scored_against=2),
+    ]
+    while_top_two = fold(_events(rows))
+    assert [card.id for card in eligible_cards(while_top_two, GreedyTree())] == [
+        "merge-of-the-old-top-two",
+    ]
+
+    # A third node outscores node 1, so the current top-2 is {3, 2} and this merge no longer names it.
+    superseded = fold(_events([*rows, *_evaluated_node(3, 1.5)]))
+    card = superseded.cards["merge-of-the-old-top-two"]
+    assert card.selection_provenance.freshness == "current"
+    assert card.selection_ready is True
+    assert _card_generation_fences_current(superseded, card) is True
+    assert eligible_cards(superseded, GreedyTree()) == []
 
 
 def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_shape():
@@ -350,6 +516,12 @@ def test_short_lived_expanded_v1_receipt_remains_current_during_v2_upgrade():
 
 
 def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_empty():
+    """The EMPTY score authority still requires an empty board — deliberately, and only here.
+
+    ``card_score_fence_state`` dropped the champion-equality clause from the INCUMBENT branch on
+    2026-08-13; this branch keeps its equivalent (``best_node_id is None``) on purpose, and that
+    helper's docstring owns the reason. Pin the asymmetry so it stays a decision rather than drift.
+    """
     statement = "first seed"
     action = {
         "operator": "draft", "params": {}, "space": {}, "eval_profile": None,
@@ -376,6 +548,15 @@ def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_em
     with_best = fold(_events([*_baseline(), added])).cards["first-seed"]
     assert with_best.selection_provenance.freshness == "stale"
     assert with_best.selection_ready is False
+
+    # …and a receipt claiming empty authority AND an anchor generation is malformed, never merely
+    # empty: stale even on the empty board that would otherwise make it current.
+    malformed = ("card_added", {**added[1], "scored_against_generation": 0})
+    broken = fold(_events([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}), malformed,
+    ])).cards["first-seed"]
+    assert broken.selection_provenance.freshness == "stale"
+    assert broken.selection_ready is False
 
 
 def test_node_building_card_link_marks_only_its_native_card_in_flight_and_fail_closed():

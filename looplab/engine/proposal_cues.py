@@ -374,6 +374,7 @@ class ProposalCuesMixin:
             pass
         if sweep_hint:
             steering.append({"kind": "sweep"})
+        self._stamp_gpu_budget_hint(researcher=_r)
         self._stamp_novelty_hint(state, self._novelty_stance, researcher=_r)
         strategy_cue = {"kind": "strategy"}
         if self._novelty_stance in {"explore", "balanced", "exploit"}:
@@ -386,6 +387,81 @@ class ProposalCuesMixin:
         bounded_steering = normalize_steering_context(steering)
         try:
             setattr(_r, "_steering_context", bounded_steering or [])
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _gpu_budget_hint_text(self) -> str:
+        """The PER-EXPERIMENT GPU budget the Researcher sizes `footprint.gpus` against, as prose.
+
+        docs/29 F1b. `agents/roles.py::_FOOTPRINT_GUIDANCE` has always asked the Researcher to declare
+        `{"gpus": N}` and never told it what N may be; the only channel carrying that was the
+        operator's goal text. On `rubertlite-dr-unified-v5` the goal said "two H200 GPUs are
+        available", every Card declared `{"gpus": 2}`, and a run whose settled `eval_parallel` was 2
+        ran serially at double the per-node cost — `CUDA_VISIBLE_DEVICES=0,1`, `WORLD_SIZE=2` at the
+        process level. Nothing in the engine was wrong; the role was sizing against a budget it could
+        not see.
+
+        WHERE THE TWO NUMBERS COME FROM, and why they are not the same kind of fact:
+
+        * the WIDTH is `self._eval_parallel` — the run's OWN settled width. Read here, at proposal
+          time, which is downstream of every place that owns it: `Engine.__init__` resolves launch
+          AUTO off the box, `_repin_settled_widths` REPLACES that with what `run_started` pinned when
+          the axis was launched AUTO (invariant #6), and `_apply_control_overrides` re-applies a
+          durable `budget_extend` retune on every turn. Computing this once in `__init__` — the
+          obvious place, since that is where the width settles for a fresh run — would capture the
+          pre-re-pin value and tell a run resumed on a different box a ceiling derived from the NEW
+          box's GPU count instead of the width its own log was written under. `budget_extend` is the
+          second reason the read stays per-proposal: an operator who widens the run mid-log must see
+          the ceiling narrow with it, or the next Card is sized against a width nobody is running at.
+        * the POOL is `len(self._gpu_ids)` — deliberately the LIVE box, and deliberately not pinned.
+          The reservation clamps a declared footprint against this same live pool
+          (`resources.py::_clamp_resource_footprint`), so a ceiling quoted from a pool the run no
+          longer has would be a number the scheduler will not honour in either direction: too low and
+          devices sit idle, too high and we reproduce exactly the defect this hint exists to close.
+          A resume onto a bigger box therefore keeps the run's pinned WIDTH and states the ceiling the
+          new box can actually serve.
+
+        Silent when the task declares itself CPU-locked (`_task_gpu_capable`, absent means capable).
+        An undeclared footprint on such a task is already a zero-device request that never takes the
+        pool-wide host lease, and `_FOOTPRINT_GUIDANCE` already says to leave it unspecified — so
+        there is no ceiling to state. Naming GPU counts to a role whose adapter says its code cannot
+        touch a device is the prompt-side twin of the category error `_task_gpu_capable` exists to
+        stop: inferring the WORK's needs from the BOX.
+        """
+        from looplab.engine.widths import per_experiment_gpu_budget
+        if not self._task_gpu_capable():
+            return ""
+        pool = len(getattr(self, "_gpu_ids", None) or [])
+        budget = per_experiment_gpu_budget(pool, getattr(self, "_eval_parallel", 0))
+        if budget is None:
+            return ""
+        if budget == 0:
+            # pool == 0 with a GPU-capable task: a positive `gpus` is `required_unavailable` and
+            # fails admission closed rather than queueing, so say that instead of a device count.
+            return ("\nGPU BUDGET — this host exposes NO GPU. Declare `footprint: {\"gpus\": 0}` "
+                    "(or leave `footprint` unspecified) and write CPU-only code: a positive `gpus` "
+                    "declaration cannot be satisfied here and the experiment is REFUSED admission "
+                    "rather than queued.")
+        return (
+            f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
+            f"concurrently on a pool of {pool} GPU(s), so ONE experiment may declare at most "
+            f"`footprint.gpus = {budget}`. That is a CEILING, and declaring more does NOT get this "
+            "experiment more hardware: the extra devices are taken from the sibling experiments that "
+            "would otherwise run at the same time, so the run serialises at the same per-experiment "
+            f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
+            "declare, the training/eval command must target that SAME count.")
+
+    def _stamp_gpu_budget_hint(self, researcher=None) -> None:
+        """Stamp `_gpu_budget_hint` (RESEARCHER_HINT_ATTRS) onto the active Researcher.
+
+        Set UNCONDITIONALLY, empty included: role instances are pooled and reused across builds
+        (Variant-1), so a stale ceiling from an earlier width would otherwise outlive a
+        `budget_extend` retune. Same `researcher` override and same swallow-everything contract as
+        `_set_complexity_hint`, whose per-build researcher this is called with — a Toy role that
+        rejects attribute writes must not fail a build over a prompt cue."""
+        _r = researcher if researcher is not None else self.researcher
+        try:
+            setattr(_r, "_gpu_budget_hint", self._gpu_budget_hint_text())
         except Exception:  # noqa: BLE001
             pass
 

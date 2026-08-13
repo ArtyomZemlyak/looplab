@@ -31,9 +31,13 @@ def test_the_prompt_cues_are_a_strict_subset_of_the_hint_registry():
 def test_the_subset_is_exactly_the_prose_cues():
     """`_digest_cap` is a numeric cap, `_hyp_order` orders the board inside `_state_brief`, and
     `_novelty_stance` / `_steering_context` / `_cross_run_advisory_receipt` are read structurally —
-    none of them is concatenated into the user turn as prose."""
+    none of them is concatenated into the user turn as prose.
+
+    `_gpu_budget_hint` (docs/29 F1b — the per-experiment GPU ceiling) is LAST, and the position is
+    part of the contract: `_complexity_hint` carries the GPU RESOURCE CONTRACT cue announcing the
+    POOL size, and the ceiling has to be the last number the model reads about devices."""
     assert RESEARCHER_PROMPT_CUES == (
-        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")
+        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint")
 
 
 @pytest.mark.parametrize("module,holder,method", [
@@ -53,9 +57,11 @@ def test_both_researchers_read_the_SAME_cue_tuple(module, holder, method):
 def test_the_tuple_is_declared_in_exactly_one_place():
     # Matched at the START of a tuple line, so the same names appearing inside the broader
     # RESEARCHER_HINT_ATTRS registry (prefixed by `_digest_cap`) are not counted as a second copy.
+    # DERIVED from the registry rather than hand-copied: a hand-copied literal that goes stale when a
+    # cue is added counts ZERO, which reads as "declared nowhere" and points at the wrong defect.
+    literal = '\n    ' + ', '.join(f'"{cue}"' for cue in RESEARCHER_PROMPT_CUES) + ')'
     combined = inspect.getsource(roles_mod) + inspect.getsource(agent_mod)
-    assert combined.count(
-        '\n    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")') == 1
+    assert combined.count(literal) == 1
 
 
 # ------------------------------------------------------------------ AG-08: the run_phase collision

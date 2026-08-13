@@ -75,12 +75,64 @@ MAX_STAGE_COUNT = 16
 # both modes: the operator writes it on `cmd.stages`, the Developer writes it on
 # `looplab_stages.json`. The in-script assert is the recommended belt (see the repo-Developer
 # prompt's STAGE CHECKS block); this is the braces, and it is the half the ENGINE can enforce.
+#
+# THE OTHER HALF, added 2026-08-13: `needs` — what a stage READS.
+#
+# `expect` describes only what a stage WRITES, so nothing in the manifest ever stated what a stage
+# consumes, and every failure of that kind arrived as a crash deep inside somebody's loader — or, far
+# worse, did not arrive at all. Both of the run-killing path defects on this box are of that shape:
+# `rubertlite-dr-unified-v5` node 0 wrote its checkpoint exactly where it declared and the scorer read
+# a different directory; `v6` node 4 trained a 0.726 model and then SCORED A HUMAN'S JULY CHECKPOINT
+# because an absolute path in an editable config named it, with the artifact contract PASSING (the
+# stage did write everything it promised) and the run recording 0.225 as a real result.
+#
+# `needs` is deliberately NOT inside `expect`: `expect` is a claim about this stage's own output,
+# checked AFTER it runs, and a precondition is a different fact checked BEFORE — with a different
+# remedy. A missing output means the code or the declaration is wrong; a missing input means this
+# stage should not have started, and usually that an EARLIER stage put the file somewhere else. That
+# distinction is what the check buys: when a declared input is absent, the engine names the earlier
+# stage whose `expect.files` promised it, so "train wrote the checkpoint one directory over" is
+# reported as that sentence instead of as a traceback in a loader.
+#
+# It is a stat() before the command, so it costs nothing and it fails BEFORE the GPU-hours, not after.
 MAX_STAGE_EXPECT_FILES = 16
+MAX_STAGE_NEEDS_FILES = 16
 MAX_STAGE_ASSERT_CHARS = 300
 # Closed key set. An unknown key is REFUSED, not ignored: `expect`'s whole value is that a declared
 # condition is actually checked, so a silently-dropped `"assets"` typo would leave a stage
 # advertising a contract nothing enforces — which is the failure this field exists to end.
 STAGE_EXPECT_KEYS = ("files", "assert")
+
+
+def _validate_rel_paths(nm: str, field: str, values) -> tuple[Optional[list], Optional[str]]:
+    """The path-SHAPE rule both declaration lists go through: workdir-relative, no traversal, no NUL,
+    de-duplicated, order preserved, bounded.
+
+    One function rather than two copies because the two lists are read by opposite halves of the same
+    contract (`expect.files` after the stage, `needs` before it) and a shape one side accepts and the
+    other refuses would be a manifest that validates and then behaves differently depending on which
+    check reaches it first. Containment is re-decided at check time against the REAL workdir by
+    `_confined` — a symlink the candidate plants at eval time is invisible from a manifest."""
+    cap = MAX_STAGE_NEEDS_FILES if field == "needs" else MAX_STAGE_EXPECT_FILES
+    if not isinstance(values, list) or not all(isinstance(f, str) for f in values):
+        return None, f"stage {nm!r} `{field}` must be a list of workdir-relative path strings."
+    if len(values) > cap:
+        return None, f"stage {nm!r} `{field}` may name at most {cap} paths."
+    out: list = []
+    for f in values:
+        rel = f.strip()
+        while rel.startswith("./"):
+            rel = rel[2:]
+        if not rel or "\x00" in rel:
+            return None, f"stage {nm!r} `{field}` contains an empty path."
+        if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
+            return None, (f"stage {nm!r} `{field}` entry {f!r} must be RELATIVE to the eval "
+                          "workdir — an absolute path names something outside this node.")
+        if ".." in rel.replace("\\", "/").split("/"):
+            return None, (f"stage {nm!r} `{field}` entry {f!r} escapes the eval workdir.")
+        if rel not in out:
+            out.append(rel)
+    return out, None
 
 
 def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
@@ -109,20 +161,9 @@ def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
             return None, f"stage {nm!r} `expect.files` must be a list of workdir-relative path strings."
         if len(files) > MAX_STAGE_EXPECT_FILES:
             return None, f"stage {nm!r} `expect.files` may name at most {MAX_STAGE_EXPECT_FILES} paths."
-        out: list = []
-        for f in files:
-            rel = f.strip()
-            while rel.startswith("./"):
-                rel = rel[2:]
-            if not rel or "\x00" in rel:
-                return None, f"stage {nm!r} `expect.files` contains an empty path."
-            if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
-                return None, (f"stage {nm!r} `expect.files` entry {f!r} must be RELATIVE to the eval "
-                              "workdir — an absolute path names something outside this node.")
-            if ".." in rel.replace("\\", "/").split("/"):
-                return None, (f"stage {nm!r} `expect.files` entry {f!r} escapes the eval workdir.")
-            if rel not in out:
-                out.append(rel)
+        out, err = _validate_rel_paths(nm, "expect.files", files)
+        if err is not None:
+            return None, err
         if out:
             clean["files"] = out
     a = expect.get("assert")
@@ -908,6 +949,15 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
             if err is not None:
                 return None, err
             st["expect"] = exp
+        if s.get("needs") is not None:
+            # The stage's INPUT contract — see the block above `MAX_STAGE_EXPECT_FILES`. Validated
+            # here beside `expect` for the same reason: `declare_stages`, `EvalSpec.stages` and
+            # `_resolve_stages` must accept exactly the same manifest.
+            needs, err = _validate_rel_paths(nm, "needs", s["needs"])
+            if err is not None:
+                return None, err
+            if needs:
+                st["needs"] = needs
         clean.append(st)
     return clean, None
 
@@ -1010,6 +1060,22 @@ EXPECT_ESCAPES = ("stage {stage!r} declares artifact {path!r}, which does not re
                   "workdir (an absolute path, a `..` traversal, or a symlink out of the sandbox). "
                   "Declared artifacts are workdir-relative.")
 
+# THE FLOOR THE CONTRACT WAS HELD TO, recorded on the stage row a contract failure produces.
+#
+# `verify_stage_artifacts`' freshness half compares `st_mtime` against the stage's OWN wall-clock
+# start (`_w0` below), and that number existed nowhere outside `_run_stages`' frame. It has to,
+# because the engine now RE-ASKS this same check after a repair corrected the declaration
+# (`engine/metric_salvage.py::recheck_floor` — the F1e re-check), and a re-check held to a LATER
+# floor would refuse the very artifact the stage wrote, while one held to an EARLIER floor (the
+# attempt's start, the eval's) would let a leftover from a previous attempt of this deliberately
+# reused workdir satisfy the corrected path. The only floor that means "this run of this stage
+# produced it" is the one the original check used, so it is written down rather than re-derived.
+#
+# Additive and fold-ignored: `replay._on_stage_finished` copies exactly name/status/exit_code/
+# seconds out of the row, so this rides on `stage_finished` without changing folded state (the same
+# way `concern` already does), and every reader of an older log sees it absent.
+EXPECT_SINCE_KEY = "expect_since"
+
 
 def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
     """The TECHNICAL half of the stage success contract: None when every declared artifact is there,
@@ -1061,6 +1127,91 @@ def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: st
         if not _file_is_fresh(p, since):
             return EXPECT_STALE.format(stage=stage, path=rel)
     return None
+
+
+# What `verify_stage_inputs` reports. Same family shape as the EXPECT_* constants above and for the
+# same reason — the repair loop reads ONE vocabulary — but every sentence here names the thing that
+# is different about an input: the stage has NOT run, so nothing about its code is implicated yet.
+NEEDS_ESCAPES = ("stage {stage!r} declares an input {path!r} that resolves outside the eval workdir. "
+                 "Declared inputs are workdir-relative.")
+NEEDS_MISSING = ("stage {stage!r} did not start: it DECLARES that it reads {path!r}, and that path "
+                 "does not exist in the eval workdir. Either an earlier stage was supposed to write "
+                 "it and wrote it somewhere else, or this stage reads a different path than it "
+                 "declares. Fix whichever is wrong — do not delete the declaration to make this pass.")
+# Appended when an EARLIER stage in this same pipeline declared the missing path as its own output.
+# This is the whole point of the input contract: it turns a mismatch between two declarations into
+# one sentence naming both stages, instead of a crash inside somebody's loader three stages later.
+NEEDS_MISSING_PRODUCER = (" Stage {producer!r} DECLARES this path as one of its own outputs "
+                          "(`expect.files`), so the two declarations disagree about where the file "
+                          "is, or that stage did not really produce it.")
+# Appended when a file of the same NAME exists elsewhere in the workdir — the same near-miss signal
+# `EXPECT_MISSING_NEARBY` gives the output side, and the same repair: one of the two paths is wrong.
+NEEDS_MISSING_NEARBY = (" A file of that name DOES exist at {found!r}.")
+NEEDS_EMPTY = ("stage {stage!r} did not start: its declared input {path!r} exists but is EMPTY. "
+               "Whatever was supposed to produce it did not finish — running this stage on a 0-byte "
+               "input would either crash inside a loader or silently train on nothing.")
+
+
+def verify_stage_inputs(needs, workdir, *, stage: str = "", producers: Optional[dict] = None,
+                        since: Optional[float] = None) -> Optional[str]:
+    """The stage's INPUT contract: None when every declared input is present and non-empty, otherwise
+    a one-line reason naming the first one that is not. Checked BEFORE the command runs.
+
+    TWO conditions, not the output side's three, and the missing one is deliberate: an input has NO
+    freshness rule. A stage legitimately reads things that predate it by any amount — the seeded
+    repo, a mounted dataset, a base checkpoint, a `train` output the engine deliberately REUSED
+    across attempts (`_safe_reuse_start`). Applying `expect`'s staleness gate here would refuse the
+    reuse the persistent workdir exists for. `since` is accepted so a caller can be explicit about
+    that and so the signature matches its output twin, and it is intentionally unused.
+
+    `producers` maps a declared output path to the EARLIER stage that promised it, which is what lets
+    the refusal name both sides of a disagreement between two declarations. Absent, the message is
+    still correct, just less specific.
+    """
+    del since  # see the docstring: an input has no freshness rule, and saying so beats omitting it
+    for rel in (needs or []):
+        p = _confined(workdir, rel)
+        if p is None:
+            return NEEDS_ESCAPES.format(stage=stage, path=rel)
+        try:
+            st = p.stat()
+        except OSError:
+            message = NEEDS_MISSING.format(stage=stage, path=rel)
+            producer = (producers or {}).get(rel)
+            if producer:
+                message += NEEDS_MISSING_PRODUCER.format(producer=producer)
+            # `since=None`: the near-miss scan's freshness filter is about "did THIS stage write it",
+            # which is meaningless for an input — any copy of that name is worth reporting.
+            elsewhere = _artifact_written_elsewhere(workdir, rel, None)
+            if elsewhere:
+                message += NEEDS_MISSING_NEARBY.format(found=elsewhere)
+            return message
+        if p.is_dir():
+            try:
+                if not any(p.iterdir()):
+                    return NEEDS_EMPTY.format(stage=stage, path=rel)
+            except OSError:
+                return NEEDS_EMPTY.format(stage=stage, path=rel)
+        elif st.st_size <= 0:
+            return NEEDS_EMPTY.format(stage=stage, path=rel)
+    return None
+
+
+def stage_output_producers(stages, upto: int) -> dict:
+    """{declared output path -> the name of the FIRST stage before `upto` that declares it}.
+
+    First rather than last on purpose: when two stages claim the same output, the one a later stage's
+    input contract should point at is the one that established the path. Built per check rather than
+    once because `_resolve_stages` can hand `_run_stages` a different list per attempt."""
+    out: dict = {}
+    for s in (stages or [])[:max(0, upto)]:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("name") or "")
+        expect = s.get("expect") if isinstance(s.get("expect"), dict) else {}
+        for rel in (expect.get("files") or []):
+            out.setdefault(rel, name)
+    return out
 
 
 def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Optional[list]:
@@ -1396,6 +1547,26 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         _sto = finite_timeout(_stg.get("timeout", timeout), timeout)
         if not _scmd:
             continue
+        # THE INPUT CONTRACT, before anything is spent. A stage whose declared input is not there
+        # cannot succeed, and every second it runs before discovering that is a second bought at GPU
+        # prices — v5 node 0 spent 76 minutes on a pipeline whose scorer read a directory the trainer
+        # never wrote to. The refusal is shaped exactly like the `expect` one (a stage row, an early
+        # return, `failed_stage` set) so it flows through the SAME repair loop and stage-scoped re-run
+        # with no new mid-loop vocabulary — the status is different only because the remedy is.
+        # `isinstance`, not `or []`: `run_command_eval(stages=...)` is public, and a raw
+        # `"needs": "ckpt.pt"` string must degrade to "no contract" rather than iterate per character.
+        _needs = _stg.get("needs") if isinstance(_stg.get("needs"), list) else []
+        _input_problem = (verify_stage_inputs(_needs, str(ex.wd), stage=_sname,
+                                              producers=stage_output_producers(stages, _i))
+                          if _needs else None)
+        if _input_problem:
+            stage_results.append({"name": _sname, "status": "needs_failed", "exit_code": 0,
+                                  "seconds": 0.0, "concern": str(_input_problem)[:700]})
+            run.early = RunResult(
+                exit_code=0, stdout=run.out, metric=None, timed_out=False,
+                stderr=f"stage '{_sname}' failed its declared input contract: {_input_problem}",
+                stages=stage_results, failed_stage=_sname)
+            return run
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
         # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
@@ -1449,7 +1620,8 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             run.early = RunResult(
                 exit_code=run.rc, stdout=run.out, stderr=f"stage '{_sname}' failed:\n{run.err}",
                 metric=_salvaged, timed_out=run.timed_out, stages=stage_results,
-                failed_stage=_sname, stalled=_salvageable_stall(run.signals))
+                failed_stage=_sname, stalled=_salvageable_stall(run.signals),
+                diverged=bool(run.signals.get("diverged")))
             return run
         # THE SUCCESS CONTRACT, technical half. Runs on every stage that declared `expect`, needs no
         # model, and fails the stage exactly the way a non-zero exit does — same `failed_stage`, same
@@ -1474,6 +1646,9 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # delete the declaration to make this pass") and would now lose the one part that says
             # the stage actually worked. A cap that truncates the answer is not a bound, it is a bug.
             stage_results[-1]["concern"] = str(_artifact_problem)[:700]
+            # The floor this contract was checked against, so a re-check of a CORRECTED declaration
+            # is held to the identical one — see `EXPECT_SINCE_KEY`.
+            stage_results[-1][EXPECT_SINCE_KEY] = _w0
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
@@ -1681,5 +1856,6 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
-                     stages=stage_results, stalled=_salvageable_stall(_sig))
+                     stages=stage_results, stalled=_salvageable_stall(_sig),
+                     diverged=bool(_sig.get("diverged")))
 

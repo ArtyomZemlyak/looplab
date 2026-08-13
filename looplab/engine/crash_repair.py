@@ -283,6 +283,52 @@ class CrashRepairMixin:
                     "rows, gradient accumulation instead of one large batch, lower precision "
                     "(float16/bfloat16), or freeing large intermediates — keep the approach, cut the "
                     "memory.")
+        if reason == "diverged":
+            # The directive that must be said FIRST is the negative one. This kill and an OOM kill are
+            # the same SIGKILL with the same absent traceback, so a model reading only the exit code
+            # reaches for the memory playbook — which is what happened for three rounds on v6 node 5,
+            # each one halving a batch size that was never the problem.
+            return ("[failure kind: diverged]\n" + error + "\n"
+                    "LoopLab's own training health-check KILLED this stage: the live log reported a "
+                    "non-finite loss or grad_norm (NaN/inf) repeatedly, so the model could no longer "
+                    "learn and the rest of the budget would have been wasted. This is NOT an "
+                    "out-of-memory kill and NOT a timeout — do not reduce batch size, model size or "
+                    "sequence length to fix it; that changes nothing about the instability and costs "
+                    "another full run to find out. Return a corrected, complete change that makes the "
+                    "OBJECTIVE numerically stable: lower the learning rate or lengthen the warmup, "
+                    "clip gradients, add an epsilon inside every log/sqrt/division, compute the loss "
+                    "in float32 even under mixed precision, guard a masked softmax against an "
+                    "all-masked row and a 0*log(0), and reduce or ramp the weight of any newly-added "
+                    "auxiliary/regularisation term. Keep the idea; make its arithmetic survivable.")
+        if reason == "stalled":
+            # Same misclassification hazard as `diverged`, opposite fix: the process was ALIVE and
+            # silent, so there is nothing to read in stderr and nothing memory-shaped to cut.
+            return ("[failure kind: stalled]\n" + error + "\n"
+                    "LoopLab's stall watchdog KILLED this stage: it stayed alive but produced no "
+                    "output for the whole stall window — a hung distributed barrier, a wedged CUDA "
+                    "op, a deadlocked dataloader or a lock nobody releases. This is NOT an "
+                    "out-of-memory kill and NOT a timeout; reducing batch or model size does not "
+                    "unblock a deadlock. Return a corrected, complete change that either removes the "
+                    "hang (a barrier every rank reaches, a bounded timeout on the blocking call, "
+                    "`num_workers=0` / no fork under a multithreaded runtime, no lock held across a "
+                    "collective) or makes progress observable — print or flush a heartbeat line at "
+                    "least once per inner loop so the next run reports WHERE it stopped.")
+        if reason == "needs_failed":
+            # The one directive that must NOT say "diagnose the crash": there was no crash. The stage
+            # was refused before it started, so its code is not evidence of anything yet, and the two
+            # candidate repairs are both in DECLARATIONS — either the earlier stage's `expect.files`
+            # or this stage's `needs`. The error text already names both sides where it can.
+            return ("[failure kind: needs_failed]\n" + error + "\n"
+                    "This stage never ran. It DECLARES an input file (`needs` in the stage manifest) "
+                    "that was not present in the eval workdir when its turn came, so LoopLab refused "
+                    "to start it rather than spend the stage's runtime on a pipeline that cannot "
+                    "succeed. Do not debug this stage's code — it did not execute. Find which of the "
+                    "two declarations is wrong: either an EARLIER stage writes that file somewhere "
+                    "other than where it declares it (fix that stage's code or its `expect.files`), "
+                    "or THIS stage's `needs` names a path the pipeline never produces (fix the "
+                    "`needs` entry to the real path). Removing the `needs` entry is not a fix — it "
+                    "only moves the same failure into the stage's own loader, later and more "
+                    "expensively.")
         if self._deep_repair:
             return (f"[failure kind: {reason or 'unknown'}]\n{error}\n"
                     "Diagnose the root cause; if it's unclear, add a tiny reproduction/"

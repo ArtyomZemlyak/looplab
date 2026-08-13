@@ -709,17 +709,29 @@ class LLMRepoDeveloper:
         from looplab.tools._base import fn_spec
         return fn_spec("declare_stages",
                         "Declare the ORDERED pipeline stages for this experiment and finish the stages "
-                        "phase. Each stage is {name, command:[argv...], timeout?, check?, expect?}; they "
+                        "phase. Each stage is {name, command:[argv...], timeout?, check?, needs?, "
+                        "expect?}; they "
                         "run IN ORDER in the same workdir so artifacts (a trained checkpoint, prepared "
                         "data) persist to later stages. Put `%params%` in a command to inject THIS node's "
                         "hyperparameters as `--key value`, or bake the values into the argv yourself. "
-                        "Give a long training stage a GENEROUS timeout (seconds). Give every stage an "
-                        "`expect` — what it produces and what its success MEANS — because exit code 0 "
-                        "alone does not tell the engine a stage did its job.",
+                        "Give a long training stage a GENEROUS timeout (seconds). Give every stage BOTH "
+                        "its `needs` (the files it READS) and its `expect` (what it produces and what "
+                        "its success MEANS) — exit code 0 alone does not tell the engine a stage did its "
+                        "job, and a stage that starts without its input can only fail expensively.",
                         {"stages": {"type": "array", "items": {"type": "object", "properties": {
                             "name": {"type": "string"},
                             "command": {"type": "array", "items": {"type": "string"}},
                             "timeout": {"type": "number"}, "check": {"type": "boolean"},
+                            # The INPUT half of the contract, described here for the same reason
+                            # `expect` is: the schema is where a model reliably reads a field's shape.
+                            "needs": {"type": "array", "items": {"type": "string"}, "description":
+                                      "Workdir-relative paths this stage READS and cannot run without "
+                                      "(e.g. ['data/train.parquet','ckpt/model.pt']). The engine "
+                                      "checks them BEFORE the stage starts and refuses to run it if "
+                                      "one is missing or empty — naming the earlier stage that "
+                                      "declared it as an output, if any. Name what an EARLIER stage "
+                                      "produces and what the workdir must already contain; do NOT "
+                                      "name a path outside the workdir."},
                             # The per-stage SUCCESS CONTRACT. The schema is the one place a model
                             # reliably reads the field's shape, so both halves are described HERE as
                             # well as in the phase prompt — and `assert` says what it is NOT, because
@@ -879,6 +891,16 @@ class LLMRepoDeveloper:
             "not point at another experiment's checkpoint), and TESTING; bake this node's "
             "hyperparameters into the `train` command (or use "
             "`%params%`). Give training a generous timeout.\n\n"
+            "GIVE EVERY STAGE ITS `needs` — the workdir-relative files it READS and cannot run without: "
+            "what an earlier stage produces, plus whatever the seeded workdir must already contain. The "
+            "engine checks them BEFORE the stage starts, so a pipeline whose stages disagree about where "
+            "a file lives fails in one second with both declarations named, instead of after the "
+            "training. This is not paperwork — it is the defect that has cost this project the most: a "
+            "run once trained a good model for 76 minutes and then scored a DIFFERENT experiment's "
+            "checkpoint, because the scorer read a path the trainer never wrote to, and every contract "
+            "passed. Write the same path string the stage's own code will open. If a stage genuinely "
+            "reads nothing but the repo it was seeded with, omit `needs` — an empty declaration is "
+            "worse than none.\n\n"
             "GIVE EVERY STAGE AN `expect` — this is what makes a stage's success mean something. A stage "
             "that exits 0 has proved nothing: a mining stage that covered 1.2% of the queries exits 0 "
             "exactly like one that covered 100%, and the next stage consumed the 1.2% as if it were "

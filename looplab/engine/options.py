@@ -87,6 +87,11 @@ class EngineOptions:
     sandbox_memory: str = "4g"           # --memory for the untrusted command-eval Docker tier ("" = unbounded)
     sandbox_cpus: str = ""               # --cpus for the untrusted command-eval Docker tier ("" = unbounded)
     seed_mode: str = "auto"              # RepoTask node seeding fallback: auto|tracked|all
+    # Source-tree read fence: off|warn|deny (see Settings.read_fence for why deny is the default).
+    # Same value on BOTH sides on purpose — unlike merge_mode/report_every, this is not a knob where
+    # the library may be quieter than the product: a bare `Engine(...)` driving a repo task can
+    # record the same corrupt metric, and it is a no-op for every non-repo task anyway.
+    read_fence: str = "deny"
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3
     max_nodes: int = 8

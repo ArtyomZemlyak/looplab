@@ -765,3 +765,376 @@ def test_a_cause_fix_that_changed_nothing_is_still_receipted_so_a_resume_cannot_
     assert prior is not None, "the resume gate has nothing to read, so it would re-buy the call"
     assert not (prior.get("changed") or prior.get("code") or prior.get("files")
                 or prior.get("deleted"))
+
+
+# --------------------------------------------------------------------------------------------
+# THE RE-CHECK (backlog F1e) — after a manifest-only cause fix, the artifact CHECK is re-asked
+# against the CORRECTED declaration (never the stage: no re-evaluation). A node that passes is
+# recorded as MEASURED, with no `metric_salvaged` violation and no salvage provenance.
+#
+# THE CASE, `runs/rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE its checkpoint, printed
+# the number and failed its declared artifact contract because the declaration missed the testbed's
+# composed `<run_name>_<model>` suffix. ONE node — the "every merge is salvaged" reading of that run
+# was n=1 plus a prediction node 4 disproved, and nothing here tests or assumes anything about which
+# operator authored the declaration.
+#
+# AND NODE 3 IS STILL NOT PROMOTED, which is the first thing these cases pin. Its manifest declared
+# `train` → `merge`; the contract failure aborted the pipeline, so `merge` and the operator's
+# appended `score` never ran and the recovered number is a plain training run's. A corrected path
+# cannot speak for stages that never executed.
+# --------------------------------------------------------------------------------------------
+
+def _writing_manifest(declared, wrote, *, backdate=0.0, then=()):
+    """A manifest shaped like v6 node 3's: a `train` stage that REALLY writes its checkpoint (at
+    `wrote`), prints the metric, and then declares it at `declared`.
+
+    `then` names further stages the manifest declares AFTER it (node 3 declared `merge`), which the
+    contract failure never reaches. `backdate` ages the artifact by that many seconds, which is how a
+    leftover from an EARLIER attempt of this deliberately-reused workdir looks to the freshness gate.
+    """
+    script = ("import os, pathlib\n"
+              f"p = pathlib.Path({wrote!r})\n"
+              "p.parent.mkdir(parents=True, exist_ok=True)\n"
+              "p.write_bytes(b'weights')\n"
+              f"age = {float(backdate)!r}\n"
+              "if age:\n"
+              "    t = os.path.getmtime(p) - age\n"
+              "    os.utime(p, (t, t))\n"
+              "print('RECALL@100: 0.743250')\n")
+    stages = [{"name": "train", "command": ["python", "-c", script], "timeout": 120.0,
+               "expect": {"files": [declared]}}]
+    stages += [{"name": n, "command": ["python", "-c", "print('later')"], "timeout": 120.0}
+               for n in then]
+    return json.dumps({"stages": stages})
+
+
+def test_a_pipeline_that_aborted_early_is_never_promoted_however_right_the_corrected_path_is(tmp_path):
+    """v6 NODE 3, END TO END, and the answer is that it STAYS SALVAGED.
+
+    Everything the promotion needs is true except one thing: the declared `merge` stage and the
+    operator's appended `score` stage never executed, because the contract failure aborted the
+    pipeline. The artifact really is on disk at the corrected path — the re-check would pass — and
+    the node is still not promoted, because a node is its WHOLE pipeline. Promoting it would file a
+    train-only number under a node claiming to be train-then-merge-then-score, which is worse than
+    leaving it salvaged: salvage at least marks it.
+    """
+    manifest = _writing_manifest(DECLARED, ACTUAL, then=("merge",))
+    evs, _eng, _dev = _drive(tmp_path, manifest=manifest, name="node3",
+                             dev=_Dev(fixed_manifest=_writing_manifest(ACTUAL, ACTUAL,
+                                                                       then=("merge",))))
+    terminals = _terminals(evs)
+    assert len(terminals) == 1 and terminals[0].type == "node_evaluated", "invariant #2"
+    assert terminals[0].data["metric"] == pytest.approx(V5_VALUE)   # still recovered, still counted
+    prov = terminals[0].data["metric_provenance"]
+    assert prov["salvaged"] is True and prov.get("declaration_repaired") is None
+    assert prov["cause_repaired"] is True, "the declaration is still fixed for the next attempt"
+    st = fold(evs)
+    assert [v["name"] for v in st.nodes[0].violations] == ["metric_salvaged"]
+    assert st.nodes[0].feasible is False and st.nodes[0] not in st.feasible_nodes()
+    # THE EVIDENCE the gate reads: one stage ran out of the three the chain declared.
+    rows = [e.data["name"] for e in evs
+            if e.type == "stage_finished" and e.data.get("node_id") == 0]
+    assert rows == ["train"], "merge and score never executed"
+
+
+def test_even_a_one_stage_manifest_leaves_the_operators_score_stage_unrun(tmp_path):
+    """The same refusal with nothing but `train` declared, because the operator's protected `score`
+    is APPENDED to every Developer manifest — so a contract failure in the manifest's last stage
+    still leaves the stage that actually scores the run unexecuted."""
+    evs, _eng, _dev = _drive(tmp_path, manifest=_writing_manifest(DECLARED, ACTUAL), name="onestage",
+                             dev=_Dev(fixed_manifest=_writing_manifest(ACTUAL, ACTUAL)))
+    prov = _terminals(evs)[0].data["metric_provenance"]
+    assert prov["salvaged"] is True and prov.get("declaration_repaired") is None
+    assert [v["name"] for v in fold(evs).nodes[0].violations] == ["metric_salvaged"]
+    assert [e.data["name"] for e in evs if e.type == "stage_finished"] == ["train"]
+
+
+def test_a_fix_whose_artifact_is_still_absent_stays_salvaged(tmp_path):
+    """The other control, and the one the pipeline's own evidence decides: when the stage really
+    produced nothing, the corrected declaration names a file that is not there. `_manifest`'s stage
+    prints the metric and writes no artifact."""
+    evs, _eng, _dev = _drive(tmp_path, manifest=_manifest(DECLARED), name="absent",
+                             dev=_Dev(fixed_manifest=_manifest(ACTUAL)))
+    assert len(_terminals(evs)) == 1, "invariant #2, on the refusal path too"
+    prov = _terminals(evs)[0].data["metric_provenance"]
+    assert prov["salvaged"] is True and prov["cause_repaired"] is True
+    assert [v["name"] for v in fold(evs).nodes[0].violations] == ["metric_salvaged"]
+
+
+# --- the one shape the four rules admit, driven through the real seam ------------------------
+#
+# A pipeline that ran END TO END whose FINAL stage exited 0, printed the number and misnamed its own
+# artifact. NOTE, and it is a finding rather than a caveat: no shipped pipeline shape produces that
+# together with a manifest-only repair that corrects it — in Developer-manifest mode the final stage
+# is the appended `score`, which `_resolve_stages` builds with no `expect` at all, and in operator
+# `cmd.stages` mode the declaration lives in the task spec, which `looplab_stages.json` cannot fix.
+# So these cases drive the seam over the shape the rules describe, and the end-to-end cases above are
+# what pin the live behaviour: nothing is promoted today.
+
+def _seam_engine(tmp_path, stages, *, name="seam"):
+    """A real Engine + its folded node + a real workdir, for calling `_recheck_repaired_contract`
+    directly. The operator declares the pipeline (`eval.stages`), which is the mode in which a final
+    stage can carry `expect.files` at all."""
+    run_dir = tmp_path / name
+    eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=_Researcher(), developer=_Dev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True)
+    eng._eval_spec = {"command": ["python", "-c", "print('score')"], "cwd": ".",
+                      "metric": dict(V5_METRIC), "timeout": 120.0, "stages": stages}
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": "print('unused')\n", "files": {}})
+    node = fold(eng.store.read_all()).nodes[0]
+    workdir = run_dir / "nodes" / "node_0"
+    workdir.mkdir(parents=True, exist_ok=True)
+    return eng, node, workdir
+
+
+_COMPLETED = [{"name": "prep", "command": ["python", "-c", "pass"], "timeout": 60.0},
+              {"name": "train", "command": ["python", "-c", "pass"], "timeout": 60.0,
+               "expect": {"files": [ACTUAL]}}]
+_FIX = {"changed": ["looplab_stages.json"], "deleted": [], "code": ""}
+
+
+def _seam_rows(since, *, complete=True):
+    rows = [{"name": "prep", "status": "ok", "exit_code": 0, "seconds": 1.0}] if complete else []
+    from looplab.runtime.command_eval import EXPECT_SINCE_KEY
+    return rows + [{"name": "train", "status": "expect_failed", "exit_code": 0, "seconds": 2.0,
+                    EXPECT_SINCE_KEY: since}]
+
+
+def _seam_salvage(**kw):
+    base = dict(metric=V5_VALUE, condition="artifact_contract", source="declared_reader",
+                reader="stdout_regex", stage="train", producer=ms.OPERATOR_PRODUCED)
+    base.update(kw)
+    return ms.SalvagedMetric(**base)
+
+
+def _write_artifact(workdir, *, age=0.0):
+    p = Path(workdir) / ACTUAL
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"weights")
+    if age:
+        t = time.time() - age
+        os.utime(p, (t, t))
+    return p
+
+
+def test_a_completed_pipeline_whose_final_declaration_was_wrong_is_MEASURED(tmp_path):
+    """THE STANDARD for the promotion itself. Every declared stage ran, the last one exited 0 and
+    printed the number, its artifact is on disk and fresh, and the declaration that named it was
+    corrected by a manifest-only repair. Nothing about the number was ever in doubt — only the
+    sentence describing where it lived — so the node is measured, with provenance and no violation."""
+    eng, node, workdir = _seam_engine(tmp_path, _COMPLETED)
+    _write_artifact(workdir)
+    since = time.time() - 30
+    res = _res(stdout="RECALL@100: 0.743250\n", failed_stage="train", stages=_seam_rows(since))
+    prov = eng._recheck_repaired_contract(res, node, workdir, _seam_salvage(), _FIX,
+                                          "stage 'train' ... did NOT produce its declared artifact")
+    assert prov is not None
+    assert prov["salvaged"] is False and prov["declaration_repaired"] is True
+    assert prov["stage"] == "train" and prov["reader"] == "stdout_regex"
+    assert prov["producer"] == "operator_stage"
+    assert prov["expect_files"] == [ACTUAL]
+    assert "did NOT produce its declared artifact" in prov["declaration_error"]
+    # None of the salvage vocabulary rides along: such a node never enters that path.
+    assert "condition" not in prov and "source" not in prov and "salvaged_error" not in prov
+
+
+def test_the_seam_refuses_every_shape_the_four_rules_exclude(tmp_path):
+    """Each refusal is a different rule, and each is the difference between a measured node and a
+    salvaged one — so they are asked over the SAME otherwise-passing setup, one deviation at a time.
+    """
+    eng, node, workdir = _seam_engine(tmp_path, _COMPLETED)
+    _write_artifact(workdir)
+    since = time.time() - 30
+    ok_res = _res(stdout="", failed_stage="train", stages=_seam_rows(since))
+    assert eng._recheck_repaired_contract(ok_res, node, workdir, _seam_salvage(), _FIX, "e")
+
+    # (1) the pipeline aborted early — `prep` never ran.
+    assert eng._recheck_repaired_contract(
+        _res(failed_stage="train", stages=_seam_rows(since, complete=False)),
+        node, workdir, _seam_salvage(), _FIX, "e") is None
+    # (2) the repair touched CODE, so its artifact must be re-RUN, not re-checked: re-checking would
+    #     attach the OLD code's number to a node whose recorded code is now different.
+    for fix in ({"changed": ["looplab_stages.json", "train.py"], "deleted": [], "code": ""},
+                {"changed": ["looplab_stages.json"], "deleted": ["old.py"], "code": ""},
+                {"changed": [], "deleted": [], "code": "print('rewritten')\n"},
+                {}):
+        assert eng._recheck_repaired_contract(ok_res, node, workdir, _seam_salvage(), fix,
+                                              "e") is None
+    # (3) the artifact predates the stage — a leftover in the deliberately-reused workdir.
+    _write_artifact(workdir, age=3600.0)
+    assert eng._recheck_repaired_contract(ok_res, node, workdir, _seam_salvage(), _FIX, "e") is None
+    _write_artifact(workdir)
+    # (4) the value came off a RELOCATED file, so a second declaration — the operator's own metric
+    #     path — is still wrong and the manifest fix did not touch it.
+    assert eng._recheck_repaired_contract(ok_res, node, workdir,
+                                          _seam_salvage(source="relocated_file"), _FIX, "e") is None
+    # …and the freshness floor is not optional: a stage row with no recorded floor fails closed.
+    assert eng._recheck_repaired_contract(
+        _res(failed_stage="train", stages=[{"name": "prep", "status": "ok"},
+                                           {"name": "train", "status": "expect_failed"}]),
+        node, workdir, _seam_salvage(), _FIX, "e") is None
+
+
+def test_the_re_check_never_raises_out_of_the_eval_worker(tmp_path):
+    """It walks the candidate's own workdir and re-resolves an agent-authored manifest, inside the
+    eval worker whose only handler is `except GpuPinUnenforceable`. Anything raised here would leave
+    the node with NO terminal and the run re-dying on every resume — the failure class CLAUDE.md
+    names for the unregistered metric-reader path slot."""
+    eng, node, workdir = _seam_engine(tmp_path, _COMPLETED, name="boom")
+
+    class _Exploding:
+        condition = "artifact_contract"
+
+        @property
+        def source(self):
+            raise RuntimeError("mount went away")
+
+    assert eng._recheck_repaired_contract(
+        _res(failed_stage="train", stages=_seam_rows(time.time() - 30)),
+        node, workdir, _Exploding(), _FIX, "e") is None
+
+
+# --- the re-check's admission rules, as truth tables ------------------------------------------
+
+def test_a_node_is_its_whole_pipeline_not_its_first_stage():
+    """RULE 1, and the most categorical. v6 node 3's chain was train → merge → score and only `train`
+    ran, so the number it recovered is a plain training run's — filed under a node that claims to be
+    something else."""
+    chain = [{"name": "prep"}, {"name": "train"}, {"name": "score"}]
+    ok = _stages(("prep", "ok"), ("train", "reused"), ("score", "expect_failed"))
+    assert ms.declared_pipeline_completed(chain, ok, "score") is True   # `reused` really did run
+    # node 3: the failure is not on the last stage, so two stages never executed.
+    assert ms.declared_pipeline_completed(chain, _stages(("prep", "ok"),
+                                                         ("train", "expect_failed")),
+                                          "train") is False
+    # a declared stage with no record at all, and a stage that did not succeed
+    assert ms.declared_pipeline_completed(chain, _stages(("prep", "ok"),
+                                                         ("score", "expect_failed")),
+                                          "score") is False
+    assert ms.declared_pipeline_completed(chain, _stages(("prep", "fail"), ("train", "ok"),
+                                                         ("score", "expect_failed")),
+                                          "score") is False
+    # the last stage must have failed its ARTIFACT contract, not something else
+    assert ms.declared_pipeline_completed(chain, _stages(("prep", "ok"), ("train", "ok"),
+                                                         ("score", "check_failed")),
+                                          "score") is False
+    # fail closed on a chain it cannot read: unresolvable, unnamed, or ambiguous
+    assert ms.declared_pipeline_completed([], ok, "score") is False
+    assert ms.declared_pipeline_completed([{"name": ""}], _stages(("", "expect_failed")), "") is False
+    assert ms.declared_pipeline_completed([{"name": "a"}, {"name": "a"}],
+                                          _stages(("a", "expect_failed")), "a") is False
+
+
+def test_only_a_manifest_only_repair_may_be_re_checked():
+    """RULE 2 — FAIL CLOSED on everything ambiguous, and each clause is a real shape, not a reflex."""
+    assert ms.declaration_only_repair(["looplab_stages.json"]) is True
+    assert ms.declaration_only_repair(["./looplab_stages.json"]) is True   # the one spelling drift
+    # a second file, a deletion, a whole-file code artifact, and "nothing was corrected at all"
+    assert ms.declaration_only_repair(["looplab_stages.json", "train.py"]) is False
+    assert ms.declaration_only_repair(["looplab_stages.json"], deleted=["old.py"]) is False
+    assert ms.declaration_only_repair(["looplab_stages.json"], code="print(1)\n") is False
+    assert ms.declaration_only_repair([]) is False
+    assert ms.declaration_only_repair(None) is False
+    # A manifest under a subdirectory is NOT the manifest the eval reads (`_resolve_stages` reads the
+    # workdir root), so the match is exact — unlike `_safe_reuse_start`'s basename rule, whose
+    # looseness points the other way (it refuses MORE reuse).
+    assert ms.declaration_only_repair(["sub/looplab_stages.json"]) is False
+
+
+def test_only_a_contract_failure_read_by_the_operators_own_spec_may_be_promoted():
+    """RULE 3. A `relocated_file` salvage already tells us a SECOND declaration — the operator's
+    metric path — is still wrong, which is not a node whose only defect has been corrected. And a
+    re-check can only speak for the failure class in which a declared contract is what failed."""
+    assert ms.recheckable_salvage(_seam_salvage()) is True
+    assert ms.recheckable_salvage(_seam_salvage(source="relocated_file")) is False
+    assert ms.recheckable_salvage(_seam_salvage(source="eval_result")) is False
+    assert ms.recheckable_salvage(_seam_salvage(condition="eval_failed")) is False
+    assert ms.recheckable_salvage(_seam_salvage(condition="stage_failed")) is False
+    assert ms.recheckable_salvage(None) is False
+
+
+def test_the_re_check_floor_is_the_stages_own_start_and_fails_closed_without_one(tmp_path):
+    """RULE 4 as a rule. The floor is the number the ORIGINAL check used, recorded by the writer that
+    used it — not re-derived, and never relaxed to a looser one that would admit an artifact written
+    before this stage ran."""
+    from looplab.runtime.command_eval import EXPECT_SINCE_KEY, verify_stage_artifacts
+
+    attempt_start = time.time() - 120        # what `salvage` itself is held to
+    stage_start = time.time() - 60           # what the contract was held to
+    res = _res(failed_stage="train", stages=[
+        {"name": "prep", "status": "ok", "exit_code": 0, "seconds": 0.0},
+        {"name": "train", "status": "expect_failed", "exit_code": 0, "seconds": 1.0,
+         EXPECT_SINCE_KEY: stage_start}])
+    assert ms.recheck_floor(res, "train") == pytest.approx(stage_start)
+    # A file written by an EARLIER phase of this same attempt satisfies the looser floor and must not
+    # satisfy this one — which is the whole reason the stage's own start is threaded out at all.
+    art = tmp_path / "model.safetensors"
+    art.write_bytes(b"weights")
+    old = time.time() - 90
+    os.utime(art, (old, old))
+    expect = {"files": ["model.safetensors"]}
+    assert verify_stage_artifacts(expect, str(tmp_path), attempt_start, stage="train") is None
+    assert "NOT written by this run" in verify_stage_artifacts(
+        expect, str(tmp_path), ms.recheck_floor(res, "train"), stage="train")
+    # FAIL CLOSED: no recorded floor (an older log, another writer) refuses rather than degrading to
+    # existence-only, which is precisely how a previous attempt's artifact gets promoted.
+    bare = _res(failed_stage="train", stages=_stages(("train", "expect_failed")))
+    assert ms.recheck_floor(bare, "train") is None
+    assert ms.recheck_floor(res, "prep") is None          # a stage that failed no contract
+    assert ms.recheck_floor(res, "") is None
+    assert ms.recheck_floor(_res(stages=[{"name": "train", "status": "expect_failed",
+                                          EXPECT_SINCE_KEY: "recently"}]), "train") is None
+
+
+def test_the_declaration_may_not_name_a_file_the_repair_itself_wrote():
+    """The one adversarial shape, refused rather than trusted. `_write_node_files` materializes the
+    corrected manifest AFTER the stage start, so a 'fix' that declared `looplab_stages.json` as the
+    stage's own output would sail through the freshness gate on a file the stage never produced —
+    and the fix is authored by the agent whose declaration was wrong in the first place."""
+    changed = ["looplab_stages.json"]
+    stages = [{"name": "train", "expect": {"files": ["looplab_stages.json"]}},
+              {"name": "score"}]
+    assert ms.recheckable_expect(stages, "train", changed) == {}
+    ok = [{"name": "train", "expect": {"files": [ACTUAL]}}]
+    assert ms.recheckable_expect(ok, "train", changed) == {"files": [ACTUAL]}
+    # A dropped contract is not a fix: "declare nothing and it passes" is the repair the failure
+    # message explicitly forbids ("Do not delete the declaration to make this pass").
+    assert ms.recheckable_expect([{"name": "train", "expect": {"files": []}}], "train", changed) == {}
+    assert ms.recheckable_expect([{"name": "train"}], "train", changed) == {}
+    assert ms.recheckable_expect([], "train", changed) == {}
+    assert ms.recheckable_expect(ok, "mine", changed) == {}
+
+
+def test_the_stage_row_records_the_FLOOR_its_contract_was_held_to(tmp_path):
+    """The writer half of the freshness rule, driven through a REAL staged eval.
+
+    `verify_stage_artifacts`' floor lived only in `_run_stages`' frame, and the re-check has to be
+    held to the identical number — so the stage row now carries it. Pinned by running a pipeline
+    whose first stage takes measurable time: the recorded floor is AFTER that stage finished, which
+    is what distinguishes "this stage's own start" from the looser floors in reach (the eval's, the
+    attempt's) — and those are exactly the ones under which an earlier phase's leftover satisfies a
+    corrected path.
+    """
+    from looplab.runtime.command_eval import EXPECT_SINCE_KEY, run_command_eval
+
+    t_eval = time.time()
+    res = run_command_eval(
+        ["python", "-c", "print('score never runs')"], str(tmp_path), 60.0, dict(V5_METRIC),
+        stages=[{"name": "prep", "command": ["python", "-c", "import time; time.sleep(0.4)"],
+                 "timeout": 60.0},
+                {"name": "train", "command": ["python", "-c", "print('RECALL@100: 0.743250')"],
+                 "timeout": 60.0, "expect": {"files": [DECLARED]}}])
+    row = res.stages[-1]
+    assert row["name"] == "train" and row["status"] == "expect_failed"
+    floor = ms.recheck_floor(res, "train")
+    assert floor is not None, "the row must carry the floor its contract was checked against"
+    assert floor == pytest.approx(row[EXPECT_SINCE_KEY])
+    assert t_eval + 0.4 <= floor <= time.time(), "the TRAIN stage's start, not the eval's"
+    # …and it is the stage row's own fact: the earlier stage carries no floor and answers None.
+    assert ms.recheck_floor(res, "prep") is None

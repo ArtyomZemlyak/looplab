@@ -22,6 +22,7 @@ import anyio
 
 from looplab.core.hardware import detect_gpus
 from looplab.core.models import effective_card_footprint, normalize_researcher_footprint
+from looplab.runtime import read_fence
 from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 
@@ -37,6 +38,9 @@ _LEASE_NOTICE_INTERVAL_S = 30.0
 # Bounded read of the holder stamp below.  Only this module writes a lease file, so anything longer is
 # a foreign/stale file and is reported as an unknown holder instead of being echoed back.
 _LEASE_STAMP_BYTES = 64
+# "`_read_fence_dir` has not run yet", distinct from its real `None` result ("this run has no
+# fence") — the difference decides whether the memo is a hit or a miss.
+_UNRESOLVED_FENCE = object()
 
 
 def default_gpu_host_lease_path() -> Path:
@@ -752,6 +756,45 @@ class ResourceSchedulingMixin:
                 "reserved GPU physical selectors are malformed or not unique")
         return physical
 
+    def _read_fence_dir(self) -> Optional[str]:
+        """Materialize this run's source-tree READ FENCE once and return its PYTHONPATH directory.
+
+        `None` — and therefore no marker in the child env at all — whenever the fence would be a
+        no-op: a non-repo task (no editable source exists, so there is nothing a node could read that
+        it does not own), `read_fence="off"`, or every declared root dropped as too broad. That is
+        what keeps `looplab run --backend toy` and every offline test byte-identical.
+
+        Installed lazily rather than at `Engine.__init__` so a run that never launches an eval never
+        writes the directory, and memoized on the instance because `_resource_eval_env` is called
+        once per eval from concurrent workers (`install` is itself idempotent and atomic, so the
+        memo is a cost optimization, not the correctness argument)."""
+        cached = getattr(self, "_read_fence_cache", _UNRESOLVED_FENCE)
+        if cached is not _UNRESOLVED_FENCE:
+            return cached
+        policy = str(getattr(self, "_read_fence", "deny") or "deny")
+        spec = getattr(self, "_repo_spec", None)
+        # Decide "is there anything to fence" BEFORE reading `run_dir`: the no-fence answer must not
+        # depend on any engine state beyond the repo spec, so a non-repo run resolves to None on an
+        # engine that has nothing else wired (which is also what the scheduler-only test doubles are).
+        if policy == "off" or not (spec or {}).get("editables"):
+            self._read_fence_cache = None
+            return None
+        roots, allow, dropped = read_fence.fence_inputs(spec, allow=[str(self.run_dir)])
+        try:
+            resolved = read_fence.install(self.run_dir, roots=roots, allow=allow, policy=policy)
+        except OSError as exc:
+            # An unwritable run dir must not take down the run: the fence is a safety net over an
+            # authoring error, not a correctness precondition of the eval. Loud, once, then unfenced.
+            _LOG.warning("read fence could not be installed under %s (%s); evals run UNFENCED",
+                         self.run_dir, exc)
+            resolved = None
+        if dropped:
+            # A dropped root is the one case where the operator's fence silently shrinks, so say so.
+            _LOG.warning("read fence ignoring editable root(s) %s: fencing a path that broad would "
+                         "refuse reads the interpreter itself needs", ", ".join(dropped))
+        self._read_fence_cache = resolved
+        return resolved
+
     def _resource_eval_env(self, reservation: Optional[dict], *, base: Optional[dict] = None,
                            inherit_host: bool = False) -> Optional[dict]:
         """Build the child env for a reservation without changing the unpinned legacy branch."""
@@ -770,7 +813,7 @@ class ResourceSchedulingMixin:
                 "explicit GPU requirement cannot be satisfied: no GPUs were detected")
         if (not reservation or reservation.get("whole_pool_unpinned")
                 or (not reservation.get("cpu_only") and not reservation.get("gpu_ids"))):
-            return dict(base) if base is not None else None
+            return self._fenced_env(dict(base) if base is not None else None)
         # SECURITY (source-side strip): `inherit_host` shovels the host environment into the eval env so
         # a pinned/CPU reservation can override CUDA_VISIBLE_DEVICES. But the host env holds LLM_API_KEY /
         # cloud creds, and `run_argv` (subprocess tier) overlays this dict on top of its own
@@ -786,4 +829,20 @@ class ResourceSchedulingMixin:
         env["CUDA_VISIBLE_DEVICES"] = (
             "" if reservation.get("cpu_only")
             else ",".join(self._physical_gpu_ids(reservation.get("gpu_ids"))))
-        return env
+        return self._fenced_env(env)
+
+    def _fenced_env(self, env: Optional[dict]) -> Optional[dict]:
+        """Stamp the READ FENCE marker onto a child env, or hand it back untouched.
+
+        The unfenced case returns the SAME object it was given — including `None`, which several
+        callers and `tests/test_gpu_resources.py` read as "unpinned, whole box, legacy behavior".
+        Turning that `None` into `{}` would be safe for the Docker tiers (both `docker_gpu_argv` and
+        `docker_gpu_env` branch on `CUDA_VISIBLE_DEVICES` being ABSENT, which a marker-only dict
+        still satisfies) but it would rewrite a sentinel three other modules read, for nothing on a
+        run that has no fence. So the dict is materialized only when there is a fence to carry."""
+        fence = self._read_fence_dir()
+        if not fence:
+            return env
+        out = dict(env or {})
+        out[read_fence.FENCE_DIR_ENV] = fence
+        return out

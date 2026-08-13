@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
+from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
 
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
@@ -314,6 +315,19 @@ class RunResult:
     # had already printed its metric keeps `metric` set — the orchestrator SALVAGES it (a completed
     # train+eval that only hung on teardown still counts) instead of wasting the whole run.
     stalled: bool = False
+    # DIVERGE watchdog: True when the stage was tree-killed because its live log reported non-finite
+    # loss/grad_norm repeatedly. It is the AUTHENTICATED verdict (`run_argv`'s out-of-band `signals`),
+    # not the stderr sentinel — the marker is mixed into the candidate's own stderr and is therefore
+    # forgeable, which is the same reason `_salvageable_stall` reads the flag rather than the text.
+    #
+    # It exists because of what happens WITHOUT it: the watchdog kills with SIGKILL and no traceback,
+    # which is byte-for-byte the signature `triage.py::_failure_reason` uses to recognise an OOM. On
+    # v6 node 5 that misread sent three repair rounds down a memory-reduction path (batch 8192 ->
+    # 2048 -> 512 -> 256, ~15 minutes of GPU each) for a training that was diverging, not swapping —
+    # while the correct directive (stabilise the loss / drop the LR) was in the same stderr the whole
+    # time. A watchdog kill is the ENGINE's own verdict about the run; it must never be inferred from
+    # the exit code the engine itself caused.
+    diverged: bool = False
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's
@@ -497,8 +511,12 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # Killing the local `docker run` CLI does NOT necessarily stop the daemon-owned container. Attach
     # a unique host cidfile at the universal argv choke point (covers DockerSandbox and command-eval),
     # then force-remove that exact container if host timeout/cancel kills the client first.
-    if (len(argv) >= 2 and Path(str(argv[0])).stem.lower() in {"docker", "docker.exe"}
-            and argv[1] == "run" and "--cidfile" not in argv):
+    # Hoisted out of the cidfile guard below because the READ FENCE also needs it: a `docker run`
+    # argv launches the CLIENT on the host, and the container it starts inherits nothing from this
+    # environment (only what `docker_gpu_env` forwards via `-e`).
+    _docker_run = (len(argv) >= 2 and Path(str(argv[0])).stem.lower() in {"docker", "docker.exe"}
+                   and argv[1] == "run")
+    if _docker_run and "--cidfile" not in argv:
         import tempfile
         import uuid
         # SECURITY: the cidfile MUST live outside the bind-mounted workdir. DockerSandbox mounts `wd`
@@ -551,6 +569,25 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # and always keep what the engine explicitly passes in `env` (e.g. LOOPLAB_EVAL_SEED).
     base = {k: v for k, v in os.environ.items() if not is_secret_env(k, v)}
     full_env = {**base, **{k: str(v) for k, v in (env or {}).items()}}
+    # SOURCE-TREE READ FENCE (runtime/read_fence.py). The engine hands a fenced launch the fence
+    # directory in `LOOPLAB_READ_FENCE_DIR`; prepending it to PYTHONPATH is what makes CPython import
+    # the generated `sitecustomize` at startup and install the audit hook that refuses reads of the
+    # operator's editable SOURCE tree. Done HERE because this is the universal launch choke point —
+    # SubprocessSandbox, every command-eval stage, run_setup and the metric adapter all pass through
+    # it — and because PYTHONPATH is inherited, so every python the eval spawns is fenced too.
+    #
+    # An explicit marker, not a filesystem search: discovering the fence by walking up from the cwd
+    # would cost a `stat` of an ABSENT file per level per launch, which is 105-950 ms each on the
+    # geesefs/S3 mount a run root usually lives on.
+    #
+    # Skipped for a `docker run` argv: that PYTHONPATH would name a HOST directory the container
+    # cannot see, and the untrusted tiers are fenced by construction anyway — the source tree is
+    # never bind-mounted into the container (`engine/eval_dispatch.py::_data_binds` binds the
+    # workdir plus the declared data/reference sources, and nothing else). The marker itself is left
+    # in the env: it is inert without the PYTHONPATH entry and it tells an operator inspecting a
+    # container that the run had a fence.
+    if not _docker_run:
+        prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
     # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted

@@ -50,7 +50,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:e0bcf7c9643c85ba57f35226a2824884c9531b93e21496fcffc2e770cc9e3c60"
+_EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e6fdffab4f56"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -86,7 +86,16 @@ _EXPECTED_DIGEST = "sha256:e0bcf7c9643c85ba57f35226a2824884c9531b93e21496fcffc2e
 #               `node_failed`, which changes the population a calibration pair is measured over.
 #               `speculation_quality` additionally refuses evidence containing a salvaged node, so a
 #               receipt issued before this could not describe the same envelope. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 195
+#   2026-08-13  + read_fence, and a CHANGED default for inline_repair_reasons (+ diverged, stalled,
+#               needs_failed). Two real envelope changes in one day, and neither is inert for a
+#               calibration replicate. `read_fence` decides what a node's eval process may READ: at
+#               its `deny` default a replicate that reads outside its own workdir now FAILS where it
+#               used to succeed on a foreign file's contents. The three new failure reasons are
+#               classifications a replicate can actually receive — a watchdog kill that used to be
+#               reported as `oom` is now `diverged`, and a stage refused for a missing declared
+#               input is `needs_failed` — and each is repair-eligible by default, so the number of
+#               attempts a failing replicate buys changes too. Old receipts SHOULD stop verifying.
+_EXPECTED_FIELD_COUNT = 196
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

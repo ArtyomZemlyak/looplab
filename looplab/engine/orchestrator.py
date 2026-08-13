@@ -578,6 +578,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         phase_handoff_summary = _opt("phase_handoff_summary")
         trust_mode = _opt("trust_mode")
         seed_mode = _opt("seed_mode")
+        read_fence = _opt("read_fence")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
@@ -1043,6 +1044,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.sandbox_memory = _opt("sandbox_memory")
         self.sandbox_cpus = _opt("sandbox_cpus")
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
+        # Source-tree READ FENCE policy (off|warn|deny) — read by `engine/resources.py`, which
+        # materializes the fence lazily on the first eval and stamps its marker into the child env.
+        # It is the counterpart to `_seed_mode`: seeding decides what a node's copy CONTAINS, this
+        # decides that the copy is the only place the node may read from.
+        self._read_fence = read_fence or "deny"
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times
