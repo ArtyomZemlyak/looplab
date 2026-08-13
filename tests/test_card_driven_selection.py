@@ -160,7 +160,14 @@ def test_forced_seed_prefix_consumes_staged_draft_cards_before_raw_width():
     ]
 
 
-def test_forced_debug_precedes_card_scoring_and_reuses_matching_ready_card_id():
+def test_a_failed_leaf_no_longer_forces_anything_and_a_debug_card_is_dead_weight():
+    """Was `test_forced_debug_precedes_card_scoring_and_reuses_matching_ready_card_id` (F5).
+
+    A failed leaf used to PRE-EMPT the whole scoring pass so the lane could open a fresh node to
+    retry the experiment that had just failed, reusing the matching ready `debug` Card's id. Both
+    halves are gone: the forced prefix and the id-reuse helper it fed. What must hold now is that the
+    failed leaf is simply not an anchor — the lane goes on to score, and the ready `debug` Card
+    sitting on the board influences nothing."""
     state = RunState(
         nodes={
             0: _node(0, metric=0.8),
@@ -171,9 +178,11 @@ def test_forced_debug_precedes_card_scoring_and_reuses_matching_ready_card_id():
     )
     policy = GreedyTree(n_seeds=1, max_nodes=3, debug_depth=1)
 
-    assert card_next_actions(state, policy, max_nodes=3) == [
-        {"kind": "debug", "parent_id": 1, "_card_id": "debug-card"},
-    ]
+    actions = card_next_actions(state, policy, max_nodes=3)
+    assert all(a["kind"] != "debug" for a in actions), actions
+    assert all(a.get("parent_id") != 1 for a in actions), (
+        "nothing may anchor on the failed node — that is the Debug node under another name")
+    assert all(a.get("_card_id") != "debug-card" for a in actions)
 
 
 def test_tombstoned_failed_node_is_not_a_forced_debug_and_does_not_steal_capacity():
@@ -196,7 +205,10 @@ def test_tombstoned_failed_node_is_not_a_forced_debug_and_does_not_steal_capacit
     }]
 
 
-def test_debug_card_runtime_anchor_is_the_first_eligible_failed_leaf_not_breedable():
+def test_no_debug_card_is_ever_eligible_however_many_failed_leaves_there_are():
+    """Was `test_debug_card_runtime_anchor_is_the_first_eligible_failed_leaf_not_breedable`, which
+    pinned WHICH of two ready `debug` Cards the deterministic first-failed-leaf rule picked. There is
+    no pick any more — a Card whose action cannot be created is not eligible, and none of them can."""
     state = RunState(
         nodes={
             0: _node(0),
@@ -211,10 +223,15 @@ def test_debug_card_runtime_anchor_is_the_first_eligible_failed_leaf_not_breedab
 
     assert [card.id for card in eligible_cards(
         state, GreedyTree(n_seeds=0, max_nodes=8, debug_depth=1),
-    )] == ["first"]
+    )] == []
 
 
-def test_tombstoned_earlier_failure_cannot_mask_the_live_debug_card():
+def test_a_tombstoned_earlier_failure_changes_nothing_now_that_debug_cards_are_dead():
+    """Was `test_tombstoned_earlier_failure_cannot_mask_the_live_debug_card` — a tombstoned failed
+    node must not hide a LATER live one from the first-failed-leaf scan, which was a real masking bug
+    while that scan existed. With the scan gone the case degenerates, and the assertion that carries
+    over is the one worth keeping: a board holding a live-looking `debug` Card produces no debug
+    action and no forced prefix at all."""
     state = RunState(
         nodes={
             0: _node(0, status=NodeStatus.failed, metric=None, tombstoned=True),
@@ -226,10 +243,8 @@ def test_tombstoned_earlier_failure_cannot_mask_the_live_debug_card():
     )
     policy = GreedyTree(n_seeds=1, max_nodes=3, debug_depth=1)
 
-    assert [card.id for card in eligible_cards(state, policy)] == ["live-debug"]
-    assert forced_card_actions(state, policy, max_nodes=3) == [{
-        "kind": "debug", "parent_id": 1, "_card_id": "live-debug",
-    }]
+    assert [card.id for card in eligible_cards(state, policy)] == []
+    assert forced_card_actions(state, policy, max_nodes=3) is None
 
 
 def test_budget_denominator_excludes_tombstoned_constraint_and_trust_gated_nodes():
@@ -807,7 +822,11 @@ def test_asha_higher_rung_uses_that_rungs_survivor_width_not_rung_zero_width():
     ("draft", (), {"kind": "draft", "_card_id": "card"}),
     ("improve", (1,), {"kind": "improve", "parent_id": 1, "_card_id": "card"}),
     ("expand", (1,), {"kind": "improve", "parent_id": 1, "_card_id": "card"}),
-    ("debug", (1,), {"kind": "debug", "parent_id": 1, "_card_id": "card"}),
+    # `debug` maps to None (F5): the Debug node was deleted, so a historical `debug` Card is never
+    # turned back into an executable action — it falls through to the same fail-closed answer every
+    # malformed shape gets. It stays in this table rather than being dropped, because "an operator
+    # this function refuses" is the fact under test.
+    ("debug", (1,), None),
     ("merge", (1, 2), {"kind": "merge", "parent_ids": [1, 2], "_card_id": "card"}),
 ])
 def test_card_action_is_bounded_and_preserves_internal_claim_identity(operator, parents, expected):

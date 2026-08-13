@@ -68,6 +68,8 @@ def test_repair_loop_fires_for_repo_task_on_eval_failure(tmp_path):
                     sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=4))
     state = anyio.run(engine.run)
     assert dev.repaired                                   # repair WAS invoked (code is empty)
-    # the draft failed (bad config); a debug node repaired it -> a node reached metric 0.0
-    assert any(n.operator == "debug" for n in state.nodes.values())
+    # The draft failed (bad config) and was repaired IN PLACE -> a node reached metric 0.0. Until
+    # 2026-08-13 the repair arrived as a `debug` CHILD; F5 deleted that node, so the assertion is the
+    # same property with the extra node removed from it.
+    assert all(n.operator != "debug" for n in state.nodes.values())
     assert any(n.metric == 0.0 for n in state.nodes.values())

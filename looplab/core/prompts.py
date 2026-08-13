@@ -59,6 +59,11 @@ PROMPT_KEYS: tuple[str, ...] = (
     "repo_developer_system_intro", "repo_developer_system_body", "repo_onboarder_system",
     "strategist_system", "tool_strategist_system",
     "pilot_system", "triage_system",
+    # F8's repair CRITIC, a separate key from `triage_system` for the same reason
+    # `concept_consolidate_system` is separate from `merge_system`: it is a different job (is this
+    # chain circling? vs what do I change next?) and folding it into the triage prompt would change
+    # the shipped text of a paid agent whose verdict is the loop's primary stop.
+    "repair_critic_system",
     "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
     # The concept-vocabulary consolidation prompt (doc 25 SE-10). A SEPARATE key from
     # `merge_system`: consolidating an axis/slug vocabulary is a different job from the generic

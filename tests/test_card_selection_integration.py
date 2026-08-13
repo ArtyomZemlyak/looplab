@@ -516,8 +516,15 @@ def test_a_run_whose_first_node_crashes_finishes_at_every_speculation_depth(tmp_
     evaluated = [node for node in state.nodes.values() if node.status is NodeStatus.evaluated]
     assert len(evaluated) >= 10, f"depth={depth} evaluated only {len(evaluated)}"
     assert state.best_node_id is not None
-    # The crash was repaired rather than abandoned: something bred from node 0.
-    assert any(0 in node.parent_ids for node in state.nodes.values())
+    # NOTHING BREEDS FROM NODE 0 ANY MORE, and that is the F5 decision, not a regression. This line
+    # used to read "the crash was repaired rather than abandoned: something bred from node 0" — the
+    # `debug` Card opening a fresh node to have another go at the experiment that just failed. That
+    # node is deleted; a crash is repaired IN PLACE (and this run sets `inline_repair=False`, so
+    # here it is simply abandoned). The regression this test actually exists for is above and still
+    # holds at both depths: no `stuck`, the run finishes, ten of twelve nodes evaluated, and the
+    # budget denominator matches the speculation-off control exactly.
+    assert not any(0 in node.parent_ids for node in state.nodes.values()), (
+        "no node may be created to retry a failed experiment (F5)")
     # Every discarded prefetch was refunded, so the budget denominator matches the off-run exactly.
     assert card_budget_used(state) == 12, sorted(
         (node.id, node.status.value, node.error_reason) for node in state.nodes.values())

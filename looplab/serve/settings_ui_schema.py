@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 172
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 173
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -45,6 +45,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # uncurated omission for the same reason `read_fence` is: the probe is an EXECUTION surface inside
 # the engine process, so an operator must be able to see that it exists and close it, and its
 # timeout is the bound between "a question" and "a job that belongs in an eval stage".
+# 169 rows since F8's `repair_critic_after` joined Resilience & efficiency, directly under
+# `inline_repair_attempts`. It is a row rather than an uncurated omission because the operator is
+# the one who has to understand that the repair bound stopped being a count: the cap above it now
+# defaults to 0, and this is the knob that says when the second model gets its veto. Note what it is
+# NOT — it cannot extend a repair loop, only end one — and the help text says so, because a reader
+# who mistakes it for a budget will set it wrong in the expensive direction.
 # (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
@@ -55,13 +61,13 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-# (172 since four curated rows landed together on 2026-08-13: `assistant_time_budget_s` gave the
-# chat its own wall clock; `eval_deadline_grace_s` is the one-shot judge-granted extension a stage
-# may get at its deadline; `developer_probe` and `developer_probe_timeout_s` are the Developer's
-# read-only interpreter probe. All four are rows rather than uncurated omissions for the same
-# reason: each is a switch an operator pays for - GPU time for the grace, provider time for the
-# probe - and a knob that spends money has to be visible to whoever is spending it.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "5d67ce771436d9b0fd5b693ec166f77f44e4a70dd71fefc0c7e865f45875d277"
+# (173 since five curated rows landed across five branches on 2026-08-13. Four spend an operator's
+# money or machine when switched on — `eval_deadline_grace_s` (GPU time), `developer_probe` and
+# `developer_probe_timeout_s` (provider time), `repair_critic_after` (an extra call per repair from
+# the Nth on) — and one, `assistant_time_budget_s`, gave the chat the wall clock it used to borrow
+# from every engine role. Each branch pinned this digest against a tree without the others, so it is
+# re-derived over the merged keyset rather than taken from any side.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "e9bb0d22b6889e97cb08d6449475ddac1bfb1e728beaaa25767c56459b5e4d9e"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

@@ -830,8 +830,11 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
             # repair under the same card." Nothing decides that. `bind_idea_to_board_card` is handed
             # ONLY `next_board_prompt_cards`, so a CARD_ID from this block resolves to no visible
             # card and is NULLED; no code path parses `rationale` for a card id; and the one thing
-            # that does attach a re-attempt (`card_reservation.py::_retry_attach_card`) fires on the
-            # POLICY's `debug` action against a failed node, never on a proposal. Driven: a
+            # that does attach a re-attempt (`card_reservation.py::_retry_attach_card`) fired on the
+            # POLICY's `debug` action against a failed node, never on a proposal — and since F5
+            # deleted the Debug node (2026-08-13) it fires on nothing at all, which makes this block
+            # MORE load-bearing, not less: it is now the only thing standing between a model asking
+            # for "another attempt" and a second card. Driven: a
             # byte-identical seed offered back through this block still minted a second card — the
             # very card-0/card-3 shape this whole change removed, now reachable THROUGH the prompt
             # that describes the fix.

@@ -150,12 +150,16 @@ class EngineOptions:
     # revalidates it and refuses a stale/forged one (`Engine.__init__`'s admission block).
     speculation_gate_receipt: Optional[str] = None
     inline_repair: bool = True           # hybrid: triage + repair a crashed node IN PLACE (no new node)
-    inline_repair_attempts: int = 12     # HARD cap on in-place repair retries per node (0 = UNLIMITED).
-                                         # The primary stop is the triage model's `abandon` verdict;
-                                         # this is the backstop — see core/config.py for the numbers
-                                         # behind 12. Same value as the product Settings on purpose:
-                                         # a bound is the CONSERVATIVE choice, so the library default
-                                         # must not be the more permissive of the two.
+    inline_repair_attempts: int = 0       # HARD cap on in-place repair retries per node. 0 = NO
+                                         # OPERATOR CAP, which since F8 (2026-08-13) is the default:
+                                         # the stop is a JUDGMENT (the triage model's `abandon`, the
+                                         # Developer's own `(developer stuck: …)`, and the repair
+                                         # critic), and the floors underneath it are
+                                         # `evaluate._UNLIMITED_REPAIR_CEILING`, the eval-time budget
+                                         # and the LLM money ceiling. Same value as the product
+                                         # Settings on purpose: these two must not disagree about
+                                         # what stops a repair loop.
+    repair_critic_after: int = 3         # durable repairs before the critic is consulted (0 = off)
     # ALL of `core/models.py::FAILURE_REASONS` since 2026-08-12 — see the field comment in
     # `core/config.py` for the run this default cost. Bound to the registry, not respelled:
     # this is the copy that would silently disagree with Settings.

@@ -51,7 +51,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:6c593301d84dcfd7528fa1594085bf00681fe810c9cc35c1db1b79efe9165abf"
+_EXPECTED_DIGEST = "sha256:119f5a08d52e05cd060fe18bf9c6e74273a1d36ae3e3963dbecf392608d6b905"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -120,7 +120,25 @@ _EXPECTED_DIGEST = "sha256:6c593301d84dcfd7528fa1594085bf00681fe810c9cc35c1db1b7
 #               measured over an incomplete settings map. Re-measured once over the merged map:
 #               200 fields. Neither branch's digest was ever correct for the shipped tree, which is
 #               why this is re-derived here rather than picked from one side.
-_EXPECTED_FIELD_COUNT = 200
+#   2026-08-13  + repair_critic_after, and a CHANGED default for inline_repair_attempts (12 -> 0).
+#               F8/F5: the in-node repair bound stopped being a count. The 'field set changed too'
+#               branch, and it is emphatically NOT inert for a calibration replicate — this is the
+#               same knob whose 0 -> 12 move on 2026-08-05 was recorded above as a real envelope
+#               change, taken back the other way for a different reason. A failing replicate now
+#               buys repairs until a JUDGMENT stops it (bounded by the engine's ceiling of 50, the
+#               eval-time budget and the money ceiling) rather than at attempt 12, and the critic is
+#               a second model that can end the loop earlier. Both directions change how many evals
+#               a replicate spends, so old receipts SHOULD stop verifying. Both pins re-set.
+#               NOTE the OTHER receipt this day revokes, which is not visible from this file:
+#               `search/scorer_fidelity.py`'s `forced_debug` case became `no_forced_debug` when the
+#               Debug node was deleted, and that row is part of `speculation_quality`'s derivation.
+#   2026-08-13  MERGE of five branches. Each re-pinned this digest against a tree carrying only its
+#               own new knob, so every one of the five was measured over an incomplete settings map
+#               and none was ever correct for the shipped tree. Re-measured ONCE over the merged
+#               map: 201 fields. A plain union of the branches also left several `_EXPECTED_DIGEST`
+#               and `_EXPECTED_FIELD_COUNT` statements in this file, where Python silently uses the
+#               last — the vacuous-guard shape the comment above warns about, now collapsed to one.
+_EXPECTED_FIELD_COUNT = 201
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

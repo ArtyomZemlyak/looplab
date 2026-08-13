@@ -212,7 +212,8 @@ def _boss_context_parts(st, nid: Optional[int], full: "Path", *, advisory: bool 
                   if advisory else
                   ("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
                    "node likely crashed or never started). To make progress you MUST act: `resume` to "
-                   "restart the loop, and if a node is failing add a debug/inject step to fix it — "
+                   "restart the loop, and if a node is failing `reset` it (which re-runs it in place) "
+                   "rather than injecting a node to retry it — "
                    "don't just advise."))
     parts = [status]
     attn = _attention_states(st)          # §1: paused / awaiting-approval / trust-flag / stuck-build

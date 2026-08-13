@@ -239,7 +239,9 @@ stages' inputs are unchanged, so a repair that **deletes** any file, changes any
 (a config/params/data file — invisible to import reachability), or runs under a non-default
 `cmd.cwd` also forces a full re-run, as does an opaque stage (`python -m`, a shell wrapper).
 `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
-may burn before abandoning to the inter-node debug operator.
+may burn before abandoning the node. (It used to abandon *to* the inter-node debug operator; that
+operator was removed on 2026-08-13 — a failure is repaired inside the node that failed, for as long
+as the repair judgment allows.)
 
 **When the stage that broke is not the stage that is wrong**, the repair can say so. An earlier stage
 that exited 0 was counted successful, but exit 0 only means it did not crash — a data/mining stage can

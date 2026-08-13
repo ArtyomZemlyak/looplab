@@ -756,6 +756,14 @@ class CardReservationMixin:
         no live `node_building` marker naming it. Both are read off the SAME folded snapshot the
         reservation commits against, so the window is the tail CAS and nothing wider.
         """
+        # UNREACHABLE SINCE 2026-08-13 (F5), and kept exactly as it is rather than deleted. `debug`
+        # is the only operator that attaches, and nothing mints a `debug` Idea any more — the Debug
+        # node was removed, so this returns `None` on the first line for every live call. It stays
+        # because it is the FAIL-CLOSED half of a rule that already cost two byte-identical twin
+        # Cards (card-0/card-3 in rubertlite-dr-unified-v5, card-0/card-1 in rubert-dr-0807): if a
+        # retry operator is ever reintroduced under a different name, the right outcome is that it
+        # lands on this gate rather than on the absence of one. Deleting it would also be a live risk
+        # for no gain — `_reserve_node_build` has five callers and only one may attach at all.
         if idea.operator != "debug" or len(parents) != 1:
             return None
         parent = state.nodes.get(parents[0])

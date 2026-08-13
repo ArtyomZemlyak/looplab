@@ -163,10 +163,18 @@ class CrashRepairMixin:
                     return verdict
             return verdict
         # NO judge wired (`unified_agent` off) — a configuration, not a failure. The deterministic
-        # rule keeps repairing mechanical crashes, bounded ONLY by the operator's hard cap, because
-        # it has no way to form the stop judgement the model makes. 0 = unlimited -> a large cap.
-        cap = self._inline_repair_attempts or 10**9
-        return _rule_triage(reason, error, attempt, cap)
+        # rule keeps repairing crashes, bounded ONLY by the caller's hard cap, because it has no way
+        # to form the stop judgement the model makes.
+        #
+        # THE CAP IS THE EFFECTIVE ONE, not `inline_repair_attempts or 10**9`. That spelling read 0
+        # as "no bound at all" and handed the rule 10**9, which was survivable only while 0 was rare;
+        # since F8 made 0 the DEFAULT it would have told the rule path there is no bound on every
+        # shipped run. `_effective_repair_cap` is the same three-way answer the budget gate and the
+        # cap-out message read, which is the whole reason it is a named function
+        # (`engine/evaluate.py`) rather than three inline comparisons that used to disagree.
+        from looplab.engine.evaluate import _effective_repair_cap
+        return _rule_triage(reason, error, attempt,
+                            _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
                     repair_log, depth, attempts_left) -> dict:
@@ -247,6 +255,67 @@ class CrashRepairMixin:
             return {"action": UNANSWERABLE_TRIAGE_ACTION,
                     "rationale": f"{type(exc).__name__}: {exc}"[:300],
                     "missing_dependency": ""}
+
+    @in_llm_lane("build")
+    def _repair_critic(self, state: RunState, node, repair_log, attempt: int) -> dict:
+        """Is this node's repair chain still addressing different causes? `{"action", "rationale"}`
+        with action ∈ `CRITIC_ACTIONS` — F8's second stop signal.
+
+        THE ONE THING IT MAY DO IS STOP. `stop` becomes the same terminal an `abandon` produces,
+        carrying the eval's own authenticated `reason`; there is no verdict here that moves a
+        metric, a champion, selectability or a violation. Doc 36's line, on the safe side.
+
+        FAILS OPEN, and that is deliberate — read `engine/repair_judgment.py::DEFAULT_CRITIC_ACTION`
+        before changing it. A critic that is not wired, cannot be reached, or answers something
+        unreadable contributes nothing and the loop stops exactly where it would have without one:
+        the triage judge is still the primary stop and the floors are still enforced. There is no
+        `unanswerable` twin here for the same reason — a critic's silence is not evidence about the
+        provider, because the triage call one line above it just reached the same endpoint.
+
+        No deterministic fallback either, and that asymmetry with `_triage_crash` is the point: the
+        rule path exists there because SOMETHING must decide repair-vs-stop with no model wired, and
+        `_rule_triage` can at least recognise a mechanical crash. "Are these attempts circling?" has
+        no rule form — that is the whole finding of the deleted error-signature counter, which
+        answered it with a regex and was defeated by a Cyrillic identifier, a blank stderr and a
+        varying request id. A heuristic here would be that mistake with a new name."""
+        from looplab.engine.repair_judgment import (CRITIC_CONTINUE, DEFAULT_CRITIC_ACTION,
+                                                    coerce_critic_action,
+                                                    format_repair_trajectory)
+        fn = getattr(self.researcher, "repair_critic", None)
+        if not callable(fn):
+            return {"action": CRITIC_CONTINUE, "rationale": "no repair critic wired"}
+        trajectory = format_repair_trajectory(repair_log)
+        if not trajectory:
+            return {"action": CRITIC_CONTINUE, "rationale": "no repair trajectory to judge yet"}
+        try:
+            from looplab.agents.roles import _state_brief
+            try:
+                # NOT a proposal, exactly as in `_ask_triage`: this asks for a stop/continue verdict,
+                # so the board's claim contracts are instructions it cannot follow.
+                brief = _state_brief(state, None, for_proposal=False)
+            except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
+                brief = ""
+            # Own span, and it bands as `triage` beside the stop decision it belongs to rather than
+            # inflating `evaluate` — the same trace-attribution rule `_ask_triage` documents.
+            extra = {"trajectory": trajectory, "attempt": attempt, "brief": brief, "state": state}
+            with self.tracer.span("repair_critic", attempt=attempt):
+                out = fn(node, **_accepted_kwargs(fn, extra))
+        except BudgetExceeded:      # the hard budget stop must propagate, not degrade to a verdict
+            raise
+        except Exception as exc:  # noqa: BLE001 - a critic whose CALL failed has no opinion. It is
+            # NOT the dead-provider signal its triage sibling makes of the same exception: that one
+            # is the loop's only stop and a silent "keep repairing" there is the 2345-repair
+            # incident, while this one is an extra veto whose absence restores the previous
+            # behaviour exactly. Reporting a provider outage from here would ALSO be the wrong
+            # diagnosis twice over — `_triage_crash` reached the same endpoint moments earlier and
+            # would have said so itself.
+            return {"action": DEFAULT_CRITIC_ACTION,
+                    "rationale": f"the repair critic could not be reached ({type(exc).__name__})"}
+        if not isinstance(out, dict):
+            # Includes the `None` a `UnifiedAgent` with no pilot model returns.
+            return {"action": DEFAULT_CRITIC_ACTION, "rationale": "the repair critic returned no verdict"}
+        return {"action": coerce_critic_action(out.get("action")),
+                "rationale": str(out.get("rationale", ""))[:300]}
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None) -> str:

@@ -29,17 +29,31 @@ def test_merge_idea_means_params():
     assert idea.concepts_added == idea.concepts_removed == []
 
 
-def test_policy_debugs_failed_leaf_then_stops():
+def test_no_policy_opens_a_node_to_retry_a_failed_one():
+    """F5, inverted from `test_policy_debugs_failed_leaf_then_stops`.
+
+    That test pinned the Debug node: a failed leaf forced `{"kind": "debug", "parent_id": 0}` ahead
+    of everything else, bounded by `debug_depth`. The operator deleted it on 2026-08-13 — a failure
+    is fixed inside the node that failed — so what has to be pinned now is the ABSENCE, in the two
+    shapes it could come back: the `debug` kind itself, and an `improve` wearing its clothes.
+
+    The second is the one worth driving rather than reading. `improve` anchors on
+    `breedable_nodes()`, which is evaluated-and-feasible only, so a failed node is structurally
+    unreachable as an improve parent — but that is a property of a function three layers away, and
+    "no policy can retry a failed node" is the rule this file is responsible for."""
     st = RunState(direction="min")
     st.nodes[0] = Node(id=0, operator="draft",
                        idea=Idea(operator="draft", params={"x": 1.0}), status=NodeStatus.failed)
     pol = GreedyTree(n_seeds=1, max_nodes=8, debug_depth=1)
-    assert pol.next_actions(st) == [{"kind": "debug", "parent_id": 0}]
-
-    # Once a debug child exists for the failed node, no further debug for it.
-    st.nodes[1] = Node(id=1, parent_ids=[0], operator="debug",
-                       idea=Idea(operator="debug", params={"x": 1.1}), status=NodeStatus.failed)
-    assert all(a["kind"] != "debug" for a in pol.next_actions(st))
+    actions = pol.next_actions(st)
+    assert all(a["kind"] != "debug" for a in actions), actions
+    assert all(a.get("parent_id") != 0 for a in actions), (
+        "no action may anchor on the failed node — that is a Debug node under another name")
+    # …and the failed node is still not an improve parent once the run has a good node beside it.
+    st.nodes[1] = Node(id=1, operator="draft", idea=Idea(operator="draft", params={"x": 2.0}),
+                       metric=0.5, status=NodeStatus.evaluated)
+    for a in pol.next_actions(st):
+        assert a["kind"] != "debug" and a.get("parent_id") != 0, a
 
 
 def test_d7_expand_operator_is_yield_tracked_and_counts_as_improve_family():
@@ -191,7 +205,13 @@ def _engine(run_dir, max_nodes):
 
 
 def test_self_repair_is_policy_agnostic(tmp_path):
-    """Debug/self-repair now works under every policy (was GreedyTree-only)."""
+    """Self-repair still works under every policy — but IN PLACE, with no node of its own (F5).
+
+    This test used to assert `any(n.operator == "debug" and n.metric == 0.1)`, i.e. that a fresh
+    Debug node was opened and succeeded. The property it was really guarding — a broken solution
+    gets repaired under Evolutionary and MCTS too, not only GreedyTree — is unchanged and is what is
+    asserted now: the SAME node that crashed carries the repaired metric, and no second node was
+    spent on it. That is the whole of the F5 decision in one assertion."""
     from looplab.search.policy import EvolutionaryPolicy, MCTSPolicy
 
     class _BrokenThenFixed:
@@ -210,8 +230,10 @@ def test_self_repair_is_policy_agnostic(tmp_path):
         eng = Engine(rd, task=ToyTask.load(TASK_FILE), researcher=_Stub(),
                      developer=_BrokenThenFixed(), sandbox=SubprocessSandbox(), policy=pol)
         state = anyio.run(eng.run)
-        assert any(n.operator == "debug" and n.metric == 0.1 for n in state.nodes.values()), \
+        assert any(n.metric == 0.1 for n in state.nodes.values()), \
             f"{pol.__class__.__name__} did not self-repair"
+        assert all(n.operator != "debug" for n in state.nodes.values()), \
+            f"{pol.__class__.__name__} opened a Debug node"
 
 
 def test_end_to_end_produces_a_merge_node(tmp_path):

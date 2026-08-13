@@ -636,6 +636,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
+        repair_critic_after = _opt("repair_critic_after")
         inline_repair_reasons = _opt("inline_repair_reasons")
         inline_repair_retrain_cap = _opt("inline_repair_retrain_cap")
         metric_salvage = _opt("metric_salvage")
@@ -752,7 +753,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._deep_repair = deep_repair
         # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
         self._inline_repair = inline_repair
-        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
+        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = no operator cap
+        # F8: how many durable repairs before the CRITIC is asked whether the chain is
+        # circling. It is a cadence, not a bound — the critic can only stop, never extend.
+        self._repair_critic_after = max(0, int(repair_critic_after))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
         # METRIC SALVAGE — settled through the same `_opt` ladder as every other policy, so a
@@ -1779,8 +1783,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 continue
 
             evals = [a for a in actions if a["kind"] == "evaluate"]
+            # `debug` is deliberately NOT in this tuple any more (F5). Nothing in `search/`
+            # produces one, so the only ways an action of that kind reaches here are a third-party
+            # policy and a stale plugin — and this loop is the one place both funnel through. A
+            # failure is repaired inside the node that failed; opening a fresh node to have another
+            # go at the same experiment is the thing the operator deleted.
             creates = [a for a in actions
-                       if a["kind"] in ("draft", "improve", "debug", "merge")]
+                       if a["kind"] in ("draft", "improve", "merge")]
 
             if creates:
                 # doc 25 ES-05: the 220-line branch that used to live here is now a §4 phase
@@ -4779,19 +4788,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         parent = state.nodes[action["parent_id"]]
         if kind == "debug":
-            repair = getattr(self.developer, "repair", None)
-            if callable(repair) and parent.error and (parent.code or parent.files or self._repo_spec):
-                idea = parent.idea.model_copy(deep=True)
-                idea.operator = "debug"
-                return _link(idea, proposed=False)   # the PARENT's idea, not a fresh proposal
-            self._set_complexity_hint(state, parent, researcher=researcher)
-            # A repair proposal should not be pushed toward an unrelated direction.
-            self._stamp_novelty_hint(state, "balanced", researcher=researcher)
-            with self.tracer.span("propose") as _span:
-                idea = self._canonicalize_idea_operator(
-                    researcher.propose(state, parent), "debug")
-                stamp_proposal_span(_span, idea, node_id=prospective_node_id)
-            return _link(idea)
+            # REFUSED (F5). This branch used to copy the failed parent's own Idea onto a NEW node
+            # and hand it back to the Developer — the Debug node, i.e. another attempt at the
+            # experiment that just failed, paid for out of the node budget. `None` is the answer
+            # this function already gives for "no idea could be prepared", so the caller declines
+            # the build without a new failure mode; the loop-level filter above is what normally
+            # stops such an action reaching here at all, and this is the second door.
+            return None
 
         # improve / capability-expand
         self._set_complexity_hint(state, parent, researcher=researcher)
@@ -4964,38 +4967,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         _didea,
                         pnodes[0] if self._merge_mode == "ensemble" and pnodes else None,
                         developer=developer, state=state)
-            elif kind == "debug":
-                parent = state.nodes[action["parent_id"]]
-                parents = [parent.id]
-                repair = getattr(developer, "repair", None)
-                # Error-feedback debug: hand the failure back to the Developer to fix. Fires for
-                # whole-file solutions (parent.code), multi-file edits (parent.files), AND any
-                # repo task (self._repo_spec) even when a prior attempt fell back to the empty
-                # baseline — so an e2e agent can fix runtime errors / missing deps from the
-                # error alone (it edits requirements and the eval's setup step re-installs them).
-                if callable(repair) and parent.error and (parent.code or parent.files
-                                                          or self._repo_spec):
-                    # C3 deep test-driven repair (when enabled): failure taxonomy + a structured
-                    # "reproduce then fix" directive, not just the raw stderr tail. Depth is already
-                    # bounded by debug_depth.
-                    err = self._repair_error_context(parent.error_reason, parent.error,
-                                                     state=state, node=parent)
-                    with self.tracer.span("repair", parent_id=parent.id), self._progress(
-                            PROGRESS_STAGE_BUILD, "repair", node_id=node_id, operator=kind,
-                            parent_id=parent.id):
-                        code = self._repair(
-                            parent, err, state, developer=developer)  # seed from parent's OWN files
-                else:
-                    # Signal-delivery (§1): the debug re-propose now gets the SAME cross-run priors +
-                    # failure-reflection + fault-localization + trust cues as draft/improve — exactly
-                    # when the agent is FIXING a failure it most needs "this crash class recurred
-                    # before" and "the likely files to edit". Previously this branch called only
-                    # _stamp_novelty_hint, so those cues were absent on the repair proposal.
-                    with self.tracer.span("implement"), self._progress(
-                            PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
-                        code = self._implement(
-                            self._directed_idea(idea.model_copy(deep=True), state), parent,
-                            developer=developer, state=state)
+            # The `debug` build branch is GONE (F5). It called `developer.repair` on a FRESH node
+            # seeded from the failed parent's files — inline repair with a node-budget slot attached
+            # to it. Its whole justification was that the in-node loop had a fixed count and had to
+            # hand off somewhere when the count ran out; F8 removed the count, so the hand-off has
+            # nowhere to go and no reason to exist. `_prepare_node_idea` refuses the kind before a
+            # build is ever reached, so this branch was unreachable as well as unwanted.
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
@@ -5399,6 +5376,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             for parent_id, generation in parent_generations.items():
                 if expected_parent_generations.get(parent_id) != generation:
                     raise ValueError(f"stale parent generation for node #{parent_id}")
+
+        # AN OPERATOR MAY NOT INJECT A DEBUG NODE EITHER (F5). This surface offered
+        # draft/improve/debug/merge and was the last producer left once the policies and the Card
+        # lane lost theirs — and it is the one that most looks like an exception worth making, since
+        # a human asked for it. It is not: what the operator gets instead is strictly better, because
+        # the node they would have opened is now repaired in place with no budget slot spent and no
+        # second lineage to reconcile. Raised as a `ValueError` like every other refusal here, so the
+        # control path answers the operator rather than the run dying (`_drain_injects`).
+        if str(idea_d.get("operator") or "").strip().lower() == "debug":
+            raise ValueError(
+                "debug nodes were removed on 2026-08-13: a failure is repaired inside the node that "
+                "failed, for as long as the repair judgment allows. Reset the failed node to repair "
+                "it again, or inject a draft/improve if this is genuinely a different experiment.")
 
         code = req.get("code")
         # U3 real merge: this combines Idea metadata only. Developer work remains after reservation.

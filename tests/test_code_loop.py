@@ -76,17 +76,25 @@ class _BrokenThenFixedDeveloper:
         return "import json\nprint(json.dumps({'metric': 0.123}))\n"
 
 
-def test_error_feedback_debug_repairs(tmp_path):
+def test_error_feedback_repair_fixes_the_node_that_broke(tmp_path):
+    """Renamed from `test_error_feedback_debug_repairs` (F5, 2026-08-13).
+
+    It asserted that a broken draft produced a `debug` CHILD which then evaluated successfully. The
+    Debug node was deleted — a failure is repaired inside the node that failed — so the property is
+    the same one seen from the other side: the SAME node reaches the working metric, and no second
+    node was spent to get there."""
     task = CodeRegressionTask(seed=1, n=10)
     eng = Engine(tmp_path / "run", task=task, researcher=_StubResearcher(),
                  developer=_BrokenThenFixedDeveloper(), sandbox=SubprocessSandbox(),
                  policy=GreedyTree(n_seeds=1, max_nodes=4, debug_depth=1))
     state = anyio.run(eng.run)
-    # The draft failed; a debug child repaired it and evaluated successfully.
-    debug_nodes = [n for n in state.nodes.values() if n.operator == "debug"]
-    assert debug_nodes
-    fixed = [n for n in debug_nodes if n.metric == 0.123]
-    assert fixed, "error-feedback debug should have produced a working solution"
+    assert all(n.operator != "debug" for n in state.nodes.values())
+    # NODE 0 is the one whose first implement was broken, and it is the one that must carry the
+    # metric — naming it rather than "some node reached 0.123" is what distinguishes an in-place
+    # repair from a fresh child that happened to be built from the same fixed developer.
+    assert state.nodes[0].metric == 0.123, (
+        "the repair must land on the node that broke, not on a child of it")
+    assert not state.nodes[0].parent_ids
     # That repaired node should be (or tie for) the best.
     assert state.best() is not None and state.best().metric == 0.123
 

@@ -517,5 +517,17 @@ def test_command_prompt_teaches_finalize_and_stop_pause_synonymy():
     assert "synonym" in COMMAND_SYSTEM                       # pause ≡ stop stated explicitly
     # P20: reset teaches pipeline stage names, not just the three lifecycle stages
     assert "eval-PIPELINE stage name" in COMMAND_SYSTEM
-    # P37: the chat prompt's operator list includes merge (its sibling prompts already did)
-    assert "improve/draft/debug/merge" in CHAT_SYSTEM
+    # P37: the chat prompt's operator list includes merge (its sibling prompts already did) — and
+    # since F5 (2026-08-13) it must NOT include `debug`, because the engine refuses that injection
+    # outright now. A prompt that keeps teaching a verb the mapper rejects is the same defect this
+    # test exists for, pointed the other way: the model recommends an action the operator cannot take.
+    assert "improve/draft/merge" in CHAT_SYSTEM
+    # …and no OFFERING of `debug` survives in either prompt. Pinned as the offering spellings rather
+    # than a bare `"debug" not in`, because both prompts now say out loud that the operator does not
+    # exist — a blanket ban would forbid exactly the sentence that fixes the problem.
+    for taught in ("improve/draft/debug/merge", "draft/improve/debug/merge", "improve/draft/debug"):
+        assert taught not in CHAT_SYSTEM and taught not in COMMAND_SYSTEM, taught
+    assert "no `debug`" in CHAT_SYSTEM and "NO `debug` operator" in COMMAND_SYSTEM, (
+        "both prompts must SAY the operator is gone, not merely omit it — a model that has seen "
+        "older runs will otherwise keep recommending an injection `inject_node` now refuses (F5), "
+        "and COMMAND_SYSTEM is the one whose vocabulary the action mapper actually reads")

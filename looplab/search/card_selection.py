@@ -31,7 +31,7 @@ from looplab.core.models import (
 )
 from looplab.search.concept_projection import (
     canonical_recorded_concept, current_concept_projection)
-from looplab.search.policy import (META_RUNG, asha_expansion, debug_action,
+from looplab.search.policy import (META_RUNG, asha_expansion,
                                    rank_by_metric)
 
 
@@ -384,8 +384,9 @@ def _seed_target(policy: object) -> int:
     return _bounded_nonnegative_int(getattr(policy, "pop", 0))
 
 
-def _debug_depth(policy: object) -> int:
-    return _bounded_nonnegative_int(getattr(policy, "debug_depth", 1), 1)
+# `_debug_depth` lived here and read the policy's now-inert `debug_depth`. Gone with the Debug node
+# (F5): the Card lane no longer has a debug action to bound, and a live reader of a dead knob is how
+# an operator ends up tuning something that does nothing.
 
 
 def _card_parent_ids(card: Card) -> tuple[int, ...] | None:
@@ -417,8 +418,9 @@ def card_action(card: Card) -> Action | None:
         return {"kind": "draft", META_CARD_ID: card.id}
     if card.operator in {"improve", "expand"} and len(parents) == 1:
         return {"kind": "improve", "parent_id": parents[0], META_CARD_ID: card.id}
-    if card.operator == "debug" and len(parents) == 1:
-        return {"kind": "debug", "parent_id": parents[0], META_CARD_ID: card.id}
+    # No `debug` branch (F5). A `debug` Card cannot be authored any more, and a HISTORICAL one must
+    # not be turned back into an action by a resumed run — it falls through to `None`, which is the
+    # fail-closed answer this function already gives every malformed shape.
     if card.operator == "merge" and len(parents) == 2:
         return {"kind": "merge", "parent_ids": list(parents), META_CARD_ID: card.id}
     return None
@@ -493,7 +495,6 @@ def _live_card_action(
     *,
     breedable_ids: set[int],
     top_two_ids: set[int],
-    forced_debug: Action | None,
 ) -> bool:
     parents = _card_parent_ids(card)
     if parents is None:
@@ -512,17 +513,10 @@ def _live_card_action(
             and set(parents) == top_two_ids
             and all(parent in breedable_ids for parent in parents)
         )
-    if card.operator == "debug":
-        # A failed debug anchor is intentionally not breedable.  It is live only when it is the SAME
-        # first failed leaf selected by the policy's forced repair gate.  Replay currently applies the
-        # breedable rule to debug too; this recheck is ready for that projection bug to be fixed without
-        # ever broadening selection beyond selection_ready in the meantime.
-        return bool(
-            len(parents) == 1
-            and forced_debug is not None
-            and forced_debug.get("kind") == "debug"
-            and forced_debug.get("parent_id") == parents[0]
-        )
+    # `debug` falls through to False (F5). It used to be live only while it matched the policy's
+    # forced repair gate; that gate is gone, so a historical `debug` Card is never executable again —
+    # which is the same answer the removed recheck would now give, reached by the default branch
+    # rather than by a special case nobody can trigger.
     return False
 
 
@@ -537,7 +531,6 @@ def eligible_cards(state: RunState, policy: object) -> list[Card]:
     breedable = state.breedable_nodes()
     breedable_ids = {node.id for node in breedable}
     top_two_ids = {node.id for node in rank_by_metric(state, breedable)[:2]}
-    forced_debug = debug_action(_effective_policy_state(state), _debug_depth(policy))
     return [
         card for _, card in sorted(state.cards.items())
         if _strictly_selection_ready(card)
@@ -545,22 +538,13 @@ def eligible_cards(state: RunState, policy: object) -> list[Card]:
             card,
             breedable_ids=breedable_ids,
             top_two_ids=top_two_ids,
-            forced_debug=forced_debug,
         )
     ]
 
 
-def _matching_ready_debug_card(state: RunState, action: Action) -> Card | None:
-    parent_id = action.get("parent_id")
-    for _, card in sorted(state.cards.items()):
-        parents = _card_parent_ids(card)
-        if (
-            _strictly_selection_ready(card)
-            and card.operator == "debug"
-            and parents == (parent_id,)
-        ):
-            return card
-    return None
+# `_matching_ready_debug_card` bound a bare forced debug action to an already-ready `debug` Card so
+# the lane did not author a second one for the same work. Both halves are gone with F5 — there is no
+# forced debug action to bind and no `debug` Card to bind it to.
 
 
 def _forced_card_actions(
@@ -586,16 +570,11 @@ def _forced_card_actions(
     used = card_budget_used(state)
     limit = _bounded_nonnegative_int(max_nodes)
 
-    # Debug is checked before the terminal gate, while the remaining-budget guard prevents an overrun.
-    # Use the effective policy view so a tombstoned/gated failed node cannot be rediscovered forever as
-    # a bare debug action even though it no longer consumes capacity.
-    if used < limit:
-        repair = debug_action(_effective_policy_state(state), _debug_depth(policy))
-        if repair is not None:
-            matching = _matching_ready_debug_card(state, repair)
-            if matching is not None:
-                repair = {**repair, META_CARD_ID: matching.id}
-            return [repair]
+    # THE FORCED DEBUG PREFIX IS GONE (F5). It sat here, ahead of the terminal gate: a failed leaf
+    # pre-empted every other action so the lane would open a fresh node to have another go at the
+    # experiment that had just failed. That node is exactly what the operator deleted — the failure is
+    # fixed inside the one node now, bounded by the judgment in `engine/repair_judgment.py` rather
+    # than by the count that used to hand control to this prefix.
 
     if used >= limit:
         return []

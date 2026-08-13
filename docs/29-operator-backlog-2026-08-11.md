@@ -548,6 +548,29 @@ the same change. `systemic_failure_stop` stays as the floor under both. The two 
 removing the Debug node while the repair bound is still a fixed count would convert "give up and open
 a new node" into "give up", which is strictly worse than today.
 
+**LANDED 2026-08-13, with F8, in one change.** Every producer is cut: `search/policy.py::debug_action`
+and `_debug_lineage` (and with them the four policies' forced-debug branch and `legal_actions`' debug
+option), the Card lane's forced debug prefix and its `_matching_ready_debug_card` id-reuse helper,
+the orchestrator's `debug` create filter entry / `_prepare_node_idea` branch / build branch, and the
+operator INJECT surface — which was the last one and the one that most looked like an exception worth
+making. The evasion route is closed too and is DRIVEN rather than reasoned about: `improve` anchors on
+`breedable_nodes()`, which never contains a failed node, and `tests/test_debug_node_removed.py` pins
+that no policy, no legal-action envelope, no Card lane and no real crashing run breeds from a failure.
+
+Three things are deliberately KEPT and documented as inert: `KIND_DEBUG` (an event-log spelling —
+preserved runs contain `debug` nodes and must still fold, render and replay), `Settings.debug_depth`
+(`LOOPLAB_DEBUG_DEPTH`, every `config.snapshot.json`, and the calibrated speculation envelope all pin
+the name), and the fold's debug-leaf readers in `events/card_ledger.py`. Selection moved the other
+way: a historical `debug` Card is never live again. Replay reports what happened; selection refuses to
+repeat it — and removing the fold readers while leaving the folded shape they interpret is precisely
+the silent break, since the L3 budget and `selection_ready` both key on that map.
+
+Two things the removal exposed, both fixed here: `_rule_triage` abandoned a non-mechanical crash,
+which was only *conservative* while an abandoned node then got a Debug node — with it gone the same
+verdict throws the lineage away, so a `RuntimeError` one repair would have fixed ended a node; and
+`_triage_crash` handed the rule path `10**9` instead of the effective cap, harmless while `0` was
+rare and wrong the moment F8 made it the default.
+
 Design principle behind both: [`36-agent-driven-decisions-2026-08-13.md`](36-agent-driven-decisions-2026-08-13.md).
 
 ## F7 · The Research Atlas: what it uniquely holds, and what it duplicates — **SHIPPED**
@@ -675,6 +698,39 @@ never *what the result was* — the line is drawn in
 
 **Ordering constraint.** F5 and F8 land together. Removing the Debug node while the repair bound is
 still a fixed count turns "give up and open a new node" into plain "give up".
+
+**LANDED 2026-08-13.** `inline_repair_attempts` defaults to `0` — no count cap — and the transition is
+a judgment made of the two signals that already existed:
+
+  * **the Developer's own verdict.** `core/models.py::DEVELOPER_STUCK_PREFIX` — it may answer a repair
+    ask with `(developer stuck: <why>)` instead of code, and the engine's repair ask now TELLS it so
+    (`engine/repair_judgment.py::developer_stuck_contract`; a sentinel nobody is told about is a
+    sentinel nobody emits). No attempt is spent and no `node_repaired` is written, because nothing was
+    repaired. It is checked ABOVE `_repair_provider_failure` and that ordering is load-bearing: the
+    declaration is not Python, so the provider classifier would call it `unparseable`, and three of
+    them would terminalize the node as `developer_crash` **and pause the whole run** naming a provider
+    that is answering perfectly. "No fix left" and "the session is dead" are opposite facts.
+  * **a critic** (`engine/repair_judgment.py`, `UnifiedAgent.repair_critic`, consulted from
+    `repair_critic_after = 3` repairs on) asked one question and given one power: are successive
+    attempts addressing different causes, or circling one — and it may only STOP.
+
+**How the judgment is kept away from the record.** Every stop — triage's `abandon`, the Developer's
+declaration, the critic's `stop` — terminalizes the node carrying the eval's OWN authenticated
+`_failure_reason`. No LLM verdict sets `reason`, so none of them can reach salvage, selection, the
+champion, or whether a violation stands. That is doc 36's table: this decides what to do NEXT, never
+what the result WAS. And the critic's evidence is authenticated — the per-attempt CAUSE it compares is
+the engine's `reason` column (from the sandbox's out-of-band signal channel, now carried durably on
+`node_repaired`), while the stderr tail beside it is LABELLED candidate-controlled in the prompt. A
+critic that read the KIND of a failure off a banner the failing script printed would hand the
+candidate the stop decision, which is exactly what `c862045c` took away from the failure classifier.
+
+**The floors are unchanged and are what keeps this from being an unbounded spend:**
+`_UNLIMITED_REPAIR_CEILING` (50), the run's eval-time budget, `systemic_failure_stop`, and the LLM
+money ceiling, which raises `BudgetExceeded` at the client where the money is actually spent and
+therefore cannot be talked past by any judge. The critic FAILS OPEN — unwired, unreachable or
+unreadable contributes nothing — which is the opposite of triage's fail-closed default and is
+deliberate: it is an extra veto, not the only stop, so one flapped socket must not kill a node every
+other participant considers healthy.
 
 ---
 

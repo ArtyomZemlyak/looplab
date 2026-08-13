@@ -369,7 +369,13 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal
         "reserve",     # `_reserve_node_build` — the Card plan + the `node_building` append
         "implement",   # the Developer's implement call
-        "repair",      # the Developer's repair call (the `debug` operator's own branch)
+        # NO `repair` phase. One existed for exactly one day: it bracketed `developer.repair` inside
+        # the `debug` operator's build branch, and F5 deleted that branch on 2026-08-13 — the whole
+        # justification for building a FRESH node to repair in was that the in-node loop had a fixed
+        # count and had to hand off when it ran out, and F8 removed the count. Repair now happens
+        # only inside `_evaluate`'s own loop, which is a different stage and would need its own
+        # append site. Removed rather than left dangling, per the rule stated below: an entry no run
+        # can reach renders a step the operator watches and never sees complete.
     ),
     # There is deliberately NO `commit` phase for the fold-verify-and-append tail after the Developer
     # returns. It is seconds, not minutes, and it already ENDS in `node_created` — a folded event the

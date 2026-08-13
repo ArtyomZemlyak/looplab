@@ -674,7 +674,7 @@ def build_router(srv) -> APIRouter:
             rd, lambda state: _node_context(state, nid))
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
-                  "draft/improve/debug/merge; numeric params; a short rationale). "
+                  "draft/improve/merge; numeric params; a short rationale — there is no `debug` operator, a failed node is repaired in place). "
                   + _CONCEPT_AUTHORING_GUIDANCE + "Base it on the "
                   "run context and this discussion.\n\n" + node_context
                   + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
@@ -691,7 +691,7 @@ def build_router(srv) -> APIRouter:
                 except Exception:  # small models can fumble strict output; fall back to editable text
                     text = await anyio.to_thread.run_sync(lambda: client.complete_text([
                         {"role": "system", "content": "Reply with a one-line experiment suggestion: "
-                         "the operator (improve/draft/debug), suggested params, and why — plain text."},
+                         "the operator (improve/draft), suggested params, and why — plain text."},
                         {"role": "user", "content": prompt}]))
                     fallback = Idea(operator="improve", params={}, rationale=text.strip()[:600])
                     return {"ok": True, "parsed": False,

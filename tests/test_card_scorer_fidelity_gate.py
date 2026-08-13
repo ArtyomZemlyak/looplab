@@ -28,7 +28,7 @@ def test_scorer_fidelity_matrix_is_exact_bounded_and_json_ready():
     assert SCORER_FIDELITY_CASE_NAMES == (
         "forced_pending",
         "forced_seed",
-        "forced_debug",
+        "no_forced_debug",
         "forced_budget",
         "direction_min",
         "direction_max",
@@ -64,7 +64,12 @@ def test_scorer_fidelity_matrix_is_exact_bounded_and_json_ready():
     assert results["forced_pending"]["expected_ownership"] == [None, None]
     assert results["forced_budget"]["expected_ownership"] == []
     assert results["forced_seed"]["expected_ownership"] == ["seed-a", "seed-b"]
-    assert results["forced_debug"]["expected_ownership"] == ["debug-matching"]
+    # RENAMED and INVERTED with F5 (2026-08-13). The case still carries a ready `debug` Card and an
+    # `improve` distractor on the same board; what it pins is now that the distractor is what both
+    # authorities select, because a failed leaf forces nothing and a `debug` Card is never
+    # executable. Every speculation calibration receipt issued before that commit is revoked — this
+    # row is part of `search/speculation_quality.py`'s derivation.
+    assert results["no_forced_debug"]["expected_ownership"] == ["debug-distractor"]
 
 
 def test_bandit_yield_fixture_uses_unequal_nonzero_exploration_counts():

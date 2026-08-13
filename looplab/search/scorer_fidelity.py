@@ -33,7 +33,7 @@ SCORER_FIDELITY_CASE_COUNT = 15
 SCORER_FIDELITY_CASE_NAMES = (
     "forced_pending",
     "forced_seed",
-    "forced_debug",
+    "no_forced_debug",
     "forced_budget",
     "direction_min",
     "direction_max",
@@ -397,6 +397,18 @@ def _cases() -> list[_Case]:
         _ready_card("seed-a", operator="draft"),
         _ready_card("seed-b", operator="draft"),
     ])
+    # RENAMED `forced_debug` -> `no_forced_debug` on 2026-08-13 (F5). The case is unchanged in
+    # SHAPE — a failed leaf, a `debug` Card ready on the board, an `improve` distractor — and its
+    # meaning is inverted, which is why the name had to move with it: a failed leaf no longer forces
+    # anything, and the ready `debug` Card must never be the one selected. It still guards a real
+    # parity property (the legacy policy and the Card lane agree about a board carrying a historical
+    # `debug` Card), and the ownership column is what carries the change.
+    #
+    # NOTE FOR WHOEVER HOLDS A SPECULATION CALIBRATION RECEIPT: this row is part of
+    # `search/speculation_quality.py`'s derivation, so every receipt issued before this commit is
+    # revoked and has to be re-earned. That is the honest cost of the behaviour genuinely changing —
+    # leaving the old expectation in place would have failed the gate outright, which revokes the
+    # same receipts and disables speculation as well.
     debug_state = _state(
         [
             _node(0, metric=0.70),
@@ -430,11 +442,11 @@ def _cases() -> list[_Case]:
             ("seed-a", "seed-b"),
         ),
         _Case(
-            "forced_debug",
+            "no_forced_debug",
             debug_state,
             GreedyTree(n_seeds=1, max_nodes=3, debug_depth=1, enable_merge=False),
             3,
-            ("debug-matching",),
+            ("debug-distractor",),
         ),
         _Case(
             "forced_budget",

@@ -99,7 +99,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 172
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 173
     # 199 -> 201 Settings and 168 -> 170 catalogued rows: TWO rows landed together on 2026-08-13.
     # `assistant_time_budget_s` gave the CHAT its own wall clock — `run_turn` read the engine-wide
     # `agent_time_budget_s` and then applied `or 300.0`, so the neighbouring row's documented
@@ -112,6 +112,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 173
     # 194 -> 195 Settings and 163 -> 164 catalogued rows when `task_facets_finalize` split the
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
@@ -121,7 +122,13 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # `read_fence` is one — the probe is an EXECUTION surface running inside the engine process, so
     # an operator has to be able to see that it exists and close it, and its timeout is the line
     # between "a question" and "a job that belongs in an eval stage".
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 203
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 204
+    # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
+    # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
+    # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed
+    # meaning in the same commit — its default is now 0 — and an operator reading one without the
+    # other would conclude that in-node repair had become unbounded.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 204
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
