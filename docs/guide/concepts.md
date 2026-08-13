@@ -426,7 +426,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 
 - **draft** — a fresh candidate.
 - **improve** — refine the current best.
-- **debug / repair** — on a failure, hand the failing code + stderr back to fix it. Since 2026-08-12
+- **repair** — on a failure, hand the failing code + stderr back to fix it, **inside the node that
+  failed**. There is no `debug` OPERATOR any more: until 2026-08-13 a node whose inline repairs ran
+  out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
+  along with any `draft`/`improve` that would be one under another name (nothing may be created to
+  retry an experiment that just failed). Since 2026-08-12
   **any** of the eight `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
   `check_failed` — not only the mechanical three. An in-place repair doesn't consume the node budget;
@@ -434,9 +438,19 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once
   per attempt (the call the loop already made) and is shown this node's whole repair history — what
   failed, what each fix claimed, which files it actually changed, how far the pipeline got — so it
-  can answer "I no longer know how to fix this". `inline_repair_attempts` is a hard backstop behind
-  it, and both the budget and that history are read back off the **event log**, so `looplab resume`
-  continues a node's repair chain instead of starting a fresh one on top of it. A judge that
+  can answer "I no longer know how to fix this". Since 2026-08-13 **two more signals stop it**, and
+  the fixed count stopped being the transition (`inline_repair_attempts` now defaults to `0`): the
+  **Developer itself** may answer a repair ask with `(developer stuck: …)` instead of code — a
+  first-class outcome rather than another failed attempt — and a **repair critic** is asked, from the
+  third repair on, only whether successive attempts are addressing different causes or circling one.
+  A count could answer neither question: `rubert-dr-0804` wore 369 distinct error signatures on one
+  broken registry, and v6 node 5 halved a batch size three times against an OOM that never happened.
+  None of the three may decide *what the result was* — every stop terminalizes carrying the eval's
+  own authenticated failure reason, so no model's word moves a metric, a champion, selectability or a
+  violation. The **floors** stay underneath: an absolute ceiling of 50 repairs per node, the eval-time
+  budget, `systemic_failure_stop`, and the money ceiling. Both the budget and that history are read
+  back off the **event log**, so `looplab resume` continues a node's repair chain instead of starting
+  a fresh one on top of it. A judge that
   *could not answer* never means "keep going": a dead endpoint stops the node **and** pauses the run
   naming the provider, while a live model answering something unreadable stops only that node (see
   [LLM & agents](llm-and-agents.md#llm-outage-resilience)). The budget has
@@ -660,14 +674,16 @@ replay. Until 2026-08-12 the row carried no membership at all and every Card-bui
 no concepts; until the delta half landed the same was still true of every non-root proposal, since the
 Researcher authors a delta whenever a parent membership exists.
 
-A **repair attaches to the card it repairs.** A card is a work item that can carry several nodes, so a
-`debug` re-attempt of a failed node claims that node's own card (one more `node_building`, no second
+A **repair attaches to the card it repairs** — historically. A card is a work item that can carry
+several nodes, so a `debug` re-attempt of a failed node claimed that node's own card (one more `node_building`, no second
 `card_added`) instead of minting a new one. The rule is narrow and fails closed: only `debug`, only one
 parent, only a live singly-registered native owner, only a **failed leaf** (the parent node is
 terminally `failed`, and nothing else under that card is still pending or building — a question already
 being re-attempted does not need a second simultaneous owner), and only when the two seed statements
 share a `belief_id` — so a repair that genuinely re-scopes its question still gets its own card, and two
-different actions that merely reuse formulaic wording are never merged. Before 2026-08-12 a retry
+different actions that merely reuse formulaic wording are never merged. Since F5 deleted the Debug
+node (2026-08-13) nothing reaches this rule at all — it is kept fail-closed, as the gate a
+reintroduced retry operator would have to land on rather than sail past. Before 2026-08-12 a retry
 reused the parent's Idea verbatim with only `operator` flipped, which is a different action digest and
 therefore a second card whose statement was byte-identical to the first: the board showed one research
 question twice. `Card.belief_id` / `Card.retry_of` still name that relationship for any card that does
