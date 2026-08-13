@@ -312,6 +312,71 @@ EV_CONCEPT_LENS_COMPLETED = "concept_lens_completed"  # validated spec or author
 EV_CONCEPT_LENS_FAILED = "concept_lens_failed"        # retry-safe pre-provider terminal failure
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
+# The SETUP phase's `setup_started`/`setup_step` pair exists because the pre-node work "is otherwise
+# silent between run_started and the first node" (orchestrator.py's own comment at the append site).
+# Every other multi-minute stretch of a run had the same hole and no such pair, so an operator watching
+# a live run saw a frozen panel for the whole of it. `phase_progress` is that same idea generalized
+# ONCE, rather than a new event type per silent stretch: a beacon a long operation emits at each of its
+# own step boundaries so the activity feed, the status strip and the in-flight node card can all say
+# WHICH step is running and for how long.
+#
+# ONE type, not one per stage, because invariant #7 makes every new type a registry + narration +
+# diagram change, and the thing that actually has to be typo-proof is the (stage, phase) PAIR — which
+# `PROGRESS_PHASES` below closes and `assert_progress_phase` enforces at every append site. A bare
+# string phase would render as an empty chip and no test would notice.
+#
+# DIAGNOSTIC on purpose. It must never fold: it is emitted at a rate the fold has no reason to carry,
+# it says nothing about selection, and a resume must reconstruct the same RunState from a log that has
+# these rows and from one that does not. It is safe to append from a concurrent producer for the
+# reason invariant #1 states for diagnostics — `speculation.py::_proposal_authority_seq` excludes
+# DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside the paid-proposal CAS window cannot discard
+# the proposal. That exclusion is the load-bearing property, NOT "the fold ignores it".
+EV_PHASE_PROGRESS = "phase_progress"
+# WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
+# every reader re-deriving the vocabulary.
+PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `engine/node_build.py`
+PROGRESS_STAGE_RESUME = "resume"    # process start -> the loop's first turn, `Engine._enter_run`
+PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD, PROGRESS_STAGE_RESUME})
+# The steps of each stage, in the order they actually happen. The ORDER is meaningful to a reader (a
+# UI may render a stepper) but it is NOT a contract the engine has to satisfy: a build can skip
+# `novelty` (a mechanical merge/debug idea never crosses the gate) and can run `repair` instead of
+# `implement`. What IS a contract is membership — `assert_progress_phase` refuses anything else, so a
+# renamed step goes red at its append site rather than rendering as a blank chip.
+PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
+    PROGRESS_STAGE_BUILD: (
+        "propose",     # the Researcher's proposal call — the long, wholly invisible one: it runs
+                       # BEFORE `node_building` is appended, so until it returns the UI has no node
+                       # to draw at all and the strip falls through to "Planning next experiment…".
+        "novelty",     # `_apply_novelty_gate`, which may pay for a whole second proposal
+        "reserve",     # `_reserve_node_build` — the Card plan + the `node_building` append
+        "implement",   # the Developer's implement call
+        "repair",      # the Developer's repair call (the `debug` operator's own branch)
+        "commit",      # footprint finalize + the `node_created` append
+    ),
+    PROGRESS_STAGE_RESUME: (
+        "read_log",    # re-reading and folding events.jsonl — O(log size), and the first thing a
+                       # resume does; on a large run this alone is the whole visible freeze
+        "reconcile",   # the re-entry prologue's lifecycle settle (`_enter_run`)
+        "ready",       # the loop is about to take its first turn
+    ),
+}
+PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})
+
+
+def assert_progress_phase(stage: str, phase: str, status: str) -> None:
+    """Refuse an unregistered `phase_progress` triple AT THE APPEND SITE.
+
+    A progress beacon has no reader that fails loudly: the fold skips it, and a UI keyed on an
+    unknown phase renders nothing. So a typo'd `"implememt"` would ship as a silently missing signal
+    — the exact class of defect invariant #7 exists for, and the exact thing this whole change is
+    trying to remove. Raising here makes it a red test in any run that reaches the site instead.
+    """
+    if stage not in PROGRESS_STAGES:
+        raise ValueError(f"unknown progress stage: {stage!r}")
+    if phase not in PROGRESS_PHASES[stage]:
+        raise ValueError(f"unknown progress phase for stage {stage!r}: {phase!r}")
+    if status not in PROGRESS_STATUSES:
+        raise ValueError(f"unknown progress status: {status!r}")
 # FOLDED, despite sitting in this diagnostic block: `replay.py::_on_setup_finished` is registered in
 # `_HANDLERS`, and the constant is correctly absent from DIAGNOSTIC_EVENTS below (the partition test
 # would fail otherwise). Called out here the same way EV_RUN_SETUP_STARTED/FINISHED are, so a reader
@@ -510,7 +575,8 @@ NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
 # new event type FORCES a conscious "does the fold read this?" decision (arch-review §5 P2: the old
 # source-scan test went dead after the fold became a dispatch table, leaving coverage unprotected).
 DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
-    EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
+    EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS,
+    EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK,
     EV_WORKSPACE_SEEDED,
