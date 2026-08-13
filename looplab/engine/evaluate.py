@@ -72,6 +72,13 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
 from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
                                    UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
                                    _failure_reason, repair_artifact_defect)
+# The repair-verification rung: did this repair do what its rationale said? A LEAF (pure functions
+# over bytes the loop already holds — no engine state, no events, no model), imported here rather
+# than re-derived, because the same verdict has to be written to the durable row, read back off the
+# log by `_durable_repair_ledger` and rendered by `_format_repair_log`, and a second spelling of
+# `REPAIR_VERDICTS` would let those three disagree silently.
+from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, REPAIR_VERDICTS, changed_region,
+                                          inert_streak, verify_repair)
 
 # How many repair calls may answer with something that is not Python before the loop calls it a
 # provider failure rather than a truncation. NOT operator-settable and deliberately small: this is
@@ -321,6 +328,15 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
                "stages_passed": d.get("stages_passed")}
         if "changed" in d:
             row["changed"] = list(d.get("changed") or [])
+        # The verification columns are read back the same way and for the same reason, with one
+        # extra rule: an ABSENT `verified` key must stay absent. `repair_verify.inert_streak` reads
+        # "no key" as "not inert" and breaks the streak on it, so a row from before this column
+        # existed — or a `salvage_cause_fix` marker row, which never writes one — can never
+        # terminalize a node on evidence nobody recorded. Coercing it to a default here would put
+        # that decision back in the one place that cannot tell the two apart.
+        if d.get("verified") in REPAIR_VERDICTS:
+            row["verified"] = str(d.get("verified"))
+            row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
         rows.append(row)
     return attempts, rows, unparseable
 
@@ -2077,6 +2093,22 @@ class EvaluateMixin:
                 changed, new_deleted = _repair_change_set(
                     prev_files, prev_deleted, repaired_files, repaired_deleted)
                 _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if new_code else [])
+                # DID IT DO WHAT IT SAID? The change set above is what the repair DID; the rationale
+                # a line below is what it SAID. Nothing ever compared them, and on the shipped corpus
+                # ~25 % of explained repairs named a change their diff does not contain — 13 of them
+                # changed nothing whatsoever and still bought a full re-evaluation. See
+                # `engine/repair_verify.py` for the measurement, the two-tier design and above all
+                # why only the byte-anchored verdict is allowed to stop anything.
+                #
+                # Computed HERE, beside the change set and before the append, for the same reason
+                # `changed` is: it belongs in the DURABLE row. A resumed judge that reads the history
+                # without this column is back to being told what each fix intended and never what it
+                # accomplished. `node` is still the PRE-repair fold at this point (the re-fold is
+                # below the append), so `node.code` is the artifact `new_code` replaced.
+                _verification = verify_repair(
+                    triage.get("rationale", ""), changed=changed, deleted=new_deleted,
+                    code_changed=(new_code or "") != (node.code or ""),
+                    region=changed_region(prev_files, repaired_files, node.code, new_code))
                 async with self._write_lock:
                     repair_payload = {
                         "node_id": node_id, "generation": generation,
@@ -2092,6 +2124,14 @@ class EvaluateMixin:
                         # condition and had the same process-local lifetime.
                         "changed": _changed_col,
                         "stages_passed": _depth,
+                        # The verification rung's answer, in the same durable row as the evidence it
+                        # was derived from. `verified` is a member of `repair_verify.REPAIR_VERDICTS`
+                        # and emphatically NOT of `triage.py::TRIAGE_ACTIONS` — it is a fact about
+                        # bytes, not a verdict about the node, and no model may emit one (the two
+                        # vocabularies are cross-referenced in both modules). `unmet` is capped
+                        # because it is model-derived text riding in an event payload.
+                        "verified": _verification.verdict,
+                        "unmet": list(_verification.unmet[:12]),
                         "unparseable_repairs": unparseable_repairs}
                     if repaired_footprint is not None:
                         repair_payload.update({
@@ -2133,7 +2173,34 @@ class EvaluateMixin:
                     "error": err[-_JUDGE_ERROR_CHARS:],
                     "fix": str(triage.get("rationale", ""))[:200],
                     "changed": _changed_col,
+                    "verified": _verification.verdict,
+                    "unmet": list(_verification.unmet[:12]),
                     "stages_passed": _depth})
+                # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
+                # means the engine compared the bytes and nothing moved: the files this loop is about
+                # to re-materialize are the ones already on disk, `_safe_reuse_start` will reuse
+                # every completed stage because the change set is empty, and the eval it is about to
+                # pay for is the eval that just failed. Repeating that is not a retry, it is a
+                # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
+                # in a row at ~2.7 h each, and rubertlite-dense-retrieval node 57 three.
+                #
+                # ONE is allowed: a developer can legitimately burn a turn budget reading before it
+                # edits, and stopping a node on that would be a regression. The bound is on the
+                # STREAK, so a chain that recovers is never charged for what it already fixed
+                # (`inert_streak`), and it is read off `repair_log` — which is seeded from the
+                # durable rows — so a resume continues the streak instead of refunding it.
+                #
+                # This is the only verdict the loop acts on. `REPAIR_UNMET` is model-derived and
+                # rides into the judge's history as evidence; see `engine/repair_verify.py`.
+                _inert = inert_streak(repair_log)
+                if _inert >= INERT_REPAIR_LIMIT:
+                    triage_outcome = ("abandon", (
+                        f"the last {_inert} repair attempts changed nothing at all — the engine "
+                        "compared the repaired files against the ones already on disk and they are "
+                        "byte-identical, so re-evaluating would re-run inputs this node has already "
+                        "run; abandoning in-node repair (a budgeted inter-node debug node can still "
+                        "pick it up)"))
+                    break
                 _stages = self._resolved_stages(node, workdir)
                 # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
                 # its blind spots: a deletion is invisible to the reachability closure (the file was
