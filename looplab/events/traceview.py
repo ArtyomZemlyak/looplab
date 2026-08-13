@@ -46,6 +46,11 @@ TRACE_NODE_SPAN_CAP = 512
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
+# The EPISODE MAP's ceiling (`node_episodes`). Not a span window: an episode row carries identity,
+# timing and counts, never contents, and the whole map is derived from light spans already in memory.
+# The largest node in the shipped 43-run corpus (rubert-dr-0804 node 1, 14,507 spans / 2,345 inline
+# repairs) yields 7,048 bands, so this leaves real headroom while keeping the response finite.
+TRACE_NODE_EPISODE_CAP = 10000
 # Trace projections are already bounded by the span and per-field caps above.  This final aggregate
 # ceiling keeps both HTTP responses and the archived trace.json finite without imposing a topology
 # depth limit (a 4,096-deep valid tree is still part of the public projection contract).
@@ -151,6 +156,38 @@ def settle_node_span_cap(limit, *, default: int) -> int:
     return max(default, min(limit, TRACE_NODE_SPAN_CAP_MAX))
 
 
+def settle_trace_anchor(before) -> Optional[str]:
+    """The ONE settle rule for a client-supplied window ANCHOR (`?before=<span_id>`).
+
+    A node's trace window has always been a TAIL: the newest `limit` spans of one
+    `(node_id, generation)`. That makes every step older than the window unreachable at ANY limit,
+    because raising the limit only ever extends the SAME tail — and the limit's ceiling is real
+    (`TRACE_NODE_SPAN_CAP_MAX`, 3.4 ms/span of request-thread time). Measured 2026-08-13 on
+    `runs/rubert-dr-0804` node 1: the node ran 3 h 50 m and recorded 14,507 spans across 2,345 inline
+    repairs; the 512-span default window covers its last **7.6 minutes** and the 4,096 ceiling its
+    last **59.3 minutes**. So 74 % of that node's life — including every repair the operator opens
+    the trace to read, the early ones where the bug first showed — could not be reached from any
+    surface. Nor did the ATTEMPT picker help: inline repair does not bump `Node.attempt` (only
+    `node_reset` does), so all 14,507 spans are generation 0 and the picker does not render at all.
+
+    `before` is the fix, and it is a SEEK, not a wider read: the window becomes the `limit` spans
+    ending at the named span instead of ending at the file tail. Same rows read, same cost, same
+    ceiling — the window MOVES rather than grows. Absent/blank/unusable means "no anchor", i.e. the
+    tail, so a malformed value can never silently pin a reader to a stale part of the log; an id that
+    this run's index does not know is REFUSED at the route rather than degraded to the tail, because
+    serving the newest spans under an older anchor's label is the one failure worse than none.
+    """
+    if not isinstance(before, str):
+        return None
+    before = before.strip()
+    if not before:
+        return None
+    # Reuse the identity plane's own bound/redaction rule instead of inventing a second one: the
+    # anchor is compared against `span_id`s that already passed `_normalized_id`, so anything it
+    # would have quarantined cannot match a row anyway and must not be echoed back in a receipt.
+    return _normalized_id(before)
+
+
 def trace_file_revision(path: str | os.PathLike) -> Optional[str]:
     """Cheap CAS token for the exact ``spans.jsonl`` file snapshot.
 
@@ -189,27 +226,40 @@ _EVENT_FIELDS_CAP = 8
 _STRUCT_ITEMS_CAP = 32
 _STRUCT_DEPTH_CAP = 3
 _TOOL_CALLS_CAP = 16
-_CONVERSATION_STAGE_CAP = 64
-_CONVERSATION_TURN_CAP = 256
+# The render caps are the span window's OWN arithmetic bound, one coefficient each — deliberately
+# NOT a second ceiling with a number of its own. `_conversation_bands` derives at most one stage per
+# span (a band needs a span to exist) and `_thread_turns` at most two turns per span (a generation
+# contributes its `request` boundary plus itself; a tool or stage op exactly one). So a window of N
+# spans can never derive more than N stages / 2N turns, and caps set to exactly that render whatever
+# the window read — which is what "the window is the single knob" has claimed all along.
+_CONVERSATION_STAGES_PER_SPAN = 1
+_CONVERSATION_TURNS_PER_SPAN = 2
 
 
 def conversation_render_caps(span_cap: int) -> tuple[int, int]:
-    """Stages/turns to RENDER for a given conversation span window — they scale WITH the window.
+    """Stages/turns to RENDER for a given conversation span window — the window's own bound.
 
-    Measured on `runs/rubert-dr-0804` node 1 (14,507 spans) before this existed: at the default
-    window the response carried 512 spans, and from those 512 spans the projection derived 256 stages
-    and 425 turns — of which it rendered 64 and 105. Every one of the missing 192 stages was already
-    IN HAND; only these two caps hid them. So raising the span window alone was a placebo: `?limit=`
-    at 1024 and at 4096 both returned the byte-identical 64-stage response, because the caps below
-    re-truncated the wider read back to the same 64.
+    Measured on `runs/rubert-dr-0804` node 1 (14,507 spans): at the default window the response
+    carried 512 spans, and from those 512 spans the projection derived 256 stages and 425 turns.
+    Until 2026-08-13 flat caps of 64 stages / 256 turns (scaled by `span_cap // 512`) then rendered
+    64 and 105 of them. Every one of the missing 192 stages and 320 turns was ALREADY IN HAND — the
+    server had paid the 3.4 ms/span to read them and the 0.9 ms/span to thread them — and only these
+    caps hid them. That is what truncated the reasoning the operator asked to read, and it bound on
+    nodes as small as 258 spans, far below any node the 512-span window itself troubles: on the
+    43-run corpus only 3 runs have a node above that window at all.
 
-    That is why the conversation's "load more" moves all three numbers together instead of the span
-    window alone. The window stays the single knob (and TRACE_NODE_SPAN_CAP_MAX stays the single
-    ceiling); these caps are DERIVED from it, so the response size stays proportional to what the
-    operator explicitly asked for — measured 197 KB at x1 up to 1.6 MB at the x8 ceiling.
+    Lifting them costs NOTHING. Re-measured 2026-08-13 on that node, same window, capped vs
+    uncapped: `build_conversation` 0.17 s vs 0.18 s at x1 and 1.42 s vs 1.39 s at the x8 ceiling —
+    the caps only ever SLICED work already done, so removing the slice is 0 ms of server time. What
+    it does cost is response bytes, which are now honestly proportional to the window the operator
+    asked for: 193 KB -> 778 KB at x1, 1.56 MB -> 6.2 MB at the x8 ceiling.
+
+    The SPAN window therefore stays the single knob and TRACE_NODE_SPAN_CAP_MAX the single ceiling —
+    and, since 2026-08-13, `before=` moves that window instead of only growing it, which is the
+    control an operator reaching for an EARLY repair actually wants (see `settle_trace_anchor`).
     """
-    factor = max(1, int(span_cap) // TRACE_CONVERSATION_SPAN_CAP)
-    return _CONVERSATION_STAGE_CAP * factor, _CONVERSATION_TURN_CAP * factor
+    cap = max(1, int(span_cap))
+    return cap * _CONVERSATION_STAGES_PER_SPAN, cap * _CONVERSATION_TURNS_PER_SPAN
 
 
 def unavailable_projection(*, light: bool | None = None) -> dict:
@@ -1355,6 +1405,16 @@ def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[di
         for g in sorted(groups.values(), key=_first_turn_start):
             grp = sorted(g["spans"], key=lambda x: x.get("start", 0.0))
             turns = _thread_turns(grp, by_id)
+            band_span = g["span"]
+            band_attrs = band_span.get("attributes") or {}
+            # WHERE THIS BAND IS IN THE LOG — the `?before=` anchor that puts a span window on it.
+            # The band's own operation span is the right one: spans.jsonl is written on CLOSE, so an
+            # operation's row lands AFTER every row it contains, and a window cut at it therefore
+            # ENDS with this band complete. A synthesized band (`phase:<name>` live, `trace:<tid>`
+            # legacy) has no such span, so the latest real span of the group stands in — one band
+            # boundary of slop in a 512-span window, versus no seek at all.
+            anchor = (band_span.get("span_id") if band_span.get("span_id") in by_sid
+                      else (grp[-1].get("span_id") if grp else None))
             # Keep a stage band that is still RUNNING even though it has no turns yet: a live training
             # subprocess emits only the `stage_started` anchor (its own turn is suppressed as noise) and
             # its stage op flushes on close — so without this the Train/Evaluate band would be dropped as
@@ -1362,8 +1422,24 @@ def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[di
             # stage log inside the (turnless) band.
             running_stage = any(s.get("name") == "stage_started" for s in grp)
             if turns or running_stage:
-                stages.append({"trace_id": tid, "label": g["span"].get("name"),
+                stages.append({"trace_id": tid, "label": band_span.get("name"),
                                "start": _first_turn_start(g),
+                               # Band IDENTITY and the seek key, carried on every band so the
+                               # episode map (`node_episodes`) and the conversation name the same
+                               # thing — the map IS this function, not a second reading of the log.
+                               "band": band_span.get("span_id"),
+                               "anchor": anchor,
+                               "seconds": band_span.get("duration_s"),
+                               "status": band_span.get("status"),
+                               "spans": len(grp),
+                               # The operator's OWN unit for a repaired node: `attempt` is the
+                               # inline-repair ordinal `engine/evaluate.py` stamps on each
+                               # triage/inline_repair span (1..2,345 on rubert-dr-0804 node 1). It is
+                               # NOT `Node.attempt`, the lifecycle generation the picker beside this
+                               # one selects — the two spellings are cross-referenced in
+                               # `core/models.py::Node.attempt` and must never be merged.
+                               "ordinal": band_attrs.get("attempt"),
+                               "reason": band_attrs.get("reason"),
                                "rollup": _rollup(grp), "turns": turns})
     stages.sort(key=lambda x: x.get("start", 0.0))
     return stages, matching_spans
@@ -1434,6 +1510,62 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
     return _conversation_payload(state, stages, matching_spans, observed_total=observed_total,
                                  total_spans=total_spans, span_cap=span_cap,
                                  identity={"node_id": str(node_id)})
+
+
+def node_episodes(spans: list[dict], node_id, *, total_spans=None,
+                  cap: int = TRACE_NODE_EPISODE_CAP,
+                  _normalized: bool = False) -> dict:
+    """THE MAP of one node's trace: every band its conversation reads, with no band's contents.
+
+    A node's trace window is bounded and always has been. What was missing is somewhere to point it.
+    `runs/rubert-dr-0804` node 1 recorded 2,345 inline repairs over 3 h 50 m; the operator opens that
+    node's trace to read the repairs and the window shows the last 7.6 minutes of it. Widening is not
+    an answer (it is the same tail, and its ceiling costs 3.4 ms/span of request thread), and the
+    attempt picker is not one either — inline repair does not bump `Node.attempt`, so all 14,507
+    spans are generation 0 and the picker does not even render. So: list the episodes, let the
+    operator choose one, and put the window THERE (`settle_trace_anchor`).
+
+    This is deliberately the SAME function the conversation bands with, over the same node selection.
+    A second "what are this node's steps" reading is exactly how a map ends up naming things the
+    surface it maps does not have — the failure `traceSurfaceModel.js` records for the card trace.
+    Each row carries only identity, timing, counts and the `anchor` to seek to; contents stay behind
+    the window the operator then moves.
+
+    Cheap ON PURPOSE, so this can be a plain one-shot read beside a bounded one: it takes the LIGHT
+    spans the index already holds in memory (`SpanIndex.light_spans_for_node`, measured 11.8 ms for
+    all 14,507 of that node's spans) and touches spans.jsonl not at all. Measured 2026-08-13 over
+    that node: 7,048 bands in 82 ms of CPU, no disk read. `turns` are threaded and discarded — they
+    are what decides whether a band is real (a structure-only group is not an episode), and paying
+    82 ms to keep one band rule beats a second rule that agrees today.
+    """
+    spans = list(spans) if _normalized else _normalize_spans(spans)
+    stages, matching_spans = _conversation_bands(spans, keep=lambda s, trace_nid: (
+        (nid := effective_node_id(s, trace_nid)) is not None and str(nid) == str(node_id)))
+    total_episodes = len(stages)
+    cap = max(0, int(cap))
+    # The TAIL, like every other trace window — and for the same reason: the newest is what a live
+    # reader is looking at. A node past this ceiling is not in the shipped corpus (the largest is
+    # 7,048), and the receipt states the omission rather than letting the list read as complete.
+    visible = stages[-cap:] if cap else []
+    # Flat counts, not the band's `rollup`: a map row is chosen from, not read from, and the nested
+    # token/cost record is most of its bytes. Measured on rubert-dr-0804 node 1 — 7,048 rows, 2.3 MB
+    # with the rollup and 1.1 MB without, for a control the operator opens on a node whose trace they
+    # already cannot see the end of. The full rollup is one click away on the band itself.
+    episodes = [{"band": stage.get("band"), "anchor": stage.get("anchor"),
+                 "trace_id": stage.get("trace_id"), "label": stage.get("label"),
+                 "start": stage.get("start"), "seconds": stage.get("seconds"),
+                 "status": stage.get("status"), "spans": stage.get("spans"),
+                 "ordinal": stage.get("ordinal"), "reason": stage.get("reason"),
+                 "generations": (stage.get("rollup") or {}).get("generations"),
+                 "tools": (stage.get("rollup") or {}).get("tools")}
+                for stage in visible]
+    projection = _response_projection(
+        total_spans=total_spans if total_spans is not None else len(matching_spans),
+        visible_spans=len(matching_spans),
+        total_episodes=total_episodes, visible_episodes=len(episodes),
+        omitted_episodes=max(0, total_episodes - len(episodes)))
+    return {"schema": TRACE_PROJECTION_SCHEMA, "node_id": str(node_id),
+            "episodes": episodes, "projection": projection}
 
 
 def build_trace_conversation(state: RunState, spans: list[dict], trace_id, *, total_spans=None,

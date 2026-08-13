@@ -739,14 +739,20 @@ def _conversation_run(tmp_path, *, stages: int, spans_per_stage: int = 1):
     return TestClient(make_app(tmp_path)), len(rows)
 
 
-def test_conversation_limit_unhides_stages_the_default_window_already_held(tmp_path):
+def test_conversation_renders_every_band_its_window_already_held(tmp_path):
     """The operator's defect: "N steps hidden" with no way to see them, in the DEFAULT view.
 
     This node is deliberately built SMALLER than the span window — 400 spans against a 512 default —
-    so `omitted_spans` is zero at every limit and the span read cannot be what changes. Everything
-    hidden is hidden by the stage/turn RENDER caps, which is what the live server showed on
-    runs/rubert-dr-0804 node 1: 192 stages and 320 turns withheld from a response that already held
-    every span they were derived from. A `limit` wired only to the span read passes nothing here.
+    so `omitted_spans` is zero at every limit and the span read cannot be what withholds anything.
+    Until 2026-08-13 flat render caps (64 stages / 256 turns) withheld it anyway: this same node
+    answered 64 of its 200 bands, and the live server did the same to runs/rubert-dr-0804 node 1 —
+    192 stages and 320 turns withheld from a response that already held every span they were derived
+    from, 3.4 ms/span of request thread paid for evidence it then dropped on the floor.
+
+    The caps are now the span window's own arithmetic bound (`conversation_render_caps`), so this is
+    the property in its strong form: what the window READ is what the operator READS. It is also what
+    makes the paging receipts honest — after this, `omitted_stages > 0` can only ever mean "widen or
+    move the span window", never "the server has it and will not give it to you".
     """
     pytest.importorskip("fastapi")
 
@@ -755,26 +761,22 @@ def test_conversation_limit_unhides_stages_the_default_window_already_held(tmp_p
 
     default = client.get("/api/runs/demo/nodes/0/conversation").json()
     assert default["projection"]["omitted_spans"] == 0
-    assert len(default["stages"]) == 64               # every band past the render cap is withheld…
-    assert default["projection"]["omitted_stages"] == 136   # …and the receipt says so
-    assert default["projection"]["truncated"] is True
-    hidden_turns = default["projection"]["omitted_turns"]
-    assert hidden_turns > 0
+    assert len(default["stages"]) == 200               # every band the window held, at the DEFAULT
+    assert default["projection"]["omitted_stages"] == 0
+    assert default["projection"]["omitted_turns"] == 0
+    assert default["projection"]["visible_turns"] == default["projection"]["total_turns"]
+    assert default["projection"]["truncated"] is False
 
-    # One click of the shared window (512 -> 1024) must actually deliver bands, not just re-read.
-    paged = client.get("/api/runs/demo/nodes/0/conversation", params={"limit": 1024}).json()
-    assert len(paged["stages"]) == 128
-    assert paged["projection"]["omitted_stages"] == 72
-    assert paged["projection"]["visible_turns"] > default["projection"]["visible_turns"]
-
-    # Paging to the ceiling reaches the whole conversation on a node this size.
+    # Widening cannot add anything, because nothing was withheld — and it must not SUBTRACT either.
     whole = client.get("/api/runs/demo/nodes/0/conversation",
                        params={"limit": TRACE_NODE_SPAN_CAP_MAX}).json()
     assert len(whole["stages"]) == 200
     assert whole["projection"]["omitted_stages"] == 0
     assert whole["projection"]["omitted_turns"] == 0
+    assert whole["projection"]["visible_turns"] == default["projection"]["visible_turns"]
     # Every widened window stays inside the same browser contract as the default one.
     assert SECRET not in json.dumps(whole)
+    assert SECRET not in json.dumps(default)
 
 
 def test_conversation_limit_widens_the_span_window_and_clamps_to_the_one_ceiling(tmp_path):
