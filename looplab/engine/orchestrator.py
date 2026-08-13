@@ -618,6 +618,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         speculation_gate_receipt = _opt("speculation_gate_receipt")
         inline_repair = _opt("inline_repair")
         inline_repair_attempts = _opt("inline_repair_attempts")
+        repair_critic_after = _opt("repair_critic_after")
         inline_repair_reasons = _opt("inline_repair_reasons")
         inline_repair_retrain_cap = _opt("inline_repair_retrain_cap")
         metric_salvage = _opt("metric_salvage")
@@ -734,7 +735,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._deep_repair = deep_repair
         # Hybrid in-node crash repair (triage + inline repair). See Settings.inline_repair.
         self._inline_repair = inline_repair
-        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = unlimited
+        self._inline_repair_attempts = max(0, int(inline_repair_attempts))   # 0 = no operator cap
+        # F8: how many durable repairs before the CRITIC is asked whether the chain is
+        # circling. It is a cadence, not a bound — the critic can only stop, never extend.
+        self._repair_critic_after = max(0, int(repair_critic_after))
         self._inline_repair_reasons = tuple(inline_repair_reasons or ("crash",))
         self._inline_repair_retrain_cap = max(0, int(inline_repair_retrain_cap))
         # METRIC SALVAGE — settled through the same `_opt` ladder as every other policy, so a

@@ -38,9 +38,10 @@ import anyio
 import orjson
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import (DEVELOPER_ERROR_PREFIX, NodeStatus, coerce_node_id,
-                                 developer_artifact_footprint,
-                                 is_developer_error, normalize_extra_metrics)
+from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
+                                 coerce_node_id,
+                                 developer_artifact_footprint, developer_stuck_reason,
+                                 is_developer_error, is_developer_stuck, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
@@ -51,6 +52,8 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
                                            recheckable_expect, recheckable_salvage,
                                            salvage as salvage_metric)
 from looplab.engine.options import _UNSET
+from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due,
+                                            developer_stuck_contract, repair_floor_stop)
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
 
 # Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
@@ -319,6 +322,14 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
                "error": str(d.get("error_in", ""))[-_JUDGE_ERROR_CHARS:],
                "fix": str(d.get("rationale", ""))[:200],
                "stages_passed": d.get("stages_passed")}
+        # THE AUTHENTICATED CAUSE, and it is `in`-guarded for the same reason `changed` below is: a
+        # row written before this column existed does not know what its cause was, and telling F8's
+        # critic "(not recorded)" versus silently defaulting it to `crash` is the difference between
+        # the two answers it is being asked to tell apart. `reason` is `_failure_reason`'s
+        # classification, which reads the sandbox's out-of-band watchdog flags and never the stderr
+        # sentinel (`c862045c`) — so it is the one column here the candidate cannot write.
+        if "reason" in d:
+            row["reason"] = str(d.get("reason") or "")
         if "changed" in d:
             row["changed"] = list(d.get("changed") or [])
         rows.append(row)
@@ -1880,23 +1891,27 @@ class EvaluateMixin:
                 # is answered by making the ONE budget big enough to cover the longest real chain on
                 # record and letting the judge stop early when there is nothing left to try, rather
                 # than by giving the loop a second allowance to spend.
-                budget_left = attempt < _repair_cap
-                # Inline-repair gate: feature on, repairable reason, budget left, a Developer that can
-                # repair, and something to repair (whole-file code, multi-file edits, or a repo).
+                # THE FLOOR, and since F8 that is all this is. It used to be the TRANSITION — an
+                # `attempt < 12` that decided "keep repairing vs give up and open a Debug node" — and
+                # a count cannot tell a chain converging on a fix from one rewriting the same line
+                # for an hour. `repair_judgment.repair_floor_stop` is the same bound with a truth
+                # table and a name, and the shipped default for `inline_repair_attempts` is now 0, so
+                # what normally binds is a judgment (the triage judge, the Developer's own "I do not
+                # know how to fix this", and the critic below) with this ceiling underneath.
+                floor_stop = repair_floor_stop(
+                    attempt=attempt, operator_cap=int(self._inline_repair_attempts or 0),
+                    ceiling=_UNLIMITED_REPAIR_CEILING)
+                # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
+                # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
                 if (not self._inline_repair
                         or reason not in self._inline_repair_reasons
-                        or not budget_left
+                        or floor_stop is not None
                         or not callable(getattr(self.developer, "repair", None))
                         or not (node.code or node.files or self._repo_spec)):
-                    if not budget_left and self._inline_repair:
+                    if floor_stop is not None and self._inline_repair:
                         # Which bound stopped it, said out loud. An operator whose snapshot says 0
                         # never chose 50 and must not read a terminal that implies they did.
-                        triage_outcome = ("abandon", (
-                            f"inline repair has spent its hard limit of {_repair_cap} attempt(s) on "
-                            "this node (inline_repair_attempts)" if self._inline_repair_attempts else
-                            f"inline repair has spent the engine's absolute ceiling of {_repair_cap} "
-                            "attempt(s) on this node — this run's inline_repair_attempts is 0, which "
-                            "sets no operator cap, so the ceiling is what stopped it"))
+                        triage_outcome = ("abandon", floor_stop)
                     break
                 # THE STOP DECISION. One call per attempt — the same call the loop already made — now
                 # carrying this node's repair history, so the model is answering "given everything
@@ -1991,6 +2006,34 @@ class EvaluateMixin:
                                 "packages": installed, "round": dep_rounds, "source": "triage",
                                 "resolved": self._drain_dep_receipts(installed)})
                         continue   # re-run with the library present (no repair attempt spent)
+                # THE CRITIC (F8). The triage judge just said "repair" — the question it answers is
+                # "given this failure, do I know what to change?", and a model answers that
+                # optimistically and one step at a time. The question nothing was asking is about the
+                # SHAPE of the chain: are the attempts addressing different causes, or circling one?
+                # That is what defeated every counter here. `rubert-dr-0804` produced 369 distinct
+                # error signatures on one wall, so the anti-stuck recurrence counter never saw a
+                # repetition; v6 node 5 halved a batch size three times, so no count was near its cap.
+                # Both are obvious to something reading the trajectory and invisible to something
+                # counting it.
+                #
+                # DELIBERATELY BELOW THE INSTALL BRANCHES. A dependency round spends no repair
+                # attempt and changes the environment, so a chain that looks repetitive across two
+                # `ModuleNotFoundError`s is a chain that is actually progressing — asking above the
+                # install would judge a trajectory the engine was in the middle of invalidating.
+                #
+                # It can ONLY stop, and it never touches `reason`: the terminal below carries the
+                # eval's own authenticated failure classification exactly as an `abandon` does, so no
+                # metric, champion, selectability or violation moves on this verdict. Doc 36's line.
+                if critic_due(attempt, self._repair_critic_after):
+                    critic = await anyio.to_thread.run_sync(
+                        self._repair_critic, state, node, repair_log[-_JUDGE_HISTORY_ROWS:],
+                        attempt + 1)
+                    if critic.get("action") == CRITIC_STOP:
+                        triage_outcome = ("abandon", (
+                            "the repair critic stopped this chain — "
+                            + (str(critic.get("rationale", "")).strip()
+                               or "successive attempts were addressing the same cause")))
+                        break
                 # action == "repair": fix the code in place and re-eval (no new node, no budget spent).
                 # Snapshot the PRE-repair file set now (node is still the pre-repair fold) so we can
                 # compute the repair's REAL change set below — `developer.last_files` is the node's whole
@@ -2012,8 +2055,16 @@ class EvaluateMixin:
                 rollback_refusal = ""
                 with self.tracer.span("inline_repair", node_id=node_id, attempt=attempt + 1):
                     try:
+                        # The stuck contract rides on the ERROR CONTEXT rather than inside
+                        # `_repair_error_context`, so it reaches every Developer implementation
+                        # (whole-file, repo, CLI-backed) through the one argument they all take, and
+                        # so the build-time `implement` path — which has nothing to be stuck about —
+                        # never sees it. Appended after the per-reason directive on purpose: "here is
+                        # what went wrong and what to do about it" then "…and here is how to say you
+                        # cannot", never the other way round.
                         new_code = self._repair(
-                            node, self._repair_error_context(reason, _err_in, state=state, node=node),
+                            node, self._repair_error_context(reason, _err_in, state=state, node=node)
+                            + developer_stuck_contract(DEVELOPER_STUCK_PREFIX),
                             state)
                     except BudgetExceeded:
                         raise      # the hard budget stop propagates, exactly as in `_triage_crash`
@@ -2048,6 +2099,28 @@ class EvaluateMixin:
                 # `await` would risk picking up a sibling node's answer and re-running an expensive
                 # stage on THIS node that nobody asked for.
                 _rollback_ask = str(getattr(self.developer, "last_rollback_stage", "") or "").strip()
+                # THE DEVELOPER SAYING "I DO NOT KNOW HOW TO FIX THIS" (F8). The first of the two
+                # signals the operator asked for, and the one that already existed as a capability
+                # and had no way to be expressed: a Developer that knew it was beaten could only
+                # return another fix it did not believe in, which every counter downstream read as an
+                # ordinary attempt.
+                #
+                # ABOVE `_repair_provider_failure` ON PURPOSE, and this ordering is load-bearing. The
+                # declaration is not Python, so that function would classify it `unparseable`, charge
+                # the provider-failure counter, and — three declarations in — terminalize the node as
+                # `developer_crash` AND pause the whole RUN naming a provider that is answering
+                # perfectly. "The model has no fix left" and "the model's session is dead" are
+                # opposite facts with opposite recoveries; `core/models.py::DEVELOPER_STUCK_PREFIX`
+                # is a separate sentinel for exactly that reason.
+                #
+                # NO REPAIR IS SPENT and no `node_repaired` is written: nothing was repaired. The
+                # node terminalizes below carrying the eval's own authenticated `reason` — this is a
+                # stop, not a re-classification of what failed.
+                if is_developer_stuck(new_code):
+                    _stuck_why = developer_stuck_reason(new_code) or "no reason given"
+                    triage_outcome = ("abandon", "the Developer declared it does not know how to fix "
+                                                 f"this — {_stuck_why}"[:400])
+                    break
                 # WAS THIS A REPAIR AT ALL, OR A DEAD PROVIDER? The four answers and the incident
                 # each one was retrofitted for live in `_repair_provider_failure`. The unparseable
                 # counter round-trips through the return value — it is per-NODE, not per-attempt, so
@@ -2092,6 +2165,11 @@ class EvaluateMixin:
                         # condition and had the same process-local lifetime.
                         "changed": _changed_col,
                         "stages_passed": _depth,
+                        # The AUTHENTICATED cause of the failure this repair answers — F8's critic
+                        # compares causes across attempts, and the only trustworthy source of "what
+                        # kind of failure was that" is `_failure_reason` over the sandbox's
+                        # out-of-band signals. Additive (invariant #5); the fold ignores it.
+                        "reason": reason,
                         "unparseable_repairs": unparseable_repairs}
                     if repaired_footprint is not None:
                         repair_payload.update({
@@ -2133,6 +2211,7 @@ class EvaluateMixin:
                     "error": err[-_JUDGE_ERROR_CHARS:],
                     "fix": str(triage.get("rationale", ""))[:200],
                     "changed": _changed_col,
+                    "reason": reason,
                     "stages_passed": _depth})
                 _stages = self._resolved_stages(node, workdir)
                 # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on

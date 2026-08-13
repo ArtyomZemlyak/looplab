@@ -154,6 +154,31 @@ def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int,
     return None
 
 
+# --- What the Developer is told it may say ------------------------------------------------------
+
+# THE OTHER HALF OF `core/models.py::DEVELOPER_STUCK_PREFIX`: a sentinel nobody is told about is a
+# sentinel nobody emits. Appended by `engine/evaluate.py` to the error context of every INLINE repair
+# ask, and only there — the build-time `implement` path has nothing to be stuck about, and the
+# inter-node paths that used to call `_repair_error_context` are gone with the Debug node (F5).
+#
+# Worded to be hard to reach by accident and easy to reach on purpose. "Only if you have no fix left
+# to try" plus "a fix you do not believe in is worse than this" is the whole instruction: the failure
+# mode being bought off is a model that keeps producing plausible edits because producing an edit is
+# what it was asked for. The literal is spelled from the constant rather than typed twice, because a
+# drifted sentinel is a declaration that reads as a syntax error and charges the provider-failure
+# counter instead of stopping the node.
+def developer_stuck_contract(prefix: str) -> str:
+    """The paragraph that tells the Developer it is allowed to give up, spelled from `prefix`."""
+    return ("\n\n[YOU MAY DECLINE. If you have genuinely run out of things to try on this node — you "
+            "cannot tell what is wrong, or every fix you can think of has already been tried and "
+            "failed — then do NOT return another edit. Return exactly one line instead:\n"
+            f"    {prefix} <one sentence on what you are stuck on>)\n"
+            "and nothing else. This ends the node cleanly and hands the budget back to the search; "
+            "it is not a failure and it costs you nothing. A repair you do not believe in is worse "
+            "than this, because it buys another full evaluation to find out. Use it only when you "
+            "have no candidate fix left — if you can name a change worth trying, make it.]")
+
+
 # --- What the critic reads ----------------------------------------------------------------------
 
 _TRAJECTORY_HEADER = "--- THIS NODE'S REPAIR TRAJECTORY (oldest first) ---"

@@ -649,7 +649,36 @@ class Settings(BaseSettings):
     # SUPERSEDES the environment/experiment apportionment (commit e0ec3a4d), which bounded two
     # ledgers with this one number. A budget is about time and money — a re-eval costs the same
     # whichever kind of mistake preceded it — so `repair_class` and its corroboration are gone.
-    inline_repair_attempts: int = Field(default=12, ge=0)
+    #
+    # THE DEFAULT IS NOW 0, i.e. NO OPERATOR COUNT CAP (2026-08-13, F8). Everything above stays true
+    # about what the number MEANS; what changed is that a number is no longer the transition. The
+    # operator's ruling: *"я бы хотел чтобы репейринг у нас был по сути бесконечный, но стопался бы
+    # каким-нибудь LLM критиком и самим девелопером, что типа я фиг знает как чинить"* — and it lands
+    # with the F5 deletion of the Debug node, because "give up at 12 and open a fresh node" and "give
+    # up at 12" are only the same change if nothing replaces the counter.
+    #
+    # The reasoning for 12 above is sound and is exactly why it cannot be the stop: it is calibrated
+    # against the longest chain ANYONE HAD SEEN. A count is blind to the two ways this actually goes
+    # wrong — `rubert-dr-0804`'s 369 distinct error signatures on one wall (no counter saw a
+    # repetition) and v6 node 5's three rounds of batch-halving on an OOM that never happened (no
+    # counter came near its cap). What stops the loop now is a judgment: the triage judge, the
+    # Developer's own `(developer stuck: …)`, and `engine/repair_judgment.py`'s critic. Underneath
+    # them the floors are unchanged — `_UNLIMITED_REPAIR_CEILING` (50), the eval-time budget,
+    # `systemic_failure_stop`, and the LLM money ceiling that raises `BudgetExceeded` at the client.
+    #
+    # A NON-ZERO VALUE IS STILL A HARD CAP and still wins over every judgment. An operator who wants
+    # the old behaviour writes `inline_repair_attempts: 12` and gets it byte-for-byte.
+    inline_repair_attempts: int = Field(default=0, ge=0)
+    # F8's CRITIC: how many durable repairs this node must already have before a second model is
+    # asked whether the chain is circling. 0 = no critic (the loop stops on triage + the floors,
+    # exactly as it did before 2026-08-13).
+    #
+    # 3 rather than 1 because the critic's question is not askable earlier and asking it anyway costs
+    # money to be told nothing: with one attempt behind it there is no trajectory to compare, and
+    # `agents/unified_agent.py::repair_critic` refuses an empty one outright. 3 is also below both
+    # recorded disasters — v6 node 5's batch-halving was visible at three attempts, and 0804's wall
+    # was visible long before its 2,345th.
+    repair_critic_after: int = Field(default=3, ge=0)
     # Which failure reasons (`engine/triage.py::FAILURE_REASONS`) are eligible for inline repair.
     # Default: ALL of them, since 2026-08-12.
     #
