@@ -227,6 +227,48 @@ This subsumes most of the value of [F1c](#f1c-catch-a-path-that-escapes-the-node
 static half without its false-positive problem, because it acts on a contract that has already failed
 and an artifact that already exists.
 
+## F1f · The eval batch is a BARRIER, so one slow node idles a GPU for hours
+
+**Found while watching `rubertlite-dr-unified-v6`, 2026-08-13.** Not the same defect as the
+`freshness_stale` one fixed in `6f0a8be3` — that one stopped two cards from ever being *selectable*
+at the same time. This one stops a new turn from *starting*, and it survives that fix.
+
+**Measured.** `run_started` pins `eval_parallel: 2`. Nodes 5 and 6 were dispatched from the same turn
+and really did train concurrently, so the fan-out works. Node 6 finished at 06:19 (86 minutes); node
+5 was still training. At 08:11 — **~2 hours later** — `nvidia-smi` showed GPU 1 at `4 MiB` and 0%,
+`card-3` folded to `selection_ready=True` with an EMPTY blocker list, and the log since 06:19
+contained nothing but `llm_usage`, `train_monitor_alert`, and four `research_completed`/`hint` pairs.
+No `card_build_requested`, no `node_building`, no `card_added`. Node 5 was at step 4415/7060 with
+2:09 remaining, so the idle window is ~4 hours on one device.
+
+**Why.** `Engine._dispatch_evals` takes `evals` — the batch ONE turn produced — and runs it under
+`async with anyio.create_task_group() as tg:`. The slot semaphore lets that batch's members overlap,
+but the task group **joins every member** before `_dispatch_evals` returns, and the next turn's node
+creation happens after it returns. So the concurrency width applies WITHIN a turn and never across
+turns: with heterogeneous node durations (86 min vs ~6 h here) the fast slot sits idle until the
+slowest member of its own batch finishes.
+
+The repeating deep research is in the OUTER `bg_tg` and keeps running on its own timer, which is
+exactly why the run looks alive from the event log while no experiment is being built — four rounds
+of research directions were produced into an idle GPU.
+
+**What it would take.** Continuous dispatch across turns: the producer admits a new node whenever a
+slot frees, rather than the loop awaiting the whole batch. That is not a small change and it is not
+mine to make unilaterally — it moves node CREATION into (or alongside) the dispatch loop, and engine
+invariant #1 says only the main task appends folded events, with the `llm_parallel` build fan-out
+already carving out a carefully-bounded own-node-only exception. The turn structure is also what
+makes `_proposal_authority_seq`'s position fence and the Card build-request CAS reason about a
+stable window. Decide the shape first; do not incrementally loosen the join.
+
+**Cheap mitigation available today, no code:** an `eval_timeout` closer to the real training cost
+bounds the worst-case idle, and `eval_parallel: 1` at least makes the serialization honest rather
+than advertising a width the loop cannot sustain. Neither is a fix.
+
+**Related, and worth stating because it made this window worse:** node 5's batch size was 8192 as
+proposed and is 256 as it runs — three repair rounds shrank it 32x chasing an OOM that never
+happened (the watchdog-vs-OOM misclassification fixed in `c862045c`). At 2.93 s/it that turned a
+~1.5 h training into a ~6 h one, and it is the 6 h that the barrier then idles a GPU against.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
