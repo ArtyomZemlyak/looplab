@@ -1965,8 +1965,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # `drift`/`expect_failed`/`check_failed` can buy up to 50 Developer calls AND up to 50 full
     # re-evaluations that the first half of the same run bought ZERO of. On a GPU task where one eval
     # is the 76-minute training this range's own comments cite, that is hours nobody chose.
-    # (c) is `("crash", "timeout", "oom")`, pointable at every commit before that date.
-    "inline_repair_reasons": ("crash", "timeout", "oom"),
+    # (c) is `("crash", "timeout", "oom")` — PLUS the two verdicts that are RE-CLASSIFICATIONS of
+    # those, not new treatments. `triage._failure_reason` returns `diverged`/`stalled` from
+    # short-circuits placed ABOVE the `exit_code != 0` branch that used to answer `oom`/`crash` for
+    # the same watchdog SIGKILL, so pinning the bare historical tuple would REMOVE behaviour the
+    # original run had: a resumed node that the old classifier called `oom` (and repaired) is now
+    # called `diverged`, matches nothing, and terminalizes with ZERO repair attempts. This map
+    # exists to stop re-entry changing a run's treatment in EITHER direction.
+    # `needs_failed` is deliberately NOT here: the `needs` input contract did not exist before this
+    # window, so no pre-field node could produce it and there is no historical treatment to preserve.
+    "inline_repair_reasons": ("crash", "timeout", "oom", "diverged", "stalled"),
     # THE SOURCE-TREE READ FENCE, added 2026-08-13 defaulting to `deny`. (a) holds. (b) is the
     # strongest kind on this table after `systemic_failure_stop`: it is not extra work, it is an
     # INTERVENTION that can fail a node outright — a repo run whose training script legitimately

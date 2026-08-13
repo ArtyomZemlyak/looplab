@@ -2608,9 +2608,18 @@ def build_router(srv) -> APIRouter:
         (422) rather than silently read as "default": it can only be a client defect, and a paging
         control that quietly ignores its own argument is how a dead pager looks from the outside.
 
-        ``attempt`` binds this CURRENT-node view to the lifecycle rendered by the Inspector. It is
-        checked before and after the read; old attempts remain available through attempt-history
-        evidence rather than being silently concatenated into the current conversation.
+        ``attempt`` binds this view to the lifecycle rendered by the Inspector, and is checked
+        before and after the read. An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked
+        and echoed back — the same rule as the span-tree twin, because these are two VIEWS of one
+        trace surface and the Inspector's attempt picker switches between them over one selection.
+        Only an attempt this node has never REACHED is refused. Old attempts are never silently
+        concatenated into the current conversation: the generation fence applies to the span window
+        itself (`node_window_snapshot` / `full_spans_for_node`).
+
+        This paragraph used to say old attempts were reachable "through attempt-history evidence
+        rather than" here — the pre-relaxation contract, left behind when the `!=` fence became `>`.
+        Reading it as current would invite restoring a refusal that breaks the Inspector's attempt
+        picker and every historical Dock event row.
 
         Successful stable snapshots carry an opaque ``cursor`` equal to their ETag. A caller may
         return it as ``If-None-Match``; an unchanged node/generation/window then answers 304 before
