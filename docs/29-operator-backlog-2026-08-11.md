@@ -157,9 +157,15 @@ around the trust boundary that `b0327182` just closed for the scorer's code.
 | 1 | draft | 0.715142 | measured |
 | 2 | draft | 0.727991 | measured |
 | 3 | **merge** | **0.728113** | **salvaged** |
-| 4 | **merge** | — | declares the wrong path again |
+| 4 | merge | 0.224975 | measured |
 
-Every DRAFT is measured; every MERGE is salvaged. A merge node's Developer authors a fresh config
+**CORRECTION (same night).** The first version of this entry read "every DRAFT is measured, every
+MERGE is salvaged" and predicted node 4 would fail the same way. It did not: node 4 set
+`run_name: unified-baseline`, the repo composed `unified-baseline_rubert-tiny-lite`, and the
+declaration named exactly that — a correct path, a fresh checkpoint, a measured metric. (Its 0.2249
+is a real negative result: mean-merging the two models' weights destroyed them.) So the sample is
+ONE salvaged merge, not a systematic bias against the merge operator, and the claim was n=1 plus a
+prediction. What follows stands on the single honest case and should not special-case merges. A merge node's Developer authors a fresh config
 with a new `run_name` and gets the testbed's composed `<run_name>_<model>` directory wrong, so the
 `train` stage exits 0, fails its declared artifact contract, and metric salvage recovers the number
 from the stage's stdout. Node 4 declares `unified-baseline_rubert-tiny-lite/final/…` — the OLD HUMAN
@@ -168,9 +174,8 @@ experiment's name, not its own.
 **The consequence is the part that matters.** Under the default `metric_salvage: audit` a salvaged
 metric carries a `metric_salvaged` violation and is excluded from `feasible_nodes()`, so it can never
 become champion or be bred from. Node 3 produced the best number in the run (0.728113 vs the
-champion's 0.727991) and cannot win. So the search operator whose whole job is to COMBINE the best
-results is structurally disqualified, on every merge, by a path typo. That is a far worse outcome
-than the salvage itself, and neither `audit` nor `select` is the right answer to it — `select` would
+champion's 0.727991) and cannot win — on the strength of a path typo, not of anything about the
+number. Neither `audit` nor `select` is the right answer to that — `select` would
 admit agent-produced bytes wholesale, which is the boundary salvage exists to keep.
 
 **The fix is specific and cheap: the metric was never actually unmeasured.** The pipeline DID produce
