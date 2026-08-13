@@ -84,6 +84,15 @@ export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
 
 export const SALVAGED_METRIC_VIOLATION = 'metric_salvaged'
 export const isSalvagedMetricViolation = v => v?.name === SALVAGED_METRIC_VIOLATION
+// An UNBOUND metric rides the SAME `metric_salvaged` row on purpose (a second exclusion vocabulary
+// would still exclude the node while silently ceasing to be recognised by every existing reader),
+// so the row NAME cannot tell the two apart — only its `salvage.condition` can. Without this, an
+// unbound node is labelled "Metric salvaged, not measured … recovered with its own declared
+// reader", which is false in both halves: nothing failed and nothing was recovered. That is exactly
+// the false accusation the comment below exists to prevent, one condition over.
+export const UNBOUND_SUBJECT_CONDITION = 'metric_subject_unbound'
+export const isUnboundSubjectViolation = v =>
+  isSalvagedMetricViolation(v) && v?.salvage?.condition === UNBOUND_SUBJECT_CONDITION
 // The node's own folded `metric_provenance`, which is the ONLY record of a salvage under
 // `metric_salvage: "select"`. Everything the salvage UI knew used to hang off the violation ROW, and
 // `select` is precisely the rung that has no row — so the operator who opted a salvaged metric INTO
@@ -101,6 +110,20 @@ export function nodeFeasibilityStatus(node) {
   // an unmeasured value out of champion selection — but the operator reading "Constraint violation"
   // about a node whose experiment SUCCEEDED, and whose metric was recovered by the run's own
   // declared reader, is being told something false. The exclusion is real; the accusation is not.
+  // Checked BEFORE the salvage branch, because an unbound row satisfies `isSalvagedMetricViolation`
+  // too — it IS one of those rows. The number here was measured by the scoring path and the eval
+  // succeeded; what is missing is any record of WHAT it is about.
+  if (violations.length && violations.every(isUnboundSubjectViolation)) {
+    const why = violations.find(isUnboundSubjectViolation)?.salvage?.unbound_reason
+    return result(
+      'warn',
+      'Metric bound to no subject',
+      'Nothing records which artifact this number is about'
+        + `${why === 'not_declared' ? ', because the task declares no eval.metric.subject'
+             : why ? `: the declared subject is ${why}` : ''}`
+        + ', so the claim cannot be checked and the node is excluded from winner selection.',
+    )
+  }
   if (violations.length && violations.every(isSalvagedMetricViolation)) {
     const source = violations.find(isSalvagedMetricViolation)?.salvage
     return result(

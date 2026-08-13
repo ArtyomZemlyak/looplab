@@ -55,3 +55,32 @@ test('report verdict never calls missing detector coverage trustworthy', () => {
   assert.match(value.headline, /not fully verified/i)
   assert.doesNotMatch(value.headline, /passes the trust checks/i)
 })
+
+test('an unbound metric is not reported as a salvaged one', () => {
+  // It rides the SAME `metric_salvaged` row (a second exclusion vocabulary would still exclude the
+  // node while ceasing to be recognised by every existing reader), so only `salvage.condition`
+  // separates them — and the salvage wording is false in both halves for an unbound metric: nothing
+  // failed and nothing was recovered.
+  const node = {
+    status: 'evaluated', feasible: false, metric: 0.9,
+    metric_provenance: { subject_bound: false, unbound_reason: 'not_declared', subjects: [] },
+    violations: [{ name: 'metric_salvaged', value: 0.9, max: null, min: null,
+                   salvage: { salvaged: false, condition: 'metric_subject_unbound',
+                              unbound_reason: 'not_declared' } }],
+  }
+  const status = nodeFeasibilityStatus(node)
+  assert.equal(status.label, 'Metric bound to no subject')
+  assert.ok(status.detail.includes('eval.metric.subject'))
+  assert.ok(!status.detail.includes('declared reader'))
+  assert.notEqual(status.label, 'Constraint violation')
+})
+
+test('a real salvage still reads as a salvage', () => {
+  const node = {
+    status: 'evaluated', feasible: false, metric: 0.7,
+    metric_provenance: { salvaged: true, stage: 'train' },
+    violations: [{ name: 'metric_salvaged', value: 0.7, max: null, min: null,
+                   salvage: { salvaged: true, condition: 'artifact_contract', stage: 'train' } }],
+  }
+  assert.equal(nodeFeasibilityStatus(node).label, 'Metric salvaged, not measured')
+})
