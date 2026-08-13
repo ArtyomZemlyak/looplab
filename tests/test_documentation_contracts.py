@@ -43,8 +43,10 @@ def test_index_mentions_every_numbered_document():
                       if path.name != "00-INDEX.md")
     # Deliberately a literal, not a derived count: this is the tripwire that a document was added or
     # REMOVED without anyone touching the index, and the `missing` check below cannot see a deletion.
-    # Moving it is part of adding a doc — 30 since doc 30 (corporate contour / opportunistic GPU).
-    assert len(numbered) == 30, "the derived numbered-document inventory changed"
+    # Moving it is part of adding a doc — 35 since doc 37 (the decision-sites survey). It had been
+    # stale at 30 through docs 31/32/33 and 36, which is what a tripwire looks like when the count is
+    # moved by whoever next trips it rather than by whoever added the document.
+    assert len(numbered) == 35, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

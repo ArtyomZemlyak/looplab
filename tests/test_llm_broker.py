@@ -522,20 +522,29 @@ def test_the_capped_lanes_are_exactly_the_registered_ones():
         lane for lane, limit in default_llm_lane_limits(None).items() if limit is not None}
 
 
-def test_the_per_eval_stage_check_is_not_in_a_capped_lane():
-    """The eval-path producer this registry was written for, pinned by name.
+def test_no_per_eval_producer_in_eval_stages_is_in_a_capped_lane():
+    """EVERY eval-path producer in `eval_stages.py`, not just the first one in the file.
 
-    `_check` is created inside `_stage_check_fn`, so it is a CLOSURE, not an Engine attribute — the
-    registry scan above sees it, but a behavioural test cannot reach it without running an eval. Pin
-    the source declaration instead, and pin the reason: its lane must be one with no background cap,
-    or every concurrent eval's inter-stage gate queues behind every other one.
+    Both are CLOSURES (`_check` inside `_stage_check_fn`, `_judge` inside `_deadline_grace_fn`), so
+    neither is an Engine attribute the registry scan above can reach and neither is reachable
+    behaviourally without running an eval. Pin the source declarations instead, and pin the reason:
+    an eval worker BLOCKS on each of these, one per concurrent eval, so a capped lane means every
+    concurrent eval's gate queues behind every other one — measured at 4 evals as peak 1, 4x the wall
+    time, which is why the registry exists.
+
+    Asserted over ALL matches and against an expected SET, because the single-`search` version this
+    replaced pinned whichever declaration happened to come first in the file: adding `_judge` above
+    `_check` turned a real property into a name mismatch, and adding one BELOW `_check` in a capped
+    lane would have gone unnoticed entirely.
     """
     source = (_ENGINE_DIR / "eval_stages.py").read_text(encoding="utf-8")
-    lane = _LANE_DECL.search(source)
-    assert lane is not None and lane.group(2) == "_check"
-    assert lane.group(1) not in BACKGROUND_LANE_PRODUCERS, (
-        f"the per-eval inter-stage check declares the capped lane {lane.group(1)!r}")
-    assert default_llm_lane_limits(None)[lane.group(1)] is None
+    lanes = list(_LANE_DECL.finditer(source))
+    assert {m.group(2) for m in lanes} == {"_check", "_judge"}, (
+        "an eval-path LLM producer joined or left eval_stages.py — give it a row here")
+    for m in lanes:
+        assert m.group(1) not in BACKGROUND_LANE_PRODUCERS, (
+            f"the per-eval producer {m.group(2)!r} declares the capped lane {m.group(1)!r}")
+        assert default_llm_lane_limits(None)[m.group(1)] is None
 
 
 def test_a_capped_lane_serializes_what_an_uncapped_one_overlaps():
