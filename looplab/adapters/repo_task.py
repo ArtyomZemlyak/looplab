@@ -314,7 +314,7 @@ class EvalSpec(BaseModel):
     # F1d). It rides in `task.snapshot.json` verbatim, so a resume re-validates and re-applies the
     # SAME environment the run's results were produced under. Operator-authored, like the rest of
     # this model — the Developer has no surface for it, by design. Secrets are REFUSED; see
-    # `command_eval.validate_env_map`.
+    # `core/envsafe.py::validate_env_map`, the ONE rule all three declaring levels go through.
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str = "."                           # relative to the node eval workdir
     # Freeze the FILE the `command` executes, when the argv names one that the editable source
@@ -583,12 +583,14 @@ class EvalSpec(BaseModel):
     @classmethod
     def _env_valid(cls, v):
         # The eval-wide half of the DECLARED ENVIRONMENT, validated by the SAME shared rule as the
-        # per-stage block and the run-level setting (`command_eval.validate_env_map`) — three levels
-        # that get MERGED must agree about what a legal declaration is, or an operator's variable
-        # would change meaning depending on which line they wrote it on.
+        # per-stage block and the run-level setting (`core/envsafe.py::validate_env_map`) — three
+        # levels that get MERGED must agree about what a legal declaration is, or an operator's
+        # variable would change meaning depending on which line they wrote it on. Imported from
+        # its HOME rather than through `command_eval`'s re-export: this is not a stage, and
+        # `adapters` may import `core` directly.
         if not v:
             return {}
-        from looplab.runtime.command_eval import validate_env_map
+        from looplab.core.envsafe import validate_env_map
         clean, err = validate_env_map("cmd/eval `env`", v)
         if err:
             raise ValueError(err)
