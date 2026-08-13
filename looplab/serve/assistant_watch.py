@@ -586,7 +586,15 @@ class WatchService:
 
     # ---- the decision ---------------------------------------------------------------------
     def tick(self, *, now: Optional[float] = None) -> list[dict]:
-        """Service every due watch once. Returns the records it touched (for tests and logging)."""
+        """Service every due watch once. Returns the records it touched (for tests and logging).
+
+        ONE thread, and each wake-up runs its turn inline, so watches are serviced strictly in
+        due order and never concurrently. That is deliberate rather than a limitation: the alternative
+        is N unattended model calls in flight against the same shared endpoint, competing with the
+        operator's own turn for provider concurrency — a stall with no visible cause, which is the
+        cost `core/llm_broker.py` exists to bound for the engine's lanes. The interval between wake-ups
+        is a floor, not a promise, and a watch delayed behind a sibling says so through its `next_due`.
+        """
         ts = time.time() if now is None else float(now)
         touched = []
         for record in self.store.due(now=ts):

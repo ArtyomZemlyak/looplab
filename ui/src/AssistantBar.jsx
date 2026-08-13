@@ -34,10 +34,12 @@ import {
   danglingAssistantTurn,
   unavailableAssistantRecovery,
 } from './assistantRecovery.js'
+import { stripPollMs, watchStrip } from './assistantWatchModel.js'
 import './assistant-polish.css'
 import {
   get, fmtAgo, fmtDate, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
+  assistantWatches, assistantWatchStop,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
   assistantFork, assistantForkStatus, assistantShare, assistantUnshare,
   commandActionForEvent, commandCanRetry, commandErrorMessage,
@@ -407,6 +409,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [runs, setRuns] = useState([])
   const [pending, setPending] = useState([])      // live HITL confirm requests
+  // Standing watches (§F4). A LIST the browser reads — never the thing doing the watching,
+  // which is server-side and durable; closing this tab costs the monitoring nothing.
+  const [watches, setWatches] = useState([])
+  const [stoppingWatches, setStoppingWatches] = useState(() => new Set())
+  // The poll re-arms itself from the CURRENT list to choose its next cadence, and its effect is
+  // keyed on the session alone (re-subscribing on every list change would restart the timer on each
+  // tick). A ref is what lets the timer read the fresh list without becoming a dependency.
+  const watchesRef = useRef(watches)
+  watchesRef.current = watches
   const [attentionPermissionFocus, setAttentionPermissionFocusState] = useState({
     session: '', id: '', token: 0, phase: 'idle',
   })
@@ -3674,7 +3685,67 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const attentionPermissionHandoffActive = attentionPermissionFocus.phase !== 'idle'
   const attentionPermissionTargetVisible = attentionPermissionFocus.phase === 'ready'
     && pending.some(request => request?.id === attentionPermissionFocus.id)
+  // §F4 · standing watches. Choreography only — every decision about what a row SAYS is in
+  // `assistantWatchModel.js`, which `node --test` drives with no React. The cadence comes from the
+  // model too (`stripPollMs`): slow when nothing is armed, because then the only thing that can
+  // change the list is the operator, who is already causing a refresh when they do it.
+  const watchView = watchStrip(watches)
+  useEffect(() => {
+    if (!sid) { setWatches([]); return undefined }
+    let live = true
+    let timer = null
+    const read = async () => {
+      try {
+        const payload = await boundedRequest(signal => assistantWatches(sid, { signal }), 8000)
+        if (!live) return
+        // Replace only on a well-formed answer. A transient failure must leave the last known list
+        // standing rather than blanking the strip to "no standing watches", which is the one
+        // sentence this surface must never print while a watch is in fact armed.
+        if (Array.isArray(payload?.watches)) setWatches(payload.watches)
+      } catch { /* a failed read keeps what the operator had — see above */ }
+      if (!live) return
+      timer = setTimeout(read, stripPollMs(watchStrip(watchesRef.current)))
+    }
+    read()
+    return () => { live = false; if (timer) clearTimeout(timer) }
+  }, [sid])
+
+  const stopWatch = async (watchId) => {
+    if (!watchId || stoppingWatches.has(watchId)) return
+    setStoppingWatches(current => new Set(current).add(watchId))
+    try {
+      await boundedRequest(signal => assistantWatchStop(watchId, { signal }), 8000)
+      const payload = await boundedRequest(signal => assistantWatches(sid, { signal }), 8000)
+      if (Array.isArray(payload?.watches)) setWatches(payload.watches)
+    } catch { /* the next poll reconciles; never leave the row stuck "stopping" on a blip */ }
+    setStoppingWatches(current => {
+      const next = new Set(current)
+      next.delete(watchId)
+      return next
+    })
+  }
+
+  const renderWatchStrip = () => (!watchView.visible ? null : <div className="asst-watches"
+    role="region" aria-label="Standing watches">
+    <div className="asst-watches-h muted">{watchView.summary}</div>
+    {watchView.items.map(item => <div key={item.id}
+      className={'asst-watch' + (item.attention ? ' attention' : '') + (item.terminal ? ' done' : '')}>
+      <div className="asst-watch-top">
+        <span className="asst-watch-for">{item.waitingFor}</span>
+        <span className="asst-watch-status">{item.statusText}</span>
+        {item.nextCheck && <span className="asst-watch-next muted">next check {item.nextCheck}</span>}
+        {item.budget && <span className="asst-watch-budget muted">{item.budget}</span>}
+        {item.stoppable && <button type="button" className="btn sm asst-watch-stop"
+          disabled={stoppingWatches.has(item.id)}
+          onClick={() => stopWatch(item.id)}>Stop</button>}
+      </div>
+      <div className="asst-watch-what muted">{item.instruction}</div>
+      {item.note && <div className="asst-watch-note muted">{item.note}</div>}
+    </div>)}
+  </div>)
+
   const renderThread = () => <>
+    {renderWatchStrip()}
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
         Ask anything — inspect the code, read your runs, steer or create runs{runId ? ` · run “${runId}” is open` : ''}.
