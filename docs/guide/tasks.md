@@ -186,6 +186,24 @@ What makes a salvaged metric admissible is narrow on purpose:
   "salvage_cause_fix"` — and the node terminalizes on the metric it already has, without paying for a
   second evaluation. A salvaged node does not carry a broken manifest into its next attempt.
 
+**The exclusion covers cross-run memory too, not just this run's champion** (since 2026-08-13).
+Being out of `feasible_nodes` stops the node winning *here*; it did not stop the run writing what
+that number "showed" into the **shared** store, which is where a later run reads it as evidence. So
+an excluded salvaged node grounds no cross-run claim about its metric: it is not one half of a
+comparative (credit-assigned) pair lesson, not a row of the ranked table the whole-run reflection
+generalizes from, and not evidence on an auto-distilled skill card. The same rule covers a node the
+run's own trust gate excludes under `trust_gate: gate | block` — a reward-hack or leakage flag makes
+the number one nobody earned, which is the same defect one step over. A node that breached one of
+your **constraints** is unaffected: its number was measured and its exclusion is a fact about the
+bound, so it keeps its place everywhere.
+
+What the node *observed* is still recorded, because that half is independent of the unmeasured
+number: its concepts go into the run's concept capsule (the tag, never a numeric outcome), and the
+run-end reflection is shown the node as an **observation** — its salvage condition and the failure it
+overrode, with no metric attached — so "this declaration shape breaks" can still become a lesson.
+Under `metric_salvage: "select"` with operator-produced output no violation is minted at all, and the
+node stays in every population, annotated as recovered rather than measured.
+
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine
 re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against

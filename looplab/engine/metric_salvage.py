@@ -128,6 +128,13 @@ from typing import Optional
 METRIC_SALVAGE_MODES = ("off", "audit", "select")
 DEFAULT_METRIC_SALVAGE = "audit"
 
+# The `violations` row name that carries the exclusion. A CONSTANT because it is now read as well as
+# written: `violation_rows` mints it and `metric_unmeasured` (below) is the reader every knowledge
+# writer asks, and a typo'd literal on either side is silent — the fold's rule is
+# `feasible = not violations`, so a misspelled row still excludes the node from selection while the
+# reader that has to keep it out of a cross-run LESSON stops recognising it.
+SALVAGE_VIOLATION = "metric_salvaged"
+
 # Where a salvaged value came from. A CLOSED set so a reader of the event can tell the rungs apart,
 # and so an added rung (an LLM extraction, say) has to declare itself rather than inherit the
 # credibility of the deterministic one.
@@ -372,8 +379,46 @@ class SalvagedMetric:
             return []
         if settled == "select" and self.producer == OPERATOR_PRODUCED:
             return []
-        return [{"name": "metric_salvaged", "value": self.metric, "max": None, "min": None,
+        return [{"name": SALVAGE_VIOLATION, "value": self.metric, "max": None, "min": None,
                  "salvage": self.as_event()}]
+
+
+def metric_unmeasured(node) -> bool:
+    """Is this node's METRIC one nobody measured — i.e. salvaged AND not admitted to selection?
+
+    THE KNOWLEDGE BOUNDARY, stated once so every writer asks the same question. The
+    `metric_salvaged` violation was designed as SELECTION machinery: the fold turns any violation
+    row into `feasible = False`, which keeps the node out of `feasible_nodes()` and therefore out of
+    champion selection and breeding. But selection is not the only path a number travels. The
+    cross-run knowledge writers — the M6 comparative pair lessons, the whole-run reflection — read
+    `state.nodes` directly, so a value that could not become champion could still become a LESSON
+    asserting something about the metric, stamped with that node as its evidence, appended to the
+    shared `lessons.jsonl` and retrieved by a later run as if it were measurement. The violation
+    gated breeding and not knowledge; this predicate is what closes that half.
+
+    It reads the VIOLATION ROW, not `metric_provenance`, because the row is the enforcement and the
+    provenance is only the account — under `select` with operator-produced bytes the operator has
+    explicitly accepted the value as comparable, no row is minted, and such a node must stay in
+    every population it was in before (annotated, never hidden — see
+    `engine/lessons_distill.py::_SALVAGED_ROW_NOTE`). Keying on `metric_provenance.salvaged` alone
+    would silently overrule that setting; keying on `feasible` alone would also catch a
+    CONSTRAINT-violating node, whose number is real and whose exclusion is a fact about the bound
+    rather than about the measurement.
+
+    WHAT THIS DOES NOT SAY. It is not "ignore this node". A salvaged node ran, and what it OBSERVED
+    — which concepts it touched, that its declaration failed and how — is real knowledge that is
+    independent of the unmeasured number, and both halves are still recorded: `store_concept_capsule`
+    keeps the concept TAG while withholding the numeric outcome, and `reflect_lessons` shows the node
+    as an observation with its salvage condition and no metric. Only claims ABOUT THE METRIC are
+    refused, which is the same distinction the violation already makes for selection.
+
+    Total over junk (a hand-edited log, a `violations` list of strings): anything that is not a dict
+    row naming this violation is not one.
+    """
+    for row in (getattr(node, "violations", None) or ()):
+        if isinstance(row, dict) and row.get("name") == SALVAGE_VIOLATION:
+            return True
+    return False
 
 
 def _usable(value) -> Optional[float]:
