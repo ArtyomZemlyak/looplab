@@ -735,3 +735,125 @@ def test_the_lesson_evidence_ids_come_from_the_same_filtered_population(monkeypa
     assert [n.id for n in _ranked_experiment_rows(excluded, 5)] == [0]
     admitted = _reflection_state(salvaged_feasible=True)
     assert [n.id for n in _ranked_experiment_rows(admitted, 5)] == [1, 0]
+
+
+# --------------------------------------------------------------------------------------------
+# …and neither may it ground the M6 COMPARATIVE pair lesson, which is the same claim by another
+# route: the rank was fixed and `select_comparison_pairs` — the other producer writing into the
+# SAME shared `lessons.jsonl` — went on handing the salvaged node to the credit assigner.
+# --------------------------------------------------------------------------------------------
+
+def _lineage_state(*, violations=None, provenance=None, flagged=None, trust_gate="audit"):
+    """Parent #0 (measured 0.50) -> child #1 (0.95), where the CHILD is whatever the caller says."""
+    from looplab.core.models import Idea, Node, NodeStatus, RunState
+
+    st = RunState(goal="g", direction="max", task_id="t", run_id="r")
+    st.trust_gate = trust_gate
+    st.nodes[0] = Node(id=0, operator="draft", status=NodeStatus.evaluated, metric=0.50,
+                       idea=Idea(operator="draft", params={"lr": 0.1}))
+    st.nodes[1] = Node(id=1, operator="improve", parent_ids=[0], status=NodeStatus.evaluated,
+                       metric=0.95, idea=Idea(operator="improve", params={"lr": 0.3}),
+                       violations=list(violations or []), feasible=not violations,
+                       metric_provenance=provenance)
+    for nid in (flagged or ()):
+        st.reward_hacks.append({"node_id": nid, "generation": 0,
+                                "signals": [{"signal": "critic:hardcoded_metric"}]})
+    return st
+
+
+_SALVAGE_ROW = [{"name": "metric_salvaged", "value": 0.95, "max": None, "min": None}]
+_SALVAGE_PROV = {"salvaged": True, "condition": "artifact_contract", "source": "declared_reader",
+                 "stage": "train", "salvaged_error": "expect files missing: final/model.safetensors"}
+
+
+def test_an_excluded_salvaged_node_is_never_half_of_a_comparative_pair():
+    """A `solution` pair IS a metric claim — its whole content is the Δ between two numbers, and the
+    lesson credits whichever difference produced it. The violation that keeps the node out of
+    `feasible_nodes()` said that Δ may not decide the champion; the pair distiller wrote it into the
+    SHARED store anyway, where a later run retrieves it as evidence."""
+    from looplab.engine.memory import select_comparison_pairs
+
+    child = _lineage_state(violations=_SALVAGE_ROW, provenance=_SALVAGE_PROV)
+    assert select_comparison_pairs(child) == []
+    # …and from the PARENT side too: the Δ is just as unmeasured when the baseline is the salvage.
+    parent = _lineage_state()
+    parent.nodes[0].violations = list(_SALVAGE_ROW)
+    parent.nodes[0].feasible = False
+    parent.nodes[0].metric_provenance = dict(_SALVAGE_PROV)
+    assert select_comparison_pairs(parent) == []
+
+
+def test_the_salvage_the_operator_admitted_still_pairs():
+    """`select` + operator-produced bytes mints NO violation row, which is the operator saying this
+    number is comparable. The boundary reads the ROW, so it must not overrule that."""
+    from looplab.engine.memory import select_comparison_pairs
+
+    admitted = _lineage_state(provenance=_SALVAGE_PROV)      # salvaged, no violation row
+    assert [(p["a"], p["b"]) for p in select_comparison_pairs(admitted)] == [(1, 0)]
+
+
+def test_a_constraint_violating_node_keeps_its_place_in_the_pairs():
+    """The rule is about MEASUREMENT, not about feasibility. A node that breached one of the
+    operator's hard bounds has a number the scoring path really produced — its exclusion is a fact
+    about the bound — so `promotion_eligible_nodes` is deliberately NOT the predicate here."""
+    from looplab.engine.memory import select_comparison_pairs
+
+    bound = _lineage_state(violations=[{"name": "latency_ms", "value": 900.0, "max": 500.0,
+                                        "min": None}])
+    assert bound.nodes[1].feasible is False
+    assert [(p["a"], p["b"]) for p in select_comparison_pairs(bound)] == [(1, 0)]
+
+
+def test_a_trust_flagged_node_is_barred_from_a_pair_exactly_when_the_gate_is_on():
+    """The identical leak, one violation family over: under `gate`/`block` the run refuses to select
+    on a reward-hacked number, and a credit-assigned lesson generalizing from it is that refusal
+    leaving the run. Under `audit` nothing is gate-excluded and this must not invent an exclusion the
+    operator turned off."""
+    from looplab.engine.memory import select_comparison_pairs
+
+    assert select_comparison_pairs(_lineage_state(flagged=[1], trust_gate="gate")) == []
+    audited = _lineage_state(flagged=[1], trust_gate="audit")
+    assert [(p["a"], p["b"]) for p in select_comparison_pairs(audited)] == [(1, 0)]
+
+
+# --------------------------------------------------------------------------------------------
+# The other half of the boundary: dropped from the METRIC claims is not dropped from the run.
+# --------------------------------------------------------------------------------------------
+
+def test_a_salvaged_node_still_teaches_what_it_broke_on(monkeypatch):
+    """An excluded salvaged node is `evaluated`, so the reflection prompt's failure list (keyed on
+    `NodeStatus.failed`) never saw it either — and once the rank correctly refused it, the one thing
+    the run had actually learnt from it went nowhere. The failure is real, is independent of the
+    unmeasured number, and is the cheapest evidence to reuse (a declaration that breaks breaks for
+    every later run on the same repo). So it is fed as an OBSERVATION, with its condition and its
+    recorded error and no metric at all."""
+    from looplab.agents import agent as agent_module
+    from looplab.engine.lessons import LessonMemory
+
+    seen: dict = {}
+
+    def _fake_agentic_text(client, tools, messages, **kw):
+        seen["prompt"] = messages[-1]["content"]
+        return "[BAD] a declared artifact path must match what the testbed composes"
+
+    monkeypatch.setattr(agent_module, "agentic_text", _fake_agentic_text)
+    state = _lineage_state(violations=_SALVAGE_ROW, provenance=_SALVAGE_PROV)
+    mem = LessonMemory.__new__(LessonMemory)
+    mem._e = type("_E", (), {"_reflect_client": lambda self: object(), "task": None})()
+    mem._reflect_tools = lambda _state: []
+    mem._reflect_loop_opts = lambda: None
+
+    lessons = mem.reflect_lessons(state, state.nodes[0], ["fp"])
+
+    prompt = seen["prompt"]
+    assert "What RAN but was NEVER MEASURED" in prompt
+    assert "#1 improve ran, then FAILED its declaration (artifact_contract)" in prompt
+    assert "final/model.safetensors" in prompt, "the model needs the error, not the bucket"
+    # The METRIC claim is still refused: the number never appears, and #1 is not in the ranked table.
+    assert "0.95" not in prompt
+    assert "\nWhat worked (best first):\n#0 draft" in prompt
+    assert "#1" not in prompt.split("What RAN but was NEVER MEASURED")[0]
+    # …and the lesson is GROUNDED in it, so a later re-check that promotes the node to measured
+    # re-derives this batch instead of leaving a stale conclusion in the shared store.
+    assert lessons and 1 in lessons[0]["evidence"]
+    assert "1" in (lessons[0]["evidence_sig"] or {})

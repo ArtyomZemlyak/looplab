@@ -45,20 +45,74 @@ from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
 #     model that generalizes about it would be the same silence one layer up.
 # Nothing else is filtered: a constraint-violating node has a MEASURED metric and its exclusion is a
 # fact about the bound, not about the number, so it keeps its historical place in these rows.
+#
+# DROPPED FROM THE RANK IS NOT DROPPED FROM THE RUN, and until the observation rows below existed it
+# was: an excluded salvaged node is `evaluated`, so `reflect_lessons`' failure list (which keys on
+# `NodeStatus.failed`) never saw it either, and a node that trained for 76 minutes and then failed
+# its declared artifact contract taught the shared store nothing at all. That failure is REAL
+# knowledge and it is independent of the unmeasured number — the declaration broke, and which
+# declaration broke transfers to every later run on the same repo. So the boundary is drawn between
+# the two CLAIMS rather than around the node: no claim about its METRIC, its OBSERVATION kept. See
+# `_unmeasured_observation_rows`.
 _SALVAGED_ROW_NOTE = " [metric SALVAGED, not measured by the scoring path]"
 
 
 def _ranked_experiment_rows(final: RunState, limit: int) -> list:
     """The run's experiments, best first, as the reflection prompts may show them."""
+    from looplab.engine.memory import unreliable_metric_ids
     rev = (final.direction != "min")
+    # ONE rule for "this node's number may not ground a cross-run claim", shared with the M6
+    # comparative pair selection (`memory.unreliable_metric_ids`) — the two used to disagree, so a
+    # salvaged node the reflection prompt correctly refused to rank was still handed to the pair
+    # distiller as one half of a credited Δ. It also covers the trust-flagged nodes this rank had
+    # never excluded: under `gate`/`block` the run refuses to select on a reward-hacked number, and
+    # a cross-run lesson generalizing from it is that refusal leaving the run.
+    unreliable = unreliable_metric_ids(final)
     usable = [n for n in final.evaluated_nodes()
-              if n.metric is not None
-              and not ((n.metric_provenance or {}).get("salvaged") and n.feasible is False)]
+              if n.metric is not None and n.id not in unreliable]
     return sorted(usable, key=lambda n: n.metric, reverse=rev)[:limit]
 
 
 def _salvage_note(node) -> str:
     return _SALVAGED_ROW_NOTE if (node.metric_provenance or {}).get("salvaged") else ""
+
+
+def _unmeasured_observation_rows(final: RunState, limit: int) -> list:
+    """The salvaged-and-EXCLUDED nodes as `(node, line)` OBSERVATIONS — what each ran into, with no
+    number attached.
+
+    THE HALF OF A SALVAGED NODE'S KNOWLEDGE THAT SURVIVES THE BOUNDARY. `metric_unmeasured` refuses
+    every claim about the node's METRIC; it does not say the node is unknowable. Such a node ran, it
+    produced output, and it failed a DECLARATION — on the run this whole subsystem exists for, a
+    manifest that named the checkpoint one directory over. "This declaration shape breaks" is a
+    transferable finding, it needs no metric to be true, and it is exactly the kind of
+    environment/contract constraint `reflect_lessons`' docstring already calls the cheapest evidence
+    to reuse.
+
+    The line carries the salvage CONDITION and the recorded `salvaged_error`, and says in as many
+    words that a metric was recovered but not measured — because the alternative to saying it is a
+    model that infers from an unexplained absence. It carries NO metric value: a number in the row
+    is a number the model will generalize about, which is the thing being refused.
+
+    Bounded and returned WITH its nodes so the caller can stamp the same `evidence_sig` it stamps
+    for every other row it feeds: a lesson grounded in an observation must be re-derived when that
+    node's outcome later flips, exactly like one grounded in a result."""
+    from looplab.engine.metric_salvage import metric_unmeasured
+    aborted = set(getattr(final, "aborted_nodes", None) or [])
+    rows = []
+    for node in sorted(final.evaluated_nodes(), key=lambda n: n.id):
+        if node.id in aborted or not metric_unmeasured(node):
+            continue
+        prov = node.metric_provenance or {}
+        condition = str(prov.get("condition") or "eval_failed")
+        error = " ".join(str(prov.get("salvaged_error") or "").split())[:200]
+        rows.append((node, f"#{node.id} {node.operator} ran, then FAILED its declaration "
+                           f"({condition})" + (f": {error}" if error else "")
+                     + " — a metric was recovered from its output but NOT measured by the scoring "
+                       "path, so it is evidence about what BROKE and never about the metric"))
+        if len(rows) >= limit:
+            break
+    return rows
 
 
 class LessonDistillMixin:
@@ -329,13 +383,20 @@ class LessonDistillMixin:
         rows = [f"#{n.id} {n.operator} metric={n.metric:.4g} params={n.idea.params}"
                 + _salvage_note(n) for n in ok]
         fails = [f"#{n.id} {n.operator} failed: {n.error_reason}" for n in bad]
+        # The OBSERVATION half of the salvage boundary. These nodes are `evaluated`, so the failure
+        # list above (which keys on `NodeStatus.failed`) cannot see them, and the rank correctly
+        # refuses them — without this they were the one population the run learnt nothing from.
+        observed = _unmeasured_observation_rows(final, 3)
         # PROVENANCE for reconciliation: the concrete nodes this whole-run reflection is grounded in
         # (the winning rows + the failure rows fed into the prompt). Stamped on every lesson below so a
         # later re-eval that FLIPS any of these outcomes (a false-failure re-scored to evaluated, a
         # champion demoted) is detected by `reconcile_lessons` and the batch is re-derived from the
         # corrected state. Coarse on purpose: a whole-run generalization can't be attributed per-node, so
         # ANY fed-node change invalidates the batch (one LLM re-reflection — cheap, correct).
-        ev_ids = [n.id for n in ok] + [n.id for n in bad]
+        # The observation rows are grounded in a node exactly as the other two are — a salvaged node
+        # whose contract is later re-checked and PASSES becomes a measured one (metric_salvage.py's
+        # RE-CHECK section), which is precisely the flip this signature exists to catch.
+        ev_ids = [n.id for n in ok] + [n.id for n in bad] + [n.id for n, _ in observed]
         ev_sig = self._evidence_sig_map(final, ev_ids)
         # The full experimental record — every resolved Card work item with its outcome + Δ — so the LLM can
         # CONSOLIDATE many trials of the SAME theme (e.g. every temperature experiment) into ONE lesson,
@@ -352,7 +413,7 @@ class LessonDistillMixin:
         # still return without a call: the prompt would carry a task line and nothing else, and the
         # model can only invent. This is the guard `best is None` was standing in for, stated over the
         # evidence it was a proxy for. A run with failures but no winner has evidence and reflects.
-        if not (rows or fails or hyps):
+        if not (rows or fails or hyps or observed):
             return []
         # With no winner the failure rows are the ONLY evidence, so say what the run is and point the
         # model at the tools that hold the detail (`error_reason` is a one-word bucket — "crash" — and
@@ -367,6 +428,14 @@ class LessonDistillMixin:
         prompt = ("Distil reusable LESSONS from a finished ML experiment run, to guide FUTURE runs on "
                   f"SIMILAR tasks.\nTask: {final.goal}" + worked +
                   ("\nWhat failed:\n" + "\n".join(fails) if fails else "") +
+                  # ADDITIVE: absent unless the run actually salvaged a metric it then excluded, so
+                  # every prompt without one is byte-identical to the shipped contract. The header
+                  # states the boundary in the prompt itself — a row the model may generalize about
+                  # only as a failure — because the alternative to saying it is a model that reads a
+                  # bare "#3 failed its declaration" beside a "what worked" table and infers a
+                  # comparison nobody made.
+                  ("\nWhat RAN but was NEVER MEASURED (generalize about what broke, never about a "
+                   "metric):\n" + "\n".join(line for _, line in observed) if observed else "") +
                   ("\nHypotheses tested (outcome, Δ):\n" + "\n".join(hyps) if hyps else "") +
                   "\n\nWrite GENERALIZABLE lessons — transferable findings, NOT these exact numbers "
                   "(e.g. 'a larger batch size aided convergence'). CONSOLIDATE every finding about the "
