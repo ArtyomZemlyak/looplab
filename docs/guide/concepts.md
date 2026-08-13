@@ -408,10 +408,19 @@ That marker cannot cover the part of a build that happens *before* it. `node_bui
 after the Researcher's proposal returns, so for the whole of that call — routinely the longest single
 wait in the loop — there is no marker, no node and no state field, and every surface fell through to
 "Planning next experiment…". The engine therefore also emits a **`phase_progress` beacon** at each
-step boundary of a build (`propose` → `novelty` → `reserve` → `implement`/`repair`) and of a **resume**
-(`read_log` → `reconcile`). It is a *diagnostic* event: `replay.fold` ignores it by design, because it
-is transient progress and a resume must rebuild the same `RunState` with or without it, and because
-it is appended from concurrent producers where only a fold-ignored type is permitted (invariant #1).
+step boundary of a build (`propose` → `novelty` → `reserve` → `implement`/`repair`). It is a
+*diagnostic* event: `replay.fold` ignores it by design, because it is transient progress and a resume
+must rebuild the same `RunState` with or without it, and because it is appended from concurrent
+producers where only a fold-ignored type is permitted (invariant #1).
+
+A **resume** is just as blank as a build was — every line of `Engine._enter_run` runs before the
+loop's first turn, so nothing the UI polls has moved — and it deliberately has **no** beacon. The
+event log is the wrong channel for that particular wait: the prologue is where the speculation
+receipt gate (which pins the log bytes as unchanged when it *rejects* a run), the finalize-scope
+reconciliation and the settled-width pins all read the raw log, and beacons appended there changed
+which branch the wrap-up handshake took, minting a fresh **paid** finalize scope instead of resuming
+the existing one. Making a resume visible needs a channel that is not `events.jsonl` — a run-dir
+progress sidecar the server tails is the obvious candidate.
 
 The `(stage, phase)` vocabulary is closed in `events/types.py::PROGRESS_PHASES` and asserted at every
 append site by `assert_progress_phase` — a beacon has no reader that fails loudly (the fold skips it,
@@ -1025,11 +1034,11 @@ drives a `✍️ writing` / `🔧 repairing` / `🔀 merging` status (by the nod
 node's trace live; a `pending` node is being **trained** (the sandbox eval — no LLM), shown as
 `running (training)` with no live pulse. The Dock's status strip goes one level finer, from the
 `phase_progress` beacons above: it names the STEP ("Proposing 4 experiments…", "Writing code for
-experiment #7…", "Resuming — reading the run log…") rather than only the fact that a build is running,
+experiment #7…") rather than only the fact that a build is running,
 and its age clock measures the current *phase* rather than the whole build — so `40m` beside "Writing
 code for experiment #7…" means the Developer has been going forty minutes. The decode is the pure
 model `ui/src/buildingModel.js::openPhases`/`livePhase`/`phaseLabel`; `Dock.jsx` keeps only the choice
-of which label to show. The assistant chat streams the same way — interstitial prose
+of which label to show. A resume still shows only the transport strip's "Resume requested…". The assistant chat streams the same way — interstitial prose
 (`SSE_TEXT`) and tool steps (`SSE_STEP`) between tool rounds, Claude-Desktop-style.
 
 ## Module map

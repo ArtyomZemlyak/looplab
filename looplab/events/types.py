@@ -335,16 +335,22 @@ EV_PHASE_PROGRESS = "phase_progress"
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.
 PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_create_node_scoped`
-# The run prologue (`Engine._enter_run`) — everything between the process starting and the loop's
-# first turn. It runs on every invocation, fresh run and resume alike, but it is only EMITTED on a
-# re-entry: the call site gates it on a one-stat "the log is already non-empty" probe. That gate is
-# not a nicety. A `started` row appended before the prologue's own `read_all()` would (a) land in
-# that read, and the speculation-calibration bootstrap refuses a run whose log is not exactly empty
-# at start, and (b) displace the exact five-event setup prefix
-# `search/speculation_quality.py::_validate_calibration_setup` pins. It also keeps the label honest:
-# a fresh run must never be told it is "Resuming…".
-PROGRESS_STAGE_RESUME = "resume"
-PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD, PROGRESS_STAGE_RESUME})
+# ONE stage, and the absence of a `resume` one is a MEASURED result rather than an omission. A resume
+# is just as blank as a build — every line of `Engine._enter_run` runs before the loop's first turn,
+# so no node, marker or pending count has moved and the run looks dead — and beacons were added there
+# and REVERTED, because the event log is the wrong channel for that particular wait. Thirteen tests
+# across four files broke, and each was a real property: `test_speculation_runtime_gate` pins the log
+# BYTES as unchanged when the receipt gate rejects a run (an authorization property, and the gate sits
+# below the read a beacon would have to bracket); `test_report`/`test_stop_finalize_resume` broke on
+# finalize RECOVERY, where the appended rows changed which branch the wrap-up handshake took and
+# minted a fresh PAID scope instead of resuming the existing one; `test_end_to_end` and
+# `test_settled_width_pins` pin exact event counts across a resume. That is invariant #1's warning
+# arriving in practice — the question is never "does the fold read it?" but "does any reader key on
+# it?", and the prologue is precisely where the authorization fences, the finalize-scope
+# reconciliation and the width pins all read the raw log. Making a resume visible needs a channel
+# that is NOT events.jsonl (a run-dir progress sidecar the server tails is the obvious candidate);
+# adding a stage here without that channel would reintroduce all thirteen.
+PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD})
 # The steps of each stage, in the order they actually happen. The ORDER is meaningful to a reader (a
 # UI may render a stepper) but it is NOT a contract the engine has to satisfy, and a surface that
 # assumes every phase appears will be wrong on most real runs. Which ones fire is CONFIGURATION-
@@ -371,16 +377,6 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
     # one is noise, and a phase listed here that nothing emits would be worse: this table is what a
     # UI stepper would render, so an entry no run ever reaches shows the operator a step that never
     # completes. Add one here only together with its append site.
-    PROGRESS_STAGE_RESUME: (
-        "read_log",    # re-reading and folding events.jsonl — O(log size), and the first thing the
-                       # prologue does. On a large run this alone is the whole visible freeze, and
-                       # it is the one phase that CANNOT report its own start from the log's
-                       # contents, because it is what reads them.
-        "reconcile",   # everything the prologue settles before the first turn: the width repin, the
-                       # speculation receipt, interrupted-build recovery, command ACKs, setup
-        # No `ready` phase: "the loop is about to take its first turn" is exactly `reconcile`'s
-        # `finished` beacon, and a zero-length phase is a step an operator can never catch.
-    ),
 }
 PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})
 

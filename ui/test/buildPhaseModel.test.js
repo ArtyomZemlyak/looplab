@@ -71,15 +71,14 @@ test('a dead or finished run shows no phase, however many beacons are left open'
   assert.equal(livePhase(null, log), null)
 })
 
-test('a resume names its two phases — the prologue runs before anything else can move', () => {
-  const readLog = [beacon(100, { stage: 'resume', phase: 'read_log', status: 'started' })]
-  assert.equal(phaseLabel(livePhase(liveRun, readLog)), 'Resuming — reading the run log…')
-  const reconcile = [
-    ...readLog,
-    beacon(120, { stage: 'resume', phase: 'read_log', status: 'finished', events: 41203 }),
-    beacon(121, { stage: 'resume', phase: 'reconcile', status: 'started' }),
-  ]
-  assert.equal(phaseLabel(livePhase(liveRun, reconcile)), 'Resuming — restoring run state…')
+test('a stage this build does not ship stays unlabelled rather than half-rendered', () => {
+  // The resume stage was built, measured and REVERTED — the engine cannot beacon from its run
+  // prologue without moving a paid finalize decision (events/types.py::PROGRESS_STAGES). A row here
+  // without an emitter would put a phase on screen that never starts and never ends, so the model
+  // must degrade to the caller's own text instead.
+  const log = [beacon(100, { stage: 'resume', phase: 'read_log', status: 'started' })]
+  assert.equal(openPhases(log).length, 1)          // still decoded — the fold is stage-agnostic
+  assert.equal(phaseLabel(livePhase(liveRun, log)), null)
 })
 
 test('a speculative build says so — it is work that may be thrown away', () => {

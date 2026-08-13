@@ -17,7 +17,6 @@ from looplab.events.types import (
     EV_PHASE_PROGRESS,
     PROGRESS_PHASES,
     PROGRESS_STAGE_BUILD,
-    PROGRESS_STAGE_RESUME,
     PROGRESS_STAGES,
     PROGRESS_STATUSES,
     assert_progress_phase,
@@ -114,22 +113,27 @@ def test_a_real_build_narrates_its_phases(offline_run):
     assert all("seconds" in b and "ok" in b for b in finished)
 
 
-def test_a_fresh_run_emits_no_resume_beacon_and_keeps_the_calibration_setup_prefix(offline_run):
-    """The one-stat re-entry gate, driven rather than asserted about.
-
-    A `resume/read_log` started row on a fresh run would land in the prologue's own `read_all()`.
-    That breaks two things that both fail silently: the speculation-calibration bootstrap refuses a
-    run whose log is not exactly empty at start, and `speculation_quality._validate_calibration_setup`
-    pins the log's FIRST FIVE events as an exact setup prefix.
-    """
-    rows, beacons = _beacons(offline_run)
-    assert [b for b in beacons if b["stage"] == PROGRESS_STAGE_RESUME] == []
+def test_the_calibration_setup_prefix_still_opens_the_log(offline_run):
+    """`speculation_quality._validate_calibration_setup` pins the log's FIRST FIVE events as an exact
+    setup prefix, and the bootstrap separately refuses a run whose log is not exactly empty at start.
+    Both fail silently — a calibration run simply stops being able to mint a receipt — so the head of
+    a real run's log is asserted here rather than left to the gate to discover six GPU runs later."""
+    rows, _beaconed = _beacons(offline_run)
     assert [r["type"] for r in rows[:3]] == ["setup_started", "setup_step", "run_started"]
 
 
-def test_a_resume_narrates_the_prologue_that_runs_before_anything_else_moves(offline_run, tmp_path):
-    """A resume's blank wait is structural: the prologue happens before the loop's first turn, so no
-    node, marker or pending count has moved and the run looks dead."""
+def test_the_run_prologue_stays_write_free_because_its_readers_key_on_the_raw_log(offline_run,
+                                                                                  tmp_path):
+    """The measured reason `PROGRESS_STAGES` has one stage and not two.
+
+    A resume is just as blank as a build, and beacons WERE added to `Engine._enter_run` and reverted.
+    Thirteen tests across four files broke and every one was a real property — the receipt gate pins
+    the log BYTES as unchanged when it rejects a run, and finalize RECOVERY changed branch and minted
+    a fresh PAID scope instead of resuming the existing one. This drives the invariant that made
+    those breaks possible: a resume must add NO row of its own to the log before the loop's first
+    turn. If someone re-adds a prologue beacon, this fails here rather than in `test_report`, where
+    it reads as a finalize bug.
+    """
     import shutil
     from looplab.cli import app
     from typer.testing import CliRunner
@@ -137,18 +141,20 @@ def test_a_resume_narrates_the_prologue_that_runs_before_anything_else_moves(off
     resumed = tmp_path / "resumed"
     shutil.copytree(offline_run, resumed)
     (resumed / "engine.lock").unlink(missing_ok=True)
+    before = [json.loads(line) for line in
+              (resumed / "events.jsonl").read_text().splitlines() if line.strip()]
     result = CliRunner().invoke(app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2",
         "--direction", "min", "--backend", "toy", "--out", str(resumed), "--max-nodes", "8",
     ])
     assert result.exit_code == 0, result.output
-    _rows, beacons = _beacons(resumed)
-    resume = [b for b in beacons if b["stage"] == PROGRESS_STAGE_RESUME]
-    assert {b["phase"] for b in resume} == {"read_log", "reconcile"}
-    read_done = next(b for b in resume if b["phase"] == "read_log" and b["status"] == "finished")
-    # The numbers are what make the beacon actionable rather than decorative: an operator staring at
-    # a still screen is told the process is working, and roughly on what.
-    assert read_done["events"] > 0 and read_done["nodes"] > 0
+    rows, beacons = _beacons(resumed)
+    # Nothing may claim a stage the registry does not declare, and `resume` is not declared.
+    assert PROGRESS_STAGES == {PROGRESS_STAGE_BUILD}
+    assert all(b["stage"] in PROGRESS_STAGES for b in beacons)
+    # The already-durable prefix is untouched byte-for-byte: a re-entry appends only AFTER its
+    # authorization and finalize-reconciliation reads, never before or between them.
+    assert rows[:len(before)] == before
 
 
 def test_the_beacon_never_takes_down_the_work_it_reports_on(tmp_path):
@@ -185,10 +191,10 @@ def test_enabled_false_runs_the_body_and_emits_nothing(tmp_path):
 
     engine = Engine.__new__(Engine)
     engine.store = EventStore(tmp_path / "events.jsonl")
-    with engine._progress(PROGRESS_STAGE_RESUME, "read_log", enabled=False):
+    with engine._progress(PROGRESS_STAGE_BUILD, "propose", enabled=False):
         pass
     assert engine.store.read_all() == []
-    with engine._progress(PROGRESS_STAGE_RESUME, "read_log") as learned:
+    with engine._progress(PROGRESS_STAGE_BUILD, "propose") as learned:
         learned["events"] = 7
     types = [e.type for e in engine.store.read_all()]
     assert types == [EV_PHASE_PROGRESS, EV_PHASE_PROGRESS]

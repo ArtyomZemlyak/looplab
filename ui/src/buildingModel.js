@@ -148,11 +148,12 @@ const PHASE_TEXT = {
   'build|reserve': (r) => `Reserving experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
   'build|implement': (r) => `Writing code for experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
   'build|repair': (r) => `Repairing experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
-  // A resume is the other blank wait. `read_log` is named for what it costs rather than what it is
-  // called: on a long run the fold of a large events.jsonl IS the freeze, and an operator who is told
-  // that is not the one who kills the process thinking it hung.
-  'resume|read_log': () => 'Resuming — reading the run log…',
-  'resume|reconcile': () => 'Resuming — restoring run state…',
+  // A RESUME is the other blank wait and it is deliberately absent, not forgotten. The engine cannot
+  // emit a beacon from its run prologue: that is where the authorization fences, the finalize-scope
+  // reconciliation and the width pins all read the raw log, and appended rows moved a PAID finalize
+  // decision (see `events/types.py::PROGRESS_STAGES`). Making a resume visible needs a channel that
+  // is not the event log. This table is the place that would grow a row for it, so the note lives
+  // here too — a label added without that channel renders a phase nothing emits.
 }
 
 export function phaseLabel(record) {
