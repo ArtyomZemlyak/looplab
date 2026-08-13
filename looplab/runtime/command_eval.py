@@ -1540,6 +1540,15 @@ def bind_metric_subject(subject, workdir, *, since: Optional[float], stages=None
                     stage=stage)
 
 
+def absent_metric_subject() -> dict:
+    """The provenance record for a metric whose task declared no subject — see
+    `runtime/metric_subject.absent_declaration`. Re-exported here because the engine already reaches
+    the whole eval vocabulary through `command_eval`, and a second import path for one dict is how
+    two spellings of "no subject" come to exist."""
+    from looplab.runtime import metric_subject as _ms
+    return _ms.absent_declaration()
+
+
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None) -> _EvalRun:

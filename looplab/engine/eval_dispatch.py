@@ -644,6 +644,21 @@ class EvalDispatchMixin:
                 # violation is decided at the terminal, in `engine/evaluate.py`.
                 subject=(_subject if str(getattr(self, "metric_subject", "audit") or "audit") != "off"
                          else None))
+            # AN ABSENT DECLARATION IS ITSELF THE FINDING, and it has to be recorded HERE.
+            #
+            # `run_command_eval` records nothing when no subject is declared, deliberately: it is the
+            # library boundary, and "the operator declared nothing" is a fact about the TASK, not
+            # about the run. But `not_declared` is the state 82 of 83 corpus metrics are in — it is
+            # the whole reason this exists — so leaving it unrecorded would make `require` a rung
+            # that fires on a mis-declared subject and never on a missing one, i.e. on the rare case
+            # and not the universal one.
+            #
+            # Scoped to THIS branch, which is `if self._eval_spec:` — a task with an operator eval
+            # spec, the only place a `subject` could have been declared. A toy/dataset/sweep eval has
+            # no such field and must not be told it forgot one.
+            if (str(getattr(self, "metric_subject", "audit") or "audit") != "off"
+                    and getattr(res, "metric_subject", None) is None):
+                res.metric_subject = command_eval.absent_metric_subject()
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;

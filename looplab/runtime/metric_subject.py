@@ -292,6 +292,21 @@ def bind(subject, workdir, *, since: Optional[float] = None,
     return out
 
 
+def absent_declaration() -> dict:
+    """The provenance record for a metric whose task declared NO subject at all.
+
+    A named function rather than a dict literal at the engine's call site, because it is the rule
+    that decides the universal case: `not_declared` is the state 82 of 83 corpus metrics are in, so a
+    `require` rung that recorded only MIS-declared subjects would fire on the exception and never on
+    the rule. A rule nobody can state is a rule nobody reviews (CLAUDE.md's guard-test ladder, tier
+    2), and this one is otherwise reachable only through a whole simulated eval.
+
+    It is deliberately identical in shape to what `bind([])` returns — the engine and the runtime
+    must not have two spellings of "no subject" for a reader to have to recognise.
+    """
+    return bind([], "", since=None)
+
+
 # What an operator is told when a metric could not be bound. Per-reason, because the fixes are
 # genuinely different and a message naming the wrong one sends them hunting the wrong failure — the
 # same rule `command_eval._PATHLESS_COST` records for the reader slots.

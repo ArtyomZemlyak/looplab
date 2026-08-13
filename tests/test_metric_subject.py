@@ -376,3 +376,48 @@ def test_the_run_report_names_an_unbound_node_rather_than_silently_excluding_it(
     # …and it must NOT be reported as a constraint breach, which would accuse the run of something
     # that did not happen.
     assert "violated a constraint" not in text
+
+
+def test_a_task_that_declares_no_subject_is_recorded_as_unbound_not_as_silence():
+    """`not_declared` is the state 82 of 83 corpus metrics are in — the universal case, not the rare
+    one. A `require` rung that recorded only MIS-declared subjects would fire on the exception and
+    never on the rule.
+
+    The rule is a NAMED function rather than a dict literal at the engine's call site precisely so it
+    can be driven here: buried inside `_run_eval` it is reachable only through a whole simulated eval
+    (CLAUDE.md's ladder, tier 2). Its shape must equal what `bind([])` returns, or the engine and the
+    runtime would have two spellings of "no subject" for a reader to recognise.
+    """
+    from looplab.runtime.command_eval import absent_metric_subject
+    assert ms.absent_declaration() == ms.bind([], "", since=None)
+    assert absent_metric_subject() == ms.absent_declaration()
+    rows = unbound_subject_violation_rows(absent_metric_subject(), 0.5, "require")
+    assert [r["name"] for r in rows] == [SALVAGE_VIOLATION]
+    assert rows[0]["salvage"]["unbound_reason"] == "not_declared"
+
+
+def test_the_eval_dispatch_branch_records_the_absent_declaration_itself():
+    """That the engine CALLS the rule, from the branch that is scoped to an operator eval spec.
+
+    Tier 3 (AST, never substrings) and it says only what tier 3 can say: the call is in the text of
+    `_run_eval`. What it protects is the scoping — a toy/dataset eval has no `eval.metric` field and
+    must not be told it forgot one, so the call has to live inside `if self._eval_spec:` and nowhere
+    broader.
+    """
+    import ast
+    import inspect
+
+    from looplab.engine.eval_dispatch import EvalDispatchMixin
+    tree = ast.parse(inspect.getsource(EvalDispatchMixin._run_eval).lstrip())
+    called = {n.func.attr for n in ast.walk(tree)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "absent_metric_subject" in called
+    # …and it is inside the `self._eval_spec` branch, not beside it.
+    guarded = [b for b in ast.walk(tree)
+               if isinstance(b, ast.If)
+               and any(isinstance(x, ast.Attribute) and x.attr == "_eval_spec"
+                       for x in ast.walk(b.test))]
+    assert guarded, "the operator-eval-spec branch is gone — re-derive this scoping"
+    inner = {n.func.attr for b in guarded for n in ast.walk(b)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    assert "absent_metric_subject" in inner
