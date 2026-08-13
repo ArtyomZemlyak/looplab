@@ -118,6 +118,18 @@ def _failure_reason(res) -> str:
         return "timeout"
     if (res.stderr or "").startswith("setup failed:"):
         return "setup"
+    # The two WATCHDOG verdicts come BEFORE the exit-code heuristics, because the engine caused the
+    # exit code it would otherwise be reading: both watchdogs tree-kill, so both land on exactly the
+    # `-9 with no traceback` signature the OOM branch below recognises. Read the authenticated flags
+    # (`runtime/command_eval.py` fills them from `run_argv`'s out-of-band `signals`), never the stderr
+    # sentinels — those are mixed into the candidate's own output and are forgeable.
+    # Divergence outranks a stall: a run that logs non-finite records and then goes silent is
+    # stall-killed first and the drain confirms the divergence afterwards, which is the same
+    # precedence `command_eval._salvageable_stall` applies to the salvage gate.
+    if getattr(res, "diverged", False):
+        return "diverged"
+    if getattr(res, "stalled", False):
+        return "stalled"
     if res.exit_code != 0:
         # OOM-kill: on a memory-capped pod (a JupyterHub cgroup limit) the kernel SIGKILLs a too-big
         # eval — exit -9 (POSIX, Python returns -signal) or 137 (128+9) — with little/no Python
@@ -137,6 +149,8 @@ def _failure_reason(res) -> str:
     # its own source.
     _rows = [row for row in (getattr(res, "stages", None) or []) if isinstance(row, dict)]
     _last = str(_rows[-1].get("status") or "") if _rows else ""
+    if _last == "needs_failed":
+        return "needs_failed"
     if _last == "expect_failed":
         return "expect_failed"
     if _last == "check_failed":
@@ -379,9 +393,17 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     history — so `max_attempts` is doing all the work here, which is exactly why the backstop is not
     optional."""
     err = error or ""
-    if reason in ("timeout", "oom") and attempt <= max_attempts:
-        why = ("timeout — reduce compute to fit the budget (rule-based)" if reason == "timeout"
-               else "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)")
+    # The two watchdog verdicts join timeout/oom here because they are the same KIND of fact: the run
+    # was stopped by a resource or health rule, not by a mistaken idea, so the deterministic path can
+    # safely say "repair" without a judge. Each carries its OWN rationale — the whole reason they are
+    # separate reasons is that "reduce memory" is the wrong instruction for both.
+    if reason in ("timeout", "oom", "diverged", "stalled") and attempt <= max_attempts:
+        why = {"timeout": "timeout — reduce compute to fit the budget (rule-based)",
+               "oom": "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)",
+               "diverged": "health-check killed it — the loss/grad_norm went non-finite; stabilise the "
+                           "objective (LR, warmup, grad clipping, epsilons), do NOT cut memory (rule-based)",
+               "stalled": "stall watchdog killed it — the stage was alive and silent; remove the hang or "
+                          "emit a heartbeat, do NOT cut memory (rule-based)"}[reason]
         return {"action": "repair", "rationale": why}
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
     if reason == "crash" and mechanical and attempt <= max_attempts:

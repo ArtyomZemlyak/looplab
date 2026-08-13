@@ -226,6 +226,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "reachability": "agents",  # task-aware inventory of reachable LLM consumers at run start
+    "read_fence": "runtime",   # the source-tree read fence: the generated per-run sitecustomize
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",

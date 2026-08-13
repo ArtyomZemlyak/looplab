@@ -777,8 +777,17 @@ class RepoTask(BaseModel):
         and leave the Developer nothing to change — the adapter would stop being able to run an
         experiment at all. The residual hole is real and is stated rather than papered over: a
         scorer that reads its checkpoint path from an editable config can still be pointed
-        somewhere else. What closes THAT is the stage `expect` contract and the artifact rules in
-        the Developer prompt, not a wider protect list.
+        somewhere else.
+
+        What closes THAT is `runtime/read_fence.py`. This docstring used to name the stage `expect`
+        contract and the Developer prompt instead, and both were measured NOT to close it: `expect`
+        checks what a stage WRITES and never what it READS, so `runs/rubertlite-dr-unified-v6`
+        node 4 passed its artifact contract while scoring a HUMAN's checkpoint that an absolute path
+        in exactly such an editable config named (its own train.log records RECALL@100 0.726; the
+        score.log the run recorded, 0.225) — and the prompt-level advisory that fires on that very
+        edit is in the node's `spans.jsonl` verbatim and was committed over anyway. The fence is a
+        read-side mechanism rather than a wider protect list precisely because the protect list is
+        the thing this docstring explains cannot be widened.
         """
         if self.eval is None or not self.eval.protect_entrypoint:
             return {}

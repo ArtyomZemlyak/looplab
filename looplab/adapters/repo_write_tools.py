@@ -223,7 +223,9 @@ class RepoWriteTools:
                         "verbatim — this tool will refuse; fix the failing stage's script instead."
                         if self._operator_stages else ""),
                      {"stages": {"type": "array", "description":
-                                 "ordered preceding stages, each {name, command:[argv...], timeout?, check?}"}},
+                                 "ordered preceding stages, each {name, command:[argv...], timeout?, "
+                                 "check?, needs?:[input paths this stage READS], "
+                                 "expect?:{files:[output paths this stage WRITES], assert?}}"}},
                      ["stages"]),
         ]
 

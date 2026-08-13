@@ -68,6 +68,7 @@ ATTR_BY_FIELD = {
     "sandbox_memory": "sandbox_memory",
     "sandbox_cpus": "sandbox_cpus",
     "seed_mode": "_seed_mode",
+    "read_fence": "_read_fence",
     "n_seeds": "n_seeds",
     "max_nodes": "max_nodes",
     "policy_name": "_policy_name",

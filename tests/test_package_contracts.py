@@ -44,7 +44,7 @@ def _package_imports(package: str) -> dict[str, set[str]]:
 
 def test_runtime_holds_only_process_execution_modules():
     names = {path.stem for path in (ROOT / "runtime").glob("*.py")} - {"__init__"}
-    assert names == {"sandbox", "command_eval", "deps", "bg_tasks"}, (
+    assert names == {"sandbox", "command_eval", "deps", "bg_tasks", "read_fence"}, (
         "a module that is not process execution landed in runtime again")
 
 

@@ -71,6 +71,39 @@ phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engi
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
 falls back to the single command instead of half-running).
 
+**Each stage may declare what it READS — `needs`.** The counterpart of `expect`, and the half that was
+missing until 2026-08-13: a manifest described what every stage produced and nothing about what it
+consumed, so a pipeline whose stages disagreed about where a file lives had no way to say so. Both of
+the most expensive failures on record are that shape — one run trained for 76 minutes and then scored a
+directory the trainer never wrote to; another trained a model to recall@100 0.726 and scored a *human's*
+checkpoint that an absolute path in an editable config named, with every artifact contract passing and
+`0.225` recorded as the experiment's result.
+
+```jsonc
+{ "name": "score", "command": ["python", "score.py"], "timeout": 3600,
+  "needs": ["ckpt/model.pt", "data/eval.parquet"] }   // workdir-relative paths this stage READS
+```
+
+Each declared input must exist inside the workdir and be non-empty **before** the stage starts. It is a
+`stat()` per path, so the failure costs one second instead of the stage's runtime, and it fails *before*
+the GPU-hours rather than after them. When an **earlier** stage declared the missing path in its own
+`expect.files`, the refusal names that stage, so a disagreement between two declarations reads as one
+sentence instead of a traceback inside somebody's loader three stages later; when a file of the same
+name exists elsewhere in the workdir, that path is reported too — "your training worked and one of the
+two paths is wrong" is a different repair from "nothing was produced".
+
+There is deliberately **no freshness rule** on an input. `expect` refuses an artifact older than the
+stage, because a stale output means the stage did not produce it; an input is legitimately older by any
+amount — the seeded repo, a mounted dataset, a base checkpoint, or a `train` output the engine
+deliberately reused across repair attempts. Applying the output rule here would refuse the very reuse
+the persistent workdir exists for.
+
+A missing input fails the stage as `needs_failed` — its own repair reason, separate from
+`expect_failed`, because the stage never ran: nothing about its code is implicated, and the repair is in
+one of the two *declarations*. Deleting the `needs` entry is explicitly not a fix; it only moves the
+identical failure into the stage's own loader, later and more expensively. Omit `needs` entirely for a
+stage that reads only the workspace it was seeded with — an empty declaration asserts nothing.
+
 **Each stage may declare what its success MEANS — `expect`.** Exit 0 is not evidence a stage worked: a
 mining stage that produced hard negatives for 1.2% of the queries exits 0 exactly like one that produced
 100%, and the next stage consumes the 1.2% as if it were whole (this happened on a real run, and the
@@ -225,8 +258,31 @@ Three things follow, and each is deliberate:
 **What is protected is the entrypoint file, not what it imports.** A scorer's import closure is the
 repo (its model, config and data modules), so freezing it would freeze everything and leave the agent
 nothing to change. A scorer that reads its checkpoint path from an *editable* config can therefore
-still be pointed elsewhere; what holds that line is the stage `expect` contract (below), not a wider
-`protect` list.
+still be pointed elsewhere; what holds that line is the **source-tree read fence**, not a wider
+`protect` list and not the stage `expect` contract.
+
+**The source-tree read fence (`read_fence`, default `deny`).** A node runs in its own copy of your
+editable repo, so the source tree provably cannot contain anything that node's pipeline produced.
+The fence makes reading it impossible: a generated `sitecustomize.py` under
+`<run>/.looplab-fence/` goes first on the eval's `PYTHONPATH` and installs an audit hook that refuses
+any `open` resolving under an editable source root, raising in the child with a message that names
+the fix — so it lands in the node's own stderr and reaches the repair loop. It exists because
+`expect` checks what a stage **writes** and never what it **reads**: on `rubertlite-dr-unified-v6`
+node 4 trained a good model (its own `train.log` records `RECALL@100: 0.726`) and then scored a
+*human's* checkpoint that an absolute path in an editable config pointed at (`score.log:
+0.225` — the number the run recorded), with the artifact contract passed and no violation anywhere.
+
+What stays readable: the node workdir, the run directory, `/tmp`, site-packages, the model/HF cache,
+and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned read channel and
+is allow-listed even when it lives inside the editable tree. The fence is a no-op for a non-repo task
+and for the Docker tiers (the source is never bind-mounted into a container), and it is an
+interpreter-level hook, so a non-Python binary is not covered.
+
+The one legitimate refusal is a large **untracked** in-tree input that `seed_mode: auto` does not
+copy into the workdir. Fix it by declaring a `dataset`/`references` mount or setting
+`seed_mode: "all"` — the refusal names all three. `read_fence: "warn"` lets the read through while
+logging it to stderr and to `<run>/.looplab-fence/violations.log`, which is the honest setting for
+one run while you find out what your pipeline actually reads; `"off"` installs nothing.
 
 **A `protect`ed file is also always MATERIALIZED into every node workdir**, whatever `seed_mode` says —
 it is copied from the editable source after the tree seed, before the mounts. That is not cosmetic: the
@@ -528,7 +584,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` exposes the source at `./name` as a **read-only symlink** (and a read-only bind mount under the Docker tiers), **not** a copy (`engine/workspace.py:183-185`, `engine/eval_dispatch.py:151-153`); `false` is context-only. Edits under `./name` therefore reach your source — the read-only mount is what prevents that. |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
-| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, expect?}` — `expect` is the stage's success contract (`{files?, assert?}`, see above), and declaring it on an operator stage is how you hold a stage the agent may not edit to a condition |
+| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, needs?, expect?}` — `needs` lists the workdir-relative files the stage READS (checked before it starts) and `expect` is the stage's success contract (`{files?, assert?}`, see above); declaring either on an operator stage is how you hold a stage the agent may not edit to a condition |
 | `eval.cwd` | Working directory for the eval, relative to the node eval workdir (default `.`) |
 | `eval.setup_timeout` | Per-node `eval.setup` budget in seconds (default `600`) |
 | `eval.run_setup` | **Run-level** setup: runs ONCE at run start in the editable repo root, not per node — the autonomy default when deps don't change between experiments. A failure aborts the run. **You usually do not need to set this.** When your first editable repo ships a `requirements.txt`, LoopLab derives `python -m pip install -r requirements.txt` and runs it here by default, so the repo's pinned versions are the versions the eval gets (`auto_install_deps`, on by default, `trusted_local` only). Setting it explicitly **replaces** that default entirely — nothing is prepended or merged — which is how you install something else, or nothing |

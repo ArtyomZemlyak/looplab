@@ -1175,6 +1175,30 @@ class Settings(BaseSettings):
     # code-only; "all" forces a full recursive copy (legacy). Genesis authors per-task from the
     # user's words; this is the global default when unspecified.
     seed_mode: str = "auto"
+    # Source-tree READ FENCE (`runtime/read_fence.py`): what happens when a node's own process tries
+    # to read the operator's editable SOURCE tree. "deny" (default) raises in the child and the
+    # refusal — which names the fix — lands in the node's stderr; "warn" logs one line per distinct
+    # path to stderr and to `<run>/.looplab-fence/violations.log` and lets the read through; "off"
+    # installs nothing. No-op for a non-repo task: with no editable source there is nothing to fence.
+    #
+    # WHY DENY IS THE DEFAULT, and not warn. The failure this closes does not announce itself.
+    # `runs/rubertlite-dr-unified-v6` node 4 trained a genuinely good model (train.log RECALL@100
+    # 0.726) and then scored a HUMAN's checkpoint from 2026-07-18 that an absolute path in an
+    # editable config pointed at (score.log RECALL@100 0.225) — and that second number is what the
+    # run recorded. `expect` passed, because `expect` checks what a stage WRITES and never what it
+    # READS. A warn rung would have logged that and the run would have recorded the same corrupt
+    # metric, so warn does not close the defect; it only makes it auditable afterwards. It is also
+    # exactly the rung already tried and already spent: an advisory note fires on `edit_file` today
+    # with this very text, is in node 4's `spans.jsonl` verbatim, and the node committed the path
+    # anyway. Warn stays available because it is the honest answer for ONE run while an operator
+    # finds out what their pipeline actually reads.
+    #
+    # The one real false positive is a large untracked in-tree input that `seed_mode: "auto"` does
+    # not copy into the workdir: under deny that run fails LOUDLY, in the child, with a message
+    # naming all three fixes (`data:` mount, `references:` mount, `seed_mode: "all"`). Loud and
+    # wrong is strictly cheaper than silent and wrong — the silent version cost 76 GPU-minutes and a
+    # published metric that was off by 3x.
+    read_fence: str = "deny"
     llm_model: str = "qwen3:8b"
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -1664,6 +1688,10 @@ class Settings(BaseSettings):
         ("strategist_backend", ("off", "rule", "llm", "agent")),
         ("eval_trust_mode", ("ratify_freeze", "autonomous", "ratify_freeze_drift")),
         ("seed_mode", ("auto", "tracked", "all")),
+        # Spelled out rather than imported from `runtime/read_fence.py::POLICIES`: `core` imports
+        # nothing above itself, and `runtime` imports `core`, so the import would close a cycle.
+        # `tests/test_read_fence.py` pins the two spellings equal.
+        ("read_fence", ("off", "warn", "deny")),
         ("backend", ("toy", "llm")),
         ("developer_backend", lambda: DEVELOPER_BACKENDS),
         ("llm_parser", lambda: _parser_names()),

@@ -164,7 +164,12 @@ def test_every_closed_vocabulary_field_is_validated():
                        # metric the run recovered rather than measured may become champion, so an
                        # out-of-set value silently falling through would be the loudest version of
                        # exactly the failure this test exists for.
-                       "metric_salvage"}
+                       "metric_salvage",
+                       # `read_fence` (off|warn|deny) joined 2026-08-13. Its out-of-set failure is
+                       # the worst shape this test guards: `read_fence="Deny"` would install no
+                       # fence at all, and the run would look exactly like a fenced one right up to
+                       # the node that reads a foreign checkpoint and reports its score.
+                       "read_fence"}
 
 
 @pytest.mark.parametrize("field,bad", [
@@ -172,6 +177,7 @@ def test_every_closed_vocabulary_field_is_validated():
     ("strategist_backend", "Rule"), ("eval_trust_mode", "ratify"), ("seed_mode", "auto "),
     ("backend", "TOY"), ("developer_backend", "aidr"), ("llm_parser", "toolcall"),
     ("metric_salvage", "Audit"),
+    ("read_fence", "Deny"),
 ])
 def test_a_near_miss_value_fails_loudly_and_names_the_vocabulary(field, bad):
     with pytest.raises(ValueError) as info:

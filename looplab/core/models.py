@@ -588,12 +588,24 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # options and the settings docs — the failure mode of the copies is silent, and it has already
 # happened once: `no_metric` was in the classifier and absent from the default set, so that whole
 # class of failure was never repaired and nobody had decided it should not be.
+# `needs_failed` is the INPUT contract's twin of `expect_failed` and is separate for the same kind of
+# reason: the stage never RAN, so nothing about its own code is implicated — the repair is either an
+# earlier stage that wrote its output elsewhere or a declaration that names the wrong path, and
+# telling the Developer "your stage crashed" would send it to read code that never executed.
 # `expect_failed` / `check_failed` are deliberately NOT folded into `no_metric`: the command did
 # not "run cleanly and print nothing", it ran and then failed a contract its own manifest
 # declared. Measured cost of the conflation — rubertlite-dr-unified-v5 node 0 died as
 # `no_metric` having printed its metric, and the operator was told the command printed none.
+# `diverged` and `stalled` are the two WATCHDOG verdicts, and they are separate members for the same
+# reason: both are tree-kills the ENGINE issued, so both exit -9 with no traceback — byte-identical to
+# the kernel OOM signature `_failure_reason` recognises. Measured cost of that conflation on
+# rubertlite-dr-unified-v6 node 5: the DIVERGE watchdog stopped a training whose loss went 1.2e+25
+# then NaN, the classifier called it `oom`, and the Developer spent three repair rounds halving the
+# batch size (8192 -> 2048 -> 512 -> 256) at ~3 GPU-minutes each while the actual instability went
+# untouched. "Reduce memory" and "stabilise the numerics" are opposite directives.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
-                                    "expect_failed", "check_failed")
+                                    "expect_failed", "check_failed", "diverged", "stalled",
+                                    "needs_failed")
 
 
 def is_developer_error(code) -> bool:

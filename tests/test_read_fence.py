@@ -1,0 +1,500 @@
+"""The source-tree READ FENCE (`looplab/runtime/read_fence.py`).
+
+Every behavioural test here launches a REAL subprocess through `run_argv` — the same choke point the
+engine uses — and asserts on what that process could and could not read. That is deliberate on two
+counts. First, the property is "a node's process cannot read the operator's source tree", and only a
+real interpreter with the generated `sitecustomize` on its PYTHONPATH can be said to have it.
+Second, `sys.addaudithook` is IRREVERSIBLE: installing the fence in the pytest process would fence
+the test session itself for the rest of the run. The one in-process test (`test_predicate_*`) execs
+the generated source under the probe name, which is the seam that yields the pure predicate WITHOUT
+installing a hook.
+
+The headline test is `test_a_source_read_is_refused_with_the_message`, and it is written to fail
+without the fence: the same child, launched without the marker, reads the file and prints its
+contents. That is the shape of the defect it closes — `runs/rubertlite-dr-unified-v6` node 4 read a
+human's checkpoint out of the editable source tree and scored it, and every gate the run had passed.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import textwrap
+from pathlib import Path
+
+import pytest
+
+from looplab.core.config import Settings
+from looplab.runtime import read_fence
+from looplab.runtime.sandbox import run_argv
+
+# The fixture the whole file shares: an editable SOURCE tree holding the operator's checkpoint, a
+# `data:` mount source that lives INSIDE it (the legal read channel, and the one shape a naive
+# prefix fence would break), a node workdir, and a "model dir" standing in for an HF cache.
+CHECKPOINT = "HUMAN CHECKPOINT FROM 2026-07-18"
+
+
+def _world(tmp_path):
+    src = tmp_path / "vectorizer-unified"
+    (src / "experiments" / "baseline" / "final").mkdir(parents=True)
+    (src / "experiments" / "baseline" / "final" / "model.safetensors").write_text(CHECKPOINT)
+    (src / "corpus").mkdir()
+    (src / "corpus" / "queries.jsonl").write_text("mounted data\n")
+    sibling = tmp_path / "vectorizer-unified-notes"      # proves the root compare is not a substring
+    sibling.mkdir()
+    (sibling / "note.txt").write_text("sibling, not fenced\n")
+    run_dir = tmp_path / "run"
+    wd = run_dir / "nodes" / "node_4"
+    wd.mkdir(parents=True)
+    (wd / "own.txt").write_text("the node's own copy\n")
+    models = tmp_path / "hf-cache"
+    models.mkdir()
+    (models / "config.json").write_text("{}\n")
+    return src, sibling, run_dir, wd, models
+
+
+def _install(run_dir, src, *, policy="deny", allow=()):
+    """Install a fence the way the engine does, via the same input derivation."""
+    spec = {"editables": [{"name": ".", "path": str(src)}],
+            "data": {name: {"path": str(p)} for name, p in allow}}
+    roots, allowed, dropped = read_fence.fence_inputs(spec, allow=[str(run_dir)])
+    assert not dropped
+    return read_fence.install(run_dir, roots=roots, allow=allowed, policy=policy)
+
+
+def _run(code, wd, fence_dir=None, extra_env=None):
+    env = dict(extra_env or {})
+    if fence_dir:
+        env[read_fence.FENCE_DIR_ENV] = fence_dir
+    return run_argv([sys.executable, "-c", textwrap.dedent(code)], str(wd), 60.0, env or None)
+
+
+# --------------------------------------------------------------------------- the property
+
+
+def test_a_source_read_is_refused_with_the_message(tmp_path):
+    """A real process opening the operator's checkpoint is refused, and the refusal names the fix.
+
+    Fails without the fence: the control half below is the SAME child with no marker, and it reads
+    the file. This is exactly node 4's read."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    code = f"print(open({str(target)!r}).read())"
+
+    unfenced_rc, unfenced_out, _err, _to = _run(code, wd)
+    assert unfenced_rc == 0 and CHECKPOINT in unfenced_out, "control: the read must succeed unfenced"
+
+    fence = _install(run_dir, src)
+    rc, out, err, timed_out = _run(code, wd, fence)
+    assert rc != 0 and not timed_out
+    assert CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+    assert read_fence.REFUSAL_MESSAGE.replace("{path}", str(target)) in err
+    # The exact repair instructions, spelled out, because the reader is the repair loop.
+    assert "Use a workdir-relative path" in err
+    assert "`data:`/`references:` mount" in err and 'seed_mode: "all"' in err
+
+
+def test_the_refusal_is_not_swallowed_by_an_oserror_handler(tmp_path):
+    """`except OSError: <fall back>` is THE shape around a file read. A `PermissionError` would be
+    caught by it and the fence would become the silent skip the requirements forbid."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run(f"""
+        try:
+            data = open({str(target)!r}).read()
+        except (OSError, IOError):
+            print("SWALLOWED — the fence was caught by a routine fallback")
+        """, wd, fence)
+    assert "SWALLOWED" not in out
+    assert rc != 0 and "LoopLabSourceReadRefused" in err
+
+
+def test_controls_stay_readable(tmp_path):
+    """The workdir, a data mount whose source lives INSIDE the fenced root, site-packages, the
+    stdlib, a model/HF cache dir and a sibling directory with a shared name prefix all stay open."""
+    src, sibling, run_dir, wd, models = _world(tmp_path)
+    mount = wd / "corpus"                       # how `link_input` materializes a `data:` mount
+    mount.symlink_to(src / "corpus")
+    fence = _install(run_dir, src, allow=[("corpus", src / "corpus")])
+    import pydantic                              # a real site-packages file, outside every root
+    rc, out, err, _to = _run(f"""
+        import json, os
+        reads = {{}}
+        reads["workdir"] = open("own.txt").read().strip()
+        reads["mount_through_symlink"] = open("corpus/queries.jsonl").read().strip()
+        reads["mount_at_source"] = open({str(src / 'corpus' / 'queries.jsonl')!r}).read().strip()
+        reads["site_packages"] = os.path.basename(open({pydantic.__file__!r}).name)
+        reads["stdlib"] = os.path.basename(open(json.__file__).name)
+        reads["model_dir"] = open({str(models / 'config.json')!r}).read().strip()
+        reads["prefix_sibling"] = open({str(sibling / 'note.txt')!r}).read().strip()
+        open(os.path.join({str(tmp_path)!r}, "scratch"), "w").write("x")   # writes are audited too
+        reads["tmp"] = "ok"
+        print(json.dumps(reads))
+        """, wd, fence)
+    assert rc == 0, err
+    # A fenced process must be SILENT when nothing is refused. The first spelling of the
+    # sitecustomize chain popped `sys.modules["sitecustomize"]`, which made importlib's own
+    # `sys.modules.pop(name)` raise and put
+    # `Error in sitecustomize; set PYTHONVERBOSE for traceback: KeyError: 'sitecustomize'`
+    # on the stderr of every fenced eval — into eval.log, into the captured tail, into the repair
+    # loop's input. Nothing else here would have failed on it.
+    assert err == "", err
+    got = json.loads(out.strip().splitlines()[-1])
+    assert got == {
+        "workdir": "the node's own copy",
+        "mount_through_symlink": "mounted data",
+        "mount_at_source": "mounted data",
+        "site_packages": os.path.basename(pydantic.__file__),
+        "stdlib": "__init__.py",
+        "model_dir": "{}",
+        "prefix_sibling": "sibling, not fenced",
+        "tmp": "ok",
+    }
+
+
+def test_a_grandchild_process_is_fenced_too(tmp_path):
+    """PYTHONPATH is inherited, so a dataloader worker / torchrun rank / a shell script's python is
+    fenced at no extra cost. This is the whole reason the mechanism is `sitecustomize` and not an
+    in-process patch of the eval's entry module."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run(f"""
+        import subprocess, sys
+        r = subprocess.run([sys.executable, "-c", "print(open({str(target)!r}).read())"],
+                           capture_output=True, text=True)
+        print("GRANDCHILD_RC", r.returncode)
+        print(r.stderr)
+        """, wd, fence)
+    assert rc == 0                              # the parent itself read nothing
+    assert "GRANDCHILD_RC 1" in out
+    assert "LoopLabSourceReadRefused" in out
+    assert CHECKPOINT not in out
+
+
+def test_chdir_into_the_source_tree_is_refused(tmp_path):
+    """The hot path bails on a relative path with no `..` without touching the filesystem, which is
+    only sound while the cwd cannot BE the source tree. Refusing the chdir is what keeps it sound."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run(f"""
+        import os
+        os.chdir({str(src)!r})
+        print(open("experiments/baseline/final/model.safetensors").read())
+        """, wd, fence)
+    assert rc != 0 and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+
+
+# --------------------------------------------------------------------------- the rungs
+
+
+def test_warn_rung_reads_through_and_records_it(tmp_path):
+    """The defensible-for-one-run rung: the read happens, but it is on the node's stderr and in the
+    run's own diagnostic, so an operator finding out what their pipeline reads is not flying blind."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src, policy="warn")
+    rc, out, err, _to = _run(f"print(open({str(target)!r}).read())", wd, fence)
+    assert rc == 0 and CHECKPOINT in out                     # warn does NOT stop the read …
+    assert "LOOPLAB READ FENCE (warn)" in err                # … it makes it observable
+    assert read_fence.REFUSAL_MESSAGE.replace("{path}", str(target)) in err
+    rows = read_fence.violations(run_dir)
+    assert len(rows) == 1 and rows[0].startswith("warn\t") and str(target) in rows[0]
+
+
+def test_warn_is_bounded_per_distinct_path(tmp_path):
+    """A retry loop must not turn the diagnostic into a gigabyte of the same line."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src, policy="warn")
+    rc, _out, err, _to = _run(f"""
+        for _ in range(50):
+            open({str(target)!r}).read()
+        """, wd, fence)
+    assert rc == 0
+    assert err.count("LOOPLAB READ FENCE (warn)") == 1
+    assert len(read_fence.violations(run_dir)) == 1
+
+
+def test_off_installs_nothing(tmp_path):
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    assert _install(run_dir, src, policy="off") is None
+    assert not (run_dir / read_fence.FENCE_DIRNAME).exists()
+
+
+def test_deny_records_the_refusal_beside_the_run(tmp_path):
+    """The stderr traceback is the primary channel, but a child that swallows every exception would
+    take the evidence with it. The run keeps its own copy."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    _run(f"""
+        try:
+            open({str(target)!r}).read()
+        except BaseException:
+            pass
+        """, wd, fence)
+    rows = read_fence.violations(run_dir)
+    assert len(rows) == 1 and rows[0].startswith("deny\t") and str(target) in rows[0]
+
+
+# --------------------------------------------------------------------------- the predicate
+
+
+def _predicate(roots, allow=()):
+    """The generated fence's own `_fenced`, WITHOUT installing its irreversible audit hook."""
+    src = read_fence.render(roots, allow, policy="deny", log="", run="")
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "sitecustomize.py", "exec"), ns)
+    assert "_hook" in ns and ns.get("_POLICY") == "deny"
+    return ns["_fenced"]
+
+
+@pytest.mark.parametrize("path,refused", [
+    ("/src/repo/experiments/final/model.safetensors", True),
+    ("/src/repo/", True),
+    ("/src/repo", False),               # the root itself is not a file; opening it is an IsADirectory
+    ("/src/repo/data/queries.jsonl", False),          # allow-listed mount source wins over the root
+    ("/src/repository/other.txt", False),             # shared prefix, different tree
+    ("/src/other/x", False),
+    ("relative/path.txt", False),                     # cannot leave the cwd, and cwd is the workdir
+    ("./x.txt", False),
+    ("/tmp/x", False),
+])
+def test_predicate_truth_table(path, refused):
+    fenced = _predicate(("/src/repo/",), ("/src/repo/data/",))
+    assert (fenced(path) is not None) is refused
+
+
+def test_predicate_normalizes_the_shapes_open_actually_receives():
+    fenced = _predicate(("/src/repo/",))
+    assert fenced(b"/src/repo/x") == "/src/repo/x"          # os.open takes bytes
+    assert fenced(Path("/src/repo/x")) == "/src/repo/x"     # every os.PathLike
+    assert fenced("/src/repo/a/../b") == "/src/repo/b"      # a `..` inside the root still lands
+    assert fenced("/src/repo/../repo2/x") is None           # …and one that leaves it does not
+    assert fenced(7) is None                                # os.fdopen on an already-open fd
+    assert fenced(object()) is None                         # not a path at all -> never our problem
+
+
+def test_the_directory_predicate_catches_the_root_itself():
+    """`open` names a file INSIDE a root; `os.chdir` names the root, which carries no trailing
+    separator and therefore misses the prefix test the hot path uses."""
+    src = read_fence.render(("/src/repo/",), ("/src/repo/data/",), policy="deny", log="", run="")
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "sitecustomize.py", "exec"), ns)
+    assert ns["_fenced"]("/src/repo") is None                # the open path is deliberately unchanged
+    assert ns["_fenced_dir"]("/src/repo") == "/src/repo"
+    assert ns["_fenced_dir"]("/src/repo/") == "/src/repo/"
+    assert ns["_fenced_dir"]("/src/repo/data") is None       # an allow-listed mount stays enterable
+    assert ns["_fenced_dir"]("/src/repository") is None
+
+
+def test_a_root_too_broad_to_fence_is_dropped_not_accepted():
+    """Fencing `$HOME` or `/` would refuse reads the interpreter itself needs, so a run with such an
+    editable is left UNFENCED rather than made unable to start python at all — and it is reported."""
+    home = os.path.expanduser("~")
+    roots, _allow, dropped = read_fence.fence_inputs(
+        {"editables": [{"name": ".", "path": home}, {"name": "x", "path": "/"},
+                       {"name": "y", "path": "/usr"}]})
+    assert roots == [] and len(dropped) == 3
+
+
+# --------------------------------------------------------------------------- the plumbing
+
+
+def test_run_argv_prepends_the_fence_and_keeps_an_existing_pythonpath(tmp_path):
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, _err, _to = _run("import os; print(os.environ['PYTHONPATH'])", wd, fence,
+                              extra_env={"PYTHONPATH": "/opt/theirs"})
+    assert rc == 0
+    assert out.strip().splitlines()[-1] == os.pathsep.join([fence, "/opt/theirs"])
+
+
+def test_run_argv_leaves_a_docker_argv_alone(tmp_path, monkeypatch):
+    """A `docker run` argv launches the CLI on the HOST; that PYTHONPATH would name a directory the
+    container cannot see. The untrusted tiers are fenced by construction instead — the source tree
+    is never bind-mounted in."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    fake = tmp_path / "docker"
+    fake.write_text("#!/bin/sh\nexec env\n")
+    fake.chmod(0o755)
+    rc, out, _err, _to = run_argv([str(fake), "run", "--rm", "img"], str(wd), 60.0,
+                                  {read_fence.FENCE_DIR_ENV: fence})
+    assert rc == 0
+    assert f"PYTHONPATH={fence}" not in out
+    assert f"{read_fence.FENCE_DIR_ENV}={fence}" in out      # the marker still rides along, inert
+
+
+def test_prepend_is_idempotent():
+    env = {}
+    read_fence.prepend_pythonpath(env, "/f")
+    read_fence.prepend_pythonpath(env, "/f")
+    assert env["PYTHONPATH"] == "/f"
+    env = {"PYTHONPATH": os.pathsep.join(["/a", "/f", "/b"])}
+    read_fence.prepend_pythonpath(env, "/f")
+    assert env["PYTHONPATH"] == os.pathsep.join(["/f", "/a", "/b"])
+
+
+def test_install_is_atomic_and_rewrites_only_on_change(tmp_path):
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    d = Path(_install(run_dir, src))
+    first = (d / "sitecustomize.py").stat().st_mtime_ns
+    assert _install(run_dir, src) == str(d)
+    assert (d / "sitecustomize.py").stat().st_mtime_ns == first     # unchanged policy -> no rewrite
+    _install(run_dir, src, policy="warn")
+    assert "'warn'" in (d / "sitecustomize.py").read_text()
+    assert not list(d.glob("*.tmp"))                                # no partial file left behind
+
+
+def test_a_prior_sitecustomize_still_runs(tmp_path):
+    """This directory is PREPENDED to PYTHONPATH, so it shadows anyone else's `sitecustomize`
+    (coverage's subprocess support, a distro's). Shadowing one silently would be a real regression in
+    someone else's tooling."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    theirs = tmp_path / "theirs"
+    theirs.mkdir()
+    (theirs / "sitecustomize.py").write_text("import sys; sys.stderr.write('THEIRS RAN\\n')\n")
+    fence = _install(run_dir, src)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    rc, _out, err, _to = _run(f"print(open({str(target)!r}).read())", wd, fence,
+                              extra_env={"PYTHONPATH": str(theirs)})
+    assert "THEIRS RAN" in err                       # …chained …
+    assert rc != 0 and "LoopLabSourceReadRefused" in err     # …and ours still won the hook
+
+
+# --------------------------------------------------------------------------- the engine wiring
+
+
+def test_engine_stamps_the_marker_for_a_repo_task_only(tmp_path):
+    """A toy run must be byte-identical to what it was: no fence directory, and the unpinned env
+    stays the `None` three other modules read as 'whole box, legacy behavior'."""
+    from tests.factories import make_engine
+
+    toy = make_engine(tmp_path / "toy")
+    assert toy._resource_eval_env(None) is None
+    assert toy._read_fence_dir() is None
+    assert not (Path(toy.run_dir) / read_fence.FENCE_DIRNAME).exists()
+
+    src, _sib, _rd, _wd, _models = _world(tmp_path / "w")
+    repo = make_engine(tmp_path / "repo")
+    repo._repo_spec = {"editables": [{"name": ".", "path": str(src)}],
+                       "data": {"corpus": {"path": str(src / "corpus")}}}
+    env = repo._resource_eval_env(None)
+    assert env is not None and env[read_fence.FENCE_DIR_ENV] == repo._read_fence_dir()
+    assert "CUDA_VISIBLE_DEVICES" not in env          # the unpinned branch is otherwise untouched
+    generated = (Path(repo.run_dir) / read_fence.FENCE_DIRNAME / "sitecustomize.py").read_text()
+    assert str(src) + os.sep in generated
+    assert str(src / "corpus") + os.sep in generated  # the data mount is allow-listed, not fenced
+
+
+def test_engine_policy_off_stamps_nothing(tmp_path):
+    from tests.factories import make_engine
+
+    src, _sib, _rd, _wd, _models = _world(tmp_path / "w")
+    e = make_engine(tmp_path / "run", read_fence="off")
+    e._repo_spec = {"editables": [{"name": ".", "path": str(src)}]}
+    assert e._read_fence_dir() is None
+    assert e._resource_eval_env(None) is None
+
+
+def test_a_pinned_reservation_still_carries_both(tmp_path):
+    """The fence must not displace the GPU pin, and the pin must not displace the fence."""
+    from tests.factories import make_engine
+
+    src, _sib, _rd, _wd, _models = _world(tmp_path / "w")
+    e = make_engine(tmp_path / "run")
+    e._repo_spec = {"editables": [{"name": ".", "path": str(src)}]}
+    e._gpu_physical_ids = {0: "3"}
+    env = e._resource_eval_env({"gpu_ids": [0]}, base={"LOOPLAB_EVAL_SEED": "7"})
+    assert env["CUDA_VISIBLE_DEVICES"] == "3"
+    assert env["LOOPLAB_EVAL_SEED"] == "7"
+    assert env[read_fence.FENCE_DIR_ENV] == e._read_fence_dir()
+
+
+# --------------------------------------------------------------------------- node 4, end to end
+
+# `runs/rubertlite-dr-unified-v6/nodes/node_4` in miniature, and the ONLY test here that runs a whole
+# engine. The scorer is the operator's protected entrypoint; it resolves a checkpoint path out of an
+# editable CONFIG, and that config carries an absolute path into the source tree where a human's
+# stale checkpoint sits. Nothing in the node's declared artifacts is wrong, so `expect` passes and
+# the run records the stale number as the node's metric. The `off` half of this test IS that
+# corruption, reproduced; the `deny` half is the fence refusing it.
+_SCORER = (
+    "import json\n"
+    "path = open('config.txt').read().strip()\n"
+    "print(json.dumps({'metric': float(open(path).read().strip())}))\n"
+)
+HUMAN_METRIC = 0.224975      # what the stale source-tree checkpoint scores
+
+
+def _git_repo(root, tracked):
+    import subprocess
+    root.mkdir(parents=True, exist_ok=True)
+    for name, text in tracked.items():
+        (root / name).write_text(text, encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "add", *tracked], cwd=root, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "i"],
+                   cwd=root, check=True, capture_output=True)
+    return root
+
+
+def _repo_run(tmp_path, policy):
+    import anyio
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    src = Path(tmp_path) / "vectorizer-unified"
+    src.mkdir(parents=True)
+    (src / "checkpoint.txt").write_text(f"{HUMAN_METRIC}\n")     # the human's 2026-07-18 artifact
+    _git_repo(src, {"looplab_eval.py": _SCORER,
+                    "config.txt": str(src / "checkpoint.txt") + "\n"})
+    task = RepoTask(id="p", direction="max", editable_path=str(src),
+                    protect=["looplab_eval.py"],
+                    eval=EvalSpec(command=[sys.executable, "looplab_eval.py"],
+                                  metric={"kind": "stdout_json", "key": "metric"}))
+    researcher, developer = task.build_roles()
+    run_dir = tmp_path / ("run-" + policy)
+    engine = Engine(run_dir, task=task, researcher=researcher, developer=developer,
+                    sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                    read_fence=policy)
+    state = anyio.run(engine.run)
+    errors = [json.loads(x)["data"].get("error", "")
+              for x in (run_dir / "events.jsonl").read_text(encoding="utf-8").splitlines()
+              if json.loads(x)["type"] == "node_failed"]
+    return state, errors, src
+
+
+def test_the_node_4_corruption_is_reproduced_and_then_refused(tmp_path):
+    off_state, off_errors, _src = _repo_run(tmp_path / "off", "off")
+    best = off_state.best()
+    # Unfenced: the run FINISHES, reports a best node, and the number it reports came out of the
+    # operator's source tree. No failure, no violation, nothing to look at. This is the defect.
+    assert not off_errors and best is not None and best.metric == pytest.approx(HUMAN_METRIC)
+
+    deny_state, deny_errors, src = _repo_run(tmp_path / "deny", "deny")
+    assert deny_state.best() is None, "a read of the source tree must not produce a metric"
+    assert deny_errors, "the refusal has to reach a node terminal, not vanish"
+    joined = "\n".join(deny_errors)
+    assert "is under the operator's SOURCE tree, not this node's workspace" in joined
+    assert str(src / "checkpoint.txt") in joined            # the offending path, by name
+    assert 'seed_mode: "all"' in joined                     # …and the fix, in the repair loop's input
+    rows = read_fence.violations(tmp_path / "deny" / "run-deny")
+    assert rows and str(src / "checkpoint.txt") in rows[0]
+
+
+def test_settings_vocabulary_matches_the_module(tmp_path):
+    """`core` cannot import `runtime`, so the policy vocabulary is spelled twice. Pin them equal —
+    a third rung added on one side only would be accepted by config and ignored by the fence."""
+    enum = dict((name, vocab) for name, vocab in Settings._ENUM_FIELDS if name == "read_fence")
+    assert tuple(enum["read_fence"]) == tuple(read_fence.POLICIES)
+    assert Settings().read_fence == "deny"
+    with pytest.raises(ValueError):
+        Settings(read_fence="warn-only")
