@@ -78,9 +78,11 @@ export const buildEpisodeMap = payload => {
     }
     kind.episodes.push(row)
   }
+  // Read fine, nothing to seek to. Reached both by a node whose whole trace fits in one window and
+  // by a map whose every row lacked an anchor — the operator's move is the same in both, and neither
+  // is a failed read, which is the distinction the `unavailable` branch above exists to keep.
   if (!kinds.length) {
-    return { status: 'unavailable' === payload.status ? 'unavailable' : 'empty',
-      kinds: [], total: 0, omitted, partial: omitted > 0 }
+    return { status: 'empty', kinds: [], total: 0, omitted, partial: omitted > 0 }
   }
   return {
     status: 'ready',

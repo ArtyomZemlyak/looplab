@@ -2308,7 +2308,6 @@ def build_router(srv) -> APIRouter:
         all. Echoed back so a surface can fence a late response from a previous anchor."""
         rd = _run_dir(run_id)
         _assert_trace_reset_clear(rd)
-        anchor = _settle_window_anchor(rd, before)
         if (expected_generation is not None
                 and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
             raise HTTPException(400, {
@@ -2325,6 +2324,9 @@ def build_router(srv) -> APIRouter:
                 "message": "The run was reset or replaced before its node trace was read.",
                 "remediation": "Reload run state and request the current generation.",
             })
+        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
+        # a read whose run has already been replaced has no business building one.
+        anchor = _settle_window_anchor(rd, before)
         observed_attempt = _cached_node_attempt(rd, nid)
         current_attempt = observed_attempt if observed_attempt is not None else 0
         # Setup/pseudo-node and legacy trace rows have no folded lifecycle marker and therefore use
@@ -2774,7 +2776,6 @@ def build_router(srv) -> APIRouter:
         receiving the same 200 JSON envelope (with one additive cursor field)."""
         rd = _run_dir(run_id)
         _assert_trace_reset_clear(rd)
-        anchor = _settle_window_anchor(rd, before)
         if (expected_generation is not None
                 and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
             raise HTTPException(400, {
@@ -2791,6 +2792,9 @@ def build_router(srv) -> APIRouter:
                 "message": "The run was reset or replaced before its conversation was read.",
                 "remediation": "Reload run state and request the current generation.",
             })
+        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
+        # a read whose run has already been replaced has no business building one.
+        anchor = _settle_window_anchor(rd, before)
         # An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked and echoed back — the
         # same rule as the span-tree twin above, because these are the two VIEWS of one trace
         # surface and the Inspector's attempt picker switches between them over one selection.  The

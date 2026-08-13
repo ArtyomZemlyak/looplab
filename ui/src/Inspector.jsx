@@ -21,8 +21,8 @@ import {
 } from './traceProjection.js'
 import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
-  EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, episodeAnchor, episodeAt,
-  episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
+  EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, clampEpisodeIndex, episodeAnchor,
+  episodeAt, episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
 } from './traceEpisodeModel.js'
 import {
   TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS,
@@ -2129,12 +2129,19 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
   const here = map?.status === 'ready' ? episodePosition(map, anchor) : null
   const activeKind = kind || here?.label || kinds[0]?.label || null
   const active = kinds.find(row => row.label === activeKind) || null
-  const seek = index => {
-    const episode = episodeAt(map, activeKind, index)
+  // The field is the operator's, so it holds what they typed — but it FOLLOWS the window whenever
+  // the window moves under them (a seek settling, a re-read after a repair landed). Deriving it from
+  // `here` instead would make typing a number do nothing while anchored; keeping it purely local
+  // would let it drift away from the position the caption reports.
+  useEffect(() => {
+    if (here && here.label === activeKind) setDraft(here.index + 1)
+  }, [here?.label, here?.index, activeKind])
+  const index = Math.max(0, (Number.isSafeInteger(draft) ? draft : 1) - 1)
+  const seek = target => {
+    const episode = episodeAt(map, activeKind, target)
     const next = episodeAnchor(episode)
-    if (next) { setDraft(index + 1); onSeek(next) }
+    if (next) { setDraft(clampEpisodeIndex(map, activeKind, target) + 1); onSeek(next) }
   }
-  const index = here && here.label === activeKind ? here.index : Math.max(0, draft - 1)
   return <span className="trace-episodes">
     <button type="button" className="seg" aria-expanded={open}
       title="Jump the trace window to an earlier step of this experiment — an early repair, the first training run, the proposal."
@@ -2165,16 +2172,17 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
           onClick={() => seek(index - 1)}>‹</button>
         <input className="seg trace-episode-n" type="number" min="1" max={active?.count || 1}
           aria-label={`which ${active?.name || 'step'} to show`}
-          value={index + 1}
+          value={draft}
           onChange={e => setDraft(Number(e.target.value) || 1)}
-          onKeyDown={e => { if (e.key === 'Enter') seek(Math.max(0, draft - 1)) }} />
+          onKeyDown={e => { if (e.key === 'Enter') seek(index) }} />
         <span className="muted">of {active?.count || 0}</span>
         <button type="button" className="seg" title="next"
           disabled={!active || index >= active.count - 1}
           onClick={() => seek(index + 1)}>›</button>
-        <button type="button" className="seg" title="last" disabled={!active || index >= active.count - 1}
+        <button type="button" className="seg" title="last"
+          disabled={!active || index >= active.count - 1}
           onClick={() => seek((active?.count || 1) - 1)}>»</button>
-        <button type="button" className="btn xs" onClick={() => seek(Math.max(0, draft - 1))}>show</button>
+        <button type="button" className="btn xs" onClick={() => seek(index)}>show</button>
         {here && <span className="muted trace-episode-sum">
           {episodeSummary(here.episode, here.index)}</span>}
         {map.partial && <span className="muted">{episodeMapNotice(map)}</span>}

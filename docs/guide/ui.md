@@ -298,15 +298,33 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   `node_created`. Each row says which rule matched it, and a card whose research cannot be
   identified shows none rather than a guess: a mis-attributed hypothesis is worse than an empty
   section.
-- **Earlier attempts of a repaired node** — the node trace carries an `attempt` picker whenever the
-  node has more than one generation. Each inline repair bumps the generation and each keeps its own
-  trace, so the attempt that actually CRASHED — usually the one worth reading — is selectable
-  instead of only the last. The routes have always taken `?attempt=`; until 2026-08-12 the UI sent
-  the current generation and rejected any older response as stale. Selecting an earlier attempt is
-  a read: the destructive **clear trace** stays bound to the CURRENT generation, so browsing history
-  can never erase it, and a historical selection never falls back to the node-detail payload (which
-  always describes the current attempt) — showing the newest trace under an older label would be
-  worse than showing nothing.
+- **Earlier attempts of a reset node** — the node trace carries an `attempt` picker whenever the
+  node has more than one generation. `Node.attempt` is the lifecycle generation and it is bumped by
+  `node_reset` (and by a holdout rotation), so each reset keeps its own trace and the attempt that
+  actually CRASHED — usually the one worth reading — is selectable instead of only the last. The
+  routes have always taken `?attempt=`; until 2026-08-12 the UI sent the current generation and
+  rejected any older response as stale. Selecting an earlier attempt is a read: the destructive
+  **clear trace** stays bound to the CURRENT generation, so browsing history can never erase it, and
+  a historical selection never falls back to the node-detail payload (which always describes the
+  current attempt) — showing the newest trace under an older label would be worse than showing
+  nothing.
+- **Earlier steps INSIDE one attempt** — the `steps` control beside the attempt picker, and the
+  separate thing it is for. An *inline repair* does **not** open a lifecycle generation, so the
+  attempt picker cannot reach one: measured 2026-08-13 on `runs/rubert-dr-0804` node 1, all 14,507
+  spans of its 2,345 repairs are generation 0 and that picker does not render at all. Nor could
+  widening reach them — the trace window is a TAIL, so a bigger `limit` is the same tail extended,
+  and its 4,096-span ceiling is real (the conversation costs ~3.4 ms per span, on the request
+  thread). On that node the 512-span default window covers the last 7.6 minutes of a 3 h 50 m
+  experiment and the ceiling the last 59.3, leaving 74 % of it — every early repair — unreachable.
+  So `GET /nodes/{n}/episodes` publishes the node's own episodes (every band its conversation reads,
+  with none of their contents, each carrying the span id to seek to), and `?before=<span_id>` on
+  `/nodes/{n}/trace` and `/nodes/{n}/conversation` puts the SAME window on a chosen one. The map is
+  derived from the in-memory light span index and reads no `spans.jsonl` bytes (7,048 episodes in
+  82 ms on that node); it loads when the control is opened. The control is visible whenever the
+  node's trace projection reports omitted spans, and it steps by ordinal (« ‹ 17 › ») rather than
+  listing 2,345 rows. An anchor the run's index cannot place is refused with HTTP 409
+  `trace_anchor_unknown` rather than answered with the tail — the newest steps under an older
+  episode's label is the one failure worse than an empty panel.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
@@ -320,10 +338,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   absent individual span is unavailable. The Inspector and live Dock render unavailable, partial and honestly
   empty states separately. Full recorded span dictionaries remain only in `spans.jsonl` and are not downloadable
   through these routes. While a node is working, the conversation poll retains one last-good response only in
-  memory and conditionally revalidates its opaque cursor for that exact run generation, node attempt and span
-  window. An unchanged poll is an empty HTTP 304, avoiding full-row reads, projection CPU and repeated JSON;
-  selected appends, rewrites, resets and a wider window invalidate it, while a receipt-proven append for
-  another node does not. After a process cold-loads its persisted accelerator, one verifying 200 source-row
+  memory and conditionally revalidates its opaque cursor for that exact run generation, node attempt, span
+  window and window ANCHOR. An unchanged poll is an empty HTTP 304, avoiding full-row reads, projection CPU
+  and repeated JSON; selected appends, rewrites, resets, a wider window and a MOVED one invalidate it, while
+  a receipt-proven append for another node does not. After a process cold-loads its persisted accelerator, one verifying 200 source-row
   read is required before that exact window can return a 304. A platform/filesystem that cannot provide the required descriptor mutation proof
   conservatively rebuilds and may false-invalidate instead of risking a stale 304.
   These private diagnostics remain `Cache-Control: no-store`; the UI performs the revalidation itself and uses
