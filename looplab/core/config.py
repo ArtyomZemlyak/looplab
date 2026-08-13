@@ -1386,6 +1386,17 @@ class Settings(BaseSettings):
     # boss at max_turns=3 / 45s), which silently dropped a slow reasoning model to a no-op reply.
     agent_max_turns: int = 0           # max tool turns before the emit is forced (0 = unlimited)
     agent_time_budget_s: float = 0.0   # wall-clock ceiling across the loop's turns (0 = no cap)
+    # The CHAT's own wall clock, separate from the engine roles' above. `serve/assistant.py::run_turn`
+    # used to read `agent_time_budget_s` and then apply `or 300.0` — so the documented "0 = no cap"
+    # silently became a five-minute ceiling for the assistant and ONLY for the assistant, with no way
+    # to express "no cap" for it at all and no way to raise it without also raising every engine
+    # role's. That floor exists for a real reason (a stalled shared-LLM call must not leave the chat
+    # "thinking" forever), so it stays as the DEFAULT — it just becomes nameable.
+    #   None = inherit `agent_time_budget_s` when that is set, else the 300 s default
+    #   0    = no cap (the operator's "infinite assistant mode"; pair it with a watch, not a wish)
+    #   >0   = that many seconds
+    # `serve/assistant.py::assistant_time_budget` is the rule, with a truth table beside it.
+    assistant_time_budget_s: float | None = None
     # G · Soft convergence SAFETY NET (not a research cap). Two thresholds on the agent's tool-turn count:
     # at `agent_emit_after` the loop NUDGES the agent once ("you've investigated enough — emit now"); at
     # `agent_emit_force` it FORCES the emit from what was gathered. Set GENEROUSLY — a focused researcher

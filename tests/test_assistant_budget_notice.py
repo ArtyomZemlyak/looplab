@@ -5,8 +5,16 @@ the answer". The loop was behaving as designed — on budget exhaustion it salva
 from everything it gathered, which rescues an answer instead of discarding the investigation. What it
 never did was tell anyone, so a truncated answer arrived looking like a finished one.
 
-`agent_time_budget_s` is UNSET by default, and `serve/assistant.py::run_turn` then applies a
-five-minute floor — so on a shared, slow endpoint this is the limit most long turns actually hit.
+`agent_time_budget_s` is UNSET by default, and `serve/assistant.py::run_turn` then applied a
+five-minute FLOOR — so on a shared, slow endpoint this is the limit most long turns actually hit,
+and the documented "0 = no cap" was unreachable for the chat. That floor is now the DEFAULT of the
+chat's own `assistant_time_budget_s` (see `assistant.assistant_time_budget`), so "no cap" is
+expressible without also unbounding every engine role.
+
+And the half that was still missing: only two of the loop's FIVE non-emit exits reported anything.
+The other three — stuck, prose-stall, convergence ceiling — fell straight to `fallback`, which for
+the assistant returns the last thing the model said out loud. A long turn that started circling came
+back as a bare interstitial narration with no notice at all, which is the operator's report verbatim.
 """
 from __future__ import annotations
 
@@ -105,7 +113,11 @@ def test_an_ordinary_turn_reports_nothing():
 
 def test_run_turn_puts_the_notice_in_both_the_envelope_and_the_answer():
     """Two surfaces read this differently — the chat renders the reply text, tooling reads the dict —
-    so a notice in only one of them is invisible to half the callers."""
+    so a notice in only one of them is invisible to half the callers.
+
+    The notice TEXT moved out of `run_turn` into `assistant.cutoff_notice` when the watch service
+    became a second caller that reports the same fact about a wake-up turn; the pins moved with it
+    rather than being deleted, because what they hold is that both surfaces still get one."""
     import inspect
 
     from looplab.serve import assistant
@@ -113,8 +125,11 @@ def test_run_turn_puts_the_notice_in_both_the_envelope_and_the_answer():
     source = inspect.getsource(assistant.run_turn)
     assert "on_budget=budget_box.update" in source
     assert '"budget_exhausted": dict(budget_box)' in source
-    assert "was cut" in source and "not a finished investigation" in source
-    assert "agent_time_budget_s" in source, "the notice must name the knob that raises the limit"
+    assert "cutoff_notice(budget_box)" in source
+
+    notice = inspect.getsource(assistant.cutoff_notice)
+    assert "was cut" in notice and "not a finished investigation" in notice
+    assert "assistant_time_budget_s" in notice, "the notice must name the knob that raises the limit"
 
 
 class _StreamingFake:
@@ -155,7 +170,7 @@ def test_the_notice_survives_the_streamed_final_answer(tmp_path):
     assert "was cut" in result["reply"], (
         "the notice must survive the streamed answer — this is the assertion the source pin could "
         "not make")
-    assert "agent_time_budget_s" in result["reply"]
+    assert "assistant_time_budget_s" in result["reply"]
 
 
 def test_an_ordinary_streamed_turn_carries_no_notice(tmp_path):
@@ -173,3 +188,150 @@ def test_an_ordinary_streamed_turn_carries_no_notice(tmp_path):
                       reply_sink=lambda _chunk: None)
     assert "budget_exhausted" not in result
     assert "was cut" not in result["reply"]
+
+
+# --------------------------------------------------------------- the other three exits (F4)
+class _Circles:
+    """A model that repeats ONE call forever — the STUCK exit, and the operator's report verbatim.
+
+    It also writes interstitial prose, which is what `fallback` hands back: before this was reported,
+    a 300-second turn returned "Let me look at the next file." as the answer, with nothing anywhere
+    saying the investigation had been cut off.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, messages, tool_specs, tool_choice="auto"):
+        self.calls += 1
+        return {"role": "assistant", "content": "Let me look at the next file.",
+                "tool_calls": [{"id": f"c{self.calls}", "type": "function",
+                                "function": {"name": "look", "arguments": "{}"}}]}
+
+    def complete_text(self, messages):
+        return "text"
+
+
+def test_a_turn_stopped_for_going_in_circles_says_so_and_says_what_it_repeated():
+    seen = {}
+    drive_tool_loop(
+        _Circles(), _Tools(), [{"role": "user", "content": "go"}],
+        {"type": "function", "function": {"name": "emit", "description": "emit",
+         "parameters": {"type": "object", "properties": {"reply": {"type": "string"}}}}},
+        finalize=lambda args: "done", fallback=lambda msgs: "fell back", on_budget=seen.update)
+    assert seen.get("kind") == "stuck"
+    assert "look" in seen.get("detail", ""), "the operator must learn WHAT it repeated"
+
+
+def test_a_turn_the_model_would_not_emit_from_says_so():
+    class _OnlyProse:
+        def chat(self, messages, tool_specs, tool_choice="auto"):
+            return {"role": "assistant", "content": "I think the answer is probably fine.",
+                    "tool_calls": []}
+
+        def complete_text(self, messages):
+            return "text"
+
+    seen = {}
+    drive_tool_loop(
+        _OnlyProse(), _Tools(), [{"role": "user", "content": "go"}],
+        {"type": "function", "function": {"name": "emit", "description": "emit",
+         "parameters": {"type": "object", "properties": {"reply": {"type": "string"}}}}},
+        finalize=lambda args: "done", fallback=lambda msgs: "fell back", on_budget=seen.update)
+    assert seen.get("kind") == "stalled"
+
+
+def test_a_turn_forced_to_answer_at_the_convergence_ceiling_says_so():
+    class _Wanders:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, messages, tool_specs, tool_choice="auto"):
+            self.calls += 1
+            return {"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"c{self.calls}", "type": "function",
+                 "function": {"name": "look", "arguments": f'{{"n": {self.calls}}}'}}]}
+
+        def complete_text(self, messages):
+            return "text"
+
+    seen = {}
+    drive_tool_loop(
+        _Wanders(), _Tools(), [{"role": "user", "content": "go"}],
+        {"type": "function", "function": {"name": "emit", "description": "emit",
+         "parameters": {"type": "object", "properties": {"reply": {"type": "string"}}}}},
+        emit_after=0, emit_force=3, stuck_detection=False,
+        finalize=lambda args: "done", fallback=lambda msgs: "fell back", on_budget=seen.update)
+    assert seen.get("kind") == "emit_force"
+    assert seen["turns"] == 3
+
+
+def test_every_reported_kind_is_in_the_closed_vocabulary_and_has_a_sentence():
+    """A kind the loop can report but the chat has no words for is how this defect comes back: the
+    fact reaches the envelope and the operator still reads a truncated answer with no explanation."""
+    from looplab.agents.tool_loop import LOOP_CUTOFF_KINDS
+    from looplab.serve.assistant import _CUTOFF_SENTENCES
+
+    assert set(_CUTOFF_SENTENCES) == set(LOOP_CUTOFF_KINDS)
+    for kind in LOOP_CUTOFF_KINDS:
+        from looplab.serve.assistant import cutoff_notice
+        text = cutoff_notice({"kind": kind, "turns": 7, "seconds": 1.5})
+        assert "was cut short" in text and "7 tool turns" in text
+
+
+def test_an_unknown_kind_still_produces_a_notice_rather_than_silence():
+    from looplab.serve.assistant import cutoff_notice
+    assert "was cut short" in cutoff_notice({"kind": "something_new", "turns": 1, "seconds": 1})
+    assert cutoff_notice({}) == "", "an ordinary turn carries no notice at all"
+
+
+def test_a_stuck_exit_does_not_send_the_operator_to_a_knob_that_cannot_help():
+    from looplab.serve.assistant import cutoff_notice
+    assert "assistant_time_budget_s" in cutoff_notice({"kind": "time", "turns": 1, "seconds": 1})
+    assert "assistant_time_budget_s" not in cutoff_notice({"kind": "stuck", "turns": 1, "seconds": 1})
+
+
+# --------------------------------------------------------------- the budget rule's truth table
+def test_the_assistant_budget_rule():
+    """The floor became a DEFAULT. `0` now genuinely means no cap for the chat — the spelling that
+    did not exist before, and whose absence made the settings table's "0 = no cap" false here."""
+    from looplab.core.config import Settings
+    from looplab.serve.assistant import ASSISTANT_TIME_BUDGET_DEFAULT_S, assistant_time_budget
+
+    assert assistant_time_budget(Settings()) == ASSISTANT_TIME_BUDGET_DEFAULT_S == 300.0
+    assert assistant_time_budget(Settings(agent_time_budget_s=900.0)) == 900.0
+    assert assistant_time_budget(Settings(assistant_time_budget_s=0.0)) == 0.0
+    assert assistant_time_budget(Settings(assistant_time_budget_s=1800.0)) == 1800.0
+    # The chat's own value WINS over the engine-wide one, in both directions.
+    assert assistant_time_budget(
+        Settings(assistant_time_budget_s=0.0, agent_time_budget_s=900.0)) == 0.0
+    assert assistant_time_budget(
+        Settings(assistant_time_budget_s=60.0, agent_time_budget_s=900.0)) == 60.0
+    # No settings at all (a subagent built without one) still gets the guard, never "no cap".
+    assert assistant_time_budget(None) == 300.0
+
+
+def test_the_turn_actually_runs_unbounded_when_the_operator_says_so(tmp_path):
+    """DRIVES it: a source pin cannot tell "0 means no cap" from "0 means 300"."""
+    from looplab.core.config import Settings
+    from looplab.serve import assistant as assistant_mod
+
+    seen = {}
+    real = assistant_mod.run_turn
+
+    import looplab.agents.agent as agent_mod
+    original = agent_mod.drive_tool_loop
+
+    def _spy(client, tools, convo, emit_spec, **kw):
+        seen["time_budget_s"] = kw.get("time_budget_s")
+        return "ok"
+
+    agent_mod.drive_tool_loop = _spy
+    try:
+        real(_Client(), tmp_path, [], "go", "plan",
+             settings=Settings(assistant_time_budget_s=0.0))
+        assert seen["time_budget_s"] == 0.0, "0 must reach the loop as 0 — the loop reads it as off"
+        real(_Client(), tmp_path, [], "go", "plan", settings=Settings())
+        assert seen["time_budget_s"] == 300.0
+    finally:
+        agent_mod.drive_tool_loop = original

@@ -355,16 +355,37 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     return result, repeat_note
 
 
-def _note_budget(on_budget, kind: str, *, turns, seconds) -> None:
-    """Report that the loop ran OUT — of wall clock or of turns — without ever raising.
+# Every way this loop can stop WITHOUT the model having emitted an answer of its own accord. The
+# `on_budget` observer's `kind`, and a CLOSED vocabulary on purpose: `serve/assistant.py::run_turn`
+# turns each one into a sentence the operator reads, so a kind with no row there degrades to a
+# generic notice rather than to silence — but a kind that is never reported at all is silence, which
+# is the defect this vocabulary exists to close.
+#
+# It shipped covering only the first two. The other three fell straight through to `fallback(...)`,
+# which for the assistant means "the last thing the model said out loud" — so a 300-second turn that
+# tripped stuck-detection came back as a bare interstitial narration ("Let me look at the next
+# file.") presented as the answer, with nothing anywhere saying the investigation had been cut off.
+# That is the operator's "the assistant hangs around 40 tool uses and then a bare tool use arrives as
+# the reply", reproduced exactly.
+LOOP_CUTOFF_KINDS = ("time", "turns", "stuck", "stalled", "emit_force")
+
+
+def _note_budget(on_budget, kind: str, *, turns, seconds, detail: str = "") -> None:
+    """Report that the loop stopped WITHOUT a model-chosen emit, and which of the five ways it was.
 
     An observer is best-effort by construction: this fires on the way to a salvage emit, and a
     broken callback must not turn a rescued answer into a crash.
+
+    `detail` is omitted from the payload when empty — the envelope key set is what a UI branches on,
+    so an always-present `"detail": ""` would make every ordinary cutoff look like it carried one.
     """
     if on_budget is None:
         return
     try:
-        on_budget({"kind": kind, "turns": turns, "seconds": round(float(seconds or 0.0), 3)})
+        payload = {"kind": kind, "turns": turns, "seconds": round(float(seconds or 0.0), 3)}
+        if detail:
+            payload["detail"] = str(detail)[:200]
+        on_budget(payload)
     except Exception:  # noqa: BLE001 - an observer may never break the loop it observes
         pass
 
@@ -562,6 +583,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 return result
             stalls += 1
             if stalls >= 2:
+                # SAY SO. Twice in a row the model answered in prose and the endpoint could not be
+                # forced into a structured emit, so `fallback` is about to hand back whatever prose
+                # was last said — which reads as a finished answer and is not one.
+                _note_budget(on_budget, "stalled", turns=turn_idx,
+                             seconds=time.monotonic() - started,
+                             detail="the model answered in prose and could not be forced to emit")
                 break
             messages.append({"role": "user",
                              "content": nudge_prompt or f"Now call `{emit_name}` with your final answer."})
@@ -666,6 +693,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             call_turns += 1
             tool_turns += int(investigated)
             if emit_force and call_turns >= emit_force:
+                # Announced BEFORE the salvage, like the wall-clock exit: an answer forced at the
+                # convergence ceiling is a salvage from what was gathered either way, and the
+                # operator has to be able to tell it from a conclusion.
+                _note_budget(on_budget, "emit_force", turns=call_turns,
+                             seconds=time.monotonic() - started,
+                             detail=f"the soft-convergence ceiling ({emit_force} tool turns) was hit")
                 if _cancelled():        # paid call — see the prose-reply force above
                     break
                 ok, result = _salvage_emit()
@@ -681,6 +714,12 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
         if stuck_reason:
             # No progress — stop gracefully WITH a result instead of spinning forever. Nudge once,
             # then force the structured emit; if the client can't force it, fall through to fallback.
+            # THE ONE THAT COST THE MOST. This exit is the assistant's most common non-answer: a long
+            # investigation that starts circling, and (on an endpoint that ignores tool_choice)
+            # falls through to the last thing the model said out loud. Unreported, that is
+            # indistinguishable from a finished turn.
+            _note_budget(on_budget, "stuck", turns=turn_idx,
+                         seconds=time.monotonic() - started, detail=str(stuck_reason))
             messages.append({"role": "user",
                              "content": (stuck_prompt.replace("{reason}", str(stuck_reason)) if stuck_prompt
                                          else f"Stop: you appear to be stuck ({stuck_reason}). "

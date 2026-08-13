@@ -99,12 +99,16 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 168
-    # 194 -> 195 Settings and 163 -> 164 catalogued rows when `task_facets_finalize` split the
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 169
+    # 199 -> 200 Settings and 168 -> 169 catalogued rows when `assistant_time_budget_s` gave the
+    # CHAT its own wall clock: `run_turn` read the engine-wide `agent_time_budget_s` and then
+    # applied `or 300.0`, so the neighbouring row's documented "0 = no cap" was false for the
+    # assistant and nothing could raise the chat's limit without raising every engine role's.
+    # (Previously 194 -> 195 Settings and 163 -> 164 catalogued rows when `task_facets_finalize` split the
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 199
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 200
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}

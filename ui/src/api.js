@@ -1060,6 +1060,13 @@ export const assistantGet = (sid, options) =>
   get(`/api/assistant/sessions/${encodeURIComponent(sid)}`, options)
 export const assistantDelete = (sid, options) =>
   send(`/api/assistant/sessions/${encodeURIComponent(sid)}`, 'DELETE', undefined, options)
+// Standing watches (BACKLOG §F4). The list is the ONLY thing the browser owns here — the watching
+// itself is server-side and durable, so a closed tab costs the monitoring nothing and these calls
+// are a read plus a stop, never anything the schedule depends on.
+export const assistantWatches = (sid, options) =>
+  get(`/api/assistant/watches?session=${encodeURIComponent(sid)}`, options)
+export const assistantWatchStop = (watchId, options) =>
+  send(`/api/assistant/watches/${encodeURIComponent(watchId)}`, 'DELETE', undefined, options)
 const validAssistantForkActionId = value => typeof value === 'string'
   && value === value.toLowerCase() && UUID_V4_RE.test(value)
 const assistantForkPath = (sid, actionId = null) => {

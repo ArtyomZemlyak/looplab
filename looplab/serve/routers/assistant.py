@@ -34,6 +34,8 @@ from looplab.serve.assistant import (
     run_turn as _assistant_run_turn,
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
+from looplab.serve.assistant_watch import (
+    SessionWatches, WatchDeferred, WatchRefusal, WatchService, WatchStore)
 from looplab.serve.engine_proc import _engine_alive
 from looplab.serve.http import json_object
 from looplab.serve.llm_context import _client_tokens
@@ -300,6 +302,11 @@ def build_router(srv) -> APIRouter:
     # ------------------------------------------------------------------ assistant (general chat agent)
     _asst = SessionStore(root)
     _shares = ShareStore(root)
+    # BACKLOG §F4 — standing watches. The STORE is durable and portfolio-wide; the SERVICE is this
+    # process's scheduler over it, and every one of its four collaborators is injected here rather
+    # than imported there, so `assistant_watch.py` stays free of any FastAPI/AppState import and the
+    # whole feature is drivable in a test with no HTTP client and no model.
+    _watches = WatchStore(root)
 
     # --- pause-resume human-in-the-loop permission registry -------------------------------------
     # A mutating tool in a confirm mode calls the injected approver, which registers a request here
@@ -1450,6 +1457,12 @@ def build_router(srv) -> APIRouter:
                       "error_kind": res.get("error_kind"),
                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                      # PERSISTED, not just returned. A cut-short turn's notice lives in the reply
+                      # TEXT and survives a reload; the machine-readable fact did not, so after a
+                      # refresh nothing but prose distinguished a salvage from a conclusion and no
+                      # surface could mark it. Absent on an ordinary turn (the key IS the signal).
+                      **({"budget_exhausted": res["budget_exhausted"]}
+                         if res.get("budget_exhausted") else {}),
                       "tokens": res.get("tokens")},
                 expected_len=len(history) + 1, begin_live_ids=begin_live_ids)
             if not ok:
@@ -1481,6 +1494,137 @@ def build_router(srv) -> APIRouter:
             except Exception:  # noqa: BLE001 - titling is best-effort
                 pass
         return res
+
+    # ---------------------------------------------------------------- standing watches (§F4)
+    def _watch_observe_run(run_id: str):
+        """What the server SEES of a run — the trigger's whole evidentiary basis (doc 36).
+
+        Returns the read model's folded state row, or None when the run can never satisfy any
+        condition again. The three outcomes are deliberately distinct:
+          * 404 / 410 -> None: deleted or being deleted. `WatchService` retires the watch with a
+            stated cause instead of polling a name that will never come back.
+          * 503 -> RAISE: the deletion fence itself is unreadable, which is a transient storage
+            fault on the mounts a run root lives on. A watch must not give up on one of those.
+          * anything else -> the row, phase and liveness included.
+        """
+        try:
+            rd = srv.run_dir(run_id)
+        except HTTPException as exc:
+            if exc.status_code in (404, 410):
+                return None
+            raise
+        payload = srv.state_payload(rd)
+        state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+        return dict(state)
+
+    def _watch_run_turn(record: dict, instruction: str) -> dict:
+        """Run ONE wake-up turn, through the SAME `run_turn` an operator-typed turn goes through.
+
+        No second turn implementation, and no widened toolset: the record's PINNED mode selects
+        exactly the providers `build_tools` would give a human typing in this chat right now (doc
+        36, corollary 2 — a wider action space across TIME, not a wider trusted set). It claims the
+        session's single active-turn slot for the same reason a human turn does, and yields to a
+        human who already holds it.
+        """
+        sid = record["session"]
+        mode = normalize_mode(record.get("mode") or "plan")
+        sess = _asst.get(sid)
+        if sess is None:
+            raise WatchRefusal(f"chat {sid} no longer exists")
+        cancel_ev = threading.Event()
+        turn_epoch = secrets.token_hex(16)
+        try:
+            _acquire_turn(sid, cancel_ev, turn_epoch)
+        except HTTPException as exc:
+            # 409 == the operator is mid-turn (or a share/fork fence is up). Not a failure — wait.
+            if exc.status_code == 409:
+                raise WatchDeferred("the chat is busy") from exc
+            raise
+        try:
+            s = _llm_settings()
+            from looplab.core.llm import make_llm_client_for
+            client = make_llm_client_for(s, factory=srv.make_llm_client)
+            approver = _make_approver(sid, mode, turn_epoch, cancel_ev)
+            _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev)
+            history = list(sess["messages"])
+            turn_id = secrets.token_hex(8)
+            return _assistant_run_turn(
+                client, root, history, instruction, mode,
+                alive_fn=_engine_alive, settings=s, approver=approver,
+                on_step=_on_step, on_todos=_on_todos, cancel_check=cancel_ev.is_set,
+                command_service=srv.commands,
+                command_key_namespace=f"{sid}:{turn_id}",
+                mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
+                # A wake-up may not arm further watches. One standing watch that arms another is an
+                # unbounded population with a bounded per-watch budget, which is not a bound at all
+                # — the floor doc 36 asks for has to hold over the whole tree, not each node of it.
+                watches=None)
+        finally:
+            _release_turn(sid, cancel_ev, turn_epoch)
+
+    def _watch_append(session: str, turn: dict) -> None:
+        # Unconditional append, NOT `append_if_len`: a wake-up is not racing a stale reply of its
+        # own, and it holds the session's turn slot while it runs, so nothing can interleave. The
+        # conditional append exists to drop a cancelled turn's stale reply; a watch has no such twin.
+        _asst.append(session, turn)
+
+    _watch_service = WatchService(
+        _watches, observe_run=_watch_observe_run, run_turn_fn=_watch_run_turn,
+        append_turn=_watch_append)
+    # Settle whatever the previous process left mid-wake, and start the scheduler only if this
+    # server actually has standing watches — see `WatchService.bootstrap`.
+    _watch_service.bootstrap()
+
+    def _session_watches(sid: str, mode: str) -> SessionWatches:
+        return SessionWatches(_watches, sid, mode, on_arm=_watch_service.ensure_started)
+
+    def _watch_public(record: dict) -> dict:
+        """The wire shape. `instruction` IS included: the operator has to be able to read what a
+        standing watch will do when it wakes, and a monitoring surface that hides its own
+        instruction is the "what is it even waiting for" complaint in a different costume."""
+        return {k: record.get(k) for k in (
+            "id", "session", "mode", "status", "instruction", "trigger", "waiting_for",
+            "created", "updated", "next_due", "wakeups", "max_wakeups", "expires_at",
+            "last_observation", "last_error")}
+
+    @router.get("/api/assistant/watches")
+    def list_watches(session: Optional[str] = None, active: bool = False):
+        return {"watches": [_watch_public(r) for r in
+                            _watches.list(session=session, active_only=active)]}
+
+    @router.post("/api/assistant/watches")
+    async def arm_watch(request: Request):
+        """Arm a standing watch from the UI (the agent's own path is the `watch_run`/`watch_every`
+        tools). The MODE comes from the session, never from the body — a request that could name its
+        own mode would let a read-only chat arm a mutating watch."""
+        body = await json_object(request)
+        sid = str(body.get("session") or "")
+        sess = _asst.get(sid) if sid else None
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        mode = normalize_mode(sess["meta"].get("mode") or "plan")
+        trigger = body.get("trigger")
+        if not isinstance(trigger, dict):
+            trigger = {"kind": body.get("kind"), "run": body.get("run"),
+                       "until": body.get("until"), "every_s": body.get("every_s")}
+        try:
+            record = _session_watches(sid, mode).arm(
+                instruction=str(body.get("instruction") or ""), trigger=trigger,
+                waiting_for=str(body.get("waiting_for") or ""),
+                max_wakeups=body.get("max_wakeups"), lifetime_s=body.get("lifetime_s"))
+        except WatchRefusal as exc:
+            raise HTTPException(400, {"code": "watch_refused", "message": str(exc)}) from exc
+        return {"ok": True, "watch": _watch_public(record)}
+
+    @router.delete("/api/assistant/watches/{watch_id}")
+    def stop_watch(watch_id: str):
+        try:
+            record = _watches.cancel(watch_id)
+        except WatchRefusal as exc:
+            raise HTTPException(404, "no such watch") from exc
+        if record is None:
+            raise HTTPException(404, "no such watch")
+        return {"ok": True, "watch": _watch_public(record)}
 
     @router.post("/api/assistant/sessions/{sid}/message")
     async def assistant_message(sid: str, request: Request):
@@ -1517,7 +1661,11 @@ def build_router(srv) -> APIRouter:
                                            command_service=srv.commands,
                                            command_key_namespace=f"{sid}:{turn_id}",
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
-                                           mutation_recovery=recover_turn)
+                                           mutation_recovery=recover_turn,
+                                           # The operator's own turn may arm a standing watch,
+                                           # at the mode this turn is already running under.
+                                           # `_session_watches` pins it there (see SessionWatches).
+                                           watches=_session_watches(sid, eff_mode))
                 return _finish_turn(sid, history, instruction, client, res,
                                     best_effort_persist=True,
                                     begin_live_ids=begin_live_ids,
@@ -1595,13 +1743,19 @@ def build_router(srv) -> APIRouter:
                                            command_service=srv.commands,
                                            command_key_namespace=f"{sid}:{turn_id}",
                                            mutation_journal_path=_asst.mutation_journal_path(sid, turn_id),
-                                           mutation_recovery=recover_turn)
+                                           mutation_recovery=recover_turn,
+                                           watches=_session_watches(sid, eff_mode))
                 res = _finish_turn(sid, history, instruction, client, res,
                                    best_effort_persist=False,
                                    begin_live_ids=begin_live_ids,
                                    cancelled=cancel_ev.is_set)
+                # `budget_exhausted` rides the done event too. It is a FIXED key list, so the
+                # envelope key that tells a client "this answer is a salvage" reached the
+                # non-streaming endpoint only — and the UI uses the streaming one, which is why the
+                # fact was invisible on the path the operator actually runs.
                 q.put((SSE_DONE, {k: res.get(k) for k in
-                                  ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
+                                  ("reply", "steps", "applied", "proposals", "todos", "refs",
+                                   "tokens", "mode", "budget_exhausted")}))
             except Exception as e:  # noqa: BLE001
                 # Worker failures may carry provider URLs, routed model/account metadata or
                 # credential fragments.  SSE is part of the public API contract too: keep its

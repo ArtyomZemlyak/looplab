@@ -124,3 +124,36 @@
   .assistant-command-pending .btn { min-height: 44px; }
   .cmdbar-status.recovery { max-width: 78%; }
 }
+
+/* ---- standing watches (BACKLOG §F4) ------------------------------------------------------
+   A strip at the top of the thread listing what this chat is still watching for. It renders only
+   when something IS standing (see `assistantWatchModel.js::watchStrip`) — a permanent "no watches"
+   row is chrome, and chrome is what an operator learns to stop reading. */
+.asst-watches {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+.asst-watches-h { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+.asst-watch { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.asst-watch-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.asst-watch-for { font-weight: 600; }
+.asst-watch-status { font-size: 11px; opacity: 0.9; }
+.asst-watch-next, .asst-watch-budget { font-size: 11px; }
+.asst-watch-stop { margin-left: auto; flex: none; }
+.asst-watch-what { font-size: 11px; overflow-wrap: anywhere; }
+.asst-watch-note { font-size: 11px; }
+/* An INTERRUPTED watch is the one row that asks the operator for something — the server refused to
+   re-enter a mutating wake-up whose outcome it cannot establish. It must not look like news. */
+.asst-watch.attention .asst-watch-status { color: var(--fail-text); font-weight: 600; }
+.asst-watch.attention .asst-watch-note { color: var(--fail-text); }
+.asst-watch.done { opacity: 0.72; }
+
+@media (max-width: 600px) {
+  .asst-watch-stop { margin-left: 0; min-height: 44px; }
+}

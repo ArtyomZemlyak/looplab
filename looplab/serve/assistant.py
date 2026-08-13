@@ -1580,7 +1580,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 client=None, subagents: bool = False, mcp: bool = False, settings=None,
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
-                mutation_journal_path=None, mutation_recovery: bool = False):
+                mutation_journal_path=None, mutation_recovery: bool = False, watches=None):
     """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
     memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
     in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
@@ -1672,6 +1672,13 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns())]
     providers.append(TodoTools(on_todos=on_todos))
+    # Standing watches (BACKLOG §F4) — present in EVERY mode including read-only plan, because
+    # arming one takes no action; it records an instruction to run LATER at this chat's already-
+    # pinned mode. Deliberately NOT on the `mutation_recovery` path above: a recovered dangling turn
+    # lost the model trace that would prove which watches the first attempt already armed, and a
+    # second copy of a standing watch is a second copy of every wake-up it will ever pay for.
+    if watches is not None:
+        providers.append(WatchTools(watches, run_root=run_root))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
                                        cancel_check=cancel_check))
@@ -1724,13 +1731,91 @@ def final_answer_messages(convo: list, *, directive: str = FINAL_ANSWER_DIRECTIV
     return marked + [{"role": "user", "content": directive}]
 
 
+# The assistant's DEFAULT wall clock. Not a policy choice about how long an investigation should
+# take — a guard against a stalled shared-LLM call leaving the chat "thinking" forever. It is a
+# default now rather than a floor: `Settings.assistant_time_budget_s = 0` means no cap.
+ASSISTANT_TIME_BUDGET_DEFAULT_S = 300.0
+
+
+def assistant_time_budget(settings) -> float:
+    """How long ONE assistant turn may run, in seconds; 0.0 = no cap.
+
+    | `assistant_time_budget_s` | `agent_time_budget_s` | result |
+    |---|---|---|
+    | unset (None)  | 0 / unset | 300.0 — the default guard |
+    | unset (None)  | 900       | 900.0 — the engine-wide budget still governs, as it always did |
+    | 0             | anything  | 0.0 — NO CAP: the turn runs until the loop's own stuck/convergence
+    |               |           | nets stop it. This is the spelling that did not exist before, and
+    |               |           | its absence is why `agent_time_budget_s=0` ("no cap", per the
+    |               |           | settings table) silently meant five minutes for the chat.
+    | 1800          | anything  | 1800.0 |
+
+    Stated as a function rather than left inline because it is a rule three surfaces now depend on
+    (the turn, the always-on watch's wake-ups, and the settings documentation), and a rule nobody
+    can state is a rule nobody reviews.
+    """
+    explicit = getattr(settings, "assistant_time_budget_s", None) if settings is not None else None
+    if explicit is not None:
+        try:
+            value = float(explicit)
+        except (TypeError, ValueError):
+            value = -1.0
+        if value >= 0:
+            return value
+    inherited = 0.0
+    if settings is not None:
+        try:
+            inherited = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            inherited = 0.0
+    return inherited if inherited > 0 else ASSISTANT_TIME_BUDGET_DEFAULT_S
+
+
+# What each `LOOP_CUTOFF_KINDS` value MEANS to the person reading the chat. The loop reports the
+# mechanism; this names the consequence, because "emit_force" is not English and an operator seeing
+# a short answer needs to know whether it was cut off by a clock, by a ceiling, or by the model
+# going round in circles. A kind with no row here still gets the generic sentence — silence is the
+# failure mode this table exists to prevent, not an inelegant phrasing.
+_CUTOFF_SENTENCES = {
+    "time": "hit its wall-clock budget",
+    "turns": "used up its turn budget",
+    "stuck": "was stopped because it had started repeating itself",
+    "stalled": "could not get a final answer out of the model",
+    "emit_force": "was forced to answer at its convergence ceiling",
+}
+# Only the two clock/counter kinds are raised by raising the budget; telling an operator to raise
+# `assistant_time_budget_s` after a STUCK exit would send them to a knob that cannot help.
+_CUTOFF_BUDGET_KINDS = frozenset({"time", "turns"})
+
+
+def cutoff_notice(budget: dict) -> str:
+    """The sentence appended to a reply that is a salvage rather than a conclusion (empty for none).
+
+    Both surfaces need this to say the same thing — the chat renders the reply text, tooling reads
+    the `budget_exhausted` envelope — so a notice that lived only in `run_turn`'s body could not be
+    reused by the watch service, which reports the same fact about a wake-up turn.
+    """
+    if not budget:
+        return ""
+    kind = str(budget.get("kind") or "")
+    what = _CUTOFF_SENTENCES.get(kind, "ended without a final answer of its own")
+    detail = str(budget.get("detail") or "").strip()
+    because = f" ({detail})" if detail else ""
+    raise_it = ("Ask me to continue, or raise `assistant_time_budget_s`."
+                if kind in _CUTOFF_BUDGET_KINDS
+                else "Ask me to continue, or narrow the question.")
+    return (f"\n\n---\n_This turn {what}{because} after {budget.get('turns')} tool turns "
+            f"({budget.get('seconds')}s) and was cut short — the answer above is the best I could "
+            f"assemble from what I had gathered, not a finished investigation. {raise_it}_")
+
+
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,
              on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
              on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
              command_service=None, command_key_namespace: str = "",
-             mutation_journal_path=None, mutation_recovery: bool = False) -> dict:
+             mutation_journal_path=None, mutation_recovery: bool = False, watches=None) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -1746,7 +1831,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         command_service=command_service,
                         command_key_namespace=command_key_namespace,
                         mutation_journal_path=mutation_journal_path,
-                        mutation_recovery=mutation_recovery)
+                        mutation_recovery=mutation_recovery, watches=watches)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -1812,8 +1897,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     opts = LoopOptions.coerce(loop_opts_from_settings(settings) if settings is not None else None)
     max_turns = int(getattr(settings, "agent_max_turns", 0) or 0)
     # Interactive assistant: bound the turn's wall-clock so a stalled shared-LLM call can't leave the
-    # chat "thinking" forever. Falls back to 5 min when the setting is unset (0 = unlimited).
-    time_budget = float(getattr(settings, "agent_time_budget_s", 0.0) or 0.0) or 300.0
+    # chat "thinking" forever — see `assistant_time_budget`, which owns the rule and its truth table.
+    time_budget = assistant_time_budget(settings)
     # `.replace()` (this WINS) for all three: the assistant uses the visible write_todos tool instead
     # of the loop's self-plan, and its 5-minute floor is deliberately not the configured value.
     # Folding them into the bundle is what stops `max_turns=…, **opts` — the shape that raises
@@ -1822,11 +1907,12 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     def _collect(attr):
         return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
-    # WHAT HAPPENED TO MY TURN. On budget exhaustion the loop salvages one forced emit from what it
+    # WHAT HAPPENED TO MY TURN. On a cut-short exit the loop salvages one forced emit from what it
     # gathered — the right move — but presenting a cut-short investigation as a finished answer is
     # how "the assistant hangs around 40 tool uses and then something odd comes back" reads to an
-    # operator who was never told the turn ran out of wall clock. `agent_time_budget_s` is unset by
-    # default, so the 5-minute floor below is what most turns actually hit.
+    # operator who was never told. All FIVE of `tool_loop.LOOP_CUTOFF_KINDS` report here, not only
+    # the two clock/counter ones: the `stuck` exit reproduces the operator's report most exactly
+    # (a bare interstitial narration returned as the answer) and used to say nothing at all.
     budget_box: dict = {}
     try:
         reply = drive_tool_loop(client, tools, convo, _emit_spec(),
@@ -1891,12 +1977,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     # reply_sink is present, the turn was not cancelled, the trace is intact). The envelope key
     # survived and the sentence the operator reads did not — which is the entire point of it.
     if budget_box:
-        limit = "wall-clock budget" if budget_box.get("kind") == "time" else "turn budget"
-        reply = (f"{reply}\n\n---\n_This turn hit its {limit} after "
-                 f"{budget_box.get('turns')} tool turns ({budget_box.get('seconds')}s) and was cut "
-                 f"short — the answer above is the best I could assemble from what I had gathered, "
-                 f"not a finished investigation. Ask me to continue, or raise "
-                 f"`agent_time_budget_s`._")
+        reply = f"{reply}{cutoff_notice(budget_box)}"
     return {"ok": True, "reply": reply, "steps": steps,
             "applied": _collect("applied"), "proposals": _collect("proposals"),
             "todos": _collect("todos"), "refs": refs, "mode": mode,
@@ -1953,6 +2034,102 @@ class TodoTools:
                 pass
         done = sum(1 for t in items if t["status"] == "completed")
         return f"(todos updated: {done}/{len(items)} done)"
+
+
+class WatchTools:
+    """Arm a STANDING watch that outlives this turn, this request and this browser (BACKLOG §F4).
+
+    The operator's three asks — "infinite assistant mode; waiting on statuses; monitoring every N" —
+    reach the model as two verbs, because they are two conditions over one mechanism: wait for a run
+    to reach a state, or wake on a schedule. Everything durable about it lives in
+    `serve/assistant_watch.py`; this is only the vocabulary the model speaks.
+
+    Present in EVERY mode, read-only plan included. Arming a watch takes no action on anything — it
+    records an intention to run a turn later, at the mode this chat is already in (pinned at arm
+    time by `SessionWatches`, never re-derived), with exactly the toolset that mode already grants.
+    So it widens what the assistant can DO across time without widening what it is trusted WITH,
+    which is the distinction doc 36 asks every such change to make explicitly.
+    """
+
+    def __init__(self, watches, run_root=None):
+        self.watches = watches          # a `SessionWatches` — session-scoped, mode-pinned
+        self.run_root = run_root
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        from looplab.serve.assistant_watch import (
+            WATCH_MAX_INTERVAL_S, WATCH_MIN_INTERVAL_S, WATCH_RUN_STATES)
+        from looplab.tools._base import fn_spec
+        states = ", ".join(WATCH_RUN_STATES)
+        return [
+            fn_spec(
+                "watch_run",
+                "Wait for a run to reach a state, then carry out an instruction — even if the user "
+                "closes the browser. Use this instead of polling in a loop: your turn ends now and "
+                "a fresh turn wakes when the state is actually observed. Tell the user you armed "
+                "it and what it is waiting for.",
+                {"run": {"type": "string", "description": "the run id to watch"},
+                 "until": {"type": "array", "items": {"type": "string"},
+                           "description": f"any of: {states}"},
+                 "instruction": {"type": "string",
+                                 "description": "what to do when it fires — a complete, standalone "
+                                                "instruction, since nobody will be there to clarify"}},
+                ["run", "until", "instruction"]),
+            fn_spec(
+                "watch_every",
+                "Run an instruction on a repeating schedule until its budget runs out — the "
+                "'monitor every N' mode. Each wake-up is a fresh turn appended to this chat.",
+                {"every_s": {"type": "number",
+                             "description": f"seconds between wake-ups "
+                                            f"({WATCH_MIN_INTERVAL_S:g}–{WATCH_MAX_INTERVAL_S:g})"},
+                 "instruction": {"type": "string", "description": "the standing instruction"},
+                 "max_wakeups": {"type": "integer",
+                                 "description": "stop after this many wake-ups (optional)"}},
+                ["every_s", "instruction"]),
+            fn_spec("list_watches", "List this chat's standing watches and what each is waiting for.",
+                    {}, []),
+            fn_spec("stop_watch", "Stop one of this chat's standing watches.",
+                    {"id": {"type": "string", "description": "the watch id from list_watches"}},
+                    ["id"]),
+        ]
+
+    def execute(self, name: str, args: dict) -> str:
+        from looplab.serve.assistant_watch import WatchRefusal, describe_trigger
+        args = args or {}
+        try:
+            if name == "watch_run":
+                until = args.get("until")
+                trigger = {"kind": "run_state", "run": args.get("run"), "until": until}
+                rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
+                                       trigger=trigger)
+            elif name == "watch_every":
+                trigger = {"kind": "schedule", "every_s": args.get("every_s")}
+                rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
+                                       trigger=trigger, max_wakeups=args.get("max_wakeups"))
+            elif name == "list_watches":
+                rows = self.watches.list()
+                if not rows:
+                    return "(no standing watches on this chat)"
+                return "\n".join(
+                    f"{r['id']}  [{r['status']}]  waiting for {r.get('waiting_for')}  "
+                    f"({r.get('wakeups', 0)}/{r.get('max_wakeups')} wake-ups)" for r in rows)
+            elif name == "stop_watch":
+                stopped = self.watches.cancel(str(args.get("id") or ""))
+                if stopped is None:
+                    return "(no such watch on this chat)"
+                return f"(watch {stopped['id']} stopped)"
+            else:
+                return f"(unknown tool: {name})"
+        except WatchRefusal as exc:
+            # The refusal SENTENCE is the point: this is read by a model that can fix the call.
+            return f"(watch refused: {exc})"
+        except Exception as exc:  # noqa: BLE001 - never crash a turn over a standing-watch failure
+            return f"(could not arm the watch: {type(exc).__name__})"
+        return (f"(watch {rec['id']} armed — waiting for "
+                f"{rec.get('waiting_for') or describe_trigger(rec['trigger'])}; it survives a page "
+                f"reload and a server restart. Tell the user it is armed and what it waits for.)")
 
 
 class SubagentTools:
