@@ -1682,7 +1682,7 @@ class Settings(BaseSettings):
         Note the field stays FLAT and 1:1 with `LOOPLAB_EVAL_ENV`, as every Settings field must —
         what is nested is the VALUE, exactly as it already is for `llm_profiles`/`role_profiles`.
         """
-        from looplab.runtime.command_eval import validate_env_map
+        from looplab.core.envsafe import validate_env_map
         if value is None or value == "":
             return {}
         if isinstance(value, str):

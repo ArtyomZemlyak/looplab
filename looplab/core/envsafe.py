@@ -92,7 +92,8 @@ ENGINE_OWNED_ENV = ("CUDA_VISIBLE_DEVICES",)
 # import `runtime` to assert that, so `tests/test_stage_environment.py` holds the two together.
 
 
-def validate_env_map(where: str, values, *, cap: int = MAX_STAGE_ENV_VARS) -> tuple[Optional[dict], Optional[str]]:
+def validate_env_map(where: str, values, *,
+                     cap: int = MAX_STAGE_ENV_VARS) -> tuple[Optional[dict], Optional[str]]:
     """Validate a declared environment block into its canonical `{NAME: "value"}` form:
     `(clean, None)` or `(None, reason)`. THE single definition, shared by `stages[].env`,
     `EvalSpec.env` and `Settings.eval_env`, so the three levels that get MERGED cannot disagree about

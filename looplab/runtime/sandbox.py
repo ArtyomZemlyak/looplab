@@ -35,8 +35,7 @@ from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
 # `core/config.py::Settings.eval_env`, which may not import `runtime` (the layering rule that is also
 # why `config._SECRET_ENV_NAME` — the stricter api_key_env sibling — is a duplicate rather than an
 # import). One home beats a third copy; `tests/test_secret_env_pattern.py` is still the joint.
-from looplab.core.envsafe import (SECRET_ENV, _CREDENTIAL_URL_VALUE,  # noqa: F401 (re-export)
-                                  is_secret_env)
+from looplab.core.envsafe import SECRET_ENV, is_secret_env  # noqa: F401 (re-export)
 
 
 def git_subprocess_env() -> dict[str, str]:

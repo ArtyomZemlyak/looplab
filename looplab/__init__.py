@@ -42,6 +42,7 @@ _LAYOUT = {
     "agent": "agents",
     "agents_md": "tools",
     "appconfig": "core",
+    "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
     "appstate": "serve",
     "attention": "serve",
     "archive": "search",
