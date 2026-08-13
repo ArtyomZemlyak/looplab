@@ -59,8 +59,9 @@ import sys
 from typing import Iterable, Optional
 
 # The default set, as data rather than as code, so `looplab landlock-check` can print exactly what
-# the launch will grant. `(path, mode)`; a path that does not exist on this box contributes no rule
-# and is REPORTED by `landlock.build_ruleset`, never silently dropped.
+# the launch will grant. `(path, mode)`; an entry that does not exist on this box is dropped at
+# derivation (see `_add`'s `declared`) — these are MACHINE tiers, and `/lib32` being absent is a fact
+# about the image, not a disagreement with anything the operator said.
 #
 # `/proc`, `/sys` and `/dev` are granted WHOLE and read-write on purpose. The single largest unretired
 # unknown in this design is whether a real GPU eval survives a ruleset at all (doc 35 §7.2: CUDA,
@@ -99,15 +100,25 @@ def _norm(path) -> Optional[str]:
     return p or None
 
 
-def _add(out: dict, path, mode: str) -> None:
+def _add(out: dict, path, mode: str, *, declared: bool = False) -> None:
     """Record `path` at `mode`, with readwrite WINNING over read.
 
     The precedence matters and only in that direction: the workdir may also be reachable as a
     `/tmp` subpath on some hosts, and demoting it to read would make the node unable to write its own
     output. A grant is never narrowed by a later, broader tier.
+
+    `declared` is the difference between the operator's paths and the machine's, and it is the whole
+    reason this is one function with a flag rather than two lists. A MACHINE tier that is not on this
+    box (`/lib32` here, `/opt` on a slim image) is not a fact about anything and is dropped at
+    derivation; an OPERATOR-declared mount that is not there is a real disagreement and is kept, so
+    the launcher refuses the eval by name instead of quietly running without it. Getting this
+    backwards is not hypothetical: shipping `/lib32` into the ruleset made `landlock.apply` refuse
+    every launch on this box in the first end-to-end test.
     """
     p = _norm(path)
     if p is None:
+        return
+    if not declared and not os.path.exists(p):
         return
     if out.get(p) == "readwrite":
         return
@@ -153,16 +164,16 @@ def derive(*, workdir, run_dir=None, repo_spec: Optional[dict] = None,
     the operator sees their own declarations before the machine's.
     """
     out: dict = {}
-    _add(out, workdir, "readwrite")
+    _add(out, workdir, "readwrite", declared=True)
     if run_dir:
-        _add(out, run_dir, "readwrite")
+        _add(out, run_dir, "readwrite", declared=True)
     for path, mode in mount_sources(repo_spec):
-        _add(out, path, mode)
+        _add(out, path, mode, declared=True)
     for item in extra or ():
         if isinstance(item, (tuple, list)) and len(item) == 2:
-            _add(out, item[0], str(item[1]))
+            _add(out, item[0], str(item[1]), declared=True)
         else:
-            _add(out, item, "read")
+            _add(out, item, "read", declared=True)
     # The interpreter itself. Without `sys.prefix` (site-packages) and `sys.base_prefix` (the stdlib
     # of a venv's base) the child python does not reach `import`; without `sys.executable`'s directory
     # a venv's `bin/python -> ../../bin/python3` cannot be exec'd.

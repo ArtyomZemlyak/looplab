@@ -140,9 +140,20 @@ MODES = ("read", "readwrite")
 POLICIES = ("off", "enforce")
 
 # The env var `engine/resources.py` stamps a launch's allow-list into and `runtime/sandbox.py`
-# consumes at the Popen choke point. `os.pathsep`-joined `mode:path` entries, so it survives the
-# str-only child environment without a second serialization format.
+# consumes at the Popen choke point.
 LANDLOCK_ENV = "LOOPLAB_LANDLOCK"
+
+# The allow-list's wire format: `<mode>\x1f<path>` records joined by `\x1e`.
+#
+# NOT `os.pathsep`-joined `mode:path`, which is what this shipped as for exactly one hour. On POSIX
+# `os.pathsep` IS `":"`, so `format_env` produced `read:/usr:read:/lib` and every record then failed
+# to partition — the parser dropped all of them, the ruleset came out EMPTY, and an empty allow-list
+# denies everything: the launch died with `execvp -> EACCES` before running a single byte of the
+# eval. That is the failure mode this whole module has to be careful about and it bit its own
+# serializer first. ASCII 0x1E/0x1F are the record/unit separators, cannot appear in a POSIX path,
+# and are legal in an environment value (only NUL is not).
+_UNIT = "\x1f"
+_RECORD = "\x1e"
 
 
 class LandlockUnavailable(RuntimeError):
@@ -293,23 +304,118 @@ def apply(allow, *, strict: bool = True) -> list:
 def parse_env(value: Optional[str]) -> list:
     """`[(path, mode)]` from the `os.pathsep`-joined `mode:path` spelling `LANDLOCK_ENV` carries.
 
-    Total over junk: an entry that is not `mode:path` with a known mode is DROPPED rather than
-    raising, because this is parsed inside a `preexec_fn` between fork and exec, where an exception
-    becomes a launch failure with a traceback nobody can read. A dropped entry becomes a `skipped`
-    rule at `apply` time only if it named a real path, and `strict` then refuses the launch — so the
-    failure is still loud, just at the rung that can describe it.
+    RAISES on a malformed record rather than dropping it. Dropping was the original behaviour and it
+    is what turned the separator collision above into a total, silent denial: every record was junk,
+    every record was dropped, and the caller got a well-formed empty allow-list. Under an allow-list
+    an unparseable entry is a DENIAL, so it has to be as loud as any other.
     """
     out: list = []
-    for item in (value or "").split(os.pathsep):
+    for item in (value or "").split(_RECORD):
         if not item:
             continue
-        mode, sep, path = item.partition(":")
+        mode, sep, path = item.partition(_UNIT)
         if not sep or mode not in MODES or not path:
-            continue
+            raise LandlockUnavailable(f"malformed landlock allow-list record: {item!r}")
         out.append((path, mode))
     return out
 
 
 def format_env(allow: Iterable) -> str:
     """The `LANDLOCK_ENV` spelling of an allow-list. Inverse of `parse_env`."""
-    return os.pathsep.join(f"{mode}:{path}" for path, mode in allow)
+    return _RECORD.join(f"{mode}{_UNIT}{path}" for path, mode in allow)
+
+
+# The child-side launcher: a fresh single-threaded interpreter that applies the ruleset and then
+# `execvp`s the real argv, exactly the shape `runtime/sandbox.py::_RLIMIT_LAUNCHER` already uses and
+# for the same recorded reason — `preexec_fn` is not an option under threaded evaluators, and this
+# engine runs evals from `anyio.to_thread` workers. `execvp` keeps the pid, cwd, env, session and
+# inherited pipes, so `_kill_tree`'s pgid, `proc.pid` and the drain threads all see the process they
+# would have seen anyway, and Landlock is inherited across the exec by the kernel.
+#
+# It cannot `import looplab`: the eval may be a different interpreter in a different virtualenv. So
+# the syscall numbers and access bits are TEMPLATED IN from this module's own constants rather than
+# hand-copied — the failure mode of a hand-copy here is not a crash but a WRONG ruleset, which under
+# an allow-list means silently refusing paths nobody asked to refuse.
+#
+# FAIL-CLOSED, and this is the one policy decision inside the child. If the ruleset cannot be applied
+# the launcher REFUSES to exec, with the reason on stderr — i.e. in `eval.log`, in the captured
+# `RunResult.stderr`, and therefore in the repair feedback. Running the eval unrestricted instead
+# would mean an operator who set `landlock="enforce"` silently gets no boundary, which is worse than
+# a failed launch they can see: the whole content of this rung is a guarantee about what was NOT
+# readable while the number was produced.
+_LAUNCHER = """import ctypes, os, sys
+_UNIT, _RECORD = %(unit)r, %(record)r
+_CREATE, _ADD, _RESTRICT = %(create)d, %(add)d, %(restrict)d
+_READ, _WRITE, _HANDLED = %(read)d, %(write)d, %(handled)d
+_a = sys.argv[1:]
+_spec, _argv = _a[0], _a[2:]
+
+
+class _Attr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+class _Rule(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+
+def _die(msg):
+    sys.stderr.write("LOOPLAB landlock: %%s\\n" %% (msg,))
+    sys.exit(126)
+
+
+_lib = ctypes.CDLL(None, use_errno=True)
+_attr = _Attr(handled_access_fs=_HANDLED)
+_fd = _lib.syscall(ctypes.c_long(_CREATE), ctypes.byref(_attr),
+                   ctypes.c_size_t(ctypes.sizeof(_attr)), ctypes.c_uint32(0))
+if _fd < 0:
+    _die("landlock_create_ruleset failed: %%s" %% os.strerror(ctypes.get_errno()))
+_rules = 0
+for _item in _spec.split(_RECORD):
+    if not _item:
+        continue
+    _mode, _sep, _path = _item.partition(_UNIT)
+    if not _sep or _mode not in ("read", "readwrite") or not _path:
+        _die("malformed allow-list record %%r (an unparseable record is a DENIAL, not a no-op)"
+             %% (_item,))
+    try:
+        _pfd = os.open(_path, os.O_PATH | os.O_CLOEXEC)
+    except OSError as exc:
+        _die("cannot allow-list %%s: %%s (refusing to enforce a ruleset that would deny a path it "
+             "was asked to allow)" %% (_path, exc))
+    _r = _Rule(allowed_access=(_WRITE if _mode == "readwrite" else _READ), parent_fd=_pfd)
+    ctypes.set_errno(0)
+    if _lib.syscall(ctypes.c_long(_ADD), ctypes.c_int(_fd), ctypes.c_uint32(1),
+                    ctypes.byref(_r), ctypes.c_uint32(0)) != 0:
+        _die("landlock_add_rule(%%s) failed: %%s" %% (_path, os.strerror(ctypes.get_errno())))
+    os.close(_pfd)
+    _rules += 1
+if not _rules:
+    _die("empty allow-list: an empty ruleset denies EVERYTHING, so this would refuse the eval's own "
+         "workdir and its interpreter. Nothing was restricted and nothing was run.")
+ctypes.set_errno(0)
+if _lib.prctl(ctypes.c_int(38), ctypes.c_ulong(1), ctypes.c_ulong(0),
+              ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:
+    _die("prctl(PR_SET_NO_NEW_PRIVS) failed: %%s" %% os.strerror(ctypes.get_errno()))
+ctypes.set_errno(0)
+if _lib.syscall(ctypes.c_long(_RESTRICT), ctypes.c_int(_fd), ctypes.c_uint32(0)) != 0:
+    _die("landlock_restrict_self failed: %%s" %% os.strerror(ctypes.get_errno()))
+os.close(_fd)
+try:
+    os.execvp(_argv[0], _argv)
+except OSError as exc:
+    sys.stderr.write("failed to launch: %%s\\n" %% (exc,))
+    sys.exit(127)
+"""
+
+
+def launcher_source() -> str:
+    """The `-c` source for `launch_argv`, with this module's constants substituted in."""
+    return _LAUNCHER % {"unit": _UNIT, "record": _RECORD, "create": _SYS_LANDLOCK_CREATE_RULESET,
+                        "add": _SYS_LANDLOCK_ADD_RULE, "restrict": _SYS_LANDLOCK_RESTRICT_SELF,
+                        "read": _READ, "write": _WRITE, "handled": _HANDLED}
+
+
+def launch_argv(python: str, spec: str, argv: list) -> list:
+    """`argv` wrapped so it runs under the allow-list `spec` (a `LANDLOCK_ENV` string)."""
+    return [python, "-c", launcher_source(), spec, "--", *argv]

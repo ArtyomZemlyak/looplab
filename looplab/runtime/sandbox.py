@@ -27,6 +27,7 @@ from typing import Optional, Protocol
 
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
+from looplab.runtime import landlock as _landlock
 
 # Env-var NAMES that look like a secret — redacted from the child process environment so generated
 # code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
@@ -598,6 +599,29 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # container that the run had a fence.
     if not _docker_run:
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
+        # KERNEL READ ALLOW-LIST (runtime/landlock.py), the rung the audit hook above cannot reach:
+        # `safetensors`, a Rust `File::open`, a child `cat` and a `torchrun` rank raise no `open`
+        # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK`
+        # (engine/resources.py); absent — which is the default, `Settings.landlock="off"` — nothing
+        # here changes and the launch is byte-identical.
+        #
+        # Wrapped as a LAUNCHER, not a `preexec_fn`, for the reason `_RLIMIT_LAUNCHER` records: evals
+        # run from `anyio.to_thread` workers and a `preexec_fn` under a threaded parent is exactly
+        # the deadlock shape that pattern exists to avoid. Applied OUTERMOST, after any rlimit wrap,
+        # so the ruleset is in force for everything downstream; Landlock is inherited across `exec`
+        # by the kernel, so one application covers the whole process tree.
+        #
+        # The launch's own workdir is added here rather than by the engine: `wd` is the one path that
+        # is per-LAUNCH (the node workdir, the repo root for `setup`, a stage's cwd) and a process
+        # that cannot write its own cwd cannot run. Skipped for a `docker run` argv on the same
+        # reasoning as the fence — the container never sees these host paths, and the untrusted tiers
+        # are bounded by the bind set instead.
+        _ll = full_env.get(_landlock.LANDLOCK_ENV) or ""
+        if _ll:
+            argv = _landlock.launch_argv(
+                sys.executable,
+                _landlock.format_env([(str(wd), "readwrite")] + _landlock.parse_env(_ll)),
+                argv)
     # Run the child in UTF-8 mode so its `open()`/stdio default to UTF-8 even on Windows (whose
     # default is cp1252). LLM-written solutions and real benchmark data (mle-bench CSVs) are UTF-8 and
     # routinely crash with a cp1252 UnicodeDecodeError on the Windows host path. (The Docker/untrusted
