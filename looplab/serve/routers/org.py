@@ -11,8 +11,8 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
     validate_deletion_request)
-from looplab.serve.memory_cascade import (attributable_memory, purge_attributable_memory,
-                                          run_memory_identity)
+from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_memory,
+                                          purge_attributable_memory, run_memory_identity)
 from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
@@ -302,7 +302,17 @@ def build_router(srv) -> APIRouter:
         body = await json_object(request)
         operation_id, generation, expected_seq = validate_deletion_request(body)
         cascade = deletion_cascade_requested(body)
-        identity = (await anyio.to_thread.run_sync(lambda: _identity(run_id))) if cascade else {}
+        def _identity_before_deletion() -> dict:
+            # Record whether the run was still HERE when the identity was read, not just what the
+            # read returned. On a RETRY of an already-succeeded deletion the directory is gone (the
+            # receipt outlives it in `srv.root`), `run_memory_identity` swallows the FileNotFoundError
+            # and falls back to the directory NAME plus the SERVER's current global store — so the
+            # purge below would run under an identity this run never had, against a store it may
+            # never have written to, and report a clean success. Guessing an identity is the one
+            # thing this cascade exists not to do.
+            return {**_identity(run_id), "read_from_run": _plain_run_dir(run_id).is_dir()}
+
+        identity = (await anyio.to_thread.run_sync(_identity_before_deletion)) if cascade else {}
         result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
             srv, run_id, operation_id=operation_id,
             expected_generation=generation, expected_seq=expected_seq))
@@ -310,13 +320,25 @@ def build_router(srv) -> APIRouter:
         # deletion that fails after its memory was purged would leave the operator with a run whose
         # evidence had been destroyed on its behalf — the one outcome no retry can undo. The purge is
         # idempotent ("remove every row attributable solely to R"), so running it on a retry of an
-        # already-succeeded operation costs nothing and repairs a partial first attempt.
+        # already-succeeded operation costs nothing and repairs a partial first attempt — but only
+        # when THIS attempt could still read the identity to repair it under.
         if cascade and result.get("status") == "succeeded":
             # Read BEFORE the deletion, used after: `run_uid` and the run's own `memory_dir` live in
             # the run directory, which no longer exists by the time the purge runs.
-            result = {**result, "memory": await anyio.to_thread.run_sync(
-                lambda: purge_attributable_memory(
-                    identity["memory_dir"], identity["run_id"], identity["run_uid"]))}
+            if not identity.get("read_from_run"):
+                result = {**result, "memory": {
+                    "schema": MEMORY_CASCADE_SCHEMA, "run_id": run_id, "run_uid": "",
+                    "memory_dir": "", "identity": "unknown", "ok": False,
+                    "deleted": 0, "kept": 0, "stores": [], "failures": [{
+                        "store": "identity",
+                        "error": ("the run directory was already gone when this attempt read its "
+                                  "identity, so the purge would have guessed one; POST "
+                                  f"/api/runs/{run_id}/memory-purge with the run_uid and memory_dir "
+                                  "from the original deletion receipt")}]}}
+            else:
+                result = {**result, "memory": await anyio.to_thread.run_sync(
+                    lambda: purge_attributable_memory(
+                        identity["memory_dir"], identity["run_id"], identity["run_uid"]))}
         return JSONResponse(
             status_code=200 if result.get("status") == "succeeded" else 202,
             content=result)

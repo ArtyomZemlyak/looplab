@@ -88,6 +88,14 @@ export function cascadeOutcome(memory, runId = '') {
       text: 'The run was deleted. Its cross-run memory was only partly removed'
         + (where ? ` (${where} could not be rewritten).` : '.'),
       retryRunId: String(runId || memory.run_id || ''),
+      // The retry's IDENTITY, carried beside the handle. The run is already gone, so the server
+      // cannot read this back and refuses to guess it; the receipt is the only place it still
+      // exists. `memory_dir` matters as much as `run_uid`: it is a per-RUN setting, so a retry that
+      // omitted it opened the server's CURRENT global store, matched nothing, and reported success.
+      retryIdentity: {
+        run_uid: String(memory.run_uid || ''),
+        memory_dir: String(memory.memory_dir || ''),
+      },
     }
   }
   if (!deleted) {

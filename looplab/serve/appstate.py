@@ -591,7 +591,14 @@ class AppState:
         # 6.5 s and the UI said "Setting up task and data…" for the next 40 minutes, across a
         # 13-minute proposal and a 23-minute build. A phase derived from what has NOT happened
         # names the wrong thing as soon as one task kind stops emitting it.
-        if st.run_id and not st.setup_done:
+        # …and a legacy log that never emitted `setup_finished` is set-up-complete once a NODE exists.
+        # That is not a guess, it is the engine's OWN rule: `orchestrator.py::_setup_phase` skips
+        # setup entirely on `state.setup_done or state.nodes or state.finished`, so such a resumed run
+        # never appends `setup_finished` and `st.setup_done` stays False for the rest of its life —
+        # this phase would read "grounding" while nodes are being built and evaluated. The clause
+        # cannot mask the defect the comment above records: a modern run folds `setup_done` seconds
+        # in, long before its first node exists.
+        if st.run_id and not st.setup_done and not st.nodes:
             return PHASE_GROUNDING
         return PHASE_SEARCH
 

@@ -451,7 +451,14 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
     """
     run = RunIdentity(run_id, run_uid)
     base = Path(memory_dir) if memory_dir else None
+    # WHICH store this ran against, echoed for the same reason `run_uid` is. A retry arrives after the
+    # run directory is gone and can only pass back what the receipt told it, and `memory_dir` is a
+    # per-RUN `Settings` field — so echoing `run_uid` while omitting this is what let a faithful
+    # client fall back to the SERVER's current global store, find no row carrying that uid, and get a
+    # clean `ok: true, deleted: 0` while every lesson, case, note, claim and capsule the run wrote sat
+    # untouched in the store it was actually launched with.
     result = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
+              "memory_dir": str(base) if base is not None else "",
               "identity": "run_id" if run.legacy_only else "run_uid", "ok": True,
               "deleted": 0, "kept": 0, "stores": [], "failures": []}
     if not run.run_id or base is None or not base.is_dir():

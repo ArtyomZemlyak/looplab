@@ -978,7 +978,13 @@ def _artifacts_written_elsewhere(workdir: str, rel: str, since: Optional[float])
             except OSError:
                 continue
             here = candidate.relative_to(root) if candidate.is_relative_to(root) else candidate
-            if str(here) != str(rel):
+            # Compare the DECLARED path AS A PATH, never as text. `rel` is the operator's spec string
+            # — POSIX-spelled by convention, and possibly `./sub/x` — while `here` renders with the
+            # HOST separator, so on Windows `sub\x` never equalled `sub/x` and the declared file
+            # reported itself as written "elsewhere". That flips the outcome by OS: what
+            # `metric_salvage._relocated` would salvage from a single candidate becomes the ambiguous
+            # pair it refuses (`len(found) != 1`), on the same run against the same workdir.
+            if here != Path(str(rel or "")):
                 found.append(str(here))
     except Exception:  # noqa: BLE001 — a diagnostic must never be the thing that fails the eval
         return []

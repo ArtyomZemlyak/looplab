@@ -26,6 +26,20 @@ export const TRACE_VIEW_SPANS = 'raw'
 // the same defect wearing a table.
 export const TRACE_SURFACE_VIEWS = Object.freeze([TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS])
 
+// The switcher RENDERS from the list above rather than hand-writing one button per view. It used to
+// hand-write both, which made the comment above a claim the code did not keep: the frozen array was
+// imported by nothing, so adding a third view — or making one view subject-dependent — would have
+// been done in the JSX and left the one artefact a reader consults to learn which views exist
+// silently wrong. Label and tooltip live here for the same reason; a view with no row is a missing
+// key at render, not a button that quietly never appears.
+export const TRACE_SURFACE_VIEW_LABELS = Object.freeze({
+  [TRACE_VIEW_CONVERSATION]: Object.freeze({
+    label: 'conversation',
+    title: "Linear, de-duplicated reading: request once, then each turn's reasoning + tools",
+  }),
+  [TRACE_VIEW_SPANS]: Object.freeze({ label: 'span tree', title: '' }),
+})
+
 const safeInt = value => (Number.isSafeInteger(value) && value >= 0 ? value : null)
 
 /**

@@ -799,10 +799,17 @@ export function submitRunDeletion(runId, expectedGeneration, expectedSeq, operat
 export const getRunMemoryAttribution = (runId, options = {}) => get(
   runApiPath(runId, '/memory-attribution'), options)
 
-// Finishes a cascade whose store was locked when the run was deleted. Idempotent and keyed by run
-// id alone, so it works after the run — and its card — are gone, which is the only case it serves.
-export const purgeRunMemory = (runId, options = {}) => post(
-  runApiPath(runId, '/memory-purge'), {}, options)
+// Finishes a cascade whose store was locked when the run was deleted. Idempotent, and it must CARRY
+// the identity: this is only ever reached after the run is gone, and the server refuses an empty
+// body in exactly that case (400 `memory_purge_identity_required`) rather than guess which run a
+// reused directory name means. Posting `{}` made the retry button unable to succeed even once. Both
+// halves come from the deletion receipt's `memory` block — `memory_dir` because it is a per-RUN
+// setting, so falling back to the server's current global store finds nothing and reports a clean
+// `deleted: 0` over rows that are still there.
+export const purgeRunMemory = (runId, identity = {}, options = {}) => post(
+  runApiPath(runId, '/memory-purge'),
+  { run_uid: String(identity?.run_uid || ''), memory_dir: String(identity?.memory_dir || '') },
+  options)
 
 export function getRunDeletion(runId, operationId, options = {}) {
   if (!UUID_V4_RE.test(operationId || '')) {

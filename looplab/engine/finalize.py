@@ -923,8 +923,16 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
     # same retained diagnostic conversation. `build_trace_view` then redacts/caps that material and marks
     # omissions explicitly: trace.json is a bounded, potentially partial projection, never a raw transcript.
     try:
-        if not _flush_trace_exporter(engine):
-            raise RuntimeError("trace exporter did not reach its flush barrier")
+        # The barrier stays FIRST — nothing may snapshot spans.jsonl before the rows the exporter has
+        # already accepted have had their chance to land. It does NOT gate the projection, though.
+        # `force_flush` returning False bounds only the CALLER's wait budget (`core/tracing.py`: "The
+        # timeout bounds only the caller's wait; Python cannot safely interrupt a worker already in
+        # filesystem I/O"), so it never means the rows on disk are invalid, and anything genuinely
+        # dropped gets its own `looplab.exporter.loss` receipt. Raising here landed in the `except`
+        # below, which returns immediately under the modern protocol — so a slow flush that lost
+        # nothing cost the run BOTH `trace.json` and `tree.html`, two independently rebuildable
+        # projections that each already degrade best-effort on their own a few lines down.
+        _flush_trace_exporter(engine)
         trace_spans, trace_total = load_span_tail(
             engine.run_dir / "spans.jsonl", TRACE_VIEW_SPAN_CAP)
         trace_view = build_trace_view(

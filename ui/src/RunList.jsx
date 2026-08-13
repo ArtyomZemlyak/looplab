@@ -2303,11 +2303,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
       cascade: false,
     })
   }
-  const retryMemoryPurge = async runId => {
+  const retryMemoryPurge = async (runId, identity) => {
     if (!runId || memoryRetryBusy) return
     setMemoryRetryBusy(true)
     const request = deadlineRequest(
-      signal => purgeRunMemory(runId, { signal }), RUN_DELETION_TIMEOUT_MS)
+      signal => purgeRunMemory(runId, identity, { signal }), RUN_DELETION_TIMEOUT_MS)
     try {
       const memory = await request.promise
       // Reuse the one outcome vocabulary. A second phrasing here would let the retry report success
@@ -2315,7 +2315,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
       setDeletionNotice(cascadeOutcome(memory, runId)
         || { kind: 'status', text: 'The memory purge finished.' })
     } catch {
-      setDeletionNotice({ kind: 'error', retryRunId: runId, text:
+      // Carry the identity forward: the run is gone, so this notice is the ONLY place it still
+      // exists, and a retry that dropped it could not succeed on the next press either.
+      setDeletionNotice({ kind: 'error', retryRunId: runId, retryIdentity: identity, text:
         'The memory purge did not finish. Nothing further was removed; this can be retried.' })
     } finally {
       if (deletionMountedRef.current) setMemoryRetryBusy(false)
@@ -2432,7 +2434,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
         role={deletionNotice.kind === 'error' ? 'alert' : 'status'}>
         <span>{deletionNotice.text}</span>
         {deletionNotice.retryRunId && <button type="button" className="btn sm"
-          disabled={memoryRetryBusy} onClick={() => retryMemoryPurge(deletionNotice.retryRunId)}>
+          disabled={memoryRetryBusy}
+          onClick={() => retryMemoryPurge(deletionNotice.retryRunId, deletionNotice.retryIdentity)}>
           {memoryRetryBusy ? 'Finishing…' : 'Finish memory purge'}</button>}
         <button type="button" className="btn sm" onClick={() => setDeletionNotice(null)}>Dismiss</button>
       </div>}

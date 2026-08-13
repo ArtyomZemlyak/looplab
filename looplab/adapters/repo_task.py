@@ -203,6 +203,17 @@ def entrypoint_candidates(command) -> list[str]:
     without having to bound what the process reads.
     """
     argv = [t for t in (command or []) if isinstance(t, str)]
+    # Both forms below read the argv as `<interpreter> [flags] <target>`, which is only true when the
+    # interpreter is the argv HEAD. Under a wrapper — `bash run_eval.sh --cfg configs/base.py`,
+    # `./run.sh --metrics-out metrics.py` — the first non-flag `.py` token is an ARGUMENT, not the
+    # executed file, and returning it did two wrong things at once: `_entrypoint_protect` froze a file
+    # the operator never meant to freeze (costing the Developer a repair attempt on a refusal it
+    # cannot act on), and `eval_entrypoint_unprotected` fell silent for exactly the wrapper case that
+    # warning exists to name. The docstring above already says `bash run.sh` returns []; this is what
+    # makes that true. Say nothing rather than guess.
+    head = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
+    if not re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
+        return []
     for i, tok in enumerate(argv):
         if tok == "-m":
             mod = argv[i + 1] if i + 1 < len(argv) else ""

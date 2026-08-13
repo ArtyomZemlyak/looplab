@@ -125,7 +125,10 @@ class LessonPriorsMixin:
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
         lpath = base / "lessons.jsonl"
-        # keep_bad=True: idx must stay the RAW on-disk line number (stable lesson identity).
+        # `idx` is the row's position in THIS captured window (`core/memory_window.py`), NOT an
+        # on-disk line number — the window is a bounded tail, so the same lesson gets a different
+        # `idx` after any append. It is only a join key within this one scan (`by_idx`/`already`
+        # below) and is never persisted or compared across reads.
         lesson_rows, lesson_health = read_memory_jsonl_window(lpath)
         if note_health["unavailable"] or lesson_health["unavailable"]:
             # Run-start/cadence callers already own a durable unavailable event and deliberately leave

@@ -304,6 +304,27 @@ class SalvagedMetric:
     # answer so a caller that does not know cannot accidentally buy `select`.
     producer: str = AGENT_PRODUCED
 
+    def __post_init__(self):
+        """Bind the three declared vocabularies to the ONE place a salvage record is minted.
+
+        `SALVAGE_SOURCES`/`SALVAGE_CONDITIONS`/`SALVAGE_PRODUCERS` declared themselves closed and
+        were enforced by nothing — every slug was a hand-written literal at its construction site, so
+        a typo'd `"relocated-file"` shipped silently: the record still wrote, `as_event()` still rode
+        on `node_evaluated`, and the operator reading a salvaged node got a source slug no reader
+        recognises. That is the failure the registry convention exists to prevent (CLAUDE.md), and a
+        registry with no consumer only looks like one.
+
+        Raising is safe here and deliberately loud: both entry points that reach a construction
+        (`_salvage_eval_metric`, `_salvage_qualifying_gates`) are already wrapped in
+        `except Exception -> None`, so an unregistered slug degrades to "this node was not salvaged"
+        — the same outcome as any other salvage read failure — instead of crashing the eval.
+        """
+        for value, allowed, field in ((self.condition, SALVAGE_CONDITIONS, "condition"),
+                                      (self.source, SALVAGE_SOURCES, "source"),
+                                      (self.producer, SALVAGE_PRODUCERS, "producer")):
+            if value not in allowed:
+                raise ValueError(f"SalvagedMetric.{field}={value!r} is not one of {allowed!r}")
+
     def as_event(self) -> dict:
         """The `metric_provenance` payload for `node_evaluated`.
 

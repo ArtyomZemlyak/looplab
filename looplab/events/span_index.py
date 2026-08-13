@@ -1054,7 +1054,17 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                     break
                 if not idx._append(rec, off, length, digest):
                     break
-                last_end = off + length + 1  # +1 for the newline that follows the line in spans.jsonl
+                # +1 for the newline that follows the line in spans.jsonl. The MAXIMUM, not the last
+                # row's end: rows are validated INDIVIDUALLY here (a drifted offset is deliberately
+                # caught later, at read time, by the row digest — see
+                # `test_persisted_index_offset_drift_fails_unavailable_not_wrong_span`), so nothing in
+                # this loop proves the file's rows are offset-ordered. Taking the last row's end lets
+                # a reordered or overlapping row UNDERSTATE the bytes this index already holds;
+                # `_topup` then re-parses that region and appends the same spans a SECOND time, and
+                # the duplicates pass both `_spotcheck` (last row only) and `_read_full` (each copy
+                # points at a real, digest-matching source line). That is precisely the WRONG data
+                # this accelerator promises never to return, so it must not be reachable.
+                last_end = max(last_end, off + length + 1)
     except OSError:
         return None
     idx.covers = last_end

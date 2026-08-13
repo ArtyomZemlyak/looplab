@@ -310,6 +310,16 @@ _MECHANICAL_MARKERS = (
 # fallback below — so a typo'd literal would silently turn a stop into "keep going". Adding a
 # verdict means updating this tuple and `tests/test_repair_stop_decision.py`, which scans the
 # schema against it.
+#
+# What this tuple is NOT: the value set of the `triage_action` FIELD on a `node_repaired` row. Since
+# 2026-08-12 a second, non-triage producer writes that field —
+# `engine/metric_salvage.py::SALVAGE_CAUSE_TRIAGE_ACTION` ("salvage_cause_fix"), stamped by
+# `engine/evaluate.py::_repair_salvaged_cause` on a cause fix that bought no re-evaluation, so that
+# `_durable_repair_ledger` can keep it out of the inline-repair ATTEMPT budget. It is deliberately
+# absent from this tuple: no model may emit it, the coercion must never accept it off the wire, and
+# the fallback must never produce it — it is a marker, not a verdict. A reader who treats this tuple
+# as exhaustive over the field will mis-handle that row; a reader who adds it here breaks the emit
+# schema's enum. Keep the two vocabularies separate and cross-referenced.
 UNANSWERABLE_TRIAGE_ACTION = "unanswerable"
 UNREADABLE_TRIAGE_ACTION = "unreadable"
 TRIAGE_ACTIONS = ("repair", "abandon", "reject_idea", UNANSWERABLE_TRIAGE_ACTION,

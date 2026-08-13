@@ -131,9 +131,3 @@ def llm_consumer_plan(task, settings) -> LlmConsumerPlan:
     onboarder_roles = task_onboarder_llm_roles(task, settings)
     roles.update(onboarder_roles)
     return LlmConsumerPlan(shared_active, frozenset(roles), fallback_roles, onboarder_roles)
-
-
-def llm_consumer_roles(task, settings) -> frozenset[str | None]:
-    """Compatibility-sized view for callers that need only the role-key set."""
-
-    return llm_consumer_plan(task, settings).roles

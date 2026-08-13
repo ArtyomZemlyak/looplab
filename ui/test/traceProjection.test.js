@@ -227,7 +227,22 @@ test('Inspector and Dock preserve projection truth through every trace surface',
       inspector.indexOf('function RunSetupLog(')),
     /'Trace projection is partial\.'/,
     'the conversation must not re-inline the dead notice this change removed')
-  assert.match(inspector, />span tree<\/button>/)
+  // The switcher RENDERS from `TRACE_SURFACE_VIEWS` rather than hand-writing one button per view, so
+  // this pin follows the labels to where they now live — and gets stronger for it. The old
+  // `/>span tree<\/button>/` substring could only see that one literal was still in the JSX; these
+  // three assertions hold the actual property, which is that BOTH views are offered on every trace
+  // surface: the frozen list is what the component maps over, and every member of it has a label to
+  // render. A third view added to the list can no longer reach the UI without one.
+  const { TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS, TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS }
+    = await import('../src/traceSurfaceModel.js')
+  assert.deepEqual([...TRACE_SURFACE_VIEWS], [TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS],
+    'both views, for both subjects — a subject-dependent view list is the same defect wearing a table')
+  assert.equal(TRACE_SURFACE_VIEW_LABELS[TRACE_VIEW_SPANS].label, 'span tree')
+  for (const view of TRACE_SURFACE_VIEWS) {
+    assert.ok(TRACE_SURFACE_VIEW_LABELS[view]?.label, `${view} must carry a label to render`)
+  }
+  assert.match(inspector, /TRACE_SURFACE_VIEWS\.map\(v =>[\s\S]*?onClick=\{\(\) => setView\(v\)\}/,
+    'the toggle must be driven by the registry, not by hand-written per-view buttons')
   assert.doesNotMatch(inspector, />raw spans<\/button>|every span's full I\/O|nothing is lost|WHOLE re-sent/)
 
   assert.match(dock, /setTraceState\(\{[\s\S]*?spans:[\s\S]*?projection: d\?\.projection \|\| \{\}/,

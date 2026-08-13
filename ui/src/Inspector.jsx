@@ -21,6 +21,7 @@ import {
 } from './traceProjection.js'
 import { cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
+  TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS,
   TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS, nodeTraceSubject, opTraceSubject, traceRequestPath,
   traceSubjectAttempt, traceSubjectEmptyNotice, traceSubjectHasLogs, traceSubjectKey,
   traceSubjectLead, traceSubjectMatches, traceSubjectSpans, traceSubjectValid,
@@ -1939,13 +1940,10 @@ export function TraceSurface({
     {view !== TRACE_VIEW_CONVERSATION && pagedRead?.stale && <TraceUnavailable
       label="Span-tree refresh failed; showing confirmed spans." />}
     <div className="conv-toggle">
-      <button type="button" aria-pressed={view === TRACE_VIEW_CONVERSATION}
-        className={'seg' + (view === TRACE_VIEW_CONVERSATION ? ' on' : '')}
-        onClick={() => setView(TRACE_VIEW_CONVERSATION)}
-        title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-      <button type="button" aria-pressed={view === TRACE_VIEW_SPANS}
-        className={'seg' + (view === TRACE_VIEW_SPANS ? ' on' : '')}
-        onClick={() => setView(TRACE_VIEW_SPANS)}>span tree</button>
+      {TRACE_SURFACE_VIEWS.map(v => <button key={v} type="button" aria-pressed={view === v}
+        className={'seg' + (view === v ? ' on' : '')}
+        onClick={() => setView(v)}
+        title={TRACE_SURFACE_VIEW_LABELS[v].title}>{TRACE_SURFACE_VIEW_LABELS[v].label}</button>)}
       {view === TRACE_VIEW_CONVERSATION && <button type="button" className="seg trace-collapse"
         aria-pressed={allOpen} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}

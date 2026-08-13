@@ -84,8 +84,12 @@ test('a batch that deleted nothing says so plainly, and names the run that stopp
 })
 
 test('a clean batch is a plain confirmation, and blocked runs are still disclosed', () => {
+  // `retryIdentity` rides beside `retryRunId` on every branch that carries a handle, and is EMPTY
+  // here for the same reason the handle is: nothing needs finishing. Both are always present so a
+  // consumer reads one shape — the button is gated on the handle, never on the identity's presence.
   assert.deepEqual(bulkOutcomeNotice({ total: 2, done: ['a', 'b'], blocked: [], stoppedAt: null }),
-    { kind: 'status', retryRunId: '', text: '2 runs permanently deleted.' })
+    { kind: 'status', retryRunId: '', retryIdentity: { run_uid: '', memory_dir: '' },
+      text: '2 runs permanently deleted.' })
   const withBlocked = bulkOutcomeNotice({
     total: 2, done: ['a', 'b'], blocked: [{ runId: 'x' }], stoppedAt: null })
   assert.match(withBlocked.text, /1 selected run could not be deleted/)
@@ -101,6 +105,13 @@ test('a half-purged memory store survives the batch and carries its retry', () =
   })
   assert.equal(notice.kind, 'error', 'a clean-looking status would hide it')
   assert.equal(notice.retryRunId, 'b', 'the retry handle is what renders the button')
+  // The handle alone cannot finish the purge: the run is deleted, so the server can no longer read
+  // its `run_uid`/`memory_dir` back and refuses to guess them. The identity has to come from the
+  // receipt this notice was built from, or the button 400s on every press.
+  assert.deepEqual(bulkOutcomeNotice({
+    total: 1, done: ['b'], blocked: [], stoppedAt: null,
+    memoryFailures: [{ runId: 'b', memory: { ok: false, run_uid: 'u-b', memory_dir: '/a' } }],
+  }).retryIdentity, { run_uid: 'u-b', memory_dir: '/a' })
   assert.match(notice.text, /3 runs permanently deleted/)
   assert.match(notice.text, /only partly removed for 2 runs/)
   assert.match(notice.text, /first: “b”/)

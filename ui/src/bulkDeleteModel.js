@@ -94,18 +94,25 @@ export function bulkOutcomeNotice(state) {
       + ` (first: “${unfinished.runId}”).`
     : ''
   const retryRunId = unfinished ? String(unfinished.runId || '') : ''
+  // The identity travels with the handle, for the same reason `cascadeOutcome` carries one: the run
+  // is already deleted, so the server cannot read `run_uid`/`memory_dir` back and refuses to guess
+  // them. A button wired to the run id alone cannot finish the purge it offers.
+  const retryIdentity = {
+    run_uid: String(unfinished?.memory?.run_uid || ''),
+    memory_dir: String(unfinished?.memory?.memory_dir || ''),
+  }
   if (!stopped) {
     if (!done) return blocked ? { kind: 'error', retryRunId: '', text: tail.trim() } : null
-    return { kind: unfinished ? 'error' : 'status', retryRunId,
+    return { kind: unfinished ? 'error' : 'status', retryRunId, retryIdentity,
       text: `${plural(done, 'run')} permanently deleted.${tail}${memoryTail}` }
   }
   const why = String(stopped.reason || 'the deletion did not complete')
   if (!done) {
-    return { kind: 'error', retryRunId,
+    return { kind: 'error', retryRunId, retryIdentity,
       text: `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}.${tail}${memoryTail}` }
   }
   const untouched = Math.max(0, (state.total | 0) - done - 1)
-  return { kind: 'error', retryRunId, text:
+  return { kind: 'error', retryRunId, retryIdentity, text:
     `${plural(done, 'run')} deleted, then the batch stopped at “${stopped.runId}”: ${why}.`
     + (untouched ? ` The remaining ${plural(untouched, 'run')} were not touched.` : '')
     + `${tail}${memoryTail}` }
