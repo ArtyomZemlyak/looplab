@@ -23,7 +23,14 @@ def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
 
     `source="deep_research"` is model output, not operator authority. It remains in replay state
     and reaches proposal planning through the research memo/open-hypothesis channels, but must not
-    be relabelled here as an instruction from the operator."""
+    be relabelled here as an instruction from the operator.
+
+    REVIEW (mega-review 2026-08-13): the exclusion keys on a `source` stamp the writer only
+    started emitting on 2026-08-08 — deep-research hint rows folded from OLDER logs carry no
+    `source`, pass this filter, and render inside the operator-authority block ("most recent is
+    authoritative"), i.e. model output relabelled as operator instruction for exactly the resumed/
+    replayed runs this docstring forbids it for. New runs are stamped; if legacy exposure matters,
+    the filter needs a second key (e.g. the deep-research id prefix those rows carry)."""
     rows = [h for h in (pending_hints or [])
             if isinstance(h, dict) and h.get("source") != "deep_research"]
     hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]

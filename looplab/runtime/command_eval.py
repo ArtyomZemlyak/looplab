@@ -124,6 +124,10 @@ def _validate_rel_paths(nm: str, field: str, values) -> tuple[Optional[list], Op
         while rel.startswith("./"):
             rel = rel[2:]
         if not rel or "\x00" in rel:
+            # REVIEW (mega-review 2026-08-13): the NUL case shares the empty-string message, so a
+            # Developer whose manifest carries an embedded NUL is told the path is EMPTY and hunts
+            # for a blank entry that does not exist. This vocabulary feeds the automated repair
+            # loop, where a wrong sentence costs a paid attempt — split the two messages.
             return None, f"stage {nm!r} `{field}` contains an empty path."
         if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
             return None, (f"stage {nm!r} `{field}` entry {f!r} must be RELATIVE to the eval "

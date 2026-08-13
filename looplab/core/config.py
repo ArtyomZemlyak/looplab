@@ -1949,7 +1949,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "systemic_failure_stop": 0,
     # WHICH FAILURES BUY AN IN-NODE REPAIR. A CHANGED default on a pre-existing field, so (a) cannot
     # apply and (b)+(c) carry it, exactly as for `inline_repair_attempts` above. It widened from the
-    # mechanical three to all eight `FAILURE_REASONS` on 2026-08-12, and (b) is paid work: with
+    # mechanical three to ALL of `FAILURE_REASONS` on 2026-08-12 — eleven members at the time of
+    # writing (REVIEW mega-review 2026-08-13: this line used to say "all eight"; `diverged`,
+    # `stalled` and `needs_failed` were added the same week, and an auditor counting this map's
+    # prose against the registry got a wrong count from the map itself) — and (b) is paid work: with
     # `inline_repair_attempts` restored to its historical 0 — which `_effective_repair_cap` reads as
     # the 50-attempt engine ceiling, not as "none" — a resumed node that fails `no_metric`/`setup`/
     # `drift`/`expect_failed`/`check_failed` can buy up to 50 Developer calls AND up to 50 full

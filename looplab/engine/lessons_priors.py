@@ -118,6 +118,13 @@ class LessonPriorsMixin:
             if not isinstance(o, dict):
                 note_health["skipped"] += 1
                 continue
+            # REVIEW (mega-review 2026-08-13): `scope.allows` is fail-closed on missing polarity,
+            # and meta-note writers only started persisting `direction` in this same change set —
+            # so on an existing shared store EVERY legacy note fails the scope here and the whole
+            # exact-task "what won" tier (E4) goes dark until each task re-finalizes. Deliberate
+            # direction, but SILENT: a scope-filtered row increments neither `skipped` nor any
+            # health field, so the prior reads as "N rows, none relevant" rather than "N rows
+            # filtered for missing polarity". Count the scope exclusions into the health receipt.
             if o.get("task_id") == self._e.task.id and o.get("note") and scope.allows(o):
                 notes.append(cross_run_text(
                     o["note"], max_chars=1_200, single_line=True, entropy=True))

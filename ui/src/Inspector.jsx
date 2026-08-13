@@ -1993,6 +1993,16 @@ export function TraceSurface({
     onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
   // Unavailable takes precedence over every empty/partial shape: a failed observation is never
   // evidence that the subject recorded nothing.
+  //
+  // REVIEW (mega-review 2026-08-13): the rule above has a hole for detail-less subjects (any
+  // op-trace, or a node at a historical attempt): when the ONLY paged read fails, usePagedTrace
+  // settles `{payload: null, stale: true}`, `traceUnavailable(undefined)` is false, and
+  // `traceWindow(undefined)` reads as complete — so the fall-through below renders the positive
+  // empty claim ("No observations were recorded…") about a read that merely timed out, under a
+  // header notice claiming "showing confirmed spans" with zero spans ever confirmed. The span
+  // path also gets no useTraceRetry budget (only the conversation path does), so the false empty
+  // state is permanent until a manual gesture. A stale settle with a null payload should render
+  // TraceUnavailable, not the empty notice.
   if (unavailable)
     return shell(<TraceUnavailable onRetry={onRetry || retryRead} pending={retryPending} />)
   if (!spans.length) {
@@ -2174,6 +2184,10 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     // unavailable for this work item" — a receipt the client manufactured about a read the server
     // would have answered. The cost is not the spans (the light index serves a whole node in
     // 0.03 ms); it is five absent-marker `lstat`s per request at 105-950 ms each on this FUSE mount.
+    // REVIEW (mega-review 2026-08-13): same gap as the board's _CardTrace — bare deadlineGet, no
+    // expected_generation on the request and no traceGenerationMatches on the response, so a
+    // pre-reset read that resolves post-reset commits the archived generation's research rows
+    // while every sibling trace surface refuses the same payload as superseded.
     const request = deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
       traceReadDeadlineMs(0))
     request.promise

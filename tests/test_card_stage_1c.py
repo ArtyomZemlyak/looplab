@@ -179,6 +179,13 @@ def test_true_open_gated_and_superseded_only_evidence_have_distinct_lifecycles()
 
 
 def test_drop_and_merge_exclusions_are_order_tolerant_and_preserve_legacy_actionable():
+    # REVIEW (mega-review 2026-08-13): the name no longer matches what this proves — since the
+    # `canon_at` change the two orders below are asserted to fold DIFFERENTLY (dropped_before stays
+    # 'proposed', dropped_after goes 'dropped'), i.e. the drop is deliberately order-DEPENDENT on
+    # the merge receipt, and the order-tolerance this name advertises is exactly the property that
+    # was removed. The rule itself is driven properly by
+    # test_drop_uses_only_merge_edges_durable_at_that_point; rename this so a reader grepping for
+    # invariant-5 order-tolerance coverage does not conclude the property holds here.
     _alias_idea, alias_payload = _native_card("card-alias", "alias direction")
     _canonical_idea, canonical_payload = _native_card("card-canonical", "canonical direction")
     prefix = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})]

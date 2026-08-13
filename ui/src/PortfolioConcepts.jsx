@@ -214,6 +214,12 @@ export default function PortfolioConcepts({
 
   useEffect(() => {
     const controller = new AbortController()
+    // REVIEW (mega-review 2026-08-13): this eagerly downloads the whole bounded cross-run memory
+    // window (multi-MiB worst case per tier) on EVERY mount — each List<->Concepts flip re-pays
+    // it before any concept is clicked — and a failed read is permanent for the life of the view:
+    // neither this nor the policy read above has a retry affordance, so one transient 503 shows
+    // "could not be read" until the operator leaves and re-enters. Fetch lazily on first concept
+    // selection (or cache across mounts) and add a retry.
     get('/api/memory', { signal: controller.signal })
       .then(payload => setMemory(payload))
       // A FAILED read is not an empty store. `{}` folds to `total: 0`, which `conceptMemoryNotice`

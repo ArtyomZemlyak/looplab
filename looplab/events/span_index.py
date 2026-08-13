@@ -960,6 +960,11 @@ def _spotcheck(idx: SpanIndex) -> bool:
 def _load_persisted(spans_path: Path, identity: tuple, size: int,
                     mtime_ns: int, ctime_ns: int, source_change_token: int,
                     source_handle=None) -> Optional[SpanIndex]:
+    # REVIEW (mega-review 2026-08-13): `source_handle` is accepted and never used — the only source
+    # read this performs (the spotcheck's `_read_full`) re-OPENS the pathname, relying on the
+    # identity CAS to reject a swapped inode (fail-closed, so correctness holds), which quietly
+    # weakens the caller's one-descriptor rationale. Either thread the handle into the spotcheck
+    # read or drop the parameter so a future editor does not assume it is honored.
     """Load `spans.index.jsonl` if it is a valid, current index for this spans.jsonl (fast cold path:
     read ~16 MB instead of re-parsing 1 GB). Returns None on any mismatch → caller rebuilds. Coverage
     is DERIVED from the records actually read (not trusted from the header), so a torn index tail just

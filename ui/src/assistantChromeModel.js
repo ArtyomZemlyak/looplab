@@ -61,6 +61,13 @@ export function contextUsage(messages = []) {
     const tokens = message?.tokens || {}
     // `context` is the peak SINGLE prompt of that turn; `prompt` SUMS the same context re-sent by
     // every call in the turn (billed, O(calls²)), so it is a cost number and never a window number.
+    //
+    // REVIEW (mega-review 2026-08-13): the inline code this replaced also fell back to
+    // `tokens.prompt` when `context` was absent — messages persisted before the server emitted
+    // `context` (or from a provider path without a peak) now fold to last=0 and the chip
+    // DISAPPEARS for exactly those chats, though the commit that moved this claimed a label-only
+    // change. Legacy-data-only exposure; if it matters, restore the prompt fallback as an
+    // explicitly-approximate value.
     const value = Number(tokens.context || 0)
     if (Number.isFinite(value) && value > 0) {
       last = value

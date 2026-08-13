@@ -193,6 +193,14 @@ def fence_inputs(repo_spec: Optional[dict], *, allow: Iterable = ()) -> tuple:
             allowed.append(a)
     # An allow prefix that is not under any root is dead weight on the hot path — drop it so the
     # `startswith` tuple stays as short as the policy actually needs.
+    #
+    # REVIEW (mega-review 2026-08-13): the `r.startswith(a)` arm keeps an allow entry that is an
+    # ANCESTOR of a root, and `_fenced` tests the allow tuple after the root tuple — so a run dir
+    # that CONTAINS the editable repo (out='.' beside editable './repo'; resources.py passes
+    # allow=[run_dir]) allow-lists the entire source tree and the fence is disabled with no
+    # diagnostic. Roots dropped as too broad are warned about above; a root swallowed through the
+    # allow list is silent. Either warn here symmetrically or refuse an allow entry that is a
+    # strict ancestor of a root.
     allowed = [a for a in allowed if any(a.startswith(r) or r.startswith(a) for r in roots)]
     return roots, allowed, dropped
 
@@ -241,7 +249,22 @@ class LoopLabSourceReadRefused(Exception):
 
 def _resolve(p):
     """Normalize an `open` argument to an absolute path string, or None if it cannot name a file
-    under a fenced root. Deliberately syscall-free on the hot path."""
+    under a fenced root. Deliberately syscall-free on the hot path.
+
+    REVIEW (mega-review 2026-08-13), two bypass classes this template does not close and the
+    module's residual-risk note does not name (it names only symlinks):
+      * An ABSOLUTE path without `..` is returned verbatim, so a spelling with duplicate or dot
+        separators — the shape `f"{root}/{sub}"` produces whenever root ends in a slash — fails the
+        prefix compare against the normalized root and is silently ALLOWED (measured:
+        '/src//repo/x' and '/src/./repo/x' pass while '/src/repo/x' refuses). Normalizing when the
+        string contains a doubled separator or a '/.' segment costs the same cheap `in` test the
+        `..` case already pays.
+      * On Windows a drive-letter path ('C:'-rooted, either slash) has p[:1] != _SEP, takes the
+        relative fast bail, and is NEVER compared against a root — the fence is a complete no-op
+        there while Settings.read_fence still reports "deny" and the env marker says the run is
+        fenced. Either close it (os.path.isabs) or state Windows out of scope where the policy rung
+        is documented.
+    """
     cls = p.__class__
     if cls is not str:
         if cls is int:

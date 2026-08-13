@@ -104,6 +104,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
+    #
+    # REVIEW (mega-review 2026-08-13): the narration above stops at 195/164 while the pinned
+    # literals below read 199/168 — the comment is the tripwire's audit trail, and four of the five
+    # fields behind the last move (read_fence among them) are unaccounted for, so the next person
+    # this fires on cannot reconstruct it (doc 34 lists this tripwire's drift as a known sore).
+    # When re-pinning, extend the narration, do not replace it.
     assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 199
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)

@@ -104,6 +104,14 @@ class RunIdentity:
             # A row that names its incarnation is matched ONLY on that. Falling back to `run_id` here
             # is what destroyed the other run's rows: two incarnations named `demo` are two runs.
             return bool(self.run_uid) and row_uid == self.run_uid
+        # REVIEW (mega-review 2026-08-13): this legacy fallback fires even when the CALLER has a
+        # uid, and the receipt's `identity` field keys on the caller alone — so a uid-keyed delete
+        # of checkout B's 'demo' destroys checkout A's uid-less legacy 'demo' rows in a shared
+        # store while the receipt asserts `identity: "run_uid"` (reproduced live; the class
+        # docstring's "ambiguity is disclosed" promise holds only in the all-legacy case, and
+        # `tests/test_memory_cascade.py` pins the misleading label for the mixed case). The
+        # fallback itself is deliberate; the disclosure is not kept — count name-matched deletions
+        # separately in the receipt, or refuse them when the caller is uid-keyed.
         return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
 
     @property
@@ -280,6 +288,14 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
             other = _text(ref.get("run_uid")) or _text(ref.get("run_id"))
             if not other:
                 continue
+            # REVIEW (mega-review 2026-08-13): the membership test below mixes namespaces — a
+            # legacy ref that names an OLDER same-named incarnation by bare `run_id` compares equal
+            # to `run.run_id` and is misread as a self-reference, so its corroboration is discarded
+            # and (with evidence_count == 1 and no untraceable count) the row can be deleted despite
+            # cross-run support. Narrow in practice (consolidation usually bumps the counters
+            # first), but it is the residual of exactly the ref-ordering defect the comment above
+            # records; a run_id-namespace ref should only match when this run itself is
+            # legacy-keyed.
             # ONE rule: a ref naming any run that is not this one is corroboration, and a row with
             # corroboration survives. There used to be a `continue` above this line, guarded on
             # `other in {run.run_uid, run.run_id} and other == row's own uid` — unreachable BY
@@ -413,6 +429,15 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
     The two governance reads are done HERE, once, and are deliberately passed down rather than
     re-read per tier: they decide what is off-limits, and re-reading them mid-purge would let a
     curation decision landing between two tiers apply to one and not the other.
+
+    REVIEW (mega-review 2026-08-13): the single read is consistent ACROSS tiers but is taken
+    without the curation logs' locks and BEFORE any store lock — a curation decision that lands
+    after this read and before a tier's locked rewrite is invisible to the predicates, so a capsule
+    whose concept was just merged (or a claim a just-landed decision was computed over) can still
+    be deleted in that window. The lenient reader also skips a torn in-flight append row silently
+    (only an OSError widens to `_UNREADABLE_GOVERNANCE`). Small window, destructive direction —
+    worth either taking the curation-log locks around this read or re-checking under each store's
+    lock.
     """
     merged = merged_concept_ids(memory_dir)
     curated = _tasks_curated_by_other_runs(memory_dir, run)
@@ -494,6 +519,14 @@ def _reelect_active_cases(rows: list[dict]) -> list[dict]:
     `active` marks the best contribution in a group. Dropping a run's row can drop the group's only
     active member, and a task whose case bank has no champion is retrieved as if the task had never
     been solved — a silent regression for every run that still exists.
+
+    REVIEW (mega-review 2026-08-13): this election runs over EVERY (task_id, direction) group of
+    survivors, not only the groups this purge removed a row from — so a group that already had no
+    active member before the cascade (e.g. left that way by an earlier partial rewrite) gets a
+    member newly promoted, i.e. other runs' rows are semantically changed beyond the "this run
+    alone" rule, and the rewritten row is not counted anywhere in the receipt. Protective
+    direction, but it should be scoped to groups that actually lost a member here (and the
+    promotion counted in the receipt).
     """
     groups: dict[tuple, list[dict]] = {}
     for row in rows:

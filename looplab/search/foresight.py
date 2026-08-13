@@ -539,6 +539,18 @@ class ForesightPanelResearcher(WrapsResearcher):
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
+        # REVIEW (mega-review 2026-08-13): the base researcher has ALREADY bound each proposal's
+        # CARD_ID claim against the window it computed from its OWN `_board_prompt_attempt` counter;
+        # re-binding below against a window from this panel's independent `_board_attempt_cursor`
+        # NULLS a valid claim whenever the two cursors have drifted — and they drift as a matter of
+        # course (the base advances k per panel propose while the panel advances 1, and
+        # `_prioritize_board` skips its increment on a <2-belief board). With >5 open beliefs the
+        # two 5-card windows differ in the rotated slot, so a card the model was legitimately SHOWN
+        # is absent from the panel's window and `bind_idea_to_board_card` strips the claim — the
+        # proposal falls back to statement-hash linkage, resurrecting the lost-claim/twin-card
+        # shape the 2026-08-13 card fixes closed (reproduced against the real functions: attempts 3
+        # vs 1 over 7 cards yield windows differing in one slot). The panel should reuse the BASE's
+        # window (or not re-bind an already-bound idea).
         visible_cards = next_board_prompt_cards(
             state, getattr(self.base, "_hyp_order", None),
             attempt=max(0, self._board_attempt_cursor - 1))

@@ -327,6 +327,19 @@ def build_router(srv) -> APIRouter:
             # purge below would run under an identity this run never had, against a store it may
             # never have written to, and report a clean success. Guessing an identity is the one
             # thing this cascade exists not to do.
+            #
+            # REVIEW (mega-review 2026-08-13): the identity read here is NEVER persisted — the
+            # durable deletion receipt is a closed key set (`deletion_transaction._RECEIPT_KEYS`,
+            # loader refuses extras) with no run_uid/memory_dir, and on a 202 this request's local
+            # is simply discarded. So any deletion that COMPLETES on a retry after the directory is
+            # gone (the four documented "left the workspace but pending" phases, or a crash
+            # mid-transaction) loses the uid permanently, and the failure block below then tells
+            # the operator to pass "the run_uid and memory_dir from the original deletion receipt"
+            # — fields no receipt or 202 body ever contained. The only survivor is the volatile UI
+            # notice from a succeeded-with-partial-purge response (same page session only). The
+            # identity read on the FIRST attempt should be stored beside the receipt (a sidecar,
+            # since the receipt schema is deliberately closed) so the retry can finish the cascade
+            # uid-keyed instead of degrading to the bare-name matching 61021d2 eliminated.
             return {**_identity(run_id), "read_from_run": _plain_run_dir(run_id).is_dir()}
 
         identity = (await anyio.to_thread.run_sync(_identity_before_deletion)) if cascade else {}

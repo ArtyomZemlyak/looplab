@@ -637,6 +637,12 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
       // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
       // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
       // per request), not the spans.
+      // REVIEW (mega-review 2026-08-13): this and the Inspector research strip are the only trace
+      // reads in the app that neither send `expected_generation` (bare deadlineGet, not
+      // traceDeadlineGet) nor apply traceGenerationMatches to the response — a read issued just
+      // before a reset resolves after it and commits the archived generation's payload while every
+      // sibling surface refuses it as superseded. And the effect's expectedGeneration dep is
+      // currently always null (see the pane-level note), so it never re-fires on reset either.
       runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), traceReadDeadlineMs(0))
     request.promise
       .then(d => { if (alive) setPayload(d || {}) })
@@ -916,6 +922,12 @@ function _CardKanban({
       inFlight.current.delete(card.id)
     }
   }
+  // REVIEW (mega-review 2026-08-13): a command-recovery state machine (submitting/checking/
+  // retrying/retryable/failed/waiting-for-fold phases, retryability status lists, notice tones)
+  // spelled inline in setState updaters — the house pattern puts these transitions in a pure model
+  // beside cardControlModel.js so node --test can drive them; as written, swapping the two status
+  // lists or dropping 'rejected' ships green because nothing mounts this component (the exact
+  // AssistantBar failure mode CLAUDE.md documents).
   const recoverCardControl = async (cardId, action) => {
     const entry = optim[cardId]
     const pending = entry?.pending
@@ -1000,6 +1012,13 @@ function _CardKanban({
   useEffect(() => {
     if (!pane?.compact || !selectedCard) return undefined
     detailCloseRef.current?.focus?.()
+    // REVIEW (mega-review 2026-08-13): raw window keydown that unconditionally preventDefault()s
+    // and closes the drawer, outside the useDialogFocus/DIALOG_PRIORITY arbitration every other
+    // dialog registers with — so with a nested prioritized dialog open inside renderInspector
+    // (e.g. the destructive trace-clear confirm) Escape fires BOTH handlers: the confirm cancels
+    // AND the drawer unmounts it mid-interaction; Escape inside the drawer's own text inputs also
+    // dismisses the whole drawer instead of cancelling the edit. Register with the priority system
+    // (the drawer already declares role="dialog").
     const onKeyDown = event => {
       if (event.key === 'Escape') { event.preventDefault(); closeDetails() }
     }
@@ -1069,6 +1088,15 @@ function _CardKanban({
             aria-label={`Close details for ${selectedCard.id}`}
             onClick={closeDetails}>⟩</button>}
         </div>
+        {/* REVIEW (mega-review 2026-08-13): `state?.generation` below is ALWAYS undefined — the
+            folded run state has no run-level `generation` field; the generation is an envelope
+            SIBLING of `state` in the /api/state payload and lives in useRunState's separate
+            generationState. So every trace surface reached from this board runs with a null
+            generation fence: superseded reads are accepted after a reset, and effects keyed on
+            expectedGeneration never re-fire on a generation change. The correct value is the
+            `runGeneration` prop CardWorkspace already receives and drops. The board's own test
+            (traceSurfaceReuse.test.js) masks this by stubbing `generation` INTO its state object —
+            a shape production never produces. */}
         <_CardDetailPane card={selectedCard}
           receipt={selectedCard && isRecord(receipts[selectedCard.id]) ? receipts[selectedCard.id] : null}
           attempts={selectedCard ? attemptsByCard.get(selectedCard.id) || [] : []}

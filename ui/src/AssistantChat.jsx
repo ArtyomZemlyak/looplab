@@ -81,6 +81,14 @@ const toolActivityLabel = item => {
 
 // Tool payloads may carry arguments, results and other implementation details. This projection reads
 // labels only, keeps the newest bounded window, and therefore caps both work and disclosure DOM.
+//
+// REVIEW (mega-review 2026-08-13): two notes. (1) House pattern: this projection and
+// boundedToolText are pure decisions living in the React file with no model sibling — nothing in
+// the suite mounts AssistantChat, so the window/truncation/threshold rules are untestable by
+// node --test as placed. (2) Numbering: items whose label resolves to '' are skipped from
+// `labels` but still counted in `total`, and the <ol start> below assumes every windowed item
+// produced a label — so the ordinals and the "Showing the latest N of M steps" line disagree with
+// true positions whenever any windowed payload lacks a label/tool string.
 const toolActivityProjection = items => {
   if (!Array.isArray(items) || items.length === 0) return { labels: [], total: 0, limited: false }
   const start = Math.max(0, items.length - TOOL_ACTIVITY_ITEM_MAX)

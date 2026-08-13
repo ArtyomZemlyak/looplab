@@ -182,6 +182,15 @@ OPERATOR_PROTECTED_STAGE = "score"
 #            already handled and shipped — the STALL watchdog fires when the process went SILENT,
 #            i.e. when it had finished talking, and `evaluate.py`'s `ok` gate has salvaged that since
 #            before this module existed (`res.stalled`). A hard deadline carries no such evidence.
+#
+# REVIEW (mega-review 2026-08-13): `diverged` is absent from this set, and nothing else in
+# `salvage()`/`salvage_gates()` consults `res.diverged` — the refusal of a diverged training rests
+# entirely on `exit_code != 0`. A run whose divergence verdict landed beside a natural exit 0
+# (the kill/exit race: non-finite losses drained, process exits before the tree-kill) therefore
+# reaches `eval_failed` and is salvageable, re-admitting a number the fail-closed divergence
+# verdict condemned. Contrast `command_eval._salvageable_stall`, which subtracts diverged from the
+# stall carve-out for exactly this reason ("Divergence is the stronger, fail-closed verdict") —
+# the reason-level list here should do the same.
 NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout"})
 
 # Stage statuses that VETO salvage even when a reader can find a number.
@@ -866,6 +875,14 @@ def recheckable_expect(stages, stage: str, changed) -> dict:
     name = str(stage or "")
     if not name:
         return {}
+    # REVIEW (mega-review 2026-08-13), latent gap in the guard below: `written` is only the CHANGED
+    # set, but the repair's commit path (`_repair_salvaged_cause` -> `_write_node_files`)
+    # re-materializes EVERY `node.files` entry with a fresh mtime after the stage start — so a
+    # corrected `expect.files` naming an UNCHANGED node source file (e.g. `train.py`) would pass
+    # the freshness floor on a file the stage never produced. Unreachable today only because the
+    # promotion path never sees an operator-declared expect on the appended score stage; if that
+    # documented design option ever lands, `written` must widen to everything the commit rewrote,
+    # not just the diff.
     written = {_decl_key(c) for c in (changed or ())}
     for row in (stages or ()):
         if not isinstance(row, dict) or str(row.get("name") or "") != name:

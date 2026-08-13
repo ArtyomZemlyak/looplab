@@ -270,6 +270,18 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
 # with 409. Bounded, the worst case is a long-but-finite window; unbounded, the operator loses
 # resume/abort/hint/inject entirely, with no cancel endpoint to recover. Twelve extensions is ~4h at
 # the shipped 20-minute `max_observation_timeout`, which covers the long-eval case this exists for.
+#
+# REVIEW (mega-review 2026-08-13): the "~4h" arithmetic above does not hold. An extension is
+# consumed on every monitor PASS that takes the progress branch (`_extend_landed_pause_observation`
+# has no nearness gate on the deadline), and the monitor loop runs every `poll_interval` — 0.05 s at
+# the shipped default — so all twelve extensions burn in the first seconds of the wait, each pushing
+# `absolute_deadline_at` to roughly the same now+20min. The effective bound is therefore
+# ~`max_observation_timeout`, and a pause over an eval longer than ~20 minutes still terminalizes
+# `timed_out` — the exact wrong answer the comment above says this cap was sized to avoid. The
+# deadlock half (no unbounded `executing` record) IS fixed; the long-eval half is not. Gate the
+# extension on the deadline being NEAR (e.g. within one `command_timeout`) so each of the twelve
+# buys a real 20-minute window. `tests/test_command_intent_spent.py` drives finiteness only, with
+# seconds-apart `now` values, so it cannot see this.
 PAUSE_OBSERVATION_MAX_EXTENSIONS = 12
 
 
@@ -1445,6 +1457,13 @@ class RunCommandService:
             if not self._run_finished(rd, observation):
                 return False
             return True
+        # REVIEW (mega-review 2026-08-13): the finished-run exception above is unreachable for
+        # EV_PAUSE, and the fold never clears `paused` on `run_finished` — so a run that finished
+        # WHILE paused (abort during pause, systemic-failure stop) keeps a stale timed-out pause
+        # record unspent (`paused` is still True, so this returns False) and later controls 409
+        # `command_retry_required` until the operator explicitly retries the pause. Recoverable, but
+        # it contradicts the "no control of any kind can still be driven" rule the comment states;
+        # the pause branch should consult `_run_finished` too.
         state = (observation or self._observe(rd)).state()
         return not bool(state.paused)
 

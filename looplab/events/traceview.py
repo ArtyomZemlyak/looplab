@@ -1203,6 +1203,16 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
         while True:
             if cur_sid in memo:
                 base = memo[cur_sid]
+                # REVIEW (mega-review 2026-08-13): this ASSIGNMENT discards any `broke=True`
+                # accumulated from the flags of spans already walked below this ancestor, so in the
+                # common FILE-ORDER case (ancestors memoized before descendants) a span's own
+                # `input_partial` never propagates: walking the flagged span itself hits its
+                # complete memoized parent and records partial=False for it, and every descendant
+                # then inherits False — a lossy reconstruction rendered as complete, the opposite
+                # of the promise eleven lines down. The flag only survives when the flagged span is
+                # a chain BASE, which is the one topology the test covers. Fix shape:
+                # `broke = broke or partial.get(cur_sid, False)` (measured: G1 complete base <-
+                # G2 partial <- G3 yields g3.input_partial=None today).
                 broke = partial.get(cur_sid, False)
                 break
             if cur_sid is None or cur_sid in seen:    # missing ref / cycle → empty base, INCOMPLETE
@@ -1631,6 +1641,12 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
             "errors": sum(1 for s in node_spans if s.get("status") == "ERROR"),
         })
 
+    # REVIEW (mega-review 2026-08-13): unlike every sibling projection in this file (the node-trace
+    # tail, the conversation render caps), the research/node row loops above have NO ceiling — the
+    # serve caller hands this the whole run's light span list, so a crafted spans.jsonl with
+    # thousands of root `propose` spans stamped with this card_id (card_id survives normalization)
+    # yields an unbounded HTTP payload. And the receipt below hardcodes visible == total for every
+    # axis, so a future cap added at the route could not even be reported honestly through it.
     return {
         "schema": TRACE_PROJECTION_SCHEMA,
         "card_id": str(card_id),

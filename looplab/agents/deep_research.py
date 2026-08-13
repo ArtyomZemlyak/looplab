@@ -356,6 +356,12 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         trial = retained + [candidate]
         if len(render(trial)) <= _STATE_BRIEF_MAX_CHARS:
             retained = trial
+    # REVIEW (mega-review 2026-08-13): the trial above bounds only what it ADDS — the prefix
+    # (goal + counts + the board block, whose own sub-caps admit ~28k chars of seeds) is never
+    # itself tested, so a near-cap board rejects every candidate and this returns an OVER-budget
+    # brief showing "0 of N active experiments": a deep-research review with no experiments in it.
+    # Edge case under today's sub-caps, but no minimum experiment allocation is reserved; either
+    # reserve one or trim the board block when render([]) already exceeds the cap.
     return render(retained)
 
 

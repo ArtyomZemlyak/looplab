@@ -153,6 +153,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Mega-review of the 4-day window (2026-08-13): 35-mega-review-2026-08-13.md
       - Review deferred decisions (2026-08-13): 34-review-deferred-decisions-2026-08-13.md
       - Cross-turn eval dispatch options (2026-08-13): 33-cross-turn-dispatch-options-2026-08-13.md
       - F1e operator declaration options (2026-08-13): 32-f1e-operator-declaration-options-2026-08-13.md

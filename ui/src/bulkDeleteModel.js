@@ -97,6 +97,12 @@ export function bulkOutcomeNotice(state) {
   // The identity travels with the handle, for the same reason `cascadeOutcome` carries one: the run
   // is already deleted, so the server cannot read `run_uid`/`memory_dir` back and refuses to guess
   // them. A button wired to the run id alone cannot finish the purge it offers.
+  // REVIEW (mega-review 2026-08-13): no emptiness gate — for a LEGACY run whose cascade receipt
+  // carries no run_uid/memory_dir (the name-matched `identity: "run_id"` degradation the server
+  // supports) the retry button is still offered, every press posts empty strings, the server 400s
+  // (memory_purge_identity_required), and the catch re-offers the same empty identity forever —
+  // the exact loop the api.js comment says the identity requirement was added to prevent. Offer
+  // the button only when the identity is non-empty (same gap in memoryCascadeModel.cascadeOutcome).
   const retryIdentity = {
     run_uid: String(unfinished?.memory?.run_uid || ''),
     memory_dir: String(unfinished?.memory?.memory_dir || ''),

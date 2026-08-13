@@ -214,6 +214,15 @@ def entrypoint_candidates(command) -> list[str]:
     head = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
     if not re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
         return []
+    # REVIEW (mega-review 2026-08-13): this loop scans the WHOLE argv for `-m`, so a `-m` that is an
+    # argument consumed by a script — `python train.py -m eval` — resolves to the `-m` argument's
+    # module instead of the script Python actually executes (measured: returns eval.py /
+    # eval/__main__.py while real Python runs train.py). Both costs the wrapper comment above names
+    # then land at once: `_entrypoint_protect` freezes a file the operator never named, the REAL
+    # scorer stays editable, and because candidates are non-empty `eval_entrypoint_unprotected`
+    # never warns. The docstring's "`-m` wins over a later `.py` token" is only sound when `-m`
+    # precedes the first non-flag token; the scan should stop at the first token that is neither a
+    # flag nor a flag's argument.
     for i, tok in enumerate(argv):
         if tok == "-m":
             mod = argv[i + 1] if i + 1 < len(argv) else ""
@@ -323,6 +332,14 @@ class EvalSpec(BaseModel):
     # ADDS, so an operator who protects `data/**` would silently give up the scorer freeze that
     # `protect` is the very vocabulary for — the surprising direction. This field says the thing
     # itself, and the run's `task.snapshot.json` records the decision.
+    #
+    # REVIEW (mega-review 2026-08-13): "the snapshot records the decision" is only true of runs
+    # STARTED after this field existed. A resumed pre-field run reloads with the default True, so
+    # its edit surface tightens mid-run (later nodes refuse edits earlier nodes were allowed, and
+    # `seed_protected_files` starts materializing a file earlier nodes never received). That is the
+    # exact re-entry treatment change `config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS` exists to pin at
+    # the Settings layer; the task layer has no such map, and the protective direction is why this
+    # shipped — but the claim above should not read as if old snapshots pinned it.
     protect_entrypoint: bool = True
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides

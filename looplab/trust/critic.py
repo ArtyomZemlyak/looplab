@@ -104,7 +104,17 @@ def _param_is_referenced(pname: str, code: str) -> bool:
     So the LEAF segment counts too. That is a weaker bar than the full path, deliberately and only
     just: the check already fires only when NOTHING matches, so with a dozen parameters it still
     takes a surface that mentions not one of their names to trip. A no-op solution does not
-    accidentally contain `uniformity_weight`."""
+    accidentally contain `uniformity_weight`.
+
+    REVIEW (mega-review 2026-08-13): true of rare leaves, false of the COMMON ones. The scan
+    surface concatenates ALL of `node.files`, which for a repo task includes copied-in configs and
+    training scripts that natively contain `learning_rate`/`batch_size`/`epochs`/`seed` — so a
+    dotted param ending in any ubiquitous ML token now passes even when the Developer threaded
+    nothing (counterexample executed: a genuinely-ignored `train.training.learning_rate` no longer
+    fires because the repo's own config carries the token). The pre-fix check was 100%
+    false-positive on this task shape, so the trade is defensible for an advisory signal — but the
+    detector is now near-blind for exactly the params operators most often sweep, which is worth
+    saying here and worth a value-aware check eventually."""
     if re.search(rf"\b{re.escape(pname)}\b", code):
         return True
     leaf = pname.rsplit(".", 1)[-1]

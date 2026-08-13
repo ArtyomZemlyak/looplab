@@ -2597,6 +2597,15 @@ def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
     # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
+    #
+    # REVIEW (mega-review 2026-08-13): the bounds below drop an over-cap or non-string LEGACY row
+    # ENTIRELY — not just its journal entry but also its card-identity registration and the
+    # abandoned-reopen side effect that the pre-bounds handler executed for any truthy statement.
+    # That is a fold-output change on old logs (a previously reopened hypothesis stays abandoned;
+    # ambiguity edges can differ), which invariant 5's additive-only rule says needs reader-side
+    # tolerance rather than silence. Real-log exposure is small (Card construction refused over-cap
+    # statements anyway), but the delta is undocumented here and should be — or the reopen/identity
+    # halves should keep accepting the legacy shape with the journal row alone bounded.
     statement = d.get("statement")
     clean_statement = statement.strip() if isinstance(statement, str) else ""
     try:
@@ -2848,6 +2857,17 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             else:
                 # Handler-level LWW means repeated values for the same rejected window are still one
                 # missing projection candidate, not an ever-growing count of audit-log events.
+                #
+                # REVIEW (mega-review 2026-08-13): a NEW key refused here is refused FOREVER — the
+                # fold replays the same log prefix, so the same 4,096 keys win on every fold — and
+                # the engine's reconciliation writer (`research_cadence._sync_card_enrichments`)
+                # computes its delta from the folded card and this capped journal with no gate on
+                # `_card_enrichment_complete`, so an omitted enrichment re-appends an identical
+                # `card_enriched` row on EVERY cadence pass for the rest of the run: unbounded log
+                # growth with no convergence (reproduced live: appends-per-pass 0,1,2,3,4… once the
+                # cap is filled; the control case converges at one). Organically ~1,000 cards/nodes
+                # away, but any hand-edited/hostile log reaches it with 4,096 cheap rows. The
+                # writer should consult the omission signal (or the cap needs per-card fairness).
                 ctx.card_enrichment_omissions.setdefault(candidate_key, 1)
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:

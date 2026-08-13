@@ -2273,6 +2273,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
         setBulkDeleteState({ ...state })
         continue
       }
+      // REVIEW (mega-review 2026-08-13): a 'pending' verdict lands here too — a deletion the
+      // server ACCEPTED (202) and is still executing stops the whole batch with an error-toned
+      // notice, and the batch never polls the recovery record it just saved, even though the
+      // single-run flow has exactly that machinery (RUN_DELETION_POLL_MS). On a deployment where
+      // deletions routinely go async, bulk delete degrades to one run per press with a scary
+      // notice about nothing. 'pending' should wait-and-poll, not stop-as-failure.
       state.stoppedAt = { runId: target.runId,
         reason: verdict?.reason || 'the deletion did not complete' }
       break

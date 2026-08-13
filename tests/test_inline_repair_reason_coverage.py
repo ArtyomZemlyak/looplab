@@ -80,7 +80,13 @@ def test_an_operator_can_still_narrow_it():
 
 def test_the_gate_reads_the_setting_rather_than_a_literal():
     """`_evaluate`'s gate is what actually decides. Pinned against the engine attribute it reads, so
-    a future 'fast path' literal in that branch is a red test."""
+    a future 'fast path' literal in that branch is a red test.
+
+    REVIEW (mega-review 2026-08-13): the positive pin below is a substring over module source —
+    one comment carrying the pinned text away from vacuous (delete the gate, leave it commented:
+    green, while every reason silently stops buying repairs). CLAUDE.md's guard-test ladder says
+    lift this tier to AST (`tests/_source_scan.py::names_read` over the gating function) or drive
+    it behaviourally; the negative pin below is fine as a substring by house rule."""
     from looplab.engine import evaluate
 
     source = inspect.getsource(evaluate)

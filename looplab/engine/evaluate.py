@@ -1021,6 +1021,13 @@ class EvaluateMixin:
                 self._salvage_reader_root(workdir), since,
                 enforce_drift=(getattr(self, "eval_trust_mode", "") == "ratify_freeze_drift"))
         except Exception:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
+            # REVIEW (mega-review 2026-08-13): this containment fails OPEN — an exception in the
+            # wrapper itself yields an EMPTY violations list, so under `metric_salvage="select"`
+            # with operator-produced output the node terminalizes feasible with the operator's
+            # hard constraints never evaluated and can become champion: the exact pre-fix defect
+            # the docstring above records. `salvage_gates` itself fails a raising READER closed
+            # (an unverifiable-constraint row); this outer except should contribute the same
+            # fail-closed row instead of a clean empty result.
             return {"violations": [], "extra_metrics": {}, "drift": None}
 
     def _recheck_repaired_contract(self, res, node, workdir, salvaged, fix, err: str):
@@ -1149,6 +1156,13 @@ class EvaluateMixin:
         run at the next decision point, one that owns no half-written node.
         It never appends a terminal either — the caller owns the node's single terminal event
         (invariant #2).
+
+        REVIEW (mega-review 2026-08-13): the contract above is only ENFORCED around the paid
+        `self._repair` call — the tail (two receipt appends, two folds, `_write_node_files`) runs
+        outside any try/except, so an ENOSPC/EACCES there escapes this method and produces exactly
+        the no-terminal outcome the paragraph above exists to forbid, through the same
+        try/FINALLY callers it names. The tail needs the same containment (swallow, keep the
+        salvaged metric, let the terminal be written).
         """
         if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
                 and reason in self._inline_repair_reasons

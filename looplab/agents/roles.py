@@ -659,6 +659,12 @@ def next_board_prompt_cards(
     if hyp_order:
         position = {card_id: index for index, card_id in enumerate(hyp_order)}
         cards.sort(key=lambda card: (position.get(card.id, len(position)), card.id))
+        # REVIEW (mega-review 2026-08-13): the rotation threshold and the leaders/tail split below
+        # are bare literals (as is the 20k seed budget four lines down) three lines under the
+        # BOARD_PROMPT_CARDS constant that exists because "these bounds were bare literals" —
+        # raising the constant leaves the 5/4 split behind and the tail-rotation fairness silently
+        # stops matching the window size. Derive them (BOARD_PROMPT_CARDS, BOARD_PROMPT_CARDS - 1)
+        # and name the seed budget.
         if len(cards) > 5:
             leaders, tail = cards[:4], cards[4:]
             offset = attempt % len(tail)

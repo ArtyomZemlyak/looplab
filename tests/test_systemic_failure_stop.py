@@ -10,6 +10,13 @@ The line is not "how many failed" but WHETHER ANYTHING HAS EVER WORKED, and the 
 the whole rule. A run with an evaluated node has proved its environment, libraries and data, so a
 later failure is about that one idea and only that node and its direction stop — this bound is off.
 A run with none has proved nothing, so the N-th failure is evidence about the run.
+
+REVIEW (mega-review 2026-08-13): coverage is tier-2 (this predicate truth table) plus a tier-3 AST
+wiring scan in test_orchestrator_internals — and CLAUDE.md's own tiering says the AST tier proves
+the call is in the TEXT, not that it executes. No test drives a real Engine through three failing
+nodes to a stopped-run terminal, so a wiring regression that leaves the call textually present but
+behind a dead condition (or mis-plumbs the threshold on resume) passes both. The guarded incident
+cost 26 hours; a tier-1 test through `make_engine` with a failing sandbox is the missing piece.
 """
 from __future__ import annotations
 

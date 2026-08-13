@@ -102,6 +102,12 @@ const installDom = () => {
 }
 
 const STATE = {
+  // REVIEW (mega-review 2026-08-13): this stub puts `generation` INSIDE the state object — a shape
+  // production never produces (the folded RunState has no run-level `generation`; it is an
+  // envelope SIBLING of `state` in the /api/state payload). CardBoard's detail pane reads
+  // `state?.generation` and therefore always gets null in production, so the mounted-fetch
+  // generation-fence contract this file proves passes here and can never pass live. When the board
+  // is fixed to thread `runGeneration`, drop this key so the stub can no longer mask that class.
   generation: RUN_GENERATION,
   cards: {
     'card-many': {

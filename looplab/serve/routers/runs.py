@@ -1910,6 +1910,14 @@ def build_router(srv) -> APIRouter:
         answer; when it was spelled twice — once typed over `RunState`, once by dict spelunking here —
         a renamed field or a changed marker shape moved only one of them, and two routes would then
         disagree about the same reset.
+
+        REVIEW (mega-review 2026-08-13): "an unchanged log is a stat+lookup" is the FINISHED-run
+        case. On a LIVE run every append changes the events-file identity, so the cache misses on
+        essentially every poll, and each node_logs/node_trace/conversation request pays up to two
+        full fold + model_dump + public-card-projection rebuilds (before/after CAS) just to read
+        one node's attempt integer — on the 14k-event runs this file elsewhere measures, that is a
+        materially heavier poll than the pre-CAS route. Worth a narrow attempt-only projection (a
+        tail scan for the node's lifecycle rows) instead of the full state payload.
         """
         frame = _state_payload(rd)
         state = frame.get("state") if isinstance(frame, dict) else None

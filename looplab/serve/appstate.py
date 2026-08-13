@@ -552,6 +552,11 @@ class AppState:
                 continue
             node_ids.append(node.id)
         for event in events:
+            # REVIEW (mega-review 2026-08-13): bare string literal where every other serve reader
+            # uses the `events/types.py` registry constant — the exact typo class invariant 7 names.
+            # A misspelling here does not fail; it matches nothing, `trace_ids` stays empty, and the
+            # card trace surface silently loses every node section while returning 200. Import
+            # EV_NODE_CREATED instead.
             if event.type != "node_created":
                 continue
             data = event.data or {}
