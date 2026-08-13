@@ -747,7 +747,7 @@ def _operator_stage_names(rd: Path) -> tuple:
             # falls back to the Developer-manifest + protected-`score` path — mirror it exactly, or
             # this panel would render phantom stage bands for a pipeline the engine never ran AND
             # miss the manifest stages it actually did run.
-            clean, err = validate_stages(es["stages"])
+            clean, err = validate_stages(es["stages"], allow_env=True)
             if err is None:
                 names = tuple(str(s["name"]) for s in clean)
     except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest

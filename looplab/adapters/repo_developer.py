@@ -794,7 +794,12 @@ class LLMRepoDeveloper:
         if not ev.get("stages"):
             return []
         from looplab.runtime.command_eval import validate_stages
-        return validate_stages(ev["stages"])[0] or []
+        # `allow_env=True`: these are the OPERATOR's stages, read here only to describe the
+        # pipeline to the Developer. Validating them under the Developer's own fail-closed rule
+        # would drop the whole operator pipeline out of the prompt the moment the operator
+        # declared an `env`, and the agent would be told it may author stages the engine will
+        # ignore (M7 — this reader and `_resolve_stages` must accept the same thing).
+        return validate_stages(ev["stages"], allow_env=True)[0] or []
 
     def _stage_note(self, operator_stages, declared, carried_over, manifest_protected) -> str:
         """The three-way pipeline note the implement sessions read (doc 25 RA-07).

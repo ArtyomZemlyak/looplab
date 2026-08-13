@@ -306,6 +306,16 @@ class EvalSpec(BaseModel):
     # (runtime/command_eval.validate_stages); a stage named 'score' is allowed HERE — the operator
     # owns scoring, the reservation only guards Developer manifests.
     stages: list[dict] = Field(default_factory=list)
+    # The DECLARED ENVIRONMENT for this task's eval — applied to `setup`, to the single `command`,
+    # and to EVERY stage, with a stage's own `env` overlaying it (most specific wins). This is where
+    # a fact about the TASK belongs: `VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local` says where this
+    # repo's data lives, which is true of the repo and not of the engine, and stating it here means
+    # every node inherits it instead of each one spending a repair attempt rediscovering it (backlog
+    # F1d). It rides in `task.snapshot.json` verbatim, so a resume re-validates and re-applies the
+    # SAME environment the run's results were produced under. Operator-authored, like the rest of
+    # this model — the Developer has no surface for it, by design. Secrets are REFUSED; see
+    # `command_eval.validate_env_map`.
+    env: dict[str, str] = Field(default_factory=dict)
     cwd: str = "."                           # relative to the node eval workdir
     # Freeze the FILE the `command` executes, when the argv names one that the editable source
     # actually ships (`python -m pkg.mod`, `python score.py` — see `entrypoint_candidates`). ON by
@@ -560,9 +570,28 @@ class EvalSpec(BaseModel):
         if not v:
             return v
         from looplab.runtime.command_eval import validate_stages
-        clean, err = validate_stages(v)          # no reserved names: the operator owns `score`
+        # `allow_env=True`: THIS is the operator's own pipeline (the same reason no name is reserved
+        # here), and a stage `env` is operator-only. The Developer's two surfaces — the
+        # `declare_stages` tool and a hand-written `looplab_stages.json` — keep the fail-closed
+        # default and are refused.
+        clean, err = validate_stages(v, allow_env=True)   # no reserved names: the operator owns `score`
         if err:
             raise ValueError(f"cmd.stages invalid: {err}")
+        return clean
+
+    @field_validator("env")
+    @classmethod
+    def _env_valid(cls, v):
+        # The eval-wide half of the DECLARED ENVIRONMENT, validated by the SAME shared rule as the
+        # per-stage block and the run-level setting (`command_eval.validate_env_map`) — three levels
+        # that get MERGED must agree about what a legal declaration is, or an operator's variable
+        # would change meaning depending on which line they wrote it on.
+        if not v:
+            return {}
+        from looplab.runtime.command_eval import validate_env_map
+        clean, err = validate_env_map("cmd/eval `env`", v)
+        if err:
+            raise ValueError(err)
         return clean
 
     @model_validator(mode="after")

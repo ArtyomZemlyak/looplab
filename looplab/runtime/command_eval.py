@@ -28,10 +28,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.read_fence import FENCE_DIR_ENV
+# The DECLARED ENVIRONMENT rule lives in `core/envsafe.py` — `core/config.py::Settings.eval_env`
+# is the third declarer of the same contract and `core` may not import `runtime`, so the rule sits
+# where all three can reach it. Re-exported here because THIS is where the stage contract is read.
+from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa: F401 (re-export)
+                                  MAX_STAGE_ENV_VARS, merge_env, validate_env_map)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
-                                     finite_timeout, is_secret_env, json_line_extras,
+                                     finite_timeout, json_line_extras,
                                      json_line_metric, json_line_trials, require_docker_cli,
                                      run_argv)
 
@@ -182,144 +186,6 @@ def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
                       "drop the key.")
     return clean, None
 
-
-# --- The DECLARED ENVIRONMENT (`env`) ------------------------------------------------------------
-# THE THIRD THING A STAGE DECLARES, and the last one that had no home but CODE. `expect` states what
-# a stage writes, `needs` what it reads, and neither could say what it needs SET.
-#
-# Measured cost (backlog F1d): `rubertlite-dr-unified-v6` node 0 crashed on its first attempt with
-# `botocore InvalidAccessKeyId … ListObjects` because the data loader reached S3 with
-# `VS_LOCAL_DATA_ROOT` unset. The repair was correct and took three minutes — an
-# `os.environ.setdefault(...)` at import in the repo's config. Then node 1 hit the IDENTICAL error,
-# because a node is seeded from the SOURCE repo and never from a sibling node, so every node
-# rediscovers the same fact and spends one repair attempt on it. At `max_nodes: 14` that is up to
-# fourteen repair attempts spent on something the operator knew before the run started. The Developer
-# did the best available thing: with no `env` on the stage contract, CODE was the only surface — which
-# bakes the environment into the repo under repair, the wrong place for it, and pollutes the diff.
-#
-# WHO MAY DECLARE IT: the OPERATOR only (`allow_env`, default False — fail closed). The Developer
-# authors the scripts, not the environment they run in. An agent that could set arbitrary environment
-# for its own protected `score` stage would have another route around the trust boundary the scorer
-# freeze exists to hold (`PYTHONPATH` alone re-points every import the scorer makes), so
-# `declare_stages` and a hand-written `looplab_stages.json` are refused with a message that names the
-# operator surface instead of silently dropping the key.
-#
-# THREE LEVELS, one merge, most specific wins: `Settings.eval_env` (every stage of every node in the
-# run) < `eval.env` (every stage of this task's eval) < `stages[].env` (this stage). The engine
-# composes the first two into the process env it already hands the sandbox; only the third is
-# per-stage, and `_run_stages` is where it lands.
-MAX_STAGE_ENV_VARS = 32
-MAX_ENV_VALUE_CHARS = 4096
-# POSIX-portable variable names, and deliberately not more: a name outside this set is unreachable
-# from `os.environ[...]` in a portable shell/interpreter anyway, and `docker run -e NAME=value` parses
-# on `=`, so an embedded `=` in a NAME would silently redefine a different variable in the container.
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}\Z")
-# Names the ENGINE owns, refused to every declarer including the operator. Not a style rule — each is
-# a value some part of LoopLab computes per eval and then relies on:
-#   • CUDA_VISIBLE_DEVICES is the GPU PIN (`engine/resources.py::_resource_eval_env`), reconciled with
-#     the Docker `--gpus` args and with `cap_gpu_flags`. A declared one would hand a node its
-#     siblings' devices while the host pool lease still says otherwise.
-#   • LOOPLAB_* is the engine's own settings namespace (`LOOPLAB_<FIELD>`), so a declared one
-#     reconfigures any LoopLab the eval happens to invoke — and `LOOPLAB_READ_FENCE_DIR` in
-#     particular is the marker `run_argv` turns into the read fence's PYTHONPATH entry, i.e. the one
-#     variable that can switch the fence off from inside the thing being fenced.
-ENGINE_OWNED_ENV = ("CUDA_VISIBLE_DEVICES",)
-assert FENCE_DIR_ENV.startswith("LOOPLAB_")   # the LOOPLAB_ prefix rule below is what covers the fence
-
-
-def validate_env_map(where: str, values, *, cap: int = MAX_STAGE_ENV_VARS) -> tuple[Optional[dict], Optional[str]]:
-    """Validate a declared environment block into its canonical `{NAME: "value"}` form:
-    `(clean, None)` or `(None, reason)`. THE single definition, shared by `stages[].env`,
-    `EvalSpec.env` and `Settings.eval_env`, so the three levels that get MERGED cannot disagree about
-    what a legal declaration is — a name one level accepts and another refuses would be an
-    environment that changes meaning depending on where the operator wrote it.
-
-    `where` names the declaring site in every message (`stage 'train' env`, `eval.env`, `eval_env`),
-    because all three refusals are read by an operator who has to find the line they wrote.
-
-    SECRETS ARE REFUSED HERE, and that is the whole policy — see `_secret_refusal`.
-    """
-    if not isinstance(values, dict):
-        return None, (f"{where} must be an object of NAME -> value strings, e.g. "
-                      "{\"VS_LOCAL_DATA_ROOT\": \"/data/local\"}.")
-    if len(values) > cap:
-        return None, f"{where} may declare at most {cap} variables."
-    clean: dict = {}
-    for name, raw in values.items():
-        nm = str(name or "").strip()
-        if not _ENV_NAME_RE.match(nm):
-            return None, (f"{where} name {name!r} is not a portable environment variable name "
-                          "(letters, digits and '_', not starting with a digit).")
-        if nm in ENGINE_OWNED_ENV or nm.startswith("LOOPLAB_"):
-            return None, (f"{where} may not declare {nm!r}: LoopLab computes it per eval "
-                          "(the GPU pin, the read-fence marker, the engine's own settings), and a "
-                          "declared value would silently override the run's own treatment.")
-        # A bool is an int in Python and `str(True)` is "True", which is not what anyone writing
-        # `DEBUG: true` in YAML means to the shell. Numbers ARE meaningful (`OMP_NUM_THREADS: 4`) and
-        # are stringified, because the environment has no other type.
-        if isinstance(raw, bool) or raw is None or isinstance(raw, (list, dict)):
-            return None, (f"{where} value for {nm!r} must be a string or a number — the environment "
-                          "has no other type, and a YAML boolean would reach the process as 'True'.")
-        val = str(raw)
-        if "\x00" in val:
-            return None, f"{where} value for {nm!r} contains a NUL byte."
-        if len(val) > MAX_ENV_VALUE_CHARS:
-            return None, f"{where} value for {nm!r} is longer than {MAX_ENV_VALUE_CHARS} characters."
-        if is_secret_env(nm, val):
-            return None, _secret_refusal(where, nm)
-        clean[nm] = val
-    return clean, None
-
-
-# WHAT HAPPENS TO A VALUE THAT LOOKS LIKE A SECRET: it is REFUSED, at declaration time, and the
-# message says where credentials go instead. This is not caution about a hypothetical — a declared
-# environment is DURABLE by construction, which is the half that makes it useful and the half that
-# makes it the wrong container for a credential. `stages[].env`/`eval.env` are written verbatim into
-# `task.snapshot.json`; `Settings.eval_env` into `config.snapshot.json` AND the `run_started` event,
-# i.e. into `events.jsonl`, which is the file the exporter ships, the UI renders and the operator
-# pastes into a bug report. There is no redaction that could make that safe without also making the
-# value unreadable to the resume that has to reproduce it.
-#
-# It is also the ONE route around a boundary that already exists: `sandbox.is_secret_env` strips
-# secret-named host variables from every child process precisely so generated code cannot print them
-# into the durable stdout tail. A declared env is applied AFTER that strip, on purpose (that is what
-# makes it reach the eval) — so accepting a secret here would re-add exactly what the strip removed,
-# by the operator's own hand, in the one place it is also written to disk.
-#
-# We deliberately do NOT invent a secret store. The honest answer is that the credentials LoopLab
-# itself needs already have a boundary (`LOOPLAB_LLM_API_KEY` and a profile's `api_key_env` — runtime
-# fields, environment-only, refused by `--set` so they never enter shell history), and that a
-# credential for the CANDIDATE's own code has no boundary because the eval sandbox is where untrusted
-# agent-written code runs. Exporting it in the launching shell is still possible and is the operator's
-# informed choice; what this refuses to do is write it down.
-#
-# The screen is `sandbox.is_secret_env` — the LOOSER of the two patterns (`core/config._SECRET_ENV_NAME`
-# is the stricter sibling), name AND credential-URL value. It over-matches on purpose: `HF_TOKEN` is
-# refused, and renaming the variable is not a workaround an operator can reach by accident.
-def _secret_refusal(where: str, name: str) -> str:
-    return (f"{where} may not declare {name!r}: its name or value looks like a credential, and a "
-            "declared environment is written verbatim into the run's durable record "
-            "(task.snapshot.json / config.snapshot.json / the run_started event in events.jsonl), "
-            "which is exported, rendered in the UI and pasted into bug reports. LoopLab has no "
-            "secret store and is not adding one here. LoopLab's OWN credentials go through the "
-            "runtime-only environment boundary (LOOPLAB_LLM_API_KEY, a profile's api_key_env) which "
-            "is never snapshotted; a credential your EVAL needs has no such boundary — export it in "
-            "the launching shell if you accept that, and keep it out of the run record.")
-
-
-def merge_env(*layers) -> dict:
-    """Compose the declared environment layers, most specific LAST (run < eval < stage).
-
-    One function so the composition order is stated once and read the same way by the engine (which
-    folds run- and task-level into the process env it hands the sandbox) and by `_run_stages` (which
-    overlays the per-stage block). A `None`/empty layer contributes nothing, so an eval that declares
-    nothing composes to `{}` and every existing caller keeps its byte-identical child environment.
-    """
-    out: dict = {}
-    for layer in layers:
-        if layer:
-            out.update({str(k): str(v) for k, v in layer.items()})
-    return out
 
 # STALL watchdog window: a stage (train/eval) that emits NOTHING for this long while still ALIVE is
 # treated as hung (a distributed/DataParallel finalize deadlock, a wedged CUDA op, a lock never

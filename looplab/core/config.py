@@ -530,6 +530,24 @@ class Settings(BaseSettings):
     # non-Python stage (block-buffered stdout, a script that logs only to its own file). Threaded into
     # the eval and surfaced to the Developer so its code can emit periodic progress to stay alive.
     eval_stall_timeout_s: float = Field(default=1800.0, ge=0)
+    # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — `setup`, the
+    # single `command`, and every stage. The run-wide half of the same contract the task's `cmd.env`
+    # and a stage's own `env` carry (most specific wins: this < cmd.env < stages[].env), validated by
+    # the one shared rule `runtime/command_eval.py::validate_env_map`.
+    #
+    # WHY IT IS A SETTING AND NOT ONLY A SHELL EXPORT (backlog F1d). `VS_LOCAL_DATA_ROOT` being unset
+    # crashed `rubertlite-dr-unified-v6` node 0 in `botocore ListObjects`; the repair was correct and
+    # then node 1 hit the identical error, because a node is seeded from the SOURCE repo and never
+    # from a sibling. Exporting the variable in the launching shell fixes that and is what the
+    # operator had to do — but it leaves the fact that shaped every node's behaviour in someone's
+    # terminal history instead of in the run record. Declared here it lands in
+    # `config.snapshot.json` AND in `run_started`, so a resume reproduces the same environment
+    # (engine invariant #6) and a reader of the log can see what the nodes actually ran under.
+    #
+    # Reachable as `-s eval_env=NAME=VALUE` (comma-separated for several) as well as the JSON/mapping
+    # form a config file or `LOOPLAB_EVAL_ENV` carries — see `_eval_env_map` for why both.
+    # SECRETS ARE REFUSED, by the same rule and for the durability reason stated there.
+    eval_env: dict[str, str] = Field(default_factory=dict)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
     # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for
@@ -1639,6 +1657,47 @@ class Settings(BaseSettings):
                 f"{field} values must be nonblank strings; invalid stage key(s): "
                 + ", ".join(invalid_values))
         return dict(value)
+
+    @field_validator("eval_env", mode="before")
+    @classmethod
+    def _eval_env_map(cls, value):
+        """Accept the run-level declared environment in either spelling, then validate it with the
+        ONE shared rule (`runtime/command_eval.validate_env_map`).
+
+        TWO SPELLINGS, because the two surfaces that reach this field are not alike and neither may
+        be the awkward one. A config file's `settings:` block and `LOOPLAB_EVAL_ENV` speak
+        YAML/JSON, so a MAPPING is the natural form there and is what the snapshot round-trips.
+        `--set` is a shell argument split on the FIRST `=` (`appconfig.parse_sets`), so what arrives
+        from `-s eval_env=VS_LOCAL_DATA_ROOT=/data/local` is the STRING `VS_LOCAL_DATA_ROOT=/data/local`
+        — the exact thing an operator would have typed as a shell export, and the whole point of the
+        field is that they should not have to. Requiring JSON there instead
+        (`-s eval_env={"VS_LOCAL_DATA_ROOT":"/data/local"}`) would be a quoting puzzle in front of the
+        one launch line this exists to make sayable, so the string form is parsed here: comma-separated
+        `NAME=VALUE` pairs, each split on its own first `=` so a value may contain more of them.
+
+        Note the field stays FLAT and 1:1 with `LOOPLAB_EVAL_ENV`, as every Settings field must —
+        what is nested is the VALUE, exactly as it already is for `llm_profiles`/`role_profiles`.
+        """
+        from looplab.runtime.command_eval import validate_env_map
+        if value is None or value == "":
+            return {}
+        if isinstance(value, str):
+            parsed: dict = {}
+            for item in value.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if "=" not in item:
+                    raise ValueError(
+                        "eval_env as a string is comma-separated NAME=VALUE pairs, e.g. "
+                        f"VS_LOCAL_DATA_ROOT=/data/local — got {item!r} with no '='")
+                name, _, val = item.partition("=")
+                parsed[name.strip()] = val
+            value = parsed
+        clean, err = validate_env_map("eval_env", value)
+        if err:
+            raise ValueError(err)
+        return clean
 
     @model_validator(mode="before")
     @classmethod
