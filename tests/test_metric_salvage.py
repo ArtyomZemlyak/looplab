@@ -899,11 +899,14 @@ _COMPLETED = [{"name": "prep", "command": ["python", "-c", "pass"], "timeout": 6
 _FIX = {"changed": ["looplab_stages.json"], "deleted": [], "code": ""}
 
 
-def _seam_rows(since, *, complete=True):
+def _seam_rows(since, *, complete=True, declared=("ckpt/wrong.safetensors",)):
     rows = [{"name": "prep", "status": "ok", "exit_code": 0, "seconds": 1.0}] if complete else []
-    from looplab.runtime.command_eval import EXPECT_SINCE_KEY
+    from looplab.runtime.command_eval import EXPECT_DECLARED_KEY, EXPECT_SINCE_KEY
+    # `declared` is the declaration the contract FAILED on, which the writer stamps on the row. It
+    # must differ from `_COMPLETED`'s corrected `ACTUAL` or `declaration_actually_corrected` refuses:
+    # a repair that left the failing sentence untouched corrected nothing, whatever file it wrote.
     return rows + [{"name": "train", "status": "expect_failed", "exit_code": 0, "seconds": 2.0,
-                    EXPECT_SINCE_KEY: since}]
+                    EXPECT_SINCE_KEY: since, EXPECT_DECLARED_KEY: list(declared)}]
 
 
 def _seam_salvage(**kw):
@@ -1138,3 +1141,95 @@ def test_the_stage_row_records_the_FLOOR_its_contract_was_held_to(tmp_path):
     assert t_eval + 0.4 <= floor <= time.time(), "the TRAIN stage's start, not the eval's"
     # …and it is the stage row's own fact: the earlier stage carries no floor and answers None.
     assert ms.recheck_floor(res, "prep") is None
+
+
+# ------------------------------------------------------------------------------------------------
+# The repair must reach the DECLARATION THAT FAILED, not merely the file it usually lives in.
+#
+# `declaration_only_repair` answers "did this change set touch only looplab_stages.json" — a question
+# about a FILENAME. In operator `cmd.stages` mode the failing declaration lives in the task snapshot
+# and the manifest is ignored entirely, while the cause-repair prompt still directs the Developer at
+# the manifest: so the file-set gate passes on a repair that corrected NOTHING, and the promotion
+# then turns on whether a second stat() of the same unchanged path answers differently from the
+# first, across a window containing a full Developer LLM round trip. Driven on a real Engine before
+# this gate existed, the node was promoted with the still-wrong path recorded as its correction.
+# ------------------------------------------------------------------------------------------------
+
+def _failed_row(declared, name="train"):
+    from looplab.runtime.command_eval import EXPECT_DECLARED_KEY, EXPECT_SINCE_KEY
+    return {"name": name, "status": "expect_failed", "exit_code": 0, "seconds": 1.0,
+            EXPECT_SINCE_KEY: 1_000.0, EXPECT_DECLARED_KEY: list(declared)}
+
+
+def test_an_unchanged_declaration_is_not_a_correction():
+    from looplab.engine.metric_salvage import declaration_actually_corrected
+    rows = [_failed_row(["ckpt/model.pt"])]
+    assert declaration_actually_corrected(rows, "train", {"files": ["ckpt/model.pt"]}) is False
+    # ...and the same set spelled differently is still the same set: a reordered or './'-prefixed
+    # rewrite corrects nothing, and reading it as a correction is how the race comes back.
+    rows2 = [_failed_row(["a/x.pt", "b/y.pt"])]
+    assert declaration_actually_corrected(rows2, "train", {"files": ["./b/y.pt", "a/x.pt"]}) is False
+
+
+def test_a_genuinely_corrected_declaration_passes():
+    from looplab.engine.metric_salvage import declaration_actually_corrected
+    rows = [_failed_row(["ckpt/model.pt"])]
+    assert declaration_actually_corrected(
+        rows, "train", {"files": ["experiments/final/model.pt"]}) is True
+
+
+def test_no_recorded_declaration_means_the_question_cannot_be_answered():
+    """An older log, a row the writer did not stamp, a caller that hand-built rows. An unanswerable
+    question is not a pass — this branch is what keeps every pre-2026-08-13 run out of the promotion
+    path, which is correct: nothing about those logs establishes what changed."""
+    from looplab.engine.metric_salvage import declaration_actually_corrected
+    bare = [{"name": "train", "status": "expect_failed", "exit_code": 0, "seconds": 1.0}]
+    assert declaration_actually_corrected(bare, "train", {"files": ["ckpt/model.pt"]}) is False
+    assert declaration_actually_corrected(
+        [_failed_row([])], "train", {"files": ["ckpt/model.pt"]}) is False
+
+
+def test_the_gate_is_about_THIS_stage():
+    """A different stage's declaration changing says nothing about the one that failed."""
+    from looplab.engine.metric_salvage import declaration_actually_corrected
+    rows = [_failed_row(["ckpt/model.pt"], name="train"), _failed_row(["out.json"], name="score")]
+    assert declaration_actually_corrected(rows, "merge", {"files": ["x"]}) is False
+    assert declaration_actually_corrected(rows, "train", {"files": ["ckpt/model.pt"]}) is False
+    assert declaration_actually_corrected(rows, "train", {"files": ["fixed/model.pt"]}) is True
+
+
+def test_the_writer_records_the_declaration_its_contract_failed_on():
+    """Driven through the real `run_command_eval`, not asserted against a hand-built row: the
+    re-check can only be as good as what the writer stamped."""
+    import sys
+    import tempfile
+    from pathlib import Path
+    from looplab.runtime.command_eval import EXPECT_DECLARED_KEY, run_command_eval
+
+    with tempfile.TemporaryDirectory() as td:
+        stages = [{"name": "train",
+                   "command": [sys.executable, "-c",
+                               "import pathlib; pathlib.Path('elsewhere.pt').write_text('w')"],
+                   "expect": {"files": ["ckpt/model.pt"]}}]
+        res = run_command_eval([sys.executable, "-c", "print(1)"], td, 60,
+                               {"kind": "stdout_json", "key": "metric"}, stages=stages)
+        row = [r for r in res.stages if r["name"] == "train"][0]
+        assert row["status"] == "expect_failed"
+        assert row[EXPECT_DECLARED_KEY] == ["ckpt/model.pt"], (
+            "the failing declaration was not recorded, so no re-check can establish a correction")
+        assert Path(td, "elsewhere.pt").exists()
+
+
+def test_a_repair_that_left_the_FAILING_declaration_untouched_is_refused_at_the_seam(tmp_path):
+    """The seam, end to end, on the shape that was actually reachable: `changed` is exactly
+    `looplab_stages.json` — so the file-set gate passes — and the failing stage's declaration is
+    byte-identical before and after. That is operator `cmd.stages` mode, where the manifest the
+    Developer was told to fix is not the file the contract came from. Before this gate the promotion
+    reduced to whether a second stat() answered differently from the first."""
+    eng, node, workdir = _seam_engine(tmp_path, _COMPLETED, name="untouched")
+    _write_artifact(workdir)
+    # The declaration the contract failed on IS the one the re-resolved chain now carries.
+    res = _res(failed_stage="train", stages=_seam_rows(time.time() - 30, declared=[ACTUAL]))
+    assert eng._recheck_repaired_contract(
+        res, node, workdir, _seam_salvage(), _FIX, "e") is None, (
+        "an unchanged declaration was promoted: the re-check asked a filename, not a correction")

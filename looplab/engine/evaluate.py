@@ -45,6 +45,7 @@ from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
+                                           declaration_actually_corrected,
                                            declaration_only_repair, declaration_repair_provenance,
                                            declared_pipeline_completed, recheck_floor,
                                            recheckable_expect, recheckable_salvage,
@@ -1069,6 +1070,14 @@ class EvaluateMixin:
                 return None
             expect = recheckable_expect(chain, stage, changed)
             if not expect.get("files"):
+                return None
+            # THE REPAIR MUST HAVE REACHED THE DECLARATION THAT FAILED, not merely the file it
+            # normally lives in. Without this the gate above is a question about a FILENAME, and in
+            # operator `cmd.stages` mode — where the failing declaration is in the task snapshot and
+            # the manifest is ignored — it passes on a repair that corrected nothing, leaving the
+            # promotion to turn on whether a second stat() of an UNCHANGED path answers differently
+            # from the first. See `declaration_actually_corrected`.
+            if not declaration_actually_corrected(getattr(res, "stages", None) or (), stage, expect):
                 return None
             if verify_stage_artifacts(expect, self._salvage_reader_root(workdir), since,
                                       stage=stage) is not None:
