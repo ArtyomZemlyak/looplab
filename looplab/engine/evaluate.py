@@ -2092,7 +2092,14 @@ class EvaluateMixin:
                 # see `_repair_change_set`. `new_deleted` is consumed by the reuse predicate below.
                 changed, new_deleted = _repair_change_set(
                     prev_files, prev_deleted, repaired_files, repaired_deleted)
-                _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if new_code else [])
+                # The whole-file fallback is gated on the code having actually MOVED, not merely on
+                # it being non-empty. A repair that hands back the artifact it was given rendered
+                # `it changed: <whole-file solution>` to the judge — the column asserting a change
+                # the bytes disprove, on exactly the rows where the truth matters most. `node` is
+                # still the pre-repair fold here, so `node.code` is what `new_code` replaced.
+                _code_changed = (new_code or "") != (node.code or "")
+                _changed_col = sorted(changed)[:12] or (["<whole-file solution>"] if _code_changed
+                                                        else [])
                 # DID IT DO WHAT IT SAID? The change set above is what the repair DID; the rationale
                 # a line below is what it SAID. Nothing ever compared them, and on the shipped corpus
                 # ~25 % of explained repairs named a change their diff does not contain — 13 of them
@@ -2107,7 +2114,7 @@ class EvaluateMixin:
                 # below the append), so `node.code` is the artifact `new_code` replaced.
                 _verification = verify_repair(
                     triage.get("rationale", ""), changed=changed, deleted=new_deleted,
-                    code_changed=(new_code or "") != (node.code or ""),
+                    code_changed=_code_changed,
                     region=changed_region(prev_files, repaired_files, node.code, new_code))
                 async with self._write_lock:
                     repair_payload = {
