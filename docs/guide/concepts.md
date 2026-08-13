@@ -430,7 +430,7 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   **any** of the eleven `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
   `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
-  <!-- REVIEW (mega-review 2026-08-13): this list said "eight" and omitted the last three — it was
+  <!-- FIXED 2026-08-13 (mega-review, doc 35): this list said "eight" and omitted the last three — it was
        written on a branch where 8 was correct and merged beside the registry widening without
        reconciliation; the settings table already listed all eleven. -->
   An in-place repair doesn't consume the node budget;

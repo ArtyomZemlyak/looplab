@@ -24,8 +24,8 @@
 
 | # | Doc | Authority and scope |
 |---|-----|---------------------|
-| 35 | **[35-mega-review-2026-08-13.md](35-mega-review-2026-08-13.md)** | Review record of the 4-day window `66bc0e6..HEAD`: seven parallel reviewers plus adversarial verification, every confirmed finding annotated at its site with a `REVIEW (mega-review 2026-08-13)` comment (grep for it). Ranks the confirmed majors (read-fence bypasses, the reset-over-attached card drop, the enrichment-journal writer loop, the dead board generation fence, the pause-extension arithmetic, the unpersisted cascade identity), records the one REFUTED major so nobody "fixes" it, and lists the verified-clean areas. |
-<!-- REVIEW (mega-review 2026-08-13): this table carried TWO near-identical doc-34 rows with
+| 35 | **[35-mega-review-2026-08-13.md](35-mega-review-2026-08-13.md)** | Review record of the 4-day window `66bc0e6..HEAD`: seven parallel reviewers plus adversarial verification, every confirmed finding since FIXED (the in-place annotations it was written to index are gone — `grep -rn 'REVIEW (mega-review 2026-08-13)' looplab/ ui/src ui/test tests/` returning nothing is the check). Ranks the majors it closed (read-fence bypasses, the reset-over-attached card drop, the enrichment-journal writer loop, the dead board generation fence, the pause-extension arithmetic, the unpersisted cascade identity), records the one REFUTED major and the four recommendations that were REFUSED (with the deliberate behaviour each would have undone) so nobody re-opens them, and lists the verified-clean areas. |
+<!-- 2026-08-13: this table carried TWO near-identical doc-34 rows with
      diverging summaries — a merge artifact between e441599 and the origin/master merge 3068dcf.
      The duplicate was removed; the membership tripwire in tests/test_documentation_contracts.py
      checks presence only, not uniqueness, which is why it passed. -->
