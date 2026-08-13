@@ -317,18 +317,47 @@ the cautionary case), a bounded output projection, and a decision about whether 
 durable event — because if the Developer can act on something not in the log, replay stops
 reconstructing the run.
 
-## F3 · Node workspaces on `git worktree`
+## F3 · Node workspaces on `git worktree` — **MEASURED AND DECLINED (2026-08-13)**
 
 **Asked:** "move to git worktree?"
 
 **Today.** A node workspace is a materialized copy (`workspace_seeded` records `.[auto]:N tracked`).
 On this box that is ~75 tracked files per node onto a geesefs mount.
 
-**Worth measuring first.** The win is disk and seed time; the costs are real and specific here: geesefs
-has no exec bit and `os.link` across mounts fails `EXDEV` (both already bite — see the environment
-note), a worktree makes every node share one `.git`, whose index lock is *already* the most contended
-thing in this repo under concurrent agents, and a node that corrupts its worktree can now damage the
-source repo. Measure the seed cost before paying for that coupling.
+**Answered, not deferred.** This entry said "measure the seed cost before paying for that coupling."
+That measurement is **[doc 37](37-node-workspace-worktree-measurement-2026-08-13.md)**, taken on both
+real testbeds, and it says keep the copy. Do not re-open this without reading it — deferred invites a
+re-litigation that will re-derive the same numbers. The four headline findings:
+
+- **The disk win is backwards.** `git worktree add` is a CHECKOUT, not a link: it writes every tracked
+  file as a real file exactly as the copy does, and shares only the object DB — which the copy never
+  copies. Measured per node: copy 910,829 B, worktree 929,851 B (**+2.1 %**, a `.git` pointer plus an
+  18,944 B admin dir). The proposal's stated win is a measured loss.
+- **The seed-time win is real only under concurrency and is four orders of magnitude too small.** Full
+  cycle at W=1: copy 0.346 s vs worktree 0.376 s (the worktree is *slower* — its teardown is 1.9×). At
+  W=12: 0.880 s vs 0.463 s. Against `rubertlite-dense-retrieval` — 91.3 s of seeding, 452,121 s of
+  evaluating — the best case is ~45 s, i.e. **0.010 percentage points**.
+- **Two of the four costs above are retired by measurement, and two are disqualifying.** The exec bit
+  and hardlinks bite neither arm (`core.filemode` is already `false` on that repo; note the sharper
+  fact that `os.link` is `ENOTSUP` on geesefs *even same-mount*, not merely `EXDEV`), and the shared
+  index lock does not exist — a worktree keeps its own index, 12 concurrent adds had 0 failures, and a
+  stale 0-byte `index.lock`/`worktrees.lock` still left `worktree add` at rc=0. What *is* confirmed:
+  `git add -A` from inside a node worktree measured rc=0 and wrote blobs into the SOURCE repo; and a
+  worktree checks out a COMMIT while the copy seeds the WORKING TREE — 10 of the v1 testbed's 17
+  tracked files are dirty vs HEAD and `looplab_eval.py`, the protected scorer, is staged and never
+  committed, so a worktree seed would silently train against the operator's last commit.
+- **The disk incident was misattributed to this mechanism.** Seeding has never copied an untracked
+  file on either real testbed (all 9 `copytree` records in the corpus belong to three non-git
+  synthetic testbeds); the v1 testbed is 189 GiB of which **0.22 MB** is tracked. The 727 GB was the
+  runs' own retained training checkpoints — v6 `node_4` is 944,779,776 B, 937,847,296 of it three
+  intermediate checkpoints plus a final, because that node's own `build_trainer.py` says
+  `save_total_limit=3`. The seed is 0.096 % of that workspace.
+
+**The root fix instead**, in cost order (doc 37 §8): record a node workspace's real size as a
+fold-ignored diagnostic — today `workspace_seeded`'s 0.9 MB is the *only* workspace fact in the log,
+which is exactly why the copy got blamed — then bound retention agent-side, and only then reclaim
+non-champion checkpoints, behind a written retention policy, because `metric_salvage` reads those
+files.
 
 ## F4 · Assistant: an always-on mode
 

@@ -50,7 +50,7 @@ def test_index_mentions_every_numbered_document():
     # just move the number. Note it cannot see a doc NUMBER collision — two files may both start
     # "34-" and satisfy both the count and the membership check, which is exactly what happened when
     # the fence audit and the review-residue doc independently claimed 34.
-    assert len(numbered) == 36, "the derived numbered-document inventory changed"
+    assert len(numbered) == 38, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
