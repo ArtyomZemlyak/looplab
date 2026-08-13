@@ -39,7 +39,8 @@ export {
   runNodeApiPath, setOwnerToken, verifyOwnerToken,
 } from './apiClient.js'
 export {
-  COMMAND_FAILED, COMMAND_SUCCEEDED, commandActionForEvent, commandCanRetry, commandErrorMessage,
+  COMMAND_FAILED, COMMAND_PENDING, COMMAND_SUCCEEDED, commandActionForEvent, commandCanRetry,
+  commandErrorMessage,
   commandEventForAction, commandFailureRecord, commandFeedback, createIdempotencyKey,
   getObservedRunGeneration, isTransientCommandReadError, normalizeRunGeneration, observeRunGeneration,
   submitCommand, validRunGeneration,

@@ -245,8 +245,23 @@ before `engine.lock` appears. If a detached child remains cold past the observat
 lease is quarantined until its lock appears or its PID is definitively dead; timeout alone cannot
 authorize a second `Popen`. A different active command returns structured
 `409 command_in_progress`; an unresolved identical intent returns `409 retry_existing_command`, which
-lets a reloaded client reattach without confusing one action's result with another. Command reads and
+lets a reloaded client reattach without confusing one action's result with another. An intent whose
+EFFECT is already gone never blocks either of those: it is reconciled first, and if it is still
+unresolved after that it is settled history and admits the new command. Command reads and
 writes are `no-store`, so an intermediary cannot pin an old `accepted` response.
+
+**No state of the control plane may leave the operator without a move.** Every refusal names a
+remedy, and the remedy has to lead somewhere — a pair of refusals naming each other is what made one
+run uncontrollable for 30 hours on 2026-08-11, and `tests/test_control_plane_liveness.py` now
+searches the reachable state space for another. Two rules follow from it. `pause`'s postcondition is
+`paused`, the fold of the operator's own intent, and NOT the engine process exiting: the engine
+finishes the node it is evaluating before it releases the run, which on a GPU stage takes hours, so
+gating on it made a pause unobservable on exactly the runs where pausing matters. Whether the driver
+has released `engine.lock` yet is reported as `engine_stopped` on the succeeded record. And
+`POST /commands/{id}/retry` mints a FRESH intent when the run has SUPERSEDED the old one (a pause a
+later resume consumed); where it may not — re-issuing an additive intent would apply it twice — it
+refuses with `409 command_intent_spent` and names submitting a new command instead of re-driving an
+event nothing can observe.
 
 If a server crash leaves a quarantined spawn claim without knowable ownership, an operator can call
 `POST /api/start/{run_id}/resolve-claim` after the recovery delay with the exact verification phrase
@@ -259,7 +274,11 @@ without optional `psutil`. For a pre-upgrade, malformed, inaccessible-owner, or 
 execution/activity claim, `POST /api/runs/{run_id}/resolve-activity-claims` is the explicit recovery
 seam after process inspection and a safety delay; it requires the exact phrase
 `I verified no LoopLab command or run activity is active` and cannot clear a claim whose exact owner
-process generation is provably alive.
+process generation is provably alive. The same route resolves an UNREADABLE `cmd_*.json` record,
+which is otherwise permanent: a record the server cannot parse counts as active (fail closed, so a
+delete cannot erase the evidence of a command whose state is unknown), which refuses every later
+command, refuses reset and delete, and answers 503 to the GET its own refusal names. Such a record is
+QUARANTINED rather than deleted — renamed out of the `cmd_*.json` glob, bytes intact on disk.
 
 Creation identities are source-tagged (`psutil`, Windows FILETIME, or `/proc` start time). Unequal
 tokens prove PID reuse only when both use the same source scheme; a cross-scheme or tagged/legacy

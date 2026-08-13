@@ -42,6 +42,7 @@ export const STORED_ERROR_CODES = new Set([
   'command_storage_unavailable', 'command_timeout', 'postcondition_timeout',
   'invalid_command', 'command_target_not_found', 'command_intent_missing',
   'command_not_retryable', 'command_in_progress', 'retry_existing_command',
+  'command_intent_spent',
   'finalize_payload_conflict', 'finalize_in_progress', 'engine_finishing',
   'engine_start_uncertain', 'spawn_claim_confirmation_required', 'engine_failed',
   'spawn_failed', 'command_worker_failed', 'approval_not_requested',

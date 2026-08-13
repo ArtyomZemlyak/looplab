@@ -24,7 +24,8 @@ pytest.importorskip("fastapi")
 from fastapi import HTTPException
 
 from looplab.events.eventstore import EventStore
-from looplab.events.types import EV_PAUSE, EV_RESUME, EV_RUN_FINISHED, EV_RUN_STARTED
+from looplab.events.types import (
+    EV_HINT, EV_PAUSE, EV_RESUME, EV_RUN_FINISHED, EV_RUN_STARTED)
 
 
 def _service(tmp_path: Path, *, alive: bool = False):
@@ -83,23 +84,33 @@ def test_a_resumed_pause_no_longer_blocks_every_later_control(tmp_path):
     assert unresolved is None, "a pause whose effect was lifted is settled history"
 
 
-def test_a_pause_still_in_force_is_still_an_unresolved_intent(tmp_path):
-    """The blocking rule is not being weakened: while the run IS paused, that timed-out pause may
-    still need driving and a legacy mutation must not overtake it."""
+def test_an_intent_still_awaiting_its_driver_is_still_an_unresolved_intent(tmp_path):
+    """The blocking rule is NOT being weakened: an intent whose effect has not landed still holds
+    the boundary, and a legacy mutation must not overtake it.
+
+    This used to be driven with a timed-out `pause` on a still-paused run. That is no longer an
+    unresolved intent at all — since 2026-08-13 the pause postcondition IS the fold, so such a record
+    reconciles to `succeeded` and correctly stops blocking, which is the whole point of the fix. The
+    property needs an intent whose effect genuinely has not arrived, so it moves to a `budget_extend`:
+    additive, `engine_ack`, and still waiting for a driver that will eventually acknowledge it.
+    """
+    from looplab.events.types import EV_BUDGET_EXTEND
+
     commands, rd = _service(tmp_path, alive=True)
     store = EventStore(rd / "events.jsonl")
     store.append(EV_RUN_STARTED, {"goal": "g", "direction": "min"})
-    pause = store.append(EV_PAUSE, {"_command_id": LIVE_ID})
+    extend = store.append(EV_BUDGET_EXTEND, {"_command_id": LIVE_ID, "add_nodes": 2})
     record = {
-        "id": LIVE_ID, "event_type": EV_PAUSE, "event_seq": pause.seq,
-        "baseline_seq": pause.seq - 1, "data": {},
-        "postcondition": "paused_and_stopped", "status": "timed_out",
-        "created_at": 1.0, "updated_at": 2.0, "engine_policy": "no_spawn",
+        "id": LIVE_ID, "event_type": EV_BUDGET_EXTEND, "event_seq": extend.seq,
+        "baseline_seq": extend.seq - 1, "data": {"add_nodes": 2},
+        "postcondition": "engine_ack", "status": "timed_out",
+        "created_at": 1.0, "updated_at": 2.0, "engine_policy": "ensure_running",
         "error": {"code": "postcondition_timeout", "retryable": True, "message": "…"},
     }
     (rd / ".commands").mkdir(parents=True, exist_ok=True)
     (rd / ".commands" / f"{LIVE_ID}.json").write_text(json.dumps(record))
 
+    assert commands._intent_spent(rd, record) is False
     with pytest.raises(HTTPException) as caught:
         commands.reject_if_active(rd, "pause the run")
     assert caught.value.detail["code"] == "command_retry_required"
@@ -165,70 +176,61 @@ def test_an_unreadable_log_does_not_silently_unblock_controls(tmp_path):
     assert commands._intent_spent(rd, record) is False
 
 
-def test_a_landed_pause_waiting_on_a_live_engine_does_not_time_out_as_a_failure(tmp_path):
-    """`paused_and_stopped` is two effects: the run pauses (immediate) and the engine process
+def test_a_landed_pause_is_the_whole_postcondition_including_on_a_legacy_record(tmp_path):
+    """`paused_and_stopped` was two effects: the run pauses (immediate) and the engine PROCESS
     releases its lock (only when the in-flight evaluation settles — a pause must not abandon a
-    running node). A GPU training stage runs for HOURS, so the absolute ~20-minute observation bound
-    expired while everything worked correctly and the operator was told the pause "was not observed
-    in time" about a pause that had landed one second after they pressed the button.
+    running node). A GPU training stage runs for HOURS, so on exactly the runs where pausing matters
+    the command could only ever time out, and the operator was told the pause "was not observed in
+    time" about one that had landed a second after they pressed the button.
 
-    The extension is gated on all three facts, so it bounds the WRONG ANSWER rather than the wait:
-    a dead or stalled driver still terminalizes on the very next liveness probe.
+    This used to be answered with a bounded number of deadline EXTENSIONS
+    (`PAUSE_OBSERVATION_MAX_EXTENSIONS`), which made the wrong answer arrive later rather than not at
+    all. Since 2026-08-13 the postcondition observes THE PAUSE — the effect the operator asked for —
+    and the process half is reported beside it instead of gating it.
+
+    Both spellings are read the same way, and that is the load-bearing half of this test: a durable
+    record is never rewritten, so every run wedged under the old build still carries
+    `paused_and_stopped` on disk. If only the new spelling were re-pointed, those runs would stay
+    exactly as stuck as they are today.
     """
-    commands, rd = _service(tmp_path, alive=True)
+    commands, rd = _service(tmp_path, alive=True)   # alive: the process half is NOT satisfied
     store = EventStore(rd / "events.jsonl")
     store.append(EV_RUN_STARTED, {"goal": "g", "direction": "min"})
-    store.append(EV_PAUSE, {"_command_id": PAUSE_ID})
+    intent = store.append(EV_PAUSE, {"_command_id": PAUSE_ID})
     observation = commands._observe(rd)
 
-    assert commands._pause_is_folded(rd, observation) is True
+    for postcondition in ("paused", "paused_and_stopped"):
+        record = {"id": PAUSE_ID, "event_type": EV_PAUSE, "event_seq": intent.seq, "data": {},
+                  "postcondition": postcondition, "status": "executing"}
+        assert commands._postcondition(rd, record, observation) is True, postcondition
 
-    # …and the two ways it must NOT extend: no pause folded, and an unreadable log.
+    # …and it is not vacuous: a run that is NOT paused does not satisfy either spelling.
     other = tmp_path / "runs" / "r2"
     other.mkdir(parents=True)
     other_store = EventStore(other / "events.jsonl")
     other_store.append(EV_RUN_STARTED, {"goal": "g", "direction": "min"})
-    assert commands._pause_is_folded(other) is False
+    other_intent = other_store.append(EV_HINT, {"_command_id": PAUSE_ID, "text": "x"})
+    for postcondition in ("paused", "paused_and_stopped"):
+        record = {"id": PAUSE_ID, "event_type": EV_HINT, "event_seq": other_intent.seq,
+                  "data": {"text": "x"}, "postcondition": postcondition, "status": "executing"}
+        assert commands._postcondition(rd, record) is False, postcondition
 
-    broken = tmp_path / "runs" / "r3"
-    broken.mkdir(parents=True)
-    (broken / "events.jsonl").write_bytes(b"\x00\xffnot json\n")
-    assert commands._pause_is_folded(broken) is False
 
+def test_the_pause_observation_extension_machinery_is_gone(tmp_path):
+    """NEGATIVE pin, deliberately over the TEXT (see CLAUDE.md's guard-test tiering).
 
-def test_a_landed_pause_extends_its_observation_a_bounded_number_of_times(tmp_path):
-    """The other half of the extension: it has to END.
-
-    The sibling above proves the ingredient — a folded pause on a live driver earns more time. It
-    does not prove the wait terminates, and the first version of that extension re-armed the absolute
-    deadline on EVERY pass, so the loop's own exit condition compared against a value it had just
-    pushed forward and the record stayed `executing` for the whole evaluation. `_active_record`
-    returns exactly that record and refuses `POST /commands`, `/control` and `/resume` with 409, and
-    there is no cancel endpoint — so an operator who paused a multi-hour eval lost resume, abort,
-    hint and inject until it finished.
-
-    Drive the grant itself past its budget rather than asserting the predicate: ask far more times
-    than the cap allows and require that the grants stop.
+    The extension existed only to stop a `paused_and_stopped` command timing out while the pause had
+    landed and the engine was still working. Its own history is why it must not come back rather than
+    quietly reappear: the first version re-armed the absolute deadline on every pass, the loop's only
+    exit compared against that same value, and the record therefore stayed `executing` for the whole
+    evaluation — which is what `_active_record` returns, and that refuses `POST /commands`,
+    `POST /control` and `POST /resume` with 409, with no cancel endpoint. The postcondition no longer
+    waits for the process at all, so a re-introduced extension would be a deadline slide with nothing
+    to observe, on the one command that must never be slow.
     """
-    from looplab.serve.run_commands import PAUSE_OBSERVATION_MAX_EXTENSIONS
+    from looplab.serve import run_commands
 
-    commands, rd = _service(tmp_path, alive=True)
-    store = EventStore(rd / "events.jsonl")
-    store.append(EV_RUN_STARTED, {"goal": "g", "direction": "min"})
-    store.append(EV_PAUSE, {"_command_id": PAUSE_ID})
-    observation = commands._observe(rd)
-
-    record = {"postcondition": "paused_and_stopped", "absolute_deadline_at": 0.0}
-    granted = sum(
-        bool(commands._extend_landed_pause_observation(record, rd, observation, True, float(turn)))
-        for turn in range(PAUSE_OBSERVATION_MAX_EXTENSIONS + 25))
-    assert granted == PAUSE_OBSERVATION_MAX_EXTENSIONS, (
-        "the observation window must be long but FINITE — an unbounded one freezes every other "
-        "control command behind 409 command_in_progress")
-    assert record["pause_observation_extensions"] == PAUSE_OBSERVATION_MAX_EXTENSIONS
-
-    # …and the gates that must refuse it outright, whatever the budget says.
-    assert commands._extend_landed_pause_observation(
-        {"postcondition": "paused_and_stopped"}, rd, observation, False, 0.0) is False, "dead driver"
-    assert commands._extend_landed_pause_observation(
-        {"postcondition": "stopped"}, rd, observation, True, 0.0) is False, "other postcondition"
+    source = Path(run_commands.__file__).read_text(encoding="utf-8")
+    assert "PAUSE_OBSERVATION_MAX_EXTENSIONS = " not in source
+    assert "def _extend_landed_pause_observation" not in source
+    assert not hasattr(run_commands, "PAUSE_OBSERVATION_MAX_EXTENSIONS")
