@@ -1,5 +1,10 @@
-"""The source-tree READ FENCE: make it impossible for a node's process to read the operator's
-editable SOURCE tree.
+"""The source-tree FENCE: make it impossible for a node's process to read — or CHANGE — the
+operator's editable SOURCE tree.
+
+It is still called the READ fence, because that is the defect it was built for and the name is in
+`Settings.read_fence`, in every snapshot and in the docs. The mutation half arrived on 2026-08-13
+(`docs/34-fence-coverage-audit-2026-08-13.md`) and is not an extension of the idea, it is the same
+idea applied to the same paths: `open` is not the only way to touch a file.
 
 WHY THIS EXISTS (the defect it closes, measured on `runs/rubertlite-dr-unified-v6`)
 -----------------------------------------------------------------------------------
@@ -32,9 +37,20 @@ A generated, self-contained `sitecustomize.py` written once per run into `<run_d
 whose directory is prepended to the eval process's `PYTHONPATH` (`runtime/sandbox.py::run_argv`,
 the universal launch choke point). CPython imports `sitecustomize` at interpreter startup, so the
 module installs a `sys.addaudithook` that inspects the `open` audit event — raised by `builtins.open`,
-`io.open` AND `os.open` — and refuses any path resolving under an editable source root. Because
-`PYTHONPATH` is inherited, every python the eval spawns (dataloader workers, a torchrun rank, a
-shell script's `python`) is fenced too, at no extra cost.
+`io.open`, `io.open_code` AND `os.open` — and refuses any path resolving under an editable source
+root. Because `PYTHONPATH` is inherited, every python the eval spawns (dataloader workers, a
+torchrun rank, a shell script's `python`) is fenced too, at no extra cost.
+
+It watches two more classes of event, and each is there because the `open` hook alone measurably
+did not hold:
+* `os.chdir` — so the relative-path fast bail below stays true;
+* the twelve MUTATION events in `MUTATION_EVENTS`. `os.remove`, `os.rename`, `os.truncate` and
+  `os.chmod` raise their own events and NONE of them raises `open`, so until 2026-08-13 a node's
+  eval code could delete or rename the operator's editable tree while every read of it was refused.
+  Measured, against a real fenced child over a fake source root: 14 of 14 mutation probes went
+  THROUGH, `shutil.rmtree(<the source root itself>)` included — the root's own name carries no
+  trailing separator, so opening it is not refused, and every file under it is then unlinked with
+  `os.remove(<bare name>, dir_fd=...)`, which CPython audits with the RELATIVE name.
 
 THE MESSAGE IS THE POINT. A refusal must be actionable by the repair loop, so it is a plain
 exception carrying `REFUSAL_MESSAGE` — which names the fix — and it surfaces in the node's own
@@ -64,11 +80,37 @@ WHAT IT DOES NOT FENCE (by construction, and each is deliberate)
 * a non-Python process (a C binary, a `curl`) — the fence is an interpreter-level hook. A shell
   script IS covered as soon as it invokes python, which is how every eval in practice reads a model.
 
-Residual, stated rather than papered over: the check is a PATH fence, not an inode fence. A symlink
-inside the workdir pointing into the source tree resolves past it, because closing that hole means
-`os.path.realpath` on every open — measured at +9,866 ns/open (+88 %) versus +311 ns/open (+2.8 %)
-for the prefix compare, i.e. unaffordable on a training process that reads thousands of shards. The
-only symlinks the engine itself creates into a source are the allow-listed mounts.
+Residual, stated rather than papered over: on the READ path the check is a PATH fence, not an inode
+fence. A symlink inside the workdir pointing into the source tree resolves past `open`, because
+closing that hole means `os.path.realpath` on every open — measured at +9,866 ns/open (+88 %; a
+2026-08-13 re-measurement makes it +254 % on a 9-component path and ~474 us per call on the geesefs
+mount run workdirs live on, so the original figure understates it) versus +311 ns/open (+2.8 %) for
+the prefix compare, i.e. unaffordable on a training process that reads thousands of shards. The only
+symlinks the engine itself creates into a source are the allow-listed mounts.
+
+The RARE events do resolve symlinks, and the asymmetry is the whole design: `os.chdir` and the
+mutation events happen a handful of times per process, so they can buy `realpath` (memoized per
+directory, `_real`) and a `/proc/self/fd` lookup (`_fd_path`, ~2 us and flat across filesystems)
+that the hot path cannot. Before that, `os.chdir(<a workdir symlink pointing at the source>)` was
+permitted and every bare relative name after it read the tree — which made the fast bail's stated
+justification false.
+
+What no CPython audit hook can reach, and what therefore stays open (all measured; the options and
+their prices are in `docs/34-fence-coverage-audit-2026-08-13.md`):
+* NATIVE readers. `safetensors.safe_open`, an HDF5 read through `h5py`, `pyarrow`, a `ctypes` call
+  into libc — none of them raises a CPython audit event, so they read straight through. This is not
+  a library list to be extended; it is every reader that does not go through CPython's `open`, and
+  the only fix that does not become one is a KERNEL boundary. Landlock (ABI 2, verified available on
+  this box) is the recommendation;
+* a non-Python child: `subprocess.run(["cat", ...])`, or a stage command that is not python at all;
+* `python -S` / `-E` / `-I`, or a child launched with `PYTHONPATH` stripped — the delivery mechanism
+  is an env var and an import, and all three of those disable it;
+* `os.open(name, dir_fd=...)`. CPython's `open` audit event carries `(path, mode, flags)` and NO
+  dir_fd, so the hook cannot resolve the relative name even in principle. The mutation events do
+  carry theirs, which is why the same shape IS closed there;
+* metadata: `os.stat`, `os.lstat`, `os.access`, `os.readlink` and `os.listdir`/`os.scandir` raise no
+  event this hook watches. Enumeration leaks NAMES, never bytes — and refusing it would be partial
+  by construction anyway, since `os.stat` raises no audit event at all.
 
 MEASURED COST (2026-08-13, this box, 5 reps, best-of)
 -----------------------------------------------------
@@ -87,6 +129,22 @@ So the roots are resolved ONCE at generation time into a tuple of `str`s each en
 the hot path is `event != "open"` (one interned-string compare) followed by `str.startswith(tuple)`.
 No syscall, no `realpath`, no `getcwd`: a RELATIVE path with no `..` cannot leave the workdir, so it
 bails before touching the filesystem, and `os.chdir` into a root is refused so that bail stays true.
+
+WHAT THE MUTATION HALF COSTS (2026-08-13, this box, N=20,000, best-of-5, one FRESH process per
+variant — an audit hook can never be removed, so measuring two variants in one process reports
+cumulative cost. `OLD` is this same fence one commit earlier, i.e. the marginal price of the branch):
+                                     no hook      OLD          NEW (+mutation)
+    open + read 4 KiB              11,865 ns   12,155 (+2.4 %)  12,189 (+2.7 %)   marginal +34 ns
+    bare os.open/close              4,633 ns    5,076 (+9.6 %)   5,162 (+11.4 %)  marginal +86 ns
+    create + close + remove        23,014 ns   23,820 (+3.5 %)  24,400 (+6.0 %)   marginal +580 ns
+    per-process startup              8.68 ms     9.73 ms          9.75 ms         marginal +0.02 ms
+The READ hot path pays 34 ns/open, which is inside the run-to-run noise of the fence that was
+already there: a training process raises essentially no audited event except `open`, so the mutation
+branch is one `dict.get` that is never reached. What DOES pay is a legal mutation of the node's own
+workspace — +580 ns per create/remove pair, for the memoized `realpath` of its directory. A node that
+deletes ten thousand checkpoint shards spends 6 ms on this.
+(An earlier design note priced a 9-event SET-MEMBERSHIP variant at +3.9 % on the read path. That is
+not what shipped and not what this costs: membership was tested before the `open` compare there.)
 """
 from __future__ import annotations
 

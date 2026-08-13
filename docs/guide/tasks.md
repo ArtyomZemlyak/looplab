@@ -272,11 +272,25 @@ node 4 trained a good model (its own `train.log` records `RECALL@100: 0.726`) an
 *human's* checkpoint that an absolute path in an editable config pointed at (`score.log:
 0.225` — the number the run recorded), with the artifact contract passed and no violation anywhere.
 
-What stays readable: the node workdir, the run directory, `/tmp`, site-packages, the model/HF cache,
-and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned read channel and
-is allow-listed even when it lives inside the editable tree. The fence is a no-op for a non-repo task
-and for the Docker tiers (the source is never bind-mounted into a container), and it is an
-interpreter-level hook, so a non-Python binary is not covered.
+**It also refuses to CHANGE the tree.** `open` is not the only way to touch a file: `os.remove`,
+`os.rename`, `os.truncate`, `os.chmod` and their family raise their own audit events and none of them
+raises `open`, so until 2026-08-13 a node's eval code could delete or rename your editable tree while
+every read of it was refused — `shutil.rmtree` of the source root included. The same twelve events are
+now refused, with a message that says so. `warn` still lets them through and logs them.
+
+What stays readable — and writable: the node workdir, the run directory, `/tmp`, site-packages, the
+model/HF cache, and every `dataset`/`data`/`references` mount **source** — a mount is the sanctioned
+read channel and is allow-listed even when it lives inside the editable tree. The fence is a no-op for
+a non-repo task and for the Docker tiers (the source is never bind-mounted into a container).
+
+**What it cannot see, and you should know before relying on it.** It is a CPython audit hook, so it
+covers what goes through CPython and nothing else. A native reader — `safetensors`, `h5py`, `pyarrow`,
+anything calling libc directly — reads straight through it, and `safetensors` is the loader for the
+exact file type the incident above was about. So does a non-Python child (`subprocess.run(["cat", …])`,
+or a stage command that is not python), a child started with `python -S`/`-E`/`-I`, and a read through
+a symlink or hardlink planted in the workdir. Closing those needs a kernel boundary rather than a
+Python hook; the options, and what each costs, are in
+[the coverage audit](../34-fence-coverage-audit-2026-08-13.md).
 
 The one legitimate refusal is a large **untracked** in-tree input that `seed_mode: auto` does not
 copy into the workdir. Fix it by declaring a `dataset`/`references` mount or setting
