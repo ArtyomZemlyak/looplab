@@ -277,19 +277,45 @@ larger cost sits beside it — 167.7 GPU-h with no eval running at all, same roo
 the producer off during a long eval because the board is only refilled by outer-loop cadences), and
 it deserves its own entry.
 
-**What it would take.** The full option table is `docs/33-cross-turn-dispatch-options-2026-08-13.md`.
-The recommended shape hoists the eval task group to run scope and needs NO new invariant-#1
-exception: eval children are already engine-loop tasks, all eight terminal appends in `evaluate.py`
-are lexically inside `async with self._write_lock`, `_record_eval_start_boundary` stays at the
-dispatch decision, and resume is already written — `EV_NODE_EVAL_STARTED` exists precisely to rebuild
-the inflight set. The real cost is honest and specific: `_proposal_authority_seq`'s quiet window is
-lost for the outer `creates` branch, and the recommended answer is to keep that branch gated on
-quiescence rather than widen the fence, because a node terminal genuinely does carry selection
-authority.
+**FIXED 2026-08-13 — Option 1 ("adopting sessions"), plus a correction to what it costs.** The full
+option table is `docs/33-cross-turn-dispatch-options-2026-08-13.md` §6; the shipped shape is its
+Option 1 with one deliberate departure, recorded in that doc's §9. What landed:
 
-**Do first regardless of the option chosen:** the regression the code's own TODO asks for — an
-unequal-duration refill test driving a real engine. Nothing in an 8,900-test suite currently fails
-when the second GPU goes dark for two hours.
+* the eval task group is owned by `Engine.run`, so a session RETURNS while its evaluations burn and
+  the next session ADOPTS them from the run-scoped `Engine._eval_inflight`;
+* `CardSession`'s one gate `open_for_new_work` became two — `open_for_admission` (the fold-derived
+  stop conditions only) and `open_for_production` (those plus the two live flags). The two flags
+  never said anything about the consumer: `consumer_completed` (now `boundary_owed`) and
+  `yield_outer` both mean *the outer boundary is owed a turn*, and the answer to that is to return,
+  not to go sterile. So a freed slot is refilled by the very turn that observes the terminal;
+* quiescence gained its missing half. `_refuse_finish_over_adopted_evals` makes every finish CAS
+  refuse over a running evaluation and ask the loop for a drain, `_drain_adopted_evals` pays it
+  where it is free (the run is stopping), and the outer loop's own `_drop_stale_speculation` and
+  the AUTO-depth ratchet now both see `_eval_inflight`;
+* NO new exception to engine invariant #1. This is a LIFETIME change, not a writer change:
+  `_record_eval_start_boundary` still runs on the main task at the dispatch decision, node creation
+  still commits from the main task in `_card_phase_serve_head`, and every node terminal is still
+  appended under `_write_lock`.
+
+**The residual price the option table predicted does NOT exist, and the recommended answer to it was
+wrong.** Doc 33 said `_proposal_authority_seq`'s quiet window is lost for the outer `creates` branch
+and recommended gating that branch on eval quiescence. Gating it would have been a much larger cost
+than the doc admits — `_stage_card_creates`, the ONLY writer of Card inventory, lives in that branch,
+so gating it re-creates F1g one lane over: no inventory can be minted while an evaluation runs, which
+is precisely the 167.7 GPU-h defect. It is also unnecessary. Every `_reserve_node_build` call site is
+reached from SYNCHRONOUS main-task code, and every eval terminal is appended from an anyio task on
+the same event loop, so a terminal cannot interleave with the fence's window at all. The window is
+quiet by construction rather than by waiting. The one writer that *can* interleave is an eval WORKER
+THREAD, and the only folded rows it writes are the `SETUP_THREAD_APPENDABLE` pair, which the fence
+now excludes — the exclusion the doc warns against is for `node_evaluated`, which genuinely carries
+selection authority; `run_setup_open`/`run_setup_done` are the one folded pair whose splice-position
+neutrality this repo has actually PROVEN (`tests/test_setup_thread_appendable.py`), and a fold that
+keys them purely by command cannot change which action the policy would choose.
+
+**The regression the code's own TODO asked for now exists:**
+`tests/test_card_refill_unequal_durations.py` — a real `Engine`, real Cards, real admission, two
+evaluations of unequal duration at width 2, and a minimal outer loop. All five tests fail on the
+pre-fix tree with the defect named in the assertion message, and pass after.
 
 **Cheap mitigation available today, no code:** an `eval_timeout` closer to the real training cost
 bounds the worst-case idle. `eval_parallel: 1` is the honest floor but costs the 1.55 h v6 did use
@@ -299,6 +325,58 @@ and forecloses the prefetch design's justification. Neither is a fix.
 proposed and is 256 as it runs — three repair rounds shrank it 32x chasing an OOM that never
 happened (the watchdog-vs-OOM misclassification fixed in `c862045c`). At 2.93 s/it that turned a
 ~1.5 h training into a ~6 h one, and it is the 6 h that the barrier then idles a GPU against.
+
+## F1g · `yield_outer` sterilizes the run mid-eval, so NO eval runs for 167.7 GPU-h
+
+**The larger half of [F1f](#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours),
+and a separate defect.** F1f measures a second slot idling while a first one works. This one measures
+the box idling *entirely*: **167.7 GPU-h of "serial gap" across the 52-run corpus — time with no
+evaluation running at all**, against 164.4 GPU-h of work actually done. It is the single largest
+number in this backlog and it is bigger than the barrier it sits next to. It was written up inside
+F1f's entry and inside `docs/33-cross-turn-dispatch-options-2026-08-13.md` §5; it deserved its own
+row and now has one.
+
+**Measured, `runs/rubertlite-dr-unified-v6`.** Nodes 0→4 are strictly serial, with a 15–37 minute
+hole between every consecutive pair (`docs/33` §2c has the occupancy table). During node 0's FOUR
+HOUR evaluation the session requested **no** build at all — not one `card_build_requested`, not one
+`node_building`. The Cards that would have been buildable arrive two minutes *after* node 0's
+terminal (`card_merged`/`card_enriched` at 20:09:30 against a terminal at 20:07:29), so the run pays
+the full ~28 minute build latency SERIALLY after each terminal instead of hiding it behind the
+evaluation that was already running. Median v6 build ~28 min against 1.4–4.6 h evals, so
+`_ADAPTIVE_DEPTH_MIN_EVAL_FRACTION` (0.1) is comfortably satisfied: the prefetch pays here. It just
+never fired.
+
+**Why — the same root as F1f, one lane over.** New Cards are produced by OUTER-LOOP work
+(`_run_cadences`' hypothesis-board consolidation and Card merges; `_stage_card_creates`, the only
+writer of Card INVENTORY, which lives in `_handle_create_actions`). None of it can run while a
+session is open. So mid-evaluation the board frequently has nothing selectable,
+`_request_card_build` declines, `speculative_raw_actions` returns `[]`
+(`card_selection.py` — nothing when `selected` is non-empty *or* `fallback` is empty), and
+`_card_phase_request_build` sets `yield_outer = True`. From that instant the session is sterile for
+the rest of the evaluation — and, before the fix, still could not RETURN, because
+`_card_phase_decide_exit` held it open on `eval_inflight`. `yield_outer` means *the producer needs a
+fresh outer authority snapshot*; the session's answer to that was to stop asking for one and wait.
+
+**FIXED 2026-08-13, in the same change as F1f.** `yield_outer` now closes the PRODUCER lane only, and
+`_card_phase_decide_exit` returns instead of waiting for the evaluations — so a producer yield during
+a long evaluation reaches the outer loop *while the GPU is still busy*, the cadences and the creates
+branch refill the board, and the next session elects and prefetches behind the running eval.
+Deliberately NOT fixed by giving the outer `creates` branch a quiescence gate, which
+`docs/33` §6 recommends for a different reason: that gate would make Card inventory unmintable
+whenever an evaluation is running, which is this defect restated.
+
+Driven by `tests/test_card_refill_unequal_durations.py::test_a_producer_yield_reaches_the_outer_boundary_during_a_long_eval`
+— one long evaluation, an empty board, and the session must hand back while the GPU is busy. It fails
+on the pre-fix tree.
+
+**What is NOT fixed, and is the honest remainder.** Making the boundary reachable is necessary, not
+sufficient: nothing yet makes the card-producing cadences fire *because* a long evaluation is running.
+They remain node-count-paced (`engine/cadence.py::cadence_due` is a since-last-node-count gate), so a
+run whose board empties mid-eval will now reach the outer loop, run whatever is due, and possibly
+still find nothing to build. Closing the rest of the 167.7 GPU-h means pacing at least the
+Card-producing cadences on OCCUPANCY as well as on node count — "an evaluation is running and the
+board has nothing selectable" is a genuine trigger and there is no event for it today. That is a
+separate change and it is not in this one.
 
 ## F2 · Give the Developer simple shell commands
 

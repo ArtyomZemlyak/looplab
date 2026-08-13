@@ -70,6 +70,17 @@ other work items that test the same hypothesis), **cross-run memory**
     not a build (the per-eval repair loop, the per-eval inter-stage check) belongs in the uncapped
     `engine` lane, and `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS` enforces the split.
 
+    An evaluation outlives the turn that admitted it. The eval task group belongs to the Run, not to
+    the Card session, so a session hands back to the outer loop as soon as a decision is owed — an
+    eval terminal, or a producer that needs a fresh authority snapshot — and the next session adopts
+    whatever is still training. A freed slot is therefore refilled by the same turn that observed the
+    terminal, instead of waiting for the slowest sibling. What that widens is a LIFETIME, not a
+    writer: node terminals are still appended under the engine's write lock, node creation still
+    commits from the main task, and the durable eval-start boundary is still written at the dispatch
+    decision. The cost is paid on the way out — finishing the run is refused while an evaluation is
+    still running, and the loop drains before it finalizes, so a champion, a budget summary and a
+    paid report are never computed over a metric that does not exist yet.
+
     GPU packing is concurrent inside one Run. Separate local Engine processes that share an OS-user
     filesystem namespace conservatively serialize GPU ownership through one crash-released pool lease;
     this avoids treating ordinal, GPU-UUID, and MIG aliases as different hardware. Different OS users,

@@ -192,6 +192,22 @@ class _InjectedNodePlan(NamedTuple):
     implementation_ref: Optional[str]
 
 
+def _sole_task_group_error(group: BaseException) -> BaseException:
+    """Unwrap a task group's LONE exception, so a failure's TYPE survives the group boundary.
+
+    Backlog F1f put an `anyio` task group around the whole run so evaluations can outlive the Card
+    session that admitted them.  anyio collapses even a single exception into a `BaseExceptionGroup`,
+    and `Engine.run`'s failure type is a contract in two places: `_RefusalBoundaryGroup` in the CLI
+    prints an `OperatorRefusal` as one line at `REFUSAL_EXIT_CODE` and everything else with a full
+    traceback, and the suite asserts real types through `pytest.raises`.  A group of MORE than one is
+    a genuine multi-failure and is re-raised unchanged — flattening that would drop failures.
+    """
+
+    while isinstance(group, BaseExceptionGroup) and len(group.exceptions) == 1:
+        group = group.exceptions[0]
+    return group
+
+
 def _run_terminal_gate(state) -> bool:
     """Whether the RUN has stopped accepting new eval work (doc 25 ES-06).
 
@@ -1266,12 +1282,35 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         scope = self._begin_finalize(data, scope=scope)
         self.store.append(EV_RUN_FINISHED, {**data, "finalize_scope": scope})
 
+    def _refuse_finish_over_adopted_evals(self) -> bool:
+        """QUIESCENCE now includes running evaluations, not just a still log (backlog F1f).
+
+        Before the eval task group was hoisted to run scope, every finish decision was structurally
+        preceded by a session join, so "the log has not moved since `after_seq`" was the whole of
+        quiescence.  A session may now return with GPUs still burning, so the same `after_seq` CAS
+        can succeed while a node is mid-training — and `_finish_with_report_if_quiescent` would then
+        buy a paid report, name a champion and publish a budget summary over a metric that does not
+        exist yet.  Doc 33 calls this out as the dangerous failure of option 1 ("finalization races a
+        running eval and finishes the run over live work"), which is why it lands in the SAME change.
+
+        A REFUSAL plus a drain request, not an inline wait: the two finish helpers are sync and are
+        reached from five gates, so the loop drains on its next turn and the gate then succeeds —
+        one extra turn, no busy spin, and the finish contract itself is untouched.
+        """
+
+        if not self._evals_inflight():
+            return False
+        self._eval_drain_requested = True
+        return True
+
     def _finish_if_quiescent(self, data: dict, *, after_seq: int) -> bool:
         """CAS-claim a scoped terminal intent and publish it only while the log stays quiescent.
 
         The begin marker is the first adjacency claim. ``run_finished`` then names that marker as its
         immediate predecessor and opts into the exact-finish crash handshake.
         """
+        if self._refuse_finish_over_adopted_evals():
+            return False
         scope = f"finalize:{secrets.token_hex(16)}"
         try:
             self._begin_finalize(data, scope=scope, after_seq=after_seq)
@@ -1311,6 +1350,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if not report_planned:
             return self._finish_if_quiescent(data, after_seq=after_seq)
 
+        if self._refuse_finish_over_adopted_evals():
+            return False
         scope = f"finalize:{secrets.token_hex(16)}"
         try:
             self._begin_finalize(
@@ -1388,7 +1429,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             broker = self._llm_broker = LLMConcurrencyBroker()
         try:
             with llm_broker_scope(broker), llm_lane_scope("engine"):
-                return await self._run_with_llm_broker()
+                # THE RUN-SCOPED EVAL TASK GROUP (backlog F1f, doc 33 option 1 — "adopting
+                # sessions").  Evaluation children used to belong to whichever `_run_card_session`
+                # admitted them, and that session could not return until the LAST of them drained.
+                # So the run stopped STARTING work at the FIRST terminal and still reached the outer
+                # loop no sooner: 115.6 GPU-h of idle second slot across the six width-2 runs on this
+                # box, against 164.4 GPU-h of work actually done.  Owning the group HERE makes a
+                # session turn a DECISION boundary instead of a QUIESCENCE one — it returns, the
+                # outer loop takes its turn (cadences, acks, control overrides, forced requests,
+                # budget refresh, runaway charge, Card inventory), and the next session ADOPTS
+                # whatever is still burning.
+                #
+                # Two things make this a LIFETIME change and not a WRITER change, which is why it
+                # needs no new exception to engine invariant #1: the children are anyio tasks on
+                # this same event loop (never threads), and every one of the eight node-terminal
+                # appends in `engine/evaluate.py` is lexically inside `async with self._write_lock`.
+                # `_record_eval_start_boundary` stays on the main task at the dispatch decision,
+                # exactly where the invariant says to keep it.
+                #
+                # It is opened HERE rather than around `_run_with_llm_broker`'s turn loop only to
+                # avoid re-indenting ~300 lines of that loop for a structural change; the lifetime
+                # is the same either way.  `_run_with_llm_broker` drains adopted evals itself before
+                # `finalize_run`, so this group's join is a backstop, not the quiescence rule.
+                # `_eval_inflight` must exist before the first turn: the loop's own freshness drain
+                # and its terminal gates read it whether or not a session has been entered yet.
+                self._ensure_speculation_state()
+                try:
+                    async with anyio.create_task_group() as eval_tg:
+                        self._eval_task_group = eval_tg
+                        try:
+                            return await self._run_with_llm_broker()
+                        finally:
+                            self._eval_task_group = None
+                except BaseExceptionGroup as group:
+                    # A task group collapses even a LONE exception into a group, and `Engine.run`'s
+                    # failure TYPE is a contract: `cli/__init__.py::_RefusalBoundaryGroup` prints an
+                    # `OperatorRefusal` as one line at exit code 2 and gives everything else a
+                    # traceback at exit 1 (CLAUDE.md — "a deliberate refusal is a TYPE, not a
+                    # message"), and ~40 tests assert the type through `pytest.raises`. Wrapping a
+                    # `ConfigRefusal` in an ExceptionGroup would put every operator refusal back in
+                    # the 42-lines-of-frames presentation that split removed. Unwrap the single-
+                    # exception case and let a genuine multi-failure group through as itself.
+                    raise _sole_task_group_error(group) from None
         finally:
             # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
             # a background span that closes after return must be rejected rather than append behind
@@ -1456,6 +1538,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # `CreationRunawayCounters`, which carries the whole argument for why they read the LOG.
         runaway = CreationRunawayCounters()
         while True:
+            # A terminal gate on the previous turn refused to finish over adopted evaluations
+            # (`_refuse_finish_over_adopted_evals`). Pay the drain here, once, before re-deriving the
+            # decision prefix — the run is stopping, so there is no GPU left to idle, and the gate
+            # below then reaches its CAS over a log with no evaluation in flight.
+            if self._eval_drain_requested:
+                await self._drain_adopted_evals()
             decision_events = self.store.read_all()
             state = fold(decision_events)
             decision_seq = decision_events[-1].seq if decision_events else -1
@@ -1509,6 +1597,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     None,
                 )
                 abort_scope = f"abort:{abort.seq}" if abort is not None else None
+                # The one finisher that does NOT go through a quiescence CAS — it republishes a
+                # stable abort scope unconditionally — so its drain is spelled out here rather than
+                # delegated to `_refuse_finish_over_adopted_evals`.
+                await self._drain_adopted_evals()
                 self._finish_run({"reason": "aborted"}, scope=abort_scope)
                 break
             if state.finished:
@@ -1628,12 +1720,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if self._speculation_enabled():
                 # Layer 5 freshness is live engine policy, never fold semantics. Drain one stale Node
                 # and restart the turn; only a fully-clean fresh prefix may reach Card scoring.
-                # No `eval_inflight` to pass: this site runs between batches, with every eval task
-                # already joined. That used to be the whole argument, and it was wrong across a
-                # CRASH — a node this process never dispatched may have been mid-training when the
-                # PREVIOUS process died. `_drop_stale_speculation` now reads the durable eval-start
-                # boundary as well, so the empty default is safe by evidence rather than by timing.
-                if await self._drop_stale_speculation():
+                # This site used to pass no `eval_inflight` because it "runs between batches, with
+                # every eval task already joined". That argument was already wrong across a CRASH —
+                # a node this process never dispatched may have been mid-training when the PREVIOUS
+                # process died, which is why `_drop_stale_speculation` also reads the durable
+                # eval-start boundary — and since F1f it is wrong IN-PROCESS too: the outer loop now
+                # turns while adopted evaluations run. Passing the live set is the in-memory half;
+                # without it this call would terminalize a node whose sandbox is burning GPU minutes
+                # right now, and `_evaluate` would then write a SECOND terminal for it.
+                if await self._drop_stale_speculation(eval_inflight=self._eval_inflight):
                     continue
                 fresh_events = self.store.read_all()
                 fresh_seq = fresh_events[-1].seq if fresh_events else -1
@@ -1694,6 +1789,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             else:
                 await self._dispatch_evals(evals, state, max_es)
 
+        # Every `break` above can leave adopted evaluations running (the eval task group is owned by
+        # `Engine.run`, not by this loop), and finalization reads the FOLD: champion, budget summary,
+        # diversity archive, case store. Draining here — not at the task group's join, which happens
+        # after `finalize_run` has already returned — is what keeps that read complete.
+        await self._drain_adopted_evals()
         # Finalize (extracted to looplab/engine/finalize.py, a pure move): budget summary,
         # diversity archive, LLM cost roll-up, case store + reflection note, read-model,
         # trace.json + tree.html. Event emission order is preserved exactly.

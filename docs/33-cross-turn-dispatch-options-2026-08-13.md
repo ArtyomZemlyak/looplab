@@ -1,6 +1,7 @@
 # 33 · Cross-turn eval dispatch — analysis and options (F1f)
 
-**Status:** analysis only. Nothing here is implemented. Written 2026-08-13 against
+**Status:** IMPLEMENTED 2026-08-13 — see §9 for what shipped, where it departed from §6, and what is
+still open. §§0–8 are the original analysis, written 2026-08-13 against
 `5b7010c7`, with `runs/rubertlite-dr-unified-v6` live on the box.
 
 This is the deep read of backlog item
@@ -660,3 +661,88 @@ that is the reason this survived to be found by an operator watching `nvidia-smi
   eleven of them individually. Options 1 and 2 both require that audit as part of the work.
 * Nothing here was run inside the repo or inside `runs/`. All experiments are in the scratchpad
   against a toy task; all run-corpus reads were read-only.
+
+---
+
+## 9 · What shipped (2026-08-13)
+
+**Option 1, with one departure from §6's recommendation and one correction to its cost table.**
+Status of this document is no longer "analysis only": §§0–8 stand as written except where this
+section says otherwise. The backlog rows are
+[F1f](29-operator-backlog-2026-08-11.md#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours)
+and its new sibling
+[F1g](29-operator-backlog-2026-08-11.md#f1g-yield_outer-sterilizes-the-run-mid-eval-so-no-eval-runs-for-1677-gpu-h).
+
+**What landed.**
+
+* The eval task group is owned by `Engine.run` (§6 Option 1's "hoist to run scope"). It is opened
+  around `_run_with_llm_broker` rather than around its turn loop — the same lifetime, without
+  re-indenting ~300 lines — and `_run_with_llm_broker` drains adopted evals itself immediately before
+  `finalize_run`, so the group's join is a backstop rather than the quiescence rule.
+* `CardSession.open_for_new_work` split into `open_for_admission` (the fold-derived stop conditions
+  only) and `open_for_production` (those plus the two live flags). `consumer_completed` was renamed
+  `boundary_owed`, which is what it always meant.
+* `eval_inflight` is engine-level (`Engine._eval_inflight`) and is the object every `CardSession` is
+  handed, so adoption needs no handover step. The eval child no longer holds a session reference at
+  all: it publishes its terminal debt (`_eval_boundary_owed`) and its wake-up (`_eval_notify`)
+  engine-level, because it can outlive the session that admitted it.
+* `_refuse_finish_over_adopted_evals` + `_drain_adopted_evals` are the extended quiescence ladder
+  §6 said had to land in the same change. `_settle_speculation_depth`'s quiescence check and the
+  outer loop's `_drop_stale_speculation` both learned about `_eval_inflight` too — the latter would
+  otherwise terminalize a node whose sandbox is burning GPU minutes right now.
+* `Engine.run` unwraps the task group's lone exception. anyio collapses even a single exception into
+  a `BaseExceptionGroup`, and `Engine.run`'s failure TYPE is a contract (`_RefusalBoundaryGroup`
+  prints an `OperatorRefusal` as one line at exit 2). This was not anticipated anywhere in §6 and it
+  broke ~90 tests before it was fixed; note it as a real cost of the option.
+
+**The departure: §6's answer (b) to the `_proposal_authority_seq` exposure is wrong, and no gate was
+added.** §6 recommended keeping the outer `creates` branch gated on eval quiescence, "which costs
+nothing here because in Card mode the `creates` branch is a fallback the Card selector rarely
+reaches". That is not what the branch contains. `_stage_card_creates` — the ONLY writer of Card
+INVENTORY — lives in it. Gating it on quiescence would make inventory unmintable for the whole
+duration of every evaluation, which is §5's 167.7 GPU-h serial gap restated one lane over, i.e. the
+larger of the two numbers this document measures. §6's own §5 says Option 1's payoff is that
+card-producing work becomes reachable mid-eval; answer (b) would have foreclosed exactly that.
+
+**The correction: the exposure §6 priced is not there.** Every `_reserve_node_build` call site — the
+parallel-build reservation comprehension, `_prepare_node_idea`, `_create_node_scoped`,
+`_build_refine_block_child` — is reached from SYNCHRONOUS main-task code, and every node terminal is
+appended from an anyio task on the same event loop. A terminal cannot interleave with the fence's
+window, so the window is quiet BY CONSTRUCTION rather than by waiting. (The fence is also narrower
+than §6 implies: it is captured inside `_reserve_node_build`, *after* the paid Developer call, and it
+only compares across CAS retries.)
+
+The one writer that can interleave is an eval WORKER THREAD, and the only folded rows it writes are
+`SETUP_THREAD_APPENDABLE` (`run_setup_open`/`run_setup_done`, once per run). Those are now excluded
+from `_proposal_authority_seq`. That is admissible on evidence and is **not** a precedent for
+`node_evaluated`: they are the only folded pair in the repo whose splice-position neutrality has
+actually been proven (`tests/test_setup_thread_appendable.py`), and the fold keys them purely by
+command. A node terminal moves `best`, the parent snapshot and every Card score — §6 is right that it
+carries selection authority, and it stays in the fence.
+
+**Prefetch economics, measured rather than argued.** The one thing a change to this gate could
+silently cost is the prefetch's own yield — invariant #1 records what that looks like (depth-1
+speculation going serial, 17 builds / 5 discards becoming 12 / 0). Ten real `Engine.run`s per tree on
+the toy quadratic, `max_nodes=12`, `speculation_depth=1`, `role_factory=task.build_roles` (the
+harness `test_card_budget_refund.py`'s end-to-end test uses), reading
+`speculation_quality.speculation_budget_observation`:
+
+| | requested | committed | stale | discarded | refunded | charged_discards | evaluated |
+|---|---|---|---|---|---|---|---|
+| master (`4ddd0a0b`) | 142 | 139 | 3 | 19 | 19 | 0 | 120 |
+| this change | 141 | **140** | **1** | 20 | 20 | 0 | 120 |
+
+Equal experiments, one more commit, and two fewer `stale` closes — a `stale` close is a prefetch
+abandoned before it was ever committed, i.e. a Developer call bought and thrown away, and it is the
+disposition this document's §2a latch produced ("8 of 8 `stale` closes were `allow_commit=False`").
+Every discard is still refunded and `charged_discards` is still 0 on both. The offline smoke
+(`looplab run --backend toy`) produces an identical event-type inventory and the identical champion on
+both trees.
+
+**Left undone.** §5's serial gap is only made *addressable*, exactly as §7's table promised — the
+board can now be refilled mid-eval, but nothing yet makes the card-producing cadences fire *because*
+an evaluation is running. They stay node-count-paced. F1g's last paragraph states what closing the
+rest of that 167.7 GPU-h would take. §8's open items are unchanged: the both-latches-off control
+still has no live-proposal-lane demonstration in the scratchpad, and the eleven outer-loop cadences
+were not individually audited for safety against a moving log — the structural argument
+(at_node-idempotent and event-gated) is what this change rests on.
