@@ -1470,9 +1470,12 @@ class RunCommandService:
         force, and the gap is what made a run permanently uncontrollable on 2026-08-11:
 
           * an operator pauses; the `pause` lands within a second;
-          * the command's postcondition is `paused_and_stopped`, which also requires the engine
+          * the command's postcondition WAS `paused_and_stopped`, which also required the engine
             PROCESS to exit — impossible while a multi-hour evaluation is in flight — so ~20 minutes
-            later the record goes `timed_out`, retryable;
+            later the record went `timed_out`, retryable. (That half is fixed: since 2026-08-13 a
+            pause is satisfied by the fold, and both spellings are read that way. This predicate is
+            still needed — a record can reach a spent state by other routes, and every run wedged
+            before that date still has one on disk.);
           * the operator resumes; the run keeps going for another day;
           * from then on `reject_if_active` refuses EVERY later control with `command_retry_required`,
             because that spent pause is still "an unresolved intent with an intact durable event";
