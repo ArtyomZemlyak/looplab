@@ -1960,6 +1960,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # is the 76-minute training this range's own comments cite, that is hours nobody chose.
     # (c) is `("crash", "timeout", "oom")`, pointable at every commit before that date.
     "inline_repair_reasons": ("crash", "timeout", "oom"),
+    # THE SOURCE-TREE READ FENCE, added 2026-08-13 defaulting to `deny`. (a) holds. (b) is the
+    # strongest kind on this table after `systemic_failure_stop`: it is not extra work, it is an
+    # INTERVENTION that can fail a node outright — a repo run whose training script legitimately
+    # reads a large untracked in-tree input (the false positive `read_fence`'s own comment
+    # documents) ran fine for nodes 0..N and would hard-fail in the child for every node after the
+    # resume, with the operator having changed nothing, and each such failure then buys inline
+    # Developer repairs the first half of the run never bought. (c) is `off`, pointable at every
+    # commit before that date. Note the fence's `warn` rung is NOT the historical value: it writes
+    # to stderr, which is the captured `RunResult.stderr` the repair loop reads.
+    "read_fence": "off",
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

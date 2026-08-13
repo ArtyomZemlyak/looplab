@@ -1011,6 +1011,13 @@ class EvaluateMixin:
         produces a salvageable failure skips — so before this a salvaged node reached its terminal
         with an EMPTY `violations` list and, under `metric_salvage="select"`, could become champion
         with the operator's hard constraints never applied and the drift cross-check never run.
+        The containment below fails CLOSED, and that asymmetry is the point: "the rule said no" and
+        "the rule could not run" must not produce the same clean empty result. An empty
+        `violations` list here IS a pass — it admits the node to `feasible_nodes()` — so a raise
+        anywhere in the binding (a malformed `constraints` entry, a `_salvage_reader_root` surprise
+        on a workdir a concurrent reset reaped) would re-create the exact defect the paragraph above
+        records, one layer out. `salvage_gates` already fails a raising READER closed with an
+        unverifiable-constraint row; this contributes the same row for the whole spec.
         """
         spec = self._eval_spec if isinstance(getattr(self, "_eval_spec", None), dict) else None
         if not spec:
@@ -1020,15 +1027,11 @@ class EvaluateMixin:
                 spec, salvaged.metric, getattr(res, "stdout", "") or "",
                 self._salvage_reader_root(workdir), since,
                 enforce_drift=(getattr(self, "eval_trust_mode", "") == "ratify_freeze_drift"))
-        except Exception:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
-            # REVIEW (mega-review 2026-08-13): this containment fails OPEN — an exception in the
-            # wrapper itself yields an EMPTY violations list, so under `metric_salvage="select"`
-            # with operator-produced output the node terminalizes feasible with the operator's
-            # hard constraints never evaluated and can become champion: the exact pre-fix defect
-            # the docstring above records. `salvage_gates` itself fails a raising READER closed
-            # (an unverifiable-constraint row); this outer except should contribute the same
-            # fail-closed row instead of a clean empty result.
-            return {"violations": [], "extra_metrics": {}, "drift": None}
+        except Exception as exc:  # noqa: BLE001 — see `_salvage_eval_metric`: never the thing that fails
+            return {"violations": [{"name": "salvage_gates", "value": None, "max": None,
+                                    "min": None,
+                                    "unverifiable": f"salvage gate binding raised: {exc}"}],
+                    "extra_metrics": {}, "drift": None}
 
     def _recheck_repaired_contract(self, res, node, workdir, salvaged, fix, err: str):
         """The artifact CHECK, re-asked against the CORRECTED declaration — the `metric_provenance`
@@ -1155,14 +1158,9 @@ class EvaluateMixin:
         "stop spending", and returning here spends nothing; the loop's own budget checks stop the
         run at the next decision point, one that owns no half-written node.
         It never appends a terminal either — the caller owns the node's single terminal event
-        (invariant #2).
-
-        REVIEW (mega-review 2026-08-13): the contract above is only ENFORCED around the paid
-        `self._repair` call — the tail (two receipt appends, two folds, `_write_node_files`) runs
-        outside any try/except, so an ENOSPC/EACCES there escapes this method and produces exactly
-        the no-terminal outcome the paragraph above exists to forbid, through the same
-        try/FINALLY callers it names. The tail needs the same containment (swallow, keep the
-        salvaged metric, let the terminal be written).
+        (invariant #2). The contract is enforced around BOTH halves: the paid `self._repair` call
+        AND the durable tail (`_commit_salvaged_cause_fix`), because the tail is I/O and the callers
+        this paragraph names use `try/FINALLY` rather than `try/except`.
         """
         if not (getattr(self, "metric_salvage_repair", True) and self._inline_repair
                 and reason in self._inline_repair_reasons
@@ -1224,17 +1222,41 @@ class EvaluateMixin:
             # no attempt either, because `_durable_repair_ledger` excludes `salvage_cause_fix` rows
             # from the attempt count while still passing them to the judge history — where
             # `changed: []` is already the spelling that reads as "proposed nothing".
-            async with self._write_lock:
-                if fold(self.store.read_all()).nodes[node.id].attempt == generation:
-                    self.store.append(EV_NODE_REPAIRED, {
-                        "node_id": node.id, "generation": generation, "attempt": attempt,
-                        "files": {}, "deleted": [], "error_in": err,
-                        "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
-                        "rationale": (f"metric salvaged ({salvaged.source}); the Developer proposed "
-                                      f"no change to the failing declaration"),
-                        "changed": [], "stages_passed": None,
-                        "salvaged_metric": salvaged.metric})
+            try:
+                async with self._write_lock:
+                    if fold(self.store.read_all()).nodes[node.id].attempt == generation:
+                        self.store.append(EV_NODE_REPAIRED, {
+                            "node_id": node.id, "generation": generation, "attempt": attempt,
+                            "files": {}, "deleted": [], "error_in": err,
+                            "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
+                            "rationale": (f"metric salvaged ({salvaged.source}); the Developer "
+                                          f"proposed no change to the failing declaration"),
+                            "changed": [], "stages_passed": None,
+                            "salvaged_metric": salvaged.metric})
+            except Exception:  # noqa: BLE001 — see the tail's containment below; same contract
+                pass
             return node, attempt, False, {}   # billed, receipted, nothing to commit
+        # THE TAIL IS CONTAINED FOR THE SAME REASON THE PAID CALL IS. Everything from here down —
+        # the receipt append, the fold, `_write_node_files` — is I/O, and this method's callers
+        # handle it with `try/FINALLY`, not `try/except`. So an ENOSPC or EACCES escaping here does
+        # not fail the node, it leaves the node with NO terminal event at all: engine invariant #2
+        # broken, and a resume that re-enters and re-dies on every pass. Losing the cause fix is a
+        # best-effort improvement not applied; losing the terminal is the run. Swallow, keep the
+        # salvaged metric, and let the caller write the terminal.
+        try:
+            return await self._commit_salvaged_cause_fix(
+                node, workdir, attempt, generation, err, salvaged, new_code,
+                repaired_files, repaired_deleted, changed, stamp)
+        except Exception:  # noqa: BLE001
+            return node, attempt, False, {}
+
+    async def _commit_salvaged_cause_fix(self, node, workdir, attempt, generation, err, salvaged,
+                                         new_code, repaired_files, repaired_deleted, changed,
+                                         stamp):
+        """The durable half of `_repair_salvaged_cause`: receipt the edits, refold, restage.
+
+        Split out only so its caller can contain it as ONE unit — see the paragraph at the call
+        site. It appends `node_repaired`, never a terminal (invariant #2)."""
         async with self._write_lock:
             # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
             # the commit rather than adopting it — the caller's terminal is already stale-generation

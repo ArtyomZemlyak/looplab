@@ -104,7 +104,34 @@ MAX_STAGE_ASSERT_CHARS = 300
 STAGE_EXPECT_KEYS = ("files", "assert")
 
 
-def _validate_rel_paths(nm: str, field: str, values) -> tuple[Optional[list], Optional[str]]:
+def normalize_declared_path(path) -> str:
+    """The ONE canonical spelling of a workdir-relative declared path.
+
+    Every site that keys one declaration against another has to agree on this, byte for byte: the
+    manifest validator, `stage_output_producers`' map, `verify_stage_inputs`' lookup into it, and
+    `metric_salvage._decl_key`. They did not — the validator stripped `./` REPEATEDLY while
+    `_decl_key` stripped it once — so `././ckpt/model.pt` canonicalized to `ckpt/model.pt` on the
+    validated side and stayed `./ckpt/model.pt` on the salvage side, and the F1e re-check compared
+    mismatched spellings forever. Interior `.` segments and duplicate separators are collapsed for
+    the same reason: `train` declaring `ckpt/model.pt` and `score` needing `ckpt/./model.pt` both
+    validate, so an exact string compare would silently lose the producer link and hand the repair
+    loop a generic message instead of the one sentence that names the disagreeing stage."""
+    rel = str(path or "").strip().replace("\\", "/")
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if not rel or "\x00" in rel:
+        return rel
+    # ESCAPING SHAPES ARE RETURNED UNCHANGED, never canonicalized. Collapsing segments in an
+    # absolute, drive-lettered or `..`-bearing path would rewrite a declaration the validator must
+    # REFUSE into one it accepts — `/etc/passwd` losing its leading separator is a refusal turning
+    # into a workdir-relative read. Canonicalization is for comparing two legal spellings of the
+    # same path; it is not a sanitizer, and it must never be the thing that makes a path legal.
+    if rel.startswith("/") or (len(rel) > 1 and rel[1] == ":") or ".." in rel.split("/"):
+        return rel
+    return "/".join(p for p in rel.split("/") if p and p != ".")
+
+
+def _validate_rel_paths(nm: str, field: str, values, cap: int) -> tuple[Optional[list], Optional[str]]:
     """The path-SHAPE rule both declaration lists go through: workdir-relative, no traversal, no NUL,
     de-duplicated, order preserved, bounded.
 
@@ -112,22 +139,27 @@ def _validate_rel_paths(nm: str, field: str, values) -> tuple[Optional[list], Op
     contract (`expect.files` after the stage, `needs` before it) and a shape one side accepts and the
     other refuses would be a manifest that validates and then behaves differently depending on which
     check reaches it first. Containment is re-decided at check time against the REAL workdir by
-    `_confined` — a symlink the candidate plants at eval time is invisible from a manifest."""
-    cap = MAX_STAGE_NEEDS_FILES if field == "needs" else MAX_STAGE_EXPECT_FILES
+    `_confined` — a symlink the candidate plants at eval time is invisible from a manifest.
+
+    `cap` is a PARAMETER rather than a dispatch on `field`, because `field` is the human-readable
+    name spliced into every refusal below. Selecting the bound by string-matching that name meant a
+    third declaration list would silently inherit the `expect` cap simply by not being spelled
+    `"needs"` — no error, just a wrong bound."""
     if not isinstance(values, list) or not all(isinstance(f, str) for f in values):
         return None, f"stage {nm!r} `{field}` must be a list of workdir-relative path strings."
     if len(values) > cap:
         return None, f"stage {nm!r} `{field}` may name at most {cap} paths."
     out: list = []
     for f in values:
-        rel = f.strip()
-        while rel.startswith("./"):
-            rel = rel[2:]
-        if not rel or "\x00" in rel:
-            # REVIEW (mega-review 2026-08-13): the NUL case shares the empty-string message, so a
-            # Developer whose manifest carries an embedded NUL is told the path is EMPTY and hunts
-            # for a blank entry that does not exist. This vocabulary feeds the automated repair
-            # loop, where a wrong sentence costs a paid attempt — split the two messages.
+        rel = normalize_declared_path(f)
+        if "\x00" in rel:
+            # A separate sentence from the empty case on purpose: this vocabulary feeds the
+            # automated repair loop, and telling a Developer whose manifest carries an embedded NUL
+            # that the path is EMPTY sends it hunting for a blank entry that does not exist —
+            # a wasted paid attempt on a refusal it cannot act on.
+            return None, (f"stage {nm!r} `{field}` entry {f!r} contains a NUL byte; a declared path "
+                          "must be plain text.")
+        if not rel:
             return None, f"stage {nm!r} `{field}` contains an empty path."
         if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
             return None, (f"stage {nm!r} `{field}` entry {f!r} must be RELATIVE to the eval "
@@ -161,11 +193,11 @@ def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
     clean: dict = {}
     files = expect.get("files")
     if files is not None:
-        if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
-            return None, f"stage {nm!r} `expect.files` must be a list of workdir-relative path strings."
-        if len(files) > MAX_STAGE_EXPECT_FILES:
-            return None, f"stage {nm!r} `expect.files` may name at most {MAX_STAGE_EXPECT_FILES} paths."
-        out, err = _validate_rel_paths(nm, "expect.files", files)
+        # No pre-checks here: the type test and the cap were duplicated from `_validate_rel_paths`
+        # and short-circuited it, so `expect.files` answered from the stale copy while `needs`
+        # answered from the shared one — exactly the two-answers-to-one-question drift the helper
+        # was extracted to remove.
+        out, err = _validate_rel_paths(nm, "expect.files", files, MAX_STAGE_EXPECT_FILES)
         if err is not None:
             return None, err
         if out:
@@ -957,7 +989,7 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
             # The stage's INPUT contract — see the block above `MAX_STAGE_EXPECT_FILES`. Validated
             # here beside `expect` for the same reason: `declare_stages`, `EvalSpec.stages` and
             # `_resolve_stages` must accept exactly the same manifest.
-            needs, err = _validate_rel_paths(nm, "needs", s["needs"])
+            needs, err = _validate_rel_paths(nm, "needs", s["needs"], MAX_STAGE_NEEDS_FILES)
             if err is not None:
                 return None, err
             if needs:
@@ -1174,8 +1206,37 @@ NEEDS_EMPTY = ("stage {stage!r} did not start: its declared input {path!r} exist
                "input would either crash inside a loader or silently train on nothing.")
 
 
-def verify_stage_inputs(needs, workdir, *, stage: str = "", producers: Optional[dict] = None,
-                        since: Optional[float] = None) -> Optional[str]:
+def _confined_input(workdir, rel) -> Optional[Path]:
+    """`workdir / rel` for a DECLARED INPUT, or None when the declaration escapes the workdir.
+
+    Deliberately LEXICAL where `_confined` resolves, and the difference is a mounted dataset.
+    `engine/workspace.py::link_input` materializes a `mount:true` data/reference source as a SYMLINK
+    at `<workdir>/<name>` pointing at the operator's path outside the workdir; `.resolve()` follows
+    it, containment fails, and every stage declaring an input under that mount was refused
+    `NEEDS_ESCAPES` before it ran — with the sibling message explicitly forbidding the only fix the
+    model can apply ("do not delete the declaration to make this pass"), so the repair loop burnt
+    its attempts on a contract the engine's own seeding made unsatisfiable.
+
+    Safe to be lexical HERE, and only here, because of what this path does with the answer: it
+    `stat()`s it. It never opens the file, never parses it, never hands it to `runpy` — which are
+    the three things `_confined`'s docstring names as what containment is guarding (an answer-key
+    read, a planted result, code execution). What a stage may actually READ is owned by
+    `runtime/read_fence.py`, which allow-lists mount SOURCES for exactly the same reason. The
+    escaping shapes that matter are still refused: `..` and absolute paths are rejected by
+    `_validate_rel_paths` at authoring time and again below."""
+    text = normalize_declared_path(rel)
+    if not text or "\x00" in text or os.path.isabs(text) or (len(text) > 1 and text[1] == ":"):
+        return None
+    if ".." in text.split("/"):
+        return None
+    try:
+        return Path(workdir) / text
+    except (OSError, ValueError):
+        return None
+
+
+def verify_stage_inputs(needs, workdir, *, stage: str = "",
+                        producers: Optional[dict] = None) -> Optional[str]:
     """The stage's INPUT contract: None when every declared input is present and non-empty, otherwise
     a one-line reason naming the first one that is not. Checked BEFORE the command runs.
 
@@ -1183,23 +1244,26 @@ def verify_stage_inputs(needs, workdir, *, stage: str = "", producers: Optional[
     freshness rule. A stage legitimately reads things that predate it by any amount — the seeded
     repo, a mounted dataset, a base checkpoint, a `train` output the engine deliberately REUSED
     across attempts (`_safe_reuse_start`). Applying `expect`'s staleness gate here would refuse the
-    reuse the persistent workdir exists for. `since` is accepted so a caller can be explicit about
-    that and so the signature matches its output twin, and it is intentionally unused.
+    reuse the persistent workdir exists for. There is deliberately no `since` parameter: one was
+    accepted and immediately `del`'d "so the signature matches its output twin", which only misled
+    — the next freshness rule would be passed in, change nothing, and be debugged at the caller.
 
     `producers` maps a declared output path to the EARLIER stage that promised it, which is what lets
     the refusal name both sides of a disagreement between two declarations. Absent, the message is
     still correct, just less specific.
     """
-    del since  # see the docstring: an input has no freshness rule, and saying so beats omitting it
     for rel in (needs or []):
-        p = _confined(workdir, rel)
+        p = _confined_input(workdir, rel)
         if p is None:
             return NEEDS_ESCAPES.format(stage=stage, path=rel)
         try:
             st = p.stat()
         except OSError:
             message = NEEDS_MISSING.format(stage=stage, path=rel)
-            producer = (producers or {}).get(rel)
+            # Keyed on the CANONICAL spelling, like the map itself: `train` declaring
+            # `ckpt/model.pt` and `score` needing `ckpt/./model.pt` both validate, and an exact
+            # string compare silently dropped the one sentence naming the disagreeing stage.
+            producer = (producers or {}).get(normalize_declared_path(rel))
             if producer:
                 message += NEEDS_MISSING_PRODUCER.format(producer=producer)
             # `since=None`: the near-miss scan's freshness filter is about "did THIS stage write it",
@@ -1223,8 +1287,12 @@ def stage_output_producers(stages, upto: int) -> dict:
     """{declared output path -> the name of the FIRST stage before `upto` that declares it}.
 
     First rather than last on purpose: when two stages claim the same output, the one a later stage's
-    input contract should point at is the one that established the path. Built per check rather than
-    once because `_resolve_stages` can hand `_run_stages` a different list per attempt."""
+    input contract should point at is the one that established the path.
+
+    Keyed on `normalize_declared_path`, not the raw string: this map is joined against another
+    stage's `needs`, and two spellings of one path (`ckpt/model.pt` vs `ckpt/./model.pt`) both
+    validate. An exact compare lost the link silently and handed the repair loop a generic message
+    instead of the sentence naming the disagreeing stage — the whole reason the map exists."""
     out: dict = {}
     for s in (stages or [])[:max(0, upto)]:
         if not isinstance(s, dict):
@@ -1232,7 +1300,7 @@ def stage_output_producers(stages, upto: int) -> dict:
         name = str(s.get("name") or "")
         expect = s.get("expect") if isinstance(s.get("expect"), dict) else {}
         for rel in (expect.get("files") or []):
-            out.setdefault(rel, name)
+            out.setdefault(normalize_declared_path(rel), name)
     return out
 
 
@@ -1895,6 +1963,25 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
 #
 # Aliases rather than renames: the private spellings have many in-module call sites and appear in
 # comments across the tree, and this file's own callers are not the ones at risk.
-constraint_violations = _violations
-metric_drift_exceeds = _drift
-artifacts_written_elsewhere = _artifacts_written_elsewhere
+#
+# FORWARDERS, not `name = _private`. A by-value binding snapshots the function at import, so the
+# public and private spellings become two independently patchable objects: a
+# `monkeypatch.setattr(command_eval, "_violations", …)` — the spelling every in-module comment and
+# `tests/test_stage_artifact_near_miss.py` use for this family — would be honoured by
+# `run_command_eval` and INVISIBLE to `metric_salvage.salvage_gates`, which reaches the public name.
+# And because `salvage_gates` is wrapped in `except Exception`, the divergence has no symptom: the
+# test passes while proving nothing about the path that decides whether a salvaged metric competes
+# for champion under `metric_salvage="select"`. One object, one seam.
+def constraint_violations(*args, **kwargs):
+    """Public spelling of `_violations` — see the block above for why it forwards."""
+    return _violations(*args, **kwargs)
+
+
+def metric_drift_exceeds(*args, **kwargs):
+    """Public spelling of `_drift` — see the block above for why it forwards."""
+    return _drift(*args, **kwargs)
+
+
+def artifacts_written_elsewhere(*args, **kwargs):
+    """Public spelling of `_artifacts_written_elsewhere` — see the block above."""
+    return _artifacts_written_elsewhere(*args, **kwargs)

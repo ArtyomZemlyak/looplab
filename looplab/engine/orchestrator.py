@@ -5104,20 +5104,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             reason="proposal_rejected", drop_card=bool(current.idea.card_id))
                         self._discard_node_build_telemetry()
                         return
-                    # REVIEW (mega-review 2026-08-13): this drop bypasses the
-                    # `_reservation_minted_card` ownership guard the refusal path four lines up
-                    # routes through (via `_fail_reserved_build`), and `_drop_card_once` itself has
-                    # no ownership check — so a propose-reset of node A whose card also carries an
-                    # ATTACHED node B (a debug re-attempt landed on the same work item) drops a card
-                    # that is node B's durable evidence row. Reproduced end-to-end: mint on node 0,
-                    # attach on node 1, node_reset from_stage=propose -> card dropped `reproposed`
-                    # while `_reservation_minted_card(events, reset_node, card)` is False; and a
-                    # dropped card is unrecoverable for re-attach (`_retry_attach_card` refuses
-                    # dropped forever), so a later repair mints a byte-identical twin — the exact
-                    # shape the attach disposition exists to close. Route this drop through the same
-                    # ownership check as the sibling path. (No test covers reset-over-attached; the
-                    # lifecycle test covers only a self-owned card.)
-                    self._drop_card_once(current.idea.card_id, reason="reproposed")
+                    # THE SAME OWNERSHIP CHECK the refusal path four lines up routes through (via
+                    # `_fail_reserved_build`). `_drop_card_once` has none of its own, so dropping
+                    # unconditionally destroyed a card that a DIFFERENT node had attached to — a
+                    # debug re-attempt landing on the same work item — and a dropped card is
+                    # unrecoverable, because `_retry_attach_card` refuses `dropped` forever. The
+                    # later repair then minted a byte-identical twin: exactly the duplicate work
+                    # item the attach disposition exists to prevent. Reproduced end-to-end (mint on
+                    # node 0, attach on node 1, `node_reset from_stage=propose` on node 0).
+                    # Fail-closed here means the superseded card survives as proposed inventory,
+                    # which is the cost `_reservation_minted_card`'s own docstring prices against
+                    # deleting somebody else's finished work item.
+                    if self._reservation_minted_card(events, node.id, current.idea.card_id):
+                        self._drop_card_once(current.idea.card_id, reason="reproposed")
                     if plan.disposition == "mint":
                         self.store.append(EV_CARD_ADDED, plan.payload)
                     self.store.append(EV_NODE_BUILDING, {
