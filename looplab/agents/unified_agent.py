@@ -490,3 +490,111 @@ class UnifiedAgent(WrapsDeveloper):
         return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
                                 state=state, bind_state=state is not None,
                                 transport_fallback=_transport_failed)
+
+    # --------------------------------------------------- Repair critic (F8: the stop, not the fix)
+    _REPAIR_CRITIC_SYSTEM = (
+        "You are reviewing an autonomous ML research loop's REPAIR TRAJECTORY on a single "
+        "experiment node. You are not fixing anything and you are not deciding what the failure "
+        "was. You answer exactly one question: are the successive attempts addressing DIFFERENT "
+        "causes, or are they circling one?\n"
+        "  - 'continue': the chain is going somewhere. The cause changes, or the pipeline reaches a "
+        "later stage, or each fix touches different code and the failure moves with it. A long "
+        "chain is not by itself a circling one — a repo with stale dependencies legitimately needs "
+        "a run of mechanical fixes before the real experiment can start, and stopping that early "
+        "throws away the whole node.\n"
+        "  - 'stop': the chain is re-covering the same ground. The same cause after fixes that "
+        "claimed to address it; the same files rewritten again and again; a sequence of fixes that "
+        "are all variations of one guess (three rounds of halving a batch size is ONE idea tried "
+        "three times, not three ideas). Note especially that the same underlying wall can wear a "
+        "DIFFERENT error text every attempt — a broken library that renames the symbol it fails on "
+        "each time is still one wall. Judge the causes and the fixes, not the wording.\n"
+        "Prefer 'continue' when you are unsure: something else is still bounding this loop, and a "
+        "wrong 'stop' discards work that was about to succeed. Say 'stop' when you can state, in "
+        "one sentence, what the repeated thing IS.\n"
+        "Call `repair_critic` exactly once with your `action` and a one-sentence `rationale` naming "
+        "the pattern you saw."
+    )
+
+    def repair_critic(self, node, *, state: Optional[RunState] = None, brief: str = "",
+                      trajectory: str = "", attempt: Optional[int] = None) -> Optional[dict]:
+        """Should this node's repair loop keep going? ``{"action": "continue"|"stop", "rationale"}``,
+        or ``None`` when no pilot model is wired (the engine then simply has no critic).
+
+        THE SECOND OF F8's TWO SIGNALS, and deliberately a different call from `triage_crash` rather
+        than three more sentences in its prompt. The triage judge is answering "given this failure,
+        do I know what to change?" — a question about the NEXT step, which a model answers well and
+        optimistically. "Has this chain stopped making progress?" is a question about the SHAPE of
+        everything already tried, and asking one model both at once is what the deleted anti-stuck
+        counter was doing badly on the same evidence: the judge that just proposed a fix is the
+        worst-placed participant to rule that the fixes are all the same idea.
+
+        IT CAN ONLY STOP. There is no verdict here that makes the loop repair MORE, sets `reason`,
+        selects a salvage, or touches the node's metric — the caller turns `stop` into the same
+        terminal an `abandon` produces, carrying the eval's own authenticated failure reason. That is
+        doc 36's line: this decides whether to keep going, never what the result was.
+
+        AND ITS EVIDENCE IS AUTHENTICATED. `trajectory` is rendered by
+        `engine/repair_judgment.py::format_repair_trajectory`, whose per-attempt `cause` is the
+        engine's own `_failure_reason` (read from the sandbox's out-of-band signal channel) and
+        whose stderr tail is LABELLED as candidate-controlled. A critic that read the kind of a
+        failure off a banner the failing script printed would hand the candidate the stop decision —
+        see `c862045c`, which took that exact route away from the failure classifier.
+
+        Degrades like nothing else here: no emit, an out-of-enum action and a dead endpoint all
+        become `continue`. See `engine/repair_judgment.py::DEFAULT_CRITIC_ACTION` for why this
+        judge's fail-closed direction is the opposite of triage's."""
+        if self._pilot_client is None:
+            return None                       # no critic model -> the engine simply has no critic
+        # Deferred import of the verdict registry, for the reason `triage_crash` states above: the
+        # engine's stop decision keys on these exact strings and `agents` sits below the engine.
+        # `engine/repair_judgment.py` is pure (stdlib-only at module scope), so this cannot cycle.
+        from looplab.engine.repair_judgment import AGENT_CRITIC_ACTIONS, DEFAULT_CRITIC_ACTION
+        if not str(trajectory or "").strip():
+            # NOTHING TO JUDGE. The critic's whole question is about a chain, and asking it about an
+            # empty one buys a paid call whose only honest answer is `continue`. Refused here rather
+            # than at the caller so a duck-typed replacement inherits the property.
+            return {"action": DEFAULT_CRITIC_ACTION,
+                    "rationale": "no repair trajectory to judge yet"}
+        messages = [
+            {"role": "system", "content": render(self.prompts, "repair_critic_system",
+                                                 self._REPAIR_CRITIC_SYSTEM)},
+            {"role": "user", "content": (
+                (brief + "\n" if brief else "") +
+                f"Node {getattr(node, 'id', '?')}"
+                + ("" if attempt is None else f", about to spend repair attempt {attempt}") + ".\n"
+                + trajectory + "\n"
+                "Is this chain addressing different causes, or circling one? "
+                "Choose: continue or stop.").strip()},
+        ]
+        emit_spec = {"type": "function", "function": {
+            "name": "repair_critic",
+            "description": "Decide whether this node's repair loop is still making progress.",
+            "parameters": {"type": "object", "properties": {
+                # Read from the registry, never re-spelled — `engine/repair_judgment.py` owns the
+                # vocabulary and the engine's stop keys on it. Unlike triage there is no
+                # engine-minted member to exclude here: a critic that cannot be reached contributes
+                # `continue`, which is a value the model may legitimately emit too.
+                "action": {"type": "string", "enum": list(AGENT_CRITIC_ACTIONS),
+                           "description": "continue (the chain is addressing different causes) | "
+                                          "stop (the chain is circling one)."},
+                "rationale": {"type": "string"}},
+                "required": ["action"]}}}
+
+        def _finalize(args: dict) -> dict:
+            action = str((args or {}).get("action", "")).strip().lower()
+            if action not in AGENT_CRITIC_ACTIONS:
+                action = DEFAULT_CRITIC_ACTION
+            return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300]}
+
+        def _no_verdict(_messages) -> dict:
+            # BOTH degradations collapse here ON PURPOSE, which is the opposite of `triage_crash`'s
+            # rule and for the opposite reason. There the two ways to fail carry different POWERS (a
+            # per-node stop vs a run-level pause), so conflating them cost a run per bad emit. Here
+            # neither may stop anything: a critic that did not answer has no opinion, the triage
+            # judge and the floors are untouched, and the loop ends exactly where it would have
+            # without a critic wired at all. So there is nothing for a second callable to say.
+            return {"action": DEFAULT_CRITIC_ACTION,
+                    "rationale": "the repair critic returned no verdict — no opinion recorded"}
+
+        return self._pilot_emit(messages, emit_spec, _finalize, _no_verdict,
+                                state=state, bind_state=state is not None)
