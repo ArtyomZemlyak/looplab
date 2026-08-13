@@ -720,6 +720,25 @@ actually been proven (`tests/test_setup_thread_appendable.py`), and the fold key
 command. A node terminal moves `best`, the parent snapshot and every Card score — §6 is right that it
 carries selection authority, and it stays in the fence.
 
+**Prefetch economics, measured rather than argued.** The one thing a change to this gate could
+silently cost is the prefetch's own yield — invariant #1 records what that looks like (depth-1
+speculation going serial, 17 builds / 5 discards becoming 12 / 0). Ten real `Engine.run`s per tree on
+the toy quadratic, `max_nodes=12`, `speculation_depth=1`, `role_factory=task.build_roles` (the
+harness `test_card_budget_refund.py`'s end-to-end test uses), reading
+`speculation_quality.speculation_budget_observation`:
+
+| | requested | committed | stale | discarded | refunded | charged_discards | evaluated |
+|---|---|---|---|---|---|---|---|
+| master (`4ddd0a0b`) | 142 | 139 | 3 | 19 | 19 | 0 | 120 |
+| this change | 141 | **140** | **1** | 20 | 20 | 0 | 120 |
+
+Equal experiments, one more commit, and two fewer `stale` closes — a `stale` close is a prefetch
+abandoned before it was ever committed, i.e. a Developer call bought and thrown away, and it is the
+disposition this document's §2a latch produced ("8 of 8 `stale` closes were `allow_commit=False`").
+Every discard is still refunded and `charged_discards` is still 0 on both. The offline smoke
+(`looplab run --backend toy`) produces an identical event-type inventory and the identical champion on
+both trees.
+
 **Left undone.** §5's serial gap is only made *addressable*, exactly as §7's table promised — the
 board can now be refilled mid-eval, but nothing yet makes the card-producing cadences fire *because*
 an evaluation is running. They stay node-count-paced. F1g's last paragraph states what closing the
