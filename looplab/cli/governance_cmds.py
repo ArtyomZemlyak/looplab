@@ -827,7 +827,7 @@ def atlas_cmd(
     """PART IV cross-run Step 6 (§21.20): the legacy Research Atlas DATA payload — bounded concept
     observations, concepts observed in one returned run, and mixed-evidence claim records. It composes
     the concept overview (Step 3), claim assessments (Step 4), and bounded context pack (Step 5).
-    Pure read; the owner React preview is available at ``#/atlas``.
+    Pure read; the owner React preview is available at ``#/claims``.
 
     Wire keys such as ``thin_coverage`` and ``contradictions`` are retained for compatibility; they
     do not establish a CoverageFrame, an untried gap, or a proposition-level contradiction verdict.

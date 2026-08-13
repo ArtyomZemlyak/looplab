@@ -903,35 +903,38 @@ export const saveRunConfig = (rid, settings, {
     ...(expectedGeneration == null ? {} : { expected_generation: expectedGeneration }),
   }, options)
 
-// Experimental Research Atlas: owner-only, read-only projections over the shared memory portfolio.
+// Experimental Claims & Curation reads: owner-only, read-only projections over the shared memory
+// portfolio. The ROUTE names below are the server's and are unchanged by the F7 surface rename
+// (doc 29) — `/api/cross-run/atlas` still serves the mixed-evidence claim records the screen reads.
 // Bypass browser caches so Refresh observes newly finalized runs/governance without a stale intermediary.
 const crossRunRead = (path, options = {}) => get(path, { ...options, cache: 'no-store' })
-export function boundedAtlasText(value, max = 360) {
+export function boundedLedgerText(value, max = 360) {
   if (!['string', 'number', 'boolean'].includes(typeof value)) return ''
   const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
   const text = String(value).slice(0, limit)
   return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
     .replace(/\s+/gu, ' ').trim().slice(0, limit)
 }
-const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_concepts n_contested concept_source
-  claim_source explored thin_coverage thin_coverage_total thin_coverage_omitted contradictions
-  revisions claims n revision v status complete entries limit source_complete partial_capsules
-  source_unknown_capsules source_concepts_omitted source_outcomes_omitted source_store_complete
-  source_rows_total source_rows_quarantined source_malformed_rows source_invalid_capsule_rows
-  source_duplicate_run_rows concept runs run_id task_id task scope task_scope metric direction
-  n_helped n_neutral n_hurt
+// An ALLOWLIST: a field absent here never reaches React state. F7 dropped the concepts section, so
+// the concept sections of the atlas envelope (`explored`/`thin_coverage` — up to 24 rows carrying 6
+// run references each) and the `concept_capsules.jsonl` read receipt beside them are no longer
+// listed. They are still SERVED; nothing renders them, so nothing keeps them.
+const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_contested
+  claim_source contradictions
+  revisions claims n revision v status complete entries limit source_complete
+  runs run_id metric
   claim_uid statement epistemic maturity decision_fresh n_support n_oppose n_unverified
   n_contradicts support oppose unverified contradicts scopes receipt_known read_complete
   research_source_complete lessons research snapshot_digest rows_total rows_retained
   rows_quarantined malformed_rows invalid_rows outcome proposals receipt merges splits purges
   decisions applied concept_governance`.split(/\s+/)
 const CROSS_RUN_STATE_CAPS = {
-  explored: 24, thin_coverage: 24, contradictions: 12, claims: 40, entries: 20,
+  contradictions: 12, claims: 40, entries: 20,
   runs: 6, support: 6, oppose: 6, unverified: 6, contradicts: 6, scopes: 6,
 }
 const CROSS_RUN_COUNT_ARRAYS = new Set(['merges', 'splits', 'purges', 'decisions', 'applied'])
 function projectCrossRunValue(value, key = '', depth = 0) {
-  if (typeof value === 'string') return boundedAtlasText(value, 500)
+  if (typeof value === 'string') return boundedLedgerText(value, 500)
   if (typeof value === 'number' || typeof value === 'boolean' || value == null) return value
   if (Array.isArray(value)) {
     if (CROSS_RUN_COUNT_ARRAYS.has(key)) return value.length
@@ -947,7 +950,7 @@ function projectCrossRunValue(value, key = '', depth = 0) {
   }
   return out
 }
-export function projectResearchAtlasSource(key, value) {
+export function projectLedgerSource(key, value) {
   const projected = projectCrossRunValue(value)
   if (key === 'atlas') {
     const contested = Array.isArray(value?.contradictions) ? value.contradictions.length : 0
@@ -968,7 +971,7 @@ const crossRunLimitArgs = (limitOrOptions, fallback, maximum, options) =>
     ? { limit: fallback, options: limitOrOptions }
     : { limit: boundedCrossRunInt(limitOrOptions, fallback, maximum, 1), options }
 // Bounds exist on both sides of the wire. Client render caps prevent DOM amplification; these query
-// caps also prevent a routine Atlas preview navigation from requesting an unbounded shared ledger.
+// caps also prevent a routine claim-ledger navigation from requesting an unbounded shared ledger.
 export const getCrossRunAtlas = (limitOrOptions = 24, options) => {
   const args = crossRunLimitArgs(limitOrOptions, 24, 50, options)
   return crossRunRead(`/api/cross-run/atlas?limit=${args.limit}`, args.options)

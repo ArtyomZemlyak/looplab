@@ -211,7 +211,7 @@ test('Card belief, retry, and research identities are visible instead of wire-on
   assert.match(markup, /belief a{8}/,
     'the belief identity must be shown to the operator, and shortened rather than dumped')
   assert.match(markup, /retry of card-0/, 'a retry must name the card it retries')
-  assert.match(markup, /Open Research Atlas/, 'a card with claim_refs must offer its research')
+  assert.match(markup, /Open Claims &amp; Curation/, 'a card with claim_refs must offer its research')
 })
 
 test('Card controls use only generation-fenced command helpers and never client provenance', async () => {

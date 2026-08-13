@@ -132,11 +132,12 @@ test('the spelling-variant notice names the governed merge this view applies', a
 
   assert.match(html, /spelled\s*more than one way/)
   // It must not send the operator to a control that does not exist. The governed merge is
-  // `looplab concept-merge` / `POST /api/cross-run/concept-merge`; the Atlas screen has no
+  // `looplab concept-merge` / `POST /api/cross-run/concept-merge`; the claim-ledger screen has no
   // concept-governance control at all. (This comment and the notice it describes both named a
   // "governance" CLI GROUP and a `/concept-alias` route until 2026-08-07; neither has ever existed,
   // which is why `tests/test_ui_named_commands.py` now drives the real Typer registry.)
-  assert.ok(!/action in the Atlas/.test(html), 'the Atlas offers no concept merge')
+  assert.ok(!/action in the Atlas|action in Claims/.test(html),
+    'the claim ledger offers no concept merge — and since F7 it shows no concepts at all')
   assert.match(html, /is applied here once the revisioned policy is available/)
   assert.match(html, /governance is loading/)
 })

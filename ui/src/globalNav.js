@@ -19,8 +19,11 @@ export const GLOBAL_DESTINATIONS = Object.freeze([
     title: 'Every run in this installation — list, lineage, concepts, portfolio comparison and projects',
   }),
   Object.freeze({
-    key: 'research-atlas', hash: '#/atlas', label: 'Research Atlas',
-    title: 'Experimental cross-run portfolio evidence: concepts, claims and steward proposals',
+    // Renamed from "Research Atlas" by doc 29 F7. The old name promised a concept map, so an operator
+    // who wanted one came here and found a weaker copy of the run list's Concepts view; that section
+    // is gone and the name now states what is actually behind the link.
+    key: 'claims', hash: '#/claims', label: 'Claims & Curation',
+    title: 'Experimental cross-run claim ledger and the paid stewards’ proposals and outcomes',
   }),
   Object.freeze({
     key: 'memory', hash: '#/memory', label: 'Cross-run memory',

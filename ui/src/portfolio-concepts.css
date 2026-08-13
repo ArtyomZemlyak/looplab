@@ -1,5 +1,5 @@
 /* The global Concepts view (run list, beside List / Lineage / Compare). Kept in its own file rather
-   than in styles.css so it can be read as one thing — the same reason research-atlas.css exists. */
+   than in styles.css so it can be read as one thing — the same reason claims-curation.css exists. */
 
 .pc-stage { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 4px 2px 24px; }
 

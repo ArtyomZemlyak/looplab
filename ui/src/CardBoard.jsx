@@ -456,7 +456,7 @@ function _CardKanbanCard({
       <span className="card-kanban-k">Research claims</span>
       <span>{claimRefs.slice(0, 4).map(ref => <code key={ref}>{ref}</code>)}
         {claimRefs.length > 4 ? ` · ${claimRefs.length - 4} more` : ''}
-        {' · '}<a href="#/atlas">Open Research Atlas</a></span>
+        {' · '}<a href="#/claims">Open Claims &amp; Curation</a></span>
     </div>}
     <div className="card-kanban-evidence">
       {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"

@@ -7,16 +7,16 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { JSDOM } from 'jsdom'
 import { createServer } from 'vite'
 import {
-  ATLAS_RENDER_LIMITS,
-  boundedAtlasText,
-  buildResearchAtlasView,
-  isValidAtlasSourceEnvelope,
+  LEDGER_RENDER_LIMITS,
+  boundedLedgerText,
+  buildClaimsCurationView,
+  isValidLedgerSourceEnvelope,
   mergeCurationLogs,
-  mergeResearchAtlasPayload,
-  projectResearchAtlasSource,
-  reconcileAtlasSourceStatuses,
-  researchAtlasPayloadPortfolioId,
-} from '../src/researchAtlasModel.js'
+  mergeLedgerPayload,
+  projectLedgerSource,
+  reconcileLedgerSourceStatuses,
+  ledgerPayloadPortfolioId,
+} from '../src/claimsCurationModel.js'
 import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
 } from '../src/api.js'
@@ -66,12 +66,6 @@ const partialClaimSource = Object.freeze({
   research_source_complete: false,
   snapshot_digest: 'd'.repeat(64),
 })
-const completeConceptSource = Object.freeze({
-  source_complete: true, partial_capsules: 0, source_unknown_capsules: 0,
-  source_concepts_omitted: 0, source_outcomes_omitted: 0,
-  source_store_complete: true, source_rows_total: 1, source_rows_quarantined: 0,
-  source_malformed_rows: 0, source_invalid_capsule_rows: 0, source_duplicate_run_rows: 0,
-})
 const curationEnvelope = (entries = [], overrides = {}) => ({
   portfolio_id: PORTFOLIO_ID,
   v: 1, status: 'complete', complete: true, entries, n: entries.length, limit: 20,
@@ -93,15 +87,10 @@ const claim = (index = 0) => ({
   claim_source: completeClaimSource,
 })
 
-test('Atlas projection reconciles concurrent totals without trusting malformed text or counts', () => {
-  const view = buildResearchAtlasView({
+test('the ledger projection reconciles concurrent totals without trusting malformed text or counts', () => {
+  const view = buildClaimsCurationView({
     n_runs: 0,
-    n_concepts: 0,
     n_contested: 0,
-    explored: [{ concept: '\n  robust\tsearch ', n_runs: 0, runs: [
-      { run_id: 'run/one\n', direction: 'max', metric: 0.75 },
-    ] }],
-    thin_coverage: ['robust\nsearch'],
     contradictions: [{ ...claim(1), n_oppose: -10, oppose: ['run-1:node-3'] }],
   }, { n: 0, claims: [claim(0)] }, {
     n: 0,
@@ -109,171 +98,47 @@ test('Atlas projection reconciles concurrent totals without trusting malformed t
       receipt: { applied: [{}], skipped: [] } }],
   })
 
-  assert.deepEqual(view.totals, { runs: 3, concepts: 1, claims: 1, contested: 1, curation: 1 })
+  // `runs` is now inferred from the CLAIM rows alone — run-0 from the claims page and run-1 from the
+  // mixed-evidence record. Until F7 the concept rows contributed their own run references here.
+  assert.deepEqual(view.totals, { runs: 2, claims: 1, contested: 1, curation: 1 })
   assert.equal(view.empty, false)
-  assert.equal(view.concepts[0].concept, 'robust search')
-  assert.equal(view.concepts[0].runs[0].runId, 'run/one')
-  assert.equal(view.concepts[0].runs[0].metric, null,
-    'a legacy raw metric without task/scope context must fail closed before rendering')
-  assert.equal(view.concepts[0].runs[0].metricSuppressed, true)
+  assert.equal(Object.hasOwn(view, 'concepts'), false,
+    'the concepts section moved to the run list Concepts view; nothing may re-derive it here')
   assert.equal(view.claims[0].nSupport, 1)
   assert.equal(view.claims[0].nUnverified, 1)
   assert.deepEqual(view.claims[0].unverified, ['run-0:node-2'])
   assert.equal(view.curation[0].proposals, 3)
   assert.equal(view.curation[0].applied, 1)
-  assert.equal(boundedAtlasText({ unsafe: 'shape' }), '')
-  assert.equal(boundedAtlasText('task\u202e-name\u2066 scope\u2069'), 'task -name scope',
+  assert.equal(boundedLedgerText({ unsafe: 'shape' }), '')
+  assert.equal(boundedLedgerText('task\u202e-name\u2066 scope\u2069'), 'task -name scope',
     'bidi formatting controls cannot visually reorder model-authored comparison context')
 })
 
-test('Atlas concept-source receipts fail closed and preserve explicit partial bounds', () => {
-  const complete = completeConceptSource
-  const partial = {
-    ...complete, source_complete: false, partial_capsules: 2, source_unknown_capsules: 1,
-    source_concepts_omitted: 44, source_outcomes_omitted: 8,
-  }
-  assert.deepEqual(buildResearchAtlasView({ concept_source: complete }, {}, {}).conceptSource,
-    { status: 'complete', counts: [0, 0, 0, 0] })
-  assert.deepEqual(buildResearchAtlasView({ concept_source: partial }, {}, {}).conceptSource,
-  { status: 'partial', counts: [2, 1, 44, 8] })
-  assert.deepEqual(buildResearchAtlasView({ context_pack: { coverage: partial } }, {}, {}).conceptSource,
-    { status: 'unknown' }, 'legacy fallback is not current source authority')
-  const quarantined = {
-    ...complete, source_complete: false, source_store_complete: false,
-    source_rows_total: 5, source_rows_quarantined: 2, source_malformed_rows: 1,
-    source_invalid_capsule_rows: 1, source_duplicate_run_rows: 0,
-  }
-  assert.deepEqual(buildResearchAtlasView({ concept_source: quarantined }, {}, {}).conceptSource,
-    { status: 'partial', counts: [0, 0, 0, 0] })
-
-  const unknown = { status: 'unknown' }
-  for (const receipt of [
-    {},
-    { ...complete, partial_capsules: null },
-    { ...complete, source_concepts_omitted: '0' },
-    { ...complete, partial_capsules: 1 },
-    { ...partial, partial_capsules: 0 },
-    { ...partial, source_unknown_capsules: 3 },
-    { ...complete, source_store_complete: false },
-    { ...quarantined, source_rows_quarantined: 3 },
-    { ...quarantined, source_complete: true },
-  ]) {
-    assert.deepEqual(buildResearchAtlasView({ concept_source: receipt }, {}, {}).conceptSource,
-      unknown)
-  }
-})
-
-test('Atlas projection consumes only internally consistent backend omission receipts', () => {
-  const view = buildResearchAtlasView({
-    n_concepts: 10,
+test('the ledger reports what a bounded mixed-evidence projection did not show', () => {
+  const view = buildClaimsCurationView({
     n_contested: 5,
-    explored: [{ concept: 'visible', n_runs: 1, runs: [] }],
-    explored_total: 10,
-    explored_omitted: 9,
-    thin_coverage: ['visible'],
-    thin_coverage_total: 7,
-    thin_coverage_omitted: 6,
     contradictions: [claim(1)],
     contradictions_total: 5,
     contradictions_omitted: 4,
   }, {}, {})
 
-  assert.equal(view.totals.concepts, 10)
   assert.equal(view.totals.contested, 5)
-  assert.equal(view.hiddenConcepts, 9)
-  assert.equal(view.hiddenThin, 6)
   assert.equal(view.hiddenContradictions, 4)
 
-  const malformed = buildResearchAtlasView({
-    n_concepts: 2,
-    explored: [{ concept: 'visible', n_runs: 1, runs: [] }],
-    explored_total: 1_000_000,
-    explored_omitted: 0,
-    thin_coverage: ['visible'],
-    thin_coverage_total: 1_000_000,
-    thin_coverage_omitted: 0,
-    contradictions: [],
-  }, {}, {})
-  assert.equal(malformed.totals.concepts, 2)
-  assert.equal(malformed.hiddenConcepts, 1)
-  assert.equal(malformed.hiddenThin, 0)
+  // A server total that LAGS the rows in this very response must never hide one of them.
+  const lagging = buildClaimsCurationView({ n_contested: 0, contradictions: [claim(1)] }, {}, {})
+  assert.equal(lagging.totals.contested, 1)
+  assert.equal(lagging.hiddenContradictions, 0)
 })
 
-test('Atlas suppresses context-free raw metrics and never renders a bare optimization direction', async () => {
-  const view = buildResearchAtlasView({ explored: [
-    { concept: 'legacy row', runs: [
-      { run_id: 'legacy-run', direction: 'max', metric: 0.8 },
-    ] },
-    { concept: 'scoped row', runs: [
-      {
-        run_id: 'scoped-run', task_id: ' task-a\n', scope: ' holdout\tset ',
-        direction: 'max', metric: 0.8,
-      },
-    ] },
-  ] }, {}, {})
-  const legacy = view.concepts.find(row => row.concept === 'legacy row').runs[0]
-  const scoped = view.concepts.find(row => row.concept === 'scoped row').runs[0]
-
-  assert.deepEqual(
-    [legacy.metric, legacy.optimizationOrientation, legacy.metricSuppressed],
-    [null, '', true],
-  )
-  assert.deepEqual(
-    [scoped.task, scoped.scope, scoped.metric, scoped.optimizationOrientation,
-      scoped.metricSuppressed],
-    ['task-a', 'holdout set', 0.8, 'maximize', false],
-  )
-
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
-  try {
-    const { AtlasRunReference } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
-    const legacyMarkup = renderToStaticMarkup(
-      React.createElement(AtlasRunReference, { run: legacy }),
-    )
-    const scopedMarkup = renderToStaticMarkup(
-      React.createElement(AtlasRunReference, { run: scoped }),
-    )
-    const legacyDom = new JSDOM(legacyMarkup)
-    const scopedDom = new JSDOM(scopedMarkup)
-    const legacyText = legacyDom.window.document.body.textContent
-    const scopedText = scopedDom.window.document.body.textContent
-
-    assert.match(legacyText,
-      /legacy-run.*Metric hidden.*missing task\/scope or objective direction/is,
-      'a sighted user can see why an available raw value was not rendered')
-    assert.doesNotMatch(legacyMarkup, /0\.8|\bmax\b/i,
-      'the raw value and shorthand direction must not leak into a context-free run reference')
-    assert.equal(legacyDom.window.document.querySelector('a').textContent, legacyText,
-      'the native link name contains the same visible disclosure without duplicate ARIA copy')
-    assert.match(scopedText,
-      /task: task-a.*scope: holdout set.*Not comparable across runs.*metric name\/unit unknown.*maximize.*0[.,]8/is)
-    assert.ok(scopedText.indexOf('Not comparable across runs') < scopedText.search(/0[.,]8/),
-      'the visible comparability warning precedes the numeric value')
-    assert.doesNotMatch(scopedText, /\bmax\s+0[.,]8\b/i,
-      'optimization orientation must never be presented as a bare comparable metric')
-    assert.doesNotMatch(scopedText, /\bDirection\b/i,
-      'optimization orientation is distinct from the narrative Direction concept')
-    const atlasCss = await source('research-atlas.css')
-    const runReferenceRule = atlasCss.match(/\.atlas-runrefs a \{[^}]+\}/s)?.[0] || ''
-    assert.match(runReferenceRule, /white-space:\s*normal/)
-    assert.doesNotMatch(runReferenceRule, /text-overflow:\s*ellipsis|overflow:\s*hidden/,
-      'desktop Atlas references must not clip the warning while leaving its value visible')
-  } finally {
-    await vite.close()
-  }
-})
-
-test('Atlas derives evidence balance from sanitized totals instead of payload labels', () => {
+test('the ledger derives evidence balance from sanitized totals instead of payload labels', () => {
   const contradictory = [
     { ...claim(0), epistemic: 'refuted', n_support: 2, support: [], n_oppose: 0, oppose: [] },
     { ...claim(1), epistemic: 'supported', n_support: 0, support: [], n_oppose: 3, oppose: [] },
     { ...claim(2), epistemic: 'inconclusive', n_support: 1, support: [], n_oppose: 1, oppose: [] },
     { ...claim(3), epistemic: 'mixed', n_support: -4, support: [], n_oppose: 'bad', oppose: [] },
   ]
-  const view = buildResearchAtlasView({}, {
+  const view = buildClaimsCurationView({}, {
     research_source: completeResearchSource,
     claim_source: completeClaimSource,
     claims: contradictory,
@@ -287,10 +152,9 @@ test('Atlas derives evidence balance from sanitized totals instead of payload la
   ])
 })
 
-test('Atlas never coerces booleans or numeric strings into evidence and ledger totals', () => {
-  const view = buildResearchAtlasView({
+test('the ledger never coerces booleans or numeric strings into evidence and ledger totals', () => {
+  const view = buildClaimsCurationView({
     n_runs: true,
-    n_concepts: '8',
     n_contested: '3',
   }, {
     n: '9',
@@ -301,7 +165,7 @@ test('Atlas never coerces booleans or numeric strings into evidence and ledger t
   }, { n: true, entries: [] })
 
   assert.deepEqual(view.totals, {
-    runs: 1, concepts: 0, claims: 1, contested: 0, curation: 0,
+    runs: 1, claims: 1, contested: 0, curation: 0,
   })
   assert.deepEqual(
     [view.claims[0].nSupport, view.claims[0].nOppose,
@@ -311,7 +175,7 @@ test('Atlas never coerces booleans or numeric strings into evidence and ledger t
   assert.equal(view.claims[0].epistemic, 'inconclusive')
 })
 
-test('Atlas never reconstructs a positive from a partial D8 prefix and renders its warning', async () => {
+test('the ledger never reconstructs a positive from a partial D8 prefix and renders its warning', async () => {
   const partial = {
     source_complete: false,
     producer_receipt_known: true,
@@ -323,7 +187,7 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
     producer_claims_retained: 256,
     producer_claims_omitted: 1,
   }
-  const view = buildResearchAtlasView({}, {
+  const view = buildClaimsCurationView({}, {
     research_source: partial, claim_source: partialClaimSource, claims: [{
     ...claim(30), epistemic: 'inconclusive', n_support: 1, research_source: partial,
     claim_source: partialClaimSource,
@@ -337,12 +201,12 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
   assert.equal(view.claims[1].epistemic, 'inconclusive')
   assert.equal(view.claimSource.status, 'partial')
 
-  const contradictory = buildResearchAtlasView({}, { research_source: {
+  const contradictory = buildClaimsCurationView({}, { research_source: {
     ...completeResearchSource, producer_runs: 1, producer_unknown_runs: 1,
   }, claims: [] }, {})
   assert.equal(contradictory.claimSource.status, 'unknown')
 
-  const forgedRow = buildResearchAtlasView({}, {
+  const forgedRow = buildClaimsCurationView({}, {
     research_source: partial, claim_source: partialClaimSource, claims: [{
     ...claim(32), epistemic: 'supported', n_support: 1,
     research_source: completeResearchSource,
@@ -350,7 +214,7 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
   assert.equal(forgedRow.claims[0].epistemic, 'inconclusive')
   assert.equal(forgedRow.claimSource.status, 'unknown')
 
-  const splitSnapshot = buildResearchAtlasView({
+  const splitSnapshot = buildClaimsCurationView({
     research_source: completeResearchSource,
     claim_source: completeClaimSource,
     contradictions: [{ ...claim(33), epistemic: 'mixed', n_support: 1,
@@ -368,19 +232,19 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
     server: { middlewareMode: true },
   })
   try {
-    const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
-      concept: { status: 'unknown' }, claims: view.claimSource,
+      claims: view.claimSource,
     }))
     assert.match(markup, /Evidence source incomplete/)
-    assert.match(markup, /claims partial/)
+    assert.match(markup, /Claims partial/)
     assert.match(markup, /Absence and one-sided claim state withheld/)
   } finally {
     await vite.close()
   }
 })
 
-test('Atlas validates the additive D8 read-health extension atomically', () => {
+test('the ledger validates the additive D8 read-health extension atomically', () => {
   const quarantined = {
     ...completeResearchSource,
     source_complete: false,
@@ -392,12 +256,12 @@ test('Atlas validates the additive D8 read-health extension atomically', () => {
     invalid_rows: 1,
     snapshot_digest: 'b'.repeat(64),
   }
-  const partial = buildResearchAtlasView({}, { research_source: quarantined }, {})
+  const partial = buildClaimsCurationView({}, { research_source: quarantined }, {})
   assert.equal(partial.claimSource.status, 'unknown')
   assert.equal(Object.hasOwn(partial, 'researchSource'), false)
 
   // CODEX AGENT: producer-only diagnostics are never promoted into combined claim authority.
-  assert.equal(buildResearchAtlasView({}, {
+  assert.equal(buildClaimsCurationView({}, {
     research_source: legacyCompleteResearchSource,
   }, {}).claimSource.status, 'unknown')
   const { invalid_rows: _omitted, ...torn } = quarantined
@@ -408,12 +272,12 @@ test('Atlas validates the additive D8 read-health extension atomically', () => {
     { ...quarantined, read_complete: true },
     { ...quarantined, source_complete: true },
   ]) {
-    assert.equal(buildResearchAtlasView({}, { research_source: receipt }, {}).claimSource.status,
+    assert.equal(buildClaimsCurationView({}, { research_source: receipt }, {}).claimSource.status,
       'unknown')
   }
 })
 
-test('Atlas uses combined claim-source authority when lesson rows are quarantined', async () => {
+test('the ledger uses combined claim-source authority when lesson rows are quarantined', async () => {
   const quarantinedLessons = {
     ...completeClaimSource,
     source_complete: false,
@@ -428,7 +292,7 @@ test('Atlas uses combined claim-source authority when lesson rows are quarantine
     ...claim(35), n_support: 1, epistemic: 'supported',
     claim_source: quarantinedLessons,
   }
-  const view = buildResearchAtlasView({}, {
+  const view = buildClaimsCurationView({}, {
     research_source: completeResearchSource,
     claim_source: quarantinedLessons,
     claims: [row],
@@ -445,18 +309,18 @@ test('Atlas uses combined claim-source authority when lesson rows are quarantine
     server: { middlewareMode: true },
   })
   try {
-    const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const { EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
-      concept: { status: 'complete' }, claims: view.claimSource,
+      claims: view.claimSource,
     }))
-    assert.match(markup, /claims partial/)
+    assert.match(markup, /Claims partial/)
     assert.match(markup, /Absence and one-sided claim state withheld/)
   } finally {
     await vite.close()
   }
 })
 
-test('Atlas requires one combined claim snapshot across envelopes and every visible row', () => {
+test('the ledger requires one combined claim snapshot across envelopes and every visible row', () => {
   const laterClaimSource = { ...completeClaimSource, snapshot_digest: 'f'.repeat(64) }
   const mixed = {
     ...claim(42), epistemic: 'mixed', n_support: 1,
@@ -474,7 +338,7 @@ test('Atlas requires one combined claim snapshot across envelopes and every visi
       claims: [claim(46)],
     },
   }
-  const refreshed = mergeResearchAtlasPayload(previous, {
+  const refreshed = mergeLedgerPayload(previous, {
     claims: {
       research_source: completeResearchSource,
       claim_source: laterClaimSource,
@@ -484,18 +348,18 @@ test('Atlas requires one combined claim snapshot across envelopes and every visi
       }],
     },
   })
-  const split = buildResearchAtlasView(refreshed.atlas, refreshed.claims, {})
+  const split = buildClaimsCurationView(refreshed.atlas, refreshed.claims, {})
   assert.equal(split.claimSource.status, 'unknown')
   assert.equal(split.contradictions[0].epistemic, 'inconclusive')
   assert.equal(split.contradictions[1].epistemic, 'mixed',
     'retained two-sided evidence remains mixed even across a split read epoch')
   assert.equal(split.claims[0].epistemic, 'inconclusive')
 
-  const coherent = buildResearchAtlasView(previous.atlas, previous.claims, {})
+  const coherent = buildClaimsCurationView(previous.atlas, previous.claims, {})
   assert.equal(coherent.claimSource.status, 'complete')
   assert.equal(coherent.claims[0].epistemic, 'supported')
 
-  const forgedRow = buildResearchAtlasView({}, {
+  const forgedRow = buildClaimsCurationView({}, {
     research_source: completeResearchSource,
     claim_source: completeClaimSource,
     claims: [{ ...claim(44), claim_source: laterClaimSource }],
@@ -511,7 +375,7 @@ test('Atlas requires one combined claim snapshot across envelopes and every visi
     producer_claims_total: 2,
     producer_claims_omitted: 1,
   }
-  const contradictoryDiagnostics = buildResearchAtlasView({}, {
+  const contradictoryDiagnostics = buildClaimsCurationView({}, {
     research_source: producerPartial,
     claim_source: completeClaimSource,
     claims: [{ ...claim(50), research_source: producerPartial }],
@@ -521,10 +385,10 @@ test('Atlas requires one combined claim snapshot across envelopes and every visi
   assert.equal(contradictoryDiagnostics.claims[0].epistemic, 'supported')
 })
 
-test('Atlas never accepts a legacy research receipt as combined claim authority', () => {
+test('the ledger never accepts a legacy research receipt as combined claim authority', () => {
   const legacyRow = { ...claim(48), research_source: legacyCompleteResearchSource }
   delete legacyRow.claim_source
-  const view = buildResearchAtlasView({}, {
+  const view = buildClaimsCurationView({}, {
     research_source: legacyCompleteResearchSource,
     claims: [legacyRow],
   }, {})
@@ -538,17 +402,17 @@ test('Atlas never accepts a legacy research receipt as combined claim authority'
     { ...completeClaimSource, lessons: { ...completeReadSegment, invalid_rows: 1 } },
     { ...completeClaimSource, receipt_known: false },
   ]) {
-    assert.equal(buildResearchAtlasView({}, { claim_source: receipt }, {}).claimSource.status,
+    assert.equal(buildClaimsCurationView({}, { claim_source: receipt }, {}).claimSource.status,
       'unknown')
   }
 })
 
-test('Atlas preserves bounded structured contradictions and cannot render them support-only', () => {
+test('the ledger preserves bounded structured contradictions and cannot render them support-only', () => {
   const contradicts = Array.from(
-    { length: ATLAS_RENDER_LIMITS.evidence + 3 },
+    { length: LEDGER_RENDER_LIMITS.evidence + 3 },
     (_, index) => `opposite claim ${index}\n${'x'.repeat(500)}`,
   )
-  const view = buildResearchAtlasView({}, { claims: [
+  const view = buildClaimsCurationView({}, { claims: [
     {
       ...claim(8), epistemic: 'mixed', n_support: 1, support: ['run-8:node-1'],
       n_oppose: 0, oppose: [], contradicts,
@@ -561,13 +425,13 @@ test('Atlas preserves bounded structured contradictions and cannot render them s
 
   assert.equal(view.claims[0].epistemic, 'mixed')
   assert.equal(view.claims[0].nContradicts, contradicts.length)
-  assert.equal(view.claims[0].contradicts.length, ATLAS_RENDER_LIMITS.evidence)
+  assert.equal(view.claims[0].contradicts.length, LEDGER_RENDER_LIMITS.evidence)
   assert.ok(view.claims[0].contradicts.every(value => value.length <= 300 && !value.includes('\n')))
   assert.equal(view.claims[1].epistemic, 'mixed', 'explicit structured mixed state must survive')
 })
 
-test('Atlas requires support before structured contradictions become mixed evidence', () => {
-  const view = buildResearchAtlasView({}, { claims: [{
+test('the ledger requires support before structured contradictions become mixed evidence', () => {
+  const view = buildClaimsCurationView({}, { claims: [{
     ...claim(10), epistemic: 'mixed', n_support: 0, support: [],
     n_oppose: 0, oppose: [], contradicts: ['opposite assertion'],
   }] }, {})
@@ -577,14 +441,14 @@ test('Atlas requires support before structured contradictions become mixed evide
   assert.equal(view.claims[0].epistemic, 'inconclusive')
 })
 
-test('Atlas preserves decision freshness and warns only on stale or unknown governed decisions', async () => {
+test('the ledger preserves decision freshness and warns only on stale or unknown governed decisions', async () => {
   const rows = [
     { ...claim(20), maturity: 'operator-ratified', decision_fresh: false },
     { ...claim(21), maturity: 'operator-pinned' },
     { ...claim(22), maturity: 'operator-rejected', decision_fresh: true },
     { ...claim(23), maturity: 'machine-proposed' },
   ]
-  const view = buildResearchAtlasView({}, { claims: rows }, {})
+  const view = buildClaimsCurationView({}, { claims: rows }, {})
   assert.deepEqual(view.claims.map(row => row.decisionFresh), [false, null, true, null])
 
   const vite = await createServer({
@@ -592,7 +456,7 @@ test('Atlas preserves decision freshness and warns only on stale or unknown gove
     server: { middlewareMode: true },
   })
   try {
-    const { ClaimCard } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const { ClaimCard } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
     const markup = view.claims.map(row => renderToStaticMarkup(
       React.createElement(ClaimCard, { claim: row }),
     ))
@@ -605,40 +469,28 @@ test('Atlas preserves decision freshness and warns only on stale or unknown gove
   }
 })
 
-test('Atlas projection applies hard caps before React receives portfolio collections', () => {
-  const concepts = Array.from({ length: ATLAS_RENDER_LIMITS.concepts + 3 }, (_, index) => ({
-    concept: `concept-${index}`,
-    n_runs: 1,
-    runs: Array.from({ length: ATLAS_RENDER_LIMITS.conceptRuns + 2 }, (__, run) => ({
-      run_id: `run-${index}-${run}`, direction: 'min', metric: run,
-    })),
-  }))
-  const claims = Array.from({ length: ATLAS_RENDER_LIMITS.claims + 4 }, (_, index) => ({
+test('the ledger projection applies hard caps before React receives portfolio collections', () => {
+  const claims = Array.from({ length: LEDGER_RENDER_LIMITS.claims + 4 }, (_, index) => ({
     ...claim(index),
-    support: Array.from({ length: ATLAS_RENDER_LIMITS.evidence + 5 }, (__, ref) => `run-${index}:node-${ref}`),
+    support: Array.from({ length: LEDGER_RENDER_LIMITS.evidence + 5 }, (__, ref) => `run-${index}:node-${ref}`),
   }))
   const contradictions = Array.from(
-    { length: ATLAS_RENDER_LIMITS.contradictions + 2 }, (_, index) => claim(index))
-  const entries = Array.from({ length: ATLAS_RENDER_LIMITS.curation + 7 }, (_, index) => ({
+    { length: LEDGER_RENDER_LIMITS.contradictions + 2 }, (_, index) => claim(index))
+  const entries = Array.from({ length: LEDGER_RENDER_LIMITS.curation + 7 }, (_, index) => ({
     run_id: `run-${index}`, outcome: 'empty', proposals: {}, receipt: {},
   }))
-  const view = buildResearchAtlasView({ explored: concepts, contradictions,
-    thin_coverage: concepts.map(row => row.concept) }, { claims }, { entries })
+  const view = buildClaimsCurationView({ contradictions }, { claims }, { entries })
 
-  assert.equal(view.concepts.length, ATLAS_RENDER_LIMITS.concepts)
-  assert.equal(view.concepts[0].runs.length, ATLAS_RENDER_LIMITS.conceptRuns)
-  assert.equal(view.claims.length, ATLAS_RENDER_LIMITS.claims)
-  assert.equal(view.claims[0].support.length, ATLAS_RENDER_LIMITS.evidence)
-  assert.equal(view.contradictions.length, ATLAS_RENDER_LIMITS.contradictions)
-  assert.equal(view.curation.length, ATLAS_RENDER_LIMITS.curation)
-  assert.equal(view.hiddenConcepts, 3)
-  assert.equal(view.hiddenThin, 3)
+  assert.equal(view.claims.length, LEDGER_RENDER_LIMITS.claims)
+  assert.equal(view.claims[0].support.length, LEDGER_RENDER_LIMITS.evidence)
+  assert.equal(view.contradictions.length, LEDGER_RENDER_LIMITS.contradictions)
+  assert.equal(view.curation.length, LEDGER_RENDER_LIMITS.curation)
   assert.equal(view.hiddenContradictions, 2)
   assert.equal(view.hiddenClaims, 4)
   assert.equal(view.hiddenCuration, 7)
 })
 
-test('Atlas source-revision touches only the bounded visible slice of a huge raw ledger', () => {
+test('a source revision touches only the bounded visible slice of a huge raw ledger', () => {
   let indexedReads = 0
   const entries = new Proxy(new Array(200000), {
     get(target, property, receiver) {
@@ -650,13 +502,13 @@ test('Atlas source-revision touches only the bounded visible slice of a huge raw
     },
   })
   const huge = { conceptCuration: { entries } }
-  const statuses = reconcileAtlasSourceStatuses({}, huge, 'now')
+  const statuses = reconcileLedgerSourceStatuses({}, huge, 'now')
   assert.equal(statuses.conceptCuration.state, 'current')
   assert.equal(statuses.conceptCuration.revision, '200000')
-  assert.ok(indexedReads <= ATLAS_RENDER_LIMITS.curation)
+  assert.ok(indexedReads <= LEDGER_RENDER_LIMITS.curation)
 })
 
-test('Atlas source is projected to a bounded allowlist before React state', () => {
+test('every source is projected to a bounded allowlist before React state', () => {
   let evidenceReads = 0
   const support = new Proxy(new Array(200000), {
     has(target, property) {
@@ -678,20 +530,20 @@ test('Atlas source is projected to a bounded allowlist before React state', () =
     n: 1, revision: 4,
     debug_blob: { payload: 'x'.repeat(2_000_000) },
   }
-  assert.equal(isValidAtlasSourceEnvelope('claims', raw), true)
-  const projected = projectResearchAtlasSource('claims', raw)
+  assert.equal(isValidLedgerSourceEnvelope('claims', raw), true)
+  const projected = projectLedgerSource('claims', raw)
 
   assert.equal(projected.claims.length, 1)
-  assert.equal(projected.claims[0].support.length, ATLAS_RENDER_LIMITS.evidence)
+  assert.equal(projected.claims[0].support.length, LEDGER_RENDER_LIMITS.evidence)
   assert.ok(projected.claims[0].support.every(value => value.length <= 500 && !value.includes('\n')))
   assert.equal(projected.claims[0].statement.length, 500)
   assert.equal(Object.hasOwn(projected, 'debug_blob'), false)
   assert.equal(Object.hasOwn(projected.claims[0], 'debug_blob'), false)
-  assert.ok(evidenceReads <= ATLAS_RENDER_LIMITS.evidence)
+  assert.ok(evidenceReads <= LEDGER_RENDER_LIMITS.evidence)
 
-  assert.equal(isValidAtlasSourceEnvelope('claims', {
+  assert.equal(isValidLedgerSourceEnvelope('claims', {
     portfolio_id: PORTFOLIO_ID,
-    claims: new Array(ATLAS_RENDER_LIMITS.claims + 1).fill({}),
+    claims: new Array(LEDGER_RENDER_LIMITS.claims + 1).fill({}),
   }), false, 'an oversized top-level page is rejected before projection/state')
 })
 
@@ -711,7 +563,7 @@ test('concept and claim steward preview keeps each ledger newest-first without i
     ['concept', 'concept-new'],
     ['claim', 'claim-newest'],
   ])
-  const view = buildResearchAtlasView({}, {}, merged)
+  const view = buildClaimsCurationView({}, {}, merged)
   assert.deepEqual(view.curation.map(entry => entry.kind), ['concept', 'claim'])
   assert.deepEqual(view.curation.map(entry => entry.outcome), ['proposed', 'proposed'])
 })
@@ -724,30 +576,39 @@ test('a partial refresh replaces successful slices and preserves last-good faile
     claimCuration: { entries: [{ run_id: 'kept-claim-log' }] },
   }
   const freshClaims = { claims: [claim(2)] }
-  const merged = mergeResearchAtlasPayload(previous, { claims: freshClaims })
+  const merged = mergeLedgerPayload(previous, { claims: freshClaims })
   assert.equal(merged.atlas, previous.atlas)
   assert.equal(merged.claims, freshClaims)
   assert.equal(merged.conceptCuration, previous.conceptCuration)
   assert.equal(merged.claimCuration, previous.claimCuration)
 })
 
-test('malformed fulfilled Atlas envelopes are rejected and retain last-good source data', () => {
-  assert.equal(isValidAtlasSourceEnvelope('claims', {}), false)
-  assert.equal(isValidAtlasSourceEnvelope('claims', { claims: [] }), false)
-  assert.equal(isValidAtlasSourceEnvelope('claims', {
+test('malformed fulfilled envelopes are rejected and retain last-good source data', () => {
+  assert.equal(isValidLedgerSourceEnvelope('claims', {}), false)
+  assert.equal(isValidLedgerSourceEnvelope('claims', { claims: [] }), false)
+  assert.equal(isValidLedgerSourceEnvelope('claims', {
     portfolio_id: PORTFOLIO_ID, claims: [],
   }), true)
-  assert.equal(isValidAtlasSourceEnvelope('atlas', {
+  assert.equal(isValidLedgerSourceEnvelope('atlas', {
     portfolio_id: PORTFOLIO_ID,
     explored: [], thin_coverage: [], contradictions: [],
-  }), true)
-  assert.equal(isValidAtlasSourceEnvelope('conceptCuration', { entries: [] }), false)
+  }), true, 'the server still SENDS the concept sections; carrying them is not a defect')
+  assert.equal(isValidLedgerSourceEnvelope('atlas', {
+    portfolio_id: PORTFOLIO_ID, contradictions: [],
+  }), true, 'and it is fenced only on the section it renders')
+  assert.equal(isValidLedgerSourceEnvelope('atlas', {
+    portfolio_id: PORTFOLIO_ID, explored: [], thin_coverage: [],
+  }), false, 'an envelope without the mixed-evidence rows is not usable here')
+  assert.equal(isValidLedgerSourceEnvelope('atlas', {
+    portfolio_id: PORTFOLIO_ID, contradictions: new Array(25).fill({}),
+  }), false, 'more rows than this client asked for is a torn or hostile response')
+  assert.equal(isValidLedgerSourceEnvelope('conceptCuration', { entries: [] }), false)
 
   const previousPayload = { claims: { revision: 7, claims: [claim(7)] } }
-  const previousStates = reconcileAtlasSourceStatuses({}, previousPayload, 'before')
-  const successful = isValidAtlasSourceEnvelope('claims', {}) ? { claims: {} } : {}
-  const merged = mergeResearchAtlasPayload(previousPayload, successful)
-  const states = reconcileAtlasSourceStatuses(previousStates, successful, 'after')
+  const previousStates = reconcileLedgerSourceStatuses({}, previousPayload, 'before')
+  const successful = isValidLedgerSourceEnvelope('claims', {}) ? { claims: {} } : {}
+  const merged = mergeLedgerPayload(previousPayload, successful)
+  const states = reconcileLedgerSourceStatuses(previousStates, successful, 'after')
   assert.equal(merged.claims, previousPayload.claims)
   assert.equal(states.claims.state, 'retained-stale')
   assert.equal(states.claims.loadedAt, 'before')
@@ -759,9 +620,9 @@ test('curation source health is atomic, bounded, and rejects legacy envelopes', 
     portfolio_id: PORTFOLIO_ID,
     v: 1, status: 'complete', complete: true, entries: [entry], n: 1, limit: 20,
   }
-  assert.equal(isValidAtlasSourceEnvelope('conceptCuration', healthy), true)
-  assert.equal(isValidAtlasSourceEnvelope('claimCuration', { entries: [entry] }), false)
-  assert.equal(isValidAtlasSourceEnvelope('claimCuration', {
+  assert.equal(isValidLedgerSourceEnvelope('conceptCuration', healthy), true)
+  assert.equal(isValidLedgerSourceEnvelope('claimCuration', { entries: [entry] }), false)
+  assert.equal(isValidLedgerSourceEnvelope('claimCuration', {
     entries: [entry], n: 5, limit: 20, legacy_extra: true,
   }), false)
 
@@ -781,16 +642,16 @@ test('curation source health is atomic, bounded, and rejects legacy envelopes', 
     { entries: [entry], n: 0 },
     { entries: [entry], limit: '20' },
   ]) {
-    assert.equal(isValidAtlasSourceEnvelope('conceptCuration', envelope), false)
+    assert.equal(isValidLedgerSourceEnvelope('conceptCuration', envelope), false)
   }
 
   const previous = { conceptCuration: healthy }
   const malformed = { ...healthy, complete: false }
-  const successful = isValidAtlasSourceEnvelope('conceptCuration', malformed)
+  const successful = isValidLedgerSourceEnvelope('conceptCuration', malformed)
     ? { conceptCuration: malformed } : {}
-  const merged = mergeResearchAtlasPayload(previous, successful)
-  const before = reconcileAtlasSourceStatuses({}, previous, 'before')
-  const after = reconcileAtlasSourceStatuses(before, successful, 'after', ['conceptCuration'])
+  const merged = mergeLedgerPayload(previous, successful)
+  const before = reconcileLedgerSourceStatuses({}, previous, 'before')
+  const after = reconcileLedgerSourceStatuses(before, successful, 'after', ['conceptCuration'])
   assert.equal(merged.conceptCuration, healthy)
   assert.equal(after.conceptCuration.state, 'retained-stale')
   assert.equal(after.conceptCuration.loadedAt, 'before')
@@ -805,20 +666,20 @@ test('portfolio identity prevents partial mixing and permits an atomic full-refr
     portfolio_id: REPLACEMENT_PORTFOLIO_ID, claims: [claim(2)],
   }
 
-  const partial = mergeResearchAtlasPayload(previous, { claims: replacementClaims })
+  const partial = mergeLedgerPayload(previous, { claims: replacementClaims })
   assert.equal(partial.claims, previous.claims)
   assert.equal(partial.atlas, previous.atlas)
-  assert.equal(researchAtlasPayloadPortfolioId(partial), PORTFOLIO_ID)
+  assert.equal(ledgerPayloadPortfolioId(partial), PORTFOLIO_ID)
 
-  const switched = mergeResearchAtlasPayload(
+  const switched = mergeLedgerPayload(
     previous, { claims: replacementClaims }, { allowPortfolioSwitch: true })
   assert.deepEqual(switched.atlas, {})
   assert.equal(switched.claims, replacementClaims)
-  assert.equal(researchAtlasPayloadPortfolioId(switched), REPLACEMENT_PORTFOLIO_ID)
+  assert.equal(ledgerPayloadPortfolioId(switched), REPLACEMENT_PORTFOLIO_ID)
 })
 
-test('Atlas source provenance distinguishes current, retained-stale, and failed slices', () => {
-  const first = reconcileAtlasSourceStatuses({}, {
+test('source provenance distinguishes current, retained-stale, and failed slices', () => {
+  const first = reconcileLedgerSourceStatuses({}, {
     claims: { revision: 7, claims: [claim(1)] },
   }, '2026-07-16T03:00:00Z')
   assert.deepEqual(Object.fromEntries(Object.entries(first).map(([key, value]) => [key, value.state])), {
@@ -827,7 +688,7 @@ test('Atlas source provenance distinguishes current, retained-stale, and failed 
   assert.equal(first.claims.loadedAt, '2026-07-16T03:00:00Z')
   assert.equal(first.claims.revision, '7')
 
-  const second = reconcileAtlasSourceStatuses(first, {
+  const second = reconcileLedgerSourceStatuses(first, {
     atlas: { revisions: { concept_governance: 4, claims: 9 } },
   }, '2026-07-16T04:00:00Z')
   assert.deepEqual(Object.fromEntries(Object.entries(second).map(([key, value]) => [key, value.state])), {
@@ -837,12 +698,12 @@ test('Atlas source provenance distinguishes current, retained-stale, and failed 
   assert.equal(second.claims.revision, first.claims.revision)
   assert.equal(second.atlas.revision, 'concept 4 · claims 9')
 
-  const failedRefresh = reconcileAtlasSourceStatuses(second, {}, '2026-07-16T05:00:00Z')
+  const failedRefresh = reconcileLedgerSourceStatuses(second, {}, '2026-07-16T05:00:00Z')
   assert.deepEqual(Object.fromEntries(Object.entries(failedRefresh).map(([key, value]) => [key, value.state])), {
     atlas: 'retained-stale', claims: 'retained-stale', conceptCuration: 'failed', claimCuration: 'failed',
   })
 
-  const allCurrent = reconcileAtlasSourceStatuses(failedRefresh, {
+  const allCurrent = reconcileLedgerSourceStatuses(failedRefresh, {
     atlas: { revisions: { concept_governance: 5, claims: 10 } },
     claims: { revision: 8 },
     conceptCuration: { entries: [{ revision: 11 }, { revision: 12 }] },
@@ -854,7 +715,7 @@ test('Atlas source provenance distinguishes current, retained-stale, and failed 
   assert.equal(allCurrent.conceptCuration.revision, '12')
   assert.equal(allCurrent.claimCuration.revision, '13')
 
-  const claimsOnly = reconcileAtlasSourceStatuses(allCurrent, {
+  const claimsOnly = reconcileLedgerSourceStatuses(allCurrent, {
     claims: { revision: 9 },
   }, '2026-07-16T07:00:00Z')
   assert.equal(claimsOnly.claims.state, 'current')
@@ -865,14 +726,14 @@ test('Atlas source provenance distinguishes current, retained-stale, and failed 
   }
 })
 
-test('a source-local retry changes only the attempted Atlas slice', () => {
-  const before = reconcileAtlasSourceStatuses({}, {
+test('a source-local retry changes only the attempted slice', () => {
+  const before = reconcileLedgerSourceStatuses({}, {
     atlas: { explored: [], thin_coverage: [], contradictions: [] },
     claims: { claims: [] },
     conceptCuration: { entries: [] },
     claimCuration: { entries: [{ revision: 2 }] },
   }, 'before')
-  const failed = reconcileAtlasSourceStatuses(before, {}, 'failed', ['claimCuration'])
+  const failed = reconcileLedgerSourceStatuses(before, {}, 'failed', ['claimCuration'])
 
   assert.equal(failed.claimCuration.state, 'retained-stale')
   assert.equal(failed.claimCuration.loadedAt, 'before')
@@ -880,7 +741,7 @@ test('a source-local retry changes only the attempted Atlas slice', () => {
     assert.deepEqual(failed[key], before[key], `${key} was not attempted and must remain current`)
   }
 
-  const recovered = reconcileAtlasSourceStatuses(failed, {
+  const recovered = reconcileLedgerSourceStatuses(failed, {
     claimCuration: { entries: [{ revision: 3 }] },
   }, 'after', ['claimCuration'])
   assert.equal(recovered.claimCuration.state, 'current')
@@ -888,9 +749,9 @@ test('a source-local retry changes only the attempted Atlas slice', () => {
   assert.equal(recovered.claimCuration.revision, '3')
 })
 
-test('partial Atlas UI never presents an unavailable source as an empty current fact', async () => {
+test('a partial UI never presents an unavailable source as an empty current fact', async () => {
   const [atlas, deadline] = await Promise.all([
-    source('ResearchAtlas.jsx'), source('requestDeadline.js'),
+    source('ClaimsCuration.jsx'), source('requestDeadline.js'),
   ])
 
   assert.match(atlas, /const id = \+\+requestId\.current[\s\S]*requestedSources\.forEach[\s\S]*settle\(key/)
@@ -901,11 +762,11 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
     'each source needs a bounded liveness escape')
   assert.match(atlas, /loaded \? value : 'not loaded'/,
     'summary values from a never-loaded slice need an explicit unavailable state')
-  assert.match(atlas, /view\.empty && <AtlasEmptyState/,
+  assert.match(atlas, /view\.empty && <LedgerEmptyState/,
     'empty and partial-empty projections need compact source-level readiness')
-  assert.match(atlas, /!view\.empty && <div className="atlas-grid">/,
-    'empty projections must not render four oversized empty panels')
-  assert.match(atlas, /atlasLoaded && <>[\s\S]*No retained concepts returned\./)
+  assert.match(atlas, /!view\.empty && <div className="ledger-grid">/,
+    'empty projections must not render oversized empty panels')
+  assert.match(atlas, /mixedLoaded && \(view\.contradictions\.length > 0[\s\S]*None returned\./)
   assert.match(atlas, /claimsLoaded && \(view\.claims\.length > 0[\s\S]*No claims returned\./)
   assert.match(atlas, /curationCurrent[\s\S]*incomplete merge/)
   assert.doesNotMatch(atlas, /shown · incomplete merge/,
@@ -926,7 +787,7 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
   assert.match(atlas, /\[\['conceptCuration', 'Concept'\], \['claimCuration', 'Claim'\]\][\s\S]*sourceKey=\{sourceKey\}[\s\S]*retry=\{retry\}/)
 })
 
-test('Atlas empty state distinguishes evidence runs and each independent source', async () => {
+test('the ledger empty state distinguishes evidence runs and each independent source', async () => {
   const vite = await createServer({
     root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
     server: { middlewareMode: true },
@@ -935,86 +796,91 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
   const failed = { state: 'failed', loadedAt: '', revision: '' }
   const stale = { state: 'retained-stale', loadedAt: '2026-07-16T09:00:00Z', revision: '1' }
   try {
-    const { AtlasEmptyState, EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
-    const allCurrent = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+    const { LedgerEmptyState, EvidenceSourceNotice } = await vite.ssrLoadModule('/src/ClaimsCuration.jsx')
+    const allCurrent = renderToStaticMarkup(React.createElement(LedgerEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'complete' }, claimSource: { status: 'complete' },
+      }, claimSource: { status: 'complete' },
       pending: [], retry() {}, busy: false,
     }))
     const currentDom = new JSDOM(allCurrent)
     assert.match(currentDom.window.document.querySelector('h2').textContent, /No cross-run evidence/)
     assert.match(currentDom.window.document.body.textContent,
       /runs may still exist/)
-    assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source').length, 4)
-    assert.deepEqual([...currentDom.window.document.querySelectorAll('.atlas-readiness-state')]
+    assert.equal(currentDom.window.document.querySelectorAll('.ledger-empty-source').length, 4)
+    assert.deepEqual([...currentDom.window.document.querySelectorAll('.ledger-readiness-state')]
       .map(node => node.textContent), ['complete', 'complete', 'complete', 'complete'])
-    assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source .btn').length, 0)
+    assert.equal(currentDom.window.document.querySelectorAll('.ledger-empty-source .btn').length, 0)
     // A genuinely empty portfolio offers no action: every source loaded, so neither a settings trip
     // nor a retry would change anything, and offering one would read as "something is broken".
     assert.equal(currentDom.window.document.querySelector('a[href="#/settings"]'), null)
-    assert.equal(currentDom.window.document.querySelector('.atlas-empty-actions'), null)
+    assert.equal(currentDom.window.document.querySelector('.ledger-empty-actions'), null)
 
     // ...but when the evidence sources refused because memory is not configured, the one action
     // that CAN fix it is offered, and only then.
-    const unconfigured = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+    const unconfigured = renderToStaticMarkup(React.createElement(LedgerEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'complete' }, claimSource: { status: 'complete' },
+      }, claimSource: { status: 'complete' },
       pending: [], retry() {}, busy: false, memorySettingsNeeded: true,
     }))
     const unconfiguredDom = new JSDOM(unconfigured)
-    assert.equal(unconfiguredDom.window.document.querySelector('.atlas-empty-actions a[href="#/settings"]')
+    assert.equal(unconfiguredDom.window.document.querySelector('.ledger-empty-actions a[href="#/settings"]')
       ?.textContent, 'Memory settings')
 
-    const bounded = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+    const bounded = renderToStaticMarkup(React.createElement(LedgerEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, conceptSource: { status: 'partial' }, claimSource: { status: 'complete' },
+      }, claimSource: { status: 'partial' },
       pending: [], retry() {}, busy: false,
     }))
     const boundedDom = new JSDOM(bounded)
     assert.match(boundedDom.window.document.querySelector('h2').textContent,
       /No retained evidence/)
     assert.match(boundedDom.window.document.body.textContent, /do not prove absence/)
-    assert.deepEqual([...boundedDom.window.document.querySelectorAll('.atlas-readiness-state')]
-      .map(node => node.textContent), ['partial', 'complete', 'complete', 'complete'])
+    // Both evidence slices render claim rows read under ONE combined receipt, so both report it.
+    assert.deepEqual([...boundedDom.window.document.querySelectorAll('.ledger-readiness-state')]
+      .map(node => node.textContent), ['partial', 'partial', 'complete', 'complete'])
 
     const notice = renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
-      concept: { status: 'partial', counts: [2, 1, 44, 8] },
-      claims: { status: 'complete' },
+      claims: { status: 'partial' },
     }))
     const noticeDom = new JSDOM(notice)
     assert.ok(noticeDom.window.document.querySelector('[role="status"]'))
     assert.match(noticeDom.window.document.body.textContent,
-      /Concepts partial.*2\/1\/44\/8.*Absence and one-sided claim state withheld/is)
+      /Claims partial.*Absence and one-sided claim state withheld/is)
+    // A COMPLETE claim source prints nothing. It used to be able to fire on a partial concept-capsule
+    // read — a store this screen no longer touches — which read as a degraded claim ledger.
+    assert.equal(renderToStaticMarkup(React.createElement(EvidenceSourceNotice, {
+      claims: { status: 'complete' },
+    })), '')
 
-    const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+    const partial = renderToStaticMarkup(React.createElement(LedgerEmptyState, {
       sourceStates: {
         atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
-      }, conceptSource: { status: 'complete' }, claimSource: { status: 'unknown' },
+      }, claimSource: { status: 'unknown' },
       pending: ['conceptCuration'],
       retry() {}, busy: false,
     }))
     const partialDom = new JSDOM(partial)
     assert.match(partialDom.window.document.querySelector('h2').textContent,
-      /Atlas evidence unavailable/)
-    assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-readiness-state')]
-      .map(node => node.textContent), ['complete', 'unavailable', 'loading', 'stale'])
+      /Claim evidence unavailable/)
+    assert.deepEqual([...partialDom.window.document.querySelectorAll('.ledger-readiness-state')]
+      .map(node => node.textContent), ['unknown', 'unavailable', 'loading', 'stale'])
     // Every non-current source keeps a retry control, INCLUDING the one currently reloading. The
     // control used to be removed while loading, which reflowed the row out from under the pointer
     // and blurred it for a keyboard user; it is now held in place and gated by `busy` instead.
-    assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-empty-source .btn')]
+    assert.deepEqual([...partialDom.window.document.querySelectorAll('.ledger-empty-source .btn')]
       .map(node => node.getAttribute('aria-label')),
     ['Retry Claim records', 'Retry Concept steward log', 'Retry Claim steward log'])
-    assert.ok(partialDom.window.document.querySelector('.atlas-empty-source-loading .btn'),
+    assert.ok(partialDom.window.document.querySelector('.ledger-empty-source-loading .btn'),
       'a reloading source keeps its control in place rather than reflowing the row')
   } finally {
     await vite.close()
   }
 })
 
-test('mounted Atlas settles sources progressively and fences timed-out or superseded reads', async () => {
+test('the mounted ledger settles sources progressively and fences timed-out or superseded reads', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,
   })
@@ -1050,15 +916,18 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     button.click()
     await Promise.resolve(); await Promise.resolve()
   })
-  const atlasEnvelope = concept => ({
+  // The atlas slice contributes the MIXED-EVIDENCE records now; its concept sections are sent and
+  // ignored, which is exactly what this envelope models.
+  const atlasEnvelope = statement => ({
     portfolio_id: PORTFOLIO_ID,
-    explored: [{ concept, n_runs: 1, runs: [] }], thin_coverage: [], contradictions: [],
+    explored: [{ concept: 'ignored', n_runs: 1, runs: [] }], thin_coverage: [],
+    contradictions: [{ ...claim(71), statement }],
   })
   const claimsEnvelope = statement => ({
     portfolio_id: PORTFOLIO_ID, claims: [{ ...claim(70), statement }],
   })
   const requestFor = (batch, path) => batch.find(item => item.url.includes(path))
-  const sourceNote = label => [...document.querySelectorAll('.atlas-source-note')]
+  const sourceNote = label => [...document.querySelectorAll('.ledger-source-note')]
     .find(node => node.textContent.includes(label))
   try {
     for (const [key, value] of Object.entries(installed)) {
@@ -1068,8 +937,8 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
       root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
       server: { middlewareMode: true },
     })
-    const [{ createRoot }, { default: ResearchAtlas }] = await Promise.all([
-      import('react-dom/client'), vite.ssrLoadModule('/src/ResearchAtlas.jsx'),
+    const [{ createRoot }, { default: ClaimsCuration }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ClaimsCuration.jsx'),
     ])
     globalThis.setTimeout = (callback, delay, ...args) => {
       if (delay !== 15_000) return realSetTimeout(callback, delay, ...args)
@@ -1083,16 +952,16 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     }
     root = createRoot(document.getElementById('root'))
     await act(async () => {
-      root.render(React.createElement(ResearchAtlas, { onBack() {} }))
+      root.render(React.createElement(ClaimsCuration, { onBack() {} }))
       await Promise.resolve()
     })
     const initial = requests.slice()
     assert.equal(initial.length, 4)
-    await reply(requestFor(initial, '/atlas?'), atlasEnvelope('progressive concept'))
+    await reply(requestFor(initial, '/atlas?'), atlasEnvelope('progressive mixed record'))
     await reply(requestFor(initial, '/claims?'), claimsEnvelope('progressive claim'))
     await reply(requestFor(initial, '/curation-log?'), curationEnvelope())
 
-    assert.match(document.body.textContent, /progressive concept.*progressive claim/s,
+    assert.match(document.body.textContent, /progressive mixed record.*progressive claim/s,
       'settled slices render while the fourth request remains unresolved')
     assert.equal(document.querySelector('main').getAttribute('aria-busy'), 'true')
     assert.match(sourceNote('Claim steward log').textContent, /loading/)
@@ -1108,7 +977,7 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
       'a timed-out slice must release its exact retry')
 
     const refreshStart = requests.length
-    await click(document.querySelector('[aria-label="Refresh all Research Atlas sources"]'))
+    await click(document.querySelector('[aria-label="Refresh all claim and curation sources"]'))
     const refreshBatch = requests.slice(refreshStart)
     assert.equal(refreshBatch.length, 4)
     await reply(requestFor(refreshBatch, '/atlas?'), { detail: 'offline' }, 503)
@@ -1117,8 +986,8 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     await reply(requestFor(refreshBatch, '/claim-curation-log?'), { detail: 'offline' }, 503)
     assert.match(document.body.textContent,
       /Refresh incomplete; showing stale last-good data; some sources unavailable\./)
-    assert.match(document.body.textContent, /progressive concept/)
-    assert.match(sourceNote('Concept projection').textContent, /stale/)
+    assert.match(document.body.textContent, /progressive mixed record/)
+    assert.match(sourceNote('Mixed claims').textContent, /stale/)
 
     const localStart = requests.length
     retryButton = sourceNote('Claim steward log').querySelector('button')
@@ -1133,7 +1002,7 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     assert.equal(retryButton.getAttribute('aria-disabled'), 'true')
     assert.equal(retryButton.getAttribute('aria-busy'), 'true')
     assert.equal(retryButton.getAttribute('aria-label'), 'Retrying Claim steward log')
-    assert.equal(sourceNote('Concept projection').querySelector('button').disabled, true,
+    assert.equal(sourceNote('Mixed claims').querySelector('button').disabled, true,
       'every OTHER retry is hard-disabled while a source request is active')
     await reply(localBatch[0], curationEnvelope([{ run_id: 'claim-current', outcome: 'empty' }]))
     assert.match(document.body.textContent, /claim steward.*empty/is)
@@ -1144,24 +1013,26 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
       'a response arriving after its timeout cannot overwrite the successful retry')
 
     const supersededStart = requests.length
-    await click(sourceNote('Concept projection').querySelector('button'))
+    // The mixed-evidence watermark is the atlas slice's ONLY retry now (the concepts panel that used
+    // to own it is gone), so a failed mixed read stays recoverable outside the empty state.
+    await click(sourceNote('Mixed claims').querySelector('button'))
     const superseded = requests[supersededStart]
     assert.match(superseded.url, /\/api\/cross-run\/atlas\?limit=24$/)
     const replacementStart = requests.length
     await act(async () => {
-      root.render(React.createElement(ResearchAtlas, { key: 'replacement', onBack() {} }))
+      root.render(React.createElement(ClaimsCuration, { key: 'replacement', onBack() {} }))
       await Promise.resolve(); await Promise.resolve()
     })
     assert.equal(superseded.options.signal.aborted, true)
     const replacement = requests.slice(replacementStart)
     assert.equal(replacement.length, 4)
-    await reply(requestFor(replacement, '/atlas?'), atlasEnvelope('replacement concept'))
+    await reply(requestFor(replacement, '/atlas?'), atlasEnvelope('replacement mixed record'))
     await reply(requestFor(replacement, '/claims?'), claimsEnvelope('replacement claim'))
     await reply(requestFor(replacement, '/api/cross-run/curation-log?'), curationEnvelope())
     await reply(requestFor(replacement, '/claim-curation-log?'), curationEnvelope())
-    await reply(superseded, atlasEnvelope('superseded concept'))
-    assert.match(document.body.textContent, /replacement concept/)
-    assert.doesNotMatch(document.body.textContent, /superseded concept/,
+    await reply(superseded, atlasEnvelope('superseded mixed record'))
+    assert.match(document.body.textContent, /replacement mixed record/)
+    assert.doesNotMatch(document.body.textContent, /superseded mixed record/,
       'an aborted late response from a replaced request cannot commit')
   } finally {
     if (root) await act(async () => root.unmount())
@@ -1178,76 +1049,93 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
   }
 })
 
-test('Atlas has a discoverable owner-only route and complete resource states', async () => {
-  const [app, runList, atlas, api, css, globalMenu] = await Promise.all([
-    source('App.jsx'), source('RunList.jsx'), source('ResearchAtlas.jsx'), source('api.js'),
-    source('research-atlas.css'), source('GlobalMenu.jsx'),
+test('Claims & Curation has a discoverable owner-only route and complete resource states', async () => {
+  const [app, runList, ledger, api, css, globalMenu] = await Promise.all([
+    source('App.jsx'), source('RunList.jsx'), source('ClaimsCuration.jsx'), source('api.js'),
+    source('claims-curation.css'), source('GlobalMenu.jsx'),
   ])
   const { GLOBAL_DESTINATIONS } = await import('../src/globalNav.js')
 
-  assert.match(app, /lazy\(\(\) => import\('\.\/ResearchAtlas\.jsx'\)\)/)
-  assert.match(app, /h === '#\/research-atlas'[\s\S]*canonicalHash: '#\/atlas'/)
+  assert.match(app, /lazy\(\(\) => import\('\.\/ClaimsCuration\.jsx'\)\)/)
+  // BOTH former spellings are aliases now, and both canonicalize to the SAME new hash — `#/atlas`
+  // was the canonical form before F7 and is written into operators' bookmarks and into doc links.
+  assert.match(app, /h === '#\/research-atlas' \|\| h === '#\/atlas'[\s\S]*canonicalHash: '#\/claims'/)
+  assert.match(app, /h === '#\/claims'\) return \{ view: 'claims' \}/)
   // The route helpers go through `navigateWithListState`, which preserves the run-list scroll and
   // selection across the round trip; assigning `location.hash` directly was the old spelling and the
-  // assertion below it (the owner gate) never ran once this stopped matching. Atlas, Settings and
-  // the installation surfaces now share ONE departure — the property is unchanged and now holds for
-  // every LoopLab destination rather than only for the two that remembered to opt in.
+  // assertion below it (the owner gate) never ran once this stopped matching. This surface, Settings
+  // and the installation surfaces share ONE departure — the property holds for every LoopLab
+  // destination rather than only for the two that remembered to opt in.
   assert.match(app, /const globalNavigate = useCallback\(\(hash, snapshot\) => \{\s*navigateWithListState\(hash, snapshot, null, 'looplab'\)/,
-    'Atlas must navigate like its sibling owner routes, not by a private mechanism')
+    'the claim ledger must navigate like its sibling owner routes, not by a private mechanism')
   assert.match(app, /history\.replaceState\(history\.state, '', route\.canonicalHash\)/)
-  assert.match(app, /route\.view === 'research-atlas'/)
+  assert.match(app, /route\.view === 'claims'/)
   assert.match(app, /onGlobalNavigate=\{globalNavigate\}/)
-  assert.ok(app.lastIndexOf("route.view === 'research-atlas'") < app.indexOf('<OwnerAuth label={routeLabel}>'),
-    'Atlas content must be wrapped by the owner authentication gate')
+  assert.ok(app.lastIndexOf("route.view === 'claims'") < app.indexOf('<OwnerAuth label={routeLabel}>'),
+    'claim/curation content must be wrapped by the owner authentication gate')
   // Discoverability moved from a loose header button into the LoopLab menu the run list renders.
   // Assert the whole chain — the list mounts the menu, the menu renders the shared destination list,
-  // and that list still contains the canonical Atlas hash — so removing any link fails here.
+  // and that list still contains the canonical hash — so removing any link fails here.
   assert.match(runList, /<GlobalMenu current="list"[\s\S]*onNavigate=\{openGlobal\}/)
   assert.match(globalMenu, /GLOBAL_DESTINATIONS\.map\(entry =>/)
   assert.deepEqual(
-    GLOBAL_DESTINATIONS.filter(entry => entry.key === 'research-atlas')
+    GLOBAL_DESTINATIONS.filter(entry => entry.key === 'claims')
       .map(entry => [entry.hash, entry.label]),
-    [['#/atlas', 'Research Atlas']],
-    'the Atlas must stay a canonical, labelled LoopLab destination')
-  assert.match(atlas, /requestedSources\.forEach/)
-  for (const state of [/Loading Atlas/, /Research Atlas couldn.t load/,
-    /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
-  assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
-  assert.match(atlas, /D8 receipts cover processed rows,[\s\S]*not every run/)
-  assert.match(atlas, /<EvidenceSourceNotice concept=\{view\.conceptSource\} claims=\{view\.claimSource\}/)
-  assert.match(atlas, /Referenced runs/)
-  assert.match(atlas, /Atlas source readiness/)
-  // Keep the implicit list role: role="region" would erase list semantics for assistive technology.
-  assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
-  assert.doesNotMatch(atlas, /<ul[^>]*role="region"/)
-  assert.match(atlas, /aria-label="Bounded mixed-evidence claim records"/)
-  assert.doesNotMatch(atlas, /aria-label="[^"]*[Cc]ontradictory claims"/)
-  assert.match(atlas, /Some portfolio records were ignored\./)
-  assert.match(atlas, /Refresh incomplete; showing stale last-good data/)
-  assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)
-  assert.match(css, /\.atlas-source-loading \{[^}]*color: var\(--working-text\)/)
-  assert.match(css, /\.atlas-source-failed \{[^}]*color: var\(--fail-text\)/)
-  assert.match(atlas, /Concepts seen across runs/)
-  assert.match(atlas, /Observed in one run/)
-  assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Coverage<\/p>|<h3>Thin coverage/)
-  assert.match(atlas, /support-only evidence/)
-  assert.match(atlas, /not a verdict or applicability decision/)
-  assert.match(atlas, /claim grouping ·/)
-  assert.match(atlas, /\['support', claim\.support, claim\.nSupport\]/)
-  assert.match(atlas, /kind === 'contradiction' \? 's' : ' refs'/)
-  assert.doesNotMatch(atlas, /scope ·|>support <b>|>oppose <b>/)
-  assert.match(atlas, /Recent proposals \+ outcomes/)
-  assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Audit trail<\/p>|Concept \+ claim governance/)
-  assert.equal((atlas.match(/<SourceWatermark (?:key=\{sourceKey\} )?sourceKey=/g) || []).length, 4,
+    [['#/claims', 'Claims & Curation']],
+    'the claim ledger must stay a canonical, labelled LoopLab destination')
+  assert.deepEqual(GLOBAL_DESTINATIONS.filter(entry => /atlas/i.test(`${entry.key}${entry.hash}${entry.label}`)), [],
+    'no menu entry may still carry the old name')
+  assert.match(ledger, /requestedSources\.forEach/)
+  for (const state of [/Loading claims and curation/, /Claims & Curation couldn.t load/,
+    /No cross-run evidence/, /Some sources unavailable\./]) assert.match(ledger, state)
+  assert.match(ledger, /Claims &amp; Curation[\s\S]*Experimental · bounded · read-only/)
+  assert.match(ledger, /D8 receipts cover processed rows,[\s\S]*not every run/)
+  assert.match(ledger, /<EvidenceSourceNotice claims=\{view\.claimSource\}/)
+  assert.match(ledger, /Referenced runs/)
+  assert.match(ledger, /Claim and curation source readiness/)
+  assert.doesNotMatch(ledger, /<ul[^>]*role="region"/)
+  assert.match(ledger, /aria-label="Bounded mixed-evidence claim records"/)
+  assert.doesNotMatch(ledger, /aria-label="[^"]*[Cc]ontradictory claims"/)
+  assert.match(ledger, /Some portfolio records were ignored\./)
+  assert.match(ledger, /Refresh incomplete; showing stale last-good data/)
+  assert.match(css, /\.ledger-source-retained-stale \{[^}]*color: var\(--working-text\)/)
+  assert.match(css, /\.ledger-source-loading \{[^}]*color: var\(--working-text\)/)
+  assert.match(css, /\.ledger-source-failed \{[^}]*color: var\(--fail-text\)/)
+  // F7: the concepts section is GONE, not hidden, and what replaced it is a LINK to the view that
+  // outgrew it. Negative pins stay substrings on purpose — what must not come back is the text.
+  for (const gone of [/Concepts seen across runs/, /Observed in one run/, /Bounded explored concepts/,
+    /thin_coverage/, /conceptSource/, /ledger-concepts/, /ledger-thin/, /ledger-runref/]) {
+    assert.doesNotMatch(ledger, gone, 'the weaker concept copy must not return to this surface')
+  }
+  assert.match(ledger, /<a href="#\/concepts">Concepts view<\/a>/,
+    'the section it replaced must leave a way to reach the richer view')
+  assert.match(app, /h === '#\/concepts'\) return \{ view: 'list', listView: 'concepts' \}/,
+    'that link must resolve to the run list opened ON its Concepts view, not to the List tab')
+  assert.match(app, /<RunList key=\{requestedListView \|\| 'runs'\}/,
+    'RunList captures its initial navigation once, so the requested view has to re-key it')
+  assert.match(ledger, /support-only evidence/)
+  assert.match(ledger, /not a verdict or applicability decision/)
+  assert.match(ledger, /claim grouping ·/)
+  assert.match(ledger, /\['support', claim\.support, claim\.nSupport\]/)
+  assert.match(ledger, /kind === 'contradiction' \? 's' : ' refs'/)
+  assert.doesNotMatch(ledger, /scope ·|>support <b>|>oppose <b>/)
+  assert.match(ledger, /Recent proposals \+ outcomes/)
+  assert.equal((ledger.match(/<SourceWatermark (?:key=\{sourceKey\} )?sourceKey=/g) || []).length, 3,
     'every panel must disclose its source; the mapped curation watermark renders twice')
-  assert.match(atlas, /bounded observations, not coverage/)
-  assert.match(atlas, /history, not current governance/)
-  assert.match(atlas, /data-route-main tabIndex=\{-1\}/)
+  // The dropped concepts panel owned the atlas slice's only retry; the mixed-evidence watermark
+  // inherited it. Driven for real by the mounted test, which clicks it and observes the request.
+  assert.match(ledger, /sourceKey="atlas"[\s\S]*?activeRetry=\{busy && request\.key === 'atlas'\}/)
+  assert.doesNotMatch(ledger, /retryable=\{false\}/,
+    'no watermark may opt out of its retry now that no panel doubles up on a source')
+  assert.match(ledger, /history, not current governance/)
+  assert.match(ledger, /data-route-main tabIndex=\{-1\}/)
   assert.match(api, /crossRunRead[\s\S]*cache: 'no-store'/)
   assert.match(api, /cross-run\/claims\?limit=\$\{args\.limit\}&offset=/)
+  // The HTTP contract deliberately did NOT move with the surface.
+  assert.match(api, /cross-run\/atlas\?limit=/)
 })
 
-test('Atlas reads are no-store, abortable, and clamp every paging input', async () => {
+test('cross-run reads are no-store, abortable, and clamp every paging input', async () => {
   const previous = {
     fetch: globalThis.fetch,
     location: globalThis.location,
@@ -1283,32 +1171,33 @@ test('Atlas reads are no-store, abortable, and clamp every paging input', async 
 })
 
 test('empty and malformed envelopes degrade to a stable empty projection', () => {
-  assert.doesNotThrow(() => buildResearchAtlasView(null, { claims: 'not-an-array' }, []))
-  const view = buildResearchAtlasView({
-    explored: [null], thin_coverage: [{}], contradictions: [{}],
+  assert.doesNotThrow(() => buildClaimsCurationView(null, { claims: 'not-an-array' }, []))
+  const view = buildClaimsCurationView({
+    contradictions: [{}],
   }, { claims: [{ statement: { unsafe: true } }] }, { entries: [{}] })
-  assert.deepEqual(view.concepts, [])
-  assert.equal(view.invalidRows.concepts, 1)
-  assert.deepEqual(view.thin, [])
   assert.deepEqual(view.contradictions, [])
   assert.deepEqual(view.claims, [])
   assert.deepEqual(view.curation, [])
-  assert.equal(view.invalidRows.total, 5)
+  assert.equal(view.invalidRows.total, 3)
   assert.equal(view.empty, true)
-  assert.deepEqual(buildResearchAtlasView(null, null, null).totals,
-    { runs: 0, concepts: 0, claims: 0, contested: 0, curation: 0 })
-  assert.equal(buildResearchAtlasView(null, null, null).empty, true)
+  assert.deepEqual(buildClaimsCurationView(null, null, null).totals,
+    { runs: 0, claims: 0, contested: 0, curation: 0 })
+  assert.equal(buildClaimsCurationView(null, null, null).empty, true)
 })
 
-test('thin observations and contested/contradiction records prevent a false empty Atlas', () => {
-  assert.equal(buildResearchAtlasView({ thin_coverage: ['one-run-only'] }, {}, {}).empty, false)
-  assert.equal(buildResearchAtlasView({ n_contested: 2 }, {}, {}).empty, false)
-  assert.equal(buildResearchAtlasView({ contradictions: [claim(1)] }, {}, {}).empty, false)
+test('contested/contradiction and curation records prevent a false empty ledger', () => {
+  assert.equal(buildClaimsCurationView({ n_contested: 2 }, {}, {}).empty, false)
+  assert.equal(buildClaimsCurationView({ contradictions: [claim(1)] }, {}, {}).empty, false)
+  assert.equal(buildClaimsCurationView({}, {}, { n: 3 }, ).empty, false)
+  // A concept-only atlas response is now EMPTY here: this surface renders none of it, and claiming
+  // otherwise would print "showing 0 of 0" panels beside a "not empty" heading.
+  assert.equal(buildClaimsCurationView(
+    { explored: [{ concept: 'one' }], thin_coverage: ['one-run-only'] }, {}, {}).empty, true)
 })
 
 test('curation preview stays bounded to steward outcome counts', async () => {
-  const [atlas, css] = await Promise.all([source('ResearchAtlas.jsx'), source('research-atlas.css')])
+  const [atlas, css] = await Promise.all([source('ClaimsCuration.jsx'), source('claims-curation.css')])
   assert.match(atlas, /<b>\{entry\.kind\} steward<\/b>[\s\S]*entry\.proposals[\s\S]*entry\.applied/)
   assert.doesNotMatch(atlas, /entry\.runId|entry\.at|entry\.revision/)
-  assert.match(css, /\.atlas-curation-list/)
+  assert.match(css, /\.ledger-curation-list/)
 })

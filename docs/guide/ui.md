@@ -387,7 +387,8 @@ for the whole installation no matter which run is open, and every surface behind
 | Destination | Route | What it is |
 |---|---|---|
 | **Runs** | `#/` | Every run: list, map, portfolio comparison, projects |
-| **Research Atlas** | `#/atlas` | Experimental cross-run portfolio evidence (concepts, claims, steward log) |
+| **Claims & Curation** | `#/claims` | Experimental cross-run claim ledger + the paid stewards' proposals and outcomes. Renamed from *Research Atlas* (doc 29 F7), whose concepts section was dropped in favour of Runs → **Concepts**; `#/atlas` and `#/research-atlas` are canonicalized aliases |
+| **Concepts** | `#/concepts` | The run list opened on its **Concepts** view — the cross-run concept map (`is_a` forest, co-occurrence, per-concept detail). Not a separate screen: it is the run list's third representation, given a hash so other surfaces can link to it |
 | **Cross-run memory** | `#/memory` | Lessons, solved-task cases and meta-notes carried *between* runs (`/api/memory`) |
 | **Knowledge & prompts** | `#/knowledge` | The authored prompts / skills / knowledge every run shares (`/api/{kind}`) |
 | **Host & GPU** | `#/gpu` | Live `nvidia-smi` for the machine the server runs on (`/api/gpu`) |
@@ -415,13 +416,14 @@ which is where the old "click the logo to go home" behaviour lives now; one clic
 ## Which graph am I looking at?
 
 LoopLab has three graph surfaces and one separate experimental portfolio summary. They answer different
-questions; the Atlas preview is deliberately **not** another force/DAG graph:
+questions; **Claims & Curation** is deliberately **not** another force/DAG graph — and since doc 29 F7 it
+holds no concepts at all, which is why **Runs → Concepts** below is the only cross-run concept map:
 
 | Surface | What its nodes/regions mean | What it does **not** mean |
 |---|---|---|
 | **Runs → Lineage** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. Labelled **Lineage** because it draws ancestry — which run came from which, inside which folder. Its internal view key is still `map`, which is what saved views and shared links carry. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the lineage topology. |
 | **Runs → Concepts** | The concept tree across the runs the list is currently showing, folded from each run's `concepts` rollup — the same array Lineage draws, so the project folder and every list filter apply unchanged, and an extra scope button narrows to the runs checked for Compare. Ids are `/`-paths, so each row's ancestors are materialized from the id itself and marked `grouping` when no run named them. A node reports the DISTINCT runs at or below it, the experiments tagged with exactly that id, and a best metric **only** where the contributing runs share one task and one objective direction. Above the tree: how many runs in scope carry any tag at all. Below it: an always-present **Untagged** bucket, then **Studied together** — the co-occurrence pairs, an unordered pair of concepts one run was tagged with, weighted by the number of DISTINCT runs that named both, with an operator-visible floor (default 2 runs). Selecting a concept adds its partners to the detail pane. | It is not a taxonomy. Runs that disagree about the hierarchy stay separate roots; ids differing only in `-` versus `_` are reported side by side and never merged, because merging them would be LoopLab asserting a taxonomy nobody authored — renaming a concept across runs is a governed cross-run action, not a render-time guess. No subtree experiment TOTAL is shown: one experiment carries several tags, so summing a subtree would count it more than once. A concept absent from the tree means untagged, not unstudied. Co-occurrence is folded from the same rows as the tree, never fetched: the server's cross-run corpus is the run-end capsule ledger, whose membership is not this list's (measured 2026-08-06 on the shipped corpus: 3 capsules against 15 tagged runs), and rendering that inside a filtered view would misstate the population. A pair below the floor is COUNTED and named, so an empty panel reads as "nothing repeats yet" rather than "nothing co-occurs"; a pair is evidence one run named both ids, so a `grouping` row never has partners. |
-| **Run → Lineage** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Lineage previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. An experiment whose membership could not be materialized is withheld from the chips ROW-WISE and disclosed as `PARTIAL · N withheld` — its siblings stay filterable and the counts become a lower bound; only a run-scoped integrity failure (degraded run base, malformed receipt store) refuses the whole bar as `UNAVAILABLE`. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Lineage while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio Atlas. |
+| **Run → Lineage** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Lineage previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. An experiment whose membership could not be materialized is withheld from the chips ROW-WISE and disclosed as `PARTIAL · N withheld` — its siblings stay filterable and the counts become a lower bound; only a run-scoped integrity failure (degraded run base, malformed receipt store) refuses the whole bar as `UNAVAILABLE`. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Lineage while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio-wide research index. |
 
 The run workspace's legacy **Analysis → Cross-run** panel is likewise not a scientific comparison surface.
 It retains bounded same-task-ID navigation and per-run objective observations, but does not rank, crown, draw
@@ -440,7 +442,7 @@ is about. Each panel now says so in its own header; the full per-kind reference 
 |---|---|---|---|
 | **Lab → Authoring** | `prompts` (role system-prompt overrides), `skills` (techniques the Researcher can load), `knowledge` (free-form notes) | **you** — plus the assistant's `remember` tool for `knowledge` | root Markdown uses a CAS/receipt editor; nested skill packages are review-only |
 | **Lab → Memory** | Lessons, Cases, Notes, and a read-only view of the same `knowledge` notes | the **runs**, at run end | no |
-| **Runs → Atlas preview** | Concepts and claims across every run in the shared memory dir | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
+| **Lab → Claims & Curation** | Claims across every run in the shared memory dir, plus the steward proposals and their outcomes | derived at read time from what the runs wrote, plus your governance decisions | no — governance is CLI/HTTP only |
 
 Consequences that have repeatedly been reported as bugs and are not:
 
@@ -449,7 +451,7 @@ Consequences that have repeatedly been reported as bugs and are not:
   them somewhere; `memory_dir` and `knowledge_dir` do have defaults.
 - **`knowledge` deliberately appears twice** — writable in Authoring, read-only in Memory. One
   directory, one set of files.
-- **An Atlas claim will not appear in the Memory panel under that name.** Claims are a projection over
+- **A Claims & Curation claim will not appear in the Memory panel under that name.** Claims are a projection over
   the same `lessons.jsonl` rows plus the deep-research memo claims, not a fourth store.
 - **Configured skill packages are visible without becoming writable paths.** Root `*.md` skills keep
   the flat CAS/receipt editor. Nested `**/SKILL.md` packages appear under safe relative display names
@@ -584,13 +586,13 @@ limitations. The owner HTTP OpenAPI contract types the nested concept, research 
 receipts, governance revisions, visible claim rows and bounded context pack; consumers may accept additive
 fields but must not replace those authority-bearing shapes with arbitrary JSON. The owner React route does
 not turn those bounded whole-store summaries into the complete
-Part-IV Research Space/Atlas contract. A bounded per-run Concepts tree/table is shipped, but the canonical
+Part-IV Research Space contract. A bounded per-run Concepts tree/table is shipped, but the canonical
 Research Space, focused multi-relation concept map and cross-run interactive concept graph are not. Do not
-interpret the home Lineage view, primary concept axis grouping, per-run Concepts table, or Atlas preview as the complete
-concept/evidence UI specified in
+interpret the home Lineage view, primary concept axis grouping, per-run Concepts table, or the cross-run
+Concepts view as the complete concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
 
-The preview validates the concept-source receipt independently. Its D8 producer details are consumed through
+The preview's D8 producer details are consumed through
 the current combined v1 `claim_source`; legacy or malformed source shapes fail closed. Durable row totals,
 retained/quarantined counts, malformed/invalid counts and the lowercase snapshot digest must agree. A D8
 producer receipt describes only explicitly processed and persisted D8 rows; it does **not** prove that every
@@ -598,7 +600,7 @@ run in the portfolio executed D8.
 
 One-sided claim authority comes from the separate v1 `claim_source`, not from D8 alone. It joins durable
 lesson/research read health with D8 producer completeness. The endpoint envelope and every visible row must
-carry the same valid receipt, and independently refreshed Atlas/claims slices must share its non-empty
+carry the same valid receipt, and the independently refreshed mixed-evidence/claims slices must share its non-empty
 `snapshot_digest`. A missing/legacy/malformed receipt, a quarantined lesson or research row, an incomplete D8
 producer, or a cross-endpoint digest mismatch produces a visible **Combined claim source partial/unknown**
 notice. The client then withholds reconstructed support-only/refutation-only states and exact absence;
@@ -618,7 +620,7 @@ alias and split ledgers cannot race. A settings/symlink/directory replacement re
 `409 portfolio_identity_conflict` before any target ledger write, even when its revision happens to match.
 An observed but not-yet-created memory directory is read-only: governance/steward POSTs return
 `409 portfolio_not_initialized` without creating storage or a provider client; initialize it and refresh
-the complete Atlas before forming a new action.
+every slice before forming a new action.
 The server derives actor/time, returns 409 on stale/colliding actions, and provides explicit clear
 operations. A claim decision must also name a currently projected structured claim and its observed evidence
 digest. Structured decisions resolve exact scope+metric, scope-only, global metric, then global, so an unscoped

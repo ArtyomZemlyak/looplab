@@ -138,7 +138,7 @@ other work items that test the same hypothesis), **cross-run memory**
 | Cross-run memory CASCADE: what a run's deletion may remove from the five shared stores — one attribution predicate per store, and an irreversible purge keyed on `run_uid` (never the reused directory NAME) | `serve/memory_cascade.py` |
 | Cross-run index · claims · taxonomy/claim governance | `engine/cross_run_index.py`, `engine/claims.py`, `engine/concept_registry.py`, `engine/governance_health.py` |
 | Paid proposal steward lifecycle — two at-most-once transactions over the same three ledgers: `curation_protocol.py` is the unattended FINALIZE one (semantic content-digest key, side-file claim), `steward_invocation.py` the on-demand HTTP/CLI one (operator `action_id`, in-ledger `begun` claim) | `engine/curation_protocol.py`, `engine/steward_invocation.py`, `engine/concept_steward.py`, `engine/claim_steward.py`, `engine/task_facets.py` |
-| Research Atlas / owner governance API · UI | `serve/routers/cross_run.py`, `ui/src/ResearchAtlas.jsx`, `ui/src/researchAtlasModel.js` |
+| Claims & Curation (ex-Research Atlas) / owner governance API · UI | `serve/routers/cross_run.py`, `ui/src/ClaimsCuration.jsx`, `ui/src/claimsCurationModel.js` |
 | Trace span exporter | `core/tracing.py` |
 
 For the narrative behind each box, read **[Concepts](concepts.md)**; for the full design rationale and

@@ -118,7 +118,7 @@ test('the review route renders the inert arm and the owner routes render the men
     'the workspace header may mount the menu once, and only through the reviewMode branch')
 
   // Every owner topbar reaches the menu through the same component; no screen composes its own.
-  const owners = { 'RunList.jsx': 'list', 'Settings.jsx': 'settings', 'ResearchAtlas.jsx': 'research-atlas' }
+  const owners = { 'RunList.jsx': 'list', 'Settings.jsx': 'settings', 'ClaimsCuration.jsx': 'claims' }
   for (const [file, current] of Object.entries(owners)) {
     assert.match(await source(file), new RegExp(`<GlobalMenu current="${current}"`),
       `${file} must mark its own destination as the open one`)

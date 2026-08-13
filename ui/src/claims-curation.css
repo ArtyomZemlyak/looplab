@@ -1,0 +1,122 @@
+/* The Claims & Curation surface (the former Research Atlas — doc 29 F7). Kept out of styles.js the
+   same way portfolio-concepts.css is: one screen, read as one thing. The `ledger-` prefix names what
+   the screen holds now; its concept list and the run references inside it were removed with F7. */
+.claims-curation-page { flex: 1; min-height: 0; overflow: auto; background: var(--bg); }
+.ledger-content { width: min(1240px, calc(100% - 32px)); margin: 0 auto; padding: 26px 0 48px; }
+.ledger-intro { margin-bottom: 18px; }
+.ledger-intro h1 { margin: 2px 0 7px; font-size: clamp(24px, 4vw, 34px); line-height: 1.15; }
+.ledger-intro p { max-width: 72ch; margin: 0 0 8px; color: var(--fg-dim); }
+.ledger-intro p:last-child { margin-bottom: 0; }
+.ledger-elsewhere { padding: 9px 12px; border: 1px solid var(--line-2); border-radius: 9px;
+  background: var(--bg-1); }
+.ledger-elsewhere code { font-size: 11px; }
+.ledger-route-state-message { display: grid; justify-items: center; gap: 10px; }
+.ledger-degraded { margin-bottom: 14px; }
+.ledger-degraded span { overflow-wrap: anywhere; }
+
+.ledger-summary { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; margin-bottom: 6px; }
+.ledger-stat { display: flex; flex-direction: column; gap: 3px; min-width: 0; padding: 13px 15px;
+  border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-1); box-shadow: var(--shadow-card); }
+.ledger-stat span { color: var(--fg-mut); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; }
+.ledger-stat strong { color: var(--fg); font-size: 25px; font-variant-numeric: tabular-nums; }
+.ledger-empty { display: grid; grid-template-columns: minmax(230px, .85fr) minmax(0, 1.4fr); gap: 18px;
+  align-items: start; margin-bottom: 14px; padding: 18px; border: 1px solid var(--line-2); border-radius: 12px;
+  background: var(--bg-1); box-shadow: var(--shadow-card); }
+.ledger-empty-message h2 { margin: 3px 0 8px; font-size: 18px; }
+.ledger-empty-message p { margin: 0; color: var(--fg-dim); line-height: 1.5; }
+.ledger-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.ledger-source-readiness { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.ledger-empty-source { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 9px;
+  align-items: center; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-2); }
+.ledger-readiness-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-mut); }
+.ledger-empty-source-head { display: flex; align-items: baseline; justify-content: space-between; gap: 9px; }
+.ledger-empty-source-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 11px; }
+.ledger-readiness-state { flex: none; color: var(--fg-mut); font-size: 10px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .04em; }
+.ledger-empty-source-current .ledger-readiness-dot { background: var(--ok); }
+.ledger-empty-source-current .ledger-readiness-state { color: var(--ok-text); }
+.ledger-empty-source-loading .ledger-readiness-dot,
+.ledger-empty-source-retained-stale .ledger-readiness-dot { background: var(--working); }
+.ledger-empty-source-loading .ledger-readiness-state,
+.ledger-empty-source-retained-stale .ledger-readiness-state { color: var(--working-text); }
+.ledger-empty-source-failed .ledger-readiness-dot { background: var(--fail); }
+.ledger-empty-source-failed .ledger-readiness-state { color: var(--fail-text); }
+
+/* One column: the three remaining panels (mixed evidence, claims, steward log) are each full width.
+   The two-column split existed to put the concepts list beside the mixed-evidence one. */
+.ledger-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+.ledger-panel { min-width: 0; overflow: hidden; border: 1px solid var(--line-2); border-radius: 12px;
+  background: var(--bg-1); box-shadow: var(--shadow-card); }
+.ledger-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 62px; padding: 11px 14px; border-bottom: 1px solid var(--line); }
+.ledger-panel-head h2 { margin: 2px 0 0; font-size: 16px; line-height: 1.2; }
+.ledger-panel-head > span { flex: none; max-width: 48%; overflow-wrap: anywhere; text-align: right; }
+.ledger-section-empty, .ledger-boundary-note { margin: 0; padding: 18px 14px; color: var(--fg-mut); }
+.ledger-boundary-note { border-top: 1px solid var(--line); font-size: 11px; }
+.ledger-source-note { margin: 0; padding: 9px 14px; border-top: 1px solid var(--line);
+  color: var(--fg-mut); font-size: 10px; line-height: 1.45; }
+.ledger-source-note strong { color: var(--fg-dim); }
+.ledger-source-retained-stale { border-color: var(--working); color: var(--working-text); }
+.ledger-source-retained-stale strong { color: var(--working-text); }
+.ledger-source-loading { border-color: var(--working); color: var(--working-text); }
+.ledger-source-loading strong { color: var(--working-text); }
+.ledger-source-failed { border-color: var(--fail); color: var(--fail-text); }
+.ledger-source-failed strong { color: var(--fail-text); }
+.ledger-retry-action { min-width: 76px; }
+.claims-curation-route .btn[aria-disabled="true"] { opacity: .4; cursor: progress; }
+.claims-curation-route .btn[aria-disabled="true"]:not(.primary):hover {
+  background: var(--bg-3); border-color: var(--line-2); color: var(--fg);
+}
+.claims-curation-route .btn.primary[aria-disabled="true"]:hover {
+  background: var(--accent-dim); border-color: var(--accent); color: var(--accent-ink);
+}
+.claims-curation-route .btn[aria-disabled="true"]:active { transform: none; }
+.ledger-source-focus-target:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.ledger-claim-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.ledger-claim-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 560px; overflow: auto; }
+.ledger-claim-list.compact { display: block; max-height: 440px; }
+.ledger-claim { min-width: 0; padding: 12px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ledger-claim-list .ledger-claim:nth-child(2n) { border-right: 0; }
+.ledger-claim-list.compact .ledger-claim { border-right: 0; }
+.ledger-claim-head, .ledger-claim-counts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.ledger-claim p { margin: 8px 0; overflow-wrap: anywhere; line-height: 1.48; }
+.ledger-claim-counts { color: var(--fg-mut); font-size: 10px; }
+.ledger-claim-counts span { padding-right: 7px; border-right: 1px solid var(--line-2); }
+.ledger-claim-counts span:last-child { border-right: 0; }
+.ledger-claim-counts b { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
+.ledger-claim-context { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.ledger-claim-context .pill { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-claim-context .muted { align-self: center; font-size: 10px; }
+.ledger-claim details { margin-top: 8px; }
+.ledger-claim summary { display: inline-flex; align-items: center; min-height: 28px;
+  color: var(--accent-text); font-size: 10px; cursor: pointer; }
+.ledger-evidence { display: grid; gap: 4px; margin-top: 6px; }
+.ledger-evidence code { display: block; min-width: 0; padding: 4px 6px; overflow: hidden; border-radius: 4px;
+  background: var(--bg-2); color: var(--fg-dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.ledger-evidence-boundary { color: var(--fg-mut); font-size: 10px; line-height: 1.4; }
+.ledger-epistemic.mixed, .ledger-epistemic.refuted { border-color: var(--working); color: var(--working-text); }
+.ledger-epistemic.supported { border-color: var(--ok); color: var(--ok-text); }
+
+.ledger-curation-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.ledger-curation-list li { min-width: 0; padding: 12px 14px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.ledger-curation-list li:nth-child(2n) { border-right: 0; }
+.ledger-curation-list a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ledger-curation-list p { margin: 7px 0; color: var(--fg-dim); overflow-wrap: anywhere; }
+
+@media (max-width: 800px) {
+  .ledger-content { width: min(100% - 20px, 680px); padding-top: 18px; }
+  .ledger-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .ledger-claim-list, .ledger-curation-list { display: block; }
+  .ledger-claim, .ledger-curation-list li { border-right: 0; }
+}
+
+@media (max-width: 600px) {
+  .claims-curation-route .topbar .ttl { order: 5; flex-basis: 100%; }
+  .claims-curation-route .topbar .btn { min-height: 44px; }
+  .ledger-panel-head { align-items: flex-start; }
+  .ledger-summary { gap: 7px; }
+  .ledger-stat { padding: 10px 12px; }
+  .ledger-claim summary { min-height: 44px; display: inline-flex; align-items: center; }
+}

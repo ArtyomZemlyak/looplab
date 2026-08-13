@@ -21,9 +21,10 @@ _STUCK_BUILD_SECONDS = 1200.0
 def global_settings(store: SettingsStore) -> "Settings":
     """Typed global defaults resolved from environment plus the UI settings store.
 
-    Saved settings are launch defaults, but several owner-side read surfaces (portfolio memory, Atlas,
-    authoring paths, run-less Genesis) also need the same resolved values. Keeping this separate from the
-    per-run snapshot overlay prevents those surfaces from silently falling back to environment-only state.
+    Saved settings are launch defaults, but several owner-side read surfaces (portfolio memory,
+    claims/curation, authoring paths, run-less Genesis) also need the same resolved values. Keeping
+    this separate from the per-run snapshot overlay prevents those surfaces from silently falling
+    back to environment-only state.
     """
     overrides = {key: value for key, value in store.load_ui_settings().items() if value is not None}
     return store.resolve_settings(overrides)

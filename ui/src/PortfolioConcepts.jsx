@@ -350,7 +350,7 @@ export default function PortfolioConcepts({
         Durable cross-run concept memory does not cover this whole list: {governance.unrepresentedRuns}
         visible run(s) have no retained capsule
         {governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted} capsule id(s) were omitted from the policy receipt</>}.
-        The tree still shows their run-authored tags, but Atlas and agent priors may use a smaller population.
+        The tree still shows their run-authored tags, but the agent priors may use a smaller population.
       </div>}
 
     {forest.truncated && <div className="notice resource-warning" role="status">
