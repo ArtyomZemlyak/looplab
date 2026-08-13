@@ -342,8 +342,14 @@ class SpeculationMixin:
         # only fire when there is no head request, no build marker and nothing in flight in this
         # process. Costs nothing: the loop reaches this point once per turn and a fast task is
         # quiescent between batches constantly.
+        # …and an ADOPTED EVAL is now one of the things in flight.  Since F1f the outer loop turns
+        # while evaluations run, and settling the depth to 0 makes `_speculation_enabled()` False —
+        # which routes the very next `_run_card_session` into `_dispatch_evals`, a dispatcher that
+        # knows nothing about `_eval_inflight` and would re-dispatch a node this process is already
+        # training. Same shape as the leak the head-request clause above closes, one lane over.
         if (self._head_request(state) is not None
                 or state.buildings
+                or self._evals_inflight()
                 or getattr(self, "_spec_build_inflight", None)
                 or getattr(self, "_spec_builds", None)):
             return False
@@ -527,6 +533,63 @@ class SpeculationMixin:
             self._spec_raw_stage_result: Optional[SpecRawStageResult] = None
         if not hasattr(self, "_spec_force_outer"):
             self._spec_force_outer = False
+        if not hasattr(self, "_eval_inflight"):
+            # RUN-scoped, not session-scoped (F1f).  Every `CardSession` is handed THIS object, so
+            # the adopted set survives a session return; `_run_with_llm_broker` reads it to keep a
+            # terminal gate, a depth ratchet or a freshness drain from acting as though the log were
+            # quiescent while GPUs are still burning.
+            self._eval_inflight: set[tuple[int, int]] = set()
+
+    # Run-scoped eval plumbing, CLASS-level so every entry point sees a defined value without an
+    # initialization-order dependency (same reasoning as `_spec_fold_memo`).  Only `_eval_inflight`
+    # is per-instance, because it is mutable.
+    #
+    #   `_eval_task_group`     the run-scoped anyio group `_run_with_llm_broker` opens around its
+    #                          whole turn loop; `None` outside a run, which makes a direct
+    #                          `_run_card_session(...)` call fall back to session-scoped evals.
+    #   `_eval_notify`         the CURRENT session's wake-up stream, or `None` between sessions.
+    #   `_eval_boundary_owed`  set by an eval child's `finally`; consumed by the next session turn.
+    #   `_eval_drain_requested`  set by a terminal gate that refused to finish over live evals; the
+    #                          run loop drains on its next turn and the gate then succeeds.  A
+    #                          FLAG rather than an inline wait because the gates are sync helpers
+    #                          (`_finish_if_quiescent`, `_finish_with_report_if_quiescent`) reached
+    #                          from five call sites, and making them async to hold one `await`
+    #                          would move the finish contract instead of guarding it.
+    _eval_task_group: Any = None
+    _eval_notify: Any = None
+    _eval_boundary_owed: bool = False
+    _eval_drain_requested: bool = False
+
+    def _evals_inflight(self) -> bool:
+        """Is any adopted evaluation still running in this process?
+
+        The IN-MEMORY half only, and deliberately so: it answers "may this main-task decision assume
+        a quiescent log?", which is a question about THIS process.  The durable half — "did a
+        previous process leave an eval mid-training?" — is `node_eval_started`, and
+        `_drop_stale_speculation` is where that one is read.
+        """
+
+        return bool(getattr(self, "_eval_inflight", ()))
+
+    async def _drain_adopted_evals(self) -> None:
+        """Wait until no adopted evaluation is running in this process.
+
+        The ONE place the run pays a real barrier, and it pays it where the barrier is free: every
+        caller is already committed to stopping work (a terminal gate that wants to append
+        `run_finished`, or the run loop on its way into `finalize_run`).  There is no GPU to idle —
+        the run is ending — and the alternative is finalization computing a champion, a budget
+        summary and a paid report over a node that has not reported its metric yet.
+
+        Deliberately a poll and not a join: the task group is owned by `Engine.run`, so this cannot
+        `await` it, and every child clears its own `_eval_inflight` entry in a `finally` that runs
+        even under cancellation.  `_eval_notify` is the CURRENT session's stream and there is no
+        session here, so a wake-up channel would have to be invented for a wait that happens at most
+        once per run.
+        """
+
+        self._eval_drain_requested = False
+        while self._evals_inflight():
+            await anyio.sleep(0.05)
 
     def _producer_role_pair(self) -> Optional[tuple[Any, Any]]:
         """Lease one non-primary pair from the Layer-2 role pool.
@@ -1980,23 +2043,39 @@ class SpeculationMixin:
         node_id: int,
         generation: int,
         reservation: Optional[dict],
-        session: CardSession,
+        max_eval_seconds: Optional[float],
     ) -> None:
+        """One adopted evaluation child.  Owned by the RUN-scoped eval task group, not a session.
+
+        It deliberately takes no `CardSession`.  The task group that runs it outlives the session
+        that admitted it, so a child holding a session reference would, after that session returned,
+        set a flag nobody reads and post its wake-up into a closed stream — the successor session
+        would never learn that a slot had come free.  Everything it has to publish is therefore
+        engine-level: the inflight set, the boundary debt, and the CURRENT session's wake-up stream.
+        """
+
         try:
-            await self._evaluate(node_id, anyio.CapacityLimiter(1), session.max_eval_seconds)
+            await self._evaluate(node_id, anyio.CapacityLimiter(1), max_eval_seconds)
         finally:
-            # CODEX AGENT: this session-wide first-completion fence prevents the Card path from
-            # refilling a freed GPU while unrelated long-running siblings finish. Preserve the outer
-            # cadence boundary without turning one terminal child into head-of-line blocking for
-            # every remaining slot; add an unequal-duration refill regression.
-            # One terminal/attempt boundary closes this admitted batch. Existing children still
-            # burn to terminal, but no later scorer/admission may bypass outer controls/cadences.
-            session.consumer_completed = True
+            # This is the resolution of the `CODEX AGENT` TODO that used to sit here: "this
+            # session-wide first-completion fence prevents the Card path from refilling a freed GPU
+            # while unrelated long-running siblings finish. Preserve the outer cadence boundary
+            # without turning one terminal child into head-of-line blocking for every remaining
+            # slot; add an unequal-duration refill regression."
+            #
+            # ONE terminal owes the outer control/Strategist/cadence boundary ONE turn.  That is all
+            # it ever meant, and it is now all it does: the debt closes the PRODUCER lane and asks
+            # `_card_phase_decide_exit` to return, and the session CAN return, because the eval task
+            # group is run-scoped and the next session adopts whatever is still burning.  It no
+            # longer closes admission, so the slot this child just freed is refilled by the very
+            # turn that observes the terminal.  The regression the TODO asked for is
+            # `tests/test_card_refill_unequal_durations.py`.
+            self._eval_boundary_owed = True
             if reservation is not None:
                 self._clear_eval_resource_reservation(node_id, generation)
                 self._release_gpus(reservation.get("gpu_ids"))
-            session.eval_inflight.discard((node_id, generation))
-            notify_producer(session.notify, ("eval", (node_id, generation)))
+            self._eval_inflight.discard((node_id, generation))
+            notify_producer(self._eval_notify, ("eval", (node_id, generation)))
 
     def _card_phase_serve_raw_stage(self, session: CardSession) -> None:
         """Commit one prepared raw proposal, then elect and start its producer in the same turn."""
@@ -2005,7 +2084,7 @@ class SpeculationMixin:
         if not raw_consumed:
             return
         session.progressed = True
-        if raw_staged and not session.consumer_completed and not session.yield_outer:
+        if raw_staged and not session.boundary_owed and not session.yield_outer:
             if self._request_card_build(consumed_inflight=session.eval_inflight):
                 # The election above APPENDED, so this snapshot re-folds: `_fold_current` serves the
                 # memo only while the observed tail is unmoved.
@@ -2046,16 +2125,22 @@ class SpeculationMixin:
             session.progressed = True
 
         if (
-            # An eval terminal closes this admitted batch.  Leave its already-built next
-            # Node untouched for the outer control/Strategist/cadence boundary; freshness
-            # will re-run from that fresh outer turn.  A pre-decided serial fallback has
-            # the same boundary semantics while its admitted eval burns to terminal.
+            # ADMISSION's gate, not production's, and this pairing is load-bearing.  The freshness
+            # drain is the PRECONDITION of a correct admission: an eval terminal can move `best`
+            # and make the already-built next Node stale, so a session that keeps admitting after a
+            # terminal (which is the whole F1f fix) must keep draining after one too.  It used to
+            # read the full predicate and stop here on that terminal — "leave its already-built next
+            # Node untouched for the outer control/Strategist/cadence boundary; freshness will
+            # re-run from that fresh outer turn" — which was coherent only while admission stopped
+            # with it.  Un-latching admission without un-latching this would be the one genuinely
+            # dangerous version of this change: it would dispatch exactly the stale prefetch the
+            # drain exists to kill.
             #
             # The gate reads its OWN snapshot rather than the `current` above, because
             # `_skip_if_aborted` may have appended between them.  Asking `_fold_current` again is
             # free when nothing was appended (the tail is unmoved) and correct when something was,
             # so there is no "remember to refresh" line here for anyone to delete later.
-            session.open_for_new_work(
+            session.open_for_admission(
                 self._session_gates(self._session_state(), session))
             and await self._drop_stale_speculation(
                 eval_inflight=session.eval_inflight,
@@ -2080,7 +2165,7 @@ class SpeculationMixin:
         # without another scorer consult/claim crossing the outer cadence boundary.
         if self._serve_card_builds(
             session.max_eval_seconds,
-            allow_commit=session.open_for_new_work(
+            allow_commit=session.open_for_production(
                 self._session_gates(current, session)),
         ):
             session.progressed = True
@@ -2097,7 +2182,7 @@ class SpeculationMixin:
         if (
             head is not None
             and key is not None
-            and session.open_for_new_work(self._session_gates(current, session))
+            and session.open_for_production(self._session_gates(current, session))
             and key not in self._spec_build_inflight
             and key not in self._spec_builds
         ):
@@ -2111,17 +2196,19 @@ class SpeculationMixin:
         """
 
         current = self._session_state()
-        if not session.open_for_new_work(self._session_gates(current, session)):
+        if not session.open_for_admission(self._session_gates(current, session)):
             return False
         selection_changed = False
         while len(session.eval_inflight) < max(1, int(self._eval_parallel)):
             current = self._session_state()
-            # `.stopping`, NOT `open_for_new_work`: inside an admitted batch only the FOLD-derived
-            # half may stop the fill.  Re-reading `consumer_completed` here would let the first
-            # sibling to terminate truncate the batch its own siblings are still being admitted
-            # into — a width-4 consumer that silently admits three, which is the "speculation
-            # quietly went serial" failure this subsystem has already paid for once.  The batch
-            # BOUNDARY is the outer entry gate above, which does read both flags.
+            # `.stopping` and `open_for_admission` are now the SAME predicate, and the asymmetry
+            # this comment used to describe is gone with the defect: re-reading the terminal latch
+            # here would have let the first sibling to terminate truncate the batch its own
+            # siblings were still being admitted into — a width-4 consumer that silently admits
+            # three, the "speculation quietly went serial" failure this subsystem has already paid
+            # for once.  That was the SAME mistake as F1f, one scope smaller, and it was fixed
+            # here first.  Both spellings are kept because they answer different questions: this
+            # one is the inner fill, the gate above is the batch BOUNDARY.
             if self._session_gates(current, session).stopping:
                 break
             candidates = [node for node in current.pending_nodes()
@@ -2216,8 +2303,13 @@ class SpeculationMixin:
             self._record_eval_start_boundary(chosen)
             session.eval_inflight.add((chosen.id, chosen.attempt))
             try:
-                session.task_group.start_soon(
-                    self._card_eval_one, chosen.id, chosen.attempt, reservation, session,
+                # The RUN-scoped group (`session.eval_task_group`), not the session-owned one.
+                # `_record_eval_start_boundary` above is unchanged and still runs HERE, on the main
+                # task at the dispatch decision, exactly where engine invariant #1 says to keep it —
+                # widening the child's LIFETIME moves no writer.
+                session.eval_task_group.start_soon(
+                    self._card_eval_one, chosen.id, chosen.attempt, reservation,
+                    session.max_eval_seconds,
                 )
             except BaseException:
                 session.eval_inflight.discard((chosen.id, chosen.attempt))
@@ -2246,7 +2338,7 @@ class SpeculationMixin:
         )
         if not (
             consumer_active
-            and session.open_for_new_work(self._session_gates(current, session))
+            and session.open_for_production(self._session_gates(current, session))
             and self._head_request(current) is None
             and not self._spec_build_inflight
             and not self._spec_raw_stage_inflight
@@ -2358,14 +2450,23 @@ class SpeculationMixin:
             or self._spec_raw_stage_inflight
             or self._spec_raw_stage_result is not None
         )
-        inflight = bool(any((
-            session.eval_inflight, outstanding, building, memory_pending)))
-        if session.open_for_new_work(gates):
-            # Still open for work, so a ready pending Node also keeps the session alive.
-            return not (inflight or pending_ready)
-        # Closing — for any of the five reasons `open_for_new_work` folds into one predicate — so
-        # only work already in flight can hold the session open.
-        return not inflight
+        # PRODUCER work this session owns and no other turn can adopt: a durable request head it
+        # elected, a `node_building` marker, an isolated build/raw-stage worker holding an
+        # in-memory result slot.  Evals are deliberately NOT in here any more — see below.
+        producer_inflight = bool(any((outstanding, building, memory_pending)))
+        if session.open_for_production(gates):
+            # Still open for work, so a ready pending Node or a running eval keeps the session
+            # alive — there is nothing to hand back to and a slot may free at any moment.
+            return not (producer_inflight or session.eval_inflight or pending_ready)
+        # Closing.  The outer control/Strategist/cadence boundary is owed a turn (a terminal
+        # landed, the producer yielded, or a fold-derived stop condition fired) — so RETURN and let
+        # it have one.  Waiting for `session.eval_inflight` here is precisely the F1f barrier: the
+        # wait bought nothing, because the boundary this session is holding itself open to reach
+        # does not arrive until the LAST eval lands, while the debt was incurred by the FIRST.  The
+        # run-scoped eval task group means the children survive the return and the next session
+        # adopts them from `self._eval_inflight` (and, across a crash, from the durable
+        # `node_eval_started` boundary `_drop_stale_speculation` already reads).
+        return not producer_inflight
 
     async def _run_card_session(
         self,
@@ -2392,7 +2493,17 @@ class SpeculationMixin:
             max_eval_seconds=max_es,
             wall_deadline=wall_deadline,
             notify=send,
+            # ENGINE-level, shared by every session in the run.  A session that returns while its
+            # evals burn hands the successor the same set object, so the successor's width fill and
+            # its `_session_admissible` exclusion both see the adopted children without any
+            # handover step to forget.
+            eval_inflight=self._eval_inflight,
         )
+        # The CURRENT session's wake-up stream, for children that outlive the session that admitted
+        # them.  Cleared on exit so a late terminal posts into a closed stream that
+        # `notify_producer` already swallows, rather than into a stream a LATER session is reading
+        # — which would be a wake-up nobody could interpret.
+        self._eval_notify = send
 
         async with anyio.create_task_group() as bg_tg:
             session.bg_task_group = bg_tg
@@ -2402,9 +2513,25 @@ class SpeculationMixin:
                 session.research_spawned = bool(self._spawn_research(bg_tg, state))
             try:
                 async with send, receive, anyio.create_task_group() as task_group:
+                    # TWO groups with two different lifetimes.  `task_group` is session-owned and
+                    # still joins on return: it runs the PRODUCERS (`_produce_card_build`,
+                    # `_produce_raw_card_stage`), whose in-memory result slots only this session can
+                    # drain, and `_card_phase_decide_exit` refuses to leave while one is open.
+                    # `eval_task_group` is the RUN-scoped one the spine owns, so an evaluation
+                    # outlives the session that admitted it.  The fallback keeps a direct
+                    # `_run_card_session(...)` call (tests, embedders) behaving exactly as before:
+                    # the evals then land in the session group and are joined on return.
                     session.task_group = task_group
+                    session.eval_task_group = self._eval_task_group or task_group
                     while True:
                         session.progressed = False
+                        # Transfer the boundary DEBT the eval children publish engine-level.  The
+                        # child cannot write it onto a session it may outlive, and consuming it here
+                        # is what makes it "one terminal owes ONE outer turn" rather than a latch a
+                        # later session inherits.
+                        if self._eval_boundary_owed:
+                            self._eval_boundary_owed = False
+                            session.boundary_owed = True
                         if await self._close_developer_sentinel_once():
                             session.progressed = True
                         self._card_phase_serve_raw_stage(session)
@@ -2428,5 +2555,6 @@ class SpeculationMixin:
                         with anyio.move_on_after(0.5):
                             await receive.receive()
             finally:
+                self._eval_notify = None
                 if getattr(self, "_concurrent_research_repeat", False):
                     bg_tg.cancel_scope.cancel()
