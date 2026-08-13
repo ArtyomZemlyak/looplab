@@ -25,32 +25,17 @@ from typing import Callable, Optional
 
 from looplab.core import _pathsafe
 from looplab.tools._base import RESULT_CAP, clip, fn_spec
+# The per-stream tail budgets moved DOWN to `_base.py` beside `clip`/`fit_rows`: `run_probe`
+# (tools/dev_probe.py) reports the same two-stream shape and must not carry a second copy of the
+# rule that decides which half of a failure survives the cap. Imported under this module's own
+# spelling so its call site below is byte-identical.
+from looplab.tools._base import STDOUT_TAIL as _STDOUT_TAIL  # noqa: F401  (kept for the spec text)
+from looplab.tools._base import stream_tails as _stream_tails
 from looplab.tools.perm_modes import (authorize, decide_action, default_approver,
                                       refusal_for)
 
 _MAX_OUTPUT = 64_000
 _MAX_TIMEOUT = 600.0
-
-# Per-STREAM tail budgets for run_command's reply. The agent loop caps the COMBINED result at
-# RESULT_CAP (head-keep), so giving each stream ~RESULT_CAP alone let a verbose stdout push the whole
-# stderr section — the traceback, i.e. the reason the command failed — past the cap, where the loop
-# silently dropped it. The MINIMUM guarantees below hold even when both streams are long; when one
-# stream is short, `_stream_tails` reallocates its unused budget to the other (a stderr-only failure
-# gets ~the whole cap for its traceback, not half — the fixed 50/50 split truncated exactly the
-# frames the repair needed). Headroom (-400) covers the exit-code head + section labels + notes.
-_STDOUT_TAIL = RESULT_CAP // 2 - 200
-# stderr's own guaranteed minimum is DERIVED in `_stream_tails` as `avail - _STDOUT_TAIL`,
-# deliberately not a second constant that could drift away from it.
-
-
-def _stream_tails(out: str, err: str) -> tuple[int, int]:
-    """Per-call tail budgets: each stream is guaranteed its minimum share, and whatever one stream
-    leaves unused flows to the other (stderr first — the exception lives there). Sum always fits
-    under RESULT_CAP with the -400 label/head headroom."""
-    avail = RESULT_CAP - 400
-    err_take = min(len(err), avail - min(len(out), _STDOUT_TAIL))
-    out_take = min(len(out), avail - err_take)
-    return out_take, err_take
 
 # Moved verbatim to core/gitenv.py so runtime/bg_tasks imports it DOWNWARD (it was the one
 # runtime -> tools upward lazy import). Re-exported here because this module's own git subprocess
