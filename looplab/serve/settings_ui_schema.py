@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 169
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -35,7 +35,13 @@ SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
 # tests/test_config_docs_sync.py, which keeps configuration.md's "N of the M direct Settings
 # fields" sentence honest.
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
-# 168 rows since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
+# 169 rows since F8's `repair_critic_after` joined Resilience & efficiency, directly under
+# `inline_repair_attempts`. It is a row rather than an uncurated omission because the operator is
+# the one who has to understand that the repair bound stopped being a count: the cap above it now
+# defaults to 0, and this is the knob that says when the second model gets its veto. Note what it is
+# NOT — it cannot extend a repair loop, only end one — and the help text says so, because a reader
+# who mistakes it for a budget will set it wrong in the expensive direction.
+# (Previously 168, since the SOURCE-TREE READ FENCE joined Safety & trust, beside `seed_mode`: the two are
 # the same question from both ends — seeding decides what a node's own copy CONTAINS, the fence
 # decides that the copy is the only place the node may read from. It is a row rather than an
 # uncurated omission because it is an operator-visible policy that can REFUSE a running eval, and
@@ -45,7 +51,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "68fcf2e159dba79f1c4775892dc43291493f85350cf4510bc83305ce85f6e431"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "86978b154bbcd76bd6ef7d2aeef209e8e2e557a09512e24631fe1edd9022a0eb"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
