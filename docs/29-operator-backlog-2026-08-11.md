@@ -146,6 +146,54 @@ and whether the Developer may DECLARE env in `declare_stages` or only the operat
 operator-only: an agent that can set arbitrary environment for its own scoring stage has another route
 around the trust boundary that `b0327182` just closed for the scorer's code.
 
+## F1e · Re-check a repaired artifact contract instead of leaving the metric SALVAGED
+
+**Found by watching, 2026-08-13, and it is a systematic bias — not a one-off.** On
+`rubertlite-dr-unified-v6`:
+
+| node | operator | metric | provenance |
+|---|---|---|---|
+| 0 | draft | 0.708762 | measured |
+| 1 | draft | 0.715142 | measured |
+| 2 | draft | 0.727991 | measured |
+| 3 | **merge** | **0.728113** | **salvaged** |
+| 4 | **merge** | — | declares the wrong path again |
+
+Every DRAFT is measured; every MERGE is salvaged. A merge node's Developer authors a fresh config
+with a new `run_name` and gets the testbed's composed `<run_name>_<model>` directory wrong, so the
+`train` stage exits 0, fails its declared artifact contract, and metric salvage recovers the number
+from the stage's stdout. Node 4 declares `unified-baseline_rubert-tiny-lite/final/…` — the OLD HUMAN
+experiment's name, not its own.
+
+**The consequence is the part that matters.** Under the default `metric_salvage: audit` a salvaged
+metric carries a `metric_salvaged` violation and is excluded from `feasible_nodes()`, so it can never
+become champion or be bred from. Node 3 produced the best number in the run (0.728113 vs the
+champion's 0.727991) and cannot win. So the search operator whose whole job is to COMBINE the best
+results is structurally disqualified, on every merge, by a path typo. That is a far worse outcome
+than the salvage itself, and neither `audit` nor `select` is the right answer to it — `select` would
+admit agent-produced bytes wholesale, which is the boundary salvage exists to keep.
+
+**The fix is specific and cheap: the metric was never actually unmeasured.** The pipeline DID produce
+the artifact — the near-miss diagnostic proves it, naming the exact file — and `metric_salvage_repair`
+already fixes the declaration in the same attempt (node 3: `changed: ["looplab_stages.json"]`,
+`cause_repaired: true`). What is missing is one step: after the cause repair corrects the manifest,
+**re-run the artifact CHECK against the corrected declaration — not the stage.** The file is on disk;
+`verify_stage_artifacts` is a handful of `stat` calls. If it now passes, the contract is satisfied by
+the artifact the pipeline really produced, and the node should be recorded as MEASURED with no
+violation, because nothing about the number was ever in doubt — only the sentence describing where it
+lived.
+
+**What to decide before building it.** (a) The freshness gate: the re-check must keep `since` at the
+stage's own start, or a leftover from an earlier attempt could satisfy the corrected path. (b) Which
+repairs qualify: only a repair whose `changed` set is exactly the manifest — a repair that touched
+CODE has changed what the stage would produce, and its artifact must be re-run, not re-checked.
+(c) Ordering against `metric_salvage`: the re-check belongs BEFORE the salvage decision, so a node
+that passes never enters the salvage path at all and needs no provenance.
+
+This subsumes most of the value of [F1c](#f1c-catch-a-path-that-escapes-the-nodes-own-workspace)'s
+static half without its false-positive problem, because it acts on a contract that has already failed
+and an artifact that already exists.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
