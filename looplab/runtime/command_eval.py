@@ -105,12 +105,13 @@ STAGE_EXPECT_KEYS = ("files", "assert")
 
 
 def _validate_rel_paths(nm: str, field: str, values) -> tuple[Optional[list], Optional[str]]:
-    """The path-SHAPE rule both declaration lists go through: workdir-relative, no traversal, no NUL,
-    de-duplicated, order preserved, bounded.
+    """The path-SHAPE rule every artifact declaration goes through: workdir-relative, no traversal,
+    no NUL, de-duplicated, order preserved, bounded.
 
-    One function rather than two copies because the two lists are read by opposite halves of the same
-    contract (`expect.files` after the stage, `needs` before it) and a shape one side accepts and the
-    other refuses would be a manifest that validates and then behaves differently depending on which
+    One function rather than copies because the lists are read by different halves of the same
+    contract — `expect.files` after the stage, `needs` before it, and (since 2026-08-13) the metric's
+    `subject`, which is the artifact the NUMBER is about — and a shape one side accepts and another
+    refuses would be a declaration that validates and then behaves differently depending on which
     check reaches it first. Containment is re-decided at check time against the REAL workdir by
     `_confined` — a symlink the candidate plants at eval time is invisible from a manifest."""
     cap = MAX_STAGE_NEEDS_FILES if field == "needs" else MAX_STAGE_EXPECT_FILES

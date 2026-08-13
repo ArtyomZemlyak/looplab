@@ -1199,6 +1199,65 @@ class Settings(BaseSettings):
     # wrong is strictly cheaper than silent and wrong — the silent version cost 76 GPU-minutes and a
     # published metric that was off by 3x.
     read_fence: str = "deny"
+    # METRIC SUBJECT (`runtime/metric_subject.py`): what a recorded metric must say about WHAT IT IS
+    # ABOUT. `eval.metric.subject` names the artifact the number is a claim about; the engine binds
+    # it to that artifact's content identity (`core/atomicio.file_identity` + a digest) at the score
+    # stage's start and folds the record onto `node_evaluated.metric_provenance`.
+    #   "off"     — record nothing (byte-identical to the behaviour before 2026-08-13).
+    #   "audit"   — RECORD, always: every evaluated node carries provenance, bound or not. No
+    #               violation, no selection effect.
+    #   "require" — the INVERSION: an UNBOUND metric also gets the existing `metric_salvaged`
+    #               violation, so it is counted, visible in the UI and lineage, and never selectable.
+    #
+    # THE NUMBER THAT DECIDES THIS. Across the six repo runs that have an event log, 82 of 83
+    # recorded metrics carry NO `metric_provenance` at all (98.8 %) — the one exception is the
+    # SALVAGE path, i.e. provenance is written only once something has already failed. On the happy
+    # path the engine records which stage ran, how long it took and what number came out, and nothing
+    # whatsoever about what the number is about. And 2 of those 83 are provably about bytes the node
+    # did not produce, and are the SAME number: v2 node 4 and v6 node 4, three weeks apart, both
+    # recorded 0.224975 from the same foreign checkpoint named at the same `config.yaml:215`.
+    #
+    # WHY `audit` IS THE DEFAULT AND NOT `require`, stated so the next reader does not have to guess.
+    # `require` is the rung this design is for, and the record is the half that is free: no shipped
+    # task declares a `subject` yet, so flipping the default today would make every node of every
+    # existing repo task unbound and therefore unselectable — a run with no champion. That is the
+    # exact failure mode doc 35 §4b(2) warns about ("a boundary that makes legitimate work fail is a
+    # boundary the Developer spends repair attempts fighting"). `audit` writes the referent from the
+    # first node, which is what makes the flip MEASURABLE instead of a guess.
+    #
+    # THE EVIDENCE THAT WOULD JUSTIFY FLIPPING IT TO `require`: one real repo run, on a task that
+    # declares `eval.metric.subject`, in which every evaluated node records `subject_bound: true` —
+    # i.e. the audit rung itself reports a zero false-positive rate over a full run. That is directly
+    # countable from `node_evaluated.metric_provenance` and needs no new instrumentation, which is
+    # the whole reason the record ships first.
+    metric_subject: str = "audit"
+    # LANDLOCK (`runtime/landlock.py`): apply a KERNEL read allow-list to the eval process and
+    # everything it spawns. "off" (default) installs nothing; "enforce" derives the allow-list from
+    # the operator's declared mounts (`runtime/read_allowlist.py`) and applies it in the child
+    # between fork and exec, so a native reader is covered too.
+    #
+    # WHY IT EXISTS BESIDE `read_fence`, which is not superseded. The shipped fence is an interpreter
+    # audit hook and cannot see a read that never reaches Python: measured on the incident's own
+    # 92 MB checkpoint, `safetensors.torch.load_file` loads 55 tensors and raises ZERO `open` audit
+    # events. The fence's coverage of this incident is a property of `transformers` reading
+    # `config.json` first — a third-party library's file ordering — not a property of the fence. The
+    # fence STAYS as the message rung: its refusal is a plain non-`OSError` carrying an actionable
+    # fix, and Landlock's is an `EACCES` -> `PermissionError` -> `OSError`, which is precisely the
+    # shape `except OSError: <fall back>` turns into a silent skip.
+    #
+    # WHY OFF IS THE DEFAULT. Enforcement and cost are verified on this box (ABI 2; Python `open`, a
+    # child `cat` and raw `libc.fopen` all refused; +2.1 %/open, 0.15 ms setup) — but those are
+    # `open`/`read` microbenchmarks. NOBODY HAS RUN A LANDLOCK ALLOW-LIST THROUGH A REAL GPU EVAL:
+    # torch, CUDA, NCCL, `/dev/nvidia*`, `/dev/shm`, `/sys/class` and the geesefs read surfaces were
+    # never exercised, and doc 35 §7.2's author records that their own candidate allow-list omitted
+    # `/sys` and `/dev` entirely and "would have failed such a run". A ruleset missing one surface
+    # does not degrade, it refuses mid-training.
+    #
+    # THE EVIDENCE THAT WOULD JUSTIFY FLIPPING IT TO `enforce`: one real GPU eval — a full
+    # train+score on the box the runs happen on — completed under `landlock="enforce"` with the
+    # derived allow-list, with `looplab landlock-check <run_dir>` reporting zero skipped rules. Until
+    # that exists this rung is opt-in and the audit hook is the shipped boundary.
+    landlock: str = "off"
     llm_model: str = "qwen3:8b"
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
@@ -1692,6 +1751,11 @@ class Settings(BaseSettings):
         # nothing above itself, and `runtime` imports `core`, so the import would close a cycle.
         # `tests/test_read_fence.py` pins the two spellings equal.
         ("read_fence", ("off", "warn", "deny")),
+        # Same reason as `read_fence` above — spelled out rather than imported from
+        # `runtime/metric_subject.py::MODES` / `runtime/landlock.py::POLICIES`, because core imports
+        # nothing above itself. `tests/test_metric_subject.py` pins all three pairs equal.
+        ("metric_subject", ("off", "audit", "require")),
+        ("landlock", ("off", "enforce")),
         ("backend", ("toy", "llm")),
         ("developer_backend", lambda: DEVELOPER_BACKENDS),
         ("llm_parser", lambda: _parser_names()),
@@ -1940,6 +2004,14 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # second half admitted one, in the same event log, with nobody having chosen either.
     "metric_salvage": "off",
     "metric_salvage_repair": False,
+    # THE METRIC SUBJECT BINDING, added 2026-08-13. It satisfies (a)+(b)+(c). (a) the field did not
+    # exist. (b) is the subtle one and it is real even at the `audit` rung: the score stage's `needs`
+    # is DERIVED from the declared subject (`engine/eval_stages.py`), so a resumed pre-versioning run
+    # whose task file has since gained a `subject` would start failing its scorer with `needs_failed`
+    # — a stage contract the first half of that same event log never had, and one that buys inline
+    # repair attempts. (c) is `off`, which is exactly what "before 2026-08-13" means. A resumed run
+    # keeps the account it was written with; a NEW run gets the record.
+    "metric_subject": "off",
     # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
     # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the
     # run, so a resumed pre-versioning snapshot stops itself after three failed nodes under a policy

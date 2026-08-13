@@ -92,6 +92,14 @@ class EngineOptions:
     # the library may be quieter than the product: a bare `Engine(...)` driving a repo task can
     # record the same corrupt metric, and it is a no-op for every non-repo task anyway.
     read_fence: str = "deny"
+    # METRIC SUBJECT binding: off|audit|require (see Settings.metric_subject). Same value on BOTH
+    # sides, for the same reason `read_fence` is: a bare `Engine(...)` driving a repo task records
+    # the same referent-less number as the product does, and `audit` costs one stat plus a bounded
+    # digest per eval.
+    metric_subject: str = "audit"
+    # Kernel read allow-list: off|enforce (see Settings.landlock for why off is the default and for
+    # the exact evidence that would move it).
+    landlock: str = "off"
     # --- A7 Strategist + richer-operator knobs (config-first; defaults == today's behavior) ---
     n_seeds: int = 3
     max_nodes: int = 8

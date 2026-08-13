@@ -49,6 +49,7 @@ from looplab.events.types import (
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
+from looplab.runtime.metric_subject import settle_mode as settle_metric_subject_mode
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
                                    settled_width_refusal)
 from looplab.engine.audit import AuditMixin
@@ -579,6 +580,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         trust_mode = _opt("trust_mode")
         seed_mode = _opt("seed_mode")
         read_fence = _opt("read_fence")
+        metric_subject = _opt("metric_subject")
+        landlock = _opt("landlock")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
@@ -1049,6 +1052,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # It is the counterpart to `_seed_mode`: seeding decides what a node's copy CONTAINS, this
         # decides that the copy is the only place the node may read from.
         self._read_fence = read_fence or "deny"
+        # METRIC SUBJECT rung (off|audit|require) — read by `engine/eval_dispatch.py` (which hands
+        # `run_command_eval` the declared subject), by `engine/eval_stages.py` (which derives the
+        # protected score stage's `needs` from it) and by `engine/evaluate.py` (which folds the
+        # record onto the terminal and, under `require`, mints the violation). Settled through the
+        # module's own vocabulary so an unknown rung from another binary's snapshot degrades to the
+        # conservative one rather than silently to the strictest.
+        self.metric_subject = settle_metric_subject_mode(metric_subject)
+        # Kernel read ALLOW-LIST (off|enforce). Read by `engine/resources.py`, which derives the
+        # allow-list from the operator's declared mounts and stamps it into the child env; the
+        # boundary itself is applied in the child, between fork and exec.
+        self._landlock = str(landlock or "off")
         self._run_setup_done = False             # run-level (once) dependency setup guard
         self._run_setup_lock = _threading.Lock()   # _run_eval runs on parallel worker threads; the
         #   check-then-set on _run_setup_done races without this, launching run_setup (pip) N times

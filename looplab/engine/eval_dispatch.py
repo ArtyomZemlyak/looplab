@@ -612,6 +612,13 @@ class EvalDispatchMixin:
                         binds=self._data_binds(workdir),
                         env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
                     if self.trust_mode in ("untrusted", "hostile") else None)
+            # The operator's declared metric SUBJECT, filtered to strings HERE rather than trusted:
+            # `_grandfathered` reloads a recorded `task.snapshot.json` WITHOUT re-validating it, so
+            # the pydantic guard on `EvalSpec.metric` is not total over what reaches this line, and a
+            # non-string entry becomes `Path(workdir) / 123` -> an uncaught TypeError out of the eval
+            # worker (no node terminal, re-dying on every resume).
+            _mspec = es.get("metric") if isinstance(es.get("metric"), dict) else {}
+            _subject = [s for s in (_mspec.get("subject") or []) if isinstance(s, str) and s.strip()]
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
@@ -629,7 +636,14 @@ class EvalDispatchMixin:
                 start_stage=((node.rerun_stage if node is not None else None)
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
-                check_fn=check_fn)                            # Phase 3: optional inter-stage agentic verify
+                check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
+                # METRIC PROVENANCE: what the number is a claim ABOUT. Gated on the rung so `off` is
+                # byte-identical to the behaviour before this shipped — and so a RESUMED pre-2026-08-13
+                # run (which `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins to `off`) does not acquire a
+                # different record mid-log. The binding is a READ; whether an unbound metric is a
+                # violation is decided at the terminal, in `engine/evaluate.py`.
+                subject=(_subject if str(getattr(self, "metric_subject", "audit") or "audit") != "off"
+                         else None))
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
