@@ -413,12 +413,6 @@ CARD_IDEA_CONCEPT_FIELDS = ("concept_mode", "concepts", "concepts_added", "conce
 # The UTF-8 cap is deliberately the worst-case encoding size of the character cap, so valid Unicode
 # statements are never accepted by one layer and rejected by another.
 #
-# REVIEW (mega-review 2026-08-13): "every Card producer" is not yet true — two engine producer
-# sites still hardcode the pre-widening 2,048 cap (`engine/card_reservation.py` `_card_statement`
-# and its merge-payload sibling; grep for 2_048 there). Fail-closed direction, so no corruption,
-# but the layers disagree about one statement: the HTTP boundary and replay accept 4,000 chars
-# while an engine-minted Idea with a 2,049-char hypothesis is silently refused Card ownership.
-# Point those two sites at this constant or narrow this comment's claim.
 CARD_STATEMENT_MAX_CHARS = 4_000
 CARD_STATEMENT_MAX_UTF8_BYTES = 16_000
 

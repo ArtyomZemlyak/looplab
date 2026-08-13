@@ -62,8 +62,14 @@ def read_memory_jsonl_window(
     # `tools/memory_tools.py` come through this window, while `serve/memory_cascade.py` and
     # `engine/lesson_hygiene.py` come through `read_jsonl_lenient` — so a row containing a bare CR
     # was two rows here and one row there, and one of those readers DELETES from the store.
+    # `b"".split(b"\n")` is `[b""]`, and an empty buffer does not end in a newline — so a 0-byte
+    # store (a fresh LOOPLAB_MEMORY_DIR, or one whose rows a cascade just purged) reported
+    # `source_rows: 1` with zero rows decoded, where `splitlines()` reported 0. That count is the
+    # receipt the operator's `/api/memory` view and the Researcher's own prior both read to tell
+    # "the store holds nothing" from "the window skipped rows", so it asserted a record no reader
+    # could account for. Drop one trailing empty element, which covers both shapes.
     encoded = raw.split(b"\n")
-    if raw.endswith(b"\n"):
+    if encoded and not encoded[-1]:
         encoded.pop()
     if len(encoded) > max_rows:
         encoded = encoded[-max_rows:]

@@ -1195,24 +1195,21 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
         # at a base / already-memoized ancestor / missing ref / cycle, then apply the deltas back DOWN.
         if sid in memo:
             return memo[sid]
-        chain: list[tuple] = []           # (span_id, carry, delta_input), from `sid` upward
+        # (span_id, carry, delta_input, own_partial), from `sid` upward. `own_partial` is per-LEVEL
+        # rather than one flag for the whole walk, because partialness travels in exactly one
+        # direction: a span whose input was dropped makes every span chained ONTO it truncated, and
+        # says nothing about the ancestors above it, whose reconstructions are still exact. A single
+        # accumulator applied uniformly over `reversed(chain)` marked the whole chain — so walking
+        # the same three spans leaf-first flagged the complete BASE as partial, i.e. the answer
+        # depended on file order. Both directions were wrong, in opposite ways.
+        chain: list[tuple] = []
         seen: set = set()
         cur_sid = sid
         base: list = []
-        broke = False                     # True ⇒ a referenced ancestor was missing → prefix is truncated
+        broke = False                     # partialness of the BASE the walk bottoms out at
         while True:
             if cur_sid in memo:
                 base = memo[cur_sid]
-                # REVIEW (mega-review 2026-08-13): this ASSIGNMENT discards any `broke=True`
-                # accumulated from the flags of spans already walked below this ancestor, so in the
-                # common FILE-ORDER case (ancestors memoized before descendants) a span's own
-                # `input_partial` never propagates: walking the flagged span itself hits its
-                # complete memoized parent and records partial=False for it, and every descendant
-                # then inherits False — a lossy reconstruction rendered as complete, the opposite
-                # of the promise eleven lines down. The flag only survives when the flagged span is
-                # a chain BASE, which is the one topology the test covers. Fix shape:
-                # `broke = broke or partial.get(cur_sid, False)` (measured: G1 complete base <-
-                # G2 partial <- G3 yields g3.input_partial=None today).
                 broke = partial.get(cur_sid, False)
                 break
             if cur_sid is None or cur_sid in seen:    # missing ref / cycle → empty base, INCOMPLETE
@@ -1229,8 +1226,7 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             # A durable exporter fallback can retain this span's delta identity while omitting its
             # over-limit input. Once one ancestor declares that loss, every descendant is partial
             # even though the ancestor row and back-reference are both present and well-formed.
-            if a.get("input_partial") is True:
-                broke = True
+            own_partial = a.get("input_partial") is True
             cur = a.get("input")
             if "input_carry" not in a or not isinstance(cur, list):
                 base = cur if isinstance(cur, list) else []
@@ -1238,8 +1234,9 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             frm = a.get("input_from")
             if frm is None:                            # self-contained base: its `input` is the full ctx
                 memo[cur_sid] = list(cur)
-                partial[cur_sid] = broke               # an explicit exporter/projection loss survives
+                partial[cur_sid] = own_partial         # an explicit exporter/projection loss survives
                 base = memo[cur_sid]
+                broke = own_partial
                 break
             # Coerce carry to a NON-NEGATIVE int: a malformed span (bit-rot on a network mount, or a
             # hand-edited log) whose input_carry is a string/float would make `full[:carry]` raise
@@ -1249,16 +1246,21 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             raw_carry = a.get("input_carry")
             carry = raw_carry if (isinstance(raw_carry, int) and not isinstance(raw_carry, bool)
                                   and raw_carry >= 0) else 0
-            chain.append((cur_sid, carry, cur))
+            chain.append((cur_sid, carry, cur, own_partial))
             cur_sid = frm
         full = base
-        for csid, carry, delta in reversed(chain):     # apply deltas base→leaf, memoizing every level
+        running = broke
+        for csid, carry, delta, own_partial in reversed(chain):
+            # base→leaf, memoizing every level. `running` accumulates DOWNWARD only: once a level
+            # declares its own loss, it and everything chained onto it are partial; levels already
+            # passed stay exact.
             full = list(full[:carry]) + list(delta)
+            running = running or own_partial
             memo[csid] = full
-            partial[csid] = broke
+            partial[csid] = running
         if sid not in memo:
             memo[sid] = full
-            partial[sid] = broke
+            partial[sid] = running
         return memo[sid]
 
     out: list[dict] = []

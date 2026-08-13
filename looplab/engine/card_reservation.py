@@ -46,7 +46,8 @@ import orjson
 from looplab.agents.roles import is_researcher_fallback
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, Idea, NodeStatus, RunState,
+from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, CARD_STATEMENT_MAX_CHARS,
+                                 Idea, NodeStatus, RunState,
                                  card_action_digest,
                                  card_ownership_receipt, durable_idea_payload,
                                  hypothesis_statement_digest, idea_proposal_ref,
@@ -215,7 +216,8 @@ class CardReservationMixin:
         hypothesis = idea.hypothesis.strip() if isinstance(idea.hypothesis, str) else ""
         rationale = idea.rationale.strip() if isinstance(idea.rationale, str) else ""
         statement = hypothesis or rationale or f"{idea.operator} experiment"
-        if (not statement or len(statement) > 2_048 or not statement.isprintable()
+        if (not statement or len(statement) > CARD_STATEMENT_MAX_CHARS
+                or not statement.isprintable()
                 or statement != statement.strip()):
             return None
         return statement
@@ -1823,7 +1825,8 @@ class CardReservationMixin:
                 }
                 statement = event.data.get("statement")
                 if (isinstance(statement, str) and statement.strip()
-                        and len(statement.strip()) <= 2_048 and statement.strip().isprintable()):
+                        and len(statement.strip()) <= CARD_STATEMENT_MAX_CHARS
+                        and statement.strip().isprintable()):
                     payload["statement"] = statement.strip()
                 self.store.append(EV_CARD_MERGED, payload)
                 wrote = True

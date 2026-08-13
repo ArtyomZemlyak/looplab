@@ -506,6 +506,48 @@ def test_missing_ancestor_marks_input_partial(tmp_path):
         assert len(att["input"]) < len(sent[gens.index(g)])       # a short prefix, honestly marked
 
 
+def test_input_partial_propagates_to_DESCENDANTS_not_only_from_a_chain_base(tmp_path):
+    """A span's own `input_partial` must reach everything chained onto it.
+
+    This is the durable-exporter fallback shape, NOT a torn file: g2's row and back-reference are
+    both present and well-formed, and it declares that its own over-limit input was dropped
+    (`tracing.generation` sets exactly this flag). Every span is in the set.
+
+    The memo hit used to ASSIGN the ancestor's partial flag over the one accumulated while walking
+    down, so in the common FILE-ORDER case — ancestors memoized before descendants — the flag never
+    propagated: walking the flagged span hit its COMPLETE memoized parent, recorded partial=False
+    for it, and every descendant inherited False. The flag survived only when the flagged span was
+    itself a chain base, which is the one topology `test_missing_ancestor_marks_input_partial`
+    above happens to cover.
+    """
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    _write_toolloop(rd, n_turns=6)
+    spans = load_spans(rd / "spans.jsonl")
+    gens = sorted((s for s in spans if s.get("kind") == "generation"),
+                  key=lambda s: s.get("start", 0.0))
+    lossy = gens[2]["span_id"]
+    marked = [{**s, "attributes": {**(s.get("attributes") or {}), "input_partial": True}}
+              if s.get("span_id") == lossy else s
+              for s in spans]
+
+    hyd = {h["span_id"]: h for h in hydrate_inputs(marked)}
+    for g in gens[:2]:
+        assert not hyd[g["span_id"]]["attributes"].get("input_partial"), (
+            "a span ABOVE the loss is still exact and must not be marked")
+    assert hyd[lossy]["attributes"]["input_partial"] is True, "a span's own flag must survive"
+    for g in gens[3:]:
+        assert hyd[g["span_id"]]["attributes"].get("input_partial") is True, (
+            "a descendant of a lossy span renders as COMPLETE — the operator is shown a truncated "
+            "prefix with no indication it is truncated")
+
+    # Order-independence: the defect was a function of which side of the memo the walk landed on,
+    # so the same set presented ancestors-last must answer identically.
+    rev = {h["span_id"]: h for h in hydrate_inputs(list(reversed(marked)))}
+    assert rev[gens[-1]["span_id"]]["attributes"].get("input_partial") is True
+    assert not rev[gens[0]["span_id"]]["attributes"].get("input_partial")
+
+
 def test_cyclic_input_from_is_guarded(tmp_path):
     """A corrupt/looping `input_from` (should never happen, but the reader is files-as-truth over an
     external file) resolves without hanging — the cycle guard bounds reconstruction."""

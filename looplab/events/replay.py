@@ -2858,17 +2858,17 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 # Handler-level LWW means repeated values for the same rejected window are still one
                 # missing projection candidate, not an ever-growing count of audit-log events.
                 #
-                # REVIEW (mega-review 2026-08-13): a NEW key refused here is refused FOREVER — the
-                # fold replays the same log prefix, so the same 4,096 keys win on every fold — and
-                # the engine's reconciliation writer (`research_cadence._sync_card_enrichments`)
-                # computes its delta from the folded card and this capped journal with no gate on
-                # `_card_enrichment_complete`, so an omitted enrichment re-appends an identical
-                # `card_enriched` row on EVERY cadence pass for the rest of the run: unbounded log
-                # growth with no convergence (reproduced live: appends-per-pass 0,1,2,3,4… once the
-                # cap is filled; the control case converges at one). Organically ~1,000 cards/nodes
-                # away, but any hand-edited/hostile log reaches it with 4,096 cheap rows. The
-                # writer should consult the omission signal (or the cap needs per-card fairness).
+                # A NEW key refused here is refused FOREVER: the fold replays the same log prefix,
+                # so the same 4,096 keys win on every fold. That is fine for the fold — it is the
+                # bound doing its job — but it makes the omission a DURABLE fact the writer has to
+                # see, which is what `card_enrichment_omissions` carries out to `derive_cards` and
+                # what `Card._card_enrichment_complete` publishes. `research_cadence`'s
+                # reconciliation now refuses to re-append against a card marked incomplete;
+                # without that gate it re-emitted a byte-identical `card_enriched` on every cadence
+                # pass for the rest of the run (measured: appends-per-pass 0,1,2,3,4… versus a
+                # control converging at one).
                 ctx.card_enrichment_omissions.setdefault(candidate_key, 1)
+
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).
