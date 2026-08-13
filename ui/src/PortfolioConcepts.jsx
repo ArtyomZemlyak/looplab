@@ -106,14 +106,15 @@ function Partners({ cooccurrence, node }) {
 // What the lab LEARNED about this concept — the lessons, cases and notes that carry it, straight
 // here rather than one screen away. Subtree matching is `conceptShelf`'s, so `loss` answers with
 // everything under `loss/contrastive/…`; two definitions of "about this concept" would drift.
-function _ConceptMemory({ memory, id }) {
+function _ConceptMemory({ memory, id, onRetry = null }) {
   const result = useMemo(() => conceptMemory(memory, id), [memory, id])
   if (memory === null) return <><h4>What the lab learned</h4>
     <p className="muted" role="status">loading cross-run memory…</p></>
   // Unreadable is its own answer, and must never be spelled as "empty" — see the fetch's `.catch`.
   if (memory?.unavailable) return <><h4>What the lab learned</h4>
     <p className="muted" role="status">Cross-run memory could not be read, so what the lab learned
-      about this concept is unknown — this is not a statement that it learned nothing.</p></>
+      about this concept is unknown — this is not a statement that it learned nothing.</p>
+    {onRetry && <button type="button" className="btn sm ghost" onClick={onRetry}>Try again</button>}</>
   const notice = conceptMemoryNotice(result)
   return <>
     <h4>What the lab learned</h4>
@@ -132,7 +133,8 @@ function _ConceptMemory({ memory, id }) {
   </>
 }
 
-function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose, memory = null }) {
+function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
+  memory = null, onMemoryRetry = null }) {
   const node = id && forest.nodes[id]
   if (!node) return null
   const shown = node.runIds.slice(0, MAX_DETAIL_RUNS)
@@ -179,7 +181,7 @@ function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose,
     </ul>
     {node.runIds.length > shown.length
       && <p className="muted">+{node.runIds.length - shown.length} more runs not listed.</p>}
-    <_ConceptMemory memory={memory} id={id} />
+    <_ConceptMemory memory={memory} id={id} onRetry={onMemoryRetry} />
     <Partners cooccurrence={cooccurrence} node={node} />
   </aside>
 }
@@ -197,6 +199,7 @@ export default function PortfolioConcepts({
   // cases and notes by these very concept ids; this view could only ever answer "which runs", and the
   // path between the two did not exist. One bounded read, shared by every concept the operator clicks.
   const [memory, setMemory] = useState(null)
+  const [memoryNonce, setMemoryNonce] = useState(0)
   const rowRefs = useRef(new Map())
 
   useEffect(() => {
@@ -212,24 +215,26 @@ export default function PortfolioConcepts({
     return () => controller.abort()
   }, [])
 
+  // LAZY, and only once a concept is actually selected. This downloads the whole bounded cross-run
+  // memory window — multi-MiB worst case per tier — and it is read by ONE panel inside the detail
+  // pane, so fetching it on mount made every List<->Concepts flip re-pay for it before the operator
+  // clicked anything. `memoryNonce` is the retry: a failed read used to be permanent for the life of
+  // the view, so one transient 503 showed "could not be read" until the operator left and came back.
   useEffect(() => {
+    if (!selected) return undefined
+    if (memory !== null && !memory?.unavailable) return undefined
     const controller = new AbortController()
-    // REVIEW (mega-review 2026-08-13): this eagerly downloads the whole bounded cross-run memory
-    // window (multi-MiB worst case per tier) on EVERY mount — each List<->Concepts flip re-pays
-    // it before any concept is clicked — and a failed read is permanent for the life of the view:
-    // neither this nor the policy read above has a retry affordance, so one transient 503 shows
-    // "could not be read" until the operator leaves and re-enters. Fetch lazily on first concept
-    // selection (or cache across mounts) and add a retry.
+    setMemory(null)
     get('/api/memory', { signal: controller.signal })
       .then(payload => setMemory(payload))
       // A FAILED read is not an empty store. `{}` folds to `total: 0`, which `conceptMemoryNotice`
       // reports as "Cross-run memory is empty, so nothing can be linked yet." — a positive claim
       // that no lesson, case or note in the whole shared memory dir carries this concept, made about
       // a read that never landed (revoked token, restarted server, slow store). The sibling policy
-      // read three lines up already keeps a distinct `unavailable` state for exactly this reason.
+      // read above already keeps a distinct `unavailable` state for exactly this reason.
       .catch(error => { if (error?.name !== 'AbortError') setMemory({ unavailable: true }) })
     return () => controller.abort()
-  }, [])
+  }, [selected, memoryNonce])
 
   const selectedIds = useMemo(() => new Set(selectedRuns.map(run => run.run_id)), [selectedRuns])
   // The selection restriction can only ever NARROW what the list is already showing. A checked run
@@ -478,7 +483,8 @@ export default function PortfolioConcepts({
 
       {selected
         ? <ConceptDetail forest={forest} cooccurrence={cooccurrence} id={selected} runsById={runsById}
-            onOpenRun={onOpenRun} onClose={() => setSelected('')} memory={memory} />
+            onOpenRun={onOpenRun} onClose={() => setSelected('')} memory={memory}
+            onMemoryRetry={() => setMemoryNonce(n => n + 1)} />
         : <aside className="pc-detail pc-detail-idle">
             <p className="muted">Pick a concept to see which runs are evidence for it, and what the lab has learned about it.</p>
           </aside>}

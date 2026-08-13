@@ -9,7 +9,8 @@ import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGe
   submitCommand, traceDeadlineGet, traceGenerationMatches } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
-import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
+import { cardControlRecovery, cardControlSubmission, cardEditReflected }
+  from './cardControlModel.js'
 // The lane vocabulary and the card-shape readers moved down into the pure model beside this file
 // (the `ui/` house pattern) so the board and `node --test` read ONE table. They are aliased back to
 // this file's existing private spellings rather than renamed at ~77 call sites: the point of the
@@ -30,6 +31,7 @@ import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { traceReadDeadlineMs } from './traceScrollModel.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
 // bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
@@ -778,6 +780,7 @@ function _CardKanban({
   // in-flight submission instead of a stale fold — see the editBaseline capture in cardControl.
   const sentEditRef = useRef({})
   const detailCloseRef = useRef(null)
+  const detailDrawerRef = useRef(null)
   const detailReturnFocusRef = useRef(null)
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
@@ -930,12 +933,11 @@ function _CardKanban({
       inFlight.current.delete(card.id)
     }
   }
-  // REVIEW (mega-review 2026-08-13): a command-recovery state machine (submitting/checking/
-  // retrying/retryable/failed/waiting-for-fold phases, retryability status lists, notice tones)
-  // spelled inline in setState updaters — the house pattern puts these transitions in a pure model
-  // beside cardControlModel.js so node --test can drive them; as written, swapping the two status
-  // lists or dropping 'rejected' ships green because nothing mounts this component (the exact
-  // AssistantBar failure mode CLAUDE.md documents).
+  // The CHOREOGRAPHY (which request, which optimistic entry, the commandId re-check that drops a
+  // late answer about a superseded command) stays here; the DECISION — which statuses are failed,
+  // which are retryable, and what phase and tone follow — is `cardControlModel.cardControlRecovery`,
+  // where `node --test` can drive its truth table. The two status lists are not the same list, and
+  // inline they were a one-token edit away from offering a retry on a terminal `rejected`.
   const recoverCardControl = async (cardId, action) => {
     const entry = optim[cardId]
     const pending = entry?.pending
@@ -960,15 +962,16 @@ function _CardKanban({
       setOptim(current => {
         const latest = current[cardId]
         if (!latest || latest.pending?.commandId !== pending.commandId) return current
-        const failed = ['failed', 'timed_out', 'rejected'].includes(record?.status)
-        const retryable = ['failed', 'timed_out'].includes(record?.status)
+        // The verdict lives in `cardControlModel.js`: the failed and retryable status lists are
+        // NOT the same list (`rejected` is terminal and must never offer a retry), and inline they
+        // were a one-token edit away from an infinite retry button, shipping green.
+        const verdict = cardControlRecovery(record)
         return { ...current, [cardId]: {
           ...latest,
           pending: {
-            ...latest.pending, phase: retryable ? 'retryable' : failed ? 'failed' : 'waiting-for-fold',
-            retryable,
+            ...latest.pending, phase: verdict.phase, retryable: verdict.retryable,
           },
-          notice: { tone: failed ? 'error' : 'pending', text: feedback.message },
+          notice: { tone: verdict.tone, text: feedback.message },
         } }
       })
     } catch (error) {
@@ -1017,22 +1020,14 @@ function _CardKanban({
     onSelectCard?.(cardId)
   }
   const detailOpen = view && (!pane?.compact || !!selectedCard)
-  useEffect(() => {
-    if (!pane?.compact || !selectedCard) return undefined
-    detailCloseRef.current?.focus?.()
-    // REVIEW (mega-review 2026-08-13): raw window keydown that unconditionally preventDefault()s
-    // and closes the drawer, outside the useDialogFocus/DIALOG_PRIORITY arbitration every other
-    // dialog registers with — so with a nested prioritized dialog open inside renderInspector
-    // (e.g. the destructive trace-clear confirm) Escape fires BOTH handlers: the confirm cancels
-    // AND the drawer unmounts it mid-interaction; Escape inside the drawer's own text inputs also
-    // dismisses the whole drawer instead of cancelling the edit. Register with the priority system
-    // (the drawer already declares role="dialog").
-    const onKeyDown = event => {
-      if (event.key === 'Escape') { event.preventDefault(); closeDetails() }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [pane?.compact, selectedCard?.id])
+  // ESCAPE GOES THROUGH THE PRIORITY SYSTEM, like every other dialog. A raw window keydown that
+  // unconditionally `preventDefault()`s and closes sat outside `DIALOG_PRIORITY` arbitration, so
+  // with a nested prioritized dialog open inside `renderInspector` — the destructive trace-clear
+  // confirm — Escape fired BOTH: the confirm cancelled AND the drawer unmounted it mid-interaction.
+  // `useDialogFocus` also declines Escape that `defaultPrevented` already claimed, which is what
+  // lets a text input inside the drawer cancel its own edit instead of dismissing the whole drawer.
+  useDialogFocus(detailDrawerRef, closeDetails, !!(pane?.compact && selectedCard),
+    { modal: true, priority: DIALOG_PRIORITY.OVERLAY })
   const addBar = canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
     <input className="text" style={{ flex: 1 }} aria-label="New hypothesis" disabled={readOnly}
       placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
@@ -1083,7 +1078,8 @@ function _CardKanban({
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
       {detailOpen && !pane?.compact && pane?.splitter}
-      {detailOpen && <aside className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
+      {detailOpen && <aside ref={detailDrawerRef}
+        className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
         style={pane?.width ? { width: pane.width } : undefined}
         tabIndex={pane?.compact ? -1 : undefined}
         data-route-focus-guard={pane?.compact ? 'true' : undefined}
