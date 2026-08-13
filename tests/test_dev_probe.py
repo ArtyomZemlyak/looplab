@@ -370,6 +370,54 @@ def test_an_operator_prompt_override_still_wins_in_both_configurations():
         assert dev._system_body(render) == "MY OWN BODY"
 
 
+def test_a_real_repo_task_gets_a_probe_fenced_against_its_own_editable_tree(tmp_path):
+    """The whole chain, end to end: `Settings.developer_probe` -> `make_roles` -> the developer's
+    toolset -> a probe whose fence is derived from THAT task's editable root.
+
+    The unit tests above build the provider directly, so none of them would notice a `make_roles`
+    that forgot to pass the spec — and a probe with an empty spec is an UNFENCED probe that still
+    passes every fence test written against a spec it was handed itself."""
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.agents.factory import make_roles
+    from looplab.core.config import Settings
+    from looplab.core.prompts import render
+
+    src = tmp_path / "repo"
+    (src / "experiments").mkdir(parents=True)
+    (src / "train.py").write_text("print('hi')\n", encoding="utf-8")
+    (src / "experiments" / "human.txt").write_text("A HUMAN'S ARTIFACT", encoding="utf-8")
+    task = RepoTask(id="r", goal="g", direction="max", editable_path=str(src),
+                    edit_surface=["*.py"],
+                    eval=EvalSpec(command=[sys.executable, "train.py"],
+                                  metric={"kind": "stdout_json"}))
+
+    def _inner(role):
+        # make_roles returns the UnifiedAgent facade by default; the probe lives on the repo
+        # developer it delegates to.
+        while not isinstance(role, LLMRepoDeveloper) and getattr(role, "developer", None) is not None:
+            role = role.developer
+        return role
+
+    on = _inner(make_roles(task, Settings(backend="llm", developer_probe=True,
+                                          llm_base_url="http://x/v1"))[1])
+    tools = on._scout_tools(None)
+    names = {s["function"]["name"] for t in tools for s in t.specs()}
+    assert "run_probe" in names
+    assert "PROBE BEFORE YOU WORK AROUND SOMETHING" in on._system_body(render)
+
+    probe = next(t for t in tools if "run_probe" in {s["function"]["name"] for s in t.specs()})
+    leak = probe.execute("run_probe",
+                         {"code": f"print(open({str(src / 'experiments' / 'human.txt')!r}).read())"})
+    assert "A HUMAN'S ARTIFACT" not in leak, "make_roles wired an UNFENCED probe"
+    assert "OK" in probe.execute("run_probe", {"code": "print('OK')"})
+
+    off = _inner(make_roles(task, Settings(backend="llm", developer_probe=False,
+                                           llm_base_url="http://x/v1"))[1])
+    assert "run_probe" not in {s["function"]["name"]
+                               for t in off._scout_tools(None) for s in t.specs()}
+
+
 @pytest.mark.skipif(os.name == "nt", reason="the boundary's kernel half is POSIX rlimits")
 def test_the_engines_own_interpreter_is_what_answers():
     """`env_inspect` answers by IMPORTING in the engine's interpreter; a probe on a different one

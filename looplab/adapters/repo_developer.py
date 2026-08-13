@@ -386,10 +386,6 @@ class LLMRepoDeveloper:
         # every one of them.
         self._probe = bool(probe)
         self._probe_timeout_s = float(probe_timeout_s)
-        # The probe's read fence is derived from the task's OWN repo spec, by the same
-        # `read_fence.fence_inputs` the engine hands its eval fence — kept here so the derivation
-        # reads one spec per node build rather than one per phase.
-        self._probe_repo_spec = task.repo_spec() if probe else None
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -400,6 +396,10 @@ class LLMRepoDeveloper:
         # write tools can explain a mount refusal honestly — see RepoWriteTools.__init__.
         self._data_mounts = [n for n, s in (rs.get("data") or {}).items()
                              if isinstance(s, dict) and s.get("mount")]
+        # F2 · the probe's read fence is derived from the task's OWN repo spec, by the same
+        # `read_fence.fence_inputs` that hands the engine its eval fence. Bound from the `rs` already
+        # read above, once per node build rather than once per phase.
+        self._probe_repo_spec = rs if probe else None
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
         self.last_footprint: dict | None = None
