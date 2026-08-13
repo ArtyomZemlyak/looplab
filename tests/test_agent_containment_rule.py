@@ -206,13 +206,19 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     assert is_transport_failure_verdict(seen["transport"])
 
 
-def test_both_public_entry_points_go_through_the_helper():
+def test_every_public_entry_point_goes_through_the_helper():
+    """THREE since F8 added `repair_critic` (2026-08-13), and the count is the point rather than the
+    number: `_pilot_emit` owns the containment boundary — the budget-vs-transport split, the
+    bind_state decision, the call-time seam import — so a new emit path that hand-rolls its own
+    `try`/`except` around `drive_tool_loop` is how a transport failure starts being read as a
+    verdict again. Raise this only alongside a new pilot method that routes through the helper."""
     import ast
     from pathlib import Path
 
     source = (Path(__file__).resolve().parents[1] / "looplab" / "agents"
               / "unified_agent.py").read_text(encoding="utf-8-sig")
     ast.parse(source)
-    assert source.count("self._pilot_emit(") == 2, "choose_action and triage_crash, no more no less"
+    assert source.count("self._pilot_emit(") == 3, (
+        "choose_action, triage_crash and repair_critic, no more no less")
     assert "except BudgetExceeded:" not in source, (
         "the containment idiom is inlined again; `_pilot_emit` routes through tool_loop.resilient")

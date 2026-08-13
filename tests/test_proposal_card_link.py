@@ -86,10 +86,11 @@ def test_the_re_proposal_site_passes_no_idea():
 
 
 def test_every_propose_span_site_stamps():
-    """FOUR call sites open a `propose` span — draft, debug, improve, and the re-proposal a node
-    reset performs. A site that opens one and forgets the stamp is a Researcher trace that silently
-    loses its card, which is the whole defect this file exists for, and no behavioural test would
-    catch it on the other three paths."""
+    """THREE call sites open a `propose` span — draft, improve, and the re-proposal a node reset
+    performs. (It was four until 2026-08-13: the `debug` site went with the Debug node, F5.) A site
+    that opens one and forgets the stamp is a Researcher trace that silently loses its card, which is
+    the whole defect this file exists for, and no behavioural test would catch it on the other
+    paths."""
     import inspect
 
     from looplab.engine import orchestrator
@@ -98,10 +99,10 @@ def test_every_propose_span_site_stamps():
     opened = source.count('self.tracer.span("propose") as _span')
     unbound = source.count('self.tracer.span("propose"):')
     assert unbound == 0, "a `propose` span opened without binding its handle cannot be stamped"
-    assert opened == 4, f"{opened} propose spans found; every one must bind its handle"
-    assert source.count("stamp_proposal_span(_span,") == 4, "a site opened a span and forgot to stamp"
-    # Three sites know the card while the span is open; the RE-PROPOSAL site must pass NO idea —
+    assert opened == 3, f"{opened} propose spans found; every one must bind its handle"
+    assert source.count("stamp_proposal_span(_span,") == 3, "a site opened a span and forgot to stamp"
+    # Two sites know the card while the span is open; the RE-PROPOSAL site must pass NO idea —
     # the one it holds names the card this path is about to drop. Its card stays derivable through
     # the `node_created` event that shares its trace.
-    assert source.count("stamp_proposal_span(_span, idea") == 3
+    assert source.count("stamp_proposal_span(_span, idea") == 2
     assert source.count("stamp_proposal_span(_span, None, node_id=node.id)") == 1

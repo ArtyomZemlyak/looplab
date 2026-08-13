@@ -290,6 +290,7 @@ _LAYOUT = {
     "train_monitor": "engine",   # per-eval observer + diagnostics + separately opt-in early kill
     "asha_monitor": "engine",    # per-eval ASHA live-curve rank watchdog (advisory + opt-in kill)
     "triage": "engine",
+    "repair_judgment": "engine",
     "widths": "engine",        # the live concurrency-width settling rule (doc 25 ES-09/EC-11)
     "tui": "serve",
     "tui_api": "serve",

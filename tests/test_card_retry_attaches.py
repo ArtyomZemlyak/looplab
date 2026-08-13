@@ -80,6 +80,40 @@ def _seed_failed_card(engine, *, hypothesis: str = SEED):
     return fold(engine.store.read_all())
 
 
+def _retry_attach_idea(state):
+    """The retry Idea the proposal funnel used to hand back, built here instead.
+
+    F5 deleted the Debug node on 2026-08-13, so `_prepare_node_idea({"kind": "debug", …})` now
+    REFUSES — `test_the_engine_funnel_refuses_every_debug_entry_point` below is the pin for that.
+    The reservation-level attach gate it fed is deliberately still in the tree, fail-closed (see
+    `engine/card_reservation.py::_retry_attach_card`), and the tests under this helper are what keep
+    its rules reviewable: an unreachable gate whose truth table nobody can state is exactly the shape
+    a reintroduced retry operator would sail past. So the Idea is constructed the way the funnel
+    constructed it — the failed parent's own Idea with `operator` flipped — and handed straight to
+    the reservation.
+    """
+    idea = state.nodes[0].idea.model_copy(deep=True)
+    idea.operator = "debug"
+    idea.card_id = None
+    return idea
+
+
+def _linked_retry_idea(engine, state):
+    """`_retry_attach_idea` PLUS the card the proposal funnel used to resolve onto it.
+
+    `_prepare_node_idea` did two things for a retry: build the Idea, and bind the attach target the
+    reservation would later agree with. Only the first is reconstructible without the funnel, and
+    the second is what the two-pass race below is ABOUT — so it is resolved here through the same
+    planner the funnel called (`_plan_native_card`), not hand-written."""
+    idea = _retry_attach_idea(state)
+    plan = engine._plan_native_card(
+        engine.store.read_all(), state, idea, parents=[0], parent_generations={"0": 0},
+        scored_against=state.best_node_id, source="researcher", at_node=1, retry_attach=True)
+    assert plan.disposition == "attach" and plan.card_id == "card-0"
+    idea.card_id = plan.card_id
+    return idea
+
+
 def _card_added_ids(engine):
     return [event.data.get("id") for event in engine.store.read_all()
             if event.type == EV_CARD_ADDED]
@@ -92,12 +126,7 @@ def test_a_repair_becomes_another_node_under_the_card_it_retries(tmp_path):
     state = _seed_failed_card(engine)
     assert state.cards["card-0"].evidence == [0]
 
-    retry = engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
-                                      researcher=engine.researcher, prospective_node_id=1,
-                                      source="researcher")
-    assert retry is not None and retry.operator == "debug"
-    assert retry.card_id == "card-0", "the proposal funnel must already resolve the attach target"
-
+    retry = _retry_attach_idea(state)
     reservation = engine._reserve_node_build({"kind": "debug", "parent_id": 0}, retry,
                                              retry_attach=True)
     assert reservation is not None and reservation.card_id == "card-0"
@@ -129,13 +158,18 @@ def test_the_inventory_staging_lane_writes_no_twin(tmp_path):
     assert list(fold(engine.store.read_all()).cards) == ["card-0"]
 
 
-def test_without_the_attach_the_same_lane_still_mints_the_twin(tmp_path, monkeypatch):
-    """The counterfactual, so the two tests above cannot pass for some unrelated reason.
+def test_without_the_attach_the_same_planner_still_mints_the_twin(tmp_path, monkeypatch):
+    """The counterfactual, so the tests above cannot pass for some unrelated reason.
 
     Neutralize ONLY the attach resolver — every other guard (`hypothesis_merged`, the novelty gate,
-    the belief collapse, the exact-action dedupe) stays live — and the v5 board comes straight back:
-    two cards, byte-identical seeds, one `belief_id`.
-    """
+    the belief collapse, the exact-action dedupe) stays live — and the v5 twin comes straight back:
+    a second card with a byte-identical seed and the same `belief_id`.
+
+    It used to be driven through `_stage_card_creates`, the lane that actually wrote v5's card-3.
+    That lane refuses a `debug` action outright since F5 (2026-08-13), which is a STRONGER guarantee
+    and is pinned in `test_the_engine_funnel_refuses_every_debug_entry_point` — but it also means the
+    lane can no longer demonstrate what the attach resolver is worth. So the counterfactual drops one
+    layer, to the planner the lane called."""
     from looplab.engine.card_reservation import CardReservationMixin
 
     monkeypatch.setattr(CardReservationMixin, "_retry_attach_card",
@@ -143,11 +177,35 @@ def test_without_the_attach_the_same_lane_still_mints_the_twin(tmp_path, monkeyp
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
 
-    assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == ["card-1"]
+    reservation = engine._reserve_node_build({"kind": "debug", "parent_id": 0},
+                                             _retry_attach_idea(state), retry_attach=True)
+    assert reservation is not None and reservation.card_id == "card-1"
     twins = fold(engine.store.read_all()).cards
     assert twins["card-0"].seed_statement == twins["card-1"].seed_statement
     assert twins["card-0"].belief_id == twins["card-1"].belief_id
     assert twins["card-1"].retry_of == "card-0"
+
+
+def test_the_engine_funnel_refuses_every_debug_entry_point(tmp_path):
+    """F5, from this file's side: the attach machinery below is UNREACHABLE, and that is the point.
+
+    Three funnels used to carry a `debug` action into the reservation — the proposal path, the
+    inventory staging lane, and the operator's `inject_node`. All three refuse now, so nothing in the
+    tree can reach `_retry_attach_card` except a test. The gate is nevertheless kept fail-closed
+    (`engine/card_reservation.py` says why), and the rest of this file is what keeps its rules
+    statable: a reintroduced retry operator must land on the gate, not sail past it."""
+    engine = _engine(tmp_path)
+    state = _seed_failed_card(engine)
+
+    assert engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
+                                     researcher=engine.researcher, prospective_node_id=1,
+                                     source="researcher") is None
+    assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == []
+    with pytest.raises(ValueError, match="debug nodes were removed"):
+        engine._create_injected_node({"idea": {"operator": "debug", "params": {}},
+                                      "parent_id": 0, "code": "print(1)"})
+    # …and none of the three left a card behind on the way out.
+    assert _card_added_ids(engine) == ["card-0"]
 
 
 # --- the rules that keep the attach narrow -------------------------------------------------------
@@ -275,11 +333,8 @@ def test_the_two_board_blocks_never_show_the_same_card_twice(tmp_path):
 def _attached_reservation(engine, state):
     """The exact shape `_create_node_scoped` commits: `_link` resolves the attach, the reservation
     agrees, and the log holds a bare `node_building` naming a card THIS reservation did not mint."""
-    retry = engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
-                                      researcher=engine.researcher, prospective_node_id=1,
-                                      source="researcher")
-    reservation = engine._reserve_node_build({"kind": "debug", "parent_id": 0}, retry,
-                                             retry_attach=True)
+    reservation = engine._reserve_node_build({"kind": "debug", "parent_id": 0},
+                                             _retry_attach_idea(state), retry_attach=True)
     assert reservation is not None and reservation.card_id == "card-0"
     # The RECORD, written where the attach is committed: this claim did not mint card-0. It is what
     # `_reservation_minted_card` reads, and it is the only proof that survives a log whose other
@@ -406,8 +461,12 @@ def test_an_operator_injection_keeps_its_own_card_and_its_executable_identity(tm
     """
     engine = _engine(tmp_path)
     _seed_failed_card(engine)
+    # `improve` rather than `debug` since F5 refused the latter at this very boundary (2026-08-13,
+    # pinned above). The property is unchanged and if anything better demonstrated: the operator's
+    # experiment names the same parent and carries a BYTE-IDENTICAL seed statement to card-0, so a
+    # hardcoded `retry_attach` would have folded it away exactly as it folded a `debug`.
     engine._create_injected_node({
-        "idea": {"operator": "debug", "params": {"x": 1.0, "y": 2.0},
+        "idea": {"operator": "improve", "params": {"x": 1.0, "y": 2.0},
                  "rationale": "switch the loss to qwen3 cross-batch InfoNCE",
                  "hypothesis": SEED},
         "parent_id": 0,
@@ -485,11 +544,8 @@ def test_a_refused_attach_is_receipted_like_any_other_contract_refusal(tmp_path)
     `novelty_rejected` the operator can read. An attach that skipped the contract produced neither."""
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
-    retry = engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
-                                      researcher=engine.researcher, prospective_node_id=1,
-                                      source="researcher")
     assert engine._reserve_node_build(
-        {"kind": "debug", "parent_id": 0}, retry, retry_attach=True,
+        {"kind": "debug", "parent_id": 0}, _retry_attach_idea(state), retry_attach=True,
         implementation_ref="implementation:v1:short") is None
     assert any(event.type == "novelty_rejected"
                and event.data.get("kind") == "card_contract"
@@ -562,10 +618,16 @@ def test_the_staging_lane_names_the_card_it_refused_to_duplicate(tmp_path):
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
 
+    # F5 (2026-08-13): the lane no longer reaches the attach at all, because `_prepare_node_idea`
+    # refuses the `debug` kind one layer above it — so `_card_stage_attached_to` is never set on this
+    # path and the refusal it named cannot happen. The half that still matters is that the lane
+    # refuses SILENTLY-BUT-OBSERVABLY: it stages nothing, mints nothing, and a stall here is still
+    # diagnosable rather than reported as "N action(s) planned … without creating a node" with no
+    # cause. The attach-naming branch is exercised through the planner in the AUTHORITY block above.
     assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == []
-    assert engine._card_stage_attached_to == "card-0"
-    assert "card-0" in (engine._card_claim_refusal or "")
-    assert "card-0" in engine._create_stall_diagnosis([{"kind": "debug", "parent_id": 0}], state)
+    assert getattr(engine, "_card_stage_attached_to", None) is None
+    assert _card_added_ids(engine) == ["card-0"]
+    assert engine._create_stall_diagnosis([{"kind": "debug", "parent_id": 0}], state)
 
 
 def test_the_raw_speculative_lane_keeps_the_receipts_of_the_proposal_it_could_not_stage(tmp_path):
@@ -578,9 +640,7 @@ def test_the_raw_speculative_lane_keeps_the_receipts_of_the_proposal_it_could_no
 
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
-    retry = engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
-                                      researcher=engine.researcher, prospective_node_id=1,
-                                      source="researcher")
+    retry = _linked_retry_idea(engine, state)
     engine._ensure_speculation_state()
     engine._spec_raw_stage_result = SpecRawStageResult(
         generation=state.search_epoch,
@@ -742,9 +802,7 @@ def test_an_attach_that_lapses_between_the_two_planning_passes_still_builds_its_
     The committing pass holds the lock and the tail CAS, so it is the authority."""
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
-    retry = engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
-                                      researcher=engine.researcher, prospective_node_id=1,
-                                      source="researcher")
+    retry = _linked_retry_idea(engine, state)
     assert retry.card_id == "card-0"
     # and now the world moves, exactly as an operator drop would move it.
     engine.store.append(EV_CARD_AUTO_DROPPED, {

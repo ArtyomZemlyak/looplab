@@ -220,13 +220,18 @@ def test_one_dead_provider_writes_exactly_one_pause(tmp_path):
     assert fold(engine.store.read_all()).paused is True
 
 
-def test_a_mechanical_repair_of_a_legacy_fallback_node_does_not_raise_a_false_pause(tmp_path):
-    """The repair operator COPIES the failing parent's Idea, rationale and all.
+def test_a_mechanical_operator_over_a_legacy_fallback_node_does_not_raise_a_false_pause(tmp_path):
+    """A MECHANICAL operator reuses an existing Idea instead of proposing a fresh one.
 
     A log written before this change carries nodes whose rationale IS the old fallback string
-    (`/tmp/ll-s4b/run` has three). Resuming or replaying such a run and debugging one of them must not
-    raise a provider pause naming a failure that is not happening now — the breaker belongs on a fresh
-    PROPOSAL, and neither the repair copy nor the merge operator's mean/ensemble Idea is one.
+    (`/tmp/ll-s4b/run` has three). Resuming or replaying such a run and running a mechanical operator
+    over one of them must not raise a provider pause naming a failure that is not happening now — the
+    breaker belongs on a fresh PROPOSAL, and a merge's mean/ensemble Idea is not one.
+
+    IT USED TO BE DRIVEN THROUGH `debug`, whose Idea was a verbatim copy of the failing parent's —
+    the most direct way to carry a legacy fallback rationale into a new node. That operator was
+    deleted on 2026-08-13 (F5), so the case is driven through `merge`, which is the mechanical path
+    that remains and which the original docstring already named as the other half of the same rule.
     """
     class _NeverProposes:
         def propose(self, *_args, **_kwargs):
@@ -250,13 +255,19 @@ def test_a_mechanical_repair_of_a_legacy_fallback_node_does_not_raise_a_false_pa
         "idea": {"operator": "draft", "params": {"x": 0.0, "y": 0.0},
                  # verbatim from the live log this defect was found in
                  "rationale": "fallback (agent parse failed: LLM request … Connection error.)"}})
-    engine.store.append("node_failed", {"node_id": 0, "generation": 0, "error": "boom",
-                                        "reason": "crash", "eval_seconds": 0.1})
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 0.5,
+                                           "eval_seconds": 0.1})
+    engine.store.append("node_created", {
+        "node_id": 1, "parent_ids": [], "operator": "draft", "code": "print(1)",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0},
+                 "rationale": "fallback (agent parse failed: LLM request … Connection error.)"}})
+    engine.store.append("node_evaluated", {"node_id": 1, "generation": 0, "metric": 0.6,
+                                           "eval_seconds": 0.1})
     state = fold(engine.store.read_all())
     assert is_researcher_fallback(state.nodes[0].idea)     # the legacy node really is one
 
     idea = engine._prepare_node_idea(
-        {"kind": "debug", "parent_id": 0}, state, researcher=engine.researcher,
-        prospective_node_id=1, source="researcher")
-    assert idea is not None, "the repair path was refused as if it were a degraded proposal"
+        {"kind": "merge", "parent_ids": [0, 1]}, state, researcher=engine.researcher,
+        prospective_node_id=2, source="researcher")
+    assert idea is not None, "the mechanical path was refused as if it were a degraded proposal"
     assert fold(engine.store.read_all()).paused is False

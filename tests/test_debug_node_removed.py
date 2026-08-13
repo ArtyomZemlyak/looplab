@@ -41,10 +41,10 @@ from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search import card_selection, policy as policy_mod
 from looplab.search.policy import (ASHAPolicy, EvolutionaryPolicy, GreedyTree, KIND_DEBUG,
                                    MCTSPolicy, legal_actions)
+from _source_scan import iter_trees
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
-LOOPLAB = ROOT / "looplab"
 
 
 def _failed_leaf_state() -> RunState:
@@ -184,9 +184,11 @@ def test_no_module_still_calls_a_deleted_debug_producer():
     of them are load-bearing history, while a CALL to it is an ImportError waiting for the one config
     that reaches it."""
     offenders: list[str] = []
-    for path in sorted(LOOPLAB.rglob("*.py")):
-        # utf-8-sig: `adapters/repo_task.py` carries a BOM, which `ast.parse` refuses.
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    # `iter_trees` rather than a local rglob (doc 25 XP-10): the walk is shared so its DECODING stays
+    # uniform — a plain-utf-8 read dies on `adapters/repo_task.py`'s BOM, and it skips the gitignored
+    # `.ipynb_checkpoints` autosaves, which would otherwise report a stale copy of this very file's
+    # removals as a live violation nobody can fix. `tests/test_source_scan_helper.py` enforces it.
+    for path, tree in iter_trees():
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 fn = node.func
