@@ -166,13 +166,53 @@ environment variable. It did the best available thing.
 it with no repair spent. The goal text asking the agent to "set VS_LOCAL_DATA_ROOT" is asking for
 something the operator can supply once instead.
 
-**What building it would take.** A `stages[].env` map, and/or an `eval.env` applied to every stage, is
-the obvious shape — the runner already builds a per-stage environment (`_resource_eval_env` composes
-`CUDA_VISIBLE_DEVICES` there). Two things to decide: whether the values are part of the run's pinned
-treatment (they change what the code does, so probably yes — `run_started` and the config snapshot),
-and whether the Developer may DECLARE env in `declare_stages` or only the operator may set it. I lean
-operator-only: an agent that can set arbitrary environment for its own scoring stage has another route
-around the trust boundary that `b0327182` just closed for the scorer's code.
+**BUILT, 2026-08-13.** Three levels, one rule (`core/envsafe.py::validate_env_map`), most specific
+wins: `Settings.eval_env` (every stage of every node) < `cmd.env` (this task's eval) <
+`cmd.stages[].env` (this stage). The launch line the workaround above becomes:
+
+```bash
+looplab run task.yaml -s eval_env=VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local
+```
+
+Both open questions were answered the way this entry leaned.
+
+*Is it part of the pinned treatment?* **Yes, and it had to be.** The run level is recorded in
+`run_started` (and `config.snapshot.json`), folded onto `RunState.eval_env`, and restored at re-entry
+by `Engine._repin_declared_env` beside `_repin_settled_widths` — a declared variable is *why* a node
+read one corpus and not another, so a resume taking a different value from live config would keep
+appending nodes to a log whose earlier nodes are no longer comparable, with nothing saying so. It
+ADOPTS the record and warns rather than refusing (unlike the widths): the value is normally spelled
+once in a file the resume re-reads anyway, so refusing would turn an unchanged file into a hard stop.
+The key is written only when non-empty, which keeps the default `run_started` payload byte-identical —
+load-bearing, because `search/speculation_quality.py::_CALIBRATION_RUN_STARTED_FIELDS` compares that
+payload's key SET for equality and an unconditional key would revoke every issued calibration receipt.
+The two task levels ride in `task.snapshot.json`, which `resume` re-validates verbatim.
+
+*May the Developer declare it?* **No** — `validate_stages(allow_env=…)` defaults to refusing, so the
+fail-closed direction is the default and the four operator call sites opt in. `declare_stages` refuses
+the key by name and points at the operator surface; a hand-written `looplab_stages.json` carrying one
+is dropped by `materialized_stages`. The stages-phase prompt now also tells the agent not to bake an
+`os.environ.setdefault` into the repo instead, and to name the missing variable in its notes.
+
+*A third decision this entry did not raise: secrets.* A value whose name or value looks like a
+credential is **refused at declaration time**, at all three levels, by the same screen
+(`is_secret_env`) that strips secrets out of every child process — which moved into `core/envsafe.py`
+so the declared-env rule and the child-process strip cannot become two answers to one question. The
+reasoning is durability, not danger: a declared environment is written verbatim into
+`task.snapshot.json` / `config.snapshot.json` / `events.jsonl`, all of which get exported, rendered
+and pasted into bug reports, and no redaction keeps a value both safe and reproducible. **No secret
+store was invented.** The refusal names where credentials already go (`LOOPLAB_LLM_API_KEY`, a
+profile's `api_key_env` — runtime-only, never snapshotted, refused by `--set`) and says plainly that a
+credential the *eval's own code* needs has no such boundary, because the eval sandbox is where
+agent-written code runs: export it in the launching shell if you accept that.
+
+The two sandbox tiers agree by construction — `_run_eval` composes run+task level ONCE into the single
+`env` dict handed to both `make_docker_wrap` and `run_command_eval` — and the per-stage layer, the one
+that necessarily differs per child, is applied in `_run_stages`, where the subprocess tier merges it
+into the child's env dict and the Docker tier is rebound to forward it as `-e` pairs. A container wrap
+that *cannot* carry it fails the stage (`env_unsupported`) rather than running it in an environment the
+task did not declare. `tests/test_stage_environment.py` drives every one of these against a real child
+process, a real `docker run` argv, and a real event log re-entered by a second Engine.
 
 ## F1e · Re-check a repaired artifact contract instead of leaving the metric SALVAGED
 
