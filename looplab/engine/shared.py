@@ -87,8 +87,8 @@ class SharedEngineMixin:
 
         Emits `started` on entry and `finished` on exit, the latter carrying `seconds` and whether
         the step raised. Both, not just `started`, because the LAST step of a stage has no successor
-        whose `started` could bound it — a build that ends on `commit` would otherwise read as still
-        committing forever, which is precisely the "is it hung?" question this exists to answer.
+        whose `started` could bound it — a build that ends on `implement` would otherwise read as
+        still writing forever, which is precisely the "is it hung?" question this exists to answer.
 
         NOT routed through `_append_proposal_event`. That sink buffers a worker's appends until the
         main task publishes them (`novelty.py::_capture_proposal_events`), which is correct for the
@@ -102,13 +102,12 @@ class SharedEngineMixin:
         containment, because an unregistered phase is a coding error to be fixed, not a runtime
         condition to be survived (see its docstring).
 
-        `enabled=False` runs the body and emits NOTHING. It exists because one caller — the run
-        prologue — must not append before it has read the log: its own `started` row would land in
-        the `read_all()` it is about to make, which breaks two things that both fail silently. The
-        speculation-calibration bootstrap refuses a run whose log is not exactly empty at start, and
-        `search/speculation_quality.py::_validate_calibration_setup` pins the log's first FIVE events
-        as an exact setup prefix. Phrased as a suppression rather than an `if` around the `with` so
-        the bracketed body is written once and cannot drift between the two paths.
+        `enabled=False` runs the body and emits NOTHING — a caller that must sometimes stay silent
+        writes the bracketed body ONCE rather than duplicating it under an `if`. It has no production
+        caller today: the one that had it was the run prologue, and that whole beacon was reverted
+        because the log is the wrong channel there (see `events/types.py::PROGRESS_STAGES`). It is
+        kept, and driven by a test, because the next caller in a stretch that is only SOMETIMES worth
+        narrating will need exactly this and would otherwise reach for the duplicated `if`.
         """
         assert_progress_phase(stage, phase, "started")
         store = getattr(self, "store", None) if enabled else None   # bare Engine.__new__ instances
@@ -120,16 +119,15 @@ class SharedEngineMixin:
             try:
                 store.append(EV_PHASE_PROGRESS,
                              {"stage": stage, "phase": phase, "status": status, **detail, **extra})
-            except Exception:  # noqa: BLE001 - observability must never take down a build or a resume
+            except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
                 pass
 
         _emit("started")
         t0 = time.time()
         ok = True
-        # Yielded so the BODY can report what it learned to its own `finished` beacon — the read_log
-        # phase is the reason this exists: how many events it folded, and therefore whether this was
-        # a resume at all, are facts that only exist once the phase has run. Never merged into
-        # `started`, which has already been appended by then.
+        # Yielded so the BODY can report what it LEARNED to its own `finished` beacon: a count, a
+        # size, anything that does not exist until the phase has actually run. Deliberately never
+        # merged into `started`, which has already been appended by the time the body sees this.
         learned: dict = {}
         try:
             yield learned

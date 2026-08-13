@@ -1,9 +1,10 @@
-"""The `phase_progress` beacon: a build and a resume must not be a blank panel.
+"""The `phase_progress` beacon: a node build must not be a blank panel.
 
 Tier 1 wherever possible (CLAUDE.md's guard-test ladder) — these drive a REAL engine over a REAL
 event log and then read the log, rather than pinning source text. The properties that cost something
 when they break are: the beacon fires at all on the path a shipped default actually takes; it does
-NOT fire before the prologue's own `read_all`; and its (stage, phase) vocabulary cannot be typo'd.
+NOT reach the run prologue, whose readers key on the raw log; and its (stage, phase) vocabulary
+cannot be typo'd.
 """
 from __future__ import annotations
 
