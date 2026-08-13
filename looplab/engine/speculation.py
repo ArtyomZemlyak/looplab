@@ -40,6 +40,7 @@ from looplab.events.types import (
     EV_PAUSE,
     EV_POLICY_DECISION,
     EV_SPECULATION_DEPTH_SETTLED,
+    SETUP_THREAD_APPENDABLE,
 )
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
@@ -437,12 +438,25 @@ class SpeculationMixin:
         fold-ignored event is splice-neutral BY CONSTRUCTION. The FOLD is not the only reader. It was
         true of the fold and false of this fence, and a diagnostic row was silently costing paid
         proposals before this list was widened.
+
+        `SETUP_THREAD_APPENDABLE` is the ONE folded pair excluded here, and the reason is not that it
+        is convenient — it is that this is the only folded pair in the repo whose splice-position
+        neutrality has been PROVEN (`tests/test_setup_thread_appendable.py`), because the fold keys
+        `run_setup_open`/`run_setup_done` purely BY COMMAND: never by position, node or ordering
+        against any other event. Neither can change which action the policy would choose, which is
+        the property this fence actually needs. It became reachable when backlog F1f made the outer
+        loop turn while adopted evaluations run: the pair is written from an eval WORKER THREAD and
+        is therefore the only authority-bearing row that can land inside a main-task reservation's
+        CAS window. **This is deliberately NOT a precedent for widening the set to node terminals.**
+        A `node_evaluated` moves `best`, the parent snapshot and every Card score — it carries
+        selection authority, which is exactly what the fence is for.
         """
 
         return max(
             (
                 event.seq for event in events
                 if event.type not in DIAGNOSTIC_EVENTS
+                and event.type not in SETUP_THREAD_APPENDABLE
                 and event.type not in {EV_LLM_USAGE, EV_LLM_COST}
                 and type(event.seq) is int
             ),

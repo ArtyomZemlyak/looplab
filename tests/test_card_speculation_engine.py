@@ -2951,7 +2951,7 @@ def test_a_diagnostic_row_cannot_discard_a_paid_proposal():
     """
     from looplab.engine.speculation import SpeculationMixin
     from looplab.events.eventstore import Event
-    from looplab.events.types import DIAGNOSTIC_EVENTS
+    from looplab.events.types import DIAGNOSTIC_EVENTS, SETUP_THREAD_APPENDABLE
 
     def ev(kind, seq):
         return Event(v=1, seq=seq, ts=0.0, type=kind, data={})
@@ -2966,8 +2966,22 @@ def test_a_diagnostic_row_cannot_discard_a_paid_proposal():
             f"{kind} moved the proposal fence; a concurrent watchdog tick now discards a paid "
             "Developer call and blames the CAS")
 
+    # The ONE folded pair that is also excluded, and the only one that may be. It is written from an
+    # eval WORKER THREAD (`_ensure_run_setup`), so since backlog F1f made the outer loop turn while
+    # adopted evaluations run it is the only authority-bearing row that can land inside a main-task
+    # reservation's CAS window — every other concurrent writer is an anyio task on the loop the
+    # reservation is blocking. It is admissible because it is the only folded pair whose
+    # splice-position neutrality this repo has PROVEN (`tests/test_setup_thread_appendable.py`): the
+    # fold keys both rows purely by command, so neither can change which action the policy chooses.
+    for kind in sorted(SETUP_THREAD_APPENDABLE):
+        assert SpeculationMixin._proposal_authority_seq(base + [ev(kind, 2)]) == 1, (
+            f"{kind} moved the proposal fence; the first eval's setup thread now discards a paid "
+            "Developer call from a concurrent outer turn")
+
     # …and the fence still moves for anything that really does carry selection authority, or it
-    # would stop protecting the thing it exists for.
-    for kind in ("node_evaluated", "pause", "policy_decision", "card_added"):
+    # would stop protecting the thing it exists for. `node_evaluated` is the load-bearing member:
+    # a node terminal moves `best`, the parent snapshot and every Card score, so the exclusion above
+    # is NOT a precedent for it.
+    for kind in ("node_evaluated", "node_failed", "pause", "policy_decision", "card_added"):
         assert SpeculationMixin._proposal_authority_seq(base + [ev(kind, 2)]) == 2, (
             f"{kind} no longer moves the fence — a real selection change would be committed over")
