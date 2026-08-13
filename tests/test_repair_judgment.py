@@ -112,11 +112,15 @@ def test_the_floors_are_the_floor_and_the_message_names_the_right_knob():
     assert repair_floor_stop(attempt=11, operator_cap=12, ceiling=50) is None
     capped = repair_floor_stop(attempt=12, operator_cap=12, ceiling=50)
     assert capped and "inline_repair_attempts" in capped and "12" in capped
-    # Time outranks both, because a node that burned the run's eval budget is a fact about the RUN
-    # and pointing that operator at an attempt count sends them to the wrong knob.
-    timed = repair_floor_stop(attempt=0, operator_cap=12, ceiling=50,
-                              eval_seconds_spent=100.0, eval_seconds_ceiling=100.0)
-    assert timed and "eval-time budget" in timed
+    # THE OTHER TWO FLOORS ARE NOT HERE, on purpose, and this pins that they are not re-derived:
+    # the eval-time budget is compared against a FRESH fold in `_evaluate` (a stale one undercounts
+    # whatever a sibling burned under `eval_parallel > 1`), and the money ceiling raises
+    # `BudgetExceeded` at the LLM client. Both are enforced where the resource actually leaves the
+    # account, which is what makes them untalkable-past; a parameter here that no caller passes
+    # would be a rule nobody reviews.
+    import inspect
+    params = set(inspect.signature(repair_floor_stop).parameters)
+    assert params == {"attempt", "operator_cap", "ceiling"}, params
 
 
 def test_the_shipped_default_is_no_operator_count_cap():

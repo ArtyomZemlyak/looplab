@@ -117,15 +117,19 @@ def critic_due(attempt: int, after: int) -> bool:
 #     (`engine/orchestrator.py::systemic_failure_stop_reason`). It is the floor under the whole
 #     search, not under one node's repair chain.
 #   * the LLM money ceiling — `core/llm.py` raises `BudgetExceeded` at the client, which the repair
-#     loop and `_triage_crash` both re-raise rather than degrade to a verdict. A ceiling enforced at
-#     the place the money is actually spent cannot be talked past by any judge, which is the whole
-#     point; re-deriving "have we spent too much?" here would just be a second answer to a question
-#     that already has an authoritative one.
+#     loop and `_triage_crash` both re-raise rather than degrade to a verdict.
+#   * the run's EVAL-TIME budget — `engine/evaluate.py` re-folds and compares `total_eval_seconds`
+#     before each re-eval, which it must do THERE: the comparison is only sound against a fresh fold
+#     (under `eval_parallel > 1` a sibling's terminal is invisible to a stale one), and it has to
+#     happen before the expensive path rather than at this gate.
+#
+# All three are enforced at the place the resource is actually spent, which is the whole point — a
+# ceiling checked where the money or the seconds leave the account cannot be talked past by any
+# judge. Re-deriving them here would be a second answer to a question that already has an
+# authoritative one, and a parameter no caller passes is a rule nobody reviews.
 
 
-def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int,
-                      eval_seconds_spent: Optional[float] = None,
-                      eval_seconds_ceiling: Optional[float] = None) -> Optional[str]:
+def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int) -> Optional[str]:
     """Has a hard floor been reached? The operator-facing reason, or None to leave it to judgment.
 
     `operator_cap` is the raw `inline_repair_attempts` — `0` means the operator set NO count cap
@@ -136,13 +140,9 @@ def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int,
     always-`repair` judge with no cap ran 795 repairs / 796 full evals in 45 seconds and emitted no
     terminal.
 
-    ORDER IS THE MESSAGE, not the behaviour: every branch returns a stop, so which one is checked
-    first decides only what the operator is told. Time first, because a node that has burned the
-    run's eval budget is a fact about the RUN, and telling that operator about an attempt count would
-    send them to the wrong knob."""
-    if (eval_seconds_ceiling is not None and eval_seconds_spent is not None
-            and float(eval_seconds_spent) >= float(eval_seconds_ceiling)):
-        return "the run's eval-time budget was exhausted during inline repair"
+    ORDER IS THE MESSAGE, not the behaviour: both branches return a stop, so which one is checked
+    first decides only what the operator is told — and an operator whose snapshot says 12 must never
+    read a terminal implying they chose 50."""
     cap = int(operator_cap) if isinstance(operator_cap, int) and not isinstance(operator_cap, bool) else 0
     if cap > 0 and int(attempt) >= cap:
         return (f"inline repair has spent its hard limit of {cap} attempt(s) on this node "
