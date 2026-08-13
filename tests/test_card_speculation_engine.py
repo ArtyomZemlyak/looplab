@@ -2274,7 +2274,13 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
         and node.attr in {"boundary_owed", "yield_outer"}
         and isinstance(node.ctx, ast.Load)
     }
-    assert flag_readers == {"open_for_production", "_card_phase_serve_raw_stage"}, flag_readers
+    # `_card_phase_decide_exit` reads them to tell the two closing reasons APART — a terminal hands
+    # back unconditionally, a RECURRING producer yield is rate-limited on the log tail so the outer
+    # loop and a fresh session cannot ping-pong for the length of an evaluation. That distinction
+    # cannot be made from `open_for_production`, which folds both into one boolean.
+    assert flag_readers == {
+        "open_for_production", "_card_phase_serve_raw_stage", "_card_phase_decide_exit",
+    }, flag_readers
 
     # WHICH GATE EACH PHASE ASKS. One entry per phase-owned call site; changing a row here is
     # changing the barrier. `_card_phase_admit_evals` is the only consumer site and the only one
@@ -2306,6 +2312,10 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
     )
     assert stopping_readers == collections.Counter({
         "open_for_admission": 1, "open_for_production": 1, "_card_phase_admit_evals": 2,
+        # …and the exit phase, whose rate limit on a REPEAT producer yield must never suppress a
+        # fold-derived stop: an operator pause, the eval-second budget and the wall deadline all
+        # arrive without moving the log tail, so the clause has to exclude them explicitly.
+        "_card_phase_decide_exit": 1,
     }), stopping_readers
     # ...and the phase asks its own gate exactly once: the batch boundary, on entry.
     assert called_names(

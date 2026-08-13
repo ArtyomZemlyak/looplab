@@ -77,7 +77,14 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    that window as a matter of course — moved the fence and discarded a proposal the run had already
    paid for, reported as "a control/research/lifecycle event won the CAS". The fence now excludes
    `DIAGNOSTIC_EVENTS` wholesale and `tests/test_card_speculation_engine.py` drives it from the
-   registry, so a diagnostic type added later inherits the property. When you add a non-folded
+   registry, so a diagnostic type added later inherits the property. It excludes exactly ONE FOLDED
+   pair, `SETUP_THREAD_APPENDABLE`, and only on evidence: those two rows are written from an eval
+   WORKER THREAD, so since the eval task group became run-scoped (backlog F1f) they are the only
+   authority-bearing rows that can land inside a main-task reservation's CAS window — every other
+   concurrent writer is an anyio task on the loop that reservation is blocking — and they are the
+   only folded pair whose splice-position neutrality this repo has PROVEN. That is not a precedent
+   for `node_evaluated`: a node terminal moves `best`, the parent snapshot and every Card score, and
+   it stays in the fence. When you add a non-folded
    event, the question to ask is not "does the fold read it?" but **"does any reader key on its
    position?"**: the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
    `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site.
@@ -102,6 +109,19 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    direction: writing it from the eval WORKER lands it inside `_request_card_build`'s tail-CAS window and
    makes every prefetch election lose its CAS (measured: depth-1 speculation silently went serial, 17
    builds / 5 discards became 12 / 0). Keep it on the main task, at the dispatch decision.
+   *Evaluation children outlive the turn that admitted them* (backlog F1f, 2026-08-13) and this is a
+   LIFETIME, not a writer: the eval task group is owned by `Engine.run`, so `_run_card_session`
+   returns while its evals burn and the next session adopts them from `Engine._eval_inflight`. It
+   needs no exception here because eval children are anyio tasks on the engine's own event loop (not
+   threads), every one of the eight node terminals in `engine/evaluate.py` is lexically inside
+   `async with self._write_lock`, node creation still commits from the main task in
+   `_card_phase_serve_head`, and `_record_eval_start_boundary` still runs where the paragraph above
+   says. What it DOES change is what "quiescent" means for a main-task decision: the log being still
+   is no longer enough, because a GPU may be mid-training. `_refuse_finish_over_adopted_evals` makes
+   every finish CAS refuse over a running eval and `_drain_adopted_evals` pays the wait where it is
+   free; the outer loop's `_drop_stale_speculation` and the AUTO-depth ratchet both read
+   `_eval_inflight` for the same reason. Ask that question — "does this decision assume no eval is
+   running?" — of anything new on the main task.
    *Thread-side setup* is the remaining typed exception: `_ensure_run_setup` (`engine/eval_dispatch.py`)
    appends the FOLDED `events/types.py::SETUP_THREAD_APPENDABLE` pair from an eval WORKER THREAD
    (`_run_eval` under `anyio.to_thread`), outside `_write_lock`. Safe because `EventStore.append`

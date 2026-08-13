@@ -316,3 +316,84 @@ def test_an_adopted_eval_blocks_the_finish_gate_until_it_is_drained(tmp_path, mo
     assert engine._finish_if_quiescent({"reason": "aborted"}, after_seq=after_seq) is True
     assert [event for event in engine.store.read_all() if event.type == "run_finished"]
     assert EV_NODE_EVALUATED  # registry constants, never literals (invariant #7)
+
+
+def test_a_recurring_producer_yield_does_not_ping_pong_with_the_outer_loop(tmp_path, monkeypatch):
+    """The bound on the fix: a hand-back is owed once per DEBT, not once per turn.
+
+    `yield_outer` is set on a CONDITION — "no durable Card owns the next action and the raw lane has
+    nothing" — which `_card_phase_request_build` re-derives every turn and which, during a long
+    evaluation, usually answers the same way. Returning on every one of those would replace the
+    barrier with a spin: the outer loop and a fresh session trading turns several times a second for
+    the whole evaluation, each round trip a full `read_all()` + `fold()` of the run's entire log, on
+    the network mount a run directory usually lives on. So the recurring yield is rate-limited on the
+    log TAIL: the outer loop is owed a turn only when something it could act on has changed.
+
+    Driven, not pinned: the second session is entered with the log byte-identical to where the first
+    one handed back, and it must STAY OPEN rather than return again.
+    """
+
+    engine, _producer = _engine(tmp_path / "no-ping-pong", depth=2)
+    engine._eval_parallel = 2
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _commit_speculative_node(engine)
+    _without_research(monkeypatch, engine)
+    engine._spec_role_pair = None          # producer lane declines: exactly the mid-eval board state
+    engine.role_factory = None
+
+    release_slow = anyio.Event()
+    running = anyio.Event()
+
+    async def _slow_eval(admitted_id, _limiter, _max_es):
+        running.set()
+        await release_slow.wait()
+        _terminalize(engine, admitted_id)
+
+    monkeypatch.setattr(engine, "_evaluate", _slow_eval)
+    second_returned = anyio.Event()
+
+    async def _scenario():
+        async with anyio.create_task_group() as eval_tg:
+            engine._eval_task_group = eval_tg
+            try:
+                # First session: admits the slow eval, the producer yields, and it hands back.
+                with anyio.move_on_after(20):
+                    await engine._run_card_session(
+                        [], fold(engine.store.read_all()), None)
+                assert running.is_set()
+                assert engine._eval_inflight, "the slow eval must still be adopted"
+                tail_after_first = engine.store.read_all()[-1].seq
+
+                # Second session over an UNCHANGED log: the same yield, and no new debt.
+                async def _second_session():
+                    await engine._run_card_session(
+                        [], fold(engine.store.read_all()), None)
+                    second_returned.set()
+
+                async with anyio.create_task_group() as probe:
+                    probe.start_soon(_second_session)
+                    await anyio.sleep(1.5)
+                    if not engine._eval_inflight:          # defensive: the eval must still be live
+                        raise AssertionError("the slow eval ended under the probe")
+                    assert engine.store.read_all()[-1].seq == tail_after_first, (
+                        "the probe session appended; this test no longer measures a repeat yield")
+                    # THE ASSERTION. The producer's answer has not changed and neither has the log,
+                    # so this session owes the outer loop nothing and must still be polling.
+                    assert not second_returned.is_set(), (
+                        "the session handed back for a producer yield the outer loop had already "
+                        "been given — the outer loop and a fresh session now ping-pong, re-reading "
+                        "and re-folding the whole log, for as long as the evaluation runs")
+                    # Release, which both ends the eval and lets the second session close on a real
+                    # debt: the terminal.
+                    release_slow.set()
+            finally:
+                release_slow.set()
+
+    anyio.run(_scenario)
+
+    assert second_returned.is_set()
+    # The rate limit must not become a NEW latch: the terminal that arrives when the slow eval is
+    # released is a fresh debt, and the session closes on it.
+    assert engine._eval_inflight == set()
+    assert fold(engine.store.read_all()).nodes[0].status is NodeStatus.evaluated

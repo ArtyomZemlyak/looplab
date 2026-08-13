@@ -580,6 +580,10 @@ class SpeculationMixin:
     _eval_notify: Any = None
     _eval_boundary_owed: bool = False
     _eval_drain_requested: bool = False
+    #   `_outer_boundary_served_tail`  the log seq at which a session last handed back for a
+    #                          RECURRING producer yield, so the same unchanged condition cannot hand
+    #                          back again — see `_card_phase_decide_exit`'s last clause.
+    _outer_boundary_served_tail: int = -2
 
     def _evals_inflight(self) -> bool:
         """Is any adopted evaluation still running in this process?
@@ -2472,7 +2476,7 @@ class SpeculationMixin:
     def _card_phase_decide_exit(self, session: CardSession) -> bool:
         """The ONE session-exit decision.  True means break out of the turn loop."""
 
-        current = self._session_state()
+        events, current = self._fold_current()
         self._discard_orphaned_spec_results(current)
         gates = self._session_gates(current, session)
         pending_ready = any(
@@ -2503,6 +2507,30 @@ class SpeculationMixin:
         # run-scoped eval task group means the children survive the return and the next session
         # adopts them from `self._eval_inflight` (and, across a crash, from the durable
         # `node_eval_started` boundary `_drop_stale_speculation` already reads).
+        #
+        # …ONCE PER DEBT, though, and this clause is what makes that true.  `yield_outer` is set on a
+        # CONDITION, not on an event: `_card_phase_request_build` re-derives "no durable Card owns
+        # the next action and the raw lane has nothing to propose" every turn, and while a long
+        # evaluation runs that answer is usually the same one.  Without this the outer loop and a
+        # fresh session would ping-pong for the whole evaluation — each round trip a full
+        # `read_all()` + `fold()` of the run's entire log, several times a second, for hours, on the
+        # network mount a run directory usually lives on.  A hand-back is owed only when something
+        # the outer loop could ACT on has changed, and on an append-only log that is exactly "the
+        # tail moved" — by ANY writer, including the cadences the previous hand-back ran.  A terminal
+        # (`boundary_owed`) and every fold-derived stop still hand back unconditionally; only the
+        # recurring producer yield is rate-limited, and only while an adopted evaluation is still
+        # running, which is what this session then stays alive FOR.
+        if (
+            session.yield_outer
+            and not session.boundary_owed
+            and not gates.stopping
+            and session.eval_inflight
+            and not producer_inflight
+        ):
+            tail = events[-1].seq if events else -1
+            if tail == self._outer_boundary_served_tail:
+                return False              # nothing new to hand back; poll instead of ping-ponging
+            self._outer_boundary_served_tail = tail
         return not producer_inflight
 
     async def _run_card_session(
