@@ -87,7 +87,7 @@ The two most expensive single stages in the whole corpus are here: `rubert-dr-08
 verdicts use. The checker answers `OK` / `FAIL <kind>: …` / `INCONCLUSIVE: …`, and a stage dies only
 when `<kind>` is a member of the closed `runtime/command_eval.py::STAGE_CHECK_HARD_KINDS`. Everything
 else — an out-of-enum kind, prose, a bare `FAIL`, an empty reply — coerces to `inconclusive`, is
-recorded on the stage row under its own key, and fails nothing.
+recorded on the stage row under its own key (`check_inconclusive`, deliberately not `concern` — which means "this is why the stage FAILED" to the repair loop and to `metric_salvage`), and fails nothing.
 `declared_condition_violated` is refused unless the stage actually declared an `expect.assert`: **a
 checker may not invoke a contract that does not exist**, and an undeclared "condition" is exactly what
 the previous-best comparison is from the inside.

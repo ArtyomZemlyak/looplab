@@ -1523,6 +1523,11 @@ class _EvalRun:
 # condemn. What a wrong `inconclusive` costs is one more stage's runtime; what a wrong `check_failed`
 # costs is measured above.
 STAGE_CHECK_INCONCLUSIVE = "inconclusive"
+# The stage-row key an inconclusive verdict is recorded under. DELIBERATELY NOT `concern`, and
+# deliberately not the value constant above: `concern` means "this is why the stage FAILED" to the
+# repair loop and to `metric_salvage`, and an inconclusive stage did not fail. A reader keying on
+# `status` sees nothing new; a reader who wants the doubt asks for it by name.
+STAGE_CHECK_INCONCLUSIVE_KEY = "check_inconclusive"
 # The kind an UNSTRUCTURED answer carries. It is HARD, on purpose and only for back-compat: a
 # `check_fn` that returns a bare string is the historical contract (a library caller, and the doubles
 # throughout the suite), and silently downgrading those to advisory would retire the gate for every
@@ -1810,7 +1815,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 # FAILED" by the repair loop and by `metric_salvage`. Recorded rather than dropped so
                 # the operator (and a later reader of the trace) can see the doubt that was raised
                 # and, if it turns out to matter, declare an `expect` that states it as a contract.
-                stage_results[-1][STAGE_CHECK_INCONCLUSIVE] = str(_text)[:300]
+                stage_results[-1][STAGE_CHECK_INCONCLUSIVE_KEY] = str(_text)[:300]
     # all stages passed -> the LAST stage's `out`/`rc`/`to` flow into read_metric below.
     return run
 

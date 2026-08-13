@@ -21,9 +21,9 @@ import pytest
 
 from looplab.engine.eval_stages import parse_stage_check_reply
 from looplab.runtime.command_eval import (STAGE_CHECK_HARD_KINDS, STAGE_CHECK_INCONCLUSIVE,
-                                          STAGE_CHECK_UNSTRUCTURED, StageCheckVerdict,
-                                          _stage_check_outcome, coerce_stage_check_kind,
-                                          run_command_eval)
+                                          STAGE_CHECK_INCONCLUSIVE_KEY, STAGE_CHECK_UNSTRUCTURED,
+                                          StageCheckVerdict, _stage_check_outcome,
+                                          coerce_stage_check_kind, run_command_eval)
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -130,7 +130,7 @@ def test_an_inconclusive_checker_no_longer_discards_the_pipeline(tmp_path, reply
     assert [s["status"] for s in res.stages] == ["ok", "ok"]
     # The doubt is RECORDED, under a key of its own — `concern` means "this is why the stage FAILED"
     # to the repair loop and to metric_salvage, and this stage did not fail.
-    assert res.stages[0][STAGE_CHECK_INCONCLUSIVE]
+    assert res.stages[0][STAGE_CHECK_INCONCLUSIVE_KEY]
     assert "concern" not in res.stages[0]
 
 
