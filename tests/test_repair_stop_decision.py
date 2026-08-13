@@ -242,12 +242,25 @@ def test_only_an_engine_side_marker_admits_the_provider_outage_verdict():
 
 def test_the_rule_path_is_only_for_no_judge_wired():
     """`_rule_triage` may keep repairing because "the operator runs without a triage model" is a
-    configuration, not a failure. It carries no repair-class any more, and it never rejects an idea."""
+    configuration, not a failure. It carries no repair-class any more, and it never rejects an idea.
+
+    A NON-MECHANICAL CRASH IS NOW REPAIRED TOO (changed 2026-08-13 with F5). It used to abandon, and
+    that was the conservative answer only because an abandoned node then got a DEBUG NODE — the same
+    failure handed back to the same Developer with a fresh node's budget. With the Debug node
+    deleted, the identical verdict throws the node away, so a `RuntimeError` that one repair would
+    have fixed ends a lineage. The cap still binds and `reject_idea` is still never returned: killing
+    a whole idea remains the model's call, and this path cannot form it."""
     for reason, err in (("crash", "ImportError: x"), ("timeout", ""), ("oom", "")):
         out = _rule_triage(reason, err, 1, 6)
         assert out["action"] in ("repair", "abandon") and "repair_class" not in out
     assert _rule_triage("crash", "ImportError: x", 7, 6)["action"] == "abandon"   # cap respected
-    assert _rule_triage("crash", "RuntimeError: shapes", 1, 6)["action"] == "abandon"
+    assert _rule_triage("crash", "RuntimeError: shapes", 1, 6)["action"] == "repair"
+    assert _rule_triage("crash", "RuntimeError: shapes", 7, 6)["action"] == "abandon"
+    # …and only a CRASH. The reason set is unchanged, so nothing else acquired a repair here.
+    assert _rule_triage("drift", "", 1, 6)["action"] == "abandon"
+    assert _rule_triage("no_metric", "", 1, 6)["action"] == "abandon"
+    assert all(_rule_triage(r, e, a, 6)["action"] != "reject_idea"
+               for r in ("crash", "timeout", "oom", "drift") for e in ("", "boom") for a in (1, 9))
 
 
 # ------------------------------------------------- the four runaways the signature guard missed

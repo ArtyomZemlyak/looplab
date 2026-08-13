@@ -140,10 +140,18 @@ class CrashRepairMixin:
                     return verdict
             return verdict
         # NO judge wired (`unified_agent` off) — a configuration, not a failure. The deterministic
-        # rule keeps repairing mechanical crashes, bounded ONLY by the operator's hard cap, because
-        # it has no way to form the stop judgement the model makes. 0 = unlimited -> a large cap.
-        cap = self._inline_repair_attempts or 10**9
-        return _rule_triage(reason, error, attempt, cap)
+        # rule keeps repairing crashes, bounded ONLY by the caller's hard cap, because it has no way
+        # to form the stop judgement the model makes.
+        #
+        # THE CAP IS THE EFFECTIVE ONE, not `inline_repair_attempts or 10**9`. That spelling read 0
+        # as "no bound at all" and handed the rule 10**9, which was survivable only while 0 was rare;
+        # since F8 made 0 the DEFAULT it would have told the rule path there is no bound on every
+        # shipped run. `_effective_repair_cap` is the same three-way answer the budget gate and the
+        # cap-out message read, which is the whole reason it is a named function
+        # (`engine/evaluate.py`) rather than three inline comparisons that used to disagree.
+        from looplab.engine.evaluate import _effective_repair_cap
+        return _rule_triage(reason, error, attempt,
+                            _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
                     repair_log, depth, attempts_left) -> dict:

@@ -839,6 +839,22 @@ def _card_action_from_projection(card: Card) -> dict:
 def _card_debug_leaf_children(st: RunState) -> dict[int, frozenset[int]]:
     """Child node ids that END a failed node's life as a debuggable leaf, keyed by parent id.
 
+    HISTORICAL SINCE 2026-08-13 (F5), AND KEPT ON PURPOSE — read this before deleting it. The
+    PRODUCER is gone: `search/policy.py::debug_action` and the Card lane's forced debug prefix were
+    removed with the Debug node, so no run started after that date can author a `debug` Card. This
+    reader and its two siblings below stay because `fold` must keep answering correctly about the
+    logs that ALREADY EXIST — every preserved run under `runs/` with a `debug` Card folds through
+    exactly this map, and a replay that suddenly disagrees with the run's own recorded state is a
+    reproducibility break, not a cleanup.
+    ``search/card_selection.py::_live_card_action`` is the other half and it moved the OTHER way: a
+    historical `debug` Card now falls through to not-live there, so it can never be claimed again.
+    That asymmetry is the intended one — replay reports what happened, selection refuses to repeat
+    it. Deleting these readers while leaving the folded shape they interpret is the silent-breakage
+    direction: the fold would stop distinguishing a `debug` Card's own work item from any other
+    child, and the L3 budget and `selection_ready` both key on that (CLAUDE.md invariant 1 records
+    the measured flip: `{budget 2, leafs [2,3], later Card ready}` vs `{budget 3, leafs [3], not
+    ready}`).
+
     A node with a child is no longer a leaf — EXCEPT for a child the Card lane's policy cannot see.
     That universe is not a judgement call this module gets to make: ``card_selection``'s
     ``_effective_policy_state`` builds the state the policy actually reads by filtering

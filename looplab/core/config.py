@@ -807,9 +807,17 @@ class Settings(BaseSettings):
     # Researcher's context; the LLM decides whether an idea is a true duplicate.
     novelty_semantic: bool = False
     novelty_semantic_threshold: float = Field(default=0.92, ge=0.5, le=1.0)
-    # T10: debug-lineage depth bound for every policy — how many error-feedback repairs a failing
-    # lineage gets before it is abandoned. The old default (1) abandoned lineages after ONE repair;
-    # multi-turn/deeper debugging is a verified lever (AIRA2 ReAct debug +5.5 percentile points).
+    # INERT SINCE 2026-08-13 (F5) — kept as a field, and deliberately not removed. It bounded the
+    # DEBUG-LINEAGE depth: how many times a failing lineage could spawn a fresh node to have another
+    # go at the experiment that failed. That node is gone; a failure is repaired inside the one node
+    # now, and what bounds THAT is `inline_repair_attempts` plus the judgment in
+    # `engine/repair_judgment.py`.
+    #
+    # The field stays because Settings names are a compatibility surface twice over: `LOOPLAB_<FIELD>`
+    # env vars and every `config.snapshot.json` under `runs/` map 1:1 onto them (CLAUDE.md — never
+    # nest or rename a field), and `search/speculation_calibration.py` pins `debug_depth` inside the
+    # calibrated runtime envelope, so removing it would revoke receipts for a knob that no longer
+    # does anything. It is read only by the policy constructors, which now do nothing with it.
     debug_depth: int = Field(default=2, ge=1)
     # P4 operator bandit (GreedyTree): replace the fixed merge/ablate cadences with a
     # deterministic UCB over per-operator yield (Δmetric per eval-second, folded from the run).

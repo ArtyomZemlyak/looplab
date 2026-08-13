@@ -1,6 +1,7 @@
 """SearchPolicy (I6/I7/I11, ADR-18). `GreedyTree`: seed K drafts, then repeatedly
 improve the current best, periodically merging the top-2 (multi-parent DAG step),
-and debugging failed leaves up to a depth bound — until the node budget is spent.
+until the node budget is spent. (It no longer debugs failed leaves: the Debug node
+was deleted on 2026-08-13 — see the block above `operator_yields`.)
 
 The policy is *pure*: it reads a RunState and returns the next actions; the
 orchestrator executes them. This is our moat (the loop), not a framework graph.
@@ -8,7 +9,7 @@ orchestrator executes them. This is our moat (the loop), not a framework graph.
 Action kinds:
     {"kind": "draft"}
     {"kind": "improve", "parent_id": int}
-    {"kind": "debug",   "parent_id": int}
+    {"kind": "debug",   "parent_id": int}   # HISTORICAL — no producer since 2026-08-13 (F5)
     {"kind": "merge",   "parent_ids": [int, int]}
     {"kind": "evaluate","node_id": int}
     {"kind": "ablate",  "parent_id": int}
@@ -31,6 +32,11 @@ from looplab.core.models import NodeStatus, RunState
 # the event log, so they never change).
 KIND_DRAFT = "draft"
 KIND_IMPROVE = "improve"
+# HISTORICAL ONLY since F5 (2026-08-13): the Debug node was deleted and NOTHING mints this kind any
+# more. The spelling stays because these values are load-bearing in the event log — every preserved
+# run with a `debug` node has to keep folding, rendering and replaying exactly as it did. A new
+# producer is the defect, not a missing constant; `tests/test_debug_node_removed.py` is what refuses
+# one. See the block above `operator_yields` for the decision and why it needed F8 beside it.
 KIND_DEBUG = "debug"
 KIND_MERGE = "merge"
 KIND_EVALUATE = "evaluate"
@@ -81,23 +87,27 @@ def rank_by_metric(state: RunState, nodes) -> list:
 
 
 # --------------------------------------------------------------------------- #
-# Shared self-repair: debug the first failed leaf within the depth bound. Used by
-# every policy so error-feedback repair (I7) is policy-agnostic, not greedy-only.
+# THE DEBUG NODE IS GONE (F5, decided 2026-08-13). `debug_action` and `_debug_lineage`
+# lived here and every policy called them: "the inline-repair limit was exceeded, so
+# open a NEW node and start fixing again". The operator's ruling — *"дебаг ноду нафиг
+# убираем. У нас репейринг есть. Им вот и должно всё решаться."* — is that a failure is
+# fixed INSIDE the one node, for as long as it takes.
+#
+# What made that safe to remove is F8 landing in the same change: the inline-repair
+# bound stopped being a count. Deleting the Debug node while the bound was still
+# `attempt < 12` would have turned "give up and open a new node" into plain "give up",
+# which is strictly worse than what it replaced. The stop is now a judgment — the triage
+# judge, the Developer's own `(developer stuck: …)` and the repair critic
+# (`engine/repair_judgment.py`) — over floors that are about time and money.
+#
+# AND THE HALF THAT MATTERS MORE, because it is how the removal would otherwise be
+# evaded: no `draft`/`improve` node may be minted that is a Debug node under another
+# name. `improve` already cannot reach a failed node — `breedable_nodes()` is
+# evaluated-and-feasible only, and every policy below ranks that set — and
+# `tests/test_debug_node_removed.py` drives that rather than trusting the reading.
+# `KIND_DEBUG` survives as an event-log spelling (old runs contain `debug` nodes and must
+# still fold and render), with no producer anywhere.
 # --------------------------------------------------------------------------- #
-
-def _debug_lineage(state: RunState, node_id: int) -> int:
-    """Count 'debug' operators in this node's ancestry (incl. itself)."""
-    seen, stack, visited = 0, [node_id], set()
-    while stack:
-        nid = stack.pop()
-        if nid in visited or nid not in state.nodes:
-            continue
-        visited.add(nid)
-        n = state.nodes[nid]
-        if n.operator == "debug":
-            seen += 1
-        stack.extend(n.parent_ids)
-    return seen
 
 
 def operator_yields(state: RunState) -> dict[str, dict]:
@@ -187,37 +197,15 @@ def weighted_parent(state: RunState, feasible=None) -> Optional[int]:
     return best_id
 
 
-def debug_action(state: RunState, debug_depth: int) -> Optional[dict]:
-    """A debug action for the first failed leaf whose debug-lineage depth is below the
-    bound, else None. Caller is responsible for the node budget."""
-    if debug_depth <= 0:
-        return None
-    has_child: set[int] = set()
-    for n in state.nodes.values():
-        has_child.update(n.parent_ids)
-    # TOMBSTONED leaves are excluded alongside aborted ones. §6.3 gates ALL downstream selection on
-    # `not tombstoned`, so a failed leaf whose subtree was logically deleted must not be rediscovered
-    # here either — plain policies were breeding a debug child from a deleted node forever.
-    # `card_selection` masks this on its own path via `_effective_policy_state`; the legacy
-    # `next_actions` path calls this on the RAW state, so the rule has to hold here too.
-    for n in sorted(state.nodes.values(), key=lambda n: n.id):
-        if (n.status is NodeStatus.failed and n.id not in state.aborted_nodes
-                and not n.tombstoned
-                and n.id not in has_child
-                # Governance terminals are intentional, not implementation crashes to repair.
-                and n.error_reason not in {"idea_rejected", "card_dropped"}
-                and _debug_lineage(state, n.id) < debug_depth):
-            return {"kind": KIND_DEBUG, "parent_id": n.id}
-    return None
-
-
 class GreedyTree:
     """The default SearchPolicy (see the module docstring for the action schema and meta
     keys): seed `n_seeds` drafts, then repeatedly `improve` the best feasible node,
     periodically `merge` the top-2 (every `merge_every` improves, at most `max_merges`)
     and — when `ablate_every` > 0 — `ablate` the best to refine its highest-impact
-    parameter, while `debug`-repairing failed leaves within `debug_depth`, until
-    `max_nodes` is spent. Pure over the folded RunState (reads state, returns actions;
+    parameter, until `max_nodes` is spent. It no longer repairs failed leaves by opening a
+    node: `debug_depth` is accepted and inert (F5 — see the block above `operator_yields`),
+    kept only so Settings/snapshot/env compatibility and the calibrated speculation
+    envelope, which both pin the name, are undisturbed. Pure over the folded RunState (reads state, returns actions;
     the orchestrator executes them), so it is deterministic and replay-safe;
     `operator_bandit` (P4) swaps the fixed merge/ablate cadences for a deterministic UCB
     over observed per-operator yields."""
@@ -254,11 +242,6 @@ class GreedyTree:
 
         total = len(state.nodes)
 
-        # 2. Self-repair failed leaves within the depth bound (consumes budget).
-        if total < self.max_nodes:
-            dbg = debug_action(state, self.debug_depth)
-            if dbg:
-                return [dbg]
 
         if total >= self.max_nodes:
             return []  # budget spent -> finish
@@ -354,10 +337,6 @@ class EvolutionaryPolicy:
             return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
 
         total = len(state.nodes)
-        if total < self.max_nodes:
-            dbg = debug_action(state, self.debug_depth)
-            if dbg:
-                return [dbg]
         if total >= self.max_nodes:
             return []
 
@@ -430,10 +409,6 @@ class MCTSPolicy:
         if pending:
             return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
         total = len(state.nodes)
-        if total < self.max_nodes:
-            dbg = debug_action(state, self.debug_depth)
-            if dbg:
-                return [dbg]
         if total >= self.max_nodes:
             return []
         if total < self.n_seeds:
@@ -574,10 +549,6 @@ class ASHAPolicy:
         if pending:
             return [{"kind": KIND_EVALUATE, "node_id": n.id} for n in pending]
         total = len(state.nodes)
-        if total < self.max_nodes:
-            dbg = debug_action(state, self.debug_depth)
-            if dbg:
-                return [dbg]
         if total >= self.max_nodes:
             return []
 
@@ -666,9 +637,11 @@ def legal_actions(state: RunState, policy: SearchPolicy, *, max_nodes: int) -> l
     actions: list[dict] = [{"kind": KIND_DRAFT}]
     feasible = rank_by_metric(state, state.breedable_nodes())
     actions.extend({"kind": KIND_IMPROVE, "parent_id": n.id} for n in feasible)
-    dbg = debug_action(state, getattr(policy, "debug_depth", 1))
-    if dbg:
-        actions.append(dbg)
+    # NO DEBUG ACTION HERE ANY MORE (F5). This gate is the envelope the self-driving agent picks
+    # from, so leaving `debug` in it would let the agent mint the very node the policies no longer
+    # can — the "Debug node under another name" the decision names as the way the removal gets
+    # evaded. A failed node is fixed in place; `feasible` above is `breedable_nodes()`, which is
+    # evaluated-and-feasible only, so no `improve` here can anchor on one either.
     if len(feasible) >= 2:
         actions.append({"kind": KIND_MERGE, "parent_ids": [feasible[0].id, feasible[1].id]})
     best = state.best()

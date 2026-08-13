@@ -418,5 +418,22 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
     if reason == "crash" and mechanical and attempt <= max_attempts:
         return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
+    # A NON-MECHANICAL CRASH IS NOW REPAIRED TOO, while attempts remain — changed 2026-08-13 with F5,
+    # and only because F5 removed what this branch used to defer to. `abandon` here was the
+    # conservative answer on the reasoning that killing a lineage is a strong call reserved for the
+    # LLM agent; what made it conservative rather than merely lossy is that an abandoned node then
+    # got a DEBUG NODE, which handed the same failure to the same Developer with a fresh node's
+    # budget. With the Debug node deleted, the identical verdict means "throw the node away", so the
+    # cautious spelling became the destructive one — a `RuntimeError` (not in `_MECHANICAL_MARKERS`)
+    # ends a node that one repair would have fixed.
+    #
+    # This is not "repair forever": `max_attempts` is the caller's effective cap and the floors in
+    # `engine/repair_judgment.py` sit under it. And it applies ONLY to a `crash` — the reason set is
+    # unchanged, so a drift rejection or an `idea_rejected` still ends the node here as before. The
+    # rule path still never returns `reject_idea`: condemning a whole lineage remains the model's
+    # call, and this path has no way to form it.
+    if reason == "crash" and attempt <= max_attempts:
+        return {"action": "repair",
+                "rationale": "crash with attempts remaining and no judge wired (rule-based)"}
     return {"action": "abandon",
-            "rationale": "non-mechanical failure or attempts exhausted (rule-based)"}
+            "rationale": "non-repairable failure or attempts exhausted (rule-based)"}

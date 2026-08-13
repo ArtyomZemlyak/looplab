@@ -1,8 +1,13 @@
 """Operators (I7/I11, ADR-6). The result-moving levers beyond draft/improve:
 
-- debug  : a depth-bounded fix attempt on a *failed* node (re-propose from it).
 - merge  : an ensemble/merge node combining ≥2 parents (mean of numeric params) —
            the multi-parent DAG step (parent_ids has length ≥2).
+
+`debug` — "a depth-bounded fix attempt on a *failed* node (re-propose from it)" — was listed here
+and is GONE (F5, 2026-08-13). It never had a function in this module (the orchestrator's role calls
+owned it, like draft/improve), and it has no producer anywhere now: a failure is repaired inside the
+node that failed, bounded by `engine/repair_judgment.py` rather than by a node budget slot. See
+`search/policy.py`'s block above `operator_yields` for the decision and why F8 had to land with it.
 
 draft/improve live in the orchestrator's role calls; merge is purely mechanical
 (no model needed) so it lives here as a function. The policy decides *when* each
