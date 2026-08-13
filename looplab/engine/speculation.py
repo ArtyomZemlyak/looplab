@@ -98,6 +98,13 @@ def notify_producer(notify, key) -> None:
     re-scans the durable result slots anyway. Letting any of them escape would tear down the task
     group during teardown — i.e. cancel live evaluations — over a hint nobody needed.
     """
+    if notify is None:
+        # NO SESSION IS LISTENING. Since the eval task group became run-scoped an evaluation child
+        # can terminate between two sessions, with `Engine._eval_notify` cleared — the same "the
+        # consumer is already gone" case as `ClosedResourceError` below, reached one step earlier.
+        # It is still only a hint: the next session's first turn re-reads the log and re-derives
+        # `eval_inflight` before it decides anything.
+        return
     try:
         notify.send_nowait(key)
     except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
@@ -2125,22 +2132,26 @@ class SpeculationMixin:
             session.progressed = True
 
         if (
-            # ADMISSION's gate, not production's, and this pairing is load-bearing.  The freshness
-            # drain is the PRECONDITION of a correct admission: an eval terminal can move `best`
-            # and make the already-built next Node stale, so a session that keeps admitting after a
-            # terminal (which is the whole F1f fix) must keep draining after one too.  It used to
-            # read the full predicate and stop here on that terminal — "leave its already-built next
-            # Node untouched for the outer control/Strategist/cadence boundary; freshness will
-            # re-run from that fresh outer turn" — which was coherent only while admission stopped
-            # with it.  Un-latching admission without un-latching this would be the one genuinely
-            # dangerous version of this change: it would dispatch exactly the stale prefetch the
-            # drain exists to kill.
+            # An eval terminal closes this admitted batch.  Leave its already-built next
+            # Node untouched for the outer control/Strategist/cadence boundary; freshness
+            # will re-run from that fresh outer turn.  A pre-decided serial fallback has
+            # the same boundary semantics while its admitted eval burns to terminal.
+            #
+            # PRODUCTION's gate, deliberately, even though F1f un-latched ADMISSION one phase below.
+            # This SESSION-WIDE drain terminalizes an already-built Node, which is a selection act,
+            # and the outer turn — with its cadences, its Strategist and its own
+            # `_drop_stale_speculation` — is where that decision has always been taken after a
+            # terminal.  Running it here instead would move the discard EARLIER by one turn for no
+            # gain and would change which snapshot decided it.  Admission is not thereby left
+            # unguarded: `_card_phase_admit_evals` re-checks `speculative_card_is_fresh` for the
+            # exact candidate immediately before the GPU child starts, and drains on a miss — so an
+            # un-latched consumer still cannot dispatch a stale prefetch.
             #
             # The gate reads its OWN snapshot rather than the `current` above, because
             # `_skip_if_aborted` may have appended between them.  Asking `_fold_current` again is
             # free when nothing was appended (the tail is unmoved) and correct when something was,
             # so there is no "remember to refresh" line here for anyone to delete later.
-            session.open_for_admission(
+            session.open_for_production(
                 self._session_gates(self._session_state(), session))
             and await self._drop_stale_speculation(
                 eval_inflight=session.eval_inflight,
@@ -2273,7 +2284,19 @@ class SpeculationMixin:
                 )
                 if not fresh:
                     self._release_gpus(reservation.get("gpu_ids"))
-                    if await self._drop_stale_speculation(
+                    # DO NOT START IT — that is the whole point of this re-check, and it holds
+                    # unconditionally.  Whether to TERMINALIZE it is a different question, and it
+                    # belongs to whoever owns the next selection decision.  Once the outer boundary
+                    # is owed a turn (`open_for_production` false: a terminal landed, or the
+                    # producer yielded), the discard is the outer loop's — it runs its own
+                    # `_drop_stale_speculation` after the cadences, from a snapshot those cadences
+                    # may have moved, which is exactly where this decision was taken before F1f
+                    # un-latched admission.  Dropping it here instead would move a selection act one
+                    # turn earlier and onto a different snapshot, for no gain: the slot is freed
+                    # either way, and the node is unstartable either way.
+                    if session.open_for_production(
+                        self._session_gates(current, session),
+                    ) and await self._drop_stale_speculation(
                         eval_inflight=session.eval_inflight,
                     ):
                         session.progressed = True

@@ -1774,7 +1774,11 @@ def test_admission_records_the_eval_start_boundary_before_it_starts_the_worker(
     calls = called_names(Engine._card_phase_admit_evals)
     boundary = calls.index("self._record_eval_start_boundary")
     admitted = calls.index("session.eval_inflight.add")
-    started = calls.index("session.task_group.start_soon")
+    # `eval_task_group`, not `task_group`: since backlog F1f the eval child belongs to the
+    # RUN-scoped group `Engine.run` owns, so it survives the session that admitted it. The
+    # ORDER pinned here is unchanged and is the invariant-#1 half — the boundary row is still
+    # written by the MAIN task at the dispatch decision, before the child exists.
+    started = calls.index("session.eval_task_group.start_soon")
     assert boundary < admitted < started
     launches = [
         node for node in ast.walk(function_tree(Engine._card_phase_admit_evals))
@@ -1832,7 +1836,10 @@ def test_a_worker_written_eval_start_boundary_would_defeat_the_election(tmp_path
 def test_outer_spine_runs_freshness_gate_before_policy_scorer():
     source = inspect.getsource(Engine._run_with_llm_broker)
     scorer = source.index("actions = self._select_actions(state)")
-    freshness = source.rfind("await self._drop_stale_speculation()", 0, scorer)
+    # The call now carries `eval_inflight=self._eval_inflight` (backlog F1f: the outer loop
+    # turns while adopted evaluations run, so this drain must not terminalize a node whose
+    # sandbox is burning right now). Pin the CALL and its position, not the empty arg list.
+    freshness = source.rfind("await self._drop_stale_speculation(", 0, scorer)
     assert freshness >= 0
 
 
@@ -2169,7 +2176,15 @@ def test_run_card_session_pre_gpu_recheck_unions_producer_failed_but_raw_lane_do
 
 
 def test_open_for_new_work_is_the_one_exit_gate_predicate():
-    """The rule, stated. It was previously reachable only through a ~500-line closure."""
+    """The rule, stated — now as the TWO gates backlog F1f split it into.
+
+    There used to be one predicate, `open_for_new_work`, and both live session flags closed it for
+    both lanes. `consumer_completed` (now `boundary_owed`) is set in the `finally` of EVERY eval
+    child, so the FIRST terminal shut eval ADMISSION for every remaining slot while
+    `_card_phase_decide_exit` still refused to return until the LAST eval drained: 115.6 GPU-h of
+    idle second slot across the six width-2 runs on this box. The flags never said anything about
+    the consumer. They say the outer boundary is owed a turn, and the answer to that is to RETURN.
+    """
     gates_open = speculation_module.CardSessionGates(
         terminal_gate=False, budget_exhausted=False, outer_rebuild=False)
     assert gates_open.stopping is False
@@ -2181,16 +2196,25 @@ def test_open_for_new_work_is_the_one_exit_gate_predicate():
             setattr(session, name, value)
         return session
 
-    assert _session().open_for_new_work(gates_open) is True
-    # Each FOLD-derived condition closes the gate on its own...
+    # The single predicate is GONE, not renamed. A reverting patch that restores the old spelling
+    # has to delete this line to go green.
+    assert not hasattr(_session(), "open_for_new_work")
+
+    assert _session().open_for_admission(gates_open) is True
+    assert _session().open_for_production(gates_open) is True
+    # Each FOLD-derived condition closes BOTH gates on its own...
     for name in ("terminal_gate", "budget_exhausted", "outer_rebuild"):
         closed = dataclasses.replace(gates_open, **{name: True})
         assert closed.stopping is True
-        assert _session().open_for_new_work(closed) is False
-    # ...and so does each LIVE session flag, which is why they are read separately and not frozen
-    # into the snapshot: `consumer_completed` is set by the eval child at any checkpoint.
-    for flag in ("consumer_completed", "yield_outer"):
-        assert _session(**{flag: True}).open_for_new_work(gates_open) is False
+        assert _session().open_for_admission(closed) is False
+        assert _session().open_for_production(closed) is False
+    # ...and each LIVE session flag closes PRODUCTION only. They are read separately and not frozen
+    # into the snapshot because `boundary_owed` is transferred from an eval child at any checkpoint.
+    # THE ASYMMETRY IS THE FIX: a freed slot is refilled by the very turn that observed the
+    # terminal, and the debt is paid by returning, not by going sterile.
+    for flag in ("boundary_owed", "yield_outer"):
+        assert _session(**{flag: True}).open_for_production(gates_open) is False
+        assert _session(**{flag: True}).open_for_admission(gates_open) is True
 
     # The eval-seconds and wall-clock halves of `budget_exhausted`, which no call site can reach.
     state = RunState()
@@ -2210,12 +2234,15 @@ def test_open_for_new_work_is_the_one_exit_gate_predicate():
 def test_no_session_phase_re_derives_a_stop_condition_by_hand():
     """One home for the gate tuple, and one home for combining it with the live session flags.
 
-    The second half also pins a deliberate ASYMMETRY. `_card_phase_admit_evals` consults
-    `gates.stopping` directly inside an admitted batch rather than `open_for_new_work`, because
-    re-reading `consumer_completed` there would let the first sibling to terminate truncate the
-    batch its own siblings are still being admitted into. That is the exact shape of the regression
-    this subsystem has already paid for once (depth-1 speculation silently going serial), so the
-    two spellings are not interchangeable and this test says which belongs where.
+    The second half pins WHICH GATE EACH PHASE ASKS, which is the whole of the F1f fix. Admission
+    asks `open_for_admission` (the fold-derived stop conditions, and nothing else); every producer
+    site asks `open_for_production` (those plus the two live flags). Swapping one for the other in a
+    single phase is exactly how the 115.6 GPU-h barrier comes back, and it is a one-word edit.
+
+    `_card_phase_admit_evals` also still consults `gates.stopping` directly inside an admitted
+    batch: re-reading a live flag there would let the first sibling to terminate truncate the batch
+    its own siblings are still being admitted into — the same defect one scope smaller, and the one
+    this subsystem has already paid for once (depth-1 speculation silently going serial).
     """
     tree = ast.parse(
         Path(speculation_module.__file__).read_text(encoding="utf-8-sig", errors="replace"))
@@ -2237,15 +2264,37 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
                         best = node.name
         return best
 
-    # Reading a live session flag is how a second exit-gate predicate grows. Only the predicate
-    # itself and the raw-stage phase (whose own, different, gate-free test this is not) may.
+    # Reading a live session flag is how a second exit-gate predicate grows. Only the production
+    # predicate itself and the raw-stage phase (whose own, different, gate-free test this is not)
+    # may. `open_for_admission` is deliberately absent from this set: a live flag reaching the
+    # ADMISSION gate is the F1f defect, restated.
     flag_readers = {
         _owner(node) for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and node.attr in {"consumer_completed", "yield_outer"}
+        and node.attr in {"boundary_owed", "yield_outer"}
         and isinstance(node.ctx, ast.Load)
     }
-    assert flag_readers == {"open_for_new_work", "_card_phase_serve_raw_stage"}, flag_readers
+    assert flag_readers == {"open_for_production", "_card_phase_serve_raw_stage"}, flag_readers
+
+    # WHICH GATE EACH PHASE ASKS. One entry per phase-owned call site; changing a row here is
+    # changing the barrier. `_card_phase_admit_evals` is the only consumer site and the only one
+    # that may ask `open_for_admission`.
+    gate_calls = collections.Counter(
+        (_owner(node), node.func.attr) for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"open_for_admission", "open_for_production"}
+    )
+    assert gate_calls == collections.Counter({
+        ("_card_phase_admit_evals", "open_for_admission"): 1,
+        # the stale drain, the build-result commit and the head producer
+        ("_card_phase_drop_stale", "open_for_production"): 1,
+        ("_card_phase_serve_head", "open_for_production"): 2,
+        # the freshness miss inside admission defers its DISCARD (not its refusal to start)
+        ("_card_phase_admit_evals", "open_for_production"): 1,
+        ("_card_phase_request_build", "open_for_production"): 1,
+        ("_card_phase_decide_exit", "open_for_production"): 1,
+    }), gate_calls
 
     # COUNTS, not just the owner set: the admission phase reads `.stopping` at BOTH of its
     # gates — the batch fill and the pre-GPU re-check — and reverting only one of them back to
@@ -2256,10 +2305,11 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
         if isinstance(node, ast.Attribute) and node.attr == "stopping"
     )
     assert stopping_readers == collections.Counter({
-        "open_for_new_work": 1, "_card_phase_admit_evals": 2,
+        "open_for_admission": 1, "open_for_production": 1, "_card_phase_admit_evals": 2,
     }), stopping_readers
-    # ...and the phase asks the FULL predicate exactly once: its batch boundary, on entry.
-    assert called_names(Engine._card_phase_admit_evals).count("session.open_for_new_work") == 1
+    # ...and the phase asks its own gate exactly once: the batch boundary, on entry.
+    assert called_names(
+        Engine._card_phase_admit_evals).count("session.open_for_admission") == 1
 
     phases = [
         getattr(Engine, name) for name in dir(Engine)
