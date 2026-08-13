@@ -1691,6 +1691,12 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         _senv = merge_env(ex.env, _senv_decl) if _senv_decl else ex.env
         _swrap_argv, _env_problem = _stage_wrap(ex, _senv_decl)
         if _env_problem:
+            # The two exit codes differ ON PURPOSE and neither is a typo. The stage ROW carries 0
+            # because no process ran — the same value the `needs_failed` row uses, and the only
+            # honest one for a command that was never spawned. The `RunResult` carries 2, which is
+            # what `eval_stages.PROTECTED_SCRIPT_MISSING` uses for the other refusal no agent edit
+            # can satisfy: a zero there would send this down the "exit 0 but no metric" path and have
+            # the repair loop ask the Developer to make the metric appear.
             stage_results.append({"name": _sname, "status": "env_unsupported", "exit_code": 0,
                                   "seconds": 0.0, "concern": _env_problem.format(stage=_sname)})
             run.early = RunResult(
