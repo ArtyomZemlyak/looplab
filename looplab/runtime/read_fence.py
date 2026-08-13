@@ -117,6 +117,54 @@ REFUSAL_MESSAGE = (
     "mount or `seed_mode: \"all\"`."
 )
 
+# The MUTATION twin. A separate sentence because the FIX is a different one: for a read the answer
+# is "name your own copy", for a delete/rename/chmod there is no legitimate answer at all — the
+# source tree is the operator's working tree and a node has no business changing it. Same exception
+# class, same non-`OSError` reasoning (see below), because `except OSError:` is just as routine
+# around `os.remove` as it is around `open`.
+MUTATION_REFUSAL_MESSAGE = (
+    "refused: {path} is under the operator's SOURCE tree, which this node may not create, delete, "
+    "rename, truncate, link or change. This node runs in its own copy — write to, and clean up "
+    "inside, your own workdir. Nothing your pipeline produced is in the source tree."
+)
+
+# WHERE EACH MUTATION EVENT CARRIES ITS PATHS — a registry, per CLAUDE.md, because the alternative
+# is `args[0]` everywhere and a silent miss the day one of these grows an argument.
+#
+# `event -> ((path_index, dir_fd_index | None), ...)`. Every entry was DERIVED, not remembered: the
+# calls were run under a recording audit hook on this interpreter (CPython 3.12.11) and the emitted
+# `(event, args)` read off. `tests/test_read_fence.py::test_mutation_arg_shapes_match_the_interpreter`
+# re-derives the whole table the same way, so an interpreter that moves an argument goes RED here
+# rather than quietly fencing the wrong slot. Two shapes are not obvious and both are load-bearing:
+#
+#   * a `dir_fd` slot exists because CPython audits the RELATIVE name for `unlinkat`-style calls.
+#     `os.remove("secret.txt", dir_fd=<fd of the source root>)` raises `os.remove` with the bare
+#     name, which the prefix compare cannot possibly match — measured THROUGH before this table,
+#     and it is exactly how `shutil.rmtree` deletes every file under a tree;
+#   * `os.symlink`/`os.link` index 0 is the link TARGET, which is not a mutation of that path. It is
+#     listed anyway: the fence's documented residual is that a read THROUGH a symlink or hardlink
+#     into a root resolves past it, and refusing to CREATE the link closes that residual for every
+#     link the fenced process makes itself (both measured THROUGH before this table).
+#
+# Deliberately NOT here: the `shutil.*` events. Each one lowers to an `os.*` event or an `open` on
+# the same path — `copyfile`->`open`, `copymode`->`os.chmod`, `copystat`->`os.utime`+`os.chmod`,
+# `move`->`os.rename`, `rmtree`->`os.remove`+`os.rmdir` — verified by the same recording hook, so a
+# `shutil` row would be a second name for a refusal that has already happened.
+MUTATION_EVENTS = {
+    "os.remove": ((0, 1),),          # (path, dir_fd)          — os.unlink raises this too
+    "os.rename": ((0, 2), (1, 3)),   # (src, dst, src_dir_fd, dst_dir_fd) — os.replace raises this
+    "os.truncate": ((0, None),),     # (path_or_fd, length)    — os.ftruncate raises this too
+    "os.chmod": ((0, 2),),           # (path, mode, dir_fd)
+    "os.chown": ((0, 3),),           # (path, uid, gid, dir_fd)
+    "os.utime": ((0, 3),),           # (path, times, ns, dir_fd)
+    "os.mkdir": ((0, 2),),           # (path, mode, dir_fd)
+    "os.rmdir": ((0, 1),),           # (path, dir_fd)
+    "os.symlink": ((0, None), (1, 2)),   # (target, link, dir_fd) — index 0 is the target, see above
+    "os.link": ((0, 2), (1, 3)),     # (src, dst, src_dir_fd, dst_dir_fd)
+    "os.setxattr": ((0, None),),     # (path_or_fd, attribute, value, flags)
+    "os.removexattr": ((0, None),),  # (path_or_fd, attribute)
+}
+
 
 class ReadFenceRefusal(Exception):
     """Host-side twin of the generated fence's own exception class.
@@ -222,6 +270,8 @@ _ALLOW = %(allow)r
 _POLICY = %(policy)r
 _LOG = %(log)r
 _MESSAGE = %(message)r
+_MUTATION_MESSAGE = %(mutation_message)r
+_MUTATE = %(mutations)r
 _RUN = %(run)r          # provenance: the run this fence was generated for
 
 _SEP = os.sep
@@ -294,7 +344,56 @@ def _fenced_dir(p):
     return r
 
 
-def _record(path, rung):
+def _fd_path(fd):
+    """The path an OPEN DESCRIPTOR names, or None.
+
+    Only ever reached from a MUTATION event, never from `open`. That asymmetry is the whole reason
+    it is affordable: `/proc/self/fd/N` is a procfs read of an already-resolved dentry and costs
+    ~2 us flat regardless of the backing filesystem (measured 1,944 ns on the geesefs mount a run
+    root lives on, against 474,268 ns for a pre-open `realpath` of the same 13-component path), and
+    a node deletes a handful of times while it opens millions."""
+    try:
+        return os.readlink("/proc/self/fd/%%d" %% fd)
+    except Exception:
+        return None
+
+
+def _fenced_target(path, dir_fd):
+    """`_fenced_dir` plus the two argument shapes only the mutation events ever carry: a bare fd
+    (`os.truncate(fd, n)`), and a name relative to a dir_fd (`os.remove(name, dir_fd=...)`, i.e.
+    `unlinkat` — which is how `shutil.rmtree` removes every file it removes)."""
+    cls = path.__class__
+    if cls is int:
+        base = _fd_path(path)
+        return _fenced_dir(base) if base is not None else None
+    if cls is not str:
+        try:
+            path = os.fspath(path)
+        except TypeError:
+            return None
+        if path.__class__ is not str:
+            try:
+                path = os.fsdecode(path)
+            except Exception:
+                return None
+    if path[:1] != _SEP and dir_fd is not None:
+        base = _fd_path(dir_fd)
+        if base is None:
+            return None
+        path = base + _SEP + path
+    return _fenced_dir(path)
+
+
+def _dir_fd(args, index):
+    """The dir_fd an audited call passed, or None. CPython spells "no dir_fd" as -1, and an
+    interpreter that grows an argument makes the slot absent rather than wrong."""
+    if index is None or index >= len(args):
+        return None
+    fd = args[index]
+    return fd if fd.__class__ is int and fd >= 0 else None
+
+
+def _record(path, rung, event):
     """Append one line to the run's fence diagnostic. Re-entrancy-guarded: this opens a file, which
     raises `open` again — the guard makes that provably terminate rather than relying on the fence
     log being outside every root."""
@@ -303,24 +402,26 @@ def _record(path, rung):
     _busy.append(1)
     try:
         with open(_LOG, "a", encoding="utf-8") as fh:
-            fh.write("%%s\\t%%s\\t%%s\\t%%s\\n" %% (rung, os.getpid(), sys.argv[0], path))
+            fh.write("%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n" %% (
+                rung, os.getpid(), sys.argv[0], path, event))
     except Exception:
         pass
     finally:
         _busy.pop()
 
 
-def _report(path):
-    first = path not in _seen
+def _report(path, event, message):
+    key = (event, path)
+    first = key not in _seen
     if first and len(_seen) < 256:      # bounded: a retry loop must not write a gigabyte
-        _seen.add(path)
-        _record(path, _POLICY)
+        _seen.add(key)
+        _record(path, _POLICY, event)
     if _POLICY == "deny":
-        raise LoopLabSourceReadRefused(_MESSAGE.replace("{path}", path))
+        raise LoopLabSourceReadRefused(message.replace("{path}", path))
     if first:
         try:
             sys.stderr.write(
-                "LOOPLAB READ FENCE (warn): " + _MESSAGE.replace("{path}", path) + "\\n")
+                "LOOPLAB READ FENCE (warn): " + message.replace("{path}", path) + "\\n")
             sys.stderr.flush()
         except Exception:
             pass
@@ -335,13 +436,31 @@ def _hook(event, args):
         # into the source tree could otherwise read all of it with bare relative names.
         check = _fenced_dir
     else:
+        # MUTATION. One dict lookup, and only for events that are not opens — a training process
+        # raises essentially nothing else in its hot loop, so this is off the measured path. It is
+        # here because `open` is not the only way to touch a file: `os.remove`, `os.rename`,
+        # `os.truncate` and `os.chmod` raise their own events and NONE of them raises `open`, so
+        # before this branch a node's eval code could delete or rename the operator's editable tree
+        # while every read of it was refused. Deny is the default for the same reason it is for
+        # reads: the failure does not announce itself.
+        slots = _MUTATE.get(event)
+        if slots is None:
+            return
+        for path_i, fd_i in slots:
+            try:
+                bad = _fenced_target(args[path_i], _dir_fd(args, fd_i))
+            except Exception:
+                bad = None           # a bug in the fence must never break an unrelated call
+            if bad is not None:
+                _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
+                return
         return
     try:
         bad = check(args[0])
     except Exception:
         return                       # a bug in the fence must never break an unrelated open
     if bad is not None:
-        _report(bad)
+        _report(bad, event, _MESSAGE)
 
 
 def _chain():
@@ -391,6 +510,7 @@ def render(roots, allow, *, policy: str, log: str = "", run: str = "") -> str:
     return _TEMPLATE % {
         "roots": tuple(roots), "allow": tuple(allow), "policy": str(policy),
         "log": str(log), "message": REFUSAL_MESSAGE, "run": str(run), "probe": _PROBE_NAME,
+        "mutation_message": MUTATION_REFUSAL_MESSAGE, "mutations": MUTATION_EVENTS,
     }
 
 
