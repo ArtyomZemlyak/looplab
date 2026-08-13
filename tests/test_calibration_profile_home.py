@@ -46,11 +46,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-11  + systemic_failure_stop      (run-level 'nothing has ever worked' stop; see below)
 #   2026-08-11  concept_retag_every 30 -> 5  (intentional cadence-default change; field set unchanged,
 #               but the complete settings envelope and therefore old receipts genuinely changed)
+#   2026-08-13  + developer_probe, developer_probe_timeout_s  (F2, the Developer's probe)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e6fdffab4f56"
+_EXPECTED_DIGEST = "sha256:48a2da9127c8475754ec3a1f3b6dd30ad88a9e7ac37eb55bd56e216e72765ae6"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -95,7 +96,17 @@ _EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e
 #               reported as `oom` is now `diverged`, and a stage refused for a missing declared
 #               input is `needs_failed` — and each is repair-eligible by default, so the number of
 #               attempts a failing replicate buys changes too. Old receipts SHOULD stop verifying.
-_EXPECTED_FIELD_COUNT = 196
+#   2026-08-13  + developer_probe (ON) and developer_probe_timeout_s — the Developer's PROBE (F2,
+#               tools/dev_probe.py). INERT for a calibration replicate, like `concept_tidy` and
+#               `task_facets_finalize` above and unlike `read_fence`: the profile's workload scope
+#               is `quadratic_toy`, which declares no editable source tree, and `make_roles` only
+#               builds the `LLMRepoDeveloper` that carries the probe when `repo_spec()` names one —
+#               so the tool cannot be composed, cannot be called, and cannot change what a
+#               replicate does. Both pins are re-set anyway rather than exempting the two knobs:
+#               the profile is a COMPLETE settings map and this digest binds the whole non-variant
+#               envelope, which is exactly the rule that keeps the guard from needing to be clever
+#               about which knobs are reachable from which workload.
+_EXPECTED_FIELD_COUNT = 198
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

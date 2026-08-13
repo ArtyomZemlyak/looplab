@@ -286,6 +286,20 @@ def test_a_program_big_enough_to_be_authoring_is_refused_with_that_reason():
     assert "write_file" in out and "QUESTION" in out
 
 
+def test_the_generated_launcher_is_readable_valid_python_on_its_own():
+    """`render_launcher` is split out so the boundary can be diffed and compiled without a
+    subprocess — a generated file that only ever runs inside one is a file nobody reviews."""
+    import ast
+
+    from looplab.tools.dev_probe import PROBE_REFUSAL, render_launcher
+
+    src = render_launcher("/some/where/probe.py")
+    ast.parse(src)                                   # a syntax error here is a dead probe surface
+    assert "/some/where/probe.py" in src
+    assert PROBE_REFUSAL in src
+    assert "sys.addaudithook" in src and "RLIMIT_FSIZE" in src
+
+
 def test_the_provider_speaks_the_duck_typed_tool_contract():
     t = DevProbeTools()
     specs = t.specs()

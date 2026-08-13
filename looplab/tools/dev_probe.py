@@ -107,6 +107,9 @@ RESIDUALS, stated rather than papered over
   allow-lists it so a run `--out`-ed inside the repo works). A Developer that reads `events.jsonl`
   learns the run's ledger. That is a context concern, not a record concern: rule 2 means nothing it
   reads can reach the record except through `edit_file`, which is recorded.
+* A probe BLOCKS the thread its tool loop is on for up to its timeout — exactly as the loop's own
+  synchronous LLM calls already do, and for a fraction as long, which is why it is bounded by a
+  wall clock rather than made async for a surface whose every other step is blocking anyway.
 """
 from __future__ import annotations
 
