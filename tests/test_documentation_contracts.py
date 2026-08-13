@@ -43,12 +43,13 @@ def test_index_mentions_every_numbered_document():
                       if path.name != "00-INDEX.md")
     # Deliberately a literal, not a derived count: this is the tripwire that a document was added or
     # REMOVED without anyone touching the index, and the `missing` check below cannot see a deletion.
-    # Moving it is part of adding a doc — 34 since doc 36 (agent-driven decisions). It went 30 -> 34
-    # in one step because docs 31/32/33 (the 2026-08-13 option tables) each landed WITHOUT an index
-    # row, so the tripwire had been red on master since then and was read as pre-existing noise
-    # rather than as the missing rows it was reporting. That is the failure mode this literal exists
-    # to prevent, and it only works if a red one is fixed rather than inherited.
-    assert len(numbered) == 34, "the derived numbered-document inventory changed"
+    # Moving it is part of adding a doc — 35 since doc 34 (fence coverage audit). It jumped 30 -> 34
+    # in one step on 2026-08-13 because docs 31/32/33 (the option tables) had each landed WITHOUT an
+    # index row, so this tripwire had been red on master for a day and was read as pre-existing noise
+    # rather than as the three missing rows it was reporting. Doc 34 then arrived the same way. The
+    # literal only does its job if a red one is FIXED rather than inherited, so if you find it red:
+    # add the missing row, do not just move the number.
+    assert len(numbered) == 35, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
