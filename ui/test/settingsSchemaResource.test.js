@@ -33,7 +33,15 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   bound that stops a run whose every node fails for the same reason. The paired Python guards
   //   (`SETTINGS_UI_SCHEMA_KEYSET_REVISION` + the divergence table) prove it is the only added row —
   //   and this literal is exactly the tripwire the comment above records being missed once already.
-  assert.equal(Object.keys(schema.fieldByKey).length, 165)
+  //   165 -> 167 (2026-08-12): `metric_salvage` and `metric_salvage_repair` joined the Resilience
+  //   group when salvage shipped — the rung that decides whether a metric the eval already produced
+  //   can be recovered from a node that failed for something else, and whether the broken
+  //   DECLARATION is fixed in the same attempt. Two rows, one commit. And the tripwire was missed a
+  //   SECOND time: `looplab/serve/settings_ui_schema.py` moved to 167 and this literal stayed at
+  //   165, so the fixture — which reads the REAL packaged catalogue — has been failing ever since,
+  //   which is precisely the failure mode the 162 -> 163 note above describes. Read that note before
+  //   adding a catalogue row: the Python and JS halves of this count are ONE tripwire in two files.
+  assert.equal(Object.keys(schema.fieldByKey).length, 167)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

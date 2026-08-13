@@ -191,7 +191,15 @@ test('portfolio UI exposes saved views, bounded selection, fenced detail, and co
     readFile(new URL('../src/styles.css', import.meta.url), 'utf8'),
   ])
   assert.match(list, /compareIds\.size > 0/)
-  assert.match(list, /next\.size >= 8/)
+  // The cap moved to the other verb. It used to be `next.size >= 8` on SELECTION, which refused an
+  // operator picking twenty runs at the ninth checkbox even when they meant to act on all of them
+  // rather than compare them. Selecting is now bounded only by `SELECTION_MAX` (the set round-trips
+  // through the saved view and the URL), and the comparison-shaped bound lives on the COMPARISON,
+  // where `comparisonScope` reports what is shown vs omitted and `selectionNotice` says so out loud.
+  // Pinning the deleted literal is worse than pinning nothing: it reads as guarding a cap that no
+  // longer exists anywhere.
+  assert.match(list, /next\.size >= SELECTION_MAX/)
+  assert.match(list, /selectionNotice\(comparisonScope\(compareRuns\)\)/)
   assert.match(list, /Save current view/)
   assert.match(compare, /snapshot\?\.generation === expectedGeneration/)
   assert.match(compare, /probe\?\.generation === expectedGeneration/)

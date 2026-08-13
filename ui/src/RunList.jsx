@@ -1179,6 +1179,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
   // The batch reads the run list between deletions, so it needs the LATEST rows, not the ones its
   // closure captured when the operator pressed the button.
   const runsRef = useRef(null)
+  const deletionRecoveriesRef = useRef(null)
   const [deleteMemoryReport, setDeleteMemoryReport] = useState(null)
   const deleteDialogFocusRef = useRef(null)
   const deleteConfirmLockRef = useRef(false)
@@ -1317,6 +1318,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const closeRunRename = () => { setRunRename(null); restoreRunModalFocus() }
   const closeSuperTasks = () => { setStModal(false); restoreRunModalFocus() }
   useEffect(() => { runsRef.current = runs }, [runs])
+  // Mirrored for the SAME reason `runs` is: `runBulkDeletion` runs across many awaits, and the
+  // recovery map it must consult is the one the batch itself has been WRITING — `updateDeletionRecovery`
+  // adds an active record per run, and a non-4xx failure leaves it. Reading the render-time state
+  // instead let the post-batch plan re-list the run that stopped the batch as `ready`, so the next
+  // press re-stopped on it (`saveRunDeletionIntent` refuses while an unresolved intent exists) and
+  // never reached the runs behind it — a wedged batch, recoverable only by reopening the dialog.
+  useEffect(() => { deletionRecoveriesRef.current = deletionRecoveries }, [deletionRecoveries])
   useEffect(() => {
     deletionMountedRef.current = true
     return () => {
@@ -2282,7 +2290,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
     // batch that deleted eight).
     setBulkDeleteDialog(current => current
       ? { ...current, plan: bulkDeletionPlan([...compareIds].filter(id => !state.done.includes(id)),
-          runsRef.current || [], deletionRecoveries) }
+          runsRef.current || [], deletionRecoveriesRef.current || deletionRecoveries) }
       : current)
     setCompareIds(current => {
       const next = new Set(current)

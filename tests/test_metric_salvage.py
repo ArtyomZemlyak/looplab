@@ -707,3 +707,61 @@ def test_two_fresh_same_basename_files_refuse_the_relocation_rather_than_pick_on
     value, source, _reader, _detail = ms.read_salvageable_metric(spec, "", str(tmp_path),
                                                                 time.time() - 60)
     assert (value, source) == (0.1, "relocated_file")
+
+
+class _NoOpDev(_Dev):
+    """Answers the repair call and proposes NOTHING — returning the node's own manifest verbatim.
+
+    Deliberately not an empty reply: `_repair_provider_failure` reads empty-everything as the
+    Developer's SESSION having failed (dead endpoint, 401, 402), which must not be receipted because
+    a resume should retry it. This is the other shape — the provider answered, billed, and proposed
+    no change — which is the one that owed a receipt and had none.
+    """
+
+    def __init__(self, unchanged: str):
+        super().__init__()
+        self.unchanged = unchanged
+
+    def repair(self, idea, code, error):
+        self.errors.append(error)
+        self.last_files = {"looplab_stages.json": self.unchanged}
+        self.last_deleted = []
+        return ""
+
+
+def test_a_cause_fix_that_changed_nothing_is_still_receipted_so_a_resume_cannot_re_buy_it(tmp_path):
+    """The paid call is the side effect, not the edit it happened to produce.
+
+    `_repair_salvaged_cause` is documented as ONCE PER LIFECYCLE, gated on its own durable
+    `node_repaired` row (invariant #3). But the row was appended only when the repair produced
+    something committable, so the branch where the model ANSWERS and proposes no change spent a
+    provider call and left nothing durable — and a process dying in the ordinary window before the
+    terminal made the resume re-evaluate, re-salvage and buy the identical call again, with nothing
+    in folded state to bound the repeat across successive crashes.
+
+    Driven end to end over the real `_evaluate`: a Developer that answers with no change, then the
+    gate the resume actually consults, read off the real event log.
+    """
+    from looplab.engine.evaluate import _durable_salvage_cause_fix
+    from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
+
+    dev = _NoOpDev(_manifest(DECLARED))
+    evs, _eng, dev = _drive(
+        tmp_path, manifest=_manifest(DECLARED), dev=dev, name="noop")
+
+    assert len(dev.errors) == 1, "the cause fix was asked for exactly once"
+    rows = [e for e in evs if e.type == "node_repaired"
+            and (e.data or {}).get("triage_action") == SALVAGE_CAUSE_TRIAGE_ACTION]
+    assert len(rows) == 1, "a billed call that produced no change still owes a durable receipt"
+    row = rows[0].data
+    assert row["changed"] == [] and row["files"] == {} and row["deleted"] == []
+    # Fold-neutral: no `code` key, so `replay._on_node_repaired`'s `d.get("code", n.code)` leaves the
+    # node's artifact alone. A receipt for the spend must not assert an edit.
+    assert "code" not in row
+
+    # What the RESUME sees. The gate returns the row, and it must not read back as a correction —
+    # `metric_provenance.cause_repaired` would otherwise claim a fix nobody made.
+    prior = _durable_salvage_cause_fix(evs, 0, row["generation"])
+    assert prior is not None, "the resume gate has nothing to read, so it would re-buy the call"
+    assert not (prior.get("changed") or prior.get("code") or prior.get("files")
+                or prior.get("deleted"))

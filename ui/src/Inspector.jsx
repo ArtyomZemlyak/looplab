@@ -19,7 +19,7 @@ import {
   conversationWindowNotice, nodeAttemptOptions, traceDetailState, traceForAttempt, traceUnavailable,
   traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
-import { cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
+import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
   TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS,
   TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS, nodeTraceSubject, opTraceSubject, traceRequestPath,
@@ -1331,7 +1331,15 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
     setActiveKey(rows[matches[next]].key)
   }
   const onTreeKey = event => {
-    if (event.target !== event.currentTarget || activeIndex < 0) return
+    // `contains`, not identity. This is a roving virtual collection: focus is meant to stay on the
+    // viewport and `aria-activedescendant` points into it, but every row control is `tabIndex={-1}`
+    // and a `tabIndex=-1` button still TAKES focus when clicked. So after the operator clicked any
+    // row, the keydown originated on that button, `target !== currentTarget` held, and Arrow/Home/
+    // End/Enter all silently did nothing — the highlight frozen, and Tab leaving the tree because no
+    // row is in the tab order. The click handler below restores focus to the viewport; this accepts
+    // the keys either way. There is no inner text input to protect: the search box is a SIBLING of
+    // the viewport, not a descendant.
+    if (!event.currentTarget.contains(event.target) || activeIndex < 0) return
     const row = rows[activeIndex]
     if ((event.key === 'Enter' || event.key === ' ') && spanHasDetail(row)) {
       event.preventDefault(); toggle(row.key); return
@@ -1384,7 +1392,13 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
         role: 'treeitem',
         'aria-level': row.level, 'aria-posinset': row.pos, 'aria-setsize': row.size,
         'aria-selected': index === activeIndex, 'data-active': index === activeIndex ? '' : undefined,
-        onClick: () => setActiveKey(row.key) })} />
+        // Focus belongs on the VIEWPORT for the whole life of a roving `aria-activedescendant`
+        // collection. Clicking a row moves it to the clicked control (or to `<body>` for a row that
+        // renders as a plain div), which takes the tree out of the tab order; put it back.
+        onClick: event => {
+          setActiveKey(row.key)
+          event.currentTarget.closest('[role="tree"]')?.focus()
+        } })} />
   </div>
 }
 
@@ -1398,13 +1412,16 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
 //
 // What renders, per traceScrollModel state:
 //   settled   → nothing at all
-//   reachable → an invisible sentinel; scrolling it into view widens the window
-//   loading   → the same sentinel plus a `role="status"` live region announcing the read
+//   reachable → a VISIBLE button in a sentinel zone; scrolling it into view also widens the window
+//   loading   → the same zone plus a `role="status"` live region announcing the read
 //   bounded   → the honest terminal receipt: the count, and that this surface cannot go further
-// The focusable affordance is sr-only until focused (styles.css `.trace-reach`). Infinite scroll's
-// standard failure is exactly this: an IntersectionObserver fires for anyone who scrolls — including
-// a keyboard user pressing Page Up, since that scrolls the container too — but a screen-reader user
-// driving a virtual cursor never scrolls it and would have no path to the earlier steps at all.
+// The affordance is visible at all times (styles.css `.trace-reach`), and only its focus outline is
+// focus-conditional. It was sr-only-until-focused on the reasoning that a pointer user reaches the
+// earlier steps by scrolling anyway; the operator reported "the button to load the whole trace is
+// gone again" — twice — so that reasoning was measured and reversed. Scrolling still works and still
+// loads. The observer half remains load-bearing for a different reason: an IntersectionObserver
+// fires for anyone who scrolls, including a keyboard user pressing Page Up, while a screen-reader
+// user driving a virtual cursor never scrolls the container — hence a real focusable control too.
 function TraceReach({ state, notice, onReach, failed = false }) {
   const { sentinelRef, onReachFocus } = useTraceScroll({ state, onReach, failed })
   if (state === TRACE_SCROLL_SETTLED) return null
@@ -2180,8 +2197,15 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     </div>
     {researchOpen && <div className="trace-research-body">
       {research === null && <div className="muted" role="status">loading research…</div>}
+      {/* A FAILED read is not an absence. The `.catch` above sets `{projection:{unavailable:true}}`,
+          and `cardTraceNotice` is the model function that owns exactly this distinction — the card
+          board's `_CardTrace` already calls it for the identical payload, so printing our own
+          sentence here made the two screens disagree about the same fact. "No research is linked to
+          card-3" is a positive claim about the Researcher's proposal; a read that never landed
+          cannot support it, and the disclosure is not re-fetched on collapse, so it stuck. */}
       {research !== null && !researchRows.length && <div className="muted" role="status">
-        No research is linked to {cardId} — it is never inferred from timing.</div>}
+        {cardTraceNotice(research)
+          || `No research is linked to ${cardId} — it is never inferred from timing.`}</div>}
       <ResearchTraces rows={researchRows} runId={runId} expectedGeneration={expectedGeneration} />
     </div>}
   </div>

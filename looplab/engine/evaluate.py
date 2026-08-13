@@ -321,7 +321,7 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
     return attempts, rows, unparseable
 
 
-def _durable_salvage_cause_fix(events, node_id: int, generation: int) -> bool:
+def _durable_salvage_cause_fix(events, node_id: int, generation: int):
     """Has this node's lifecycle ALREADY had its salvaged metric's cause fixed, per the log?
 
     Invariant #3 for `_repair_salvaged_cause`: a paid side effect has to be gated on a durable event
@@ -331,6 +331,12 @@ def _durable_salvage_cause_fix(events, node_id: int, generation: int) -> bool:
     this) a resume that re-evaluated, re-salvaged and bought a SECOND Developer call to make the same
     edit. The row is keyed exactly as the other durable ledgers key theirs (`_durable_row_belongs`),
     so a `node_reset` genuinely earns a fresh fix for the new lifecycle.
+
+    Returns the ROW, not a bool, because the resumed caller has to answer two different questions
+    from it: "was this already paid for?" (any row) and "did it actually change anything?" (whether
+    the row carries an edit). A receipt for a call that produced NO change must not read back as a
+    corrected declaration — that would make the resumed terminal's `metric_provenance.cause_repaired`
+    claim a fix nobody made.
     """
     for e in events or []:
         if e.type != EV_NODE_REPAIRED:
@@ -339,8 +345,8 @@ def _durable_salvage_cause_fix(events, node_id: int, generation: int) -> bool:
         if not _durable_row_belongs(d, node_id, generation):
             continue
         if str(d.get("triage_action") or "") == SALVAGE_CAUSE_TRIAGE_ACTION:
-            return True
-    return False
+            return d
+    return None
 from looplab.events.replay import fold
 # The fold's OWN generation rule, CALLED rather than re-derived — `_durable_row_belongs` above is
 # the single place the durable ledgers key a raw row, and it must agree with `replay` by
@@ -1074,8 +1080,13 @@ class EvaluateMixin:
         # INVARIANT #3, and the cheapest possible spelling of it: the fix's own event. Read BEFORE
         # the paid call, from the durable log rather than from a loop local, because the case it
         # covers is a process that died between appending the row and writing the terminal.
-        if _durable_salvage_cause_fix(self.store.read_all(), node.id, generation):
-            return node, attempt, True
+        _prior = _durable_salvage_cause_fix(self.store.read_all(), node.id, generation)
+        if _prior is not None:
+            # Already paid for on an earlier pass. Whether it REPAIRED anything is a separate fact,
+            # read back off the row: a receipt written for a call that proposed no change must not
+            # resume as "the declaration was corrected".
+            return node, attempt, bool(_prior.get("changed") or _prior.get("code")
+                                       or _prior.get("files") or _prior.get("deleted"))
         with self.tracer.span("salvage_cause_repair", node_id=node.id, attempt=attempt + 1):
             try:
                 new_code = self._repair(node, cause_repair_context(salvaged, err), state)
@@ -1105,7 +1116,32 @@ class EvaluateMixin:
         changed, _new_deleted = _repair_change_set(prev_files, prev_deleted,
                                                    repaired_files, repaired_deleted)
         if not changed and not repaired_deleted and not (new_code or "").strip():
-            return node, attempt, False          # the model changed nothing; nothing to commit
+            # THE MODEL CHANGED NOTHING — but the call was answered and BILLED, so this exit still
+            # owes a durable receipt. Without one, `_durable_salvage_cause_fix` had nothing to read
+            # and a process that died before the terminal made the resume re-salvage and buy the
+            # identical Developer call again, with nothing in folded state bounding the repeat across
+            # successive crashes. This is the ONLY such exit: the three above it must NOT receipt —
+            # `BudgetExceeded` and a raised repair bought no answer, and `_repair_provider_failure`
+            # fires when the Developer's own SESSION failed (dead endpoint, 401, 402), which a resume
+            # should retry once the endpoint is back.
+            #
+            # The row is deliberately fold-NEUTRAL: no `code` key (so `replay._on_node_repaired`'s
+            # `d.get("code", n.code)` leaves the artifact alone) and empty `files`/`deleted` (which
+            # the fold skips as falsy), so it records the SPEND without asserting an edit. It charges
+            # no attempt either, because `_durable_repair_ledger` excludes `salvage_cause_fix` rows
+            # from the attempt count while still passing them to the judge history — where
+            # `changed: []` is already the spelling that reads as "proposed nothing".
+            async with self._write_lock:
+                if fold(self.store.read_all()).nodes[node.id].attempt == generation:
+                    self.store.append(EV_NODE_REPAIRED, {
+                        "node_id": node.id, "generation": generation, "attempt": attempt,
+                        "files": {}, "deleted": [], "error_in": err,
+                        "triage_action": SALVAGE_CAUSE_TRIAGE_ACTION,
+                        "rationale": (f"metric salvaged ({salvaged.source}); the Developer proposed "
+                                      f"no change to the failing declaration"),
+                        "changed": [], "stages_passed": None,
+                        "salvaged_metric": salvaged.metric})
+            return node, attempt, False
         async with self._write_lock:
             # A reset that landed while the repair call was in flight owns the next lifecycle. Skip
             # the commit rather than adopting it — the caller's terminal is already stale-generation

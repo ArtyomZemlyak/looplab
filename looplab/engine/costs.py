@@ -54,6 +54,15 @@ _CHILD_ATTRS = (
     "client", "inner", "fallback", "researcher", "developer", "repair_developer", "strategist",
     "tools", "_pilot_client", "summary_client", "loop_opts", "_loop_opts", "stage_clients",
     "providers",
+    # `abstract`/`embed`: the Memora abstractor and embedder that `agents/factory.py::_shared_providers`
+    # hands `KnowledgeTools`. Both are LIVE chat/embedding clients under the shipped defaults
+    # (`memora`, `memora_llm`), each with its own `CostAccountant`. Neither was reachable, so their
+    # calls were spent and unbilled — and since the deep researcher started building its toolset
+    # through `_shared_providers`, that is a paid client per run on the DEFAULT path, exercised at
+    # node 0 by `_ground_run_start`.
+    # `complete`: the hop from `LLMAbstractor` to `memora.chat_completer`'s callable, which carries
+    # the client as an attribute precisely so this walk can reach it (a closure cannot be walked).
+    "abstract", "embed", "complete",
 )
 
 

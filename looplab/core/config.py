@@ -1912,6 +1912,23 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # second half admitted one, in the same event log, with nobody having chosen either.
     "metric_salvage": "off",
     "metric_salvage_repair": False,
+    # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
+    # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the
+    # run, so a resumed pre-versioning snapshot stops itself after three failed nodes under a policy
+    # its operator never chose, and the run's first half would have kept going. (c) is 0, which is
+    # both "off" and the value `tests/test_options_divergence.py::EXPECTED` already records as the
+    # conservative library one.
+    "systemic_failure_stop": 0,
+    # WHICH FAILURES BUY AN IN-NODE REPAIR. A CHANGED default on a pre-existing field, so (a) cannot
+    # apply and (b)+(c) carry it, exactly as for `inline_repair_attempts` above. It widened from the
+    # mechanical three to all eight `FAILURE_REASONS` on 2026-08-12, and (b) is paid work: with
+    # `inline_repair_attempts` restored to its historical 0 — which `_effective_repair_cap` reads as
+    # the 50-attempt engine ceiling, not as "none" — a resumed node that fails `no_metric`/`setup`/
+    # `drift`/`expect_failed`/`check_failed` can buy up to 50 Developer calls AND up to 50 full
+    # re-evaluations that the first half of the same run bought ZERO of. On a GPU task where one eval
+    # is the 76-minute training this range's own comments cite, that is hours nobody chose.
+    # (c) is `("crash", "timeout", "oom")`, pointable at every commit before that date.
+    "inline_repair_reasons": ("crash", "timeout", "oom"),
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

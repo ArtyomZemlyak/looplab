@@ -517,6 +517,25 @@ def _prepare_filtered_trace_snapshot(path: Path, node_ids: set[Any]) -> _Prepare
                 return _PreparedTrace(
                     snapshot, True, snapshot.digest, snapshot.size, result, None)
 
+            # SWEEP DEAD STAGINGS FIRST. This temporary is a near-full-size copy of spans.jsonl —
+            # 476 MB to 1 GB on a real run — and it is unlinked only by `_PreparedTrace.cleanup()`
+            # from an in-process `finally`. A SIGKILL, OOM or container eviction between here and
+            # `_strict_replace_prepared_trace` therefore orphans it permanently: the durable receipt
+            # records only digests, nothing on disk names the `.tmp`, and the recovery path re-stages
+            # a FRESH full-size copy rather than adopting or removing it — so each interrupted retry
+            # added another one, on a run directory that usually lives on a paid object-store mount.
+            # No sweeper existed (`engine_proc.sweep_stale_lifecycle_locks` handles only `.lock`
+            # files, and the reset artifact manifest never enumerates `.tmp`).
+            #
+            # Both callers reach this holding the exclusive `engine_write_lock_http` +
+            # `span_destructive_write_guard`, so a matching temporary present RIGHT NOW cannot belong
+            # to a live staging — there is no other writer. Best-effort, and never fatal: failing to
+            # reclaim disk must not fail the clear the operator actually asked for.
+            for stale in path.parent.glob(f".{path.name}.clear.*.tmp"):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
             fd, raw_name = tempfile.mkstemp(
                 dir=str(path.parent), prefix=f".{path.name}.clear.", suffix=".tmp")
             temporary = Path(raw_name)

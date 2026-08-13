@@ -228,10 +228,20 @@ export default function VirtualTimeline({
   // A roving virtual collection keeps focus on the viewport and points at its active descendant.
   // When keyboard/search navigation selects an unmounted row, bring that logical row into view; the
   // next range calculation mounts it without ever mounting the thousands of rows between old/new.
+  // Only when the SELECTION moves. `layout` is read here and is therefore in the dependency list,
+  // but a layout change is not a reason to scroll: it fires whenever `rows` is replaced (every poll
+  // tick delivers a fresh array while a node is live) and whenever `measureRevision` bumps (which
+  // every first-time row measurement does). `activeKey` seeds to `rows[0]` and `activeIndex` falls
+  // back to 0, so `offsets[0]` is 0 and the `top < scrollTop` branch yanked the viewport back to the
+  // first row — periodically on a live node, and on a finished one every time scrolling mounted rows
+  // that had never been measured. The operator could not read past the first viewport.
+  const scrolledForRef = useRef(-1)
   useLayoutEffect(() => {
     const element = scrollRef.current
     if (!element || !Number.isSafeInteger(activeIndex)
         || activeIndex < 0 || activeIndex >= layout.count) return
+    if (scrolledForRef.current === activeIndex) return   // the layout moved; the selection did not
+    scrolledForRef.current = activeIndex
     const top = layout.offsets[activeIndex]
     const bottom = layout.offsets[activeIndex + 1]
     if (top < element.scrollTop) setProgrammaticScroll(top)

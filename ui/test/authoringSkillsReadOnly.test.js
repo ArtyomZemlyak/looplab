@@ -97,7 +97,12 @@ test('Authoring renders nested skill packages read-only and keeps root skills wr
     await click(button('package/SKILL.md'))
     const packaged = document.querySelector('textarea[aria-label="View package/SKILL.md"]')
     assert.ok(packaged)
-    assert.equal(packaged.disabled, true)
+    // `readOnly`, NOT `disabled`: identical write protection, but the control stays focusable and
+    // announced. `disabled` took the sole rendering of the file's contents out of the tab order, so
+    // a keyboard-only or screen-reader operator could open a read-only package and never reach its
+    // text. Both are asserted so the fix cannot silently regress to `disabled`.
+    assert.equal(packaged.readOnly, true)
+    assert.equal(packaged.disabled, false, 'disabled would remove it from the tab order')
     assert.equal(packaged.value, '# packaged')
     assert.equal(button('Save').disabled, true)
     assert.match(document.body.textContent,

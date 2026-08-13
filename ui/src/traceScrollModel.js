@@ -26,11 +26,13 @@ export const TRACE_SCROLL_BOUNDED = 'bounded'      // more exists, this surface 
 // Announced in a `role="status"` live region, never as a count: while the read is in flight the only
 // honest number is the one we do not have yet.
 export const TRACE_SCROLL_LOADING_LABEL = 'Loading earlier steps…'
-// The label on the focusable affordance. Visually hidden until focused (styles.css `.trace-reach`),
-// because a pointer user gets the same effect from scrolling and must not see a control that
-// announces a limit — but a screen-reader user navigating by virtual cursor never scrolls the
-// container, so removing every focusable path is how infinite scroll makes earlier steps
-// unreachable without a mouse.
+// The label on the affordance, which is VISIBLE to every user (styles.css `.trace-reach`). It was
+// visually-hidden-until-focused, on the reasoning that a pointer user gets the same effect from
+// scrolling and must not see a control that announces a limit. That was measured against the
+// operator and abandoned: they reported the control missing — twice — because one that only exists
+// once you tab to it does not exist to a pointer user. The screen-reader half of the rationale still
+// holds and is why it is a real focusable button rather than only a sentinel: a virtual cursor never
+// scrolls the container, so an IntersectionObserver alone leaves earlier steps unreachable.
 export const TRACE_SCROLL_REACH_LABEL = 'Load earlier steps'
 // Only ever shown for TRACE_SCROLL_BOUNDED, and deliberately NOT the old sentence about the window
 // being maximal. That one was printed whenever there was no pager — including at the 512 default,

@@ -343,6 +343,45 @@ def test_a_pre_versioning_snapshot_still_resumes_unchanged():
         assert getattr(restored, field) == historical, field
 
 
+def test_every_product_on_divergence_is_grandfathered_for_a_pre_versioning_snapshot():
+    """The OTHER direction, which nothing checked: a field OMITTED from the legacy table.
+
+    Every guard over `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — the two above and
+    `tests/test_finalization_recovery.py` — iterates the table's OWN keys, so it can only prove that
+    the rows present are honoured. An omission is invisible by construction, and two shipped that
+    way: `systemic_failure_stop` (default 3 — a run-TERMINATING policy a pre-versioning resume would
+    silently acquire) and the widened `inline_repair_reasons` (which, with `inline_repair_attempts`
+    restored to its historical 0 = the 50-attempt ceiling, buys up to 50 Developer calls and 50
+    re-evaluations per node the original run bought none of).
+
+    So this scans the other registry instead. `test_options_divergence.py::EXPECTED` is the frozen
+    list of fields whose PRODUCT default deliberately diverges from the conservative library one —
+    i.e. exactly the population the legacy table's own rule (b) describes: "defaults to adding paid
+    calls / interventions / concurrency / a different selection policy". A field can only be absent
+    here by being named in the exemption list below, with the reason, which is the discipline the
+    table's docstring already asks for in prose ("When (c) fails, leave it out and say so here").
+    """
+    from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS
+    from tests.test_options_divergence import EXPECTED
+
+    # Divergent, but deliberately NOT grandfathered. Each entry names why its historical value is
+    # not pointable at a commit, which is the table's own condition (c).
+    exempt = {
+        # Observability, not behaviour: it changes what is RECORDED about a run, never what the run
+        # does, so restoring "off" would lose evidence rather than preserve a historical contract.
+        "trace_llm_io",
+        # A MAGNITUDE for machinery that already existed, which the table's own docstring names as a
+        # class that stays out: "guessing 0/off there disables working machinery rather than
+        # preserving history". Condition (c) fails — there is no commit whose behaviour "0" spells.
+        "debug_depth",
+    }
+    missing = sorted(set(EXPECTED) - set(LEGACY_CONFIG_SNAPSHOT_DEFAULTS) - exempt)
+    assert not missing, (
+        "these fields ship a product default that diverges from the conservative library one, so a "
+        "pre-versioning snapshot acquires them on resume, but they have no row in "
+        f"LEGACY_CONFIG_SNAPSHOT_DEFAULTS and are not exempted: {missing}")
+
+
 def test_the_document_marker_does_not_move_the_speculation_runtime_scope():
     """The marker describes the FILE, not the run. Letting it into the digest would invalidate every
     calibration receipt earned before it existed."""

@@ -1565,14 +1565,32 @@ def test_conversation_conditional_read_is_exact_for_node_lifecycle_and_window(
     assert wider.json()["cursor"] == wider.headers["etag"]
     assert builds == 3
 
-    # Lifecycle resolution precedes conditional success. An abandoned attempt never gets a 304,
-    # even if its bytes and validator still exist in the append log.
+    # A reset opens attempt 1 and does NOT invalidate attempt 0's read. The refusal that used to
+    # stand here was a consequence of treating any explicit non-current attempt as an error; now an
+    # earlier attempt is a historical read, so "your copy of attempt 0 is still current" is simply
+    # true — attempt 0's spans are append-only and nothing rewrote them.
+    #
+    # The property that actually needs holding is that the two lifecycles have DISTINCT validators,
+    # so a historical label can never be satisfied by the current attempt's bytes. That is asserted
+    # directly: the same `If-None-Match` that 304s for attempt 0 must force a rebuild for attempt 1
+    # and come back with a different ETag.
     EventStore(rd / "events.jsonl").append(
         "node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
-    stale = client.get(path, params=params, headers={"If-None-Match": changed_etag})
-    assert stale.status_code == 409
-    assert stale.json()["detail"]["code"] == "node_attempt_changed"
-    assert builds == 3
+    historical = client.get(path, params=params, headers={"If-None-Match": changed_etag})
+    assert historical.status_code == 304 and historical.content == b""
+    assert builds == 3, "an unchanged historical attempt must not rebuild"
+
+    current_attempt = client.get(path, params={"attempt": 1, "limit": 512},
+                                 headers={"If-None-Match": changed_etag})
+    assert current_attempt.status_code == 200, "attempt 0's validator may not answer for attempt 1"
+    assert current_attempt.headers["etag"] != changed_etag
+    assert current_attempt.json()["attempt"] == 1
+    assert builds == 4
+
+    # And an attempt this node has never reached is still refused outright.
+    unreachable = client.get(path, params={"attempt": 9, "limit": 512})
+    assert unreachable.status_code == 409
+    assert unreachable.json()["detail"]["code"] == "node_attempt_changed"
 
 
 def test_conversation_cold_persisted_window_requires_source_verification_before_304(
@@ -1832,13 +1850,22 @@ def test_node_trace_endpoint_rejects_abandoned_attempt_and_reads_current_exactly
     ])
     client = TestClient(make_app(tmp_path))
 
-    old = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 0})
+    # An EARLIER attempt is a HISTORICAL READ, served under its own label. It used to 409, which
+    # made a repaired node's earlier traces — the ones that actually crashed — unopenable, including
+    # from the attempt picker and from every historical Dock event row. Each generation renders
+    # ALONE: the index fences a trace by its root's generation, so the two never concatenate.
+    old = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 0}).json()
     current = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 1}).json()
-    assert old.status_code == 409
-    assert old.json()["detail"] == {
+    never_ran = client.get("/api/runs/demo/nodes/0/trace", params={"attempt": 2})
+    assert old["node_id"] == 0 and old["attempt"] == 0, "the served attempt is echoed, not settled"
+    assert "old-attempt" in json.dumps(old) and "current-attempt" not in json.dumps(old)
+    # An attempt the node has NEVER reached is still refused: no such lifecycle exists, and
+    # answering it with the current one would publish live spans under a future label.
+    assert never_ran.status_code == 409
+    assert never_ran.json()["detail"] == {
         "code": "node_attempt_changed",
         "node_id": 0,
-        "expected_attempt": 0,
+        "expected_attempt": 2,
         "current_attempt": 1,
         "message": "The node was reset before its trace was read.",
         "remediation": "Reload node state and request the current attempt.",
@@ -1846,11 +1873,14 @@ def test_node_trace_endpoint_rejects_abandoned_attempt_and_reads_current_exactly
     assert current["node_id"] == 0 and current["attempt"] == 1
     assert "current-attempt" in json.dumps(current) and "old-attempt" not in json.dumps(current)
 
-    # The readable conversation is the CURRENT lifecycle only. The response echoes the exact
-    # identity the UI validates, and an explicit abandoned attempt is rejected rather than merged.
-    stale = client.get("/api/runs/demo/nodes/0/conversation", params={"attempt": 0})
-    assert stale.status_code == 409
-    assert stale.json()["detail"]["code"] == "node_attempt_changed"
+    # The conversation twin reads the same way — these are two VIEWS of one trace surface and the
+    # attempt picker switches between them over one selection.
+    stale = client.get("/api/runs/demo/nodes/0/conversation", params={"attempt": 0}).json()
+    assert stale["node_id"] == "0" and stale["attempt"] == 0
+    assert "old conversation" in json.dumps(stale)
+    assert "current conversation" not in json.dumps(stale)
+    assert client.get(
+        "/api/runs/demo/nodes/0/conversation", params={"attempt": 2}).status_code == 409
     conversation = client.get(
         "/api/runs/demo/nodes/0/conversation", params={"attempt": 1}).json()
     assert conversation["node_id"] == "0" and conversation["attempt"] == 1

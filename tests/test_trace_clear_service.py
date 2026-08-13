@@ -855,3 +855,35 @@ def test_a_same_id_retry_after_success_replays_instead_of_clearing_again(tmp_pat
     assert tc.durable_clear_node_trace(
         srv, "demo", 0, payload, known_engine_liveness=_never) == first
     assert (rd / "spans.jsonl").read_bytes() == after
+
+
+def test_a_dead_stagings_temporary_is_reclaimed_before_the_next_one(tmp_path):
+    """The staged copy is the size of spans.jsonl, and only an in-process `finally` unlinks it.
+
+    A SIGKILL between staging and publish orphans it permanently: the durable receipt records only
+    digests, nothing on disk names the `.tmp`, and the recovery path stages a FRESH full copy rather
+    than adopting it — so every interrupted retry added another multi-hundred-MB file to a run
+    directory that usually lives on a paid object-store mount, with no sweeper anywhere (the only
+    startup GC handles `.lock` files, and the reset artifact manifest never enumerates `.tmp`).
+
+    Both staging sites hold the exclusive writer lock, so a matching temporary present at that moment
+    provably belongs to a dead attempt. Driven, not pinned: a real orphan is planted, a real staging
+    runs, and the orphan's bytes are gone while the live staging's are not.
+    """
+    from looplab.serve.trace_clear import _prepare_filtered_trace_snapshot
+
+    spans = tmp_path / "spans.jsonl"
+    spans.write_bytes(b"".join(
+        json.dumps({"trace_id": "t", "span_id": f"s{i}", "parent_id": None, "name": "n",
+                    "attributes": {"node_id": 1 if i else 0}}).encode() + b"\n"
+        for i in range(3)))
+    orphan = tmp_path / ".spans.jsonl.clear.deadbeef.tmp"
+    orphan.write_bytes(b"x" * 4096)
+
+    prepared = _prepare_filtered_trace_snapshot(spans, {1})
+    try:
+        assert not orphan.exists(), "a dead staging's temporary survived the next staging"
+        assert prepared.temporary is not None and prepared.temporary.exists(), (
+            "the sweep must not eat the staging it is about to publish")
+    finally:
+        prepared.cleanup()

@@ -248,6 +248,12 @@ def chat_completer(client) -> Callable[[str], str]:
     def _complete(prompt: str) -> str:
         msg = client.chat([{"role": "user", "content": prompt}], [], tool_choice="none")
         return (msg or {}).get("content") or ""
+    # The client is otherwise reachable ONLY through this closure, and `engine/costs.py::_children`
+    # walks attributes — so every abstraction call was a real paid provider call whose own
+    # `CostAccountant` no sink was ever bound to, and which `reconcile_cost_accountants` never saw.
+    # The run's `llm_cost` understated the invoice with no row, warning or receipt naming the gap.
+    # `client` is already in `_CHILD_ATTRS`; this is what gives the walk something to read.
+    _complete.client = client
     return _complete
 
 

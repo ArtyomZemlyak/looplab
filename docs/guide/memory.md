@@ -525,9 +525,16 @@ reason** shown in the dialog before you agree:
 The purge runs **after** the run is durably gone, never before: a deletion that then refuses would
 otherwise have destroyed the evidence of a run you still have. It is idempotent (“remove every row
 attributable solely to R”), so a store that was locked at the moment of deletion can be finished
-later — the notice offers a retry, and `POST /api/runs/{run_id}/memory-purge` does the same thing
-without needing the run to exist. `GET /api/runs/{run_id}/memory-attribution` is the read-only
-preview the dialog is drawn from.
+later — the notice offers a retry, and `POST /api/runs/{run_id}/memory-purge` finishes it after the
+run is gone. That endpoint needs the run's **identity in the body**, not just its id: once the run
+directory is deleted neither `run_uid` nor `memory_dir` can be read back, and a bare run id names a
+directory *name* that the next run reuses. Pass both from the deletion receipt's `memory` block —
+an empty body is refused `400 memory_purge_identity_required`, any other key is
+`400 invalid_memory_purge_request`, and on a run that still exists a `run_uid` disagreeing with the
+run's own record is `409 memory_purge_identity_changed`. The `memory_dir` must also be a store this
+server manages (its own, or one a surviving run names); it is not a free-form path, because the
+purge rewrites whatever it is pointed at. `GET /api/runs/{run_id}/memory-attribution` is the
+read-only preview the dialog is drawn from.
 
 ## Configuration
 

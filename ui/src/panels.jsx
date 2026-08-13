@@ -1795,9 +1795,15 @@ export function AuthoringPanel({
         </div>
         <div className="authoring-editor">
           {selected ? <>
+            {/* `readOnly`, not `disabled`. Both refuse the edit identically, but `disabled` also
+                takes the control out of the tab order and out of AT forms/browse interaction — and
+                this textarea is the ONLY rendering of the file's contents. A keyboard-only or
+                screen-reader operator could select "…/SKILL.md · read-only package" (that button is
+                focusable) and then have no way to reach the text at all: Tab skips it, a package
+                longer than the box cannot be scrolled, and nothing can be selected or copied. */}
             <textarea className="text"
               aria-label={`${selected.readOnly ? 'View' : 'Edit'} ${selected.name}`}
-              value={selected.draftText} disabled={selected.truncated || selected.readOnly}
+              value={selected.draftText} readOnly={selected.truncated || selected.readOnly}
               onChange={e => editSelected(e.target.value)} />
             {selected.truncated && <div className="report-inline-state error" role="alert">
               <OpIcon name="alert" size={14} /><span>File exceeds the editor limit; only a prefix is shown, so Save is disabled.</span>

@@ -110,6 +110,10 @@ function _ConceptMemory({ memory, id }) {
   const result = useMemo(() => conceptMemory(memory, id), [memory, id])
   if (memory === null) return <><h4>What the lab learned</h4>
     <p className="muted" role="status">loading cross-run memory…</p></>
+  // Unreadable is its own answer, and must never be spelled as "empty" — see the fetch's `.catch`.
+  if (memory?.unavailable) return <><h4>What the lab learned</h4>
+    <p className="muted" role="status">Cross-run memory could not be read, so what the lab learned
+      about this concept is unknown — this is not a statement that it learned nothing.</p></>
   const notice = conceptMemoryNotice(result)
   return <>
     <h4>What the lab learned</h4>
@@ -212,7 +216,12 @@ export default function PortfolioConcepts({
     const controller = new AbortController()
     get('/api/memory', { signal: controller.signal })
       .then(payload => setMemory(payload))
-      .catch(error => { if (error?.name !== 'AbortError') setMemory({}) })
+      // A FAILED read is not an empty store. `{}` folds to `total: 0`, which `conceptMemoryNotice`
+      // reports as "Cross-run memory is empty, so nothing can be linked yet." — a positive claim
+      // that no lesson, case or note in the whole shared memory dir carries this concept, made about
+      // a read that never landed (revoked token, restarted server, slow store). The sibling policy
+      // read three lines up already keeps a distinct `unavailable` state for exactly this reason.
+      .catch(error => { if (error?.name !== 'AbortError') setMemory({ unavailable: true }) })
     return () => controller.abort()
   }, [])
 

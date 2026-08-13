@@ -134,3 +134,63 @@ def test_no_memory_dir_is_reported_rather_than_failing_the_deletion(
     body = response.json()
     assert body["status"] == "succeeded" and not run_dir.exists()
     assert body["memory"]["ok"] is False and body["memory"]["failures"]
+
+
+def test_the_purge_refuses_a_store_this_server_does_not_manage(tmp_path, monkeypatch):
+    """The body names the STORE, and that path reaches an irreversible rewrite.
+
+    `memory_dir` has to be accepted from the caller — after the run is deleted its own record is
+    gone and the receipt is the only place the value survives. But it arrived unchecked, while every
+    other path input on this router goes through the deletion transaction's containment guard. With
+    `run_uid` omitted the ownership test degrades to matching a row's bare `run_id`, so a body naming
+    any directory on the box could delete another operator's legacy rows from a store this server was
+    never configured with. A containment guard would not have caught it: an absolute path to somebody
+    else's store contains no traversal, which is why the check is membership, not shape.
+
+    Driven, not pinned: the foreign store is real, it is populated with a row the purge WOULD match,
+    and the assertion is that the bytes are still there afterwards.
+    """
+    memory = _memory(monkeypatch, tmp_path)
+    foreign = tmp_path / "someone-elses-memory"
+    foreign.mkdir()
+    (foreign / "lessons.jsonl").write_bytes(
+        orjson.dumps({"run_id": GONE, "task_id": "t", "statement": "not yours", "outcome": "won"})
+        + b"\n")
+    before = (foreign / "lessons.jsonl").read_bytes()
+
+    client = TestClient(make_app(tmp_path))
+    response = client.post(f"/api/runs/{GONE}/memory-purge",
+                           json={"run_uid": "", "memory_dir": str(foreign)})
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "memory_purge_store_unknown"
+    assert (foreign / "lessons.jsonl").read_bytes() == before, "the foreign store was rewritten"
+    # And the server's OWN store is still reachable through the same endpoint, so the guard refuses a
+    # foreign path rather than the feature.
+    assert client.post(f"/api/runs/{GONE}/memory-purge",
+                       json={"run_uid": "", "memory_dir": str(memory)}).status_code == 200
+
+
+def test_a_store_a_surviving_run_names_is_managed_even_when_it_is_not_the_global(
+        tmp_path, monkeypatch):
+    """The allow-list is not "the server's current global" — that would break the case the receipt
+    echo exists for. `memory_dir` is a per-RUN setting, so a run launched with `--memory-dir` keeps
+    its rows somewhere the global never names; a cross-run store is shared by construction, so any
+    surviving run that cites it is enough to make it nameable."""
+    _memory(monkeypatch, tmp_path)
+    other = tmp_path / "project-store"
+    other.mkdir()
+    (other / "lessons.jsonl").write_bytes(
+        orjson.dumps({"run_id": GONE, "task_id": "t", "statement": "mine alone", "outcome": "won"})
+        + b"\n")
+    kept = _run(tmp_path, KEPT)
+    (kept / "config.snapshot.json").write_text(
+        orjson.dumps({"memory_dir": str(other)}).decode(), encoding="utf-8")
+
+    client = TestClient(make_app(tmp_path))
+    response = client.post(f"/api/runs/{GONE}/memory-purge",
+                           json={"run_uid": "", "memory_dir": str(other)})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["deleted"] == 1
+    assert response.json()["memory_dir"] == str(other), "the receipt names the store it ran against"

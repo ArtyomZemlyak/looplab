@@ -426,9 +426,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
 
 - **draft** — a fresh candidate.
 - **improve** — refine the current best.
-- **debug / repair** — on a crash, hand the failing code + stderr back to fix it. Mechanical crashes
-  can be repaired **in place** within the same eval (`inline_repair`), which doesn't consume the
-  node budget; deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
+- **debug / repair** — on a failure, hand the failing code + stderr back to fix it. Since 2026-08-12
+  **any** of the eight `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
+  `check_failed` — not only the mechanical three. An in-place repair doesn't consume the node budget;
+  deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once
   per attempt (the call the loop already made) and is shown this node's whole repair history — what
   failed, what each fix claimed, which files it actually changed, how far the pipeline got — so it

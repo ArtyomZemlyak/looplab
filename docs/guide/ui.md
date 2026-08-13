@@ -215,8 +215,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
 - **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
-  lanes (proposed / building / running / evaluated / gated / dropped). A **speculative pre-build is not a
-  separate lane** — it rides those same six. `coded` is the one reserved lane the fold still never
+  lanes (proposed / building / running / evaluated / gated / dropped) — *except while a build is in
+  flight*, where the derived, never-folded `state.card_authoring` overlay replaces the folded status
+  with the live authoring phase and the row keeps `authoring.folded_status` alongside it. The fold
+  cannot express that head at all: folding the build *request* would make the servicer of that head
+  unable to claim it, which is why the board once called a 2,128-second build "not started" for all
+  but 0.3 s of it. A **speculative pre-build is not a separate lane** — it rides those same six. `coded` is the one reserved lane the fold still never
   produces: the log now *does* carry a durable eval-start boundary (`node_eval_started`, appended for
   speculative prefetch nodes at the dispatch decision), but the card projection collapses every pending
   node straight to `running`, so nothing distinguishes coded-but-not-started from running. Unknown future
@@ -332,7 +336,7 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
   global Settings), and a stale editor receives a
   structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
-- **Settings page** — a versioned, server-owned editor catalogue with 164 of the 195 direct
+- **Settings page** — a versioned, server-owned editor catalogue with 167 of the 198 direct
   `Settings` fields in 10 groups (the live counts are
   `serve/settings_ui_schema.py::SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` /
   `…_SETTINGS_FIELD_COUNT`; note the docs↔code parity test `tests/test_config_docs_sync.py` pins
@@ -461,6 +465,17 @@ alone — a consolidated lesson, a claim pool another run has curated, or a caps
 merged into a shared family all stay, and the dialog says how many stayed and why before you confirm.
 Skills and the curation logs are never cascaded. See
 [Memory & knowledge](memory.md#deleting-a-run-does-not-delete-what-it-taught-the-lab).
+
+**A selection of runs can be deleted in one gesture**, and it is a *queue* over the same per-run
+transaction rather than a bulk endpoint — each deletion keeps its own idempotency key, generation+seq
+fence and durable receipt. That shapes what you see: it runs strictly **sequentially** (each receipt
+is validated against a refreshed run list, which concurrent deletions would race), it **stops at the
+first refusal** and leaves the remainder untouched, and it reports what actually happened —
+*"8 runs deleted, then the batch stopped at run-9: `<reason>`. The remaining 3 were not touched."*
+The confirm dialog lists every run by name rather than counting them, and names the ones it cannot
+delete and why. Selection is bounded by `SELECTION_MAX` (500) only because the set round-trips
+through the saved view and the URL. The memory cascade rides along per run; if a store was locked,
+the notice carries a retry that finishes just that run's purge.
 
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer

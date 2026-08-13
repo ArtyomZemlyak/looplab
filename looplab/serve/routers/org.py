@@ -12,6 +12,7 @@ from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
     validate_deletion_request)
 from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_memory,
+                                          known_memory_dirs, memory_dir_is_known,
                                           purge_attributable_memory, run_memory_identity)
 from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
@@ -292,7 +293,23 @@ def build_router(srv) -> APIRouter:
                     "code": "memory_purge_identity_required",
                     "message": ("This run no longer exists, so its identity cannot be read back. "
                                 "Pass the run_uid and memory_dir from the deletion receipt.")})
-            return purge_attributable_memory(memory_dir or _memory_dir(), run_id, run_uid)
+            # THE STORE IS NOT THE CALLER'S TO CHOOSE. Everything else on this router routes a path
+            # through `_plain_run_dir`'s containment guard; this one arrives from the request body and
+            # goes straight to a destructive rewrite — `purge_attributable_memory` checks only
+            # `base.is_dir()` and then rewrites five `.jsonl` files under it, and with no `run_uid`
+            # the ownership test degrades to matching a row's bare `run_id`, which a reused directory
+            # name satisfies. Containment would not have helped: an absolute path to somebody else's
+            # store contains no traversal. So the check is membership in what this SERVER can name,
+            # which is also why the refusal is separate from the identity one above — "I do not know
+            # that store" and "you told me nothing" are different answers.
+            store = memory_dir or _memory_dir()
+            if not memory_dir_is_known(store, known_memory_dirs(
+                    srv.root, fallback_memory_dir=_memory_dir())):
+                raise HTTPException(400, {
+                    "code": "memory_purge_store_unknown",
+                    "message": ("That memory_dir is not a cross-run store this server manages. "
+                                "Pass the memory_dir from this run's deletion receipt.")})
+            return purge_attributable_memory(store, run_id, run_uid)
 
         return await anyio.to_thread.run_sync(_purge)
 

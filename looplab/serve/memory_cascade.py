@@ -154,6 +154,67 @@ def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -
     return identity
 
 
+def known_memory_dirs(runs_root: str | Path, *, fallback_memory_dir: str = "") -> set[str]:
+    """Every cross-run store this SERVER is configured to manage, resolved.
+
+    The purge takes `memory_dir` from the request body, because after the run is deleted its own
+    record is gone and the receipt is the only place the value survives (see `run_memory_identity`).
+    That is a caller-supplied absolute PATH reaching a destructive rewrite: `purge_attributable_memory`
+    checks only `base.is_dir()` and then rewrites five `.jsonl` files under it, and with no `run_uid`
+    the ownership test degrades to matching a row's bare `run_id`. A body naming a directory this
+    server was never told about could therefore delete another operator's legacy rows — which matters
+    most on the shared-origin deployment `serve/server.py` itself warns about, where one browser
+    principal reaches the control plane and the cross-origin guard does not apply. Every OTHER path
+    input on that router goes through the deletion transaction's containment guard; this one had none,
+    and a containment guard would not have helped anyway, since an absolute path to somebody else's
+    store contains no traversal.
+
+    So the store is checked against what the server itself can name, not against the shape of the
+    string. A CROSS-RUN store is shared by construction, so the legitimate retry — finishing a cascade
+    for a run launched with `--memory-dir` — still resolves as long as any surviving run cites it, and
+    when none does the server refuses rather than guessing, which is the rule the route already states
+    for identity.
+    """
+    known: set[str] = set()
+
+    def _add(value: str) -> None:
+        if not _text(value):
+            return
+        try:
+            known.add(str(Path(value).resolve()))
+        except Exception:  # noqa: BLE001 — an unresolvable spelling is simply not a known store
+            pass
+
+    _add(fallback_memory_dir)
+    root = Path(runs_root)
+    try:
+        entries = sorted(root.iterdir()) if root.is_dir() else []
+    except OSError:
+        entries = []
+    for rd in entries:
+        if not rd.is_dir() or rd.name.startswith("."):
+            continue
+        try:
+            cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — a run with no readable snapshot names no store
+            continue
+        if isinstance(cfg, dict):
+            _add(_text(cfg.get("memory_dir")))
+    return known
+
+
+def memory_dir_is_known(candidate: str, known: set[str]) -> bool:
+    """Whether `candidate` resolves to one of `known`. Compared as RESOLVED paths, never as text —
+    `/a/../a/memory`, `/a/memory/` and a symlinked spelling are the same store, and a purge that
+    refused them would push an operator toward passing the one spelling that skipped the check."""
+    if not _text(candidate):
+        return False
+    try:
+        return str(Path(candidate).resolve()) in known
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class StoreUnreadable(Exception):
     """The store exists and could not be read. NOT the same as "it holds nothing of ours"."""
 
@@ -519,7 +580,8 @@ def _row_identity(row: Any) -> str:
 
 __all__ = [
     "MEMORY_CASCADE_SCHEMA", "NOT_THIS_RUN", "PRESERVED_TIERS", "attributable_memory",
-    "purge_attributable_memory", "merged_concept_ids",
+    "purge_attributable_memory", "merged_concept_ids", "run_memory_identity",
+    "known_memory_dirs", "memory_dir_is_known",
     "lesson_keep_reason", "note_keep_reason", "case_keep_reason",
     "claim_keep_reason", "capsule_keep_reason",
 ]

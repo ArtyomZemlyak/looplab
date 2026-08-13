@@ -251,9 +251,19 @@ def test_no_reader_resolves_a_role_the_registry_does_not_know():
     the registry — the first version filtered candidates through a literal set identical to
     LLM_ROLE_KEYS, so the subtraction was empty by construction and a new unregistered reader could
     never trip it."""
+    # SPELLED OUT, every one of the ten, and deliberately NOT composed from `AGENT_STAGE_KEYS`. This
+    # line is the "a human agrees with the registry" half, so it has to be the human's own copy: when
+    # it read `{...5 roles} | set(AGENT_STAGE_KEYS)` it was asserting `X == X`, because
+    # `LLM_ROLE_KEYS` IS `AGENT_STAGE_KEYS | frozenset({those same five})` — the tautology this
+    # test's own docstring, two lines up, describes as the bug it was written to fix. Proved by
+    # mutation: adding a sixth stage key to `AGENT_STAGE_KEYS` left the composed version PASSING.
+    # If you add a role, add it here too; that second edit IS the check.
     known_settings_roles = {
+        # unified-agent stages (each doubles as a role — see `LLM_ROLE_KEYS`)
+        "propose", "implement", "repair", "strategy", "pilot",
+        # split roles + the standalone helpers that build their own client
         "researcher", "developer", "strategist", "compressor", "embed",
-    } | set(AGENT_STAGE_KEYS)
+    }
     assert known_settings_roles == set(LLM_ROLE_KEYS)      # the doc'd list and the registry agree
     # Any `role=` literal that names a Settings-ish role must be registered. Unrelated `role=` kwargs
     # elsewhere in the tree (tool providers, ARIA attributes) are excluded by the field-name test.
