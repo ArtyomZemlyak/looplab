@@ -6,7 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand } from './util.js'
+  submitCommand, traceDeadlineGet, traceGenerationMatches } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
 import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
@@ -631,21 +631,29 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
     // `deadlineGet` returns a HANDLE — `{controller, promise, timedOut}` — not a promise. Calling
     // `.then` on it throws at runtime, which no test catches because none mounts this component and
     // the build compiles it happily.
-    const request = deadlineGet(
-      // The shared TRACE rule, not the generic panel timeout: this route pays the same fixed
-      // per-request fence cost every other trace read does. Measured 2026-08-12 on the live run —
-      // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
-      // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
-      // per request), not the spans.
-      // REVIEW (mega-review 2026-08-13): this and the Inspector research strip are the only trace
-      // reads in the app that neither send `expected_generation` (bare deadlineGet, not
-      // traceDeadlineGet) nor apply traceGenerationMatches to the response — a read issued just
-      // before a reset resolves after it and commits the archived generation's payload while every
-      // sibling surface refuses it as superseded. And the effect's expectedGeneration dep is
-      // currently always null (see the pane-level note), so it never re-fires on reset either.
-      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), traceReadDeadlineMs(0))
+    // FENCED like every other trace read: `traceDeadlineGet` sends `expected_generation` and the
+    // response is checked with `traceGenerationMatches`. Without both, a read issued just before a
+    // reset resolves after it and commits the ARCHIVED generation's payload, while every sibling
+    // surface refuses the same bytes as superseded.
+    //
+    // The shared TRACE rule, not the generic panel timeout: this route pays the same fixed
+    // per-request fence cost every other trace read does. Measured 2026-08-12 on the live run —
+    // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
+    // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
+    // per request), not the spans.
+    const request = traceDeadlineGet(
+      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
+      expectedGeneration, null, 0, traceReadDeadlineMs(0))
     request.promise
-      .then(d => { if (alive) setPayload(d || {}) })
+      .then(d => {
+        if (!alive) return
+        if (!traceGenerationMatches(d, expectedGeneration)) {
+          // A superseded read is not an unreadable one, and must not be shown as this card's trace.
+          setPayload({ projection: { unavailable: true, superseded: true } })
+          return
+        }
+        setPayload(d || {})
+      })
       .catch(() => { if (alive) setPayload({ projection: { unavailable: true } }) })
     return () => { alive = false; request.controller.abort() }
   }, [cardId, runId, expectedGeneration])
@@ -746,7 +754,7 @@ function _CardDetailPane({
 }
 
 function _CardKanban({
-  state, cards, runId, onSelect, onClose, onToast,
+  state, cards, runId, runGeneration = null, onSelect, onClose, onToast,
   // The workspace-view extras. They stay on THIS component rather than moving the split layout into
   // a sibling because the optimistic-control state (`optim`, `cardControl`, `sentEditRef` and the
   // reconcile effect) belongs to the board, and the detail pane needs all four. Passing that bundle
@@ -1088,15 +1096,12 @@ function _CardKanban({
             aria-label={`Close details for ${selectedCard.id}`}
             onClick={closeDetails}>⟩</button>}
         </div>
-        {/* REVIEW (mega-review 2026-08-13): `state?.generation` below is ALWAYS undefined — the
-            folded run state has no run-level `generation` field; the generation is an envelope
-            SIBLING of `state` in the /api/state payload and lives in useRunState's separate
-            generationState. So every trace surface reached from this board runs with a null
-            generation fence: superseded reads are accepted after a reset, and effects keyed on
-            expectedGeneration never re-fire on a generation change. The correct value is the
-            `runGeneration` prop CardWorkspace already receives and drops. The board's own test
-            (traceSurfaceReuse.test.js) masks this by stubbing `generation` INTO its state object —
-            a shape production never produces. */}
+        {/* `runGeneration`, NOT `state?.generation`. The folded run state has no run-level
+            `generation` field at all — the generation is an envelope SIBLING of `state` in the
+            /api/state payload and lives in useRunState's separate generationState — so
+            `state?.generation` was always undefined and every trace surface reached from this
+            board ran with a dead fence: superseded reads accepted after a reset, and effects keyed
+            on expectedGeneration never re-firing on a generation change. */}
         <_CardDetailPane card={selectedCard}
           receipt={selectedCard && isRecord(receipts[selectedCard.id]) ? receipts[selectedCard.id] : null}
           attempts={selectedCard ? attemptsByCard.get(selectedCard.id) || [] : []}
@@ -1105,7 +1110,7 @@ function _CardKanban({
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
           onRecover={recoverCardControl}
-          runId={runId} expectedGeneration={state?.generation || null} />
+          runId={runId} expectedGeneration={runGeneration || null} />
       </aside>}
     </div>
   }
@@ -1889,6 +1894,7 @@ export function CardWorkspace({
   const scopeKey = `${runId || ''}:${runGeneration || ''}`
   if (hasAuthoritativeCards && !recoveryVisible) {
     return <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId}
+      runGeneration={runGeneration}
       layout="view" onSelect={onSelect} onClose={null} onToast={onToast}
       selectedCardId={selectedCardId} onSelectCard={onSelectCard}
       selectedNodeId={selectedNodeId} onSelectNode={onSelectNode}
@@ -1921,7 +1927,8 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   const recovery = inspectHypothesisDeleteRecovery(runId, runGeneration)
   const recoveryVisible = recovery.state === 'valid' || recovery.state === 'damaged'
   return hasAuthoritativeCards && !recoveryVisible
-    ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId} onSelect={onSelect}
+    ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId}
+      runGeneration={runGeneration} onSelect={onSelect}
       onClose={onClose} onToast={onToast} />
     : <_HypothesisFallback key={`hypotheses:${scopeKey}`} state={state} runId={runId}
       runGeneration={runGeneration}

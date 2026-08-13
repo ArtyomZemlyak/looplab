@@ -648,6 +648,9 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
 # there.
 BOARD_SEED_CHARS_MAX = 4_000    # a single seed statement larger than this is skipped, not truncated
 BOARD_PROMPT_CARDS = 5          # whole rows either builder will show — the number the writer cap reads
+# The prompt budget the window spends on seed statements. Named for the same reason the row
+# count is: it bounds what the model SEES, and a bare literal here reads as incidental.
+BOARD_PROMPT_SEED_BUDGET_CHARS = 20_000
 
 def next_board_prompt_cards(
     state: RunState, hyp_order: Optional[list[str]] = None, *, attempt: int = 0,
@@ -659,14 +662,12 @@ def next_board_prompt_cards(
     if hyp_order:
         position = {card_id: index for index, card_id in enumerate(hyp_order)}
         cards.sort(key=lambda card: (position.get(card.id, len(position)), card.id))
-        # REVIEW (mega-review 2026-08-13): the rotation threshold and the leaders/tail split below
-        # are bare literals (as is the 20k seed budget four lines down) three lines under the
-        # BOARD_PROMPT_CARDS constant that exists because "these bounds were bare literals" —
-        # raising the constant leaves the 5/4 split behind and the tail-rotation fairness silently
-        # stops matching the window size. Derive them (BOARD_PROMPT_CARDS, BOARD_PROMPT_CARDS - 1)
-        # and name the seed budget.
-        if len(cards) > 5:
-            leaders, tail = cards[:4], cards[4:]
+        # DERIVED from BOARD_PROMPT_CARDS, not written out. The window size is the constant three
+        # lines up — which exists precisely because these bounds used to be bare literals — so a
+        # hardcoded 5/4 here would leave the tail-rotation fairness matching a window size the
+        # builder no longer uses the moment anyone raises it, silently and with no test to notice.
+        if len(cards) > BOARD_PROMPT_CARDS:
+            leaders, tail = cards[:BOARD_PROMPT_CARDS - 1], cards[BOARD_PROMPT_CARDS - 1:]
             offset = attempt % len(tail)
             cards = leaders + tail[offset:] + tail[:offset]
     elif len(cards) > 1:
@@ -676,7 +677,8 @@ def next_board_prompt_cards(
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
-        if not seed or len(seed) > BOARD_SEED_CHARS_MAX or used + len(seed) > 20_000:
+        if (not seed or len(seed) > BOARD_SEED_CHARS_MAX
+                or used + len(seed) > BOARD_PROMPT_SEED_BUDGET_CHARS):
             continue
         selected.append(card)
         used += len(seed)
@@ -969,8 +971,16 @@ class LLMResearcher:
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
         self._board_prompt_attempt = prompt_attempt + 1
+        # PUBLISHED on the instance, not just held locally. This is the exact window the model was
+        # SHOWN, and `bind_idea_to_board_card` resolves a CARD_ID claim against it — so a wrapper
+        # that re-binds the returned Idea has to use THIS window or it nulls valid claims. The
+        # foresight panel keeps its own rotation cursor, which drifts from this one as a matter of
+        # course (the base advances k per panel propose while the panel advances 1), and with more
+        # than 5 open beliefs the two windows differ in the rotated slot. `ToolUsingResearcher`
+        # publishes the same attribute for the same reason.
         visible_cards = next_board_prompt_cards(
             state, getattr(self, "_hyp_order", None), attempt=prompt_attempt)
+        self._visible_board_cards = visible_cards
         messages = [
             {"role": "system",
              # Part V/P6: the explicit concept-mode contract, capability suffix (sweep offer — gated on
