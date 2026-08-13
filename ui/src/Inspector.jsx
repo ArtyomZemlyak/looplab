@@ -16,15 +16,19 @@ import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
-  conversationWindowNotice, nodeAttemptOptions, traceDetailState, traceForAttempt, traceUnavailable,
-  traceWindow, traceWindowNotice, unavailableTraceDetail,
+  conversationWindowNotice, nodeAttemptOptions, spansOmitted, traceDetailState, traceForAttempt,
+  traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
 import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import {
+  EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, episodeAnchor, episodeAt,
+  episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
+} from './traceEpisodeModel.js'
+import {
   TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS,
   TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS, nodeTraceSubject, opTraceSubject, traceRequestPath,
-  traceSubjectAttempt, traceSubjectEmptyNotice, traceSubjectHasLogs, traceSubjectKey,
-  traceSubjectLead, traceSubjectMatches, traceSubjectSpans, traceSubjectValid,
+  traceSubjectAttempt, traceSubjectBefore, traceSubjectEmptyNotice, traceSubjectHasLogs,
+  traceSubjectKey, traceSubjectLead, traceSubjectMatches, traceSubjectSpans, traceSubjectValid,
 } from './traceSurfaceModel.js'
 import {
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_LOADING_LABEL, TRACE_SCROLL_REACH_LABEL,
@@ -1641,6 +1645,7 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   reloadNonce = 0, onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
   const subjectKey = traceSubjectKey(subject)
   const subjectAttempt = traceSubjectAttempt(subject)
+  const subjectBefore = traceSubjectBefore(subject)
   // This is the evidence lifecycle, deliberately NOT the request representation: widening the span
   // window may retain last-good evidence on failure, while a reset/clear nonce may not. Gate during
   // render as well as commit so correctness never depends on a passive clearing effect winning a race.
@@ -1683,7 +1688,7 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
     const validator = prior?.scope === scope && prior.etag
     const conversationPath = runApiPath(runId,
       traceRequestPath(subject, TRACE_VIEW_CONVERSATION)
-      + traceReadQuery(expectedGeneration, subjectAttempt, spanLimit))
+      + traceReadQuery(expectedGeneration, subjectAttempt, spanLimit, subjectBefore))
     // ONE settle rule for both outcomes below, so the deadline path and the rejected-response path
     // cannot disagree about what a failure costs the operator.
     const commit = (ok, payload, etag = null, failure = TRACE_FAILURE_UNREADABLE) => {
@@ -1854,7 +1859,8 @@ function usePagedTrace({
   usePoll((alive) => {
     const request = traceDeadlineGet(
       runApiPath(runId, traceRequestPath(subject, TRACE_VIEW_SPANS)),
-      expectedGeneration, traceSubjectAttempt(subject), limit, traceReadDeadlineMs(limit))
+      expectedGeneration, traceSubjectAttempt(subject), limit, traceReadDeadlineMs(limit),
+      traceSubjectBefore(subject))
     request.promise.then(d => {
       // Same fence the Dock applies: a response for another node/attempt — or another trace — is a
       // stale in-flight read from the previous scope, never this subject's trace.
@@ -1923,6 +1929,7 @@ export function TraceSurface({
   // about how much of the same thing they are each showing.
   const { limit: spanLimit, canPage, loadMore } = useNodeSpanWindow()
   const subjectAttempt = traceSubjectAttempt(subject)
+  const subjectAnchored = traceSubjectBefore(subject) != null
   const detailAttempt = detail ? detail.attempt : null
   // `view` is part of the gate, not just the window: the conversation branch returns below without
   // ever reading `paged`, and both views raise the SAME shared window BY DESIGN — so an operator who
@@ -1937,7 +1944,7 @@ export function TraceSurface({
     // so an unguarded read would already be in flight by the time the refusal renders.
     enabled: traceSubjectValid(subject) && !!runId
       && view !== TRACE_VIEW_CONVERSATION && (!detail || attemptReadRequired({
-        selected: subjectAttempt, current: detailAttempt,
+        selected: subjectAttempt, current: detailAttempt, anchored: subjectAnchored,
         canPageFurther: spanLimit > NODE_TRACE_SPAN_WINDOW,
       })),
   })
@@ -1945,6 +1952,7 @@ export function TraceSurface({
   const trace = detail
     ? traceForAttempt({
       selected: subjectAttempt, current: detailAttempt, paged, detail: detail.payload,
+      anchored: subjectAnchored,
     })
     : paged
   const spans = traceSubjectSpans(subject, trace)
@@ -2075,6 +2083,106 @@ export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
   </div>
 }
 
+// WHERE TO POINT THE TRACE WINDOW — the node's episode map, as a control.
+//
+// The window a trace surface reads is bounded and reads the TAIL of one lifecycle. `TraceReach`
+// makes it BIGGER; this makes it MOVE, which is the half that was missing and the half the operator
+// asked for. On the measured stress node (rubert-dr-0804 node 1: 14,507 spans, 2,345 inline
+// repairs, 3 h 50 m) the default window shows the last 7.6 minutes and the ceiling the last 59.3, so
+// the early repairs — the ones where the bug first showed — were unreachable however far the reach
+// affordance climbed. Every decision below (which kinds exist, what a position is, what may be
+// offered) lives in `traceEpisodeModel.js`; this keeps only the fetch and the setState.
+//
+// VISIBLE, always, whenever this node HAS a bounded trace — the same rule `TraceReach` learned the
+// hard way (a control that appears only on focus does not exist to a pointer user, reported twice).
+// The map itself loads when the control is opened: it is a one-shot read that costs the server no
+// spans.jsonl bytes at all, but it is 7,048 rows on that node and nobody should pay for it while
+// reading a two-band one.
+function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onSeek, nonce = 0 }) {
+  const [open, setOpen] = useState(false)
+  const [map, setMap] = useState(null)          // null = not read yet
+  const [kind, setKind] = useState(null)        // the label the operator is stepping through
+  const [draft, setDraft] = useState(1)         // the 1-based ordinal in the number field
+  const pickerId = useId()
+  // A new node, lifecycle or trace clear invalidates every anchor in hand.
+  useEffect(() => { setMap(null); setKind(null); setOpen(false) },
+    [nodeId, attempt, expectedGeneration, nonce])
+  useEffect(() => {
+    if (!open || map !== null || !runId) return undefined
+    let alive = true
+    // `deadlineGet` returns a HANDLE, not a promise. The map is index-only work, but it shares the
+    // absent-fence probes every trace route pays on a geesefs mount, so it gets the same deadline
+    // rule as an unwidened read rather than the flat one that was aborting six-span reads.
+    const request = deadlineGet(
+      runNodeApiPath(runId, nodeId, `/episodes${traceReadQuery(expectedGeneration, attempt)}`),
+      traceReadDeadlineMs(0))
+    request.promise
+      .then(d => { if (alive) setMap(buildEpisodeMap(d)) })
+      // A failed read is not an absent history: the model's `unavailable` says so and the control
+      // prints it, rather than rendering an empty picker that reads as "no earlier steps".
+      .catch(() => { if (alive) setMap(buildEpisodeMap(null)) })
+    return () => { alive = false; request.controller.abort() }
+  }, [open, map, runId, nodeId, attempt, expectedGeneration])
+  const kinds = map?.status === 'ready' ? episodeKindOptions(map) : []
+  // The anchor RENDERING is the one the surface is fenced on (`traceSubjectMatches` refuses a
+  // payload for any other), so the requested anchor and the shown one cannot disagree on screen.
+  const here = map?.status === 'ready' ? episodePosition(map, anchor) : null
+  const activeKind = kind || here?.label || kinds[0]?.label || null
+  const active = kinds.find(row => row.label === activeKind) || null
+  const seek = index => {
+    const episode = episodeAt(map, activeKind, index)
+    const next = episodeAnchor(episode)
+    if (next) { setDraft(index + 1); onSeek(next) }
+  }
+  const index = here && here.label === activeKind ? here.index : Math.max(0, draft - 1)
+  return <span className="trace-episodes">
+    <button type="button" className="seg" aria-expanded={open}
+      title="Jump the trace window to an earlier step of this experiment — an early repair, the first training run, the proposal."
+      onClick={() => setOpen(value => !value)}>
+      <span aria-hidden="true">{open ? '▾' : '▸'}</span> steps
+      {here ? <span className="muted"> · {here.name} {here.ordinal}/{here.count}</span> : null}
+    </button>
+    {anchor && <button type="button" className="seg" onClick={() => onSeek(null)}
+      title="Return the window to this experiment's most recent steps">latest ›</button>}
+    {open && <span className="trace-episodes-body">
+      {map === null && <span className="muted" role="status">loading steps…</span>}
+      {map?.status === 'unavailable' && <span className="muted" role="status">
+        {EPISODE_MAP_UNAVAILABLE}</span>}
+      {map?.status === 'empty' && <span className="muted" role="status">{EPISODE_MAP_EMPTY}</span>}
+      {map?.status === 'ready' && <>
+        <label className="muted" htmlFor={`${pickerId}-kind`}>step </label>
+        <select id={`${pickerId}-kind`} className="seg" value={activeKind || ''}
+          onChange={e => { setKind(e.target.value); setDraft(1) }}>
+          {kinds.map(row => <option key={row.label} value={row.label}>
+            {row.name} ({row.count})</option>)}
+        </select>
+        {/* Prev/next/first/last plus a typed ordinal, because a picker cannot list 2,345 repairs and
+            a list that long is a phone book, not a map. Every position is clamped in the model, so a
+            typo can never issue a request the server would refuse. */}
+        <button type="button" className="seg" title="first" disabled={index <= 0}
+          onClick={() => seek(0)}>«</button>
+        <button type="button" className="seg" title="previous" disabled={index <= 0}
+          onClick={() => seek(index - 1)}>‹</button>
+        <input className="seg trace-episode-n" type="number" min="1" max={active?.count || 1}
+          aria-label={`which ${active?.name || 'step'} to show`}
+          value={index + 1}
+          onChange={e => setDraft(Number(e.target.value) || 1)}
+          onKeyDown={e => { if (e.key === 'Enter') seek(Math.max(0, draft - 1)) }} />
+        <span className="muted">of {active?.count || 0}</span>
+        <button type="button" className="seg" title="next"
+          disabled={!active || index >= active.count - 1}
+          onClick={() => seek(index + 1)}>›</button>
+        <button type="button" className="seg" title="last" disabled={!active || index >= active.count - 1}
+          onClick={() => seek((active?.count || 1) - 1)}>»</button>
+        <button type="button" className="btn xs" onClick={() => seek(Math.max(0, draft - 1))}>show</button>
+        {here && <span className="muted trace-episode-sum">
+          {episodeSummary(here.episode, here.index)}</span>}
+        {map.partial && <span className="muted">{episodeMapNotice(map)}</span>}
+      </>}
+    </span>}
+  </span>
+}
+
 export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, live, working, onReload,
   onOpenCard = null,
   detailStatus = 'ready',
@@ -2088,6 +2196,11 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // sent the current number. So the trace of the attempt that actually crashed, which is the one an
   // operator opens the trace to read, could not be opened at all.
   const [viewAttempt, setViewAttempt] = useState(null)
+  // WHERE inside the selected lifecycle to read — an episode's span id, or null for the newest
+  // steps. Deliberately separate state from the attempt above: they answer different questions
+  // (which lifecycle vs where inside one) and the operator's repaired node has 2,345 of the second
+  // and one of the first. See traceEpisodeModel.js.
+  const [viewBefore, setViewBefore] = useState(null)
   const attemptOptions = useMemo(
     () => nodeAttemptOptions(nodeGeneration), [nodeGeneration])
   // `null` follows the node forward: a live node that repairs mid-read must not pin the operator to
@@ -2095,11 +2208,14 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const selectedAttempt = viewAttempt == null ? (nodeGeneration ?? 0) : viewAttempt
   const historicalAttempt = selectedAttempt !== (nodeGeneration ?? 0)
   useEffect(() => { setViewAttempt(null) }, [n.id, expectedGeneration])
+  // A different node or lifecycle invalidates the anchor: a span id is meaningless outside the trace
+  // it came from, and carrying one across would ask the server to place a window it must refuse.
+  useEffect(() => { setViewBefore(null) }, [n.id, expectedGeneration, selectedAttempt])
   // What this tab is reading, in the vocabulary every trace surface now shares. The window, the
   // views, the fences and the paged read live in `TraceSurface`; what stays HERE is the node's own
   // chrome — the attempt picker, the destructive clear, the live status, the research disclosure.
   const subject = useMemo(
-    () => nodeTraceSubject(n.id, selectedAttempt), [n.id, selectedAttempt])
+    () => nodeTraceSubject(n.id, selectedAttempt, viewBefore), [n.id, selectedAttempt, viewBefore])
   // `unavailable` stays bound to the DETAIL payload, never the paged one. It feeds the trace-clear
   // fence below, and a failed paging request is not evidence that this node's telemetry is
   // unreadable — letting it flip `unavailable` would quietly change when a destructive clear is
@@ -2155,6 +2271,18 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     {historicalAttempt && <button type="button" className="seg"
       onClick={() => setViewAttempt(null)}>back to current</button>}
   </span>
+  // The EPISODE picker, the attempt picker's sibling and NOT its substitute: attempt chooses a
+  // lifecycle (what a reset creates), this chooses a position inside one (what a repair loop creates,
+  // 2,345 times on the measured node — and none of them an attempt). Rendered exactly when this
+  // node's own trace projection says steps are omitted or will not say: with nothing hidden there is
+  // nowhere to seek to, and a control implying history that does not exist is the mistake the
+  // attempt picker above avoids for the same reason. `null` from `spansOmitted` means "the payload
+  // states no usable count" — fail safe and offer the map, since that is the case where the operator
+  // is least able to tell what they are missing.
+  const traceIsBounded = !unavailable && spansOmitted(n.trace?.projection) !== 0
+  const episodePicker = traceIsBounded && <TraceEpisodes
+    runId={runId} nodeId={n.id} attempt={selectedAttempt} expectedGeneration={expectedGeneration}
+    anchor={viewBefore} onSeek={setViewBefore} nonce={nonce} />
   // THE RESEARCH BEHIND THIS EXPERIMENT. The Researcher works per CARD (a hypothesis) and the
   // Developer per NODE, so this node's reasoning lives one level up and is SHARED with every sibling
   // experiment on the same card. Rather than making the operator go and find it, the node's own trace
@@ -2274,7 +2402,7 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     detail={{ payload: n.trace, attempt: nodeGeneration ?? 0 }}
     detailUnavailable={unavailable} onRetry={retryParentTrace} retryPending={reloadPending}
     status={status}
-    controls={<>{attemptPicker}<span className="spacer" />{clearBtn}{nav}</>}
+    controls={<>{attemptPicker}{episodePicker}<span className="spacer" />{clearBtn}{nav}</>}
     below={researchStrip}
     // Validation is node-level evidence, not a span-tree item. Passing it as the FOOTER keeps it
     // after the bounded tree, which avoids lying about its ARIA parent or pinning a large non-span

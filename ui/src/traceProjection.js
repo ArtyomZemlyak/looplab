@@ -161,14 +161,18 @@ export const nodeAttemptOptions = (currentAttempt) => {
   }))
 }
 
-// Which payload may render for the selected attempt. The node-DETAIL payload always describes the
-// CURRENT attempt, so it is a valid fallback only while the current attempt is what is being shown;
-// falling back to it for a historical selection would silently show the newest trace under an older
-// attempt's label — the one failure mode that is worse than showing nothing.
-export const traceForAttempt = ({ selected, current, paged, detail }) =>
-  (selected === current ? (paged || detail || null) : (paged || null))
+// Which payload may render for the selected attempt AND anchor. The node-DETAIL payload always
+// describes the CURRENT attempt at the NEWEST window, so it is a valid fallback only while that is
+// what is being shown; falling back to it for a historical selection would silently show the newest
+// trace under an older label — the one failure mode that is worse than showing nothing.
+//
+// `anchored` is the second half of the same rule and arrived with `?before=`: an operator who seeks
+// to repair #1 must never be shown the last 512 spans of the node because the seek has not settled
+// yet. Two different questions, one answer — what may stand in for a read that has not happened.
+export const traceForAttempt = ({ selected, current, paged, detail, anchored = false }) =>
+  (selected === current && !anchored ? (paged || detail || null) : (paged || null))
 
-// A historical attempt has no detail payload to render, so its read is not optional the way the
-// current attempt's pager is.
-export const attemptReadRequired = ({ selected, current, canPageFurther }) =>
-  selected !== current || canPageFurther
+// A historical attempt — or an anchored window — has no detail payload to render, so its read is not
+// optional the way the current attempt's tail pager is.
+export const attemptReadRequired = ({ selected, current, canPageFurther, anchored = false }) =>
+  selected !== current || anchored || canPageFurther

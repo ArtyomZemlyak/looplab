@@ -49,11 +49,18 @@ const safeInt = value => (Number.isSafeInteger(value) && value >= 0 ? value : nu
  * of zero: the routes settle an absent `attempt` to the node's current generation themselves, and a
  * caller that knows only the node id (the card board's section rows) must not assert attempt 0 —
  * that would 409 every repaired node.
+ *
+ * `before` is WHERE in that generation to read — a span id from the node's episode map, or `null`
+ * for the newest steps. It belongs to the subject and not to the surface for the same reason the
+ * attempt does: it changes which evidence is on screen, so it has to reach the fence, the poll scope
+ * and the React key. The two are orthogonal and both are needed — a reset opens a new generation, a
+ * repair does not (see `traceEpisodeModel.js`), and the operator's complaint was about repairs.
  */
-export const nodeTraceSubject = (nodeId, attempt = null) => ({
+export const nodeTraceSubject = (nodeId, attempt = null, before = null) => ({
   kind: 'node',
   nodeId: nodeId == null ? null : String(nodeId),
   attempt: safeInt(attempt),
+  before: typeof before === 'string' && before !== '' ? before : null,
 })
 
 /** ONE operation's own trace, by trace id — a proposal, a strategy decision, a merge. */
@@ -73,10 +80,15 @@ export const traceSubjectValid = subject => (subject?.kind === 'node'
  */
 export const traceSubjectKey = subject => (subject?.kind === 'node'
   ? `node:${subject.nodeId}:${subject.attempt == null ? '*' : subject.attempt}`
+    + `:${subject.before || '@tail'}`
   : subject?.kind === 'trace' ? `trace:${subject.traceId}` : 'none')
 
 /** The query `attempt` a read for this subject carries — `null` means "do not send one". */
 export const traceSubjectAttempt = subject => (subject?.kind === 'node' ? subject.attempt : null)
+
+/** The query `before` a read for this subject carries — `null` means "read the newest steps". */
+export const traceSubjectBefore = subject => (subject?.kind === 'node'
+  ? (subject.before || null) : null)
 
 /** Only a node has subprocess logs; a proposal's trace has no sandbox and no stage log. */
 export const traceSubjectHasLogs = subject => subject?.kind === 'node'
@@ -111,6 +123,13 @@ export const traceSubjectMatches = (subject, payload) => {
   if (!payload || typeof payload !== 'object') return false
   if (subject?.kind === 'node') {
     if (String(payload.node_id) !== String(subject.nodeId)) return false
+    // The ANCHOR is fenced the same way, and it has to be: a seek is issued while the previous
+    // window's read is still in flight, and both responses carry this node and this attempt. Without
+    // this the tail's late answer settles under the chosen episode's label — the newest steps
+    // captioned as the oldest, which is precisely the confusion the seek exists to remove. `null`
+    // here means "whatever the server settled to", exactly as it does for the attempt; the routes
+    // echo `before: null` for an unanchored read, so the two agree on the tail without a special case.
+    if ((subject.before || null) !== (payload.before || null)) return false
     return subject.attempt == null || payload.attempt === subject.attempt
   }
   if (subject?.kind === 'trace') return String(payload.trace_id || '') === String(subject.traceId)

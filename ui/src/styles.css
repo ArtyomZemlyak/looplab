@@ -3303,6 +3303,17 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .trace-attempt { display: inline-flex; align-items: center; gap: 4px; }
 .trace-attempt select { max-width: 15em; }
 
+/* WHERE the trace window is pointed (Inspector.jsx::TraceEpisodes). The toggle sits on the control
+   bar beside the attempt picker and is VISIBLE whenever this node has steps the window cannot
+   reach — never focus-conditional; see traceScrollModel.js for what that cost the last time. The
+   body wraps onto its own line rather than squeezing the switcher, because on a repaired node it
+   carries a kind select, four nav buttons, an ordinal field and a summary. */
+.trace-episodes { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.trace-episodes-body { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.trace-episodes-body select { max-width: 14em; }
+.trace-episode-n { width: 6em; text-align: right; font-variant-numeric: tabular-nums; }
+.trace-episode-sum { font-variant-numeric: tabular-nums; }
+
 /* Age of the current live phase, beside its label. Muted and small: it answers "is this stuck?",
    which is a glance, not a reading. */
 .as-age { margin-left: 6px; font-variant-numeric: tabular-nums; }

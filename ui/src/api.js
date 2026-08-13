@@ -1207,15 +1207,20 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
 // whose sidecar bytes the caller is prepared to display.
 export const traceGenerationMatches = (payload, expectedGeneration) =>
   !expectedGeneration || payload?.run_generation === expectedGeneration
-export const traceReadQuery = (expectedGeneration, attempt, limit) => {
+// `before` is the window's ANCHOR, not a filter: the same `limit` spans ending at that step instead
+// of at the node's newest one. It travels here rather than at the call sites because a trace read has
+// exactly one spelling of its query, and an anchor a surface forgot to send is a surface silently
+// reading the tail while its picker says otherwise.
+export const traceReadQuery = (expectedGeneration, attempt, limit, before = null) => {
   const query = new URLSearchParams()
   if (attempt != null) query.set('attempt', attempt)
   if (limit) query.set('limit', limit)
+  if (before) query.set('before', before)
   if (expectedGeneration) query.set('expected_generation', expectedGeneration)
   return query.size ? `?${query}` : ''
 }
-export const traceDeadlineGet = (path, expectedGeneration, attempt, limit, timeout) =>
-  deadlineGet(path + traceReadQuery(expectedGeneration, attempt, limit), timeout)
+export const traceDeadlineGet = (path, expectedGeneration, attempt, limit, timeout, before = null) =>
+  deadlineGet(path + traceReadQuery(expectedGeneration, attempt, limit, before), timeout)
 
 // Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).

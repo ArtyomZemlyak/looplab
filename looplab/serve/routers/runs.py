@@ -2242,22 +2242,24 @@ def build_router(srv) -> APIRouter:
         aim (see `traceview.settle_trace_anchor` for the measurement it exists for). Two rules, and
         both are load-bearing:
 
-        * a malformed/blank value settles to "no anchor" — the tail — because a paging control may
-          never treat garbage as an instruction;
-        * an id this run's index cannot PLACE is refused, not degraded. Degrading would answer with
-          the node's NEWEST spans while the surface still labels them with the episode the operator
-          picked, which is the one failure worse than an empty panel — the same reasoning
-          `ui/src/traceProjection.js::traceForAttempt` states for a historical attempt. The client's
-          remedy is a real one (re-read the episode map, whose anchors come from this same index),
-          so this is an actionable 409 rather than a 4xx dead end.
+        * ABSENT/blank means "no anchor" — the tail, the behaviour every caller had before this
+          existed;
+        * anything else that does not resolve to a span of this run is REFUSED, never degraded to the
+          tail. Degrading would answer with the node's NEWEST spans while the surface still labels
+          them with the episode the operator picked, which is the one failure worse than an empty
+          panel — the same reasoning `ui/src/traceProjection.js::traceForAttempt` states for a
+          historical attempt. It is also the `limit` rule's own logic: a paging control that quietly
+          ignores its argument is exactly how a dead pager looks from the outside. The remedy is a
+          real one (re-read the episode map, whose anchors come from this same index), so this is an
+          actionable 409 rather than a dead end.
         """
         from looplab.events.span_index import get_index
         from looplab.events.traceview import settle_trace_anchor
-        anchor = settle_trace_anchor(before)
-        if anchor is None:
+        if before is None or not str(before).strip():
             return None
-        idx = get_index(rd / "spans.jsonl")
-        if idx is None or not idx.has_span(anchor):
+        anchor = settle_trace_anchor(before)
+        idx = get_index(rd / "spans.jsonl") if anchor is not None else None
+        if anchor is None or idx is None or not idx.has_span(anchor):
             raise HTTPException(409, {
                 "code": "trace_anchor_unknown",
                 "before": anchor,
