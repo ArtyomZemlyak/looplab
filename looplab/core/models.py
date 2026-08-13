@@ -613,6 +613,49 @@ def is_developer_error(code) -> bool:
     return isinstance(code, str) and code.startswith(DEVELOPER_ERROR_PREFIX)
 
 
+# THE DEVELOPER'S OWN "I DO NOT KNOW HOW TO FIX THIS" (F8). Its sibling above says the developer's
+# SESSION failed; this one says the session worked fine and the model has no fix left to try. They
+# are different facts and they must not share a spelling: `(developer error: …)` routes to the
+# provider circuit breaker and pauses the RUN, which is exactly the wrong answer for a healthy model
+# that has simply run out of ideas about one node.
+#
+# It exists because nothing asked. The repair loop's only stop signals were the triage judge and a
+# COUNT, so a Developer that knew it was beaten had exactly one way to say so — return another fix it
+# did not believe in — and every such non-fix looked to the counter like an ordinary attempt. That is
+# half of the 2,345-repair runaway: 369 distinct error signatures, none of which any participant was
+# allowed to call hopeless.
+#
+# WHY AN IN-BAND SENTINEL IS SAFE HERE, when `engine/metric_salvage.py`'s rule is that the agent
+# writes the very text an extractor reads. Because this signal is MONOTONE IN THE SAFE DIRECTION: its
+# only effect is to END the node. It cannot move a metric, a champion, selectability or a violation —
+# the node terminalizes carrying the eval's own authenticated `reason`, exactly as an `abandon` does.
+# A model that forges it wastes its own node and gains nothing; a model that forges the opposite
+# (never declaring stuck) is the behaviour we already have. Contrast `docs/36`'s table: this decides
+# what to do NEXT, never what the result WAS.
+DEVELOPER_STUCK_PREFIX = "(developer stuck:"
+
+
+def is_developer_stuck(code) -> bool:
+    """True when `code` is the Developer's own out-of-ideas declaration rather than a repair.
+
+    Deliberately a PREFIX test on the stripped text and nothing cleverer: a model that wants to
+    give up says so on the first line, and any "does this text sound hopeless?" heuristic over a
+    repair's prose is the same category error as the deleted error-signature normalizer — a rule
+    over TEXT QUALITY standing in for a judgement."""
+    return isinstance(code, str) and code.strip().startswith(DEVELOPER_STUCK_PREFIX)
+
+
+def developer_stuck_reason(code) -> str:
+    """The Developer's own words about why it is stuck, or "" when `code` is not that declaration.
+
+    Total and lossy on purpose — the reason is prose for the terminal event and for the operator,
+    never a value anything branches on."""
+    if not is_developer_stuck(code):
+        return ""
+    body = code.strip()[len(DEVELOPER_STUCK_PREFIX):].strip()
+    return body[:-1].strip() if body.endswith(")") else body
+
+
 class Trial(BaseModel):
     """One configuration evaluated inside an intra-node sweep. Audit/UI data — the node's scalar
     `metric` is set (by the engine) from the best feasible trial, so fold/best-selection are
