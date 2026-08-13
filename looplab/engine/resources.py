@@ -38,8 +38,10 @@ _LEASE_NOTICE_INTERVAL_S = 30.0
 # Bounded read of the holder stamp below.  Only this module writes a lease file, so anything longer is
 # a foreign/stale file and is reported as an unknown holder instead of being echoed back.
 _LEASE_STAMP_BYTES = 64
-# "`_read_fence_dir` has not run yet", distinct from its real `None` result ("this run has no
-# fence") — the difference decides whether the memo is a hit or a miss.
+# "this has not been resolved yet", distinct from a real `None` result ("this run has no fence" /
+# "this run has no allow-list") — the difference decides whether the memo is a hit or a miss. Shared
+# by `_read_fence_dir` and `_landlock_allow`, which memoize the same way for the same reason: both
+# are asked once per eval from concurrent workers and both legitimately resolve to None.
 _UNRESOLVED_FENCE = object()
 
 
