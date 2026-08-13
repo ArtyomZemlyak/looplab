@@ -443,6 +443,15 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   to be generous enough for the real case it protects: a repo with a year-stale `requirements.txt`
   legitimately spends several repairs re-paying migrations before it can reach its own research
   question.
+  **And what a repair CLAIMED is now checked against what it changed** (`engine/repair_verify.py`).
+  Measured across every repair in the preserved runs, about a quarter of the explained ones named a
+  concrete change — a file, a flag, a parameter — that their diff does not contain, and 13 changed
+  nothing whatsoever and still bought a full re-evaluation of byte-identical inputs. Deterministic
+  only, and tiered by how much the engine can prove: an **empty change set** is a fact about bytes
+  that no wording can evade, so two of those in a row end in-node repair; an **unmet named claim**
+  is derived from text the agent itself wrote, so it is stated in the judge's history as evidence
+  and never stops anything on its own. Both ride on the durable `node_repaired` row, so a resume
+  continues the streak rather than refunding it.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble

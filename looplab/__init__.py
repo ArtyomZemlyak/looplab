@@ -231,6 +231,7 @@ _LAYOUT = {
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",
     "regression": "adapters",
+    "repair_verify": "engine",  # did a repair DO what its rationale said? (deterministic rung)
     "replay": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
