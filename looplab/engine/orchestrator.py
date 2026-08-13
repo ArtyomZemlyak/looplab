@@ -192,6 +192,22 @@ class _InjectedNodePlan(NamedTuple):
     implementation_ref: Optional[str]
 
 
+def _sole_task_group_error(group: BaseException) -> BaseException:
+    """Unwrap a task group's LONE exception, so a failure's TYPE survives the group boundary.
+
+    Backlog F1f put an `anyio` task group around the whole run so evaluations can outlive the Card
+    session that admitted them.  anyio collapses even a single exception into a `BaseExceptionGroup`,
+    and `Engine.run`'s failure type is a contract in two places: `_RefusalBoundaryGroup` in the CLI
+    prints an `OperatorRefusal` as one line at `REFUSAL_EXIT_CODE` and everything else with a full
+    traceback, and the suite asserts real types through `pytest.raises`.  A group of MORE than one is
+    a genuine multi-failure and is re-raised unchanged — flattening that would drop failures.
+    """
+
+    while isinstance(group, BaseExceptionGroup) and len(group.exceptions) == 1:
+        group = group.exceptions[0]
+    return group
+
+
 def _run_terminal_gate(state) -> bool:
     """Whether the RUN has stopped accepting new eval work (doc 25 ES-06).
 
@@ -1438,12 +1454,23 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # `_eval_inflight` must exist before the first turn: the loop's own freshness drain
                 # and its terminal gates read it whether or not a session has been entered yet.
                 self._ensure_speculation_state()
-                async with anyio.create_task_group() as eval_tg:
-                    self._eval_task_group = eval_tg
-                    try:
-                        return await self._run_with_llm_broker()
-                    finally:
-                        self._eval_task_group = None
+                try:
+                    async with anyio.create_task_group() as eval_tg:
+                        self._eval_task_group = eval_tg
+                        try:
+                            return await self._run_with_llm_broker()
+                        finally:
+                            self._eval_task_group = None
+                except BaseExceptionGroup as group:
+                    # A task group collapses even a LONE exception into a group, and `Engine.run`'s
+                    # failure TYPE is a contract: `cli/__init__.py::_RefusalBoundaryGroup` prints an
+                    # `OperatorRefusal` as one line at exit code 2 and gives everything else a
+                    # traceback at exit 1 (CLAUDE.md — "a deliberate refusal is a TYPE, not a
+                    # message"), and ~40 tests assert the type through `pytest.raises`. Wrapping a
+                    # `ConfigRefusal` in an ExceptionGroup would put every operator refusal back in
+                    # the 42-lines-of-frames presentation that split removed. Unwrap the single-
+                    # exception case and let a genuine multi-failure group through as itself.
+                    raise _sole_task_group_error(group) from None
         finally:
             # Engine.run owns exactly one exporter lifetime. Always make its final barrier terminal:
             # a background span that closes after return must be rejected rather than append behind
