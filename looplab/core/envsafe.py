@@ -146,9 +146,11 @@ def validate_env_map(where: str, values, *,
 # pastes into a bug report. There is no redaction that could make that safe without also making the
 # value unreadable to the resume that has to reproduce it.
 #
-# It is also the ONE route around a boundary that already exists: `sandbox.is_secret_env` strips
-# secret-named host variables from every child process precisely so generated code cannot print them
-# into the durable stdout tail. A declared env is applied AFTER that strip, on purpose (that is what
+# It is also the ONE route around a boundary that already exists: `is_secret_env` — the function
+# directly above — strips secret-named host variables from EVERY child process precisely so generated
+# code cannot print them into the durable stdout tail. That the two live in one module is the point:
+# they are the same question asked twice, and a declared env that answered it differently would
+# undo the strip from the other side. A declared env is applied AFTER that strip, on purpose (that is what
 # makes it reach the eval) — so accepting a secret here would re-add exactly what the strip removed,
 # by the operator's own hand, in the one place it is also written to disk.
 #
@@ -159,9 +161,10 @@ def validate_env_map(where: str, values, *,
 # agent-written code runs. Exporting it in the launching shell is still possible and is the operator's
 # informed choice; what this refuses to do is write it down.
 #
-# The screen is `sandbox.is_secret_env` — the LOOSER of the two patterns (`core/config._SECRET_ENV_NAME`
-# is the stricter sibling), name AND credential-URL value. It over-matches on purpose: `HF_TOKEN` is
-# refused, and renaming the variable is not a workaround an operator can reach by accident.
+# The screen is this module's `is_secret_env` — the LOOSER of the two patterns
+# (`core/config._SECRET_ENV_NAME` is the stricter sibling), name AND credential-URL value. It
+# over-matches on purpose: `HF_TOKEN` is refused, and renaming the variable is not a workaround an
+# operator can reach by accident.
 def _secret_refusal(where: str, name: str) -> str:
     return (f"{where} may not declare {name!r}: its name or value looks like a credential, and a "
             "declared environment is written verbatim into the run's durable record "
