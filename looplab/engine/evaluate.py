@@ -2110,8 +2110,7 @@ class EvaluateMixin:
                 # Computed HERE, beside the change set and before the append, for the same reason
                 # `changed` is: it belongs in the DURABLE row. A resumed judge that reads the history
                 # without this column is back to being told what each fix intended and never what it
-                # accomplished. `node` is still the PRE-repair fold at this point (the re-fold is
-                # below the append), so `node.code` is the artifact `new_code` replaced.
+                # accomplished.
                 _verification = verify_repair(
                     triage.get("rationale", ""), changed=changed, deleted=new_deleted,
                     code_changed=_code_changed,
