@@ -114,20 +114,26 @@ class LessonPriorsMixin:
         # (`orchestrator._reentry_repin`) now does too, which is what stopped an unreadable memory_dir
         # from failing the run during deterministic setup on every start and resume.
         note_rows, note_health = read_memory_jsonl_window(npath)
+        scope_filtered = 0
         for _index, o in note_rows:
             if not isinstance(o, dict):
                 note_health["skipped"] += 1
                 continue
-            # REVIEW (mega-review 2026-08-13): `scope.allows` is fail-closed on missing polarity,
-            # and meta-note writers only started persisting `direction` in this same change set —
-            # so on an existing shared store EVERY legacy note fails the scope here and the whole
-            # exact-task "what won" tier (E4) goes dark until each task re-finalizes. Deliberate
-            # direction, but SILENT: a scope-filtered row increments neither `skipped` nor any
-            # health field, so the prior reads as "N rows, none relevant" rather than "N rows
-            # filtered for missing polarity". Count the scope exclusions into the health receipt.
-            if o.get("task_id") == self._e.task.id and o.get("note") and scope.allows(o):
-                notes.append(cross_run_text(
-                    o["note"], max_chars=1_200, single_line=True, entropy=True))
+            if o.get("task_id") != self._e.task.id or not o.get("note"):
+                continue
+            if not scope.allows(o):
+                # COUNTED, not silent. `scope.allows` is fail-closed on missing polarity and
+                # meta-note writers only started persisting `direction` on 2026-08-13, so on an
+                # existing shared store every LEGACY note fails here and the exact-task "what won"
+                # tier (E4) goes dark until each task re-finalizes. That direction is deliberate —
+                # a note whose polarity is unknown must not be read as agreeing with this run — but
+                # a filtered row used to increment nothing at all, so the prior read as "N rows,
+                # none relevant" rather than "N rows withheld for missing polarity". The two are
+                # very different facts for an operator wondering why the tier is empty.
+                scope_filtered += 1
+                continue
+            notes.append(cross_run_text(
+                o["note"], max_chars=1_200, single_line=True, entropy=True))
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
@@ -165,6 +171,9 @@ class LessonPriorsMixin:
             "unavailable": bool(note_health["unavailable"] or lesson_health["unavailable"]),
             "notes_digest": note_health["window_digest"],
             "lessons_digest": lesson_health["window_digest"],
+            # Withheld for an unreadable/absent SCOPE, not for being invalid — a different fact
+            # from `invalid`, and the one that explains an empty E4 tier on a legacy store.
+            "scope_filtered": int(scope_filtered),
         }
         return notes, parsed, fp, _memoized_embed(self._e._embedder), health
 
@@ -180,7 +189,10 @@ class LessonPriorsMixin:
                + (("\n[MEMORY_SOURCE_PARTIAL: "
                    f"unreadable={health['invalid']}; truncated={'true' if health['truncated'] else 'false'}; "
                    f"unavailable={'true' if health['unavailable'] else 'false'}; "
-                   "retained priors are incomplete.]") if not health["complete"] else ""))
+                   "retained priors are incomplete.]") if not health["complete"] else "")
+               + (f"\n[MEMORY_SCOPE_WITHHELD: {health['scope_filtered']} exact-task note(s) record "
+                  "no optimization direction, so their polarity cannot be established and they are "
+                  "not shown.]" if health.get("scope_filtered") else ""))
         # (1) meta-notes — research-flavoured, so the Developer never sees them.
         # DE-DUPE FIRST, then take the last 3. These notes are a `write_reflection_note` f-string
         # ("best metric {m} via op '{op}' params {p}; N nodes, M evaluated"), and `meta_notes.jsonl`

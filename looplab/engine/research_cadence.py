@@ -20,6 +20,7 @@ import logging
 import uuid
 from typing import Iterable, Optional
 
+from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
@@ -493,8 +494,11 @@ class ResearchCadenceMixin:
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
+            # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
+            # whose `source` stamp is missing (a log older than the field) is recognised by this
+            # text alone, so the two must not be spelled separately.
             self.store.append(EV_HINT, {
-                "text": "deep-research directions: " + "; ".join(directions[:5]),
+                "text": DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5]),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node

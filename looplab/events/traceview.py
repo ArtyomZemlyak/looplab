@@ -1247,6 +1247,11 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             cur = a.get("input")
             if "input_carry" not in a or not isinstance(cur, list):
                 base = cur if isinstance(cur, list) else []
+                # …unless the row says its own input was DROPPED. The durable exporter's
+                # oversized-generation fallback emits exactly this shape — no `input_carry`, and
+                # `input_partial: True` — so treating the branch as "input IS full" silently made
+                # every descendant of a dropped generation render as complete.
+                broke = own_partial
                 break   # old log / non-list → input IS full
             frm = a.get("input_from")
             if frm is None:                            # self-contained base: its `input` is the full ctx
