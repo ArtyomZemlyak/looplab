@@ -278,6 +278,8 @@ _SEP = os.sep
 _DOTDOT = ".."
 _abspath = os.path.abspath
 _normpath = os.path.normpath
+_realpath = os.path.realpath
+_realcache = {}
 _seen = set()
 _busy = []
 
@@ -327,15 +329,14 @@ def _fenced(p):
     return p
 
 
-def _fenced_dir(p):
-    """`_fenced` for a path naming a DIRECTORY. A directory's own name carries no trailing
-    separator, so `os.chdir('/src/repo')` misses the prefix test `open('/src/repo/x')` hits — and
-    symmetrically `os.chdir` into an allow-listed mount must still be permitted. Both are fixed by
-    comparing the trailing-separator form; the `open` path deliberately does NOT pay for this,
-    because opening a directory raises IsADirectoryError before it can read anything."""
-    r = _resolve(p)
-    if r is None:
-        return None
+def _prefixed(r):
+    """The trailing-separator prefix test, on an already-resolved absolute path.
+
+    A directory's own name carries no trailing separator, so `os.chdir('/src/repo')` misses the test
+    `open('/src/repo/x')` hits — and symmetrically an allow-listed mount must still be enterable.
+    Both are fixed by comparing the trailing-separator form. The `open` hot path deliberately does
+    NOT pay for this, because opening a directory raises IsADirectoryError before it can read
+    anything."""
     d = r if r.endswith(_SEP) else r + _SEP
     if not d.startswith(_ROOTS):
         return None
@@ -347,41 +348,102 @@ def _fenced_dir(p):
 def _fd_path(fd):
     """The path an OPEN DESCRIPTOR names, or None.
 
-    Only ever reached from a MUTATION event, never from `open`. That asymmetry is the whole reason
-    it is affordable: `/proc/self/fd/N` is a procfs read of an already-resolved dentry and costs
-    ~2 us flat regardless of the backing filesystem (measured 1,944 ns on the geesefs mount a run
-    root lives on, against 474,268 ns for a pre-open `realpath` of the same 13-component path), and
-    a node deletes a handful of times while it opens millions."""
+    Never reached from `open`, and that asymmetry is the whole reason it is affordable:
+    `/proc/self/fd/N` is a procfs read of an already-resolved dentry, ~2 us flat regardless of the
+    backing filesystem (measured 1,944 ns on the geesefs mount a run root lives on, against
+    474,268 ns for a pre-open `realpath` of the same 13-component path). A node deletes a handful of
+    times and opens millions, so the rare events can buy what the hot one cannot."""
     try:
         return os.readlink("/proc/self/fd/%%d" %% fd)
     except Exception:
         return None
 
 
-def _fenced_target(path, dir_fd):
-    """`_fenced_dir` plus the two argument shapes only the mutation events ever carry: a bare fd
-    (`os.truncate(fd, n)`), and a name relative to a dir_fd (`os.remove(name, dir_fd=...)`, i.e.
-    `unlinkat` — which is how `shutil.rmtree` removes every file it removes)."""
-    cls = path.__class__
-    if cls is int:
-        base = _fd_path(path)
-        return _fenced_dir(base) if base is not None else None
-    if cls is not str:
+def _real(d):
+    """`realpath`, MEMOIZED, for the rare events only.
+
+    `realpath` is catastrophic per-open (+254 %%, and ~474 us on geesefs) and nearly free per
+    DIRECTORY: a loop that chmods 10,000 files in one directory pays one call, not 10,000. Bounded
+    and cleared wholesale rather than evicted — an unbounded dict in a process that touches millions
+    of distinct paths is a leak, and the cache is a hint, never the decision.
+
+    The TOCTOU window is real and stated: a symlink repointed after its directory was first cached
+    is not seen again. That is sound against the ACCIDENT this fence exists for (an absolute path in
+    a config) and worthless against an adversary — the same honesty the module docstring keeps."""
+    r = _realcache.get(d)
+    if r is None:
         try:
-            path = os.fspath(path)
-        except TypeError:
-            return None
-        if path.__class__ is not str:
-            try:
-                path = os.fsdecode(path)
-            except Exception:
+            r = _realpath(d)
+        except Exception:
+            r = _abspath(d)
+        if len(_realcache) >= 4096:
+            _realcache.clear()
+        _realcache[d] = r
+    return r
+
+
+def _as_str(p):
+    """Coerce an audited argument to a path string, or None — WITHOUT `_resolve`'s relative fast
+    bail, which is sound only for `open`. The calls that reach here are exactly the ones that can
+    change, or step outside, the directory those relative names are read from."""
+    cls = p.__class__
+    if cls is int:
+        return _fd_path(p)                 # os.chdir(fd), os.truncate(fd), os.setxattr(fd)
+    if cls is str:
+        return p
+    try:
+        p = os.fspath(p)
+    except TypeError:
+        return None
+    if p.__class__ is str:
+        return p
+    try:
+        return os.fsdecode(p)
+    except Exception:
+        return None
+
+
+def _fenced_dir(p):
+    """`_fenced` for an argument naming a DIRECTORY the process is about to work from — `os.chdir`.
+
+    It RESOLVES SYMLINKS, and `open` deliberately does not. Without that, the module docstring's
+    central argument was FALSE: `_resolve` fast-bails on every relative path *because* a process
+    cannot `chdir` into a root, and an `abspath`/`normpath` compare let
+    `os.chdir(<workdir symlink pointing at the source>)` through — after which every bare relative
+    name read the source, measured THROUGH. The whole argument is resolved (not just its parent)
+    because the argument IS the directory in question, and `chdir` happens a handful of times per
+    process. The allow-list is applied to the RESOLVED path, so entering a `data:` mount that was
+    materialized as a symlink into the tree still works."""
+    r = _as_str(p)
+    return _prefixed(_real(r)) if r is not None else None
+
+
+def _fenced_target(path, dir_fd):
+    """The MUTATION check: the path an event is about to change, or None.
+
+    Three shapes `open` never sees, each measured THROUGH before it was handled: a bare fd
+    (`os.truncate(fd, n)`), a name relative to a dir_fd (`os.remove(name, dir_fd=...)`, i.e.
+    `unlinkat` — which is how `shutil.rmtree` deletes every file it deletes, and why rmtree of the
+    root itself used to take the whole tree), and a path under a symlinked directory.
+
+    Only the DIRNAME is resolved; the final component is kept verbatim. That is not a shortcut, it
+    is the meaning: `os.remove`/`os.rename` act on the LINK, not on what it points at, so resolving
+    the last component would refuse a node deleting its OWN symlink whose target happens to be a
+    mount source. The residual — a symlinked final component under `chmod`/`utime`, which do
+    follow — is the same class as the documented read-side one."""
+    r = _as_str(path)
+    if r is None:
+        return None
+    if r[:1] != _SEP:
+        if dir_fd is None:
+            base = _real(os.getcwd())      # rare-path only; `open`'s bail never pays for this
+        else:
+            base = _fd_path(dir_fd)
+            if base is None:
                 return None
-    if path[:1] != _SEP and dir_fd is not None:
-        base = _fd_path(dir_fd)
-        if base is None:
-            return None
-        path = base + _SEP + path
-    return _fenced_dir(path)
+        r = base + _SEP + r
+    head, _sep, tail = r.rpartition(_SEP)
+    return _prefixed(_real(head or _SEP) + _SEP + tail)
 
 
 def _dir_fd(args, index):
@@ -433,7 +495,10 @@ def _hook(event, args):
         check = _fenced
     elif event == "os.chdir":
         # Refused so the relative-path fast bail in `_resolve` stays TRUE: a process that chdir'd
-        # into the source tree could otherwise read all of it with bare relative names.
+        # into the source tree could otherwise read all of it with bare relative names. Routed
+        # through `_fenced_target`, not `_fenced_dir`, for its fd branch — `os.chdir` accepts an
+        # already-open descriptor and CPython audits the bare int, which no path compare can match
+        # (measured THROUGH: `os.chdir(os.open(root))` then a relative open read the tree).
         check = _fenced_dir
     else:
         # MUTATION. One dict lookup, and only for events that are not opens — a training process

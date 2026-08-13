@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -287,7 +288,11 @@ def test_the_directory_predicate_catches_the_root_itself():
     exec(compile(src, "sitecustomize.py", "exec"), ns)
     assert ns["_fenced"]("/src/repo") is None                # the open path is deliberately unchanged
     assert ns["_fenced_dir"]("/src/repo") == "/src/repo"
-    assert ns["_fenced_dir"]("/src/repo/") == "/src/repo/"
+    # Both spellings of the root are caught, and both REPORT the resolved form: `_fenced_dir` runs
+    # `realpath` (it is a rare-path check — see `test_chdir_through_a_symlink_is_refused` for the
+    # hole that closes), and `realpath` drops a trailing separator. What is asserted is that the
+    # root itself is refused under either spelling, which is the property this test names.
+    assert ns["_fenced_dir"]("/src/repo/") == "/src/repo"
     assert ns["_fenced_dir"]("/src/repo/data") is None       # an allow-listed mount stays enterable
     assert ns["_fenced_dir"]("/src/repository") is None
 
@@ -488,6 +493,274 @@ def test_the_node_4_corruption_is_reproduced_and_then_refused(tmp_path):
     assert 'seed_mode: "all"' in joined                     # …and the fix, in the repair loop's input
     rows = read_fence.violations(tmp_path / "deny" / "run-deny")
     assert rows and str(src / "checkpoint.txt") in rows[0]
+
+
+# ------------------------------------------------------------------- mutation (docs/34, 2026-08-13)
+#
+# The fence gated `open` and nothing else. `os.remove`, `os.rename`, `os.truncate` and `os.chmod`
+# raise their OWN audit events and none of them raises `open`, so a node's eval code could delete or
+# rename the operator's editable tree while every read of it was refused. Measured before the fix:
+# 14 of 14 mutation probes went THROUGH, `shutil.rmtree(<the source root>)` included.
+#
+# Every test below launches a REAL fenced subprocess and then asks the FILESYSTEM what happened,
+# rather than reading the fence's source. A source pin here would be satisfied by a comment; only
+# "the file is still on disk" distinguishes a refusal from a refusal that did not fire.
+
+
+def _survives(target: Path, code: str, wd, fence) -> tuple:
+    """Run `code` fenced, and report `(the file is still there, stderr)`."""
+    rc, out, err, timed_out = _run(code, wd, fence)
+    assert not timed_out
+    return target.exists(), (rc, out, err)
+
+
+def test_a_source_delete_is_refused_and_the_file_is_still_there(tmp_path):
+    """The headline. Fails without the fence: the control half is the SAME child with no marker and
+    it really deletes the operator's checkpoint."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    code = f"import os; os.remove({str(target)!r}); print('DELETED')"
+
+    rc, out, _err, _to = _run(code, wd)
+    assert rc == 0 and "DELETED" in out and not target.exists(), "control: the delete must succeed"
+    target.write_text(CHECKPOINT)                       # put the operator's file back
+
+    fence = _install(run_dir, src)
+    alive, (rc, out, err) = _survives(target, code, wd, fence)
+    assert alive, "the operator's file was DELETED from inside a fenced node process"
+    assert rc != 0 and "DELETED" not in out
+    assert "LoopLabSourceReadRefused" in err
+    assert read_fence.MUTATION_REFUSAL_MESSAGE.replace("{path}", str(target)) in err
+    assert "may not create, delete, rename, truncate, link or change" in err
+    assert target.read_text() == CHECKPOINT             # …and untouched, not merely present
+
+
+def test_rmtree_of_the_source_root_itself_is_refused(tmp_path):
+    """The worst case, and the one the prefix test alone could not see: `shutil.rmtree(<root>)`.
+
+    The root directory's own name carries no trailing separator, so opening it is not refused; then
+    rmtree unlinks every file under it with `os.remove(<bare name>, dir_fd=<fd of the dir>)`, which
+    CPython audits with the RELATIVE name. Measured before the fix: the whole tree, gone."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    _rc, _out, err, _to = _run(f"import shutil; shutil.rmtree({str(src)!r}); print('GONE')", wd, fence)
+    assert "LoopLabSourceReadRefused" in err
+    assert src.exists() and target.read_text() == CHECKPOINT
+
+
+def test_the_mutation_refusal_is_not_swallowed_by_an_oserror_handler(tmp_path):
+    """`except OSError:` is exactly as routine around a cleanup `os.remove` as it is around a read,
+    so the mutation refusal keeps the same deliberate non-`OSError` shape. A kernel-level fence
+    (landlock, an LD_PRELOAD shim) can only return EACCES and would be caught here — which is why
+    docs/34 recommends one ALONGSIDE this hook rather than instead of it."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run(f"""
+        import os
+        try:
+            os.remove({str(target)!r})
+        except OSError:
+            print("SWALLOWED — a routine cleanup handler ate the refusal")
+        """, wd, fence)
+    assert "SWALLOWED" not in out
+    assert rc != 0 and "LoopLabSourceReadRefused" in err and target.exists()
+
+
+# One operation per registered event. The dict IS the two-way registry check: its keys must equal
+# `MUTATION_EVENTS`, so an event added to the fence without a probe here — or a probe whose event
+# was dropped from the fence — fails rather than passing silently.
+_MUTATION_PROBES = {
+    "os.remove": "os.remove(T)",
+    "os.rename": "os.rename(T, T + '.moved')",
+    "os.truncate": "os.truncate(T, 0)",
+    "os.chmod": "os.chmod(T, 0o600)",
+    "os.chown": "os.chown(T, -1, -1)",
+    "os.utime": "os.utime(T, (0, 0))",
+    "os.mkdir": "os.mkdir(os.path.join(os.path.dirname(T), 'new'))",
+    "os.rmdir": "os.rmdir(os.path.dirname(T))",
+    "os.symlink": "os.symlink('/etc/hostname', os.path.join(os.path.dirname(T), 'planted'))",
+    "os.link": "os.link(T, 'stolen-hardlink')",
+    "os.setxattr": "os.setxattr(T, 'user.looplab', b'1')",
+    "os.removexattr": "os.removexattr(T, 'user.looplab')",
+}
+
+
+def test_the_probe_table_covers_exactly_the_registry():
+    assert set(_MUTATION_PROBES) == set(read_fence.MUTATION_EVENTS)
+
+
+@pytest.mark.parametrize("event", sorted(_MUTATION_PROBES))
+def test_every_registered_mutation_event_is_refused(tmp_path, event):
+    """Each registered event, driven through a real fenced child against the operator's tree."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run(f"""
+        import os
+        T = {str(target)!r}
+        {_MUTATION_PROBES[event]}
+        print('THROUGH')
+        """, wd, fence)
+    assert "THROUGH" not in out and rc != 0
+    assert "LoopLabSourceReadRefused" in err, f"{event} was not refused"
+    assert target.exists() and target.read_text() == CHECKPOINT
+    # …and the run keeps its own record of WHICH event was attempted.
+    rows = read_fence.violations(run_dir)
+    assert rows and rows[0].startswith("deny\t") and rows[0].endswith("\t" + event)
+
+
+def test_mutation_arg_shapes_match_the_interpreter(tmp_path):
+    """`MUTATION_EVENTS` says WHERE each event carries its paths. Re-derive that from the running
+    interpreter instead of trusting the table: perform every operation under a recording audit hook
+    and check the declared indices are the ones that actually hold the paths we passed.
+
+    This is the guard that keeps the table from rotting. A CPython release that inserts an argument
+    would leave the fence checking `args[0]` of something that is no longer a path — the fence would
+    still install, still run, and silently stop refusing. Run in a SUBPROCESS because
+    `sys.addaudithook` is irreversible and would otherwise fence the rest of the session."""
+    probe = tmp_path / "shapes.py"
+    probe.write_text(textwrap.dedent("""
+        import json, os, sys
+        D = sys.argv[1]
+        SEEN = {}
+        RECORDING = [False]
+
+        def hook(event, args):
+            if RECORDING[0] and event.startswith("os."):
+                SEEN.setdefault(event, []).append(args)
+
+        sys.addaudithook(hook)
+
+        def mk(name):
+            p = os.path.join(D, name)
+            with open(p, "wb") as fh:
+                fh.write(b"x")
+            return p
+
+        A, B = mk("a"), os.path.join(D, "b")
+        sub = os.path.join(D, "sub")
+        os.mkdir(sub)
+        RECORDING[0] = True
+        os.chmod(A, 0o600); os.chown(A, -1, -1); os.utime(A, (0, 0))
+        os.truncate(A, 1); os.setxattr(A, "user.p", b"1"); os.removexattr(A, "user.p")
+        os.symlink(A, os.path.join(D, "sym")); os.link(A, os.path.join(D, "hard"))
+        os.mkdir(os.path.join(D, "made")); os.rmdir(sub)
+        os.rename(A, B); os.remove(B)
+        RECORDING[0] = False
+        print(json.dumps({k: [[a if isinstance(a, (str, int)) else None for a in args]
+                              for args in v] for k, v in SEEN.items()}))
+        """), encoding="utf-8")
+    work = tmp_path / "shapework"
+    work.mkdir()
+    # Not through `_run`/`run_argv`: this child must be UNFENCED (it performs every mutation for
+    # real) and it takes an argv the fenced helper does not pass.
+    res = subprocess.run([sys.executable, str(probe), str(work)], capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    seen = json.loads(res.stdout.strip().splitlines()[-1])
+
+    assert set(read_fence.MUTATION_EVENTS) <= set(seen), (
+        "this interpreter did not raise every registered event: "
+        f"{sorted(set(read_fence.MUTATION_EVENTS) - set(seen))}")
+    for event, slots in read_fence.MUTATION_EVENTS.items():
+        args = seen[event][0]
+        assert len(slots) <= len(args)
+        for path_i, fd_i in slots:
+            value = args[path_i]
+            assert isinstance(value, str) and value.startswith(str(work)), (
+                f"{event}: args[{path_i}] is {value!r}, not one of the paths we passed — the "
+                f"registry's path slot moved")
+            if fd_i is not None:
+                assert fd_i < len(args) and isinstance(args[fd_i], int), (
+                    f"{event}: args[{fd_i}] is not a dir_fd on this interpreter")
+
+
+def test_unlinkat_through_a_dir_fd_is_refused(tmp_path):
+    """CPython audits the RELATIVE name for a dir_fd call, which no prefix compare can match. The
+    fence resolves the descriptor through /proc/self/fd — affordable only because this never runs
+    on the `open` hot path."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    final = src / "experiments" / "baseline" / "final"
+    fence = _install(run_dir, src)
+    rc, _out, err, _to = _run(f"""
+        import os
+        d = os.open({str(final)!r}, os.O_RDONLY)
+        os.remove('model.safetensors', dir_fd=d)
+        """, wd, fence)
+    assert rc != 0 and "LoopLabSourceReadRefused" in err
+    assert (final / "model.safetensors").exists()
+
+
+def test_chdir_through_a_symlink_is_refused(tmp_path):
+    """The fence's relative-path fast bail is sound only because a process cannot `chdir` into a
+    root. It compared `abspath`, so a workdir symlink pointing at the source was enterable and every
+    bare relative name then read the tree — measured THROUGH. `os.chdir` is rare, so it resolves."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    (wd / "sneak").symlink_to(src)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run("""
+        import os
+        os.chdir('sneak')
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, wd, fence)
+    assert rc != 0 and CHECKPOINT not in out and "LoopLabSourceReadRefused" in err
+
+
+def test_a_mutation_under_a_symlinked_directory_is_refused(tmp_path):
+    """The same resolution, on the mutation side: the DIRNAME is resolved (memoized), so a delete
+    aimed through a workdir symlink lands on the real tree and is refused."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    (wd / "sneak").symlink_to(src / "experiments" / "baseline" / "final")
+    fence = _install(run_dir, src)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    rc, _out, err, _to = _run("import os; os.remove('sneak/model.safetensors')", wd, fence)
+    assert rc != 0 and "LoopLabSourceReadRefused" in err
+    assert target.read_text() == CHECKPOINT
+
+
+def test_the_nodes_own_cleanup_is_untouched(tmp_path):
+    """The false-positive half, and the one that decides whether this is shippable: everything a
+    node legitimately does to its OWN workspace still works — a training run writes, renames,
+    chmods, truncates and deletes constantly. A mutation of an allow-listed `data:` mount SOURCE is
+    also permitted: the allow-list means "this is not the fenced source tree", and it is uniform
+    across reads and writes rather than being a second, different policy."""
+    src, _sib, run_dir, wd, models = _world(tmp_path)
+    fence = _install(run_dir, src, allow=[("corpus", src / "corpus")])
+    rc, out, err, _to = _run(f"""
+        import os, shutil
+        os.makedirs('ckpt/step_1', exist_ok=True)
+        open('ckpt/step_1/model.bin', 'wb').write(b'weights')
+        os.chmod('ckpt/step_1/model.bin', 0o644)
+        os.truncate('ckpt/step_1/model.bin', 4)
+        os.rename('ckpt/step_1', 'ckpt/step_2')
+        os.symlink('ckpt/step_2', 'latest')
+        os.link('ckpt/step_2/model.bin', 'ckpt/hardlink.bin')
+        os.utime('ckpt/step_2/model.bin', (0, 0))
+        shutil.rmtree('ckpt/step_2')
+        os.remove('latest')
+        open({str(models / 'config.json')!r} + '.tmp', 'w').write('{{}}')     # the model cache
+        os.remove({str(models / 'config.json')!r} + '.tmp')
+        open({str(src / 'corpus' / 'scratch.txt')!r}, 'w').write('mount')     # allow-listed source
+        os.remove({str(src / 'corpus' / 'scratch.txt')!r})
+        print('ALL LEGAL WORK DONE')
+        """, wd, fence)
+    assert rc == 0, err
+    assert "ALL LEGAL WORK DONE" in out
+    assert not read_fence.violations(run_dir), "a legal workspace mutation raised a violation"
+
+
+def test_warn_lets_a_mutation_through_and_records_it(tmp_path):
+    """`warn` is the honest rung for one run while an operator finds out what their pipeline
+    touches. It must not silently become a deny for mutations."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    target = src / "experiments" / "baseline" / "final" / "model.safetensors"
+    fence = _install(run_dir, src, policy="warn")
+    rc, out, err, _to = _run(f"import os; os.remove({str(target)!r}); print('DELETED')", wd, fence)
+    assert rc == 0 and "DELETED" in out and not target.exists()
+    assert "LOOPLAB READ FENCE (warn)" in err
+    rows = read_fence.violations(run_dir)
+    assert len(rows) == 1 and rows[0].startswith("warn\t") and rows[0].endswith("\tos.remove")
 
 
 def test_settings_vocabulary_matches_the_module(tmp_path):
