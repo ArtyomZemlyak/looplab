@@ -157,3 +157,45 @@ def test_a_legacy_string_checker_keeps_its_gate(tmp_path):
     assert res.failed_stage == "prep"
     assert res.stages[0]["status"] == "check_failed"
     assert not (tmp_path / "ran").exists()
+
+
+# --------------------------------------------------------------------------------------------
+# The RECORD side, which must not move at all
+# --------------------------------------------------------------------------------------------
+
+def test_an_inconclusive_stage_still_vetoes_salvage():
+    """doc 36 corollary 2, driven: the DOING moves and the RECORDING does not.
+
+    Before the vocabulary, a doubtful checker answer ended the pipeline at that stage, so such a
+    node could never reach salvage. Now it can — so the doubt has to veto here instead, or widening
+    the action space would have quietly widened the trusted set too.
+
+    Note the doubt is on the FIRST row: an inconclusive stage is no longer terminal, so it is
+    generally upstream of the row `status` describes, which is why the veto is a scan.
+    """
+    from looplab.engine.metric_salvage import (VETO_STAGE_KEYS, _stage_carries_veto_key,
+                                               salvage_condition)
+
+    class _Res:
+        exit_code = 0
+        timed_out = False
+        stalled = False
+
+        def __init__(self, stages):
+            self.stages = stages
+
+    clean = [{"name": "prep", "status": "ok"}, {"name": "train", "status": "fail"}]
+    assert salvage_condition(_Res(clean), "crash") == "stage_failed"
+
+    doubted = [{"name": "prep", "status": "ok", "check_inconclusive": "could not tell"},
+               {"name": "train", "status": "fail"}]
+    assert salvage_condition(_Res(doubted), "crash") is None, \
+        "a stage nobody could vouch for contributed a number to the record"
+
+    # …and the predicate itself, so the rule has a truth table rather than one scenario.
+    assert _stage_carries_veto_key(doubted) is True
+    assert _stage_carries_veto_key(clean) is False
+    assert _stage_carries_veto_key([]) is False
+    assert _stage_carries_veto_key(["not a dict"]) is False
+    assert _stage_carries_veto_key([{"check_inconclusive": ""}]) is False, "an empty doubt is no doubt"
+    assert VETO_STAGE_KEYS == {STAGE_CHECK_INCONCLUSIVE_KEY}

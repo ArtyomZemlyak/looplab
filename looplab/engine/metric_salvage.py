@@ -200,6 +200,28 @@ NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout"})
 # another reason not to put a model in that seat.
 VETO_STAGE_STATUSES = frozenset({"check_failed"})
 
+# …and the same veto for a stage the checker looked at and COULD NOT JUDGE.
+#
+# Added 2026-08-13 with the verdict vocabulary (doc 37 §2.1). That change let an unreadable /
+# out-of-enum / explicitly-inconclusive checker answer stop failing the node, because "I cannot tell"
+# is not "it failed" and killing a 15-hour training on one is what cost 46.6 GPU-hours. That is a
+# decision about what happens NEXT and it is the right one. This is the OTHER half of doc 36's
+# corollary 2 — *a wider action space must not widen the trusted set* — and without it the change
+# would quietly have done both: a pipeline whose `check`ed stage drew a doubt used to end at that
+# stage, so it could never reach salvage at all, and now it can.
+#
+# So the DOING moves and the RECORDING does not. A stage nobody could vouch for still may not
+# contribute a number to the record on a node that failed for some other reason. Note this is a
+# scan over EVERY stage row, not `stages[-1]` like the status veto above: an inconclusive stage is
+# no longer terminal, so the doubt is generally NOT on the last row — it is upstream of it, which is
+# exactly the case the status check cannot see.
+VETO_STAGE_KEYS = frozenset({"check_inconclusive"})
+
+
+def _stage_carries_veto_key(stages) -> bool:
+    """Did any stage in this pipeline record a doubt that vetoes salvage? Pure and total."""
+    return any(isinstance(s, dict) and any(s.get(k) for k in VETO_STAGE_KEYS) for s in stages)
+
 
 def settle_mode(mode) -> str:
     """The effective salvage mode for an arbitrary configured value.
@@ -278,6 +300,11 @@ def salvage_condition(res, reason: str) -> Optional[str]:
         return "eval_failed"
     status = str(stages[-1].get("status") or "")
     if status in VETO_STAGE_STATUSES:
+        return None
+    if _stage_carries_veto_key(stages):
+        # An upstream stage the checker could not vouch for — see `VETO_STAGE_KEYS`. Checked before
+        # every admitting branch below, and over ALL rows rather than the last one, because an
+        # inconclusive stage no longer ends the pipeline and so is never the row `status` describes.
         return None
     if status == "expect_failed":
         return "artifact_contract"

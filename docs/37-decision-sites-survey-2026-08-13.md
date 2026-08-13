@@ -99,6 +99,16 @@ and predates this change); the metric still comes from the operator's own reader
 *did* condemn. A wrong `inconclusive` costs one more stage's runtime. A wrong `check_failed` cost
 46.57 hours.
 
+**And the record side was held explicitly, not by assumption.** Doc 36 corollary 2 — *a wider action
+space must not widen the trusted set* — is not satisfied for free here. A doubtful checker answer used
+to END the pipeline at that stage, so such a node could never reach salvage at all; now it can. So the
+doubt moved rather than vanished: `metric_salvage.VETO_STAGE_KEYS` refuses salvage for a pipeline any
+of whose stages carries `check_inconclusive`. A stage nobody could vouch for still may not contribute
+a number to the record. Note it is a SCAN over every stage row, not the `stages[-1]` status check
+beside it: an inconclusive stage is no longer terminal, so the doubt is upstream of the row `status`
+describes — exactly the case the existing check cannot see. **The doing moves; the recording does
+not.**
+
 **Fail-open, and why that is not a weakening.** The direction of the coercion was chosen against the
 measured asymmetry, not by taste. A checker that cannot be read is not evidence of anything, and the
 things that keep the record honest are all downstream of it and all deterministic. Where a stage
