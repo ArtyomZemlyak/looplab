@@ -1,6 +1,7 @@
 import { fmt, fmtCost } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { crossRunPriorNarration } from './crossRunPrior.js'
+import { livePhase } from './buildingModel.js'
 
 // The event-feed NARRATION MODEL: pure data + pure functions that turn one raw run event into the
 // line a human reads, the kind chip it files under, and the answer to "does this type belong in the
@@ -50,6 +51,23 @@ export const NARR = {
   node_building: {
     validate: d => ownValue(d, 'node_id'),
     render: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
+  },
+  // The live-progress beacon. It IS in the curated feed (an entry here is what `isCuratedType`
+  // consults) because "every step has its own visible signal" is the whole point — and it is in
+  // STATUS_NOISE at the same time, which is not a contradiction: NOISE governs what may RESTART the
+  // status clock and what the strip's last-meaningful-event fallback keys on, not what a reader may
+  // see. The two sets have always been independent; `node_building` is likewise in both.
+  phase_progress: {
+    validate: d => ownValue(d, 'stage') && ownValue(d, 'phase') && ownValue(d, 'status'),
+    render: (d) => {
+      const where = ownValue(d, 'node_id') ? ` #${d.node_id}` : ''
+      // The duration is the reason a FINISHED beacon is worth a feed row at all — it is the only
+      // place a completed step's cost is stated in words, and "propose took 11 minutes" is the fact
+      // an operator scrolling back is looking for.
+      const took = d.status === 'finished' && Number.isFinite(Number(d.seconds))
+        ? ` — ${Number(d.seconds).toFixed(1)}s` : ''
+      return `${d.stage} ${d.phase}${where} ${d.status}${took}`
+    },
   },
   node_created: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'operator'),
@@ -451,7 +469,7 @@ export const GROUPS = [
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
   ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
-  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped'],
+  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired card_auto_dropped phase_progress'],
 ]
 export const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>
   types.split(' ').map(type => [type, group])))
@@ -541,11 +559,26 @@ export const STATUS_NOISE = new Set([
   // seconds and never reached the 20-second floor. The clock this file exists to provide rendered
   // nothing at all for exactly the wait it was built for.
   'llm_usage',
+  // `phase_progress` is here for EXACTLY the reason `llm_usage` above is, and it would have been the
+  // same defect a second time: a build emits a beacon at every step boundary, so leaving it out of
+  // this set would let the fallback scan below restart the clock on each one and the age would never
+  // reach the 20-second floor during the very wait it measures. The clock does not lose the beacon by
+  // excluding it — it reads it FIRST and far more precisely, from the still-OPEN phase's own start
+  // (see below), rather than from whichever row happened to land last.
+  'phase_progress',
 ])
 
 const STATUS_AGE_MIN_S = 20      // below this the clock is noise, and a blinking number reads as churn
 
 export function liveStatusStartedAt(live, log = []) {
+  // The CURRENT PHASE's own start wins over everything below. The two answer different questions and
+  // the phase's is the one an operator is asking: with beacons, "40m" against "Writing code for
+  // experiment #7…" means the Developer has been going 40 minutes, whereas the build-marker clock
+  // below would report the age of the whole build — proposal, gate and all — under a label naming
+  // only its last step. `livePhase` already refuses a finished or engine-less run, so this cannot
+  // resurrect the phantom clock the guards below exist to prevent.
+  const phase = livePhase(live, log)
+  if (phase?.ts != null) return phase.ts
   // The OLDEST in-flight build, not the newest: with several Developers writing at once the number
   // that matters is how long the slowest one has been going, which is the one that stalls the batch.
   const started = (Object.values(live?.buildings || {}).length

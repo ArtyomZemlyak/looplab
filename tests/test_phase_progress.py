@@ -1,0 +1,204 @@
+"""The `phase_progress` beacon: a node build must not be a blank panel.
+
+Tier 1 wherever possible (CLAUDE.md's guard-test ladder) — these drive a REAL engine over a REAL
+event log and then read the log, rather than pinning source text. The properties that cost something
+when they break are: the beacon fires at all on the path a shipped default actually takes; it does
+NOT reach the run prologue, whose readers key on the raw log; and its (stage, phase) vocabulary
+cannot be typo'd.
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from looplab.events.types import (
+    ALL_EVENT_TYPES,
+    DIAGNOSTIC_EVENTS,
+    EV_PHASE_PROGRESS,
+    PROGRESS_PHASES,
+    PROGRESS_STAGE_BUILD,
+    PROGRESS_STAGES,
+    PROGRESS_STATUSES,
+    assert_progress_phase,
+)
+
+
+def _beacons(run_dir):
+    rows = [json.loads(line) for line in
+            (run_dir / "events.jsonl").read_text().splitlines() if line.strip()]
+    return rows, [r["data"] for r in rows if r.get("type") == EV_PHASE_PROGRESS]
+
+
+# --------------------------------------------------------------------- the registry's own rules
+
+def test_the_beacon_is_registered_and_fold_ignored():
+    assert EV_PHASE_PROGRESS in ALL_EVENT_TYPES
+    # It must never fold. It is emitted at a rate the fold has no reason to carry, it says nothing
+    # about selection, and a resume must rebuild the same RunState from a log with these rows and
+    # from one without them.
+    assert EV_PHASE_PROGRESS in DIAGNOSTIC_EVENTS
+
+
+def test_the_stage_phase_pair_is_closed_and_refuses_a_typo():
+    # The defect this exists to prevent: a progress beacon has no reader that fails loudly. The fold
+    # skips it and a UI keyed on an unknown phase renders nothing, so a typo'd phase ships as a
+    # silently missing signal — which is the exact thing this whole change removes.
+    assert set(PROGRESS_PHASES) == set(PROGRESS_STAGES)
+    for stage, phases in PROGRESS_PHASES.items():
+        assert phases, f"stage {stage} declares no phases"
+        for phase in phases:
+            for status in PROGRESS_STATUSES:
+                assert_progress_phase(stage, phase, status)
+    with pytest.raises(ValueError, match="unknown progress stage"):
+        assert_progress_phase("buildd", "propose", "started")
+    with pytest.raises(ValueError, match="unknown progress phase"):
+        assert_progress_phase(PROGRESS_STAGE_BUILD, "implememt", "started")
+    with pytest.raises(ValueError, match="unknown progress status"):
+        assert_progress_phase(PROGRESS_STAGE_BUILD, "implement", "begun")
+
+
+def test_the_diagnostic_fence_covers_it_so_a_beacon_cannot_discard_a_paid_proposal():
+    """Invariant #1's real rule: not "does the fold read it?" but "does any reader key on position?".
+
+    `_proposal_authority_seq` fences a paid proposal by comparing a max-seq for EQUALITY across the
+    window in which `_prepare_node_idea` makes its call — and beacons are appended INSIDE that very
+    window, by construction, since that call is what they bracket. The fence excludes
+    DIAGNOSTIC_EVENTS wholesale, which is what makes their position immaterial. That is a property of
+    the READER; if the exclusion were ever narrowed back to a named list, every build would discard
+    the proposal it just paid for.
+    """
+    from looplab.engine.speculation import SpeculationMixin
+
+    events = [
+        type("E", (), {"type": EV_PHASE_PROGRESS, "seq": 99})(),
+        type("E", (), {"type": "node_created", "seq": 5})(),
+    ]
+    assert SpeculationMixin._proposal_authority_seq(events) == 5
+
+
+# ------------------------------------------------------------------- driven over a real engine
+
+@pytest.fixture(scope="module")
+def offline_run(tmp_path_factory):
+    """One real offline run, reused: it is the only way to prove a beacon reaches the log on the
+    path a shipped default actually takes rather than the one a hand-built call would take."""
+    from looplab.cli import app
+    from typer.testing import CliRunner
+
+    out = tmp_path_factory.mktemp("phase-progress") / "run"
+    result = CliRunner().invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2",
+        "--direction", "min", "--backend", "toy", "--out", str(out),
+    ])
+    assert result.exit_code == 0, result.output
+    return out
+
+
+def test_a_real_build_narrates_its_phases(offline_run):
+    rows, beacons = _beacons(offline_run)
+    build = [b for b in beacons if b["stage"] == PROGRESS_STAGE_BUILD]
+    assert build, "a real run emitted no build beacon at all"
+    # The PROPOSAL specifically. It is the phase that used to be wholly invisible — it runs before
+    # `node_building` is appended, so no marker and no node existed while it ran — and it is emitted
+    # from `_consume_batch_proposal`, the funnel the shipped default width goes through. A beacon
+    # only on the serial `_create_node_scoped` path would leave the default config exactly as blank
+    # as before, which is how the first version of this change was wrong.
+    assert any(b["phase"] == "propose" for b in build)
+    for b in build:
+        assert_progress_phase(b["stage"], b["phase"], b["status"])
+    # Every started row is answered, so nothing on screen can tick upward forever.
+    started = [b for b in build if b["status"] == "started"]
+    finished = [b for b in build if b["status"] == "finished"]
+    assert len(started) == len(finished)
+    assert all("seconds" in b and "ok" in b for b in finished)
+
+
+def test_the_calibration_setup_prefix_still_opens_the_log(offline_run):
+    """`speculation_quality._validate_calibration_setup` pins the log's FIRST FIVE events as an exact
+    setup prefix, and the bootstrap separately refuses a run whose log is not exactly empty at start.
+    Both fail silently — a calibration run simply stops being able to mint a receipt — so the head of
+    a real run's log is asserted here rather than left to the gate to discover six GPU runs later."""
+    rows, _beaconed = _beacons(offline_run)
+    assert [r["type"] for r in rows[:3]] == ["setup_started", "setup_step", "run_started"]
+
+
+def test_the_run_prologue_stays_write_free_because_its_readers_key_on_the_raw_log(offline_run,
+                                                                                  tmp_path):
+    """The measured reason `PROGRESS_STAGES` has one stage and not two.
+
+    A resume is just as blank as a build, and beacons WERE added to `Engine._enter_run` and reverted.
+    Thirteen tests across four files broke and every one was a real property — the receipt gate pins
+    the log BYTES as unchanged when it rejects a run, and finalize RECOVERY changed branch and minted
+    a fresh PAID scope instead of resuming the existing one. This drives the invariant that made
+    those breaks possible: a resume must add NO row of its own to the log before the loop's first
+    turn. If someone re-adds a prologue beacon, this fails here rather than in `test_report`, where
+    it reads as a finalize bug.
+    """
+    import shutil
+    from looplab.cli import app
+    from typer.testing import CliRunner
+
+    resumed = tmp_path / "resumed"
+    shutil.copytree(offline_run, resumed)
+    (resumed / "engine.lock").unlink(missing_ok=True)
+    before = [json.loads(line) for line in
+              (resumed / "events.jsonl").read_text().splitlines() if line.strip()]
+    result = CliRunner().invoke(app, [
+        "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2",
+        "--direction", "min", "--backend", "toy", "--out", str(resumed), "--max-nodes", "8",
+    ])
+    assert result.exit_code == 0, result.output
+    rows, beacons = _beacons(resumed)
+    # Nothing may claim a stage the registry does not declare, and `resume` is not declared.
+    assert PROGRESS_STAGES == {PROGRESS_STAGE_BUILD}
+    assert all(b["stage"] in PROGRESS_STAGES for b in beacons)
+    # The already-durable prefix is untouched byte-for-byte: a re-entry appends only AFTER its
+    # authorization and finalize-reconciliation reads, never before or between them.
+    assert rows[:len(before)] == before
+
+
+def test_the_beacon_never_takes_down_the_work_it_reports_on(tmp_path):
+    """A progress beacon that can fail the operation it narrates is a downgrade, so the appends are
+    contained. `assert_progress_phase` deliberately stays OUTSIDE that containment — an unregistered
+    phase is a coding error to fix, not a runtime condition to survive."""
+    from looplab.engine.orchestrator import Engine
+
+    class _ExplodingStore:
+        path = tmp_path / "events.jsonl"
+
+        def append(self, *_a, **_k):
+            raise OSError("the log is gone")
+
+    engine = Engine.__new__(Engine)
+    engine.store = _ExplodingStore()
+    ran = []
+    with engine._progress(PROGRESS_STAGE_BUILD, "implement", node_id=1):
+        ran.append(True)
+    assert ran == [True]
+    # A bare Engine built via __new__ (which ~170 test call sites do) carries no store at all.
+    bare = Engine.__new__(Engine)
+    with bare._progress(PROGRESS_STAGE_BUILD, "propose"):
+        ran.append(True)
+    assert ran == [True, True]
+    with pytest.raises(ValueError):
+        with bare._progress(PROGRESS_STAGE_BUILD, "not_a_phase"):
+            pass
+
+
+def test_enabled_false_runs_the_body_and_emits_nothing(tmp_path):
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.eventstore import EventStore
+
+    engine = Engine.__new__(Engine)
+    engine.store = EventStore(tmp_path / "events.jsonl")
+    with engine._progress(PROGRESS_STAGE_BUILD, "propose", enabled=False):
+        pass
+    assert engine.store.read_all() == []
+    with engine._progress(PROGRESS_STAGE_BUILD, "propose") as learned:
+        learned["events"] = 7
+    types = [e.type for e in engine.store.read_all()]
+    assert types == [EV_PHASE_PROGRESS, EV_PHASE_PROGRESS]
+    # A fact only the BODY can know reaches the `finished` row, never the already-appended `started`.
+    assert "events" not in engine.store.read_all()[0].data
+    assert engine.store.read_all()[1].data["events"] == 7

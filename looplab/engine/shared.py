@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import contextlib
 import math
+import time
 from typing import Optional
 
 from looplab.engine.cadence import cadence_due
+from looplab.events.types import EV_PHASE_PROGRESS, assert_progress_phase
 
 
 def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
@@ -77,6 +79,63 @@ class SharedEngineMixin:
         wired (tests build Engine via __new__ and skip __init__) — the op still runs, just untraced."""
         tr = getattr(self, "tracer", None)
         return tr.span(name, new_trace=True, **attrs) if tr is not None else contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _progress(self, stage: str, phase: str, *, enabled: bool = True, **detail):
+        """Bracket one step of a long operation with a `phase_progress` beacon, so the operator's
+        screen names the step that is running instead of showing nothing for minutes.
+
+        Emits `started` on entry and `finished` on exit, the latter carrying `seconds` and whether
+        the step raised. Both, not just `started`, because the LAST step of a stage has no successor
+        whose `started` could bound it — a build that ends on `implement` would otherwise read as
+        still writing forever, which is precisely the "is it hung?" question this exists to answer.
+
+        NOT routed through `_append_proposal_event`. That sink buffers a worker's appends until the
+        main task publishes them (`novelty.py::_capture_proposal_events`), which is correct for the
+        FOLDED audit rows it was built for and exactly wrong here: the Layer-5 speculative producer is
+        a background worker doing the very multi-minute work that is invisible, so buffering would
+        deliver every beacon at once AFTER the wait it was meant to narrate. A direct `store.append`
+        is what invariant #1 permits a concurrent task for a DIAGNOSTIC type.
+
+        Never blocks the work it wraps. A progress beacon that can fail the operation it reports on
+        is a downgrade, so the appends are contained — but `assert_progress_phase` runs OUTSIDE that
+        containment, because an unregistered phase is a coding error to be fixed, not a runtime
+        condition to be survived (see its docstring).
+
+        `enabled=False` runs the body and emits NOTHING — a caller that must sometimes stay silent
+        writes the bracketed body ONCE rather than duplicating it under an `if`. It has no production
+        caller today: the one that had it was the run prologue, and that whole beacon was reverted
+        because the log is the wrong channel there (see `events/types.py::PROGRESS_STAGES`). It is
+        kept, and driven by a test, because the next caller in a stretch that is only SOMETIMES worth
+        narrating will need exactly this and would otherwise reach for the duplicated `if`.
+        """
+        assert_progress_phase(stage, phase, "started")
+        store = getattr(self, "store", None) if enabled else None   # bare Engine.__new__ instances
+                                                                    # in tests carry no store either
+
+        def _emit(status: str, **extra):
+            if store is None:
+                return
+            try:
+                store.append(EV_PHASE_PROGRESS,
+                             {"stage": stage, "phase": phase, "status": status, **detail, **extra})
+            except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
+                pass
+
+        _emit("started")
+        t0 = time.time()
+        ok = True
+        # Yielded so the BODY can report what it LEARNED to its own `finished` beacon: a count, a
+        # size, anything that does not exist until the phase has actually run. Deliberately never
+        # merged into `started`, which has already been appended by the time the body sees this.
+        learned: dict = {}
+        try:
+            yield learned
+        except BaseException:
+            ok = False
+            raise
+        finally:
+            _emit("finished", seconds=round(time.time() - t0, 3), ok=ok, **learned)
 
     # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
     # `engine/cadence.py` states why since-last and not `n % every == 0`; the NAME lives here because

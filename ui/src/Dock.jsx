@@ -26,7 +26,7 @@ import {
 } from './traceScrollModel.js'
 import { NARR, GROUPS, GROUP_GLYPH, STATUS_NOISE, TYPE2GROUP, kindOf, isCuratedType,
   eventNarration, liveStatusAgeLabel } from './narration.js'
-import { buildingGenerations, buildingMarkers } from './buildingModel.js'
+import { buildingGenerations, buildingMarkers, livePhase, phaseLabel } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
 // The timeline is on the hot run route; memo rendering is needed only after a research event is
@@ -249,6 +249,23 @@ function agentStatus(live, log) {
   // `buildings` marker LIST (node_id->marker object) so the single-build label is right even after the
   // last-appended build (the singular `live.building`) finishes but a sibling survives. Fall back to the
   // singular `building` for a serial-build run or an old server that doesn't send `buildings`.
+  // The PHASE beacon first, and above the marker check on purpose. It is strictly more specific than
+  // everything below it: it names the step inside the build ("Writing code for experiment #7…"
+  // rather than "Writing experiment #7…"), and — the part that actually closes the operator's
+  // complaint — it is the ONLY thing that can speak during the proposal, which runs BEFORE
+  // `node_building` is appended and therefore before any marker below exists. Without this the strip
+  // fell through past every branch to "Planning next experiment…" and sat there for the whole
+  // Researcher call. A resume beacon reaches here for the same structural reason: the prologue runs
+  // before the loop's first turn, so no marker, node or pending count has moved yet.
+  // NOT `phase` — that name is already the run-level `live.phase` string ten lines up, and shadowing
+  // it here is a parse error rather than a subtle bug only because they share a scope.
+  const stepLabel = phaseLabel(livePhase(live, log))
+  if (stepLabel) {
+    // Parallel builds still need the COUNT, which the phase alone cannot carry: one beacon describes
+    // one build. Keep the marker-derived fan-out and let the phase say what they are all doing.
+    const parallel = buildingMarkers(live)
+    return parallel.length > 1 ? `${stepLabel} (${parallel.length} in parallel)` : stepLabel
+  }
   const buildMarkers = buildingMarkers(live)
   if (buildMarkers.length > 1) {
     return `Writing ${buildMarkers.length} experiments in parallel…`

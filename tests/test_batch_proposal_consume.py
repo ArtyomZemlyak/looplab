@@ -32,6 +32,12 @@ class _Host:
 
     _consume_batch_proposal = Engine._consume_batch_proposal
     _record_dropped_batch_cards = Engine._record_dropped_batch_cards
+    # `_consume_batch_proposal` brackets the proposal with the live-progress beacon, so the narrowest
+    # possible `self` now has to carry it too. Borrowed from the real Engine rather than stubbed, for
+    # the reason the two above are: a stub that answers differently from the method under test is how
+    # a protocol test stops testing the protocol. It needs no `store` — `_progress` emits nothing when
+    # `self` has none, which is exactly this host and also every `Engine.__new__` instance in the suite.
+    _progress = Engine._progress
 
     def __init__(self, ideas, *, telemetry=None, dropped=None):
         self._ideas = ideas
