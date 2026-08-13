@@ -15,6 +15,7 @@
 // concurrent deletions would race that refresh — one deletion's confirmation read would observe
 // another's half-applied state. The cost is wall-clock; the alternative is a confirmation that means
 // nothing.
+import { retryableCascadeIdentity } from './memoryCascadeModel.js'
 import { RUN_GENERATION_RE } from './panelPrimitives.js'
 
 /** Runs are deleted oldest-selection-first; a batch that stops early has then done the ones the
@@ -93,23 +94,21 @@ export function bulkOutcomeNotice(state) {
     ? ` Cross-run memory was only partly removed for ${plural(state.memoryFailures.length, 'run')}`
       + ` (first: “${unfinished.runId}”).`
     : ''
-  const retryRunId = unfinished ? String(unfinished.runId || '') : ''
   // The identity travels with the handle, for the same reason `cascadeOutcome` carries one: the run
   // is already deleted, so the server cannot read `run_uid`/`memory_dir` back and refuses to guess
-  // them. A button wired to the run id alone cannot finish the purge it offers.
-  // REVIEW (mega-review 2026-08-13): no emptiness gate — for a LEGACY run whose cascade receipt
-  // carries no run_uid/memory_dir (the name-matched `identity: "run_id"` degradation the server
-  // supports) the retry button is still offered, every press posts empty strings, the server 400s
-  // (memory_purge_identity_required), and the catch re-offers the same empty identity forever —
-  // the exact loop the api.js comment says the identity requirement was added to prevent. Offer
-  // the button only when the identity is non-empty (same gap in memoryCascadeModel.cascadeOutcome).
-  const retryIdentity = {
-    run_uid: String(unfinished?.memory?.run_uid || ''),
-    memory_dir: String(unfinished?.memory?.memory_dir || ''),
-  }
+  // them. A button wired to the run id alone cannot finish the purge it offers — and one wired to
+  // an EMPTY identity cannot either: the server 400s `memory_purge_identity_required`, the catch
+  // re-offers the same empty identity, and the operator presses it forever. The shared gate is
+  // `retryableCascadeIdentity`, so both notices refuse the dead button by the same rule.
+  // Both keys are ALWAYS present so a consumer reads one shape; what the gate decides is the
+  // HANDLE, which is what renders the button.
+  const retryable = retryableCascadeIdentity(unfinished?.memory)
+  const retryIdentity = retryable || { run_uid: '', memory_dir: '' }
+  const retryRunId = unfinished && retryable ? String(unfinished.runId || '') : ''
   if (!stopped) {
     if (!done) return blocked ? { kind: 'error', retryRunId: '', text: tail.trim() } : null
-    return { kind: unfinished ? 'error' : 'status', retryRunId, retryIdentity,
+    return { kind: unfinished ? 'error' : 'status', retryRunId,
+      retryIdentity,
       text: `${plural(done, 'run')} permanently deleted.${tail}${memoryTail}` }
   }
   const why = String(stopped.reason || 'the deletion did not complete')

@@ -75,10 +75,23 @@ export function bulkCascadeLabel(runCount = 0) {
  * every affordance that could finish the job — has left the list. Without an explicit retry handle
  * the operator is told about a half-finished purge they have no way to complete.
  */
+export function retryableCascadeIdentity(memory) {
+  // The retry endpoint refuses a body with NEITHER `run_uid` nor `memory_dir`
+  // (`memory_purge_identity_required`), because with both empty the purge would fall back to
+  // matching a run's bare directory NAME — which the next run reuses. So a button offered with an
+  // empty identity cannot ever succeed: every press 400s and the catch re-offers the same empty
+  // identity, forever. Return null when there is nothing to retry WITH, so the caller can say so
+  // instead of rendering a dead control.
+  const run_uid = String(memory?.run_uid || '')
+  const memory_dir = String(memory?.memory_dir || '')
+  return run_uid || memory_dir ? { run_uid, memory_dir } : null
+}
+
 export function cascadeOutcome(memory, runId = '') {
   if (!memory) return null
   const deleted = memory.deleted | 0
   if (memory.ok === false) {
+    const retryable = retryableCascadeIdentity(memory)
     const failed = Array.isArray(memory.failures) ? memory.failures : []
     const where = failed.map(entry => String(entry?.store || '')).filter(Boolean).join(', ')
     return {
@@ -86,16 +99,16 @@ export function cascadeOutcome(memory, runId = '') {
       // Never "deleted N rows" alone when part of it failed: this notice is the only place the
       // operator can learn that a store still holds this run's rows.
       text: 'The run was deleted. Its cross-run memory was only partly removed'
-        + (where ? ` (${where} could not be rewritten).` : '.'),
-      retryRunId: String(runId || memory.run_id || ''),
+        + (where ? ` (${where} could not be rewritten).` : '.')
+        + (retryable ? '' : ' This run\u2019s identity was not recorded, so the purge cannot be '
+          + 'finished from here.'),
       // The retry's IDENTITY, carried beside the handle. The run is already gone, so the server
       // cannot read this back and refuses to guess it; the receipt is the only place it still
       // exists. `memory_dir` matters as much as `run_uid`: it is a per-RUN setting, so a retry that
       // omitted it opened the server's CURRENT global store, matched nothing, and reported success.
-      retryIdentity: {
-        run_uid: String(memory.run_uid || ''),
-        memory_dir: String(memory.memory_dir || ''),
-      },
+      // With NEITHER, there is no retry to offer — see `retryableCascadeIdentity`.
+      retryRunId: retryable ? String(runId || memory.run_id || '') : '',
+      retryIdentity: retryable || { run_uid: '', memory_dir: '' },
     }
   }
   if (!deleted) {

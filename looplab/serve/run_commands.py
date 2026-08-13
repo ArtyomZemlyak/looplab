@@ -270,18 +270,9 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
 # with 409. Bounded, the worst case is a long-but-finite window; unbounded, the operator loses
 # resume/abort/hint/inject entirely, with no cancel endpoint to recover. Twelve extensions is ~4h at
 # the shipped 20-minute `max_observation_timeout`, which covers the long-eval case this exists for.
-#
-# REVIEW (mega-review 2026-08-13): the "~4h" arithmetic above does not hold. An extension is
-# consumed on every monitor PASS that takes the progress branch (`_extend_landed_pause_observation`
-# has no nearness gate on the deadline), and the monitor loop runs every `poll_interval` — 0.05 s at
-# the shipped default — so all twelve extensions burn in the first seconds of the wait, each pushing
-# `absolute_deadline_at` to roughly the same now+20min. The effective bound is therefore
-# ~`max_observation_timeout`, and a pause over an eval longer than ~20 minutes still terminalizes
-# `timed_out` — the exact wrong answer the comment above says this cap was sized to avoid. The
-# deadlock half (no unbounded `executing` record) IS fixed; the long-eval half is not. Gate the
-# extension on the deadline being NEAR (e.g. within one `command_timeout`) so each of the twelve
-# buys a real 20-minute window. `tests/test_command_intent_spent.py` drives finiteness only, with
-# seconds-apart `now` values, so it cannot see this.
+# Each of the twelve buys a REAL window because `_extend_landed_pause_observation` only spends one
+# when the deadline is within a `command_timeout`; consuming one per monitor pass (0.05 s at the
+# shipped default) collapsed the twelve into a single 20-minute bound.
 PAUSE_OBSERVATION_MAX_EXTENSIONS = 12
 
 
@@ -1457,14 +1448,16 @@ class RunCommandService:
             if not self._run_finished(rd, observation):
                 return False
             return True
-        # REVIEW (mega-review 2026-08-13): the finished-run exception above is unreachable for
-        # EV_PAUSE, and the fold never clears `paused` on `run_finished` — so a run that finished
-        # WHILE paused (abort during pause, systemic-failure stop) keeps a stale timed-out pause
-        # record unspent (`paused` is still True, so this returns False) and later controls 409
-        # `command_retry_required` until the operator explicitly retries the pause. Recoverable, but
-        # it contradicts the "no control of any kind can still be driven" rule the comment states;
-        # the pause branch should consult `_run_finished` too.
+        # The pause branch consults `_run_finished` TOO, so the exception above is not
+        # unreachable for the one intent that reaches here. The fold never clears `paused` on
+        # `run_finished`, so a run that finished WHILE paused (an abort during the pause, the
+        # systemic-failure stop) kept a stale timed-out pause record unspent — `paused` is still
+        # True — and every later control answered 409 `command_retry_required` until the operator
+        # explicitly retried the pause. Recoverable, but it contradicted the rule the comment above
+        # states: once a run is finished, no control of any kind can still be driven.
         state = (observation or self._observe(rd)).state()
+        if bool(state.finished):
+            return True
         return not bool(state.paused)
 
     def _extend_landed_pause_observation(self, record: dict, rd: Path, observation,
@@ -1490,9 +1483,18 @@ class RunCommandService:
             return False
         if not self._pause_is_folded(rd, observation):
             return False
+        # ONLY WHEN THE DEADLINE IS ACTUALLY NEAR. Without this the extension was consumed on every
+        # monitor pass that reached here, and the monitor runs every `poll_interval` — 0.05 s at the
+        # shipped default — so all twelve burned in the first seconds of the wait, each pushing the
+        # deadline to roughly the same now+20min. The effective bound was therefore ONE
+        # `max_observation_timeout`, not twelve, and a pause over an eval longer than ~20 minutes
+        # still terminalized `timed_out`: exactly the answer the cap above was sized to avoid.
+        # `command_timeout` is the natural nearness window — one ordinary command's worth of runway.
+        deadline = float(record.get("absolute_deadline_at") or 0)
+        if deadline - now > float(self.command_timeout):
+            return True          # still plenty of runway; do not spend one of the twelve for nothing
         record["pause_observation_extensions"] = extensions + 1
-        record["absolute_deadline_at"] = max(
-            float(record.get("absolute_deadline_at") or 0), now + self.max_observation_timeout)
+        record["absolute_deadline_at"] = max(deadline, now + self.max_observation_timeout)
         return True
 
     def _pause_is_folded(self, rd: Path,

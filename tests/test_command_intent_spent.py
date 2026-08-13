@@ -207,8 +207,13 @@ def test_a_landed_pause_extends_its_observation_a_bounded_number_of_times(tmp_pa
     there is no cancel endpoint — so an operator who paused a multi-hour eval lost resume, abort,
     hint and inject until it finished.
 
-    Drive the grant itself past its budget rather than asserting the predicate: ask far more times
-    than the cap allows and require that the grants stop.
+    Drive the WALL-CLOCK window, not the call count. The monitor polls every `poll_interval`
+    (0.05 s at the shipped default), so counting grants over seconds-apart `now` values cannot see
+    the defect this cap actually had: with no nearness gate an extension was consumed on every pass,
+    so all twelve burned in the first seconds and each pushed the deadline to roughly the same
+    now+20min — an effective bound of ONE `max_observation_timeout`, and a pause over a longer eval
+    still terminalized `timed_out`. Simulate the real loop instead: poll fast, advance to the
+    deadline, and measure how much observation time the twelve actually bought.
     """
     from looplab.serve.run_commands import PAUSE_OBSERVATION_MAX_EXTENSIONS
 
@@ -219,13 +224,27 @@ def test_a_landed_pause_extends_its_observation_a_bounded_number_of_times(tmp_pa
     observation = commands._observe(rd)
 
     record = {"postcondition": "paused_and_stopped", "absolute_deadline_at": 0.0}
-    granted = sum(
-        bool(commands._extend_landed_pause_observation(record, rd, observation, True, float(turn)))
-        for turn in range(PAUSE_OBSERVATION_MAX_EXTENSIONS + 25))
-    assert granted == PAUSE_OBSERVATION_MAX_EXTENSIONS, (
-        "the observation window must be long but FINITE — an unbounded one freezes every other "
-        "control command behind 409 command_in_progress")
+    now, polls = 0.0, 0
+    while commands._extend_landed_pause_observation(record, rd, observation, True, now):
+        polls += 1
+        assert polls < 1_000_000, "the wait must END — an unbounded one freezes the control plane"
+        # The monitor's own cadence, which is what made a per-pass extension collapse the budget.
+        now = min(now + 0.05, float(record["absolute_deadline_at"]))
     assert record["pause_observation_extensions"] == PAUSE_OBSERVATION_MAX_EXTENSIONS
+    # …and the twelve bought TWELVE windows, not one. This is the assertion the call-count version
+    # could not make, and it is the difference between a ~3h wait and a ~20min one.
+    #
+    # Each extension advances the deadline by `max_observation_timeout - command_timeout` rather
+    # than a whole window, because one is only spent once the deadline is within a `command_timeout`
+    # — so the total is ~12 x (1200 - 120), not 12 x 1200. Bound it on BOTH sides: the lower bound
+    # is what the collapsed version failed (it bought exactly one window), and the upper bound is
+    # the frozen-control-plane guarantee.
+    window = commands.max_observation_timeout - commands.command_timeout
+    assert now >= PAUSE_OBSERVATION_MAX_EXTENSIONS * window * 0.9, (
+        f"the twelve extensions bought only {now:.0f}s of observation; consuming one per monitor "
+        f"pass collapsed them to a single {commands.max_observation_timeout:.0f}s window")
+    assert now <= PAUSE_OBSERVATION_MAX_EXTENSIONS * commands.max_observation_timeout, (
+        "the wait is long but FINITE — an unbounded one freezes every other control behind 409")
 
     # …and the gates that must refuse it outright, whatever the budget says.
     assert commands._extend_landed_pause_observation(

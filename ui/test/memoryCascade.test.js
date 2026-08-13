@@ -82,15 +82,26 @@ test('a partly-failed purge carries a retry handle, because the run card is alre
   // This is the whole reason the outcome is a record. The run is deleted, its card has left the
   // list, and this notice is the last surface that can offer to finish the job.
   const outcome = cascadeOutcome(
-    { ok: false, deleted: 1, failures: [{ store: 'lessons' }] }, 'doomed')
+    { ok: false, deleted: 1, failures: [{ store: 'lessons' }],
+      run_uid: 'u-doomed', memory_dir: '/m' }, 'doomed')
   assert.equal(outcome.kind, 'error')
   assert.equal(outcome.retryRunId, 'doomed')
+  assert.deepEqual(outcome.retryIdentity, { run_uid: 'u-doomed', memory_dir: '/m' })
   assert.match(outcome.text, /only partly removed/)
   assert.match(outcome.text, /lessons/)
   assert.ok(!/1 cross-run memory row/.test(outcome.text),
     'never report a count as if the purge completed')
   assert.equal(cascadeOutcome({ ok: true, deleted: 2 }).retryRunId, '',
     'a successful purge offers no retry')
+
+  // …and a receipt with NO identity offers no retry either, because none could work: the server
+  // refuses a body carrying neither field (`memory_purge_identity_required`), so the button would
+  // 400 on every press and the catch would re-offer the same empty identity forever.
+  const blind = cascadeOutcome({ ok: false, deleted: 0, failures: [{ store: 'lessons' }] }, 'legacy')
+  assert.equal(blind.kind, 'error', 'the half-purged store is still disclosed')
+  assert.equal(blind.retryRunId, '', 'no handle, so no button')
+  assert.match(blind.text, /identity was not recorded/,
+    'and the operator is told WHY there is nothing to press')
 })
 
 test('the dialog reads the survey through the deadline HANDLE, never by awaiting it', () => {
