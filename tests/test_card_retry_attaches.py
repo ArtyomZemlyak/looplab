@@ -673,10 +673,13 @@ def test_a_concept_membership_that_disagrees_still_declines_reuse(tmp_path):
     assert fresh.disposition == "mint" and fresh.card_id == "card-1"
 
 
-def test_a_delta_proposal_carries_no_card_concepts_and_that_is_the_whole_claim(tmp_path):
-    """`2acdb825` said "the Card lane no longer loses concepts"; what holds is "no longer loses a
-    FULL membership". This pins the narrowed claim as a fact about the code rather than a note about
-    it - see `_authored_card_concepts` for what extending it would actually cost."""
+def test_a_delta_proposal_carries_its_delta_and_never_a_membership(tmp_path):
+    """`2acdb825` said "the Card lane no longer loses concepts"; what held was "no longer loses a
+    FULL membership", and this test pinned that narrowing. The delta now rides too - UNRESOLVED,
+    because the base it is a delta against (run base / parent memberships) exists only in folded
+    state, so `replay.py::_materialize_concept_deltas` owns the resolution. The one thing the row
+    must never grow is a `concepts` key: a delta is not a membership.
+    `tests/test_card_concept_round_trip.py` drives the whole round trip."""
     engine = _engine(tmp_path)
     idea = Idea(operator="draft", params={"x": 1.0, "y": 2.0}, rationale="r", hypothesis=SEED,
                 concept_mode="delta", concepts_added=["objective/retrieval"], concepts_removed=[])
@@ -685,6 +688,50 @@ def test_a_delta_proposal_carries_no_card_concepts_and_that_is_the_whole_claim(t
         parent_generations={}, scored_against=None, source="researcher", at_node=0)
     assert plan.disposition == "mint"
     assert "concepts" not in plan.payload["idea"]
+    assert plan.payload["idea"]["concept_mode"] == "delta"
+    assert plan.payload["idea"]["concepts_added"] == ["objective/retrieval"]
+    assert plan.payload["idea"]["concepts_removed"] == []
+
+
+def test_a_pre_upgrade_orphan_is_reusable_whatever_envelope_the_new_writer_would_add(tmp_path):
+    """The same crash-prefix tolerance, over a DELTA proposal. The rule is "the recorded row has no
+    concept envelope AT ALL", not "it has no `concepts` key" - a row written before the delta half
+    shipped is missing three keys, not one, and a tolerance that only knew the FULL spelling would
+    leave every delta orphan un-reusable and mint a duplicate work item for it."""
+    engine = _engine(tmp_path)
+    idea = Idea(operator="draft", params={"x": 1.0, "y": 2.0}, rationale="r", hypothesis=SEED,
+                concept_mode="delta", concepts_added=["objective/retrieval"], concepts_removed=[])
+    plan = engine._plan_native_card(
+        engine.store.read_all(), fold(engine.store.read_all()), idea, parents=[],
+        parent_generations={}, scored_against=None, source="researcher", at_node=0)
+    legacy = dict(plan.payload)
+    legacy["idea"] = {k: v for k, v in plan.payload["idea"].items()
+                      if k not in ("concept_mode", "concepts_added", "concepts_removed")}
+    engine.store.append(EV_CARD_ADDED, legacy)
+
+    reused = engine._plan_native_card(
+        engine.store.read_all(), fold(engine.store.read_all()), idea, parents=[],
+        parent_generations={}, scored_against=None, source="researcher", at_node=0)
+    assert reused.disposition == "reuse" and reused.card_id == "card-0"
+
+
+def test_a_delta_that_disagrees_still_declines_reuse(tmp_path):
+    """...and the tolerance stays exactly as narrow for the delta as for the membership: a row whose
+    recorded delta says something else is another author's claim."""
+    engine = _engine(tmp_path)
+    idea = Idea(operator="draft", params={"x": 1.0, "y": 2.0}, rationale="r", hypothesis=SEED,
+                concept_mode="delta", concepts_added=["objective/retrieval"], concepts_removed=[])
+    plan = engine._plan_native_card(
+        engine.store.read_all(), fold(engine.store.read_all()), idea, parents=[],
+        parent_generations={}, scored_against=None, source="researcher", at_node=0)
+    other = dict(plan.payload)
+    other["idea"] = {**plan.payload["idea"], "concepts_added": ["objective/something-else"]}
+    engine.store.append(EV_CARD_ADDED, other)
+
+    fresh = engine._plan_native_card(
+        engine.store.read_all(), fold(engine.store.read_all()), idea, parents=[],
+        parent_generations={}, scored_against=None, source="researcher", at_node=0)
+    assert fresh.disposition == "mint" and fresh.card_id == "card-1"
 
 
 def test_an_attach_that_lapses_between_the_two_planning_passes_still_builds_its_node(tmp_path):

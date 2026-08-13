@@ -192,8 +192,15 @@ consume only `selection_ready`, which requires all of the following:
    timeout and lifecycle fences;
 2. one complete concrete action owner with a supported operator/parent shape and matching
    `parent_generations` for every anchored attempt;
-3. with an incumbent, `scored_against` and `scored_against_generation` match its current id/attempt;
-   without one, `scored_against_empty` explicitly records that complete empty authority;
+3. with an incumbent, the node named by `scored_against` is still alive (present, not tombstoned, not
+   aborted) at exactly `scored_against_generation`; without one, `scored_against_empty` explicitly
+   records that complete empty authority and the board must still be empty. **Amended 2026-08-13:**
+   the incumbent branch also required that node to still BE `state.best_node_id`. It does not any
+   more — see `core/cards.py::card_score_fence_state` for why "a better champion appeared" is not
+   the same fact as "this proposal is invalid", what the clause was a proxy for (the merge top-2
+   recheck, which lives in `_live_card_action` and is unchanged), and what conflating them cost on
+   `runs/rubertlite-dr-unified-v6`. The empty branch deliberately keeps its board check for now;
+   that helper states the reason and the receipt-protocol constraint behind it;
 4. no linked pending, terminal, failed/superseded, missing, or merged work-item owner.
 
 ID spelling is never the discriminator: even an id that resembles a statement hash is native when its
@@ -808,9 +815,10 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   Dropped and merged-away cards receive terminal/merge `selection_blockers`; L3 must never treat the
   broader compatibility `actionable` set as its queue.
 - The score fence is the triple `scored_against`, `scored_against_generation`,
-  `scored_against_empty`, plus exact `parent_generations`. With an incumbent, id and generation must
-  still match; without one, the writer must explicitly set the empty marker. Missing legacy fence data
-  stays unknown and never becomes selection-ready.
+  `scored_against_empty`, plus exact `parent_generations`. With an incumbent, the anchor must still be
+  a live node at that exact attempt (it need NOT still be the champion — amended 2026-08-13, see the
+  **Layer-3 safety boundary** list item 3); without one, the writer must explicitly set the empty marker.
+  Missing legacy fence data stays unknown and never becomes selection-ready.
 - `RunState.cards: dict[str,Card]=default_factory(dict)`, assigned only inside `_derive_cards`.
 - **Reserve now** the operator-override maps + the final-overlay phase:
   `RunState.card_priority_pins`/`card_operator_edits`/`card_resource_pins` (`default_factory=dict`), even

@@ -394,6 +394,21 @@ CARD_ACTION_DIGEST_V2_FIELDS = (
 )
 _CARD_ACTION_DIGEST_VERSIONS = frozenset({1, 2})
 
+# The proposal-time concept envelope a ``card_added`` idea block may carry — and the deliberate
+# COMPLEMENT of the two digest tuples above: not one of these four is digested, so a Card's ownership
+# receipt is byte-identical with and without them and recording what the Researcher tagged can never
+# invalidate an already-minted Card. That exemption is why the envelope is allowed in the idea block
+# at all: it is metadata with its own receipt (``Card.concept_source``), not executable action.
+#
+# It is ONE tuple because a writer and a reader have to agree on it EXACTLY.
+# ``engine/card_reservation.py::_authored_card_concepts`` emits these keys;
+# ``events/card_ledger.py`` decodes them (``_bounded_card_action``) and admits them
+# (``_CARD_ADDED_ACTION_FIELDS``). A key one side knows and the other does not is read as a lossy
+# FUTURE action member, which silently costs the Card its ``selection_ready`` — measured, and it is
+# exactly why a DELTA proposal's membership stayed out of the Card lane after ``2acdb825`` carried a
+# full one in. ``tests/test_card_concept_round_trip.py`` drives both the agreement and the exemption.
+CARD_IDEA_CONCEPT_FIELDS = ("concept_mode", "concepts", "concepts_added", "concepts_removed")
+
 # One semantic boundary for every Card producer, replay path, identity digest, and public projection.
 # The UTF-8 cap is deliberately the worst-case encoding size of the character cap, so valid Unicode
 # statements are never accepted by one layer and rejected by another.
@@ -799,6 +814,103 @@ def surviving_work_item_aliases(card) -> list[str]:
         alias for alias in aliases
         if alias not in beliefs and (own_belief_id is None or alias != own_belief_id)
     ]
+
+
+def card_score_fence_state(
+    scored_against: Optional[int],
+    scored_against_generation: Optional[int],
+    scored_against_empty: object,
+    *,
+    anchor_live: bool,
+    anchor_attempt: Optional[int],
+    board_empty: bool,
+) -> str:
+    """The score half of the Card freshness fence: ``current`` | ``stale`` | ``unknown``.
+
+    With an incumbent the fence answers exactly one question — **is the node this proposal was scored
+    against still the same experiment it was scored against?** That is a per-ANCHOR liveness
+    question, so the caller resolves the anchor and passes the two facts that answer it:
+
+      * ``anchor_live`` — the node exists, is not tombstoned and is not aborted;
+      * ``anchor_attempt`` — its CURRENT attempt, which must equal the recorded generation. A reset
+        node re-ran; the metric the proposal was scored against no longer exists even though the id
+        does, which is why the generation is part of the receipt at all.
+
+    Missing legacy fence data stays ``unknown`` and never becomes selectable; a malformed one is
+    ``stale``. Both keep the queue fail closed while old card shadows remain readable.
+
+    **"A better champion appeared" is deliberately NOT part of the incumbent branch** (narrowed
+    2026-08-13). Until then it also required ``state.best_node_id == scored_against`` — i.e. a card
+    became permanently ``freshness_stale`` the instant ANY unrelated node outscored the champion it
+    happened to be proposed under. Nothing ever un-stales a card (the receipt is immutable, and the
+    only re-proposal path — ``_drop_card_once(..., reason="reproposed")`` — serves a node RESET, not
+    a champion change), so that was a permanent death sentence delivered by an unrelated event.
+
+    Its cost is measured, not theoretical. With one proposer producing one card at a time the
+    sequence is: propose against champion C -> some node finishes -> the champion becomes C' -> the
+    pending card is stale -> propose against C'. Two fresh selectable cards could therefore never
+    coexist, so ``eval_parallel > 1`` had nothing to dispatch no matter what the operator configured.
+    On ``runs/rubertlite-dr-unified-v6`` (14 h/eval, two H200s, ``eval_parallel`` settled to 2) the
+    board at 03:33 was ``card-3 scored_against=1 status=proposed blockers=['freshness_stale']`` and
+    ``card-5 scored_against=2 status=running`` — card-3's parent node 1 was alive, breedable and at
+    the exact attempt it was scored on; its ONLY defect was that node 2 had since beaten node 1. It
+    never ran, and GPU 1 was idle for the whole run.
+
+    Nothing that clause really protects is lost, because none of it was ever carried HERE:
+
+      * whether the proposal's own parents are executable is ``parent_state`` beside this, plus
+        ``_card_action_has_live_anchors`` (fold) / ``_live_card_action`` (selection);
+      * whether a MERGE still names the current policy top-2 is rechecked exactly, by metric, in
+        ``search/card_selection.py::_live_card_action`` — the champion-equality clause was only ever
+        a crude proxy for that, and an unsound one in both directions (the top-2 can change while the
+        champion does not, and vice versa);
+      * whether a claimed card is still the thing selection would choose NOW is
+        ``speculative_card_is_fresh``'s counterfactual SET membership, which re-scores against the
+        live board every turn.
+
+    A superseded champion is RANKING information, not a validity verdict: an independent hypothesis
+    does not become wrong because some other node scored higher. It stays fully derivable by any
+    consumer that wants it (``card.scored_against != state.best_node_id``) without a fold-level
+    blocker that no path can clear.
+
+    **The EMPTY branch keeps its board check, and that is a scoped decision, not an oversight.**
+    ``board_empty`` is ``state.best_node_id is None``, so requiring it is literally the same
+    champion-equality clause for the case where the recorded champion was "none", and by the argument
+    above it should go too: an action formed with no incumbent anchors nothing, so nothing about it
+    can die. It stays for now because (a) the only window it can cost anything in is bootstrap —
+    a draft staged before the FIRST evaluation lands, which the forced seed prefix builds long before
+    that on any real cadence — and (b) removing it makes an empty-authority Card whose build head
+    closed ``skipped="stale"`` survive and be RE-ELECTED, and the paired-run calibration receipt
+    protocol cannot express that: ``search/speculation_quality.py::_validate_calibration_card_owners``
+    requires the build-request ledger to map one-to-one onto the ``card_added`` registrations, in
+    order, so a second request for the same card is refused outright. That is a change to a receipt
+    protocol whose revision costs six GPU runs, and it belongs to that module's owner rather than to
+    a fix for an idle second GPU.
+
+    Pure and total, so the fold's tri-state and the selection-time recheck state the rule ONCE. The
+    caller owns the state lookups because the two live on opposite sides of the layer boundary
+    (``events`` may not import ``search``).
+    """
+    if scored_against is None:
+        if scored_against_empty is not True:
+            # A legacy row that simply never carried the fence. Visible, never selectable.
+            return "unknown"
+        # Modern complete EMPTY authority: the action was formed with no incumbent at all. A receipt
+        # that claims empty authority AND an anchor generation is malformed, never merely empty.
+        return (
+            "current"
+            if scored_against_generation is None and board_empty
+            else "stale"
+        )
+    if not anchor_live:
+        return "stale"
+    if scored_against_generation is None:
+        return "unknown"
+    if (type(scored_against_generation) is not int
+            or type(anchor_attempt) is not int
+            or scored_against_generation != anchor_attempt):
+        return "stale"
+    return "current"
 
 
 # Belief-vs-work-item identity (peer review): a Card is a WORK ITEM, but two cards that reuse the exact

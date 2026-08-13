@@ -36,12 +36,14 @@ from looplab.core.concepts import (
 )
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
+                     CARD_IDEA_CONCEPT_FIELDS,
                      CARD_STATEMENT_MAX_CHARS,
                      INHERITABLE_CONCEPT_PROVENANCE as _INHERITABLE_CONCEPT_PROVENANCE,
                      NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      Card, CardConceptSource, CardIdentityProvenance, CardSelectionProvenance,
                      Node, NodeStatus, RunState, card_action_digest,
-                     card_ownership_receipt, coerce_node_id as _coerce_node_id,
+                     card_ownership_receipt, card_score_fence_state,
+                     coerce_node_id as _coerce_node_id,
                      is_unevaluated_speculative_discard,
                      legacy_card_ownership_receipt_v1,
                      transitional_card_action_digest_v1,
@@ -219,6 +221,25 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
         out["_concept_tags_overflow"] = overflow
         out["_concept_tags_invalid"] = invalid
 
+    # PART V (B): the DELTA half of the same proposal-time envelope. A `delta` proposal states a
+    # CHANGE against an inheritance base — the run base at a root, else the union of its parents'
+    # effective memberships — and that base only exists in FOLDED state, so the resolution happens in
+    # `replay.py::_materialize_concept_deltas` over the whole DAG, never here and never at mint time.
+    # What the card row keeps is therefore an audit copy, not a membership: no Card field is derived
+    # from it, `_card_added_snapshot` leaves `concept_source.membership_present` False for it, and the
+    # EXECUTABLE copy travels on the claimed node's own Idea. It is decoded here for one reason — so
+    # replay stops reading these keys as unknown future ACTION members, which is what made a
+    # delta-mode Card permanently unselectable and cost the delta lane its concepts entirely.
+    # Bounded but unflagged, deliberately: the `_concept_tags_*` flags exist because `concepts`
+    # becomes `Card.concept_tags`, where a silently-truncated list would read as an exact membership.
+    # Nothing reads these, so there is no completeness claim for a flag to qualify.
+    raw_mode = value.get("concept_mode")
+    if isinstance(raw_mode, str):
+        out["concept_mode"] = raw_mode[:80]
+    for delta_field in ("concepts_added", "concepts_removed"):
+        if isinstance(value.get(delta_field), list):
+            out[delta_field] = bounded_raw_concept_values(value[delta_field])[0]
+
     if isinstance(value.get("parent_ids"), list):
         out["parent_ids"] = _bounded_card_parent_ids(value["parent_ids"])
     parent_id = _card_replay_node_id(value.get("parent_id"))
@@ -227,7 +248,7 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
     if record_unknown_fields:
         known_fields = {
             "operator", "params", "space", "eval_profile", "eval_timeout",
-            "concept_tags", "concepts",
+            "concept_tags", *CARD_IDEA_CONCEPT_FIELDS,
             "parent_id", "parent_ids",
         }
         if any(field not in known_fields for field in value):
@@ -691,7 +712,11 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
 
 
 _CARD_ADDED_ACTION_FIELDS = frozenset({
-    "operator", "params", "space", "eval_profile", "eval_timeout", "concept_tags", "concepts",
+    "operator", "params", "space", "eval_profile", "eval_timeout", "concept_tags",
+    # The whole concept envelope, from the ONE tuple its writer also emits (`core/cards.py`). Listing
+    # a subset here is the bug this constant exists to make impossible: `concepts` alone admitted a
+    # FULL membership and left every `delta` proposal's Card reading as a lossy future schema.
+    *CARD_IDEA_CONCEPT_FIELDS,
     "parent_id", "parent_ids", "_concept_tags_overflow", "_concept_tags_invalid",
 })
 
@@ -958,8 +983,15 @@ def _card_action_freshness(st: RunState, card: Card) -> str:
     """Compare one action's exact lifecycle fences with the current replay state.
 
     Missing legacy fences are ``unknown`` rather than silently rebound to the latest node attempt.
-    A known-dead anchor or a changed best/attempt is ``stale`` even when another legacy fence is
-    missing, keeping the future queue fail closed while old card shadows remain readable.
+    A known-dead anchor or a changed attempt is ``stale`` even when another legacy fence is missing,
+    keeping the future queue fail closed while old card shadows remain readable.
+
+    The two halves are independent: ``parent_state`` over the action's own parents, ``score_state``
+    over the node it was scored against.  With an incumbent the score half is an ANCHOR liveness
+    question and nothing more — a merely SUPERSEDED champion is not stale.  ``card_score_fence_state``
+    owns that rule (and the empty-authority branch's deliberately different one), so the fold and the
+    Layer-5 recheck in ``search/card_selection.py`` cannot drift apart; read its docstring before
+    changing either.
     """
     parent_ids = list(card.parent_ids or [])
     if card.parent_id is not None:
@@ -990,27 +1022,21 @@ def _card_action_freshness(st: RunState, card: Card) -> str:
     ):
         parent_state = "stale"
 
-    if card.scored_against is None:
-        if card.scored_against_empty:
-            score_state = (
-                "current"
-                if card.scored_against_generation is None and st.best_node_id is None
-                else "stale"
-            )
-        else:
-            score_state = "unknown"
-    else:
-        scored_node = st.nodes.get(card.scored_against)
-        if (scored_node is None or scored_node.tombstoned
-                or card.scored_against in st.aborted_nodes
-                or st.best_node_id != card.scored_against):
-            score_state = "stale"
-        elif card.scored_against_generation is None:
-            score_state = "unknown"
-        elif card.scored_against_generation != scored_node.attempt:
-            score_state = "stale"
-        else:
-            score_state = "current"
+    scored_node = (
+        None if card.scored_against is None else st.nodes.get(card.scored_against)
+    )
+    score_state = card_score_fence_state(
+        card.scored_against,
+        card.scored_against_generation,
+        card.scored_against_empty,
+        anchor_live=(
+            scored_node is not None
+            and not scored_node.tombstoned
+            and card.scored_against not in st.aborted_nodes
+        ),
+        anchor_attempt=None if scored_node is None else scored_node.attempt,
+        board_empty=st.best_node_id is None,
+    )
 
     states = {parent_state, score_state}
     return "stale" if "stale" in states else "unknown" if "unknown" in states else "current"

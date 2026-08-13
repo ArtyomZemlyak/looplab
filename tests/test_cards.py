@@ -1420,3 +1420,63 @@ def test_grouped_beliefs_unions_evidence_in_ascending_node_order():
     [group] = grouped_beliefs(st)
     assert group["card_ids"] == ["card-10", "card-9"]   # membership stays in board (first-seen) order
     assert group["evidence"] == [9, 10]                 # …the node ids do not
+
+
+# --- the score fence's truth table -------------------------------------------------------------
+#
+# `card_score_fence_state` is the ONE spelling of the score half of the Card freshness fence, shared
+# by the fold (`events/card_ledger.py::_card_action_freshness`) and the Layer-5 recheck
+# (`search/card_selection.py::_card_generation_fences_current`). Before it was hoisted, the rule
+# existed only as two hand-synced inline expressions over `RunState`, so no test could state a single
+# row of it — and the champion-equality clause it carried sat there unreviewed until it had idled a
+# GPU for a whole run. Stating it is the point; keep this table total over the branches.
+@pytest.mark.parametrize(
+    ("case", "kwargs", "expected"),
+    [
+        # --- no incumbent at mint time.
+        ("legacy row with no fence at all",
+         dict(scored_against=None, scored_against_generation=None, scored_against_empty=False,
+              anchor_live=False, anchor_attempt=None, board_empty=True), "unknown"),
+        ("complete empty authority on a still-empty board",
+         dict(scored_against=None, scored_against_generation=None, scored_against_empty=True,
+              anchor_live=False, anchor_attempt=None, board_empty=True), "current"),
+        # Deliberately asymmetric with the incumbent branch below — the helper's docstring owns why.
+        ("complete empty authority once a champion exists",
+         dict(scored_against=None, scored_against_generation=None, scored_against_empty=True,
+              anchor_live=False, anchor_attempt=None, board_empty=False), "stale"),
+        ("empty authority claiming an anchor generation is malformed",
+         dict(scored_against=None, scored_against_generation=0, scored_against_empty=True,
+              anchor_live=False, anchor_attempt=None, board_empty=True), "stale"),
+        ("a non-bool empty marker is not an empty authority",
+         dict(scored_against=None, scored_against_generation=None, scored_against_empty="yes",
+              anchor_live=False, anchor_attempt=None, board_empty=True), "unknown"),
+        # --- with an incumbent: an ANCHOR liveness question, and nothing else.
+        ("live anchor at the exact attempt it was scored on",
+         dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
+              anchor_live=True, anchor_attempt=0, board_empty=False), "current"),
+        ("…and still current after some other node became champion",
+         dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
+              anchor_live=True, anchor_attempt=0, board_empty=False), "current"),
+        ("dead anchor: missing, tombstoned or aborted",
+         dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
+              anchor_live=False, anchor_attempt=None, board_empty=False), "stale"),
+        ("the anchor was reset and re-ran under a new attempt",
+         dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
+              anchor_live=True, anchor_attempt=1, board_empty=False), "stale"),
+        ("legacy row with an anchor but no generation",
+         dict(scored_against=1, scored_against_generation=None, scored_against_empty=False,
+              anchor_live=True, anchor_attempt=0, board_empty=False), "unknown"),
+        ("a non-int generation can never match an attempt",
+         dict(scored_against=1, scored_against_generation=True, scored_against_empty=False,
+              anchor_live=True, anchor_attempt=1, board_empty=False), "stale"),
+    ],
+)
+def test_card_score_fence_state_truth_table(case, kwargs, expected):
+    from looplab.core.models import card_score_fence_state
+
+    positional = (
+        kwargs.pop("scored_against"),
+        kwargs.pop("scored_against_generation"),
+        kwargs.pop("scored_against_empty"),
+    )
+    assert card_score_fence_state(*positional, **kwargs) == expected, case

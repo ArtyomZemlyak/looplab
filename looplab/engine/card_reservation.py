@@ -46,7 +46,8 @@ import orjson
 from looplab.agents.roles import is_researcher_fallback
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.llm_broker import in_llm_lane
-from looplab.core.models import (Idea, NodeStatus, RunState, card_action_digest,
+from looplab.core.models import (CARD_IDEA_CONCEPT_FIELDS, Idea, NodeStatus, RunState,
+                                 card_action_digest,
                                  card_ownership_receipt, durable_idea_payload,
                                  hypothesis_statement_digest, idea_proposal_ref,
                                  normalize_researcher_footprint)
@@ -328,8 +329,8 @@ class CardReservationMixin:
             return idea
 
     @staticmethod
-    def _authored_card_concepts(idea: Idea) -> Optional[list[str]]:
-        """The proposal-time concept membership a `card_added` row carries, or None for "no claim".
+    def _authored_card_concepts(idea: Idea) -> Optional[dict]:
+        """The proposal-time concept ENVELOPE a `card_added` row carries, or None for "no claim".
 
         The Researcher authors `idea.concepts` and the whole Part IV/V subsystem — the run's concept
         tree, the board's `Card.concept_tags`, the cross-run shelf, `concept_run_base`'s seed — reads
@@ -348,44 +349,111 @@ class CardReservationMixin:
         `emit` tool call); the `card_added` row it minted recorded five idea keys and none of them
         was `concepts`.
 
-        FULL memberships only. `concept_mode`/`concepts_added`/`concepts_removed` are NOT in
-        `card_ledger.py::_CARD_ADDED_ACTION_FIELDS`, so writing them into the idea block would make
-        replay read the action as a lossy future schema and the Card would stop being
-        `selection_ready` — a far worse regression than the missing tags. A DELTA proposal therefore
-        carries nothing here (unchanged behaviour) rather than a membership that is not one.
+        EVERY PROPOSAL MODE, and what makes that possible is that the envelope travels UNRESOLVED.
+        `2acdb825` carried a `full` membership only, because `concept_mode`/`concepts_added`/
+        `concepts_removed` were not in `card_ledger.py::_CARD_ADDED_ACTION_FIELDS` and writing them
+        made replay read the whole action as a lossy future schema — the Card stopped being
+        `selection_ready`, which is worse than the missing tags. That was a missing ROW in an
+        allow-list, not a property of the design: the four keys are now one shared tuple
+        (`core/cards.py::CARD_IDEA_CONCEPT_FIELDS`) that this writer emits and the ledger decodes and
+        admits, so the two cannot drift apart again.
 
-        SO THE CLAIM IS NARROWER THAN IT WAS STATED, and the narrowing belongs here rather than in a
-        commit message nobody re-reads: `2acdb825` said "the Card lane no longer loses concepts",
-        and what actually holds is **the Card lane no longer loses a FULL membership**. A `delta`
-        proposal's membership is still lost by every Card-built node, exactly as before. That is not
-        an oversight to fix in passing. Extending it means RESOLVING the delta (base/parent union −
-        removed + added) at mint time and persisting the result as a `full` set — which changes what
-        the durable receipt claims the author wrote, makes the resolution depend on a parent snapshot
-        the immutable Card does not otherwise bind, and would have to agree with the resolution
-        `replay.py::_on_node_created` performs for the NODE or the two would disagree on the same
-        run. It is a design change with a replay contract attached, not a widened condition, and it
-        needs its own change with its own fixture. `tests/test_card_retry_attaches.py` pins the delta
-        behaviour so the narrowed claim is a fact about the code rather than a note about it.
+        WHAT A DELTA IS A DELTA AGAINST, and why it is NOT resolved here. `delta` states a CHANGE
+        against an inheritance base: the run base (`EV_RUN_CONCEPTS`) at a root, else the union of
+        the node's parents' effective memberships, resolved topologically over the whole folded DAG
+        by `replay.py::_materialize_concept_deltas`. That base exists only in folded state, and this
+        function runs at MINT time — before the node exists, possibly many turns before the claim.
+        Resolving it here and persisting a `full` set was the obvious shape and it does not survive:
 
-        Returning the RAW list is deliberate: the fold bounds it through `bounded_raw_concept_values`
-        and stamps its own overflow/invalid flags, so an over-long or malformed membership records as
-        an honestly incomplete `CardConceptSource` instead of a silently truncated exact one.
+          * the resolution would depend on a parent snapshot the immutable Card does not bind, while
+            the base itself keeps moving — the classifier cadence re-tags parents, an operator can
+            edit tags, a consolidation renames ids. The Card lane would then answer a question
+            differently from the non-Card lane for the same authored delta on the same run;
+          * a mint-time resolution is not stable across a restart, and `_card_event_matches`
+            byte-compares the whole writer payload, so a crash-prefix orphan would stop being
+            reusable — the duplicate-work-item shape the ledger exists to prevent;
+          * a parent's own membership may be an unresolved delta with an `unavailable` receipt, and
+            the only `full` set expressible for that is `[]` — which replay reads as an authoritative
+            KNOWN-EMPTY membership. That is a lie in place of an honest receipt;
+          * a root card may legitimately be minted before `EV_RUN_CONCEPTS` exists (the fold is
+            order-tolerant and `_materialize_concept_deltas` fails closed on it); a mint-time
+            resolution has nothing to fail closed with.
+
+        So the delta stays a delta, and the claim rebuilds the SAME envelope onto the executed Idea.
+        The node then folds exactly as an unmediated Researcher proposal does, through one resolver,
+        at fold time — which is also what makes it replay-identical: nothing about the membership is
+        recomputed from live state at claim time, so the durable log folds to the same node concepts
+        and the same Card on every future replay. The node's parents are the Card's parents
+        (`_prepare_existing_card_claim` re-fences `parent_generations` against the Card), so the base
+        the fold resolves against is the lineage the proposal was authored for.
+
+        The four spellings this returns, and why `full` is asymmetric:
+          * `delta`  -> `{concept_mode, concepts_added, concepts_removed}` — the mode is REQUIRED,
+            because an explicit zero delta (both lists empty, "inherit unchanged") is a real claim
+            and is indistinguishable from an absent envelope without it;
+          * `full` with a non-empty membership -> `{concepts}` and NO mode, byte-identical to what
+            `2acdb825` already writes. Not stylistic: `_card_event_matches` compares writer bytes, so
+            adding a redundant key here would decline reuse of every crash-prefix orphan minted by
+            the current writer. `_claim_concept_envelope` stamps the mode back on;
+          * `full` with an EMPTY membership -> `{concept_mode, concepts: []}`, an authoritative
+            known-empty set. It used to record nothing, which replay reads as ABSENT — a different
+            fact;
+          * an absent mode (legacy/mechanical producers) -> `{concepts}` when non-empty, else None.
+
+        Returning the RAW lists is deliberate: the fold bounds them through
+        `bounded_raw_concept_values` and stamps its own overflow/invalid flags, so an over-long or
+        malformed membership records as an honestly incomplete `CardConceptSource` instead of a
+        silently truncated exact one.
         """
-        if getattr(idea, "concept_mode", None) == "delta":
-            return None
-        concepts = list(getattr(idea, "concepts", None) or [])
-        return concepts or None
+        mode = getattr(idea, "concept_mode", None)
+        if mode == "delta":
+            return {
+                "concept_mode": "delta",
+                "concepts_added": [str(c) for c in (getattr(idea, "concepts_added", None) or [])],
+                "concepts_removed": [
+                    str(c) for c in (getattr(idea, "concepts_removed", None) or [])],
+            }
+        concepts = [str(c) for c in (getattr(idea, "concepts", None) or [])]
+        if concepts:
+            # No `concept_mode` here, and NOT a tidiness choice — see the docstring: this is the one
+            # spelling a live writer already emits, `_card_event_matches` compares writer BYTES, and a
+            # redundant key would decline reuse of every crash-prefix orphan minted since 2026-08-12.
+            return {"concepts": concepts}
+        if mode == "full":
+            return {"concept_mode": "full", "concepts": []}
+        return None
 
     @classmethod
-    def _claim_concept_envelope(cls, concepts) -> dict:
-        """The `Idea` concept kwargs a Card claim rebuilds with, from a persisted membership.
+    def _claim_concept_envelope(cls, recorded_idea) -> dict:
+        """The `Idea` concept kwargs a Card claim rebuilds with, from the durable `card_added` block.
 
-        `concepts` is exactly what `_authored_card_concepts` wrote into the durable `card_added` idea
-        block. `concept_mode="full"` is what makes `replay.py::_on_node_created` treat it as an exact
-        replacement and stamp `NODE_CONCEPT_PROVENANCE_AUTHORED` — a bare list folds the same way
-        today, but only because a truthy `idea.concepts` is a second, weaker branch of that gate.
+        The argument is the RECORDED idea block (or the fragment `_authored_card_concepts` just
+        produced for it — the fragment is that block's concept subset, so one function serves the
+        mint's round-trip proof and the real claim). Every key is untrusted durable input: a
+        malformed operand yields no envelope at all rather than a half-read one, and `Idea`'s own
+        validators bound and drop whatever survives.
+
+        `concept_mode` is what makes `replay.py::_fold_node_concept_envelope` treat the result as
+        authoritative and stamp `NODE_CONCEPT_PROVENANCE_AUTHORED`: `full` as an exact replacement,
+        `delta` as an operand pair for the fold's materialization post-pass. A bare `concepts` list
+        with no mode folds as `full` today too, but only through a second, weaker branch of that
+        gate, so the mode is stamped explicitly here.
         """
-        if not isinstance(concepts, list) or not concepts:
+        if not isinstance(recorded_idea, dict):
+            return {}
+        mode = recorded_idea.get("concept_mode")
+        if mode == "delta":
+            added = recorded_idea.get("concepts_added")
+            removed = recorded_idea.get("concepts_removed")
+            if not isinstance(added, list) or not isinstance(removed, list):
+                # A delta with no operands is not a zero delta — it is a row this reader cannot
+                # honestly execute. Fall through to no envelope, i.e. an ABSENT membership.
+                return {}
+            return {"concept_mode": "delta",
+                    "concepts_added": [str(c) for c in added],
+                    "concepts_removed": [str(c) for c in removed]}
+        concepts = recorded_idea.get("concepts")
+        if not isinstance(concepts, list) or (not concepts and mode != "full"):
             return {}
         return {"concept_mode": "full", "concepts": [str(c) for c in concepts]}
 
@@ -494,20 +562,20 @@ class CardReservationMixin:
             "rationale": rationale,
             # Deliberately narrow: replay treats any future executable member in this block as an
             # incomplete v1 action rather than silently blessing lossy semantics.
-            # `concepts` is the ONE member here the ownership digest does not cover, and it is not an
-            # exception invented at this call site: `CARD_ACTION_DIGEST_V2_FIELDS` excludes it (so the
-            # receipt and every already-minted Card's digest are byte-identical either way), while
-            # `card_ledger.py::_CARD_ADDED_ACTION_FIELDS` admits it and `_card_added_snapshot` already
-            # decodes it into `Card.concept_tags` + a `kind="card_added"` `CardConceptSource`. That
-            # reader shipped with nothing writing to it — see `_authored_card_concepts` for the
-            # measured cost of the missing half.
+            # The concept envelope is the ONE exception, and it is not one invented at this call site:
+            # `CARD_ACTION_DIGEST_V2_FIELDS` excludes every member of `CARD_IDEA_CONCEPT_FIELDS` (so
+            # the receipt and every already-minted Card's digest are byte-identical either way), while
+            # `card_ledger.py` decodes and admits exactly that tuple and `_card_added_snapshot` turns a
+            # FULL membership into `Card.concept_tags` + a `kind="card_added"` `CardConceptSource`. A
+            # delta contributes no membership here by design — it is resolved for the NODE, at fold
+            # time, against a base only folded state has. See `_authored_card_concepts`.
             "idea": {
                 "operator": action["operator"],
                 "params": action["params"],
                 "space": action["space"],
                 "eval_profile": action["eval_profile"],
                 "eval_timeout": action["eval_timeout"],
-                **({"concepts": card_concepts} if card_concepts is not None else {}),
+                **(card_concepts or {}),
             },
             "parent_id": action["parent_id"],
             "parent_ids": action["parent_ids"],
@@ -557,26 +625,30 @@ class CardReservationMixin:
         if data == expected:
             return True
         # …and the one BACKWARD tolerance, which is not the same rule as the forward one below.
-        # `_authored_card_concepts` started writing `idea.concepts` into the mint payload on
-        # 2026-08-12. An orphan `card_added` written by the PRE-upgrade writer therefore has no
-        # `concepts` key, and after the upgrade nothing could ever reuse it again: a run killed
-        # between `card_added` and its claim came back, declined its own crash-prefix row, minted a
-        # SECOND card for the same proposal and left the orphan selectable — i.e. the upgrade
-        # reintroduced the exact duplicate-work-item shape the Card ledger exists to prevent.
+        # `_authored_card_concepts` started writing a concept envelope into the mint payload on
+        # 2026-08-12 (`concepts`) and widened it to every proposal mode after. An orphan `card_added`
+        # written by a PRE-upgrade writer therefore has NO envelope at all, and after an upgrade
+        # nothing could ever reuse it again: a run killed between `card_added` and its claim came
+        # back, declined its own crash-prefix row, minted a SECOND card for the same proposal and
+        # left the orphan selectable — i.e. the upgrade reintroduced the exact duplicate-work-item
+        # shape the Card ledger exists to prevent.
         # Admitting it is provably identity-preserving rather than merely convenient:
-        # `CARD_ACTION_DIGEST_V2_FIELDS` excludes `concepts`, so the `ownership_receipt` compared
-        # above is BYTE-IDENTICAL with or without the key, and the reuse re-claims through
-        # `_claim_concept_envelope`, which reads the RECORDED row (absent -> no membership) rather
-        # than this proposal's. Narrow on purpose: only an ABSENT key, only when everything else is
-        # already exactly equal — a row whose `concepts` DISAGREE is a different author's membership
-        # and still declines.
+        # `CARD_ACTION_DIGEST_V2_FIELDS` excludes every `CARD_IDEA_CONCEPT_FIELDS` member, so the
+        # `ownership_receipt` compared above is BYTE-IDENTICAL with or without them; `proposal_ref`
+        # (which DOES digest all four) is compared and still pins this proposal's authored envelope
+        # exactly, so a row that agrees here agrees about the membership too; and the reuse re-claims
+        # through `_claim_concept_envelope`, which reads the RECORDED row (absent -> no membership)
+        # rather than this proposal's. Narrow on purpose: only a WHOLLY absent envelope, only when
+        # everything else is already exactly equal — a row whose envelope DISAGREES is a different
+        # author's claim and still declines.
         expected_idea = expected.get("idea")
         recorded_idea = data.get("idea")
-        if (isinstance(expected_idea, dict) and "concepts" in expected_idea
-                and isinstance(recorded_idea, dict) and "concepts" not in recorded_idea):
+        if (isinstance(expected_idea, dict) and isinstance(recorded_idea, dict)
+                and any(key in expected_idea for key in CARD_IDEA_CONCEPT_FIELDS)
+                and not any(key in recorded_idea for key in CARD_IDEA_CONCEPT_FIELDS)):
             pre_upgrade = dict(expected)
             pre_upgrade["idea"] = {key: value for key, value in expected_idea.items()
-                                   if key != "concepts"}
+                                   if key not in CARD_IDEA_CONCEPT_FIELDS}
             if data == pre_upgrade:
                 return True
         # This is intentionally a writer-prefix matcher, not a loose semantic comparison. A future
@@ -1414,10 +1486,13 @@ class CardReservationMixin:
             # The claim half of the concept round trip (`_authored_card_concepts`). `registrations[0]`
             # is the single mint row whose `ownership_receipt` was just proved equal to the one this
             # Card's action digest mints, so it is the exact writer row — but the digest deliberately
-            # does NOT cover `concepts`, and that is fine here rather than merely tolerated: replay
-            # stamps the rebuilt membership `NODE_CONCEPT_PROVENANCE_AUTHORED`, which
+            # does NOT cover the concept envelope, and that is fine here rather than merely tolerated:
+            # replay stamps whatever is rebuilt `NODE_CONCEPT_PROVENANCE_AUTHORED`, which
             # `classifier_verified_node_concepts` already refuses as independent evidence. It reaches
             # display read-models and `concept_run_base`'s seed, never admission or cross-run trust.
+            # A `delta` envelope rebuilds UNRESOLVED and is materialized by the fold against this
+            # node's own parents — which are the Card's parents, re-fenced generation-for-generation a
+            # few lines up, so the base is the lineage the proposal was authored for.
             # Calibration keeps precedence: its synthetic envelope is part of a byte-stable fixture.
             calibration_concepts = ({
                 "concept_mode": "full",
@@ -1427,8 +1502,7 @@ class CardReservationMixin:
                     "space/two-dimensional",
                 ],
             } if self._speculation_gate_calibration else self._claim_concept_envelope(
-                (registrations[0].data.get("idea") or {}).get("concepts")
-                if isinstance(registrations[0].data.get("idea"), dict) else None))
+                registrations[0].data.get("idea")))
             # THE rebuild — and the same one `_card_added_payload` proves the mint against, by
             # construction rather than by hand-syncing two copies of this constructor. `receipt_action`
             # is `_card_claim_receipt_action(card)`, i.e. exactly the action shape the mint digested.

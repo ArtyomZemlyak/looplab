@@ -643,14 +643,20 @@ membership on the `Idea` with an explicit contract:
 
 When `card_driven_selection` is on (the default), a proposal reaches its node through a **native Card**
 rather than straight to `node_created`, and the Idea the build executes is rebuilt from the durable
-`card_added` action alone. So the authored membership rides along on that row: `card_added.idea.concepts`
-carries a `concept_mode="full"` set, replay decodes it into `Card.concept_tags` with a
-`kind="card_added"` concept source, and the claim rebuilds the Idea with it. It sits **outside** the card
-ownership digest (`CARD_ACTION_DIGEST_V2_FIELDS`), so tagging never changes an action's identity. A
-**delta** proposal carries nothing here — `concept_mode`/`concepts_added`/`concepts_removed` are not
-action fields, and writing them into that block would make replay read the whole action as a lossy
-future schema and stop the Card being selectable. Until 2026-08-12 the row carried no membership at all
-and every Card-built node was created with no concepts.
+`card_added` action alone. So the whole authored concept envelope rides along on that row — the four
+members of `CARD_IDEA_CONCEPT_FIELDS` (`concept_mode`, `concepts`, `concepts_added`,
+`concepts_removed`), which are exactly the idea-block keys the card ownership digest
+(`CARD_ACTION_DIGEST_V2_FIELDS`) does **not** cover, so tagging never changes an action's identity and
+no already-minted Card is invalidated. A **full** proposal's set is decoded into `Card.concept_tags`
+with a `kind="card_added"` concept source; a **delta** proposal's row carries the mode and both operand
+lists and claims no membership, because a delta is a delta against an inheritance base (the run base at
+a root, else the union of the node's parents' effective sets) and that base only exists in folded state.
+The claim rebuilds the Idea with whichever envelope the row recorded, so a Card-built node folds through
+exactly the same `_materialize_concept_deltas` post-pass as an unmediated proposal — the delta is never
+resolved at mint time, which is what keeps the durable log folding to the same memberships on every
+replay. Until 2026-08-12 the row carried no membership at all and every Card-built node was created with
+no concepts; until the delta half landed the same was still true of every non-root proposal, since the
+Researcher authors a delta whenever a parent membership exists.
 
 A **repair attaches to the card it repairs.** A card is a work item that can carry several nodes, so a
 `debug` re-attempt of a failed node claims that node's own card (one more `node_building`, no second
