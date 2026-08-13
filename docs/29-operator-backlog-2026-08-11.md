@@ -317,6 +317,53 @@ the cautionary case), a bounded output projection, and a decision about whether 
 durable event — because if the Developer can act on something not in the log, replay stops
 reconstructing the run.
 
+### DECIDED AND SHIPPED, 2026-08-13 — `looplab/tools/dev_probe.py`, `Settings.developer_probe` (ON)
+
+**It is not a shell, and the reason is the read fence.** `runtime/read_fence.py` is a CPython audit
+hook: it covers `open` inside an interpreter and it covers *nothing else*. A tool that could run
+`cat`, `cp`, `find` or `bash` would be an execution surface the fence cannot see — one
+`cp <source>/experiments/final/model.safetensors ./ckpt` away from laundering a human's artifact into
+a node's workspace, i.e. the v6 node 4 defect performed on purpose rather than by accident. So:
+
+> **The probe surface is the INTERPRETER, because the interpreter is what the fence can cover.**
+
+That is the boundary doc 36 asks for rather than the allow-list it rejects: there is no table of
+permitted programs to maintain, and the one rule is the same rule that decides whether the read fence
+applies at all. `run_probe(code)` runs a short **Python program** in the node's staged files, and the
+tool description carries the one-line spellings of the bash the Developer would have typed
+(`ls` → `os.listdir`, `head -5` → `readlines()[:5]`, …).
+
+**The three questions the entry above asked, answered.**
+
+| question | decision | why |
+|---|---|---|
+| what may it run | any Python, under four rules that are path/event predicates and not lists: **no read** of the editable source tree (a fence from the SAME `fence_inputs`/`render` the engine installs, always `deny`), **no write** anywhere (audit hook for existence, `RLIMIT_FSIZE 0` for content), **no new program** (a fork inherits the hook, an exec replaces it), **no GPU** (`CUDA_VISIBLE_DEVICES=""`) | the `pip install` case is closed by "cannot write a file" and "cannot start a program", never by a check for the word *pip* — which is what stops it rotting |
+| bounded output projection | exit status + each stream as a TAIL, through the SHARED `tools/_base.py::stream_tails` that `shell_tools.run_command` now also uses | the end of a command is where the error is; a shared split is what stops the two surfaces disagreeing about which half of a failure survives `RESULT_CAP` |
+| durable event? | **No — a `tool` span in `spans.jsonl`, like every other Developer tool call** | the four rules *are* the statement that a probe has no side effect, so engine invariant #3 has nothing to gate. Its whole world is a temp directory deleted when the call returns |
+
+**And the read/write question: READ-ONLY, including its own workspace.** This is what buys the answer
+above, and the two are one decision. Authoring already has a recorded channel (`write_file`/`edit_file`,
+which carry the absolute-path advisory the fence's own docstring quotes); a probe that could write
+would be a *second, unrecorded* authoring channel, `node_created.files` would stop being the whole
+record of what the Developer built, and the probe would then need to be a folded event. It is doc 36's
+second corollary applied literally — a wider action space, and not one inch of extra trusted set.
+
+**The prompt is half the fix.** The Developer's system body asserted *"There is NO shell / bash /
+run-command tool — you CANNOT execute anything yourself"*, which is the sentence the observed failure
+quoted back at itself. It is now two alternatives spliced at the same position, and the replacement's
+load-bearing line is not the tool announcement but **"PROBE BEFORE YOU WORK AROUND SOMETHING"**. With
+`developer_probe=false` the prompt is byte-identical to what it was.
+
+**Left open, deliberately.** The probe replicates only the node's STAGED files, not the seeded repo
+tree — at build time the node workdir does not exist yet (`RepoWriteTools` collects writes;
+`engine/workspace.py::materialize` puts them on disk at eval time), so a compile check of a file that
+imports repo modules still gets an ImportError. Network is not cut (an eval stage on the trusted tier
+has it, so cutting it here would be a rule the surface it mirrors does not honour). The run directory
+stays readable, so a Developer *can* read `events.jsonl`; that is a context concern rather than a
+record concern, because nothing the probe reads can reach the record except through `edit_file`.
+And `ctypes.dlopen` reaches libc, which reaches `execve` — no audit hook can close that, and the
+read fence's own symlink residual is stated the same way.
+
 ## F3 · Node workspaces on `git worktree`
 
 **Asked:** "move to git worktree?"

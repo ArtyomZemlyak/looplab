@@ -334,8 +334,8 @@ stays focused and the trace reads cleanly:
    authoring stays in the STAGES phase.
 
 A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
-get the repo scouts plus the env inspector (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
-`py_api`, `read_installed`, `grep_installed`, `gpu_info`) — but **no write tools** — so the Developer
+get the repo scouts, the env inspector and the probe (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
+`py_api`, `read_installed`, `grep_installed`, `gpu_info`, `run_probe`) — but **no write tools** — so the Developer
 reads the real eval/entry script and
 the files it will change *before* deciding what to do, instead of planning blind off a truncated
 preview. Two tools make this practical:
@@ -347,6 +347,49 @@ preview. Two tools make this practical:
   file is never silently truncated mid-read.
 - **`gpu_info`** reports the visible GPUs (count / names / memory via `torch.cuda`) — the `nvidia-smi`
   equivalent for an agent that has no shell, so the plan can size a model/batch to the real hardware.
+
+### `run_probe` — checking instead of guessing
+
+`developer_probe` (on by default) gives the Developer one more tool: **`run_probe(code)`** runs a short
+**Python program** against the real environment, and returns its exit code plus tailed stdout/stderr.
+It exists because a Developer that cannot check something works around it instead — the shape the
+operator saw was, verbatim, *"Since I have no shell/install ability, the cleanest repair is a small
+loguru shim module"*: a **fake library**, written rather than spending one line finding out the real
+one imports. `env_inspect` answers *static* questions (a version, a signature, an Enum's members);
+`run_probe` answers "does this actually work **here**" — does this import, does this CSV parse, does
+the code I just staged get this API right.
+
+**It is not a shell, and that is the design, not a limitation.** The [source-tree read
+fence](tasks.md) is a CPython audit hook: it covers `open` inside an interpreter and nothing else. A
+tool that could run `cat`, `cp` or `bash` would be an execution surface the fence does not reach — one
+`cp <source>/final/model.safetensors ./ckpt` away from laundering somebody else's result into a node's
+workspace, which is exactly the defect the fence was built for. So the probe surface **is** the
+interpreter, which is a *boundary* rather than an allow-list of commands that would need maintaining.
+
+Four rules, none of them a list:
+
+| the probe cannot… | enforced by | what it closes |
+|---|---|---|
+| read the operator's editable source tree | a fence rendered from the SAME `read_fence.fence_inputs`/`render` the engine installs, always at `deny` — turning `read_fence` off must not open a second door | v6 node 4: a good model trained, then a human's checkpoint scored and **recorded** |
+| write a file, anywhere | an audit hook (existence: create/truncate/unlink/rename, with an actionable message) **plus** `RLIMIT_FSIZE 0` (content, in the kernel, for anything the hook cannot see) | the mid-run `pip install` that corrupted a **running** node's site-packages and cost a repair generation — closed without ever naming pip |
+| start another program | `subprocess`/`os.exec*`/`os.system`/`posix_spawn` refused. A **fork** is not: a fork inherits the hook, an exec replaces it — the rule is "no new program" | this is what makes the read fence total here rather than stopping at the first `subprocess.run(["cat", …])` |
+| see a GPU | `CUDA_VISIBLE_DEVICES=""` | a probe allocating on a device a **sibling node's** training holds for hours behind the host GPU-pool lease |
+
+It runs in a **disposable replica** of the files the Developer has staged so far (the same paths
+`write_file` uses), in a temp directory deleted when the call returns. The replica flows one way:
+authoring → probe, never back.
+
+**Why it produces no run event.** Those four rules are exactly the statement that a probe has no side
+effect, so [engine invariant #3](architecture.md) — every side effect gated on a domain event — has
+nothing to gate. The probe is recorded the way every other Developer tool call is: a `tool` span in
+`spans.jsonl`, visible in the node's trace and conversation views, not folded into `RunState`. The two
+decisions are one decision — a probe that could write its own workspace would make
+`node_created.files` stop being the whole record of what the Developer built, and would need an event.
+It is also why there is no probe *count* budget: the bound is the per-probe `developer_probe_timeout_s`
+(default 60 s, hard max 300) inside the Developer session's own wall-clock ceiling.
+
+Anything that must **produce** a file is not a probe: it belongs in the node's files and its declared
+eval stages, the surface that has a metric contract, a live log and a repair loop attached.
 
 ## Phase-handoff summaries
 
