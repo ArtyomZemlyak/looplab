@@ -352,11 +352,24 @@ starts again. This looks useless. Either name the cases where it is right, or dr
 
 **Today.** Half of this shipped on 2026-08-11: a run in which **nothing has ever worked** now stops
 instead of grinding (`systemic_failure_stop`, and see `orchestrator.systemic_failure_stop_reason` for
-the 26-hour / 1,705-call measurement that motivated it). What is left is the narrower question the
+the 26-hour / 1,705-call measurement that motivated it). What was left was the narrower question the
 operator actually asked — once the environment is proven, is a fresh Debug node a better use of a
-budget slot than the inline repair that just gave up? Nobody has measured it. The evidence to collect
-is already in the logs: for every node whose triage said `abandon`, did the debug child that followed
-reach a metric? Answer that before changing the operator.
+budget slot than the inline repair that just gave up?
+
+**DECIDED, 2026-08-13 — the Debug node goes.** The operator answered the question rather than asking
+for the measurement: *"дебаг ноду нафиг убираем. У нас репейринг есть. Им вот и должно всё
+решаться."* And the half that matters more, because it is what the removal would otherwise be evaded
+by: **no `draft`/`improve` node may be created that is a Debug node under another name** — i.e. a new
+node whose purpose is another attempt at an experiment that just failed. A failure is fixed **inside
+the one node, for as long as it takes.**
+
+That "as long as it takes" is not a licence to spin: the bound moves from a counter to a judgment,
+which is [F8](#f8-repair-without-a-fixed-bound-stopped-by-judgment-instead-of-by-a-counter) and is
+the same change. `systemic_failure_stop` stays as the floor under both. The two must land together —
+removing the Debug node while the repair bound is still a fixed count would convert "give up and open
+a new node" into "give up", which is strictly worse than today.
+
+Design principle behind both: [`36-agent-driven-decisions-2026-08-13.md`](36-agent-driven-decisions-2026-08-13.md).
 
 ## F7 · The Research Atlas: what it uniquely holds, and what it duplicates
 
@@ -381,6 +394,11 @@ holds — claims and curation. Deleting the Atlas outright would take the claim 
 outcomes offline with it, which is not what the question was about. Renaming is not cosmetic here:
 "Research Atlas" is what makes an operator expect the concept map and then find a worse one.
 
+**ACCEPTED, 2026-08-13.** The operator agreed the rename is the point. So: drop the concepts section
+in favour of a link to the Concepts view, and rename the destination after the three things it is the
+only home for — the claim records, the mixed-evidence records, and the steward curation log. The name
+is the deliverable here, not a layout tweak.
+
 ## F6 · Conversation trace: usability, and the generations that are invisible
 
 **Asked:** "make the conversation trace more convenient. You cannot see traces from earlier versions
@@ -394,6 +412,34 @@ it at a fixed span window costs **0 ms** of server time.
 
 Related and already fixed: run-level agents (the Researcher above all) had no surface at all — see the
 new Operations panel.
+
+## F8 · Repair without a fixed bound, stopped by judgment instead of by a counter
+
+**Asked, 2026-08-13:** *"я бы хотел чтобы репейринг у нас был по сути бесконечный, но стопался бы
+каким-нибудь LLM критиком и самим девелопером, что типа я фиг знает как чинить."* Paired with the
+[F5](#f5--debug-nodes-keep-scope-or-remove) decision to delete the Debug node: everything is fixed
+inside the ONE node, for as long as it takes, and nothing may open a fresh node to have another go.
+
+**Today.** The transition from "keep repairing" to "stop" is a COUNTER. A counter cannot distinguish
+a repair loop converging on a fix from one that has been rewriting the same line for an hour, and the
+two recorded disasters are both cases where the counter was the only thing looking: the 2,345-repair
+runaway on `rubert-dr-0804` (whose 369 distinct error signatures defeated the anti-stuck counter
+because the underlying `transformers`/`torch` break renamed its symbol every attempt), and the three
+rounds of batch-halving on v6 node 5 chasing an OOM that never happened.
+
+**Two signals that bear directly on the question already exist and are not used for it.** The
+Developer knows when it is out of ideas — nothing asks it. A critic can see whether successive
+attempts address different causes or circle one — nothing runs one. Both are cheap next to the GPU
+hours a bad stop decision costs in either direction.
+
+**What it must not become.** An unbounded spend with no floor. The bound moves from a count to a
+budget plus a judgment; `systemic_failure_stop` (a run where nothing has ever worked stops) remains
+underneath, and the money ceiling stays a hard number. The judgment decides *whether to keep going*,
+never *what the result was* — the line is drawn in
+[`36-agent-driven-decisions-2026-08-13.md`](36-agent-driven-decisions-2026-08-13.md).
+
+**Ordering constraint.** F5 and F8 land together. Removing the Debug node while the repair bound is
+still a fixed count turns "give up and open a new node" into plain "give up".
 
 ---
 
