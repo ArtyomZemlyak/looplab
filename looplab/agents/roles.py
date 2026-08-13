@@ -97,8 +97,12 @@ _FOOTPRINT_GUIDANCE = (
     "Optionally set `footprint` to a JSON object describing this experiment's expected resources: "
     "{`gpus`: <non-negative integer>, `gpu_mem_mib`: <non-negative integer or null>}. Leave "
     "`footprint` null (or omit it) when GPU needs are UNSPECIFIED; unspecified is distinct from "
-    "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment, and `gpus=1` only when "
-    "the experiment specifically needs one GPU. Do not put `timeout`/`eval_timeout` or authority "
+    "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment. When the user turn states "
+    "a GPU BUDGET, the count it names is a per-experiment CEILING and `gpus=1` is the ORDINARY "
+    "case, not an exception: declaring MORE than the ceiling does not get this experiment more "
+    "hardware — the extra devices come out of the sibling experiments that would otherwise run at "
+    "the same time, so the run SERIALISES at the same per-experiment cost. Size the training/eval "
+    "command to the count you declare. Do not put `timeout`/`eval_timeout` or authority "
     "and provenance keys such as `proposed_by`, `finalized_by`, or `pinned_by` inside `footprint`; "
     "wall-clock stays in the top-level `eval_timeout`, and the engine/operator own authority fields. ")
 # P14: the schema requires `operator` but the engine's policy overwrites it unconditionally
@@ -323,18 +327,27 @@ FACADE_STAGE_ATTRS: tuple[str, ...] = ("researcher", "developer", "stage_clients
 # A strict subset by design. `_digest_cap` is a numeric cap consumed separately, `_hyp_order` orders
 # the open-hypothesis board inside `_state_brief`, and `_novelty_stance` / `_steering_context` /
 # `_cross_run_advisory_receipt` are read structurally rather than concatenated as prose.
+#
+# `_gpu_budget_hint` is LAST on purpose. `_complexity_hint` already carries the GPU RESOURCE CONTRACT
+# cue, which announces the POOL SIZE ("this pool exposes at most 2 GPU(s)"); the budget states the
+# per-experiment CEILING derived from that pool and the run's settled eval width. A reader that saw
+# the pool and then the ceiling ends on the ceiling — which is the number it must actually declare.
 RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
-    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint")
+    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint")
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
-    "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt")
+    "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt",
+    "_gpu_budget_hint")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
 `_novelty_hint` + `_novelty_stance` in proposal_cues.py `_stamp_novelty_hint`;
 `_cross_run_advisory_receipt` in proposal_cues.py's advisory stamp, read back off the researcher
 handle in orchestrator.py `_node_audit_extra` and speculation.py's per-build capture;
+`_gpu_budget_hint` in proposal_cues.py `_stamp_gpu_budget_hint` — the PER-EXPERIMENT GPU ceiling
+`_FOOTPRINT_GUIDANCE` asks the Researcher to size `footprint.gpus` against and, before this hint
+existed, could only learn from the operator's goal prose (docs/29 F1b);
 `_novelty_feedback` in engine/novelty.py's gate) and the
 foresight panel (search/foresight.py `_prioritize_board` sets `_hyp_order` — the predicted
 best-first board order — on its wrapped researcher). Readers: `LLMResearcher.propose` (below)
@@ -354,9 +367,9 @@ sync with every `setattr(self.researcher, "...")` / `setattr(self.base, "...")` 
 tests/test_hint_forwarding.py scans those sites AND wires the real wrapper chains to enforce it.
 
 Both researchers honor the same cues: `LLMResearcher.propose` and `ToolUsingResearcher.propose`
-fold the same `(_complexity_hint, _sweep_hint, _novelty_feedback, _novelty_hint)` cue set into
-their prompts (`_digest_cap` is consumed separately as a numeric cap; `_hyp_order` orders the
-open-hypothesis board inside `_state_brief`)."""
+fold the same `RESEARCHER_PROMPT_CUES` set into their prompts through `collect_hint_cues` — neither
+re-derives the tuple, so a cue added here reaches BOTH prompts or NEITHER (`_digest_cap` is consumed
+separately as a numeric cap; `_hyp_order` orders the open-hypothesis board inside `_state_brief`)."""
 
 
 def forward_hints(src, dst) -> None:
