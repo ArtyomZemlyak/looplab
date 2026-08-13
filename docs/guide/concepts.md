@@ -404,6 +404,23 @@ marker (folded to a `building` slot, *not* the event-sourced node set, so it nev
 allocation or resume) that streams the node's live agent-trace right away, then is superseded by
 `node_created` when the node materializes — or dropped if the run ends first.
 
+That marker cannot cover the part of a build that happens *before* it. `node_building` is appended
+after the Researcher's proposal returns, so for the whole of that call — routinely the longest single
+wait in the loop — there is no marker, no node and no state field, and every surface fell through to
+"Planning next experiment…". The engine therefore also emits a **`phase_progress` beacon** at each
+step boundary of a build (`propose` → `novelty` → `reserve` → `implement`/`repair`) and of a **resume**
+(`read_log` → `reconcile`). It is a *diagnostic* event: `replay.fold` ignores it by design, because it
+is transient progress and a resume must rebuild the same `RunState` with or without it, and because
+it is appended from concurrent producers where only a fold-ignored type is permitted (invariant #1).
+
+The `(stage, phase)` vocabulary is closed in `events/types.py::PROGRESS_PHASES` and asserted at every
+append site by `assert_progress_phase` — a beacon has no reader that fails loudly (the fold skips it,
+a UI keyed on an unknown phase renders nothing), so a typo'd phase would ship as a silently missing
+signal. Which phases fire is configuration-dependent: `reserve` fires on the serial build path but not
+on the batch lane the shipped default width takes, `repair` only on the `debug` operator's
+error-feedback branch, and the resume pair only on a genuine re-entry (decided by one `stat`, because
+a beacon appended before the prologue's own `read_all` would land inside it).
+
 ## Search policies
 
 The policy defines deterministic node-expansion semantics and is the direct selector when both Card
@@ -1006,7 +1023,13 @@ agentic path but with `tools=None` — there is no run state to read at those ca
 `node_building` marker (emitted the instant `_create_node` starts, before the minutes-long author step)
 drives a `✍️ writing` / `🔧 repairing` / `🔀 merging` status (by the node's operator) and streams that
 node's trace live; a `pending` node is being **trained** (the sandbox eval — no LLM), shown as
-`running (training)` with no live pulse. The assistant chat streams the same way — interstitial prose
+`running (training)` with no live pulse. The Dock's status strip goes one level finer, from the
+`phase_progress` beacons above: it names the STEP ("Proposing 4 experiments…", "Writing code for
+experiment #7…", "Resuming — reading the run log…") rather than only the fact that a build is running,
+and its age clock measures the current *phase* rather than the whole build — so `40m` beside "Writing
+code for experiment #7…" means the Developer has been going forty minutes. The decode is the pure
+model `ui/src/buildingModel.js::openPhases`/`livePhase`/`phaseLabel`; `Dock.jsx` keeps only the choice
+of which label to show. The assistant chat streams the same way — interstitial prose
 (`SSE_TEXT`) and tool steps (`SSE_STEP`) between tool rounds, Claude-Desktop-style.
 
 ## Module map
