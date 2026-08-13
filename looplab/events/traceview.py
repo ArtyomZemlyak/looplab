@@ -45,6 +45,14 @@ TRACE_NODE_SPAN_CAP = 512
 # ceiling beside this one is how the two surfaces silently stop agreeing on what "everything" means.
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
+# The card-trace projection's two section ceilings. Every sibling projection in this file bounds
+# what it returns; these loops did not, and the serve caller hands them the WHOLE run's light span
+# list — so a crafted `spans.jsonl` with thousands of root `propose` spans stamped with one card_id
+# (`card_id` survives normalization) produced an unbounded HTTP payload. Generous relative to any
+# real card (a card's research rows are its proposal attempts, its node rows its attempts) so the
+# cap is invisible in practice and the receipt discloses it when it is not.
+TRACE_CARD_RESEARCH_CAP = 256
+TRACE_CARD_NODE_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
 # Trace projections are already bounded by the span and per-field caps above.  This final aggregate
 # ceiling keeps both HTTP responses and the archived trace.json finite without imposing a topology
@@ -702,7 +710,16 @@ def _response_projection(*, total_spans: int, visible_spans: int, light: bool = 
     total = max(visible_spans, _projection_counter(total_spans))
     omitted = max(0, total - visible_spans)
     clean_extra = {key: _projection_counter(value) for key, value in extra.items()}
-    truncated = omitted > 0 or truncated_spans > 0 or any(
+    # `truncated` is the flag a reader checks BEFORE trusting a section, so it has to be true when
+    # ANY axis is short — not only the span axis and the explicit `omitted_*` counters. A caller
+    # that passes `total_x`/`visible_x` for its own axis (the card projection's research and node
+    # sections) was reporting `truncated: False` over a capped list, which is exactly the
+    # "a truncated projection indistinguishable from a complete one" this receipt exists to prevent.
+    short_axis = any(
+        clean_extra.get(f"visible_{axis}", 0) < value
+        for key, value in clean_extra.items()
+        if key.startswith("total_") and (axis := key[len("total_"):]))
+    truncated = omitted > 0 or truncated_spans > 0 or short_axis or any(
         value > 0 for key, value in clean_extra.items() if key.startswith("omitted_"))
     return {
         "schema": TRACE_PROJECTION_SCHEMA,
@@ -1623,9 +1640,15 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
                 "tokens": roll["tokens"],
             })
     research.sort(key=lambda row: (row["start"], str(row["trace_id"])))
+    total_research = len(research)
+    # OLDEST-FIRST truncation, like the node-trace tail: the card's own first proposal is the row
+    # that explains it, and dropping the head to show the tail would answer a different question.
+    research = research[:TRACE_CARD_RESEARCH_CAP]
 
     nodes = []
-    for node_id in sorted(wanted_nodes, key=lambda value: (len(value), value)):
+    ordered_nodes = sorted(wanted_nodes, key=lambda value: (len(value), value))
+    total_nodes = len(ordered_nodes)
+    for node_id in ordered_nodes[:TRACE_CARD_NODE_CAP]:
         # `str(_node_id_of(s) or "")` is the bug this codebase already has a whole test file about:
         # node 0's id is FALSY, so that spelling silently gives node 0 an empty section while every
         # other node renders. Compare the resolved value against None instead.
@@ -1643,12 +1666,9 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
             "errors": sum(1 for s in node_spans if s.get("status") == "ERROR"),
         })
 
-    # REVIEW (mega-review 2026-08-13): unlike every sibling projection in this file (the node-trace
-    # tail, the conversation render caps), the research/node row loops above have NO ceiling — the
-    # serve caller hands this the whole run's light span list, so a crafted spans.jsonl with
-    # thousands of root `propose` spans stamped with this card_id (card_id survives normalization)
-    # yields an unbounded HTTP payload. And the receipt below hardcodes visible == total for every
-    # axis, so a future cap added at the route could not even be reported honestly through it.
+    # The receipt reports the REAL totals against what is visible, on every axis. Hardcoding
+    # `visible == total` would have made the caps above unreportable — a truncated projection
+    # indistinguishable from a complete one, which is the thing this receipt exists to prevent.
     return {
         "schema": TRACE_PROJECTION_SCHEMA,
         "card_id": str(card_id),
@@ -1656,6 +1676,6 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
         "nodes": nodes,
         "projection": _response_projection(
             total_spans=len(spans), visible_spans=len(spans), light=True,
-            total_research=len(research), visible_research=len(research),
-            total_nodes=len(nodes), visible_nodes=len(nodes)),
+            total_research=total_research, visible_research=len(research),
+            total_nodes=total_nodes, visible_nodes=len(nodes)),
     }

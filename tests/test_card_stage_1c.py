@@ -178,14 +178,15 @@ def test_true_open_gated_and_superseded_only_evidence_have_distinct_lifecycles()
     assert "work_terminal" in superseded_card.selection_blockers
 
 
-def test_drop_and_merge_exclusions_are_order_tolerant_and_preserve_legacy_actionable():
-    # REVIEW (mega-review 2026-08-13): the name no longer matches what this proves — since the
-    # `canon_at` change the two orders below are asserted to fold DIFFERENTLY (dropped_before stays
-    # 'proposed', dropped_after goes 'dropped'), i.e. the drop is deliberately order-DEPENDENT on
-    # the merge receipt, and the order-tolerance this name advertises is exactly the property that
-    # was removed. The rule itself is driven properly by
-    # test_drop_uses_only_merge_edges_durable_at_that_point; rename this so a reader grepping for
-    # invariant-5 order-tolerance coverage does not conclude the property holds here.
+def test_a_drop_reads_only_the_merge_edges_durable_before_it_and_keeps_legacy_actionable():
+    """The two orders below fold DIFFERENTLY, and that is the assertion.
+
+    Renamed from `..._are_order_tolerant_...`: since `canon_at` a drop resolves against the merge
+    edges durable AT THAT POINT, so `dropped_before` stays `proposed` while `dropped_after` goes
+    `dropped` — the drop is deliberately order-DEPENDENT on the merge receipt, which is the
+    opposite of what the old name advertised. A reader grepping for invariant-5 order-tolerance
+    coverage would have concluded the property holds here; it does not, and it is not meant to.
+    (`hypothesis_merged`'s splice position is load-bearing for exactly this reason.)"""
     _alias_idea, alias_payload = _native_card("card-alias", "alias direction")
     _canonical_idea, canonical_payload = _native_card("card-canonical", "canonical direction")
     prefix = [("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})]

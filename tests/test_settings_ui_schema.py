@@ -105,11 +105,17 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
     #
-    # REVIEW (mega-review 2026-08-13): the narration above stops at 195/164 while the pinned
-    # literals below read 199/168 — the comment is the tripwire's audit trail, and four of the five
-    # fields behind the last move (read_fence among them) are unaccounted for, so the next person
-    # this fires on cannot reconstruct it (doc 34 lists this tripwire's drift as a known sore).
-    # When re-pinning, extend the narration, do not replace it.
+    # …195 -> 196 / 164 -> 165 with `systemic_failure_stop`, the run-level "nothing has ever
+    #   worked" stop (2026-08-11);
+    # …196 -> 198 / 165 -> 167 with `metric_salvage` + `metric_salvage_repair`, the two salvage
+    #   knobs (2026-08-12; the catalogue rows landed one commit later, in `2cdcff9`);
+    # …198 -> 199 / 167 -> 168 with `read_fence`, the source-tree read fence (2026-08-13, `1afd909`).
+    # `inline_repair_reasons` moved in the same window but is a CHANGED default on a pre-existing
+    # field, so it moves neither count — worth saying, because it is the fourth field a reader
+    # diffing `config.py` across this window will find and try to account for.
+    #
+    # EXTEND this list when you re-pin; do not replace it. The whole value of the tripwire is that
+    # the next person it fires on can reconstruct why each move happened.
     assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 199
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)

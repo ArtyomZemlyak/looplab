@@ -106,15 +106,20 @@ def _param_is_referenced(pname: str, code: str) -> bool:
     takes a surface that mentions not one of their names to trip. A no-op solution does not
     accidentally contain `uniformity_weight`.
 
-    REVIEW (mega-review 2026-08-13): true of rare leaves, false of the COMMON ones. The scan
-    surface concatenates ALL of `node.files`, which for a repo task includes copied-in configs and
-    training scripts that natively contain `learning_rate`/`batch_size`/`epochs`/`seed` — so a
-    dotted param ending in any ubiquitous ML token now passes even when the Developer threaded
-    nothing (counterexample executed: a genuinely-ignored `train.training.learning_rate` no longer
-    fires because the repo's own config carries the token). The pre-fix check was 100%
-    false-positive on this task shape, so the trade is defensible for an advisory signal — but the
-    detector is now near-blind for exactly the params operators most often sweep, which is worth
-    saying here and worth a value-aware check eventually."""
+    KNOWN LIMITATION, stated rather than implied by the leaf fallback's optimistic wording. The
+    scan surface concatenates ALL of `node.files`, which for a repo task includes copied-in configs
+    and training scripts that natively contain `learning_rate`/`batch_size`/`epochs`/`seed`. So a
+    dotted param whose leaf is any ubiquitous ML token passes even when the Developer threaded
+    nothing — executed counterexample: a genuinely-ignored `train.training.learning_rate` does not
+    fire, because the seeded repo's own config already carries the token.
+
+    That is a deliberate trade, not an oversight: the exact-dotted-path check this replaced was 100%
+    false-positive on the same task shape (a repo param is a flattened config path and never appears
+    verbatim in the code), and a signal that fires on every node is worth nothing. Both states carry
+    little information, which is the tell that the question is at the wrong layer — whether a param
+    was really threaded is one only the task adapter can answer, by resolving the dotted path in the
+    written config and diffing it against the base. Until then this stays ADVISORY: it may hint, and
+    nothing may gate on it."""
     if re.search(rf"\b{re.escape(pname)}\b", code):
         return True
     leaf = pname.rsplit(".", 1)[-1]
