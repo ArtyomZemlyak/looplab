@@ -505,7 +505,8 @@ class AppState:
         invalidate(rd / "spans.jsonl")
 
     def node_trace_view(self, rd: Path, nid, cap: Optional[int] = None,
-                        generation: Optional[int] = None) -> dict:
+                        generation: Optional[int] = None,
+                        before: Optional[str] = None) -> dict:
         """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
         — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
         just that node's traces preserves its bounded tree/rollup projection without scanning unrelated
@@ -516,7 +517,13 @@ class AppState:
         the default stays TRACE_NODE_SPAN_CAP, and it is clamped to TRACE_NODE_SPAN_CAP_MAX so a single
         huge node can never materialize an unbounded tree. Still O(node) — a bigger cap only surfaces
         more of THAT node's already-scoped spans. ``generation`` fences a reset-surviving node id to
-        one lifecycle before either count or cap is applied."""
+        one lifecycle before either count or cap is applied.
+
+        ``before`` SEEKS that window rather than growing it: the cap's spans ENDING at the anchored
+        span instead of at the node's newest one (`SpanIndex._anchored`). It is what makes an early
+        repair reachable at all — widening only ever extends the same tail, and its ceiling is real.
+        ``total_spans`` deliberately stays the node's FULL count, so the omission receipt keeps
+        describing how big this node's trace is rather than how much of it precedes the anchor."""
         from looplab.events.span_index import get_index
         from looplab.events.traceview import (TRACE_NODE_SPAN_CAP, build_trace_view,
                                               settle_node_span_cap)
@@ -529,10 +536,35 @@ class AppState:
                 self.trace_scalars(rd), [], light=True, total_spans=0, span_cap=span_cap)
         return build_trace_view(
             self.trace_scalars(rd),
-            idx.light_spans_for_node(nid, span_cap, generation=generation),
+            idx.light_spans_for_node(nid, span_cap, generation=generation, before=before),
             light=True,
             total_spans=idx.node_span_count(nid, generation=generation),
             span_cap=span_cap)
+
+    def node_episode_map(self, rd: Path, nid, generation: Optional[int] = None) -> dict:
+        """The node's EPISODE MAP — every band of its trace, with no band's contents.
+
+        Sits beside `node_trace_view` because it is the control that makes that view's window
+        usable: the window is bounded and a heavily-repaired node is far larger than any window the
+        server can afford, so the operator needs somewhere to point it (`?before=`). Reads only the
+        in-memory light index — no spans.jsonl bytes at all — which is why a map of ALL of a node's
+        episodes can be a plain one-shot read beside a bounded one (measured 82 ms for the 7,048
+        bands of rubert-dr-0804 node 1). An unreadable/absent index degrades to the same explicit
+        unavailable receipt every other trace surface uses, never to an empty map.
+        """
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import node_episodes, unavailable_projection
+        idx = get_index(rd / "spans.jsonl")
+        if idx is None:
+            return {"node_id": str(nid), "episodes": [],
+                    "projection": unavailable_projection()}
+        return node_episodes(
+            idx.light_spans_for_node(nid, None, generation=generation), nid,
+            total_spans=idx.node_span_count(nid, generation=generation),
+            # Both the light rows and their counts come from the index, which normalized them when
+            # it built them; re-running the redaction/entropy scan over a whole 14,507-span node on
+            # every open is the same pure work `build_conversation` documents skipping.
+            _normalized=True)
 
     def card_trace_view(self, rd: Path, card_id: str) -> dict:
         """The whole story of ONE card: its research, then every node it produced.

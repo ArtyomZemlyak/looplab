@@ -596,16 +596,54 @@ in favour of a link to the Concepts view, and rename the destination after the t
 only home for — the claim records, the mixed-evidence records, and the steward curation log. The name
 is the deliverable here, not a layout tweak.
 
-## F6 · Conversation trace: usability, and the generations that are invisible
+## F6 · Conversation trace: usability, and the steps that are invisible — SHIPPED 2026-08-13
 
 **Asked:** "make the conversation trace more convenient. You cannot see traces from earlier versions
 of a node (bugs happened and repair kicked in)."
 
-**Today.** `/nodes/{n}/trace` and `/nodes/{n}/conversation` are scoped by `(node_id, generation)`, and
-the UI reads the CURRENT generation. Earlier generations are in the span log and reachable by
-`trace_id`, but no surface offers them. Separately, `traceview._CONVERSATION_TURN_CAP = 256` is what
-truncates the reasoning the operator wants to read; `CLAUDE.md` records the measurement that lifting
-it at a fixed span window costs **0 ms** of server time.
+**What this actually was.** The first reading of it — "earlier GENERATIONS are invisible" — was half
+right and shipped on 2026-08-12 as the Inspector's attempt picker (`6640349e`). Measuring the node
+the complaint came from showed the other half, and it is the bigger one:
+
+* `runs/rubert-dr-0804` node 1 has **14,507 spans across 2,345 inline repairs over 3 h 50 m, and ALL
+  of them are lifecycle generation 0.** `Node.attempt` is bumped by `node_reset`, never by inline
+  repair (`core/models.py::Node.attempt` says so; `traceProjection.js` and `docs/guide/ui.md` both
+  claimed the opposite until today). So on the very node the operator was reading, the attempt picker
+  has one option and does not render at all.
+* The window those routes read is a **TAIL**, so widening is the same tail extended. That node's
+  512-span default window covers its **last 7.6 minutes** and the 4,096-span ceiling its **last
+  59.3** — 74 % of the experiment, including every early repair where the bug first showed,
+  unreachable at any `limit`. Raising the ceiling is not the fix and was not done: the conversation
+  costs 3.4 ms/span in `full_spans_for_node` plus 0.9 ms/span in `build_conversation`, all on the
+  request thread (17.3 s at the ceiling on that node, ~64 s with no ceiling).
+
+**What shipped.**
+
+1. **The window MOVES.** `?before=<span_id>` on `/nodes/{n}/trace` and `/nodes/{n}/conversation`:
+   the same `limit` spans, ending at a chosen step. Same rows read, same cost, same ceiling. An
+   anchor the run's index cannot place is refused (409 `trace_anchor_unknown`), never degraded to the
+   tail — answering with the newest spans under an older episode's label is worse than an empty
+   panel. It is material in both the index's window revision and the route's ETag, so no conditional
+   read can answer one anchor with another's body.
+2. **The node publishes where to point it.** `GET /nodes/{n}/episodes` — every band the conversation
+   reads, with none of their contents, each carrying its `anchor`, its recorded repair ordinal, its
+   duration and its triage reason. It IS `_conversation_bands`, so the map cannot drift from the
+   surface it maps, and it is derived from the in-memory light index with no `spans.jsonl` bytes at
+   all: 7,048 episodes in 82 ms on that node.
+3. **The render caps stopped throwing away work already paid for.** `_CONVERSATION_TURN_CAP = 256`
+   and `_CONVERSATION_STAGE_CAP = 64` were flat numbers scaled by the window; on that node a
+   512-span window derived 256 bands and 425 turns and rendered 64 and 105. They are now the
+   window's own arithmetic bound (≤1 band and ≤2 turns per span), so what the window READ is what
+   the operator READS. Re-measured 2026-08-13, capped vs uncapped at the same window:
+   `build_conversation` 0.17 s vs 0.18 s at x1 and 1.42 s vs 1.39 s at the x8 ceiling — **0 ms**, as
+   `CLAUDE.md` recorded. It costs bytes: 193 KB -> 778 KB at the default window.
+4. **A VISIBLE control** (`ui/src/traceEpisodeModel.js` + `Inspector.jsx::TraceEpisodes`), beside the
+   attempt picker and explicitly not its substitute — attempt selects a lifecycle, this selects a
+   position inside one. It steps by ordinal rather than listing 2,345 rows, and the map loads when
+   the control is opened.
+
+Seeking node 1 to its first repair now returns `propose → implement → train → triage →
+inline_repair #1` — the beginning of the experiment, which no surface could open before.
 
 Related and already fixed: run-level agents (the Researcher above all) had no surface at all — see the
 new Operations panel.

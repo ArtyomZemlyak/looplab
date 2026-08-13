@@ -19,8 +19,8 @@ test.after(() => vite.close())
 
 const {
   TRACE_VIEW_CONVERSATION, TRACE_VIEW_SPANS, nodeTraceSubject, opTraceSubject, traceRequestPath,
-  traceSubjectAttempt, traceSubjectHasLogs, traceSubjectKey, traceSubjectLead, traceSubjectMatches,
-  traceSubjectSpans, traceSubjectValid,
+  traceSubjectAttempt, traceSubjectBefore, traceSubjectHasLogs, traceSubjectKey, traceSubjectLead,
+  traceSubjectMatches, traceSubjectSpans, traceSubjectValid,
 } = model
 
 test('each subject names its own routes, and a trace id is encoded into the path', () => {
@@ -51,6 +51,37 @@ test('an unpinned attempt is not attempt 0', () => {
   assert.notEqual(traceSubjectKey(nodeTraceSubject(7, 0)), traceSubjectKey(opTraceSubject('7')))
   assert.equal(traceSubjectAttempt(opTraceSubject('t')), null,
     'an operation has no attempt to send')
+})
+
+test('the window ANCHOR is part of the subject, not of the surface', () => {
+  // Two axes, and the trap is that they look like one. An ATTEMPT is a lifecycle generation, bumped
+  // by `node_reset` only; an ANCHOR is a position INSIDE one, which is where inline repairs live
+  // (2,345 of them in attempt 0 of the node this was measured on). A surface that owned the anchor
+  // privately would leave the fence, the poll scope and the React key blind to it.
+  const tail = nodeTraceSubject(7, 1)
+  const seeked = nodeTraceSubject(7, 1, 'span-abc')
+  assert.equal(traceSubjectBefore(tail), null, 'no anchor means read the newest steps')
+  assert.equal(traceSubjectBefore(seeked), 'span-abc')
+  assert.equal(traceSubjectBefore(opTraceSubject('t')), null,
+    'an operation trace is read whole; it has no window to place')
+  // A blank/absent anchor is the tail, never an empty-string query parameter.
+  assert.equal(traceSubjectBefore(nodeTraceSubject(7, 1, '')), null)
+  // Same node, same attempt, different WINDOW POSITION = a different reading, so a different scope.
+  assert.notEqual(traceSubjectKey(tail), traceSubjectKey(seeked))
+  assert.notEqual(traceSubjectKey(seeked), traceSubjectKey(nodeTraceSubject(7, 1, 'span-def')))
+  assert.equal(traceSubjectKey(seeked), traceSubjectKey(nodeTraceSubject(7, 1, 'span-abc')))
+  // THE FENCE. A seek is issued while the tail's read is still in flight and both responses carry
+  // this node and this attempt — without the anchor in the fence the tail settles under the chosen
+  // episode's label, i.e. the newest steps captioned as the oldest.
+  assert.equal(traceSubjectMatches(seeked, { node_id: 7, attempt: 1, before: 'span-abc' }), true)
+  assert.equal(traceSubjectMatches(seeked, { node_id: 7, attempt: 1 }), false,
+    'the tail’s answer must not settle an anchored read')
+  assert.equal(traceSubjectMatches(seeked, { node_id: 7, attempt: 1, before: 'span-def' }), false)
+  // …and in the other direction: a late anchored answer must not settle the tail either.
+  assert.equal(traceSubjectMatches(tail, { node_id: 7, attempt: 1, before: 'span-abc' }), false)
+  assert.equal(traceSubjectMatches(tail, { node_id: 7, attempt: 1, before: null }), true)
+  // A payload that predates the field is an unanchored read, which is what it always was.
+  assert.equal(traceSubjectMatches(tail, { node_id: 7, attempt: 1 }), true)
 })
 
 test('the fence admits only this subject’s payload', () => {

@@ -76,12 +76,14 @@ const stated = value => (Number.isSafeInteger(value) && value >= 0 ? value : nul
 // Measured on the live server (runs/rubert-dr-0804 node 1): the conversation reported 13,995 omitted
 // SPANS, while what the operator could not read was 192 omitted STAGES / 320 omitted TURNS — and
 // every one of those was already derivable from the 512 spans the response HAD. So the span count
-// names a quantity the reader cannot see and does not care about, and the span cap is not what hides
-// their steps.
+// names a quantity the reader cannot see and does not care about.
 //   * a control driven off span omission is right that "something is hidden" and wrong about what;
 //   * a notice quoting 13,995 invites the operator to expect 13,995 more steps.
-// Both hidden counts move under the SAME `limit`, because the server derives its stage/turn caps from
-// the span window (traceview.conversation_render_caps) — so one control still raises all of it.
+// Since 2026-08-13 the render caps ARE the span window's own bound (traceview.conversation_render_
+// caps), so that particular 192/320 can no longer happen: what the window read is rendered. The rule
+// below is unchanged and still load-bearing — a stage/turn omission is now proof that the SPAN window
+// is what withholds, which is exactly what makes both remedies honest: widen it (`onLoadMore`) or
+// move it (the episode control). Both hidden counts still move under the same window.
 // `totalsArePartial`: when spans are also omitted, the stage/turn TOTALS were themselves computed
 // over the windowed spans, so they are a floor, not the node's true count. Saying "of 425" flatly
 // would understate the run; the notice says "at least".
@@ -150,8 +152,15 @@ export const unavailableTraceDetail = () => ({ status: 'unavailable', attributes
 // current number and REJECTED any response carrying an older one as stale. So the trace of the
 // attempt that actually crashed — the one an operator opens the trace to read — was unreachable.
 //
-// Attempts are `0..current`, derivable with no extra request: `node.attempt` is the current
-// generation and generations are dense (each inline repair bumps it by one).
+// Attempts are `0..current`, derivable with no extra request: `node.attempt` is the current lifecycle
+// generation and generations are dense (each `node_reset` bumps it by one).
+//
+// NOT each inline repair, which this comment claimed until 2026-08-13 and which made this picker look
+// like the answer to the whole of F6. `core/models.py::Node.attempt` is bumped by `node_reset` only;
+// `node_repaired.attempt` is a separate, pre-existing INLINE-REPAIR ordinal that never reaches here.
+// The difference is not academic: `runs/rubert-dr-0804` node 1 was repaired 2,345 times inside ONE
+// generation, so this picker renders a single option on it and every one of those repairs is reached
+// by the episode control instead (`traceEpisodeModel.js`).
 export const nodeAttemptOptions = (currentAttempt) => {
   const current = Number.isSafeInteger(currentAttempt) && currentAttempt >= 0 ? currentAttempt : 0
   return Array.from({ length: current + 1 }, (_, attempt) => ({
@@ -161,14 +170,18 @@ export const nodeAttemptOptions = (currentAttempt) => {
   }))
 }
 
-// Which payload may render for the selected attempt. The node-DETAIL payload always describes the
-// CURRENT attempt, so it is a valid fallback only while the current attempt is what is being shown;
-// falling back to it for a historical selection would silently show the newest trace under an older
-// attempt's label — the one failure mode that is worse than showing nothing.
-export const traceForAttempt = ({ selected, current, paged, detail }) =>
-  (selected === current ? (paged || detail || null) : (paged || null))
+// Which payload may render for the selected attempt AND anchor. The node-DETAIL payload always
+// describes the CURRENT attempt at the NEWEST window, so it is a valid fallback only while that is
+// what is being shown; falling back to it for a historical selection would silently show the newest
+// trace under an older label — the one failure mode that is worse than showing nothing.
+//
+// `anchored` is the second half of the same rule and arrived with `?before=`: an operator who seeks
+// to repair #1 must never be shown the last 512 spans of the node because the seek has not settled
+// yet. Two different questions, one answer — what may stand in for a read that has not happened.
+export const traceForAttempt = ({ selected, current, paged, detail, anchored = false }) =>
+  (selected === current && !anchored ? (paged || detail || null) : (paged || null))
 
-// A historical attempt has no detail payload to render, so its read is not optional the way the
-// current attempt's pager is.
-export const attemptReadRequired = ({ selected, current, canPageFurther }) =>
-  selected !== current || canPageFurther
+// A historical attempt — or an anchored window — has no detail payload to render, so its read is not
+// optional the way the current attempt's tail pager is.
+export const attemptReadRequired = ({ selected, current, canPageFurther, anchored = false }) =>
+  selected !== current || anchored || canPageFurther

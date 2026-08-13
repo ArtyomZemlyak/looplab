@@ -140,7 +140,14 @@ trace, node-detail, tail, operation and conversation reader therefore passes spa
 same versioned allowlist projector before data enters the persisted index or browser:
 
 - span/attribute/event fields, collection sizes, nesting depth, text and the shared per-span text budget
-  are capped; response span/stage/turn counts are capped independently;
+  are capped; the response's SPAN window is the one knob for how much of a node is read, and the
+  stage/turn render caps are derived from it as its own arithmetic bound (`conversation_render_caps`:
+  at most one band and two turns per span, since neither can exist without one). They were flat
+  numbers until 2026-08-13, which made them a second, invisible ceiling: on `runs/rubert-dr-0804`
+  node 1 a 512-span window derived 256 bands and 425 turns and rendered 64 and 105 — evidence the
+  server had already paid 3.4 ms/span to read and 0.9 ms/span to thread, then dropped. Lifting them
+  at a fixed window is 0 ms (measured: `build_conversation` 0.17 s vs 0.18 s at that window) and
+  costs only response bytes, now honestly proportional to the window asked for;
 - persisted text is redacted before it is returned, nested secret-named fields are masked, and a
   secret-shaped required identity is quarantined instead of rewritten into a different topology;
 - complete JSON-object rows with an invalid span shape are quarantined individually; an invalid-JSON,
@@ -159,6 +166,18 @@ called rather than assume that every response has `total_spans` and `visible_spa
 | `trace/by_trace/{trace_id}/conversation` | the same stage/turn omission counters as the node conversation — it is the same projection over one operation's spans instead of one node's |
 | `spans/{span_id}` | `detail_truncated` for the selected span plus `siblings_elided`, `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when cardinality is known |
 | `trace/tail` | the bounded tail's visible/omitted counts and `source_truncated`; it does not pretend to know a whole-run total |
+
+The two per-node routes also take `?before=<span_id>`, which MOVES that window instead of growing it:
+the same `limit` spans ending at the anchored step rather than at the node's newest one. It exists
+because the window is a TAIL and widening is therefore the same tail extended — on the node above,
+14,507 spans over 3 h 50 m, the default window covers the last 7.6 minutes and the ceiling the last
+59.3, so 74 % of it was unreachable at any limit. `GET /nodes/{n}/episodes` names the places worth
+anchoring at: every band the conversation reads, with none of their contents, each carrying its
+`anchor`. It is the SAME band derivation the conversation uses (`_conversation_bands`) and is served
+from the in-memory light index without touching `spans.jsonl` — 7,048 episodes in 82 ms on that node.
+An anchor the index cannot place is refused (409 `trace_anchor_unknown`), never degraded to the tail,
+and it is material in both the index's window revision and the route's ETag so a conditional read can
+never answer one anchor with another's body.
 
 Both `by_trace` routes echo the requested `trace_id` and take the same `limit` window the node routes
 take (settled by `settle_node_span_cap`, so the ceiling stays `TRACE_NODE_SPAN_CAP_MAX`). Neither is

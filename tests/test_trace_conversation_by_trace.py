@@ -19,7 +19,7 @@ import pytest
 from looplab.events.eventstore import EventStore
 from looplab.events.span_index import invalidate
 from looplab.events.traceview import (
-    TRACE_DETAIL_SPAN_CAP,
+    TRACE_CONVERSATION_SPAN_CAP,
     build_conversation,
     build_trace_conversation,
 )
@@ -161,7 +161,12 @@ def test_both_by_trace_routes_page_and_refuse_a_negative_window(tmp_path):
 
     from looplab.serve.server import make_app
 
-    big = TRACE_DETAIL_SPAN_CAP + 40
+    # Past BOTH defaults: the span tree's 256 and the conversation's 512. The conversation half used
+    # to bind at 296 spans because a flat 256-turn RENDER cap cut a window the server had already
+    # read; since 2026-08-13 the render caps are the window's own arithmetic bound
+    # (`conversation_render_caps`), so what a widen buys is exactly the spans it newly reads — which
+    # is the property this test was always about, now stated where it is actually true.
+    big = TRACE_CONVERSATION_SPAN_CAP + 40
     _run(tmp_path, _corpus(propose_turns=big))
     client = TestClient(make_app(tmp_path))
 
@@ -172,11 +177,17 @@ def test_both_by_trace_routes_page_and_refuse_a_negative_window(tmp_path):
     assert widened["projection"]["visible_spans"] > default["projection"]["visible_spans"]
     assert widened["projection"]["omitted_spans"] == 0
 
-    narrow_turns = sum(_generations(stage["turns"]) for stage in client.get(
-        "/api/runs/demo/trace/by_trace/%s/conversation" % PROPOSE_TRACE).json()["stages"])
-    wide_turns = sum(_generations(stage["turns"]) for stage in client.get(
-        "/api/runs/demo/trace/by_trace/%s/conversation?limit=2048" % PROPOSE_TRACE).json()["stages"])
+    narrow = client.get(
+        "/api/runs/demo/trace/by_trace/%s/conversation" % PROPOSE_TRACE).json()
+    narrow_turns = sum(_generations(stage["turns"]) for stage in narrow["stages"])
+    wide = client.get(
+        "/api/runs/demo/trace/by_trace/%s/conversation?limit=2048" % PROPOSE_TRACE).json()
+    wide_turns = sum(_generations(stage["turns"]) for stage in wide["stages"])
+    assert narrow["projection"]["omitted_spans"] > 0, "the span window is what withholds turns"
     assert wide_turns > narrow_turns
+    # And the wider read withholds NOTHING it read: every turn it derived is rendered.
+    assert wide["projection"]["omitted_turns"] == 0
+    assert wide["projection"]["omitted_stages"] == 0
 
     # A client defect must fail loudly, the same wire contract as both node twins.
     for suffix in ("", "/conversation"):

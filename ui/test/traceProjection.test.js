@@ -191,14 +191,19 @@ test('Inspector and Dock preserve projection truth through every trace surface',
   // is not a second mechanism.
   assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, expectedGeneration, subjectKey, working, reloadNonce, retryNonce, spanLimit\][\s\S]*?<TraceUnavailable\s+label=\{traceFailureLabel\([\s\S]*?onRetry=\{onRetry\}/,
     'a finished conversation one-shot must expose an explicit retry')
+  // `subjectBefore` joined the request when the window became SEEKABLE (`?before=`), and it is not
+  // decoration: the same node, attempt and window ANCHORED elsewhere is a different representation,
+  // and a validator that ignored it would let a 304 answer a seek with the tail it was seeking away
+  // from. The anchor reaches the scope through `subjectKey` (traceSurfaceModel.js) and the request
+  // explicitly, so both halves are pinned here.
   assert.match(inspector,
-    /const scope = \[runId, expectedGeneration \|\| '', subjectKey, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?traceReadQuery\(expectedGeneration, subjectAttempt, spanLimit\)[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
-    'the conversation must conditionally read only its exact generation/lifecycle/window scope')
+    /const scope = \[runId, expectedGeneration \|\| '', subjectKey, spanLimit\][\s\S]*?const validator = prior\?\.scope === scope && prior\.etag[\s\S]*?traceReadQuery\(expectedGeneration, subjectAttempt, spanLimit, subjectBefore\)[\s\S]*?conditionalGet\(conversationPath, etag, \{ signal, cache: 'no-store' \}\)/,
+    'the conversation must conditionally read only its exact generation/lifecycle/window/anchor scope')
   assert.match(inspector,
     /const lifecycleScope = \[runId, expectedGeneration \|\| '', subjectKey, reloadNonce\][\s\S]*?const currentRead = read\?\.lifecycleScope === lifecycleScope \? read : null[\s\S]*?const prior = readRef\.current/,
     'fallback evidence must be gated by lifecycle, independently of the requested span window')
   assert.match(api,
-    /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit\), timeout\)/,
+    /export const traceDeadlineGet = \(path, expectedGeneration, attempt, limit, timeout, before = null\) =>[\s\S]*?deadlineGet\(path \+ traceReadQuery\(expectedGeneration, attempt, limit, before\), timeout\)/,
     'all bounded trace reads must retain the shared deadline and encoded query contract')
   assert.match(inspector,
     /const matchingNodePayload = \(result, nodeId, attempt, expectedGeneration\) => \{[\s\S]*?result\.status === 'fulfilled' && String\(payload\?\.node_id\) === String\(nodeId\)[\s\S]*?payload\?\.attempt === attempt && traceGenerationMatches\(payload, expectedGeneration\)[\s\S]*?observation\.etag !== validator[\s\S]*?payload\.cursor === observation\.etag[\s\S]*?commit\(!!payload, payload, etag,/,

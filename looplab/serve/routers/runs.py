@@ -127,13 +127,16 @@ _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
 
 def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
                        attempt: int, span_cap: int, source_revision: str, *,
-                       trace_run_id: str, task_id: str) -> str:
+                       trace_run_id: str, task_id: str,
+                       before: Optional[str] = None) -> str:
     """Opaque validator for one exact conversation representation.
 
     `source_revision` comes from SpanIndex's node/generation/window-specific full-row digests, so a
     parallel append for another node does not invalidate this node. The route identities still live
     here: the same rows requested under another run generation, attempt or settled window are a
-    different selected representation and must never validate a cached payload from this one.
+    different selected representation and must never validate a cached payload from this one — and
+    so is the same window ANCHORED somewhere else, which is why `before` is material here as well as
+    inside the index's own window revision.
     """
     material = orjson.dumps({
         "schema": _CONVERSATION_ETAG_SCHEMA,
@@ -145,6 +148,7 @@ def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
         "run_generation": run_generation,
         "attempt": attempt,
         "span_cap": span_cap,
+        "before": before,
         "source_revision": source_revision,
     }, option=orjson.OPT_SORT_KEYS)
     digest = hashlib.sha256(b"looplab:conversation-etag:v1\0" + material).hexdigest()
@@ -2209,27 +2213,63 @@ def build_router(srv) -> APIRouter:
             })
         return {"node_id": nid, "attempt": current_attempt, "metrics": m}
 
+    def _settle_window_anchor(rd: Path, before: Optional[str]) -> Optional[str]:
+        """Settle `?before=` for BOTH per-node trace surfaces, or refuse it.
+
+        The anchor is what turned the node trace window from a tail into something an operator can
+        aim (see `traceview.settle_trace_anchor` for the measurement it exists for). Two rules, and
+        both are load-bearing:
+
+        * ABSENT/blank means "no anchor" — the tail, the behaviour every caller had before this
+          existed;
+        * anything else that does not resolve to a span of this run is REFUSED, never degraded to the
+          tail. Degrading would answer with the node's NEWEST spans while the surface still labels
+          them with the episode the operator picked, which is the one failure worse than an empty
+          panel — the same reasoning `ui/src/traceProjection.js::traceForAttempt` states for a
+          historical attempt. It is also the `limit` rule's own logic: a paging control that quietly
+          ignores its argument is exactly how a dead pager looks from the outside. The remedy is a
+          real one (re-read the episode map, whose anchors come from this same index), so this is an
+          actionable 409 rather than a dead end.
+        """
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import settle_trace_anchor
+        if before is None or not str(before).strip():
+            return None
+        anchor = settle_trace_anchor(before)
+        idx = get_index(rd / "spans.jsonl") if anchor is not None else None
+        if anchor is None or idx is None or not idx.has_span(anchor):
+            raise HTTPException(409, {
+                "code": "trace_anchor_unknown",
+                "before": anchor,
+                "message": "That step is not in this run's trace index, so the window cannot be "
+                           "placed on it.",
+                "remediation": "Reload this experiment's episodes and pick one again.",
+            })
+        return anchor
+
     def _node_trace(rd: Path, nid: int, cap: Optional[int] = None, *,
-                    attempt: int = 0) -> dict:
+                    attempt: int = 0, before: Optional[str] = None) -> dict:
         try:
             # light=True: the tree carries structure + tokens + timing but NOT prompts/outputs. The UI
             # fetches a bounded/redacted observation projection lazily via /spans/{sid} when expanded,
             # so a heavily-repaired node's trace stays small and its omission receipt remains explicit.
             # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
             # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
-            tv = srv.node_trace_view(rd, nid, cap=cap, generation=attempt)
-            return {"node_id": nid, "attempt": attempt, "schema": tv.get("schema"),
+            tv = srv.node_trace_view(rd, nid, cap=cap, generation=attempt, before=before)
+            return {"node_id": nid, "attempt": attempt, "before": before,
+                    "schema": tv.get("schema"),
                     "nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {}),
                     "projection": tv.get("projection", {})}
         except Exception:  # noqa: BLE001
-            return {"node_id": nid, "attempt": attempt,
+            return {"node_id": nid, "attempt": attempt, "before": before,
                     **_trace_unavailable(nodes=[], rollup={}, summary={})}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
     def node_trace(run_id: str, nid: int, limit: int = Query(default=0, ge=0),
                    attempt: Optional[int] = Query(default=None, ge=0),
+                   before: Optional[str] = Query(default=None),
                    expected_generation: Optional[str] = Query(default=None)):
         """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
         only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
@@ -2238,10 +2278,18 @@ def build_router(srv) -> APIRouter:
         `limit` (>0) is the UI's "load more spans" control: it raises this node's span ceiling on demand
         (default 512, clamped to TRACE_NODE_SPAN_CAP_MAX in node_trace_view); 0/absent keeps the default.
         A negative limit is refused at the boundary (422) rather than silently read as the default — the
-        same wire contract as the conversation twin, so both pagers fail loudly on a client defect."""
+        same wire contract as the conversation twin, so both pagers fail loudly on a client defect.
+
+        `before` (a span id from `/nodes/{nid}/episodes`) MOVES that window instead of growing it: the
+        same `limit` spans, ending at the anchored step. It is the half `limit` cannot do — a bigger
+        limit is the same tail — and it is what makes an early repair on a long node reachable at
+        all. Echoed back so a surface can fence a late response from a previous anchor."""
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(
             rd, expected_generation, reading="its node trace", subject="its node trace")
+        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
+        # a read whose run has already been replaced has no business building one.
+        anchor = _settle_window_anchor(rd, before)
         observed_attempt = _cached_node_attempt(rd, nid)
         current_attempt = observed_attempt if observed_attempt is not None else 0
         # Setup/pseudo-node and legacy trace rows have no folded lifecycle marker and therefore use
@@ -2267,7 +2315,7 @@ def build_router(srv) -> APIRouter:
         attempt = current_attempt if attempt is None else attempt
         # 0/absent settles to the default inside `node_trace_view` — the one settle rule owns it, so
         # this route does not get a second opinion about what an unrequested window means.
-        payload = _node_trace(rd, nid, cap=limit, attempt=attempt)
+        payload = _node_trace(rd, nid, cap=limit, attempt=attempt, before=anchor)
         _assert_trace_reset_clear(rd)
         after_observed_attempt = _cached_node_attempt(rd, nid)
         after_attempt = after_observed_attempt if after_observed_attempt is not None else 0
@@ -2296,6 +2344,65 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Reload run state and request the current generation.",
             })
         return _trace_response({**payload, "run_generation": after_generation or None})
+
+    @router.get("/api/runs/{run_id}/nodes/{nid}/episodes")
+    def node_episodes_route(run_id: str, nid: int,
+                            attempt: Optional[int] = Query(default=None, ge=0),
+                            expected_generation: Optional[str] = Query(default=None)):
+        """THE MAP of one node's trace: every episode (band) it recorded, with none of their contents.
+
+        This is the surface F6 was missing. The two per-node trace reads are bounded windows over the
+        TAIL of `(node_id, generation)`, so on a heavily-repaired node most of the history is not
+        reachable by asking for more — measured on `runs/rubert-dr-0804` node 1 (14,507 spans, 2,345
+        inline repairs, 3 h 50 m): the 512-span default window shows its last 7.6 minutes and the
+        4,096-span ceiling its last 59.3. The attempt picker does not help either, because inline
+        repair does not open a lifecycle generation — every one of those spans is generation 0. So
+        the operator gets a map instead: each row names an episode and carries the `anchor` to put a
+        window on it (`?before=` on `/trace` and `/conversation`).
+
+        Cheap by construction: the whole map comes from the in-memory light index and reads no
+        spans.jsonl bytes (measured 82 ms for that node's 7,048 bands), which is why it is served
+        whole rather than paged. It is a READ of the current lifecycle by default and takes the same
+        `attempt` a historical read takes, so the map and the window it aims always describe one
+        generation."""
+        rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(rd, expected_generation)
+        current_attempt = _cached_node_attempt(rd, nid)
+        current_attempt = current_attempt if current_attempt is not None else 0
+        # Same restored contract as the two window routes: an EARLIER attempt is a historical read
+        # served as asked, an attempt this node never reached is refused. A map of a lifecycle that
+        # does not exist would be a map of the current one under a false label.
+        if attempt is not None and attempt > current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": attempt,
+                "current_attempt": current_attempt,
+                "message": "The node was reset before its episodes were read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        read_attempt = current_attempt if attempt is None else attempt
+        try:
+            payload = srv.node_episode_map(rd, nid, generation=read_attempt)
+        except Exception:  # noqa: BLE001 - an unreadable index is an unavailable map, never an empty one
+            payload = {"node_id": str(nid), **_trace_unavailable(episodes=[])}
+        # The same post-read lifecycle CAS the window routes apply: a reset landing under this read
+        # abandons every anchor in the map, and publishing them would hand the operator seek keys
+        # into a lifecycle that no longer exists.
+        after_attempt = _cached_node_attempt(rd, nid)
+        after_attempt = after_attempt if after_attempt is not None else 0
+        if after_attempt != current_attempt:
+            raise HTTPException(409, {
+                "code": "node_attempt_changed",
+                "node_id": nid,
+                "expected_attempt": current_attempt,
+                "current_attempt": after_attempt,
+                "message": "The node was reset while its episodes were being read.",
+                "remediation": "Reload node state and request the current attempt.",
+            })
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
+        return _trace_response({**payload, "node_id": str(nid), "attempt": read_attempt,
+                                "run_generation": generation or None})
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str,
@@ -2586,6 +2693,7 @@ def build_router(srv) -> APIRouter:
     def node_conversation(run_id: str, nid: int, request: Request, response: Response,
                           limit: int = Query(default=0, ge=0),
                           attempt: Optional[int] = Query(default=None, ge=0),
+                          before: Optional[str] = Query(default=None),
                           expected_generation: Optional[str] = Query(default=None)):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
         once per sub-loop, then each generation's delta (reasoning + text + tool calls) interleaved
@@ -2604,6 +2712,12 @@ def build_router(srv) -> APIRouter:
         checked before and after the read; old attempts remain available through attempt-history
         evidence rather than being silently concatenated into the current conversation.
 
+        ``before`` (a span id from `/nodes/{nid}/episodes`) SEEKS the window: the same `limit` spans,
+        ending at the anchored step rather than at the node's newest one. `attempt` and `before`
+        answer two different questions and neither substitutes for the other — `attempt` picks a
+        lifecycle GENERATION (what `node_reset` creates), `before` a position INSIDE one, which is
+        where the inline repairs live (2,345 of them in generation 0 of rubert-dr-0804 node 1).
+
         Successful stable snapshots carry an opaque ``cursor`` equal to their ETag. A caller may
         return it as ``If-None-Match``; an unchanged node/generation/window then answers 304 before
         the full rows are read or the conversation is rebuilt. Legacy unconditional callers keep
@@ -2611,6 +2725,9 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(
             rd, expected_generation, reading="its node conversation", subject="its conversation")
+        # Settled AFTER the run fence and before the read: resolving it consults the span index, and
+        # a read whose run has already been replaced has no business building one.
+        anchor = _settle_window_anchor(rd, before)
         # An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked and echoed back — the
         # same rule as the span-tree twin above, because these are the two VIEWS of one trace
         # surface and the Inspector's attempt picker switches between them over one selection.  The
@@ -2650,7 +2767,7 @@ def build_router(srv) -> APIRouter:
                 # projector derive the honest count instead of pinning that raced body to zero.
                 return None, missing_revision, None, True
             revision, count, conditional_ok = observed.node_window_snapshot(
-                nid, span_cap, generation=read_attempt)
+                nid, span_cap, generation=read_attempt, before=anchor)
             return observed, revision, count, conditional_ok
 
         def recheck_lifecycle() -> str | None:
@@ -2690,7 +2807,7 @@ def build_router(srv) -> APIRouter:
             pass
         candidate_etag = (_conversation_etag(
             run_id, nid, before_generation, read_attempt, span_cap, source_revision,
-            trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
+            trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id, before=anchor)
             if source_revision is not None else None)
         if source_conditional_ok and candidate_etag is not None and if_none_match(
                 request.headers.get("if-none-match"), candidate_etag):
@@ -2705,7 +2822,7 @@ def build_router(srv) -> APIRouter:
             trace_scalars = srv.trace_scalars(rd)
             refreshed_etag = (_conversation_etag(
                 run_id, nid, after_generation, read_attempt, span_cap, source_revision,
-                trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
+                trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id, before=anchor)
                 if source_revision is not None else None)
             if source_conditional_ok and refreshed_etag is not None and if_none_match(
                     request.headers.get("if-none-match"), refreshed_etag):
@@ -2721,9 +2838,10 @@ def build_router(srv) -> APIRouter:
                 idx, source_revision, total, source_conditional_ok = source_snapshot()
                 candidate_etag = _conversation_etag(
                     run_id, nid, before_generation, read_attempt, span_cap, source_revision,
-                    trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id)
+                    trace_run_id=trace_scalars.run_id, task_id=trace_scalars.task_id,
+                    before=anchor)
             spans = (idx.full_spans_for_node(
-                nid, span_cap, generation=read_attempt)
+                nid, span_cap, generation=read_attempt, before=anchor)
                 if idx is not None else load_spans(rd / "spans.jsonl"))
             conversation = build_conversation(
                 trace_scalars, spans, nid, total_spans=total, span_cap=span_cap,
@@ -2747,7 +2865,7 @@ def build_router(srv) -> APIRouter:
                 after_etag = _conversation_etag(
                     run_id, nid, after_generation, read_attempt, span_cap,
                     after_source_revision, trace_run_id=after_trace_scalars.run_id,
-                    task_id=after_trace_scalars.task_id)
+                    task_id=after_trace_scalars.task_id, before=anchor)
                 if (after_conditional_ok and candidate_etag is not None
                         and hmac.compare_digest(candidate_etag, after_etag)):
                     stable_etag = candidate_etag
@@ -2756,7 +2874,7 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         if stable_etag is not None:
             response.headers["ETag"] = stable_etag
-        return {**conversation, "node_id": str(nid), "attempt": read_attempt,
+        return {**conversation, "node_id": str(nid), "attempt": read_attempt, "before": anchor,
                 "run_generation": after_generation or None, "cursor": stable_etag}
 
     @router.get("/api/runs/{run_id}/log")

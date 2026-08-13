@@ -786,17 +786,52 @@ class SpanIndex:
             )
         return sorted(rows)
 
+    def has_span(self, sid) -> bool:
+        """Does this index know the span id a caller wants to anchor a window at?
+
+        The routes' `?before=` refuses an id this index cannot place instead of degrading to the
+        tail: a window that silently ignores its anchor answers with the NEWEST spans under an older
+        episode's label, which is the one failure worse than showing nothing (the same rule
+        `ui/src/traceProjection.js::traceForAttempt` states for a historical attempt).
+        """
+        if sid is None:
+            return False
+        with self._rlock:
+            return str(sid) in self.by_sid
+
+    def _anchored(self, rows: list[int], before) -> list[int]:
+        """Cut an ordered row selection at its anchor. Caller holds ``_rlock``.
+
+        The window a node's trace surfaces read has always been a TAIL, so every step older than
+        `limit` spans was unreachable at any limit — raising it only ever extends the same tail, and
+        the ceiling that bounds it is real. An anchor SEEKS instead: keep the rows up to and
+        including the anchored span, and the caller's own `[-limit:]` then makes the window END
+        there. spans.jsonl is append-only and rows are file-ordered, so this is one comparison.
+
+        A `before` this index cannot place keeps the selection UNCUT — the tail — and callers must
+        therefore refuse such an id at the boundary (`has_span`); this is deliberately not the place
+        that decides, because `full_spans_for_trace`'s anchor has the opposite rule for a good
+        reason (an unindexed anchor there is a just-appended span that follows every indexed row).
+        """
+        if before is None:
+            return rows
+        anchor = self.by_sid.get(str(before))
+        if anchor is None:
+            return rows
+        return [row for row in rows if row <= anchor]
+
     def light_spans_for_node(self, node_id, limit: Optional[int] = None, *,
-                             generation: Optional[int] = None) -> list[dict]:
+                             generation: Optional[int] = None,
+                             before: Optional[str] = None) -> list[dict]:
         """The LIGHT spans of the traces attributed to this node — IN-MEMORY, no disk read (unlike
         `full_spans_for_node`, which seeks each span's full I/O). Lets the node-detail timeline build
         O(node) instead of O(whole run): `build_trace_view(light=True)` over just these yields the SAME
         `nodes[nid]`/`rollup` as over ALL spans. Candidate traces come from `node_tids`, then each
         span is filtered by its own node_id or trace-root fallback so shared traces cannot bleed.
         A generation fence is applied BEFORE the row limit, so abandoned attempts cannot consume the
-        current attempt's response window."""
+        current attempt's response window; `before` seeks that window (see `_anchored`)."""
         with self._rlock:
-            rows = self._rows_for_node(node_id, generation)
+            rows = self._anchored(self._rows_for_node(node_id, generation), before)
             if limit is not None:
                 cap = max(0, int(limit))
                 rows = rows[-cap:] if cap else []
@@ -807,10 +842,19 @@ class SpanIndex:
             return len(self._rows_for_node(node_id, generation))
 
     def _node_window_snapshot(self, node_id, limit: Optional[int], *,
-                              generation: Optional[int]) -> tuple[list[int], int, str]:
-        """Return selected rows, total and their raw revision while ``_rlock`` is held."""
+                              generation: Optional[int],
+                              before: Optional[str] = None) -> tuple[list[int], int, str]:
+        """Return selected rows, total and their raw revision while ``_rlock`` is held.
+
+        ``total`` stays the node's FULL row count even when `before` seeks the window: what the
+        omission receipt owes the operator is how big this node's trace really is, not how much of it
+        happens to lie behind the anchor they chose. `before` is part of the revision material —
+        without it two different anchors at one window would mint the same validator and a conditional
+        request would be answered 304 with the other anchor's body.
+        """
         rows = self._rows_for_node(node_id, generation)
         total = len(rows)
+        rows = self._anchored(rows, before)
         if limit is not None:
             cap = max(0, int(limit))
             rows = rows[-cap:] if cap else []
@@ -825,6 +869,7 @@ class SpanIndex:
             "source_epoch_proven": source_epoch_proven,
             "node_id": str(node_id),
             "generation": generation,
+            "before": None if before is None else str(before),
             "total": total,
             "rows": digests,
         }, option=orjson.OPT_SORT_KEYS)
@@ -833,7 +878,8 @@ class SpanIndex:
         return rows, total, revision
 
     def node_window_snapshot(self, node_id, limit: Optional[int] = None, *,
-                             generation: Optional[int] = None) -> tuple[str, int, bool]:
+                             generation: Optional[int] = None,
+                             before: Optional[str] = None) -> tuple[str, int, bool]:
         """Opaque exact-content revision for one node's bounded FULL-row window.
 
         A global source size/mtime token changes when *another* concurrently executing node appends,
@@ -852,29 +898,31 @@ class SpanIndex:
         """
         with self._rlock:
             _rows, total, revision = self._node_window_snapshot(
-                node_id, limit, generation=generation)
+                node_id, limit, generation=generation, before=before)
             verified = self._source_derived or revision in self._verified_window_revisions
             if revision in self._verified_window_revisions:
                 self._verified_window_revisions.move_to_end(revision)
         return revision, total, verified
 
     def full_spans_for_node(self, node_id, limit: Optional[int] = None, *,
-                            generation: Optional[int] = None) -> list[dict]:
+                            generation: Optional[int] = None,
+                            before: Optional[str] = None) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +
         repair traces). Candidate traces are found in-memory, then spans are retained only when the
         shared per-span-first/root-fallback rule attributes them to this node. Filtering (and an
         optional trace-root lifecycle fence) precedes totals and the row limit, so neither another
-        node sharing the trace nor an abandoned attempt can consume the conversation window."""
+        node sharing the trace nor an abandoned attempt can consume the conversation window.
+        `before` SEEKS that window to one episode instead of growing it (see `_anchored`)."""
         with self._rlock:                              # snapshot rows — never iterate the live set/lists
             rows, _total, revision = self._node_window_snapshot(
-                node_id, limit, generation=generation)
+                node_id, limit, generation=generation, before=before)
         spans = self._read_full(rows)
         # Promotion is process-local and happens only after every selected source row passed both its
         # exact-byte digest and normalized-light comparison. If a concurrent relevant append changed
         # the window, the route's post-read snapshot computes a different unverified revision.
         with self._rlock:
             current_rows, _current_total, current_revision = self._node_window_snapshot(
-                node_id, limit, generation=generation)
+                node_id, limit, generation=generation, before=before)
             if current_rows == rows and current_revision == revision:
                 self._verified_window_revisions[revision] = None
                 self._verified_window_revisions.move_to_end(revision)
