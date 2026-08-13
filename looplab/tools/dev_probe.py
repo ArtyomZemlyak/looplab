@@ -363,6 +363,8 @@ class DevProbeTools:
         try:
             work = root / "work"
             work.mkdir()
+            fence_dir = root / "fence"
+            fence_dir.mkdir()
             replica_note = self._replicate(work)
             program = root / "probe.py"
             program.write_text(code, encoding="utf-8")
@@ -377,24 +379,34 @@ class DevProbeTools:
                 # a probe that allocated on one would break a SIBLING node's training.
                 "CUDA_VISIBLE_DEVICES": "",
             }
-            if self._install_fence(root):
+            # The fence gets a directory of its OWN, holding exactly `sitecustomize.py`. That
+            # directory goes on PYTHONPATH, and `read_fence`'s own docstring states the rule this
+            # honours: "the PYTHONPATH entry contains exactly one importable name — every additional
+            # module in that directory would shadow a real one for every process in the run". Putting
+            # the fence beside `probe.py`/`probe_launcher.py` would have shadowed three.
+            if self._install_fence(fence_dir):
                 # `run_argv` consumes this marker and prepends the directory to the child's
                 # PYTHONPATH, which is what makes CPython import our `sitecustomize` at startup.
                 # Set only when there is a fence to carry, so a non-repo task's probe env stays
                 # byte-identical to what it would be without this module.
-                env[read_fence.FENCE_DIR_ENV] = str(root)
+                env[read_fence.FENCE_DIR_ENV] = str(fence_dir)
             # `sys.executable`, deliberately: `env_inspect` answers by IMPORTING in the engine's own
             # interpreter, so a probe on any other one could contradict `pkg_info` about the same
             # package and the Developer would have no way to tell which answer was about its eval.
+            #
+            # `-P` (PYTHONSAFEPATH) for the same shadowing reason: without it CPython prepends the
+            # SCRIPT's directory, which is the probe's scratch, making `probe`/`probe_launcher`
+            # importable names ahead of the real ones. It does not touch PYTHONPATH, so the fence is
+            # unaffected, and the launcher puts the replica cwd on the path explicitly instead.
             rc, out, err, timed_out = run_argv(
-                [sys.executable, str(launcher)], str(work), to, env=env,
+                [sys.executable, "-P", str(launcher)], str(work), to, env=env,
                 max_output_bytes=_MAX_OUTPUT)
         finally:
             shutil.rmtree(root, ignore_errors=True)
         return self._project(rc, out, err, timed_out, to, replica_note)
 
-    def _install_fence(self, root: Path) -> bool:
-        """Render THIS run's source-tree read fence into the probe's own directory.
+    def _install_fence(self, fence_dir: Path) -> bool:
+        """Render THIS run's source-tree read fence into the probe's own fence directory.
 
         Derived from `read_fence.fence_inputs` / `render` — the same two functions
         `engine/resources.py::_read_fence_dir` uses — so there is one policy with two installation
@@ -412,7 +424,7 @@ class DevProbeTools:
         roots, allow, _dropped = read_fence.fence_inputs(self.repo_spec, allow=())
         if not roots:
             return False
-        (root / "sitecustomize.py").write_text(
+        (fence_dir / "sitecustomize.py").write_text(
             read_fence.render(roots, allow, policy="deny", log="", run="developer-probe"),
             encoding="utf-8")
         return True
