@@ -73,6 +73,28 @@ def parse_stage_check_reply(text: str, *, declared: bool):
     return StageCheckVerdict(kind, detail)
 
 
+# The deadline judge's reply protocol. Deliberately the SMALLEST possible answer — a verdict word
+# and nothing else — because the only thing the engine may take from it is a boolean, and a model
+# that is allowed to name its own number will name a large one.
+_DEADLINE_FINISHING = "FINISHING"
+# NOT_FINISHING is listed FIRST and the verdict is read from the GROUP, never from "did it match".
+# Ordered the other way — and read as a bare truthiness test — `NOT_FINISHING` matched the pattern
+# and bought the extension it was refusing, which `tests/test_deadline_grace.py` caught.
+_DEADLINE_REPLY_RE = re.compile(r"^\s*(NOT_FINISHING|FINISHING)\b", re.IGNORECASE)
+
+
+def parse_deadline_reply(text: str) -> bool:
+    """Did the judge say the stage is about to finish? Pure, TOTAL, and fail-CLOSED.
+
+    Anything that is not an explicit `FINISHING` — prose, `NOT_FINISHING`, an empty answer, a
+    hedge — is False, i.e. the historical kill. This direction is the opposite of the stage
+    checker's and deliberately so: there, refusing to act on an unreadable answer SAVES a node; here,
+    acting on one SPENDS money. The unreadable case must resolve to whichever answer is cheap, and
+    that is not the same answer in both places."""
+    m = _DEADLINE_REPLY_RE.match((text or "").strip())
+    return m is not None and m.group(1).upper() == _DEADLINE_FINISHING
+
+
 class EvalStagesMixin:
     """The engine's staged-eval cluster. See the module docstring for the mixin convention
     (`self` is the Engine)."""
@@ -572,6 +594,67 @@ class EvalStagesMixin:
         if any(not str(c).endswith(".py") for c in changed):
             return suspect, None
         return None, self.ROLLBACK_NO_CHANGE.format(**_fmt)
+
+    def _deadline_grace_fn(self, node):
+        """The ONE-SHOT deadline judge: a callback `(log_tail) -> seconds` handed to
+        `run_command_eval`, or None when the feature is off / no client is wired.
+
+        THE DECISION IT MAKES is "kill this stage now, or give it a little longer" — what happens
+        NEXT, recoverable and re-checkable, and it touches nothing in the record. The metric still
+        comes from the operator's own reader over the protected `score` stage; a graced stage that
+        still misses the extended wall reports `timed_out` exactly as it always did; and the seconds
+        actually bought are stamped on the stage row from the out-of-band `signals`, never read back
+        out of the log.
+
+        WHY IT IS NOT A THRESHOLD. All four `stage_finished.status == "timeout"` rows in the corpus
+        sit exactly on their 4 h / 6 h / 8 h wall and discarded 22.0 GPU-hours between them, and the
+        whole captured record of `rubertlite-dense-retrieval` node 72 — 12.45 hours, five repairs —
+        ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, "two seconds from a
+        checkpoint" and "will never finish" are the identical fact. Raising the budget instead does
+        not help: it moves the same cliff later and pays for every genuinely hung run on the way.
+
+        WHAT BOUNDS IT, because a judge reading the CANDIDATE'S OWN log is exactly the input that
+        must not be trusted with anything expensive: the answer is a single word, never a number
+        (`parse_deadline_reply` — fail-closed, so an unreadable reply kills as before); the seconds
+        come from the OPERATOR'S `eval_deadline_grace_s`; `sandbox._granted_grace` clamps them again
+        in the runtime; the judge is asked AT MOST ONCE per command; an operator `cancel` is never
+        graced; and the whole thing is OFF by default. So a solution that prints a convincing
+        progress bar buys `eval_deadline_grace_s` seconds, once, and no other thing."""
+        cap = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
+        if cap <= 0:
+            return None
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return None
+        idea_text = self._idea_text(node.idea) if node is not None else ""
+
+        # EVAL-PATH, not background — the same reasoning as `_stage_check_fn`: this blocks the eval
+        # worker at the deadline and there is one per concurrent eval.
+        @in_llm_lane("engine")
+        def _judge(tail: str) -> float:
+            msgs = [{"role": "system", "content":
+                     "An ML pipeline stage has just reached its wall-clock time budget and is about "
+                     "to be killed, discarding everything it has done. You are shown the tail of its "
+                     "LIVE log. Decide ONE thing: is this stage within a few minutes of completing "
+                     "the work it is doing, or not? Evidence FOR: a progress bar at or near 100%, a "
+                     "final epoch/step counter almost at its total, a checkpoint or evaluation "
+                     "already being written. Evidence AGAINST: early progress, a repeating error, no "
+                     "movement, or a log you cannot read progress from. Default to NOT_FINISHING — "
+                     "the extension is granted once and is paid for in GPU time, so guessing costs "
+                     "real money, while being wrong the other way costs one stage that was going to "
+                     "be killed anyway. Reply with EXACTLY one word: FINISHING or NOT_FINISHING."},
+                    {"role": "user", "content":
+                     f"Experiment: {idea_text[:400]}\n\nLive log tail:\n{tail}"}]
+            try:
+                out = (client.complete_text(msgs) or "").strip()
+            except Exception:  # noqa: BLE001 — a judge failure must never turn a timeout into a crash
+                return 0.0
+            return cap if parse_deadline_reply(out) else 0.0
+
+        return _judge
 
     def _stage_check_fn(self, node):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> verdict|None that

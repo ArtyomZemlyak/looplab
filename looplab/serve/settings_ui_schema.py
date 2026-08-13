@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 168
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 169
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -45,7 +45,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (off|audit|select, default audit) and `metric_salvage_repair`. They belong beside the inline-repair
 # rows because they answer the same question from the other end: inline repair asks "can this node be
 # made to work", salvage asks "did it already, and did we throw the answer away".)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "68fcf2e159dba79f1c4775892dc43291493f85350cf4510bc83305ce85f6e431"
+# (Previously 168, since eval_deadline_grace_s joined Budgets & confirmation — the one-shot,
+# judge-granted extension a stage may get at its wall-clock deadline. A row rather than an
+# uncurated omission for the reason the reconciliation message states: it is an LLM-JUDGED switch,
+# it is OFF by default, and turning it on lets a judge reading the candidate's own live log spend
+# GPU time. An operator who is paying for that has to be able to see the number they set.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "43a3466285b09f7dc7c8e6d8dde6c8290b5aad60ca5bd92fc9a762002b13809b"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

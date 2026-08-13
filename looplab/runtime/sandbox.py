@@ -483,7 +483,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
              log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
              fsize_bytes: Optional[int] = None, health_check: bool = False,
-             stall_timeout: Optional[float] = None, signals: Optional[dict] = None):
+             stall_timeout: Optional[float] = None, signals: Optional[dict] = None,
+             on_deadline=None, deadline_grace_max_s: Optional[float] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -500,7 +501,14 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     `log_path` (optional): mirror the child's stdout+stderr to this file *live*, line by line, so a
     long eval (training epochs, tqdm) is tail-able in real time instead of opaque until it returns.
     The returned (capped) stdout/stderr are unchanged, so the metric reader + repair feedback see
-    exactly what they did before. None simply keeps no live file (the drain still runs)."""
+    exactly what they did before. None simply keeps no live file (the drain still runs).
+
+    `on_deadline` (optional `tail -> seconds`) + `deadline_grace_max_s`: a ONE-SHOT, clamped
+    extension asked for at the wall instead of killing unconditionally — see the deadline branch in
+    `_tee_drain` and `_granted_grace` for the bound and for the 22.0 discarded GPU-hours behind it.
+    `runtime` may not call an LLM, so the judge lives in the engine and arrives as this callback, the
+    same seam shape `command_eval`'s `check_fn` already uses. Omitted (the default) => the historical
+    unconditional kill, byte-for-byte."""
     # Bound the deadline at the universal choke point: a NaN/inf/negative timeout from ANY caller
     # would otherwise disable the wall-clock kill (a NaN deadline is never reached). See finite_timeout.
     timeout = finite_timeout(timeout)
@@ -641,7 +649,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
                                          health_check=health_check, stall_timeout=stall_timeout,
-                                         signals=signals)
+                                         signals=signals, on_deadline=on_deadline,
+                                         deadline_grace_max_s=deadline_grace_max_s)
     if docker_cidfile is not None:
         # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
         # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
@@ -793,8 +802,34 @@ class _StageHealthPair:
             return sum(item.hits for item in self.monitors.values()) >= self.threshold
 
 
+def _granted_grace(on_deadline, tail: str, cap) -> float:
+    """Seconds of ONE-SHOT extra wall clock a deadline judge may buy. Clamped, and TOTAL — every
+    way of not answering is 0.0, so the historical hard kill is what a missing/broken judge gets.
+
+    THE RUNTIME CLAMPS, not the judge. `runtime` may not call an LLM (it imports nothing above
+    `core`), so the thing on the other end of this callback is the engine's, and this is the one
+    place its answer is bounded. A judge that asks for an hour, for infinity, or for a string gets
+    `cap`, `cap` and 0.0 respectively — the ACTION space widens by a bounded amount and the
+    candidate's own log, which is what the judge reads, can buy time and nothing else. It cannot buy
+    a metric: `read_metric` and the operator's `score` stage are untouched by this, and a graced run
+    that still misses the extended deadline reports `timed_out` exactly as before."""
+    if on_deadline is None or not cap or float(cap) <= 0:
+        return 0.0
+    try:
+        asked = on_deadline(tail)
+    except Exception:  # noqa: BLE001 — a judge that raises must not turn a timeout into a crash
+        return 0.0
+    try:
+        asked = float(asked if asked is not None else 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not (asked > 0):          # covers 0, negatives and NaN (every comparison with NaN is False)
+        return 0.0
+    return min(asked, float(cap))
+
+
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False,
-               stall_timeout=None, signals=None):
+               stall_timeout=None, signals=None, on_deadline=None, deadline_grace_max_s=None):
     """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
     `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
@@ -834,6 +869,21 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     # main loop kills the child if it goes quiet for `stall_timeout` while still alive. A mutable holder
     # (not a bare float) so the pump threads and the wait loop share ONE value without a reassignment race.
     last_output = [_time.monotonic()]
+    # ONE-SHOT deadline grace (see the deadline branch below). `graced` records that the judge was
+    # ASKED — not that it said yes — so a judge that declines cannot be re-asked every 250 ms for the
+    # rest of the wait; `granted` is the seconds actually bought, reported out through `signals` so
+    # the caller can say so rather than silently reporting a longer stage.
+    graced = [False]
+    granted = [0.0]
+
+    def _current_tail(max_chars: int = 4000) -> str:
+        """The recent combined output the deadline judge reads. Bounded, and taken under the pump
+        lock so it never splices a half-written chunk."""
+        with lock:
+            out_b = b"".join(bufs["out"])[-max_chars * 4:]
+            err_b = b"".join(bufs["err"])[-max_chars * 4:]
+        text = (out_b.decode("utf-8", "replace") + "\n" + err_b.decode("utf-8", "replace"))
+        return text[-max_chars:]
 
     def _observe_health(key: str, text: str = "", *, final: bool = False) -> None:
         if health is not None and health.observe(key, text, final=final):
@@ -931,7 +981,41 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 except Exception:
                     pass
                 break
-            if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
+            if cancel is not None and cancel.is_set():
+                # NEVER graced. The operator asked for this to stop.
+                _kill_tree(proc)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+                timed_out = True
+                break
+            if _time.monotonic() >= deadline:
+                # THE DEADLINE IS A NUMBER THAT CANNOT SEE A PROGRESS BAR AT 664/664. Measured on
+                # the shipped corpus: all four `stage_finished.status == "timeout"` rows land exactly
+                # on their 4 h / 6 h / 8 h wall and together discarded 22.0 GPU-hours, and
+                # `rubertlite-dense-retrieval` node 72's captured tail — the whole record of a
+                # 12.45-hour node — ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. A
+                # stage two seconds from writing its checkpoint and a stage that will never finish
+                # produce the same fact at the deadline: elapsed >= timeout. Only something reading
+                # the log can tell them apart, so at the wall the judge is ASKED once — bounded by
+                # `deadline_grace_max_s`, at most ONE grace per command, and never on a cancel.
+                # With no judge wired this is byte-for-byte the unconditional kill it always was.
+                _grace = 0.0
+                if on_deadline is not None and not graced[0]:
+                    graced[0] = True
+                    _grace = _granted_grace(on_deadline, _current_tail(), deadline_grace_max_s)
+                if _grace > 0:
+                    deadline = _time.monotonic() + _grace
+                    granted[0] += _grace
+                    if logf is not None:
+                        try:
+                            logf.write(f"\n‼ LOOPLAB deadline: the stage reached its time budget and "
+                                       f"a live-log judge granted ONE extension of {int(_grace)}s.\n")
+                            logf.flush()
+                        except (OSError, ValueError):
+                            pass
+                    continue
                 _kill_tree(proc)
                 try:
                     proc.wait(timeout=10)
@@ -981,6 +1065,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     if signals is not None:
         signals["stalled"] = stalled.is_set()
         signals["diverged"] = diverged.is_set()
+        # The grace is OUT-OF-BAND for the same reason the two watchdog verdicts are: the caller must
+        # be able to say "this stage ran 6h20m because a judge bought 20 minutes" without reading it
+        # back out of text the candidate also writes into. Written ONLY when seconds were actually
+        # bought — the two watchdog flags above are always-present booleans because their absence and
+        # their `False` mean the same thing, and this key's presence is itself the fact.
+        if granted[0] > 0:
+            signals["deadline_grace_s"] = granted[0]
     if diverged.is_set() or stalled.is_set():
         err += active_marker
         # A short process can exit before the 250 ms parent poll observes the flag. A set flag means we

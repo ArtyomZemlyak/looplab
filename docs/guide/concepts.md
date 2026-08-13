@@ -509,8 +509,20 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   a train that happened. (Before 2026-08-07 only the LAST attempt's rows were written, so a reused
   stage folded to `reused / exit 0 / 0.0 s` and replay could not tell it from a stage that never ran.)
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
-  checker (Researcher/Developer) before the next stage runs; a concern stops the pipeline early so a
-  diverged train can't silently feed eval.
+  checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
+  eval. Since 2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only
+  when the checker NAMES a physical failure from the closed
+  `runtime/command_eval.py::STAGE_CHECK_HARD_KINDS` (`crash`, `nan_or_inf_loss`,
+  `no_artifact_written`, `silent_fallback`, `loss_unchanged_from_first_step`, plus
+  `declared_condition_violated` when the stage declared an `expect.assert`). Anything else — prose, an
+  out-of-enum kind, an explicit "I cannot tell" — is `inconclusive`: it is recorded on the stage row
+  under its own key and the pipeline **continues**. The old rule was `startswith("OK")` and it
+  discarded 46.6 GPU-hours across 21 stages in the shipped corpus, including two 15-hour trainings
+  that exited 0 and one node killed for "validation recall (0.79) is below previous best (0.8491)" —
+  the quality comparison the prompt has banned twice. Fail-open is safe here because nothing in the
+  RECORD rests on it: the deterministic `expect.files` contract has already run and passed before the
+  checker is consulted, and the metric still comes from the operator's reader over the protected
+  `score` stage.
 
 The operator's `cmd` is the **authoritative, non-rewritable scoring stage** and its stdout is where the
 trusted metric reader reads. The Developer's STAGES phase supplies only the stages that run BEFORE it

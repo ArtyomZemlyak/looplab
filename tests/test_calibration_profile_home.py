@@ -50,7 +50,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e6fdffab4f56"
+_EXPECTED_DIGEST = "sha256:404154c6f6e9f6fb6c05059ea5862227907c6e450d28ce95fe88564cb6a49a0a"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -95,7 +95,16 @@ _EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e
 #               reported as `oom` is now `diverged`, and a stage refused for a missing declared
 #               input is `needs_failed` — and each is repair-eligible by default, so the number of
 #               attempts a failing replicate buys changes too. Old receipts SHOULD stop verifying.
-_EXPECTED_FIELD_COUNT = 196
+#   2026-08-13  + eval_deadline_grace_s (doc 37 site #2: the one-shot, judge-granted extension a
+#               stage may receive at its wall-clock deadline). The 'field set changed too' branch.
+#               INERT AT ITS DEFAULT and re-pinned anyway, on purpose: the default is 0.0, which is
+#               the historical unconditional tree-kill byte-for-byte, so no replicate's behaviour
+#               moves unless an operator sets it. But the profile's whole job is to describe the
+#               envelope a receipt was issued under, and an operator who DOES set it changes how long
+#               a replicate may run — which is exactly the kind of difference a paired calibration is
+#               measuring. A knob that can change a replicate's wall clock does not get to be
+#               invisible to the envelope just because its default is off.
+_EXPECTED_FIELD_COUNT = 197
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

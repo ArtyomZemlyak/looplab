@@ -629,7 +629,13 @@ class EvalDispatchMixin:
                 start_stage=((node.rerun_stage if node is not None else None)
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
-                check_fn=check_fn)                            # Phase 3: optional inter-stage agentic verify
+                check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
+                # The one-shot deadline judge (doc 37 site #2). Both are needed and are separate on
+                # purpose: the callback may be None (no client) while the cap is set, and the cap is
+                # the OPERATOR'S number — `sandbox._granted_grace` clamps to it in the runtime, so a
+                # judge cannot name its own extension even if a future caller lets it try.
+                on_deadline=self._deadline_grace_fn(node),
+                deadline_grace_max_s=self.eval_deadline_grace_s)
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;

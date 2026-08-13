@@ -560,6 +560,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_kill_confidence = _opt("asha_live_kill_confidence")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
+        eval_deadline_grace_s = _opt("eval_deadline_grace_s")
         confirm_seed_base = _opt("confirm_seed_base")
         coverage_context = _opt("coverage_context")
         concept_pivot = _opt("concept_pivot")
@@ -998,6 +999,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
         # Developer so its code can emit periodic progress to avoid a false silence-kill.
         self.eval_stall_timeout_s = float(eval_stall_timeout_s)
+        # Most extra wall clock a live-log judge may buy for a stage at its deadline, ONCE per
+        # command. 0 (default) = the historical unconditional tree-kill. See
+        # `Settings.eval_deadline_grace_s` for the 22.0 discarded GPU-hours and for why it is opt-in.
+        self.eval_deadline_grace_s = float(eval_deadline_grace_s)
         self._train_monitor = bool(train_monitor)
         self._train_monitor_interval_s = train_monitor_interval_s
         self._train_monitor_kill = bool(train_monitor_kill)

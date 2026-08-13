@@ -1455,10 +1455,16 @@ class _EvalExec:
     wrap: object
     stall_timeout: Optional[float]
     stall_cap: Optional[float]
+    # The one-shot deadline judge and its clamp (`sandbox._granted_grace`). Carried HERE, beside the
+    # stall knobs, because both eval paths hand them to `run_argv` unchanged and neither may grow its
+    # own copy of the policy — a grace the staged path grants and the single-command path does not
+    # would be an unexplained difference in how long the same node is allowed to run.
     bound: object
     wrap_argv: object
     log: object
     span: object
+    on_deadline: object = None
+    deadline_grace_max_s: Optional[float] = None
 
 
 @dataclass
@@ -1704,13 +1710,21 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 ex.max_output_bytes, ex.cancel,
                 log_path=ex.log(f"{_sname}.log"), health_check=True,
                 stall_timeout=_stall_window_for(ex.stall_timeout, _sto, ex.stall_cap),
-                signals=run.signals)
+                signals=run.signals, on_deadline=ex.on_deadline,
+                deadline_grace_max_s=ex.deadline_grace_max_s)
             run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
             if _sh is not None:
                 _sh.set_many(exit_code=run.rc, timed_out=run.timed_out, stage=_sname)
         _status = "timeout" if run.timed_out else ("ok" if run.rc == 0 else "fail")
         stage_results.append({"name": _sname, "status": _status, "exit_code": run.rc,
                               "seconds": round(time.monotonic() - _t0, 3)})
+        # A stage that ran longer than its declared budget must SAY why. `seconds` alone would report
+        # a 6 h stage as 6 h 20 m with nothing naming the extra twenty minutes, and the corpus reader
+        # who reconstructs where the compute went (that is how the 22.0 discarded GPU-hours behind
+        # this feature were found) would have no way to tell a raised budget from a granted grace.
+        # From `signals`, the out-of-band channel, never from the log text.
+        if run.signals.get("deadline_grace_s"):
+            stage_results[-1]["deadline_grace_s"] = round(float(run.signals["deadline_grace_s"]), 3)
         if _status != "ok":
             # STALL-SALVAGE parity with the single-command path: that path reads the metric whenever
             # the run was not a hard timeout and reports the same authenticated `_sig` verdict, so
@@ -1826,7 +1840,8 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
             ex.max_output_bytes, ex.cancel,
             log_path=ex.log("eval.log"),
             stall_timeout=_stall_window_for(ex.stall_timeout, timeout, ex.stall_cap),
-            signals=run.signals)
+            signals=run.signals, on_deadline=ex.on_deadline,
+            deadline_grace_max_s=ex.deadline_grace_max_s)
         run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
         if _h is not None:
             _h.set_many(exit_code=run.rc, timed_out=run.timed_out)
@@ -1845,7 +1860,9 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      start_stage: Optional[str] = None,
                      stall_timeout: Optional[float] = None,
                      stall_cap: Optional[float] = None,
-                     check_fn=None) -> RunResult:
+                     check_fn=None,
+                     on_deadline=None,
+                     deadline_grace_max_s: Optional[float] = None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -1923,7 +1940,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     _eval_started = time.time()
     _ex = _EvalExec(wd=wd, env=env, cancel=cancel, max_output_bytes=max_output_bytes, grace=grace,
                     is_docker=is_docker, wrap=wrap, stall_timeout=stall_timeout,
-                    stall_cap=stall_cap, bound=_bound, wrap_argv=_w, log=_log, span=_sp)
+                    stall_cap=stall_cap, bound=_bound, wrap_argv=_w, log=_log, span=_sp,
+                    on_deadline=on_deadline, deadline_grace_max_s=deadline_grace_max_s)
     # ONE object carries what either path produced into the metric read below, so the tail can never
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,
