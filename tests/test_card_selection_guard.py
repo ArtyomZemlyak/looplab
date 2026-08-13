@@ -289,6 +289,14 @@ def test_one_receipt_bound_fresh_work_item_is_selection_ready_independent_of_id_
 
 
 def test_receipt_bound_debug_card_accepts_failed_leaf_without_broadening_mutating_anchors():
+    """The fold's shape rule for a HISTORICAL `debug` Card, kept because old logs still contain them.
+
+    Only the last assertion moved with F5: the fold still calls such a Card's receipt complete (a
+    failed leaf IS a valid debug anchor, and `improve`/`merge` on the same node still are not — that
+    asymmetry is what this case exists for), and `eligible_cards` now refuses to hand it to anyone.
+    The `improve-failed` row beside it is the F5 property from the other side, and it always held:
+    a failed node has never been an `improve` anchor, so no `improve` Card can be a Debug node under
+    another name."""
     state = fold(_events([
         *_baseline(),
         ("node_created", {
@@ -317,7 +325,7 @@ def test_receipt_bound_debug_card_accepts_failed_leaf_without_broadening_mutatin
     assert "action_receipt_incomplete" in state.cards["merge-failed"].selection_blockers
     assert [card.id for card in eligible_cards(
         state, GreedyTree(n_seeds=1, max_nodes=5, debug_depth=1),
-    )] == ["debug-failed"]
+    )] == [], "a historical debug Card is never executable again (F5)"
 
 
 def test_receipt_bound_expand_card_uses_improve_macro_but_preserves_idea_operator():
@@ -902,6 +910,14 @@ def test_an_outstanding_build_request_leaves_its_card_claimable_by_the_head_serv
 
 # --- the debug anchor vs. the Card's OWN work item (2026-08-05) -----------------------------------
 #
+# READ THIS BEFORE DELETING ANY OF THE SECTION BELOW. The Debug node was removed on 2026-08-13 (F5),
+# so nothing AUTHORS a `debug` Card any more — but `fold` still has to answer correctly about the
+# logs that already exist, and every preserved run under `runs/` with a `debug` Card folds through
+# exactly this machinery. So these cases stay and their FOLD assertions are unchanged; what changed
+# is the selection half, which now refuses the Card the fold still describes correctly. Replay
+# reports what happened; selection refuses to repeat it. The two halves being allowed to disagree
+# HERE (and nowhere else) is the point — see `events/card_ledger.py::_card_debug_leaf_children`.
+#
 # `_card_debuggable_leaf_ids` disqualified a failed node the moment it had ANY child — and a
 # receipt-bound `debug` Card's own work item IS such a child. So the instant that node existed the
 # Card's own anchor died and it folded to `action_receipt_incomplete`. The ordinary lane never
@@ -1014,8 +1030,10 @@ def test_a_discarded_prefetch_is_not_a_child_for_the_debug_anchor():
     assert 2 in _card_debuggable_leaf_ids(state), (
         "a build that never ran spent no budget and must not end its parent's life as a leaf")
     assert state.cards["debug-later"].selection_ready is True
-    assert card_action(state.cards["debug-later"]) == {
-        "kind": "debug", "parent_id": 2, "_card_id": "debug-later"}
+    # …and the fold saying so is now as far as it goes: `card_action` refuses to turn a historical
+    # `debug` Card back into an executable action (F5). `selection_ready` is a statement about the
+    # RECEIPT, not a licence, and this is where the two part company.
+    assert card_action(state.cards["debug-later"]) is None
 
 
 def test_an_ordinary_superseded_child_still_closes_the_debug_anchor():
@@ -1076,8 +1094,9 @@ _CHILDREN_THE_POLICY_VIEW_HIDES = {
 _CHILDREN_THE_POLICY_VIEW_KEEPS = {
     "evaluated": [("node_evaluated", {"node_id": 3, "metric": 0.9})],
     "failed": [("node_failed", {"node_id": 3, "reason": "crash", "eval_seconds": 4.0})],
-    # aborted attempts still consumed a real build; `node_counts_toward_card_budget` keeps them and
-    # `debug_action`'s `has_child` counts them, so the two views agree without a special case.
+    # aborted attempts still consumed a real build; `node_counts_toward_card_budget` keeps them, and
+    # the removed `debug_action`'s `has_child` counted them too, so the two views agreed without a
+    # special case — which is why removing the producer left the fold half correct as it stood.
     "aborted": [("node_abort", {"node_id": 3, "reason": "operator"}),
                 ("node_failed", {"node_id": 3, "reason": "aborted", "eval_seconds": 1.0})],
     "still pending": [],
@@ -1100,21 +1119,20 @@ def test_a_child_the_policy_view_hides_leaves_the_debug_anchor_open(child_class)
     fold refused the resulting Card forever, which is the runaway."""
     from looplab.core.models import node_counts_toward_card_budget
     from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
-    from looplab.search.card_selection import _effective_policy_state
-    from looplab.search.policy import debug_action
-
     trust_gate, kill_rows = _CHILDREN_THE_POLICY_VIEW_HIDES[child_class]
     state = fold(_events(_failed_parent_with_child(kill_rows, trust_gate=trust_gate)))
 
     assert node_counts_toward_card_budget(state, state.nodes[3]) is False, child_class
-    # the view the lane actually proposes from…
-    assert debug_action(_effective_policy_state(state), 1) == {"kind": "debug", "parent_id": 2}
-    # …and the fold, reading the SAME predicate rather than a second rule
+    # The fold, reading the predicate rather than a second rule. This half is unchanged by F5 and is
+    # what a replay of a preserved run depends on; the `debug_action(...)` assertion that used to sit
+    # above it is gone with the producer.
     assert _card_debug_leaf_children(state).get(2) is None
     assert 2 in _card_debuggable_leaf_ids(state)
     assert state.cards["debug-2nd"].selection_blockers == []
-    assert card_action(state.cards["debug-2nd"]) == {
-        "kind": "debug", "parent_id": 2, "_card_id": "debug-2nd"}
+    # …and it is STILL not executable, because a Debug node cannot be created at all now. The
+    # runaway this case was written for needed the fold and the policy to disagree; there is no
+    # longer a proposal for them to disagree about.
+    assert card_action(state.cards["debug-2nd"]) is None
 
 
 @pytest.mark.parametrize("child_class", sorted(_CHILDREN_THE_POLICY_VIEW_KEEPS))
@@ -1123,14 +1141,10 @@ def test_a_child_the_policy_view_KEEPS_still_closes_the_debug_anchor(child_class
     spent budget still ends its failed parent's life as a debuggable leaf, in BOTH views."""
     from looplab.core.models import node_counts_toward_card_budget
     from looplab.events.card_ledger import _card_debug_leaf_children, _card_debuggable_leaf_ids
-    from looplab.search.card_selection import _effective_policy_state
-    from looplab.search.policy import debug_action
-
     state = fold(_events(
         _failed_parent_with_child(_CHILDREN_THE_POLICY_VIEW_KEEPS[child_class])))
 
     assert node_counts_toward_card_budget(state, state.nodes[3]) is True, child_class
-    assert debug_action(_effective_policy_state(state), 1) is None
     assert _card_debug_leaf_children(state)[2] == frozenset({3})
     assert 2 not in _card_debuggable_leaf_ids(state)
     card = state.cards["debug-2nd"]
@@ -1408,12 +1422,16 @@ def test_a_gated_failed_PARENT_stays_a_replay_leaf_and_fails_closed_at_the_claim
     Only the CHILD side of the leaf test reads `node_counts_toward_card_budget`. A failed node the
     policy view itself hides (here: trust-gated) is still a debug CANDIDATE to replay, so replay is
     more permissive than the policy about the anchor. That direction cannot run away — the lane never
-    proposes such a parent, so nothing re-authors a Card — and `eligible_cards` rechecks every ready
-    debug Card against the live `debug_action` before it can be claimed, which is where it closes.
+    proposes such a parent, so nothing re-authors a Card — and `eligible_cards` is where it closes.
+
+    Since F5 that last clause is stronger and no longer conditional: `eligible_cards` used to recheck
+    a ready debug Card against the live `debug_action`, so this case closed because that particular
+    parent produced no proposal. There is no `debug_action` at all now, so it closes for every debug
+    Card whatever its parent. The replay side is deliberately untouched — this is exactly the
+    asymmetry the section header describes.
     """
     from looplab.events.card_ledger import _card_debuggable_leaf_ids
     from looplab.search.card_selection import _effective_policy_state
-    from looplab.search.policy import debug_action
 
     state = fold(_events([
         *_failed_node_2(trust_gate="gate"),
@@ -1424,7 +1442,6 @@ def test_a_gated_failed_PARENT_stays_a_replay_leaf_and_fails_closed_at_the_claim
 
     assert state.breed_excluded == {2}
     assert sorted(_effective_policy_state(state).nodes) == [1], "the policy cannot see node 2"
-    assert debug_action(_effective_policy_state(state), 1) is None, "…so it never proposes it"
     # replay is the permissive one here, and says so
     assert 2 in _card_debuggable_leaf_ids(state)
     assert state.cards["debug-gated-parent"].selection_ready is True

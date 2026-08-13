@@ -146,6 +146,10 @@ ATTR_BY_FIELD = {
     "cross_run_read_tools": "_cross_run_read_tools",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
+    # F8: the cadence at which the repair critic is consulted. It is NOT a bound — the critic can
+    # only stop the loop, never extend it — which is why it sits beside the repair knobs rather than
+    # among the budgets.
+    "repair_critic_after": "_repair_critic_after",
     "systemic_failure_stop": "systemic_failure_stop",
     # Metric salvage: the Engine attribute is public (the mixin declares it as a class attribute so
     # a test or a resumed subclass can set it directly), so both names are the same.

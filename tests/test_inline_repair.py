@@ -1,8 +1,13 @@
 """Hybrid in-node crash repair: agent/rule triage + inline repair within one node.
 
 Covers the replay-safety of the new `node_repaired` event, the inline-repair attempt loop in
-`_evaluate`, the deterministic rule-based triage fallback, and the `idea_rejected` lineage
-suppression in `debug_action`.
+`_evaluate` and the deterministic rule-based triage fallback.
+
+It used to also cover the `idea_rejected` / tombstoned / aborted lineage suppression in
+`search/policy.py::debug_action` — which failed leaf may be bred into a Debug node. That whole
+question is gone with the Debug node (F5, 2026-08-13): NO failed leaf is bred from at all, under any
+gate, which is a strictly stronger property than the three exemptions those tests enumerated. It is
+pinned in `tests/test_debug_node_removed.py`.
 """
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ import anyio
 from looplab.events.eventstore import EventStore
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import Engine, _rule_triage
-from looplab.search.policy import GreedyTree, debug_action
+from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
@@ -142,9 +147,14 @@ def test_inline_repair_fixes_in_place_without_new_node(tmp_path, monkeypatch):
     assert not any(n.operator == "debug" and 0 in n.parent_ids for n in st.nodes.values())
 
 
-def test_inline_repair_off_restores_debug_node(tmp_path):
-    """With inline_repair=False the crash fails normally and the inter-node debug operator repairs
-    it via a NEW node (the prior behavior)."""
+def test_inline_repair_off_no_longer_falls_back_to_a_debug_node(tmp_path):
+    """With `inline_repair=False` the crash fails normally — AND NOTHING PICKS IT UP (F5).
+
+    This test was `test_inline_repair_off_restores_debug_node` and asserted the opposite: turning
+    inline repair off "restored the prior behavior", i.e. the inter-node debug operator repaired the
+    crash in a NEW node. That fallback is what the operator deleted, so switching inline repair off
+    is now genuinely switching repair off rather than moving it somewhere more expensive. The two
+    facts it always checked — no `node_repaired`, a `crash` terminal — are unchanged."""
     dev = _MechCrashThenFixed()
     eng = _engine(tmp_path / "off", dev, inline_repair=False)
     anyio.run(eng.run)
@@ -153,7 +163,7 @@ def test_inline_repair_off_restores_debug_node(tmp_path):
     assert not any(e.type == "node_repaired" for e in evs)
     assert any(e.type == "node_failed" and e.data.get("reason") == "crash" for e in evs)
     st = fold(evs)
-    assert any(n.operator == "debug" for n in st.nodes.values())   # a debug node was created
+    assert not any(n.operator == "debug" for n in st.nodes.values())
 
 
 def test_inline_repair_attempt_bound(tmp_path):
@@ -359,48 +369,31 @@ def test_stage_reachable_files_parenthesized_multiline_import(tmp_path):
 
 
 # --------------------------------------------------------------------------- rule-based triage
-def test_rule_triage_repairs_mechanical_only():
+def test_rule_triage_repairs_any_crash_within_its_cap():
+    """Renamed from `test_rule_triage_repairs_mechanical_only` (F5, 2026-08-13).
+
+    The rule path stopped distinguishing mechanical from non-mechanical crashes because the
+    distinction only ever decided WHICH of two repair routes a crash took: mechanical ones were
+    repaired in place, everything else was abandoned to a Debug node that repaired it in a fresh
+    node. With that node deleted, `abandon` on an `AssertionError` throws the lineage away, so the
+    conservative branch became the destructive one. What still binds: the cap, and never
+    `reject_idea` (see `tests/test_repair_stop_decision.py` for the full table)."""
     assert _rule_triage("crash", "ModuleNotFoundError: no module", 1, 1)["action"] == "repair"
     assert _rule_triage("crash", "TypeError: unexpected keyword argument 'multi_class'",
                         1, 2)["action"] == "repair"
-    # Non-mechanical crash -> abandon (never reject_idea from the rule).
-    assert _rule_triage("crash", "AssertionError: metric too low", 1, 2)["action"] == "abandon"
-    # Attempts exhausted -> abandon even if mechanical.
+    assert _rule_triage("crash", "AssertionError: metric too low", 1, 2)["action"] == "repair"
+    # Attempts exhausted -> abandon, mechanical or not.
     assert _rule_triage("crash", "ImportError: x", 2, 1)["action"] == "abandon"
+    assert _rule_triage("crash", "AssertionError: metric too low", 3, 2)["action"] == "abandon"
 
 
 # --------------------------------------------------------------------------- idea_rejected gating
-def test_idea_rejected_lineage_skipped_by_debug_action():
-    st = RunState(run_id="r", task_id="t", direction="min")
-    st.nodes[0] = Node(id=0, parent_ids=[], operator="draft",
-                       idea=Idea(operator="draft", params={}),
-                       status=NodeStatus.failed, error="boom", error_reason="idea_rejected")
-    assert debug_action(st, debug_depth=1) is None     # rejected idea is not debugged
-    st.nodes[0].error_reason = "card_dropped"
-    assert debug_action(st, debug_depth=1) is None     # operator-stopped work is not crash repair
-    # A plain crash leaf IS debugged.
-    st.nodes[0].error_reason = "crash"
-    act = debug_action(st, debug_depth=1)
-    assert act and act["parent_id"] == 0
-
-
-def test_a_tombstoned_failed_leaf_is_not_rediscovered_as_debug_work():
-    """§6.3 gates ALL downstream selection on `not tombstoned`, and `card_selection` masks this on
-    its own path via `_effective_policy_state` — but the legacy `next_actions` path calls
-    `debug_action` on the RAW state, so a failed leaf whose subtree was logically deleted was bred
-    into a debug child anyway, forever."""
-    st = RunState(run_id="r", task_id="t", direction="min")
-    st.nodes[0] = Node(id=0, parent_ids=[], operator="draft",
-                       idea=Idea(operator="draft", params={}),
-                       status=NodeStatus.failed, error="boom", error_reason="crash")
-    assert debug_action(st, debug_depth=1)["parent_id"] == 0     # live crash leaf: debugged
-
-    st.nodes[0].tombstoned = True
-    assert debug_action(st, debug_depth=1) is None               # deleted subtree: not rediscovered
-
-    st.nodes[0].tombstoned = False
-    st.aborted_nodes.append(0)
-    assert debug_action(st, debug_depth=1) is None               # the sibling rule, unchanged
+# `test_idea_rejected_lineage_skipped_by_debug_action` and
+# `test_a_tombstoned_failed_leaf_is_not_rediscovered_as_debug_work` lived here. Both asked which
+# failed leaves `debug_action` was allowed to breed a Debug node from — a rejected idea, a
+# card-dropped node, a tombstoned subtree, an aborted one. F5 deleted the Debug node, so the answer
+# is now "none of them, and no others either", which no enumeration of exemptions can express.
+# `tests/test_debug_node_removed.py` drives that instead.
 
 
 # ------------------------------------------------- loop wiring: reuse start_stage / retrain cap (D13)
