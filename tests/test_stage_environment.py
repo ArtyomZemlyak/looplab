@@ -332,3 +332,30 @@ def test_the_fold_degrades_a_hand_edited_row_instead_of_handing_it_to_subprocess
     assert _folded({"A": "1", "B": 2, "C": ["x"], 3: "y", "D": True}) == {"A": "1", "B": "2"}
     assert _folded(["A=1"]) == {}
     assert _folded(None) == {}
+
+
+def test_the_config_panel_shows_the_environment_the_engine_actually_uses(tmp_path):
+    """`looplab run --out <existing dir>` rewrites config.snapshot.json from the LAUNCH settings and
+    never reads it back, while re-entry restores the environment from `run_started`. Without the
+    overlay this panel would show — and an operator would believe — a value the engine does not use."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    (rd / "nodes").mkdir(parents=True)
+    declared = {"VS_LOCAL_DATA_ROOT": "/home/jovyan/data/dr-local"}
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min",
+                        "eval_env": declared})
+    (rd / "config.snapshot.json").write_text(
+        json.dumps({"timeout": 30.0, "eval_env": {"VS_LOCAL_DATA_ROOT": "/stale/from/a/re-entry"}}),
+        encoding="utf-8")
+
+    body = TestClient(make_app(tmp_path)).get("/api/runs/demo/config").json()
+    assert body["eval_env"] == declared, "the panel showed the snapshot, not what the run uses"
+    meta = body["_looplab_config_meta"]
+    assert "eval_env" in meta["snapshot_mismatch_fields"]
+    assert "eval_env" in meta["run_read_only_fields"]

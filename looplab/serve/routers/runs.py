@@ -3318,6 +3318,18 @@ def build_router(srv) -> APIRouter:
             k for k, value in pinned.items()
             if run_start_pinned_disagreement(k, effective.get(k), value))
         effective.update({k: pinned[k] for k in mismatches})
+        # The declared environment gets the SAME overlay for the same reason, one layer down from
+        # `RUN_START_PINNED_FIELDS` (see the read-only note below for why it is not a member). It
+        # needs one: `looplab run --out <existing dir>` rewrites `config.snapshot.json` from the
+        # LAUNCH settings and never reads it back, while `Engine._repin_declared_env` restores the
+        # environment from `run_started` — so a re-entry spelling a different value leaves the
+        # snapshot holding one the engine does not use, and this panel is where an operator would
+        # read it and believe it.
+        _recorded_env = getattr(srv.state(rd), "eval_env", None)
+        if isinstance(_recorded_env, dict) and _recorded_env:
+            if effective.get("eval_env") != _recorded_env:
+                mismatches = sorted([*mismatches, "eval_env"])
+            effective["eval_env"] = dict(_recorded_env)
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
