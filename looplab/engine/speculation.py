@@ -165,11 +165,12 @@ class CardSession:
     max_eval_seconds: Optional[float]
     wall_deadline: Optional[float]
     task_group: Any = None
+    eval_task_group: Any = None
     bg_task_group: Any = None
     notify: Any = None
     eval_inflight: set[tuple[int, int]] = field(default_factory=set)
     research_spawned: bool = False
-    consumer_completed: bool = False
+    boundary_owed: bool = False
     yield_outer: bool = False
     progressed: bool = False
 
@@ -180,16 +181,46 @@ class CardSession:
             or (self.wall_deadline is not None and time.time() >= self.wall_deadline)
         )
 
-    def open_for_new_work(self, gates: CardSessionGates) -> bool:
-        """The ONE exit-gate predicate: may this turn still START speculative or eval work?
+    # TWO gates, not one — and the split IS the F1f fix (doc 33 / backlog F1f, F1g).
+    #
+    # There used to be ONE predicate, `open_for_new_work`, and both session flags closed it for
+    # BOTH lanes:  `not (gates.stopping or consumer_completed or yield_outer)`.  `consumer_completed`
+    # was set in the `finally` of EVERY eval child, so the FIRST terminal shut admission for every
+    # remaining slot — while `_card_phase_decide_exit` still refused to return until the LAST eval
+    # drained.  The session therefore stopped STARTING work at the first terminal and reached the
+    # outer boundary no sooner than it would have anyway.  Measured across the six width-2 runs on
+    # this box: 115.6 GPU-h of idle second slot against 164.4 GPU-h of work actually done — 82.6 %
+    # of all second-slot time available while the box was busy.  Worst single window 41.8 h.
+    #
+    # The two flags never meant anything about the CONSUMER.  They mean "the outer
+    # control/Strategist/cadence boundary is owed a turn" (`boundary_owed`, ex-`consumer_completed`)
+    # and "the PRODUCER lane has nothing it may do without a fresh outer authority snapshot"
+    # (`yield_outer`).  Both are answered by RETURNING, which the run-scoped eval task group now
+    # lets this session do while its evals keep running.  Admission is gated by the FOLD-derived
+    # half alone, so a freed slot is refilled on the same turn that observed the terminal.
+    def open_for_admission(self, gates: CardSessionGates) -> bool:
+        """May this turn still START an eval?  The fold-derived stop conditions, and nothing else.
 
-        The fold-derived half comes from *gates*; the two session flags are read LIVE and are not
-        bundled into the snapshot, because they are not folded state and one of them
-        (``consumer_completed``) is set from the eval child at any checkpoint.  Freezing them into
-        the gate tuple would make a turn keep admitting after the batch had already closed.
+        Deliberately NOT `or self.boundary_owed or self.yield_outer`: neither flag says anything
+        about whether a pending, fresh, resource-fitting Node may run — that is what
+        `_session_admissible` and the freshness machinery are for, and both still run downstream of
+        this gate.  Un-latching does not mean dispatching stale work.
         """
 
-        return not (gates.stopping or self.consumer_completed or self.yield_outer)
+        return not gates.stopping
+
+    def open_for_production(self, gates: CardSessionGates) -> bool:
+        """May this turn still START PRODUCER work — a Card build, or a paid raw proposal?
+
+        Here the two flags keep their exact original meaning.  `boundary_owed` still closes this
+        lane on the first terminal, because a producer started after a terminal would hold the
+        session open for the whole of its paid provider call (`memory_pending` in
+        `_card_phase_decide_exit`) and turn "the outer loop is owed a turn" into a fresh barrier of
+        its own.  They are read LIVE rather than bundled into the gate snapshot because
+        `boundary_owed` is transferred from the eval children at any checkpoint.
+        """
+
+        return not (gates.stopping or self.boundary_owed or self.yield_outer)
 
 
 class SpeculationMixin:
