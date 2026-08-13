@@ -4,12 +4,10 @@
 this box on 2026-08-13 unless marked otherwise; every mechanism claim was either read out of the code
 or driven in a bounded experiment in the scratchpad. Where I could not verify something I say so.
 
-> Note on the file number: `docs/30-corporate-contour-and-opportunistic-gpu-2026-08-12.md` already
-> owns the `30-` prefix, and `31-`/`32-` are taken by two other untracked notes dated today. This file
-> was named by the request; if the numbering matters, `33-` is the first free slot.
-> `mkdocs.yml` has `validation.nav.omitted_files: info`, so an
-> unlisted page does NOT fail `mkdocs build --strict` — this file is reachable by URL and out of the
-> nav tree, like the other dated audits.
+> Note on the file number: the two sibling notes written the same day landed as `32-` and `33-`, and
+> this file keeps `31-`. All three are indexed in `00-INDEX.md` and listed in `mkdocs.yml`'s nav —
+> `validation.nav.omitted_files: info` means an unlisted page would NOT fail `mkdocs build --strict`,
+> so being reachable by URL is not evidence of being findable.
 
 ---
 

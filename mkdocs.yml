@@ -153,7 +153,10 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
-      - Review deferred decisions (2026-08-13): 31-review-deferred-decisions-2026-08-13.md
+      - Review deferred decisions (2026-08-13): 34-review-deferred-decisions-2026-08-13.md
+      - Cross-turn eval dispatch options (2026-08-13): 33-cross-turn-dispatch-options-2026-08-13.md
+      - F1e operator declaration options (2026-08-13): 32-f1e-operator-declaration-options-2026-08-13.md
+      - Path isolation options (2026-08-13): 31-path-isolation-options-2026-08-13.md
       - Corporate contour & opportunistic GPU (2026-08-12): 30-corporate-contour-and-opportunistic-gpu-2026-08-12.md
       - Operator backlog (2026-08-11): 29-operator-backlog-2026-08-11.md
       - Deep Research SOTA roadmap (2026-08-10): 28-deep-research-sota-roadmap-2026-08-10.md

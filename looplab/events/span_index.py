@@ -650,7 +650,7 @@ class SpanIndex:
         with self._rlock:
             return len(self.light)
 
-    # DEFERRED DECISION D-04 (docs/31): the per-row SHA-256 below re-hashes each selected row's
+    # DEFERRED DECISION D-04 (docs/34): the per-row SHA-256 below re-hashes each selected row's
     # FULL bytes, and a generation span can carry 100 KB+. It is what makes this accelerator's
     # "never WRONG data" promise enforceable, so it is a cost to reduce deliberately (a bounded
     # prefix + length is strictly weaker), never one to delete.

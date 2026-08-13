@@ -1,4 +1,4 @@
-# 31 — Deferred decisions from the two-round review (2026-08-13)
+# 34 — Deferred decisions from the two-round review (2026-08-13)
 
 An 18-angle review of `2c36b7e..HEAD` produced ~90 findings. Most were fixed in the same change
 (see `git log` for `fix: correctness and doc-sync findings…`, `fix: security, cost, contract and
