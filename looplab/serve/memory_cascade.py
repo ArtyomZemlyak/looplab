@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Optional
 
 from looplab.core.jsonlio import (
     read_jsonl_lenient, replace_jsonl_rows_atomic_preserving_quarantine)
@@ -298,26 +298,30 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
             # SURVIVING run by uid — but sharing this run's directory name — compared equal and the
             # row was deleted. That is "destroy corroboration earned by runs that still exist,
             # silently", i.e. the exact outcome the predicate exists to prevent.
-            other = _text(ref.get("run_uid")) or _text(ref.get("run_id"))
-            if not other:
-                continue
-            # REVIEW (mega-review 2026-08-13): the membership test below mixes namespaces — a
-            # legacy ref that names an OLDER same-named incarnation by bare `run_id` compares equal
-            # to `run.run_id` and is misread as a self-reference, so its corroboration is discarded
-            # and (with evidence_count == 1 and no untraceable count) the row can be deleted despite
-            # cross-run support. Narrow in practice (consolidation usually bumps the counters
-            # first), but it is the residual of exactly the ref-ordering defect the comment above
-            # records; a run_id-namespace ref should only match when this run itself is
-            # legacy-keyed.
             # ONE rule: a ref naming any run that is not this one is corroboration, and a row with
             # corroboration survives. There used to be a `continue` above this line, guarded on
             # `other in {run.run_uid, run.run_id} and other == row's own uid` — unreachable BY
-            # EFFECT, because the two branches are exhaustive on `other in {…}`: whenever that guard
-            # held, the test below was already False and the loop iterated anyway. It read as a
-            # load-bearing rule about a ref naming this run's own uid, which is precisely the case
+            # EFFECT, because the two branches were exhaustive on `other in {…}`: whenever that
+            # guard held, the test below was already False and the loop iterated anyway. It read as
+            # a load-bearing rule about a ref naming this run's own uid, which is precisely the case
             # the comment above says was destroying other runs' corroboration, so a maintainer
             # hardening this predicate would have been editing a clause that never ran.
-            if other not in {run.run_uid, run.run_id}:
+            #
+            # NAMESPACES ARE NOT MIXED. `other in {run.run_uid, run.run_id}` compared a value from
+            # ONE namespace against both, so a legacy ref naming an OLDER same-named incarnation by
+            # bare `run_id` read as a SELF-reference — its corroboration was discarded, and with
+            # `evidence_count == 1` and no untraceable count the row could then be deleted despite
+            # having cross-run support. A bare-name ref can only be proved to name THIS run when
+            # this run is itself name-keyed; otherwise it is somebody else's, which keeps the row.
+            ref_uid = _text(ref.get("run_uid"))
+            ref_id = _text(ref.get("run_id"))
+            if ref_uid:
+                self_reference = bool(run.run_uid) and ref_uid == run.run_uid
+            elif ref_id:
+                self_reference = run.legacy_only and ref_id == run.run_id
+            else:
+                continue
+            if not self_reference:
                 return "consolidated: it carries evidence from other runs"
     try:
         if int(row.get("evidence_untraceable_count", 0) or 0) > 0:
@@ -443,15 +447,19 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
     re-read per tier: they decide what is off-limits, and re-reading them mid-purge would let a
     curation decision landing between two tiers apply to one and not the other.
 
-    REVIEW (mega-review 2026-08-13): the single read is consistent ACROSS tiers but is taken
-    without the curation logs' locks and BEFORE any store lock — a curation decision that lands
-    after this read and before a tier's locked rewrite is invisible to the predicates, so a capsule
-    whose concept was just merged (or a claim a just-landed decision was computed over) can still
-    be deleted in that window. The lenient reader also skips a torn in-flight append row silently
-    (only an OSError widens to `_UNREADABLE_GOVERNANCE`). Small window, destructive direction —
-    worth either taking the curation-log locks around this read or re-checking under each store's
-    lock.
-    """
+    RESIDUAL, stated because the read is deliberately unlocked and that is a real (small) window:
+    it is taken without the curation logs' own locks and BEFORE any store lock, so a curation
+    decision landing between this read and a tier's locked rewrite is invisible to the predicates —
+    a capsule whose concept was just merged, or a claim a just-landed decision was computed over,
+    can still be deleted in that window. The lenient reader also skips a torn in-flight append row
+    silently; only an OSError widens to `_UNREADABLE_GOVERNANCE`.
+
+    Not closed here because both fixes cost more than the window does. Taking the curation locks
+    around this read holds them across the whole multi-store purge, and every concurrent run's
+    finalize queues behind that; re-checking under each store's lock reintroduces the per-tier
+    divergence this single read exists to prevent — a decision applying to one tier and not the
+    next. The right shape is a governance REVISION token compared before the rewrite, which is a
+    change to the curation writers, not to this reader."""
     merged = merged_concept_ids(memory_dir)
     curated = _tasks_curated_by_other_runs(memory_dir, run)
     predicates = {
@@ -546,26 +554,29 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
             "stores": stores, "unreadable": unreadable}
 
 
-def _reelect_active_cases(rows: list[dict]) -> list[dict]:
+def _reelect_active_cases(rows: list[dict], touched: Optional[set] = None) -> list[dict]:
     """Re-run the champion election over what survives, per (task_id, direction) group.
 
     `active` marks the best contribution in a group. Dropping a run's row can drop the group's only
     active member, and a task whose case bank has no champion is retrieved as if the task had never
     been solved — a silent regression for every run that still exists.
 
-    REVIEW (mega-review 2026-08-13): this election runs over EVERY (task_id, direction) group of
-    survivors, not only the groups this purge removed a row from — so a group that already had no
-    active member before the cascade (e.g. left that way by an earlier partial rewrite) gets a
-    member newly promoted, i.e. other runs' rows are semantically changed beyond the "this run
-    alone" rule, and the rewritten row is not counted anywhere in the receipt. Protective
-    direction, but it should be scoped to groups that actually lost a member here (and the
-    promotion counted in the receipt).
+    SCOPED to `touched` — the groups this purge actually removed a row from. Running over EVERY
+    group of survivors promoted a member in groups that already had no active row before the cascade
+    (an earlier partial rewrite, a hand edit), which changes OTHER runs' rows for a reason that has
+    nothing to do with this deletion — beyond the "this run alone" rule the whole module is one
+    statement of. Repairing such a group may well be desirable; it is not this operation's to do,
+    and doing it silently inside a destructive transaction is how a cascade acquires side effects
+    nobody asked for. `touched=None` keeps the unscoped behaviour for a caller that means it.
     """
     groups: dict[tuple, list[dict]] = {}
     for row in rows:
         if "active" not in row:
             continue                                   # legacy single-slot row: no election exists
-        groups.setdefault((row.get("task_id"), row.get("direction", "min")), []).append(row)
+        key = (row.get("task_id"), row.get("direction", "min"))
+        if touched is not None and key not in touched:
+            continue
+        groups.setdefault(key, []).append(row)
     changed: list[dict] = []
     for (_task, direction), group in groups.items():
         if any(row.get("active") for row in group):
@@ -646,7 +657,10 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
                     result["kept"] += tier["kept"]
                     continue
                 survivors = [row for row, reason in verdicts if reason]
-                rewritten = (_reelect_active_cases(survivors)
+                # Only the groups THIS purge emptied a slot in are re-elected; see the function.
+                touched = {(row.get("task_id"), row.get("direction", "min"))
+                           for row, reason in verdicts if not reason}
+                rewritten = (_reelect_active_cases(survivors, touched)
                              if filename == "cases.jsonl" else [])
                 # Two things go: the rows this run solely owns, and — for cases — the stale copies of
                 # rows whose `active` we just re-elected, which are appended back in their new form.
@@ -663,7 +677,11 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
             result["identity"] = _identity_label(run, result["name_matched"])
             result["stores"].append({"store": label, "file": filename,
                                      "deleted": tier["deletable"], "kept": tier["kept"],
-                                     "name_matched": tier["name_matched"]})
+                                     "name_matched": tier["name_matched"],
+                                     # Rows this purge REWROTE without deleting: a case group whose
+                                     # champion it removed and re-elected. Counted because the row
+                                     # belongs to another run and its meaning changed.
+                                     **({"reelected": len(rewritten)} if rewritten else {})})
         except Exception as exc:  # noqa: BLE001 — one locked store must not hide the others' work
             result["ok"] = False
             result["failures"].append({"store": label, "file": filename,
