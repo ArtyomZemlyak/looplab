@@ -153,6 +153,49 @@ What makes a salvaged metric admissible is narrow on purpose:
   "salvage_cause_fix"` — and the node terminalizes on the metric it already has, without paying for a
   second evaluation. A salvaged node does not carry a broken manifest into its next attempt.
 
+**A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
+When the failure was an artifact contract and the cause fix corrected the manifest, the engine
+re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against
+the corrected declaration. If it passes, the contract is satisfied by the artifact the pipeline
+really produced: the node is recorded as **measured**, with no `metric_salvaged` violation and no
+salvage provenance, so it competes for champion and can be bred from. Nothing about the number was
+ever in doubt, only the sentence describing where it lived.
+
+Four rules bound it, and each fails closed:
+
+* **the whole declared pipeline must have run**, with the contract failure on its LAST stage. A
+  contract failure aborts the pipeline, so a node whose `train` stage failed never ran the stages
+  after it — including the operator's appended `score`. Correcting the path proves where one stage's
+  output was; it says nothing about stages that never executed, and promoting on it would file a
+  train-only number under a node claiming to be a whole pipeline. (`rubertlite-dr-unified-v6` node 3
+  is exactly that shape and stays salvaged: it declared `train` → `merge`, the contract failed on
+  `train`, and `merge` and `score` never ran.);
+* the re-check keeps `since` at **the stage's own start** — the exact floor the original check used,
+  recorded on the stage row — so a leftover from an earlier attempt in the deliberately-reused
+  workdir cannot satisfy the corrected path. No recorded floor means no re-check;
+* **only a repair whose changed set is exactly `looplab_stages.json` qualifies.** A repair that
+  touched code changed what the stage would produce, so its artifact must be re-*run*, not
+  re-checked; a declared artifact that is itself a file the repair wrote is refused for the same
+  reason;
+* only an `artifact_contract` failure whose value came out of the operator's spec unmodified is
+  promoted (a relocated-file recovery means a second declaration is still wrong).
+
+**Today no live node satisfies all four**, and that is worth knowing rather than discovering: the
+first rule needs the failure on the pipeline's final stage, and in Developer-manifest mode that stage
+is the appended `score`, which carries no `expect` at all — while in operator `cmd.stages` mode the
+declaration lives in the task spec, which `looplab_stages.json` cannot correct. So a salvaged node
+stays salvaged until someone decides whether the appended `score` stage may carry an operator-declared
+`expect`, and who may repair it.
+
+The node still records `metric_provenance` — `salvaged: false`, `declaration_repaired: true`, the
+stage, the reader, `producer`, the corrected `expect_files` and the contract failure verbatim. It
+carries **no violation**: the record exists because "the manifest was wrong and we fixed it" is worth
+knowing even when the number is sound, and it is the only durable trace that the node's recorded code
+is not byte-for-byte what produced its recorded metric. Note what the re-check does *not* prove: the
+failing stage is usually the Developer's, so the protected `score` stage never ran — the check says
+the stage produced what it declared, not that the operator's scorer ran, which is why `producer` stays
+on the record.
+
 **What the agent may EDIT is a separate, independent decision** — `edit_surface` (globs the agent may
 edit; default = the whole repo) minus `protect` (exceptions).
 

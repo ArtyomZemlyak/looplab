@@ -1004,6 +1004,22 @@ EXPECT_ESCAPES = ("stage {stage!r} declares artifact {path!r}, which does not re
                   "workdir (an absolute path, a `..` traversal, or a symlink out of the sandbox). "
                   "Declared artifacts are workdir-relative.")
 
+# THE FLOOR THE CONTRACT WAS HELD TO, recorded on the stage row a contract failure produces.
+#
+# `verify_stage_artifacts`' freshness half compares `st_mtime` against the stage's OWN wall-clock
+# start (`_w0` below), and that number existed nowhere outside `_run_stages`' frame. It has to,
+# because the engine now RE-ASKS this same check after a repair corrected the declaration
+# (`engine/metric_salvage.py::recheck_floor` — the F1e re-check), and a re-check held to a LATER
+# floor would refuse the very artifact the stage wrote, while one held to an EARLIER floor (the
+# attempt's start, the eval's) would let a leftover from a previous attempt of this deliberately
+# reused workdir satisfy the corrected path. The only floor that means "this run of this stage
+# produced it" is the one the original check used, so it is written down rather than re-derived.
+#
+# Additive and fold-ignored: `replay._on_stage_finished` copies exactly name/status/exit_code/
+# seconds out of the row, so this rides on `stage_finished` without changing folded state (the same
+# way `concern` already does), and every reader of an older log sees it absent.
+EXPECT_SINCE_KEY = "expect_since"
+
 
 def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
     """The TECHNICAL half of the stage success contract: None when every declared artifact is there,
@@ -1468,6 +1484,9 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # delete the declaration to make this pass") and would now lose the one part that says
             # the stage actually worked. A cap that truncates the answer is not a bound, it is a bug.
             stage_results[-1]["concern"] = str(_artifact_problem)[:700]
+            # The floor this contract was checked against, so a re-check of a CORRECTED declaration
+            # is held to the identical one — see `EXPECT_SINCE_KEY`.
+            stage_results[-1][EXPECT_SINCE_KEY] = _w0
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
