@@ -44,15 +44,22 @@ Each is universal (no path list, no command list), and each closes a recorded in
    against cost/compatibility on a training process, and a probe has no training to do. `off` there
    must not silently open a second door here.
 2. **It cannot write. Anywhere.** Not site-packages, not the run directory, not the event log, not
-   even its own scratch. Two independent mechanisms, because they fail in different directions:
-   an audit hook refuses `open` for write plus the filesystem-mutating `os.*`/`shutil.*` events with
-   an ACTIONABLE message, and `RLIMIT_FSIZE = 0` makes the kernel refuse file content to anything
-   the hook cannot see (a C extension writing through a raw syscall, or any audit event CPython adds
-   after this was written). The hook is the diagnosis; the rlimit is the boundary.
-   This is what closes the 2026-08-11 cautionary case, where a mid-run `pip install` corrupted a
+   even its own scratch. Two mechanisms that cover DIFFERENT things, and neither is redundant —
+   measured by mutating each one out and watching which tests survive:
+     * the audit hook refuses `open` for write and the filesystem-mutating `os.*`/`shutil.*` events.
+       This is the rung that covers a file's EXISTENCE — creation, truncation, unlink, rename — and
+       it is the one that produces an ACTIONABLE message.
+     * `RLIMIT_FSIZE = 0` makes the KERNEL refuse file CONTENT, to anything the hook cannot see: a C
+       extension going straight to the syscall, or any audit event CPython adds after this was
+       written. Its limit is on bytes, NOT on existence — with the hook removed, a raw `open` still
+       creates an EMPTY file and still truncates an existing one to zero. So the rlimit is not a
+       superset of the hook and must not be described as one; it is what stops anything of
+       consequence being PUT anywhere, and the hook is what stops something being destroyed.
+   Together they close the 2026-08-11 cautionary case, where a mid-run `pip install` corrupted a
    RUNNING node's site-packages (`AttributeError: partially initialized module 'pandas'`) and cost a
    whole repair generation because it read as a code defect. Note WHAT closes it: not a check for
-   the word "pip", but the fact that no process on this surface can write a file.
+   the word "pip", but the fact that no process on this surface can put bytes in a file — and, one
+   rung earlier, that it cannot start pip at all (rule 3).
 3. **It cannot start another program.** `subprocess`/`os.exec*`/`os.system`/`posix_spawn` are
    refused. A fork is NOT — a forked child inherits the audit hook, an exec REPLACES it. The rule is
    "no new program", and it is what makes rule 1 total: without it, the fence stops at the first
@@ -238,11 +245,13 @@ sys.addaudithook(_hook)
 # name the Developer knows it by. `python <launcher>` puts the LAUNCHER's directory on sys.path, not
 # the cwd, and without this `import train` fails for a file the model can see with os.listdir().
 sys.path.insert(0, os.getcwd())
-# The kernel backstop. RLIMIT_FSIZE 0 means no process on this surface can put bytes in a file — not
+# The kernel backstop. RLIMIT_FSIZE 0 means no process on this surface can put BYTES in a file — not
 # through a C extension, not through a raw syscall, not through an audit event that did not exist
-# when the hook above was written. Set AFTER the hook so the hook owns every case it can explain,
-# and inherited by anything the process manages to start. stdout/stderr are pipes, which RLIMIT_FSIZE
-# does not govern, so the probe can still answer.
+# when the hook above was written. It bounds content, not existence: on its own it would still let a
+# raw open create an empty file or truncate one to zero, which is exactly why the hook above covers
+# creation/truncation/unlink and this covers everything the hook cannot see. Set AFTER the hook so
+# the hook owns every case it can explain, and inherited by anything the process manages to start.
+# stdout/stderr are pipes, which RLIMIT_FSIZE does not govern, so the probe can still answer.
 try:
     import resource
 
