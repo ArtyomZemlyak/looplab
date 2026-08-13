@@ -1450,6 +1450,12 @@ def build_router(srv) -> APIRouter:
                       "error_kind": res.get("error_kind"),
                       "steps": res.get("steps") or [], "applied": res.get("applied") or [],
                       "proposals": res.get("proposals") or [], "todos": res.get("todos") or [],
+                      # PERSISTED, not just returned. A cut-short turn's notice lives in the reply
+                      # TEXT and survives a reload; the machine-readable fact did not, so after a
+                      # refresh nothing but prose distinguished a salvage from a conclusion and no
+                      # surface could mark it. Absent on an ordinary turn (the key IS the signal).
+                      **({"budget_exhausted": res["budget_exhausted"]}
+                         if res.get("budget_exhausted") else {}),
                       "tokens": res.get("tokens")},
                 expected_len=len(history) + 1, begin_live_ids=begin_live_ids)
             if not ok:
@@ -1600,8 +1606,13 @@ def build_router(srv) -> APIRouter:
                                    best_effort_persist=False,
                                    begin_live_ids=begin_live_ids,
                                    cancelled=cancel_ev.is_set)
+                # `budget_exhausted` rides the done event too. It is a FIXED key list, so the
+                # envelope key that tells a client "this answer is a salvage" reached the
+                # non-streaming endpoint only — and the UI uses the streaming one, which is why the
+                # fact was invisible on the path the operator actually runs.
                 q.put((SSE_DONE, {k: res.get(k) for k in
-                                  ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
+                                  ("reply", "steps", "applied", "proposals", "todos", "refs",
+                                   "tokens", "mode", "budget_exhausted")}))
             except Exception as e:  # noqa: BLE001
                 # Worker failures may carry provider URLs, routed model/account metadata or
                 # credential fragments.  SSE is part of the public API contract too: keep its

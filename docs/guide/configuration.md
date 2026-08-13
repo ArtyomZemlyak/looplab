@@ -75,7 +75,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **168 of the 199 direct `Settings` fields in 10 groups**. The default
+server-owned curated catalogue with **169 of the 200 direct `Settings` fields in 10 groups**. The default
 **Essential** disclosure mode contains 18 high-frequency keys; search spans all 168 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
@@ -468,6 +468,7 @@ These are no-ops unless `backend=llm`.
 | `agent_emit_after` | `LOOPLAB_AGENT_EMIT_AFTER` | `300` | Convergence nudge: after N **investigation** turns (turns that actually ran a tool — a bounced emit or a lone `update_plan` does not count), prompt the agent once to stop investigating and emit (0 = off) |
 | `agent_emit_force` | `LOOPLAB_AGENT_EMIT_FORCE` | `500` | Hard backstop: force the emit at N tool-calling turns — counting **every** turn that called a tool, so a model that only bounces on emit validation or updates its plan still terminates (0 = off) |
 | `agent_time_budget_s` | `LOOPLAB_AGENT_TIME_BUDGET_S` | `0` | Wall-clock ceiling across an agent's tool-loop turns; 0 = no cap |
+| `assistant_time_budget_s` | `LOOPLAB_ASSISTANT_TIME_BUDGET_S` | — | The **chat's own** wall clock, separate from the engine roles above. Unset = inherit `agent_time_budget_s` when it is set, else **300 s** (a guard against a stalled shared-LLM call leaving the chat "thinking" forever, not a research cap); `0` = **no cap**; `>0` = that many seconds. Until this existed, `run_turn` read `agent_time_budget_s` and then applied `or 300.0`, so the documented "0 = no cap" silently meant five minutes for the assistant and nothing could raise it without also raising every engine role's |
 | `agent_stuck_detection` | `LOOPLAB_AGENT_STUCK_DETECTION` | `true` | **B1** — stop an agent that repeats the same call / ping-pongs / re-hits the same error with no progress (forces its emit). The safety net that makes unlimited turns safe |
 | `agent_stuck_repeat` | `LOOPLAB_AGENT_STUCK_REPEAT` | `4` | Identical call+result turns in a row that count as "stuck" (min 2) |
 | `agent_stuck_alternate` | `LOOPLAB_AGENT_STUCK_ALTERNATE` | `4` | Ping-pong cycles between two calls that count as "stuck" (min 2) |
