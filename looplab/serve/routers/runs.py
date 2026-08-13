@@ -25,7 +25,7 @@ from looplab.core.atomicio import atomic_write_text, same_file_entry
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_disagreement, run_start_pinned_settings,
     settings_from_snapshot)
-from looplab.core.node_evidence import node_attempt
+from looplab.core.node_evidence import node_attempt, node_attempt_from_payload
 from looplab.core.trace_files import (
     TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
 from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
@@ -793,12 +793,20 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Wait for this Replay operation to settle, then reload run state.",
             })
 
-    def _begin_trace_read(rd: Path, expected_generation: Optional[str]) -> str:
+    def _begin_trace_read(rd: Path, expected_generation: Optional[str], *,
+                          reading: str = "trace evidence", subject: str = "its trace") -> str:
         """Capture the run identity that owns a trace-sidecar read.
 
         Trace files are not part of the event fold, so a reset/replacement can otherwise publish
         generation-A bytes in a generation-B screen.  Every trace projection uses this same
         before/after CAS in addition to the durable reset marker.
+
+        `reading`/`subject` are the only things that ever differed between the FIVE hand-written
+        copies of this ladder — they are live HTTP contract text, so they are parameters rather than
+        a reason to keep copies. What must not drift is everything else: the absent-fence probe, the
+        generation shape check and the CAS. CLAUDE.md records `_warm_directory_lookup` taking those
+        probes from a 1,714 ms median to 11 ms; that landed in the helper and silently missed four
+        routes, including the two hottest polls.
         """
         _assert_trace_reset_clear(rd)
         if (expected_generation is not None
@@ -806,7 +814,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, {
                 "code": "invalid_run_generation",
                 "message": "expected_generation must be the exact generation from run state.",
-                "remediation": "Reload the run before reading trace evidence.",
+                "remediation": f"Reload the run before reading {reading}.",
             })
         generation = srv.commands.run_generation(rd)
         if expected_generation is not None and generation != expected_generation:
@@ -814,7 +822,7 @@ def build_router(srv) -> APIRouter:
                 "code": "run_generation_changed",
                 "expected_generation": expected_generation,
                 "current_generation": generation or None,
-                "message": "The run was reset or replaced before its trace was read.",
+                "message": f"The run was reset or replaced before {subject} was read.",
                 "remediation": "Reload run state and request the current generation.",
             })
         return generation
@@ -1897,30 +1905,15 @@ def build_router(srv) -> APIRouter:
         seconds defeats the point of the indexed trace path. ``_state_payload`` keys its fold by the
         exact events-file identity and returns a copy, so an unchanged log is a stat+lookup while an
         append/reset still changes the observation used by the second check.
+
+        THROUGH `core.node_evidence`, not a second derivation. Five routes fence a reset on this
+        answer; when it was spelled twice — once typed over `RunState`, once by dict spelunking here —
+        a renamed field or a changed marker shape moved only one of them, and two routes would then
+        disagree about the same reset.
         """
         frame = _state_payload(rd)
         state = frame.get("state") if isinstance(frame, dict) else None
-        state = state if isinstance(state, dict) else {}
-        nodes = state.get("nodes")
-        nodes = nodes if isinstance(nodes, dict) else {}
-        node = nodes.get(str(nid), nodes.get(nid))
-        if isinstance(node, dict):
-            attempt = node.get("attempt", 0)
-            return attempt if type(attempt) is int and attempt >= 0 else 0
-        buildings = state.get("buildings")
-        marker = None
-        if isinstance(buildings, dict):
-            marker = buildings.get(str(nid), buildings.get(nid))
-        elif isinstance(buildings, list):
-            marker = next((row for row in buildings
-                           if isinstance(row, dict) and row.get("node_id") == nid), None)
-        building = state.get("building")
-        if marker is None and isinstance(building, dict) and building.get("node_id") == nid:
-            marker = building
-        if isinstance(marker, dict):
-            attempt = marker.get("generation")
-            return attempt if type(attempt) is int and attempt >= 0 else 0
-        return None
+        return node_attempt_from_payload(state if isinstance(state, dict) else {}, nid)
 
     def _legacy_node_log_dir_identity(rd: Path, nid: int) -> Optional[tuple[int, int]]:
         """Prove a legacy attempt-zero log directory is this run's exact node child.
@@ -2068,23 +2061,8 @@ def build_router(srv) -> APIRouter:
         NO fallback duplication into it), and the per-stage tails come back as the ordered `stages`
         map, which the UI's log panel renders per stage."""
         rd = _run_dir(run_id)
-        _assert_trace_reset_clear(rd)
-        if (expected_generation is not None
-                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
-            raise HTTPException(400, {
-                "code": "invalid_run_generation",
-                "message": "expected_generation must be the exact generation from run state.",
-                "remediation": "Reload the run before reading node logs.",
-            })
-        before_generation = srv.commands.run_generation(rd)
-        if expected_generation is not None and before_generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": before_generation or None,
-                "message": "The run was reset or replaced before its node logs were read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+        before_generation = _begin_trace_read(
+            rd, expected_generation, reading="node logs", subject="its node logs")
         current_attempt = _cached_node_attempt(rd, nid)
         legacy_node_identity = None
         if current_attempt is None:
@@ -2262,23 +2240,8 @@ def build_router(srv) -> APIRouter:
         A negative limit is refused at the boundary (422) rather than silently read as the default — the
         same wire contract as the conversation twin, so both pagers fail loudly on a client defect."""
         rd = _run_dir(run_id)
-        _assert_trace_reset_clear(rd)
-        if (expected_generation is not None
-                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
-            raise HTTPException(400, {
-                "code": "invalid_run_generation",
-                "message": "expected_generation must be the exact generation from run state.",
-                "remediation": "Reload the run before reading its node trace.",
-            })
-        before_generation = srv.commands.run_generation(rd)
-        if expected_generation is not None and before_generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": before_generation or None,
-                "message": "The run was reset or replaced before its node trace was read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+        before_generation = _begin_trace_read(
+            rd, expected_generation, reading="its node trace", subject="its node trace")
         observed_attempt = _cached_node_attempt(rd, nid)
         current_attempt = observed_attempt if observed_attempt is not None else 0
         # Setup/pseudo-node and legacy trace rows have no folded lifecycle marker and therefore use
@@ -2437,23 +2400,8 @@ def build_router(srv) -> APIRouter:
         of only seeing the label. Reads just the TAIL of spans.jsonl (bounded regardless of run length);
         text is capped here; /spans/{sid} exposes a larger bounded/redacted detail projection."""
         rd = _run_dir(run_id)
-        _assert_trace_reset_clear(rd)
-        if (expected_generation is not None
-                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
-            raise HTTPException(400, {
-                "code": "invalid_run_generation",
-                "message": "expected_generation must be the exact generation from run state.",
-                "remediation": "Reload the run before reading its live trace.",
-            })
-        before_generation = srv.commands.run_generation(rd)
-        if expected_generation is not None and before_generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": before_generation or None,
-                "message": "The run was reset or replaced before its live trace was read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+        before_generation = _begin_trace_read(
+            rd, expected_generation, reading="its live trace", subject="its live trace")
 
         def _generation_bound(payload: dict) -> dict:
             """Publish only a snapshot whose run identity stayed stable for the whole read."""
@@ -2661,23 +2609,8 @@ def build_router(srv) -> APIRouter:
         the full rows are read or the conversation is rebuilt. Legacy unconditional callers keep
         receiving the same 200 JSON envelope (with one additive cursor field)."""
         rd = _run_dir(run_id)
-        _assert_trace_reset_clear(rd)
-        if (expected_generation is not None
-                and _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
-            raise HTTPException(400, {
-                "code": "invalid_run_generation",
-                "message": "expected_generation must be the exact generation from run state.",
-                "remediation": "Reload the run before reading its node conversation.",
-            })
-        before_generation = srv.commands.run_generation(rd)
-        if expected_generation is not None and before_generation != expected_generation:
-            raise HTTPException(409, {
-                "code": "run_generation_changed",
-                "expected_generation": expected_generation,
-                "current_generation": before_generation or None,
-                "message": "The run was reset or replaced before its conversation was read.",
-                "remediation": "Reload run state and request the current generation.",
-            })
+        before_generation = _begin_trace_read(
+            rd, expected_generation, reading="its node conversation", subject="its conversation")
         # An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked and echoed back — the
         # same rule as the span-tree twin above, because these are the two VIEWS of one trace
         # surface and the Inspector's attempt picker switches between them over one selection.  The
@@ -3112,7 +3045,10 @@ def build_router(srv) -> APIRouter:
         `research` list rather than a guessed one — a mis-attributed hypothesis is worse than none.
         """
         rd = _run_dir(run_id)
-        _assert_trace_reset_clear(rd)
+        # `_begin_trace_read` OPENS with `_assert_trace_reset_clear`, so a second call here was a
+        # duplicated absent-fence probe — measured at 105-950 ms each on the geesefs/S3 mount a run
+        # root usually lives on (CLAUDE.md records five such probes costing a 1,714 ms median before
+        # `_warm_directory_lookup`). The three sibling trace routes do not pre-call it either.
         before_generation = _begin_trace_read(rd, expected_generation)
         try:
             payload = srv.card_trace_view(rd, card_id)

@@ -148,7 +148,22 @@ def _evidence_lineage(rows_newest_last: list[dict], base: dict,
     return refs, traceable, max(0, evidence_count - traceable)
 
 def normalize_statement(s: str) -> str:
-    """Identity of a lesson claim: collapsed whitespace, lowercased, capped."""
+    """Identity of a LESSON claim: collapsed whitespace, lowercased, capped at 160.
+
+    Sibling, deliberately NOT shared: `engine/research_cadence.py::normalized_belief_key` is the same
+    collapse for BELIEF identity and differs in two ways on purpose, so neither may be "unified" into
+    the other without changing what it identifies.
+
+      * `.lower()` here vs `.casefold()` there. They disagree on e.g. `ß`/`ẞ` and the Turkish dotted
+        I, so one statement can be a duplicate belief and two distinct lessons. Lesson identity is
+        durable and cross-run; widening it retroactively re-buckets a shipped store.
+      * the 160-char CAP here, none there. Two statements identical in their first 160 characters are
+        ONE lesson (they are the same claim, templated) and TWO beliefs (a belief is a research
+        direction, and a cap that fuses two directions is worse than a duplicate card).
+
+    `engine/memory.py::_canonical_auto_skill_claim` is the third member of the family and states its
+    own relationship ("uncapped") beside a call to this function. Change one, read all three.
+    """
     return " ".join(str(s or "").split()).lower()[:160]
 
 # Every numeric literal (int/decimal/scientific, sign included) — the only thing that separates one

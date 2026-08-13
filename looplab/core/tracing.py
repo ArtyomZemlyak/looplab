@@ -1545,10 +1545,6 @@ class AsyncJsonlSpanExporter:
                 "shutdown": self._shutdown,
             }
 
-    @property
-    def dropped_spans(self) -> int:
-        return int(self.metrics()["dropped_spans"])
-
     def force_flush(
         self,
         timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,

@@ -1616,6 +1616,13 @@ class RunControlTools:
                 f"reversible; {live_left} live nodes left, best now #{state.best_node_id}. "
                 f"Use purge=true for an irreversible physical compaction.)")
 
+    # DEFERRED DECISION D-01 (docs/31): an irreversible multi-file transaction with NO durable
+    # receipt, while its three siblings (reset, deletion, trace clear) all go through
+    # `serve/durable_op.py::ReceiptProtocol`. A death between the event-log rewrite and the span
+    # publish leaves a renumbered log whose `seq` no longer matches the spans sidecar, with nothing
+    # on disk saying an operation was in flight. Adopting a receipt here needs answers this code
+    # cannot give itself — who owns the operation id when an AGENT initiates it, and what recovery
+    # should do with no operator in the loop. Read docs/31 before adding a fourth receipt protocol.
     def _purge_node_snapshot(self, rid: str, rd: Path, nid: int,
                              subtree: set[int], expected_tail: int) -> str:
         """Physically compact exactly the stopped tree snapshot the operator approved."""

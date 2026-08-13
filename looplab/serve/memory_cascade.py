@@ -140,15 +140,21 @@ def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -
             identity["memory_dir"] = _text(cfg["memory_dir"])
     except Exception:  # noqa: BLE001 — a missing/damaged snapshot falls back, it does not refuse
         pass
+    # Through the shared reader and the type CONSTANT, not a hand-rolled scan for a byte literal.
+    # `iter_event_jsonl` expands the batch envelopes `EventStore.append_many` writes (whose physical
+    # `type` is a list, so a `b'"run_started"'` prefilter would skip one) and applies the torn-tail
+    # rule; `EV_RUN_STARTED` is the registry spelling, which invariant 7 exists for — a typo'd
+    # literal here does not fail, it silently yields no uid, and an empty uid is what degrades the
+    # purge to matching a REUSED directory name. Today `run_started` is only ever written by a single
+    # `append`, so the envelope case is not reachable; that is a property of the writer, not of this
+    # reader, and it is not one this module should depend on.
     try:
-        with open(rd / "events.jsonl", "rb") as handle:
-            for raw in handle:
-                if b'"run_started"' not in raw:
-                    continue
-                event = json.loads(raw.decode("utf-8"))
-                if event.get("type") == "run_started":
-                    identity["run_uid"] = _text((event.get("data") or {}).get("run_uid"))
-                    break
+        from looplab.events.eventstore import iter_event_jsonl
+        from looplab.events.types import EV_RUN_STARTED
+        for event in iter_event_jsonl(rd / "events.jsonl"):
+            if (event or {}).get("type") == EV_RUN_STARTED:
+                identity["run_uid"] = _text((event.get("data") or {}).get("run_uid"))
+                break
     except Exception:  # noqa: BLE001 — same: no uid means legacy matching, not a refusal
         pass
     return identity
@@ -274,8 +280,14 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
             other = _text(ref.get("run_uid")) or _text(ref.get("run_id"))
             if not other:
                 continue
-            if other in {run.run_uid, run.run_id} and other == _text(row.get("run_uid") or run.run_uid):
-                continue
+            # ONE rule: a ref naming any run that is not this one is corroboration, and a row with
+            # corroboration survives. There used to be a `continue` above this line, guarded on
+            # `other in {run.run_uid, run.run_id} and other == row's own uid` — unreachable BY
+            # EFFECT, because the two branches are exhaustive on `other in {…}`: whenever that guard
+            # held, the test below was already False and the loop iterated anyway. It read as a
+            # load-bearing rule about a ref naming this run's own uid, which is precisely the case
+            # the comment above says was destroying other runs' corroboration, so a maintainer
+            # hardening this predicate would have been editing a clause that never ran.
             if other not in {run.run_uid, run.run_id}:
                 return "consolidated: it carries evidence from other runs"
     try:
@@ -416,10 +428,16 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
     return [(filename, label, predicates[filename]) for filename, label in CASCADED_TIERS]
 
 
-def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity") -> dict:
+def _tier_from_verdicts(verdicts: Iterable[tuple[dict, str]]) -> dict:
+    """The tier counts, from verdicts a caller has ALREADY computed.
+
+    Split out because the purge needs the same per-row answer twice — once to count what it will
+    delete, once to select the survivors it rewrites — and it was evaluating the predicate a second
+    time over the whole store to get the second one, inside the interprocess lock every concurrent
+    run's finalize is waiting on.
+    """
     deletable, kept, reasons = 0, 0, {}
-    for row in rows:
-        reason = keep_reason(row, run)
+    for _row, reason in verdicts:
         if not reason:
             deletable += 1
         elif reason != NOT_THIS_RUN:
@@ -427,6 +445,10 @@ def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity"
             reasons[reason] = reasons.get(reason, 0) + 1
     return {"deletable": deletable, "kept": kept,
             "reasons": [{"reason": r, "rows": n} for r, n in sorted(reasons.items())]}
+
+
+def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity") -> dict:
+    return _tier_from_verdicts((row, keep_reason(row, run)) for row in rows)
 
 
 def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str = "") -> dict:
@@ -536,11 +558,14 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
         try:
             with _interprocess_lock(Path(f"{path}.lock"), required=True):
                 rows = _rows(path)
-                tier = _survey_tier(rows, keep_reason, run)
+                # ONE predicate pass. `keep_reason` reaches into `evidence_refs` and re-derives a
+                # claim identity per row, and this runs while holding the store's interprocess lock.
+                verdicts = [(row, keep_reason(row, run)) for row in rows]
+                tier = _tier_from_verdicts(verdicts)
                 if not tier["deletable"]:
                     result["kept"] += tier["kept"]
                     continue
-                survivors = [row for row in rows if keep_reason(row, run)]
+                survivors = [row for row, reason in verdicts if reason]
                 rewritten = (_reelect_active_cases(survivors)
                              if filename == "cases.jsonl" else [])
                 # Two things go: the rows this run solely owns, and — for cases — the stale copies of

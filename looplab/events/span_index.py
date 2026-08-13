@@ -51,8 +51,8 @@ from looplab.core.trace_files import (
 from looplab.events.eventstore import (
     JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
-    _normalize_span, _strip_span_io, effective_node_id, trace_root_generation,
-    trace_root_node_id)
+    _normalize_span, _strip_span_io, effective_node_id, root_span_generation, root_span_node_id,
+    trace_root_generation, trace_root_node_id, trace_root_span)
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
@@ -650,6 +650,10 @@ class SpanIndex:
         with self._rlock:
             return len(self.light)
 
+    # DEFERRED DECISION D-04 (docs/31): the per-row SHA-256 below re-hashes each selected row's
+    # FULL bytes, and a generation span can carry 100 KB+. It is what makes this accelerator's
+    # "never WRONG data" promise enforceable, so it is a cost to reduce deliberately (a bounded
+    # prefix + length is strictly weaker), never one to delete.
     def _read_full(self, rows: list[int]) -> list[dict]:
         """Read and safely project selected full span lines by seeking to their byte offsets —
         so a per-node/-trace/-span detail view touches only those bytes, not the whole file. `rows`
@@ -760,10 +764,16 @@ class SpanIndex:
             # declines to name a root there rather than nominating an arbitrary span, and this
             # follows it into the unstamped default below — the same answer the views reach, instead
             # of reading one span's `generation` as if it were the whole trace's.
+            # ONE root resolution for BOTH facts. `trace_root_generation` and `trace_root_node_id`
+            # are each `trace_root_span(...)` plus a field read, and that helper rebuilds a `by_id`
+            # dict, a roots comprehension and a `min` over the whole trace every call — so asking
+            # for the generation and then the node id paid for it twice, per candidate trace, per
+            # request, on traces that reach 14,507 spans.
+            trace_root = trace_root_span(trace_spans, _normalized=True)
             if (generation is not None
-                    and trace_root_generation(trace_spans, _normalized=True) != generation):
+                    and root_span_generation(trace_root) != generation):
                 continue
-            root_nid = trace_root_node_id(trace_spans, _normalized=True)
+            root_nid = root_span_node_id(trace_root)
             # A trace is only a candidate because `node_tids` saw the target on SOME row. Shared
             # long-lived traces can also carry newer rows stamped for other nodes. Filter by the
             # shared per-span-first/root-fallback attribution rule BEFORE totals and tail limits;
@@ -847,13 +857,6 @@ class SpanIndex:
             if revision in self._verified_window_revisions:
                 self._verified_window_revisions.move_to_end(revision)
         return revision, total, verified
-
-    def node_window_revision(self, node_id, limit: Optional[int] = None, *,
-                             generation: Optional[int] = None) -> tuple[str, int]:
-        """Backward-compatible revision/count view; HTTP conditionals use eligibility above."""
-        revision, total, _conditional_ok = self.node_window_snapshot(
-            node_id, limit, generation=generation)
-        return revision, total
 
     def full_spans_for_node(self, node_id, limit: Optional[int] = None, *,
                             generation: Optional[int] = None) -> list[dict]:

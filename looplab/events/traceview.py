@@ -674,12 +674,15 @@ def _bounded_node_trace_tail(values, node_id, cap: int, *,
         records.append((raw, normalized))
         by_trace[trace_id].append(normalized)
 
+    # ONE root resolution per trace, read twice — the same rule as `span_index._rows_for_node`,
+    # which this function is the no-index half of. Calling both `trace_root_*` helpers rebuilt the
+    # whole `by_id`/roots/min derivation twice per trace, and here that is over the WHOLE run's
+    # spans rather than one node's.
     trace_meta = {
-        trace_id: (
-            trace_root_node_id(trace_spans, _normalized=True),
-            trace_root_generation(trace_spans, _normalized=True),
-        )
-        for trace_id, trace_spans in by_trace.items()
+        trace_id: (root_span_node_id(root), root_span_generation(root))
+        for trace_id, root in (
+            (tid, trace_root_span(spans, _normalized=True))
+            for tid, spans in by_trace.items())
     }
     # Filtering precedes the global cap and exact total. Candidate-by-any-stamped-row is not enough:
     # one long-lived trace can carry spans for several nodes, and its newest foreign row must not
@@ -860,7 +863,18 @@ def trace_root_generation(spans: list[dict], *, _normalized: bool = False) -> in
     beside ``trace_root_span`` makes the indexed and fallback conversation readers choose the same
     root and therefore the same lifecycle even though spans.jsonl is written in close order.
     """
-    root = trace_root_span(spans, _normalized=_normalized)
+    return root_span_generation(trace_root_span(spans, _normalized=_normalized))
+
+
+def root_span_generation(root: Optional[dict]) -> int:
+    """The generation OF an already-resolved root span — the field read, split from the resolution.
+
+    A caller that needs both a trace's generation and its node id (`span_index._rows_for_node`,
+    `traceview._bounded_node_trace_tail`) otherwise calls `trace_root_span` TWICE over the same list,
+    and that helper rebuilds a `by_id` dict plus a roots comprehension plus a `min` every time. On a
+    14,507-span trace that is two full dict builds per candidate trace, per request. Same rule, one
+    resolution: this is the accessor half, `trace_root_span` is the choice half.
+    """
     attributes = root.get("attributes") if root is not None else None
     value = attributes.get("generation") if isinstance(attributes, dict) else None
     return value if type(value) is int and value >= 0 else 0
@@ -879,7 +893,12 @@ def trace_root_node_id(spans: list[dict], *, _normalized: bool = False) -> Optio
     Never a full ancestor walk: that would bleed one node's id across a shared trace, which is the
     thing per-span stamping exists to prevent.
     """
-    root = trace_root_span(spans, _normalized=_normalized)
+    return root_span_node_id(trace_root_span(spans, _normalized=_normalized))
+
+
+def root_span_node_id(root: Optional[dict]) -> Optional[int | str]:
+    """The node id OF an already-resolved root span — see `root_span_generation` for why this half
+    is separable: a caller needing both facts resolves the root ONCE and reads it twice."""
     return _node_id_of(root) if root is not None else None
 
 

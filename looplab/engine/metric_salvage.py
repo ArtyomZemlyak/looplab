@@ -413,7 +413,7 @@ def _relocated(metric_spec: dict, workdir: str, since: Optional[float]) -> Optio
     rel = metric_spec.get("path")
     if not isinstance(rel, str) or not rel.strip():
         return None
-    found = command_eval._artifacts_written_elsewhere(workdir, rel, since)
+    found = command_eval.artifacts_written_elsewhere(workdir, rel, since)
     if len(found) != 1:
         return None
     return dict(metric_spec, path=found[0]), found[0]
@@ -574,7 +574,7 @@ def salvage_gates(eval_spec, metric: float, stdout: str, workdir: str,
     if safe:
         try:
             out["violations"].extend(
-                command_eval._violations(stdout, wd, safe, None, since=since))
+                command_eval.constraint_violations(stdout, wd, safe, None, since=since))
         except Exception:  # noqa: BLE001 — an unreadable constraint is a violation, not a dead run
             out["violations"].extend([{"name": c.get("name", "constraint"), "value": None,
                                        "max": c.get("max"), "min": c.get("min"),
@@ -602,7 +602,7 @@ def salvage_gates(eval_spec, metric: float, stdout: str, workdir: str,
             value = command_eval.read_metric(stdout, wd, cross, wrap=None, since=since)
         except Exception:  # noqa: BLE001 — an unusable cross reader corroborates nothing
             value = None
-        if command_eval._drift(metric, value, tolerance):
+        if command_eval.metric_drift_exceeds(metric, value, tolerance):
             out["drift"] = {"primary": metric, "cross": value, "tolerance": tolerance}
     return out
 
