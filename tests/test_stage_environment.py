@@ -129,8 +129,16 @@ def test_the_docker_tier_forwards_a_stage_env_as_an_e_pair(tmp_path, monkeypatch
     rebound = wrap.rebind_env({"VS_LOCAL_DATA_ROOT": "/data/local"})(["python", "x.py"], str(tmp_path))
     assert "VS_LOCAL_DATA_ROOT=/data/local" in rebound
     assert "LOOPLAB_EVAL_SEED=7" in rebound, "rebinding dropped the engine's own env"
-    # The rebound wrap is still a real container wrap (the in-container `timeout` prefix depends on it)
-    assert getattr(rebound and wrap.rebind_env({}), "_docker", False) is True
+    # The rebound object is a FULL wrap, not a bare closure: `_docker` decides the in-container
+    # `timeout` prefix, `_mount_root` is what `host_score` guards the held-out labels against, and
+    # `rebind_env` must survive so the seam is not one-shot.
+    rebound_wrap = wrap.rebind_env({"VS_LOCAL_DATA_ROOT": "/data/local"})
+    assert rebound_wrap._docker is True
+    assert rebound_wrap._mount_root == wrap._mount_root
+    assert callable(rebound_wrap.rebind_env)
+    # …and rebinding does not mutate the wrap it came from.
+    assert not any(a.startswith("VS_LOCAL_DATA_ROOT=")
+                   for a in wrap(["python", "x.py"], str(tmp_path)))
 
 
 def test_a_container_wrap_that_cannot_carry_the_env_refuses_the_stage_instead_of_dropping_it(tmp_path):
