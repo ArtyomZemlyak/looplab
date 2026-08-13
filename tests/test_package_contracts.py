@@ -44,7 +44,16 @@ def _package_imports(package: str) -> dict[str, set[str]]:
 
 def test_runtime_holds_only_process_execution_modules():
     names = {path.stem for path in (ROOT / "runtime").glob("*.py")} - {"__init__"}
-    assert names == {"sandbox", "command_eval", "deps", "bg_tasks", "read_fence"}, (
+    assert names == {"sandbox", "command_eval", "deps", "bg_tasks", "read_fence",
+                     # The three 2026-08-13 additions belong here for the same reason `read_fence`
+                     # does: each is a property of HOW a child process is launched and what it may
+                     # touch while it runs, and each must import nothing above `core` so the eval
+                     # path stays a leaf. `metric_subject` is the identity the eval CAPTURES (a stat
+                     # and a digest around the score stage); `read_allowlist` derives what the launch
+                     # may read; `landlock` applies it in the child between fork and exec. The
+                     # POLICY over all three — which rung, whether a violation is minted — lives in
+                     # `engine/`, which is the split this package boundary exists to hold.
+                     "metric_subject", "read_allowlist", "landlock"}, (
         "a module that is not process execution landed in runtime again")
 
 

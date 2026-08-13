@@ -169,7 +169,15 @@ def test_every_closed_vocabulary_field_is_validated():
                        # the worst shape this test guards: `read_fence="Deny"` would install no
                        # fence at all, and the run would look exactly like a fenced one right up to
                        # the node that reads a foreign checkpoint and reports its score.
-                       "read_fence"}
+                       "read_fence",
+                       # `metric_subject` (off|audit|require) and `landlock` (off|enforce) joined
+                       # 2026-08-13, and both fail in the direction this test exists for. A
+                       # mis-cased `metric_subject="Require"` would settle to `audit` and silently
+                       # stop excluding metrics nobody can check; a mis-cased `landlock="Enforce"`
+                       # would install no ruleset while the operator believes the eval is bounded —
+                       # the same "looks exactly like the enforced case until it matters" shape as
+                       # `read_fence` above.
+                       "metric_subject", "landlock"}
 
 
 @pytest.mark.parametrize("field,bad", [
@@ -178,6 +186,8 @@ def test_every_closed_vocabulary_field_is_validated():
     ("backend", "TOY"), ("developer_backend", "aidr"), ("llm_parser", "toolcall"),
     ("metric_salvage", "Audit"),
     ("read_fence", "Deny"),
+    ("metric_subject", "Require"),
+    ("landlock", "Enforce"),
 ])
 def test_a_near_miss_value_fails_loudly_and_names_the_vocabulary(field, bad):
     with pytest.raises(ValueError) as info:
