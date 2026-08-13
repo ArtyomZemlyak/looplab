@@ -227,6 +227,79 @@ This subsumes most of the value of [F1c](#f1c-catch-a-path-that-escapes-the-node
 static half without its false-positive problem, because it acts on a contract that has already failed
 and an artifact that already exists.
 
+## F1f · The eval batch is a BARRIER, so one slow node idles a GPU for hours
+
+**Found while watching `rubertlite-dr-unified-v6`, 2026-08-13.** Not the same defect as the
+`freshness_stale` one fixed in `6f0a8be3` — that one stopped two cards from ever being *selectable*
+at the same time. This one stops a new turn from *starting*, and it survives that fix.
+
+**Measured.** `run_started` pins `eval_parallel: 2`. Nodes 5 and 6 were dispatched from the same turn
+and really did train concurrently, so the fan-out works. Node 6 finished at 06:19 (86 minutes); node
+5 was still training. At 08:11 — **~2 hours later** — `nvidia-smi` showed GPU 1 at `4 MiB` and 0%,
+`card-3` folded to `selection_ready=True` with an EMPTY blocker list, and the log since 06:19
+contained nothing but `llm_usage`, `train_monitor_alert`, and four `research_completed`/`hint` pairs.
+No `card_build_requested`, no `node_building`, no `card_added`. Node 5 was at step 4415/7060 with
+2:09 remaining, so the idle window is ~4 hours on one device.
+
+**Why — CORRECTED 2026-08-13, the first answer named the wrong code.** The measurements above stand;
+the mechanism below replaces what this entry originally said.
+
+*What it said, and why it was wrong.* It blamed `Engine._dispatch_evals`, which does join its whole
+task group before returning. But v6's `run_started` pins `card_driven_selection: true` and
+`speculation_depth: 2`, so `_speculation_enabled()` is true and every eval goes through
+`Engine._run_card_session` (`engine/speculation.py`) — which delegates to `_dispatch_evals` ONLY when
+speculation is off. There are two dispatchers with two different barriers, and the one this entry
+described is in the path no run on this box uses. A second claim was wrong the same way: nodes 5 and
+6 were NOT "dispatched from the same turn" — node 5 was created 04:01:08, card-7's build was
+requested 04:01:11, and node 6 was admitted 04:46:13, i.e. while node 5 was already training.
+
+*What actually happens.* The continuous cross-turn dispatcher this entry asked to be built ALREADY
+EXISTS. The Card session admits from `state.pending_nodes()` — the whole folded board, not a per-turn
+batch — refills a freed slot on the next poll, runs its own producer, and already commits
+`node_created` from the main task inside the dispatch loop. It is switched off by two booleans:
+`CardSession.consumer_completed`, set in the `finally` of EVERY eval child, and `yield_outer`. Either
+makes `open_for_new_work()` false for ALL slots, and `_card_phase_decide_exit` then will not let the
+session return until the LAST eval drains. So the run stops starting work at the FIRST terminal and
+still cannot reach the outer boundary until the slowest eval lands. That asymmetry is the defect, and
+the code carries its own unresolved `CODEX AGENT` TODO at that line.
+
+Verified on a bounded toy-backend run, not inferred: at the idle moment the probe reads width 2, one
+slot free, `terminal`/`budget`/`outer_rebuild` all False, `consumer_completed=True`,
+`yield_outer=True`, `open_for_new_work=False`, and `admissible_pending: [2]` — a prefetched,
+committed node the engine itself judged admissible, sitting unstarted.
+`tests/test_card_budget_refund.py:488` independently documents the same latch.
+
+**The cost, measured across the six width-2 runs on this box.** 115.6 GPU-h of barrier idle against
+164.4 GPU-h of work actually done — **82.6% of all second-slot time available while the box was busy
+went unused**. Worst single window: `rubert-dr-0807`, 41.8 h at occupancy 1 after having been at 2.
+v6 reached width 2 for 1.55 h out of 17.31; v5 never ran two evals at once at all. A SECOND and
+larger cost sits beside it — 167.7 GPU-h with no eval running at all, same root (`yield_outer` latches
+the producer off during a long eval because the board is only refilled by outer-loop cadences), and
+it deserves its own entry.
+
+**What it would take.** The full option table is `docs/33-cross-turn-dispatch-options-2026-08-13.md`.
+The recommended shape hoists the eval task group to run scope and needs NO new invariant-#1
+exception: eval children are already engine-loop tasks, all eight terminal appends in `evaluate.py`
+are lexically inside `async with self._write_lock`, `_record_eval_start_boundary` stays at the
+dispatch decision, and resume is already written — `EV_NODE_EVAL_STARTED` exists precisely to rebuild
+the inflight set. The real cost is honest and specific: `_proposal_authority_seq`'s quiet window is
+lost for the outer `creates` branch, and the recommended answer is to keep that branch gated on
+quiescence rather than widen the fence, because a node terminal genuinely does carry selection
+authority.
+
+**Do first regardless of the option chosen:** the regression the code's own TODO asks for — an
+unequal-duration refill test driving a real engine. Nothing in an 8,900-test suite currently fails
+when the second GPU goes dark for two hours.
+
+**Cheap mitigation available today, no code:** an `eval_timeout` closer to the real training cost
+bounds the worst-case idle. `eval_parallel: 1` is the honest floor but costs the 1.55 h v6 did use
+and forecloses the prefetch design's justification. Neither is a fix.
+
+**Related, and worth stating because it made this window worse:** node 5's batch size was 8192 as
+proposed and is 256 as it runs — three repair rounds shrank it 32x chasing an OOM that never
+happened (the watchdog-vs-OOM misclassification fixed in `c862045c`). At 2.93 s/it that turned a
+~1.5 h training into a ~6 h one, and it is the 6 h that the barrier then idles a GPU against.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."

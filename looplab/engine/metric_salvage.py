@@ -880,6 +880,54 @@ def recheckable_expect(stages, stage: str, changed) -> dict:
     return {}
 
 
+def declaration_actually_corrected(rows, stage: str, expect) -> bool:
+    """Did the repair reach the DECLARATION THAT FAILED — not merely the file it usually lives in?
+
+    `declaration_only_repair` answers a question about a FILENAME: did this change set touch only
+    `looplab_stages.json`. That is necessary and it is not sufficient, because a repair can write
+    that file without altering the sentence the contract failed on — and in operator `cmd.stages`
+    mode it cannot alter it at all, since the failing declaration lives in the task snapshot and the
+    manifest is ignored, while `cause_repair_context` still directs the Developer at the manifest.
+    The file-set gate then passes on a repair that corrected nothing, and everything downstream
+    reduces to whether `verify_stage_artifacts` answers differently on a second look at an UNCHANGED
+    declaration — across a window that contains a full Developer LLM round trip, on a network
+    filesystem. That is a race deciding whether a node is champion-eligible, and it was reachable:
+    driven end to end on a real `Engine`, the node was promoted with the still-wrong path recorded as
+    its corrected `expect_files`.
+
+    So the rule is stated as what it actually needs to be: the post-repair declaration must DIFFER
+    from the one the contract was held to. `rows` is `RunResult.stages`, where the failing row
+    carries `command_eval.EXPECT_DECLARED_KEY`; `expect` is the corrected block from
+    `recheckable_expect`.
+
+    FAIL CLOSED, in the two ways that matter:
+      * NO recorded pre-repair declaration — an older log, a row the writer did not stamp, a caller
+        that hand-built rows — means the question cannot be answered, and an unanswerable question is
+        not a pass. This is the branch that keeps every pre-2026-08-13 run out of the promotion path
+        entirely, which is correct: nothing about those logs establishes what changed.
+      * An UNCHANGED declaration is the "original contract passing on a second look" that
+        `declaration_only_repair`'s empty-change-set clause already refuses in the other direction.
+        Order-insensitive and path-normalized, so a reordered or `./`-prefixed rewrite of the same
+        set is correctly read as no correction at all.
+    """
+    from looplab.runtime import command_eval        # deferred, like every command_eval read here
+
+    name = str(stage or "")
+    files = [f for f in ((expect or {}).get("files") or []) if isinstance(f, str)]
+    if not name or not files:
+        return False
+    for row in (rows or ()):
+        if not isinstance(row, dict) or str(row.get("name") or "") != name:
+            continue
+        before = row.get(command_eval.EXPECT_DECLARED_KEY)
+        if not isinstance(before, list) or not before:
+            return False
+        was = {_decl_key(f) for f in before if isinstance(f, str)}
+        now = {_decl_key(f) for f in files}
+        return bool(was) and was != now
+    return False
+
+
 def declaration_repair_provenance(salvaged, expect_files, error: str) -> dict:
     """The `metric_provenance` for a node whose repaired contract PASSED the re-check.
 

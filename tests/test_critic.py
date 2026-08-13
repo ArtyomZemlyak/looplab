@@ -127,3 +127,49 @@ def test_hardcoded_metric_not_masked_by_a_symmetric_substring():
     ok = ("import json\nis_symmetric = True\nscore = compute()\n"
           "print(json.dumps({'metric': score}))\n")
     assert not any(i["issue"] == "hardcoded_metric" for i in critique(idea, ok))
+
+
+def test_a_dotted_param_set_in_a_NESTED_CONFIG_is_not_reported_as_ignored():
+    """MEASURED on rubertlite-dr-unified-v6: `critic:params_ignored` fired on nodes 2, 3, 4 and 6 —
+    every node the check ran on — while each node's own `config.yaml` set every one of those
+    parameters under its nested key. A repo task's params are FLATTENED dotted paths and the file
+    that sets them is a hierarchy, so the literal string `train.training.learning_rate` appears
+    nowhere and never will.
+
+    The surface below is the real shape: the exact param names node 6 proposed, against the exact
+    file it wrote them into."""
+    params = {"loss.temperature": 0.05, "loss.uniformity_weight": 0.0,
+              "train.training.learning_rate": 0.001, "train.training.batch_size": 8192.0}
+    config = ("loss:\n"
+              "  type: nll_cos\n"
+              "  temperature: 0.05\n"
+              "  uniformity_weight: 0.0\n"
+              "train:\n"
+              "  training:\n"
+              "    learning_rate: 0.001\n"
+              "    batch_size: 8192\n")
+    issues = critique(Idea(operator="improve", params=params), config)
+    assert not any(i["issue"] == "params_ignored" for i in issues), (
+        "a node that set every proposed parameter was reported as ignoring all of them")
+
+
+def test_a_surface_that_mentions_no_parameter_at_all_is_still_reported():
+    """The control, and the reason the leaf rule is only just weaker than the dotted one: the check
+    fires only when NOTHING matches, so a solution that ignored the proposal still trips it. A no-op
+    does not accidentally contain `uniformity_weight`."""
+    params = {"loss.temperature": 0.05, "loss.uniformity_weight": 0.0,
+              "train.training.learning_rate": 0.001}
+    code = ("import json\n"
+            "score = train_with_defaults()\n"
+            "print(json.dumps({'metric': score}))\n")
+    issues = critique(Idea(operator="improve", params=params), code)
+    assert any(i["issue"] == "params_ignored" for i in issues)
+
+
+def test_one_matching_leaf_is_enough_because_the_rule_is_none_of_them():
+    """Stated so it cannot be tightened by accident: `params_ignored` asks whether the proposal was
+    implemented AT ALL, not whether every knob was threaded. A partially-applied proposal is a
+    modelling judgement the search ranks, not a trust finding."""
+    params = {"a.alpha": 1.0, "b.beta": 2.0, "c.gamma": 3.0}
+    issues = critique(Idea(operator="improve", params=params), "gamma = 3.0\nrun(gamma)\n")
+    assert not any(i["issue"] == "params_ignored" for i in issues)

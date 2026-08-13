@@ -1076,6 +1076,24 @@ EXPECT_ESCAPES = ("stage {stage!r} declares artifact {path!r}, which does not re
 # way `concern` already does), and every reader of an older log sees it absent.
 EXPECT_SINCE_KEY = "expect_since"
 
+# THE DECLARATION THAT FAILED, recorded beside the floor and for the same reason: the F1e re-check
+# needs to know what the contract SAID, not only when it was held.
+#
+# Without it the re-check can only ask "did the repair write the manifest?" — a question about a
+# FILENAME, which is not the same question as "did the repair reach the declaration that failed".
+# The gap is a real, first-class shape, not a defensive hypothetical: in operator `cmd.stages` mode
+# the failing declaration lives in the task snapshot and `looplab_stages.json` is ignored entirely,
+# while the cause-repair prompt tells the Developer to fix `looplab_stages.json` — so the file-set
+# gate passes on a repair that corrected NOTHING, and the promotion then turns on whether a second
+# `stat()` of the same unchanged path answers differently from the first, across a window containing
+# a full Developer LLM round trip. Driven end to end on a real Engine: the node was promoted with the
+# still-wrong path recorded as its corrected `expect_files`.
+#
+# Additive and fold-ignored, exactly like `EXPECT_SINCE_KEY`: `replay._on_stage_finished` copies only
+# name/status/exit_code/seconds, and a reader of an older log sees it absent — which the re-check
+# treats as "cannot establish", i.e. no promotion.
+EXPECT_DECLARED_KEY = "expect_declared"
+
 
 def verify_stage_artifacts(expect, workdir, since: Optional[float], *, stage: str = "") -> Optional[str]:
     """The TECHNICAL half of the stage success contract: None when every declared artifact is there,
@@ -1649,6 +1667,9 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # The floor this contract was checked against, so a re-check of a CORRECTED declaration
             # is held to the identical one — see `EXPECT_SINCE_KEY`.
             stage_results[-1][EXPECT_SINCE_KEY] = _w0
+            # The DECLARATION that failed, verbatim, so a re-check can establish that the repair
+            # actually reached IT — see `EXPECT_DECLARED_KEY`.
+            stage_results[-1][EXPECT_DECLARED_KEY] = list(_expect.get("files") or [])
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
