@@ -99,12 +99,17 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 168
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 170
     # 194 -> 195 Settings and 163 -> 164 catalogued rows when `task_facets_finalize` split the
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 199
+    # 199 -> 201 Settings and 168 -> 170 rows for the Developer's PROBE (F2): `developer_probe` and
+    # `developer_probe_timeout_s`. Both are ROWS rather than uncurated omissions for the reason
+    # `read_fence` is one — the probe is an EXECUTION surface running inside the engine process, so
+    # an operator has to be able to see that it exists and close it, and its timeout is the line
+    # between "a question" and "a job that belongs in an eval stage".
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 201
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
