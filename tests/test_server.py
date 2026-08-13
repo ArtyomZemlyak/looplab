@@ -2481,7 +2481,7 @@ def test_put_run_config_null_clears_optional_but_not_required_or_read_only_field
     _write_snapshot(rd, timeout=30.0, max_seconds=90.0, profile="default")
     client = TestClient(make_app(tmp_path))
     metadata = client.get("/api/runs/demo/config").json()["_looplab_config_meta"]
-    assert metadata["run_read_only_fields"] == ["profile"]
+    assert metadata["run_read_only_fields"] == ["eval_env", "profile"]
 
     cleared = _run_config_put(client, "demo", {"settings": {"max_seconds": None}})
     assert cleared.status_code == 200
@@ -2495,8 +2495,15 @@ def test_put_run_config_null_clears_optional_but_not_required_or_read_only_field
     profile = _run_config_put(client, "demo", {"settings": {"profile": None}})
     assert profile.status_code == 422
     assert "profile can't be changed per-run" in profile.json()["detail"]
+    # `eval_env` is read-only for a DIFFERENT reason and the refusal has to be its own: re-entry
+    # restores it from `run_started` (invariant #6), so a saved change would be ignored by the very
+    # engine the operator is editing. Accepting it silently is the worst of the three options.
+    env = _run_config_put(client, "demo", {"settings": {"eval_env": {"VS_LOCAL_DATA_ROOT": "/x"}}})
+    assert env.status_code == 422
+    assert "eval_env can't be changed per-run" in env.json()["detail"]
     persisted = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
     assert persisted["timeout"] == 30.0 and persisted["profile"] == "default"
+    assert persisted.get("eval_env") in (None, {})
 
 
 def test_put_run_config_fails_closed_when_interprocess_lock_is_unavailable(

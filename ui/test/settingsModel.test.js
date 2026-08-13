@@ -188,13 +188,14 @@ test('per-run config metadata is separated from the flat config and exposes laun
       config_revision: 'a'.repeat(64),
       run_start_pinned_fields: ['holdout_fraction', 'holdout_fraction', 'select_verifier'],
       snapshot_mismatch_fields: ['holdout_fraction'],
-      run_read_only_fields: ['profile'],
+      run_read_only_fields: ['eval_env', 'profile'],
     },
   })
   assert.deepEqual(parsed.config, { timeout: 40, holdout_fraction: 0.4 })
   assert.equal(parsed.configRevision, 'a'.repeat(64))
   assert.deepEqual([...parsed.pinnedFields], ['holdout_fraction', 'select_verifier'])
-  assert.deepEqual([...parsed.readOnlyFields], ['holdout_fraction', 'select_verifier', 'profile'])
+  assert.deepEqual([...parsed.readOnlyFields],
+    ['holdout_fraction', 'select_verifier', 'eval_env', 'profile'])
   assert.deepEqual(parsed.mismatchFields, ['holdout_fraction'])
 })
 
@@ -270,7 +271,7 @@ test('settings and run-config resources reject malformed HTTP-200 envelopes', ()
 
   const config = { ...settings, _looplab_config_meta: {
     config_revision: 'b'.repeat(64), run_start_pinned_fields: [],
-    snapshot_mismatch_fields: [], run_read_only_fields: ['profile'],
+    snapshot_mismatch_fields: [], run_read_only_fields: ['eval_env', 'profile'],
   } }
   assert.equal(splitRunConfigPayload(config, SETTINGS_SCHEMA).readOnlyFields.has('profile'), true)
   const ack = { ok: true, config, changed: ['max_nodes'], normalized_pinned: [],
@@ -279,7 +280,7 @@ test('settings and run-config resources reject malformed HTTP-200 envelopes', ()
   for (const malformed of [{}, { ...config, _looplab_config_meta: null },
     { ...config, max_nodes: [] },
     { ...config, _looplab_config_meta: {
-      run_start_pinned_fields: [], snapshot_mismatch_fields: [], run_read_only_fields: ['profile'],
+      run_start_pinned_fields: [], snapshot_mismatch_fields: [], run_read_only_fields: ['eval_env', 'profile'],
     } },
     { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 'short' } },
     { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 'C'.repeat(64) } },
