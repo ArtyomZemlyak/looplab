@@ -41,7 +41,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   165, so the fixture — which reads the REAL packaged catalogue — has been failing ever since,
   //   which is precisely the failure mode the 162 -> 163 note above describes. Read that note before
   //   adding a catalogue row: the Python and JS halves of this count are ONE tripwire in two files.
-  assert.equal(Object.keys(schema.fieldByKey).length, 167)
+  //   167 -> 168 (2026-08-13): `read_fence`. FOURTH occurrence of the same drift — that commit moved
+  //   `settings_ui_schema.py` to 168 and left this literal behind, exactly as the 162 -> 163 and
+  //   165 -> 167 notes above record. The pattern is now unmistakable: the Python guard is in the
+  //   suite a contributor runs (`python -m pytest`) and this one is not, so it is ALWAYS the half
+  //   that gets missed. If you are adding a row and reading this, the fix is to grep the repo for
+  //   the OLD number rather than trusting either file to remind you.
+  assert.equal(Object.keys(schema.fieldByKey).length, 168)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)
