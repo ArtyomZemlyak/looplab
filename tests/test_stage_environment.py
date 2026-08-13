@@ -264,7 +264,7 @@ def test_the_launch_line_an_operator_actually_types():
     assert Settings().eval_env == {}
 
 
-def test_a_declared_env_is_recorded_folded_and_restored_on_re_entry(tmp_path):
+def test_a_declared_env_is_recorded_folded_and_restored_on_re_entry(tmp_path, caplog):
     """The durability chain, end to end over a REAL event log: run_started carries it, the fold pins
     it, and a SECOND Engine over the same run dir adopts the record over its own live config."""
     from looplab.events.replay import fold
@@ -278,10 +278,16 @@ def test_a_declared_env_is_recorded_folded_and_restored_on_re_entry(tmp_path):
     assert started and started[0].data["eval_env"] == declared, "the log does not record it"
     assert fold(eng.store.read_all()).eval_env == declared
 
-    # A re-entry whose LIVE config disagrees adopts the record (engine invariant #6).
+    # A re-entry whose LIVE config disagrees adopts the record (engine invariant #6) — and SAYS
+    # which variable disagreed and how. The ordinary case is one variable whose VALUE moved, so a
+    # warning that printed the two key SETS would report a conflict while hiding it: both sides read
+    # `['VS_LOCAL_DATA_ROOT']`. That is what this run's own warning did before it was measured.
     resumed = make_engine(tmp_path, eval_env={"VS_LOCAL_DATA_ROOT": "/somewhere/else"})
-    resumed._repin_declared_env(fold(resumed.store.read_all()))
+    with caplog.at_level("WARNING"):
+        resumed._repin_declared_env(fold(resumed.store.read_all()))
     assert resumed._eval_env == declared
+    warned = "\n".join(r.getMessage() for r in caplog.records)
+    assert "/home/jovyan/data/dr-local" in warned and "/somewhere/else" in warned
 
 
 def test_a_run_with_no_declaration_writes_a_byte_identical_run_started(tmp_path):

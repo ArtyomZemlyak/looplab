@@ -2466,11 +2466,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return
         live = dict(getattr(self, "_eval_env", None) or {})
         if live != recorded:
+            # Name the DISAGREEING variables with BOTH values, not the two key sets: the ordinary
+            # case is one variable whose VALUE changed (a data root re-pointed at a different
+            # corpus), and two identical-looking key lists is a warning that reports a conflict
+            # while hiding it. Printing values is safe precisely because a secret-shaped one was
+            # refused at declaration time — that refusal is what lets this message be useful.
+            names = sorted(set(recorded) | set(live))
+            detail = "; ".join(f"{n}: log={recorded.get(n)!r} launch={live.get(n)!r}"
+                               for n in names if recorded.get(n) != live.get(n))
             _LOG.warning(
-                "resume: this run's run_started recorded eval_env=%s; the launch config says %s. "
-                "The RECORD wins (engine invariant #6) — every node in this log was evaluated under "
-                "the recorded environment and results have to stay comparable. Start a NEW run to "
-                "evaluate under a different one.", sorted(recorded), sorted(live))
+                "resume: this run's declared eval_env disagrees with the launch config (%s). The "
+                "RECORD wins (engine invariant #6) — every node in this log was evaluated under the "
+                "recorded environment and results have to stay comparable. Start a NEW run to "
+                "evaluate under a different one.", detail)
         self._eval_env = dict(recorded)
 
     def _repin_settled_widths(self, entry: RunState, *, source: Optional[str] = None) -> None:

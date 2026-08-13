@@ -46,11 +46,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-11  + systemic_failure_stop      (run-level 'nothing has ever worked' stop; see below)
 #   2026-08-11  concept_retag_every 30 -> 5  (intentional cadence-default change; field set unchanged,
 #               but the complete settings envelope and therefore old receipts genuinely changed)
+#   2026-08-13  + eval_env                   (run-level declared environment; see below)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e6fdffab4f56"
+_EXPECTED_DIGEST = "sha256:6c001567197eabef7f9f09c2e8a69984c232172706db404fd5d219d47232d2bb"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -95,7 +96,16 @@ _EXPECTED_DIGEST = "sha256:34bff316ebd837ef7e58f4b67c03e9cd417b0d5534cd26f57d03e
 #               reported as `oom` is now `diverged`, and a stage refused for a missing declared
 #               input is `needs_failed` — and each is repair-eligible by default, so the number of
 #               attempts a failing replicate buys changes too. Old receipts SHOULD stop verifying.
-_EXPECTED_FIELD_COUNT = 196
+#   2026-08-13  + eval_env                   (the RUN-LEVEL DECLARED ENVIRONMENT, backlog F1d). The
+#               'field set changed too' branch. The profile pins it to `{}`, so a calibration
+#               replicate runs under no declaration and this knob is INERT for the toy workload —
+#               like `concept_tidy` and `task_facets_finalize` before it, and the guard is
+#               deliberately not clever enough to exempt an inert knob, because the digest binds the
+#               COMPLETE non-variant envelope. What makes re-pinning right rather than merely
+#               necessary is what the field IS: a value that changes what every eval process in the
+#               run can read. An envelope that can no longer state that is not the envelope a later
+#               receipt would be compared against. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 197
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
