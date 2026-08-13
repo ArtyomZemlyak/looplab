@@ -334,14 +334,27 @@ EV_SETUP_STEP = "setup_step"
 EV_PHASE_PROGRESS = "phase_progress"
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.
-PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `engine/node_build.py`
-PROGRESS_STAGE_RESUME = "resume"    # process start -> the loop's first turn, `Engine._enter_run`
+PROGRESS_STAGE_BUILD = "build"      # idea -> code: one node's whole build, `_create_node_scoped`
+# The run prologue (`Engine._enter_run`) — everything between the process starting and the loop's
+# first turn. It runs on every invocation, fresh run and resume alike, but it is only EMITTED on a
+# re-entry: the call site gates it on a one-stat "the log is already non-empty" probe. That gate is
+# not a nicety. A `started` row appended before the prologue's own `read_all()` would (a) land in
+# that read, and the speculation-calibration bootstrap refuses a run whose log is not exactly empty
+# at start, and (b) displace the exact five-event setup prefix
+# `search/speculation_quality.py::_validate_calibration_setup` pins. It also keeps the label honest:
+# a fresh run must never be told it is "Resuming…".
+PROGRESS_STAGE_RESUME = "resume"
 PROGRESS_STAGES: frozenset[str] = frozenset({PROGRESS_STAGE_BUILD, PROGRESS_STAGE_RESUME})
 # The steps of each stage, in the order they actually happen. The ORDER is meaningful to a reader (a
-# UI may render a stepper) but it is NOT a contract the engine has to satisfy: a build can skip
-# `novelty` (a mechanical merge/debug idea never crosses the gate) and can run `repair` instead of
-# `implement`. What IS a contract is membership — `assert_progress_phase` refuses anything else, so a
-# renamed step goes red at its append site rather than rendering as a blank chip.
+# UI may render a stepper) but it is NOT a contract the engine has to satisfy, and a surface that
+# assumes every phase appears will be wrong on most real runs. Which ones fire is CONFIGURATION-
+# dependent: a mechanical merge/debug idea never crosses the novelty gate; `repair` replaces
+# `implement` only on the `debug` operator's error-feedback branch; and `reserve` fires on the serial
+# `_create_node_scoped` path but NOT on the batch/staged lane that the shipped default width takes,
+# because that lane reserves elsewhere. Measured on the offline quadratic smoke run: 12 propose,
+# 8 novelty, 16 implement, 0 reserve, 0 repair. What IS a contract is membership —
+# `assert_progress_phase` refuses anything else, so a renamed step goes red at its append site rather
+# than rendering as a blank chip.
 PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
     PROGRESS_STAGE_BUILD: (
         "propose",     # the Researcher's proposal call — the long, wholly invisible one: it runs
@@ -351,13 +364,22 @@ PROGRESS_PHASES: dict[str, tuple[str, ...]] = {
         "reserve",     # `_reserve_node_build` — the Card plan + the `node_building` append
         "implement",   # the Developer's implement call
         "repair",      # the Developer's repair call (the `debug` operator's own branch)
-        "commit",      # footprint finalize + the `node_created` append
     ),
+    # There is deliberately NO `commit` phase for the fold-verify-and-append tail after the Developer
+    # returns. It is seconds, not minutes, and it already ENDS in `node_created` — a folded event the
+    # feed, the strip and the DAG all react to today. A phase whose only signal duplicates an existing
+    # one is noise, and a phase listed here that nothing emits would be worse: this table is what a
+    # UI stepper would render, so an entry no run ever reaches shows the operator a step that never
+    # completes. Add one here only together with its append site.
     PROGRESS_STAGE_RESUME: (
-        "read_log",    # re-reading and folding events.jsonl — O(log size), and the first thing a
-                       # resume does; on a large run this alone is the whole visible freeze
-        "reconcile",   # the re-entry prologue's lifecycle settle (`_enter_run`)
-        "ready",       # the loop is about to take its first turn
+        "read_log",    # re-reading and folding events.jsonl — O(log size), and the first thing the
+                       # prologue does. On a large run this alone is the whole visible freeze, and
+                       # it is the one phase that CANNOT report its own start from the log's
+                       # contents, because it is what reads them.
+        "reconcile",   # everything the prologue settles before the first turn: the width repin, the
+                       # speculation receipt, interrupted-build recovery, command ACKs, setup
+        # No `ready` phase: "the loop is about to take its first turn" is exactly `reconcile`'s
+        # `finished` beacon, and a zero-length phase is a step an operator can never catch.
     ),
 }
 PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "finished"})

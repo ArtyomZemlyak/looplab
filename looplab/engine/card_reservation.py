@@ -55,6 +55,7 @@ from looplab.engine.proposal_cues import normalize_steering_context
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_DROPPED,
                                   EV_CARD_MERGED, EV_HYPOTHESIS_MERGED, EV_NODE_BUILDING,
+                                  PROGRESS_STAGE_BUILD,
                                   EV_NODE_CREATED, EV_NOVELTY_REJECTED)
 from looplab.search.card_selection import (META_CARD_ID, card_action as projected_card_action,
                                            card_budget_used, card_selection_set, eligible_cards,
@@ -1346,14 +1347,21 @@ class CardReservationMixin:
             else:
                 for offset, action in enumerate(raw):
                     source = "engine" if action.get("kind") == "merge" else "researcher"
-                    idea = self._prepare_node_idea(
-                        action,
-                        proposal_state,
-                        researcher=self.researcher,
-                        prospective_node_id=proposal_node_ceiling + offset,
-                        source=source,
-                        proposal_events=proposal_events,
-                    )
+                    # The per-action lane of `_stage_card_creates` (the batch lane's sibling — see
+                    # the note below on why the two do not share `_link`). One paid Researcher call
+                    # per action, run serially, so without a beacon a width-4 stage is four
+                    # invisible waits in a row that read as one hang.
+                    with self._progress(PROGRESS_STAGE_BUILD, "propose",
+                                        node_id=proposal_node_ceiling + offset, prospective=True,
+                                        operator=action.get("kind")):
+                        idea = self._prepare_node_idea(
+                            action,
+                            proposal_state,
+                            researcher=self.researcher,
+                            prospective_node_id=proposal_node_ceiling + offset,
+                            source=source,
+                            proposal_events=proposal_events,
+                        )
                     if idea is None:
                         continue
                     prepared.append((

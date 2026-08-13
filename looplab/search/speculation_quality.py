@@ -81,6 +81,7 @@ from looplab.events.types import (
     EV_NODE_RESET,
     EV_NODE_TOMBSTONED,
     EV_PAUSE,
+    EV_PHASE_PROGRESS,
     EV_POLICY_DECISION,
     EV_RESTART,
     EV_RESUME,
@@ -246,6 +247,23 @@ _CALIBRATION_CARD_IDEA_FIELDS = frozenset({
 _CALIBRATION_COMMON_EVENT_TYPES = frozenset({
     EV_SETUP_STARTED,
     EV_SETUP_STEP,
+    # The live-progress beacon (`events/types.py::EV_PHASE_PROGRESS`). It is admitted rather than
+    # excluded for the same reason `EV_CARD_BUILD_ATTEMPTED` below had to be: this allow-list is
+    # consulted by `_validate_calibration_event_envelope`, which every clean offline calibration run
+    # passes through, and the beacon is emitted unconditionally by `_enter_run` and by the build
+    # spine — so leaving it out would reject EVERY future calibration run as "outside the clean
+    # calibration protocol" and no receipt could ever be minted again. That is the exact defect the
+    # comment on EV_CARD_BUILD_ATTEMPTED records, five days late.
+    #
+    # This widening cannot revoke an already-issued receipt. The allow-list only RAISES; it is not an
+    # input to the receipt body, so `canonical_json(body)` over any log that validated before this
+    # change is byte-identical after it. What changes is only which logs are admitted at all, and the
+    # only new admissions are logs carrying a fold-ignored beacon that no calibration measurement
+    # reads. (`_validate_calibration_setup`'s five-event prefix and its `setup_step` count of exactly
+    # 2 are untouched: the first beacon is `startup/read_log`, which is appended before the setup
+    # prefix even begins, so the prefix assertion is checked against a log whose head it no longer
+    # is. See the guard test — this is the ONE ordering fact the widening actually depends on.)
+    EV_PHASE_PROGRESS,
     EV_RUN_STARTED,
     EV_SETUP_FINISHED,
     EV_CARD_ADDED,

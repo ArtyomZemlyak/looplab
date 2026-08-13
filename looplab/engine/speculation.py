@@ -40,6 +40,7 @@ from looplab.events.types import (
     EV_PAUSE,
     EV_POLICY_DECISION,
     EV_SPECULATION_DEPTH_SETTLED,
+    PROGRESS_STAGE_BUILD,
 )
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
@@ -1595,7 +1596,15 @@ class SpeculationMixin:
         self._discard_node_build_telemetry(researcher=researcher, developer=developer)
         audit_events: list[tuple[str, dict, Optional[str], Optional[str]]] = []
         try:
-            with self._capture_proposal_events() as captured:
+            # The Layer-5 speculative producer's proposal. It is a background worker doing a full
+            # paid Researcher call, so it is invisible for exactly as long as the foreground one is —
+            # and the beacon must NOT ride the `_capture_proposal_events` sink around it, which
+            # buffers until the main task publishes. See `SharedEngineMixin._progress` for why a
+            # DIAGNOSTIC row may be appended straight from this worker.
+            with self._progress(PROGRESS_STAGE_BUILD, "propose",
+                                node_id=proposal_node_ceiling, prospective=True,
+                                speculative=True, operator=raw_action.get("kind")), \
+                    self._capture_proposal_events() as captured:
                 idea = self._prepare_node_idea(
                     raw_action,
                     proposal_state,

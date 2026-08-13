@@ -46,7 +46,8 @@ from looplab.events.types import (
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
-    EV_ENV_CHANGED, EV_WORKSPACE_CHANGED)
+    EV_ENV_CHANGED, EV_WORKSPACE_CHANGED,
+    PROGRESS_STAGE_BUILD, PROGRESS_STAGE_RESUME)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
@@ -1420,8 +1421,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         method that reached it from another engine file would bind a different object; see
         `engine/card_reservation.py::_fold` for the deferred-attribute pattern that costs.
         """
-        events = self.store.read_all()
-        state = fold(events)
+        # The two resume beacons. A resume is the operator's other reported blank wait, and it is
+        # blank for a structural reason: everything below this line happens BEFORE the loop's first
+        # turn, so no node, no marker and no status the UI polls has moved yet — the run looks dead.
+        # `read_log` is bracketed on its own because it is the phase whose cost scales with the run:
+        # re-reading and folding a large `events.jsonl` is most of what a resume of a long run spends
+        # its time on, and it is the part an operator most often mistakes for a hang.
+        #
+        # Emitted ONLY on a genuine re-entry, decided by ONE stat rather than by reading the log —
+        # the read is the very thing being narrated, so the decision has to precede it. A fresh run
+        # must emit nothing at all here: its `started` row would land in the `read_all()` below,
+        # which breaks the calibration bootstrap's exactly-zero-prior-events rule and displaces the
+        # five-event setup prefix `speculation_quality._validate_calibration_setup` pins. It is also
+        # simply the honest label — a first run is not resuming. A stat that cannot be taken
+        # (missing file = a fresh run; any OSError = do not guess) settles to "not a resume", i.e.
+        # to silence, because a wrong "Resuming…" is worse than the absent one it replaces.
+        try:
+            _reentry = self.store.path.stat().st_size > 0
+        except OSError:
+            _reentry = False
+        with self._progress(PROGRESS_STAGE_RESUME, "read_log", enabled=_reentry) as _rl:
+            events = self.store.read_all()
+            state = fold(events)
+            # Reported on `finished`, because until the log is read neither number exists. They are
+            # what makes the beacon actionable rather than decorative: "folded 41,203 events" tells
+            # an operator staring at a still screen that the process is working, and roughly on what.
+            _rl["events"] = len(events)
+            _rl["nodes"] = len(state.nodes)
         # Re-entry authorization is the first semantic boundary.  Recovery, command ACK and setup all
         # append events, so a stale/missing/different receipt must fail before any of them can mutate a
         # positive-depth run.  `_reentry_repin` repeats this after setup to guard a concurrent tail edit.
@@ -1434,20 +1460,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # resumed/reused as another sample; every evidence lane starts from an exactly empty log.
             raise SpeculationAuthorizationError(
                 "speculation gate calibration requires exactly zero prior events at run start")
-        if self._recover_interrupted_builds(state):
-            # Recovery appends terminal evidence. Re-fold before setup or any policy work so this
-            # invocation cannot resurrect the abandoned marker or reuse its reserved id.
-            events = self.store.read_all()
-            state = fold(events)
-        self._ack_commands(events)
-        # A hard kill can land after the durable terminal intent (`finalize_step:begun`) but before
-        # `run_finished`. Never run setup/search in that gap; finalization restores the exact terminal
-        # payload from the begun marker and resumes only the same wrap-up scope.
-        if (incomplete_finalize_scope(events) is None
-                and not state.finalization_pending()):
-            self._setup_phase(state)
+        # `reconcile` covers everything left before the loop's first turn: interrupted-build
+        # recovery, command ACKs and — on a fresh or materially changed run — the whole SETUP phase.
+        # Setup already narrates itself (`setup_started`/`setup_step`), so this beacon does not
+        # duplicate it; it bounds the stretch AROUND it, which nothing did.
+        with self._progress(PROGRESS_STAGE_RESUME, "reconcile", enabled=_reentry) as _rc:
+            if self._recover_interrupted_builds(state):
+                # Recovery appends terminal evidence. Re-fold before setup or any policy work so this
+                # invocation cannot resurrect the abandoned marker or reuse its reserved id.
+                events = self.store.read_all()
+                state = fold(events)
+                _rc["recovered_builds"] = True
+            self._ack_commands(events)
+            # A hard kill can land after the durable terminal intent (`finalize_step:begun`) but before
+            # `run_finished`. Never run setup/search in that gap; finalization restores the exact terminal
+            # payload from the begun marker and resumes only the same wrap-up scope.
+            if (incomplete_finalize_scope(events) is None
+                    and not state.finalization_pending()):
+                self._setup_phase(state)
 
-        return self._reentry_repin()
+            return self._reentry_repin()
 
     async def _run_with_llm_broker(self) -> RunState:
         entry_finished = self._enter_run()
@@ -4250,7 +4282,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         about to record. Resetting stays at the call sites precisely because that ordering differs:
         `run` clears after the reservations are durable, `_stage_card_creates` clears in a `finally`.
         """
-        ideas = self._propose_batch(state, width)
+        # The BATCH proposal's progress beacon, and the one that matters most: on the default config
+        # this — not `_prepare_node_idea` from `_create_node_scoped` — is the path a run actually
+        # takes, and it is the single longest wholly invisible stretch in the loop. It runs before any
+        # node id exists, so no `node_building` marker has been appended and the UI has literally
+        # nothing to draw; the strip falls through to "Planning next experiment…" for the entire
+        # Researcher call. This is the funnel BOTH batch call sites go through (doc 25 ES-08), which
+        # is why the beacon belongs here and not duplicated at each.
+        #
+        # No `node_id`: a batch proposes `width` ideas at once and none of them has an id yet.
+        # Emitting a prospective one would name a node that several of these ideas will not become.
+        # `count` is the honest shape, and a beacon without a node_id is the run-level phase it is.
+        with self._progress(PROGRESS_STAGE_BUILD, "propose", count=int(width)):
+            ideas = self._propose_batch(state, width)
         telemetry = list(getattr(self, "_pending_batch_telemetry", None) or [])
         if len(telemetry) < len(ideas):
             telemetry.extend([None] * (len(ideas) - len(telemetry)))
@@ -4609,10 +4653,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # final writer-owned Card id first, then run the same proposal-bound novelty sidecar as the
             # ordinary draft/improve path. Reserved parallel batches bypass this helper entirely: their
             # shared proposal pass has already applied the gate.
-            final = self._apply_novelty_gate(
-                state, linked, researcher=researcher,
-                prospective_node_id=prospective_node_id,
-            )
+            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
+                                node_id=prospective_node_id, prospective=True, operator=kind):
+                final = self._apply_novelty_gate(
+                    state, linked, researcher=researcher,
+                    prospective_node_id=prospective_node_id,
+                )
             return _link(final)
 
         if kind == "draft":
@@ -4622,11 +4668,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None:
                 return None
-            final = self._apply_novelty_gate(
-                state, idea,
-                repropose=lambda: _link(self._canonicalize_draft_idea(
-                    researcher.propose(state, None))),
-                researcher=researcher, prospective_node_id=prospective_node_id)
+            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
+                                node_id=prospective_node_id, prospective=True, operator=kind):
+                final = self._apply_novelty_gate(
+                    state, idea,
+                    repropose=lambda: _link(self._canonicalize_draft_idea(
+                        researcher.propose(state, None))),
+                    researcher=researcher, prospective_node_id=prospective_node_id)
             return _link(final)
 
         if kind == "merge":
@@ -4666,11 +4714,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
-        final = self._apply_novelty_gate(
-            state, idea,
-            repropose=lambda p=parent: _link(self._canonicalize_idea_operator(
-                researcher.propose(state, p), authoritative_operator)),
-            researcher=researcher, prospective_node_id=prospective_node_id)
+        with self._progress(PROGRESS_STAGE_BUILD, "novelty",
+                            node_id=prospective_node_id, prospective=True, operator=kind):
+            final = self._apply_novelty_gate(
+                state, idea,
+                repropose=lambda p=parent: _link(self._canonicalize_idea_operator(
+                    researcher.propose(state, p), authoritative_operator)),
+                researcher=researcher, prospective_node_id=prospective_node_id)
         return _link(final)
 
     @in_llm_lane("build")
@@ -4720,10 +4770,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return
             prospective_node_id = self._node_id_ceiling(proposal_events, proposal_state)
             source = "engine" if action.get("kind") == "merge" else "researcher"
-            idea = self._prepare_node_idea(
-                action, proposal_state, researcher=researcher,
-                prospective_node_id=prospective_node_id,
-                source=source, proposal_events=proposal_events, preproposed=preproposed)
+            # The PROSPECTIVE id, not a real one: this whole phase runs before `node_building` is
+            # appended, which is the reason it is the invisible one — the UI has no node to draw yet,
+            # so it falls through to "Planning next experiment…" for however long the Researcher
+            # takes. `prospective: True` marks the id as the ceiling's guess so a reader never treats
+            # it as a committed node; the `reserve` beacon below carries the id that was actually
+            # taken, and the two agree except when a concurrent build wins the id first.
+            with self._progress(PROGRESS_STAGE_BUILD, "propose", node_id=prospective_node_id,
+                                prospective=True, operator=action.get("kind")):
+                idea = self._prepare_node_idea(
+                    action, proposal_state, researcher=researcher,
+                    prospective_node_id=prospective_node_id,
+                    source=source, proposal_events=proposal_events, preproposed=preproposed)
             if idea is None:
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
@@ -4732,15 +4790,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if steering_context is None:
                 self._discard_node_build_telemetry(researcher=researcher, developer=developer)
                 return
-            reserved = self._reserve_node_build(
-                action, idea, scored_against=proposal_state.best_node_id,
-                source=source, steering_context=steering_context,
-                # The ordinary build spine, and the ONE site that commits an attach. `_link` above
-                # planned with the same flag, so a `debug` re-attempt of a question card-N already
-                # asks becomes another node under card-N instead of a byte-identical twin. Spelled
-                # here rather than defaulted inside the reservation: four other callers reach that
-                # method and none of them may attach (see `_plan_native_card`).
-                retry_attach=True)
+            with self._progress(PROGRESS_STAGE_BUILD, "reserve", node_id=prospective_node_id,
+                                prospective=True, operator=action.get("kind")):
+                reserved = self._reserve_node_build(
+                    action, idea, scored_against=proposal_state.best_node_id,
+                    source=source, steering_context=steering_context,
+                    # The ordinary build spine, and the ONE site that commits an attach. `_link` above
+                    # planned with the same flag, so a `debug` re-attempt of a question card-N already
+                    # asks becomes another node under card-N instead of a byte-identical twin. Spelled
+                    # here rather than defaulted inside the reservation: four other callers reach that
+                    # method and none of them may attach (see `_plan_native_card`).
+                    retry_attach=True)
         if reserved is None:
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
             return
@@ -4781,7 +4841,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._reset_developer_footprint(developer)
             if kind == "draft":
                 parents: list[int] = []        # not whatever label the LLM returns
-                with self.tracer.span("implement"):
+                # The progress beacon rides ON the existing tracer span rather than nesting inside
+                # it: same boundary, same body, no reindentation of code whose comments are
+                # load-bearing. The span feeds `spans.jsonl` (a per-node trace an operator opens
+                # after the fact); the beacon feeds the live strip, which is the surface that was
+                # blank while this call ran.
+                with self.tracer.span("implement"), self._progress(
+                        PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
                     code = self._implement(
                         self._directed_idea(idea.model_copy(deep=True), state),
                         developer=developer, state=state)
@@ -4790,7 +4856,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # A0b: real ensembling (code recombination) when configured/Strategist-selected;
                 # else the legacy mean-param merge. Toy/baseline developers degrade to mean.
                 pnodes = [state.nodes[i] for i in parents]
-                with self.tracer.span("implement"):
+                with self.tracer.span("implement"), self._progress(
+                        PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
                     # A code-ensemble merge must SEED from the primary parent's solution (like improve),
                     # not implement() from scratch: from-scratch gave the Developer no base, so the
                     # ensemble node shipped without the agent-authored eval entrypoint and crash-failed
@@ -4819,7 +4886,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # bounded by debug_depth.
                     err = self._repair_error_context(parent.error_reason, parent.error,
                                                      state=state, node=parent)
-                    with self.tracer.span("repair", parent_id=parent.id):
+                    with self.tracer.span("repair", parent_id=parent.id), self._progress(
+                            PROGRESS_STAGE_BUILD, "repair", node_id=node_id, operator=kind,
+                            parent_id=parent.id):
                         code = self._repair(
                             parent, err, state, developer=developer)  # seed from parent's OWN files
                 else:
@@ -4828,14 +4897,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # when the agent is FIXING a failure it most needs "this crash class recurred
                     # before" and "the likely files to edit". Previously this branch called only
                     # _stamp_novelty_hint, so those cues were absent on the repair proposal.
-                    with self.tracer.span("implement"):
+                    with self.tracer.span("implement"), self._progress(
+                            PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
                         code = self._implement(
                             self._directed_idea(idea.model_copy(deep=True), state), parent,
                             developer=developer, state=state)
             else:  # improve
                 parent = state.nodes[action["parent_id"]]
                 parents = [parent.id]
-                with self.tracer.span("implement"):
+                with self.tracer.span("implement"), self._progress(
+                        PROGRESS_STAGE_BUILD, "implement", node_id=node_id, operator=kind):
                     code = self._implement(
                         self._directed_idea(idea.model_copy(deep=True), state), parent,
                         developer=developer, state=state)
