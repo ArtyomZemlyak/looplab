@@ -1,4 +1,4 @@
-# 31 · F1e is unreachable — who may repair a declaration, and what the promotion would be asserting
+# 32 · F1e is unreachable — who may repair a declaration, and what the promotion would be asserting
 
 **Status: ANALYSIS AND OPTIONS. Nothing here is implemented.** Written 2026-08-13 against
 `5b7010c7`, about `2b980d0b` (`feat(salvage): re-check a repaired artifact declaration instead of

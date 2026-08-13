@@ -1,4 +1,4 @@
-# 32 · Cross-turn eval dispatch — analysis and options (F1f)
+# 33 · Cross-turn eval dispatch — analysis and options (F1f)
 
 **Status:** analysis only. Nothing here is implemented. Written 2026-08-13 against
 `5b7010c7`, with `runs/rubertlite-dr-unified-v6` live on the box.

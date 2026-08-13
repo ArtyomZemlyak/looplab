@@ -56,7 +56,15 @@ def read_memory_jsonl_window(
             return [], receipt
         raw = raw[boundary + 1:]
 
-    encoded = raw.splitlines()
+    # Split ONLY on the JSONL record delimiter, the rule `core/jsonlio.py` states and this copy
+    # broke: `bytes.splitlines` also splits bare CR, form feed and vertical tab, which are bytes
+    # INSIDE one poisoned record. The same stores are read both ways — the Researcher's priors and
+    # `tools/memory_tools.py` come through this window, while `serve/memory_cascade.py` and
+    # `engine/lesson_hygiene.py` come through `read_jsonl_lenient` — so a row containing a bare CR
+    # was two rows here and one row there, and one of those readers DELETES from the store.
+    encoded = raw.split(b"\n")
+    if raw.endswith(b"\n"):
+        encoded.pop()
     if len(encoded) > max_rows:
         encoded = encoded[-max_rows:]
         receipt["source_window_truncated"] = True

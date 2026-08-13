@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from looplab.core.atomicio import same_file_entry
+from looplab.core.pathsafe import is_reparse
 
 
 TraceFileIdentity = tuple[int, int]
@@ -161,14 +162,14 @@ def trace_file_change_token(
     return token if token > 0 else None
 
 
-def _is_reparse_point(info: os.stat_result) -> bool:
-    marker = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0) or 0)
-    return bool(marker and (int(getattr(info, "st_file_attributes", 0) or 0) & marker))
-
-
 def assert_private_trace_file(info: os.stat_result, path: Path) -> None:
     """Require one unaliased regular trace file (works for lstat and fstat results)."""
-    if stat.S_ISLNK(info.st_mode) or _is_reparse_point(info):
+    # `core/pathsafe.is_reparse` is the ONE spelling of "this entry redirects elsewhere", and both
+    # halves are load-bearing: POSIX symlinks show up in `st_mode` and set no attribute, while
+    # Windows junctions set `FILE_ATTRIBUTE_REPARSE_POINT` and are NOT `S_ISLNK`. This module had a
+    # private copy that answered only the attribute half and re-added the `S_ISLNK` half here — which
+    # is exactly the drift `pathsafe`'s own docstring records finding across seven modules.
+    if is_reparse(info):
         raise OSError(errno.ELOOP, "trace path must not be a link or reparse point", path)
     if stat.S_ISDIR(info.st_mode):
         # Preserve the ordinary binary-reader contract used by callers/tests while still rejecting
@@ -207,8 +208,14 @@ def open_private_trace_file(
     normally omit it; modules that historically resolved a monkeypatchable module-level ``open`` may
     pass that callable explicitly.
     """
-    if mode not in {"rb", "a+b"}:
-        raise ValueError("trace files support only 'rb' and 'a+b' modes")
+    # `rb+` is READ/UPDATE on a file that must already exist. It is here rather than open-coded at
+    # its one caller (`serve/trace_clear.py`, which needs write access purely so `strict_fsync` can
+    # run — on Windows that is the CRT `_commit`, which raises EBADF on a read-only descriptor) so
+    # the `O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK|O_BINARY` set stays in ONE place. That flag set is the
+    # security contract for opening a run-private trace file, and a second copy meant adding or
+    # hardening a flag silently left the destructive publication path on the old one.
+    if mode not in {"rb", "a+b", "rb+"}:
+        raise ValueError("trace files support only 'rb', 'rb+' and 'a+b' modes")
     target = Path(path)
     creates = mode == "a+b"
     before = None

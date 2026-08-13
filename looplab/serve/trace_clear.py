@@ -33,6 +33,7 @@ from fastapi import HTTPException
 from looplab.core.atomicio import (
     file_identity, strict_atomic_write_text, strict_fsync, strict_replace,
     strict_fsync_parent)
+from looplab.core.pathsafe import is_reparse
 from looplab.core.trace_files import (
     TRACE_JSONL_ROW_MAX_BYTES, assert_private_trace_file, open_private_trace_file,
     trace_file_identity)
@@ -64,17 +65,15 @@ def _trace_clear_receipt_lstat(path: Path) -> Optional[os.stat_result]:
         }) from exc
 
 
-def _trace_clear_receipt_reparse(info: os.stat_result) -> bool:
-    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return stat.S_ISLNK(info.st_mode) or bool(attributes & reparse_flag)
-
-
 def _trace_clear_regular_receipt(path: Path) -> Optional[os.stat_result]:
     info = _trace_clear_receipt_lstat(path)
     if info is None:
         return None
-    if (_trace_clear_receipt_reparse(info) or not stat.S_ISREG(info.st_mode)
+    # `core/pathsafe.is_reparse` — the single spelling. This file carried a third copy with its own
+    # `0x400` fallback for the Windows attribute, in a module whose whole job is to refuse a
+    # redirected path before a destructive rewrite; a hardening applied to `pathsafe` would have
+    # missed it silently.
+    if (is_reparse(info) or not stat.S_ISREG(info.st_mode)
             or int(getattr(info, "st_nlink", 1)) != 1):
         raise HTTPException(409, {
             "code": "trace_clear_receipt_path_invalid",
@@ -189,7 +188,7 @@ def _pending_trace_clear_for_lifecycle(
         # receipt. Symlinks and other suspicious matching entries still fail closed in the loader.
         info = _trace_clear_receipt_lstat(path)
         if (info is not None and stat.S_ISDIR(info.st_mode)
-                and not _trace_clear_receipt_reparse(info)):
+                and not is_reparse(info)):
             continue
         receipt = _load_trace_clear_receipt(path)
         if (receipt is not None
@@ -364,9 +363,20 @@ def _read_exact_chunks(stream, size: int):
     """Yield exactly one snapshotted byte range through a fixed-size buffer."""
     remaining = max(0, int(size))
     while remaining:
-        chunk = stream.read(min(_TRACE_CLEAR_STREAM_CHUNK, remaining))
+        request = min(_TRACE_CLEAR_STREAM_CHUNK, remaining)
+        chunk = stream.read(request)
         if not chunk:
             raise OSError("short read while snapshotting spans.jsonl")
+        if len(chunk) > request:
+            # Fail closed on an OVER-return, the same rule `core/trace_files.py`'s bounded reader
+            # states: "Real binary files obey read(n); fail closed for a malformed/custom stream
+            # instead of letting it bypass the allocation boundary used by remote filesystem
+            # wrappers too." This copy lacked it, so a FUSE/wrapper stream that over-returned let
+            # the DESTRUCTIVE path — the one that rewrites spans.jsonl — allocate past the ceiling
+            # the shared reader exists to enforce.
+            raise OSError(
+                f"oversized read while snapshotting spans.jsonl: "
+                f"requested {request}, got {len(chunk)}")
         remaining -= len(chunk)
         yield chunk
 
@@ -599,21 +609,21 @@ def _strict_replace_prepared_trace(prepared: _PreparedTrace, destination: Path) 
     before = os.lstat(temporary)
     assert_private_trace_file(before, temporary)
 
-    def nofollow_opener(raw_path, flags):
-        return os.open(
-            raw_path,
-            flags | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
-        )
-
     # Opened for UPDATE, not read-only, purely so the durable sync below can run: on Windows
     # `os.fsync` is the CRT `_commit`, which needs write access and raises EBADF on a read-only
     # descriptor — `strict_fsync` then reports "durable fsync failed" and the route answers 503
     # `trace_clear_outcome_unknown`, telling the operator to verify the same operation again. That
     # advice could never succeed, because the failure is deterministic: every clear failed on this
-    # platform and left its write-ahead receipt pending. Nothing here reads through the handle; the
-    # nofollow/type/identity checks around it are unaffected by the mode, and "rb+" does not truncate.
-    with open(temporary, "rb+", opener=nofollow_opener) as stream:
+    # platform and left its write-ahead receipt pending. Nothing here reads through the handle, and
+    # "rb+" does not truncate.
+    #
+    # Through the SHARED opener: the `O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK|O_BINARY` set is the security
+    # contract for a run-private trace file, and this module used to re-spell it. Two copies meant a
+    # flag added or hardened in `core/trace_files.py` silently left the DESTRUCTIVE publication path
+    # — the one that fsyncs and then `strict_replace`s over the operator's spans.jsonl — opening with
+    # the old set. `expected_identity` folds the pre-open CAS into the same call.
+    with open_private_trace_file(
+            temporary, "rb+", expected_identity=trace_file_identity(before)) as stream:
         opened = os.fstat(stream.fileno())
         assert_private_trace_file(opened, temporary)
         if trace_file_identity(opened) != trace_file_identity(before):

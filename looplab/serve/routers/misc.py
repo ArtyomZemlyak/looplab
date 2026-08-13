@@ -143,7 +143,28 @@ def _author_parent_chain_is_safe(root: Path, relative: Path) -> bool:
 
 
 def _read_author_file_safely(root: Path, path: Path) -> bytes | None:
-    """Read one bounded stable regular file and discard any link/path replacement race."""
+    """Read one bounded stable regular file and discard any link/path replacement race.
+
+    NOT routed through `core/trace_files.py::open_private_trace_file`, and the reasons are specific
+    rather than historical — this is the same read-then-verify dance (lstat -> `O_NOFOLLOW` open ->
+    fstat identity -> re-lstat -> compare), so the resemblance is real and a reader should know why
+    the two are separate:
+
+      * it answers about a file under an operator's AUTHORING root, not a run-private sidecar, so it
+        additionally proves the whole PARENT CHAIN is safe and that the resolved path is still inside
+        `root` — questions the trace helper never has to ask, because its callers already hold a run
+        directory;
+      * it must not require `st_nlink == 1`. `assert_private_trace_file` does, correctly, for a file
+        the service itself created; a skill file is an ordinary repo file an operator may legitimately
+        have hard-linked, and refusing it would be a new refusal dressed as a refactor;
+      * it returns `None` where the shared helper raises, because every caller here treats
+        unreadable and absent alike.
+
+    What the two MUST keep in common is the identity ladder itself. If a race is ever added to
+    `_changed()` there, add it here; the mixed `same_file_entry`/`file_identity` tiers below are the
+    same weak/strong pair that helper uses, spelled out because this function needs both at four
+    comparison points rather than two.
+    """
     try:
         relative = path.relative_to(root)
     except (ValueError, RuntimeError):

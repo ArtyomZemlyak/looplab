@@ -34,7 +34,8 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.agents.roles import (
-    WrapsResearcher, bind_idea_to_board_card, forward_hints, next_board_prompt_cards,
+    BOARD_SEED_CHARS_MAX, WrapsResearcher, bind_idea_to_board_card, forward_hints,
+    next_board_prompt_cards,
 )
 from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
@@ -43,6 +44,12 @@ from looplab.core.prompts import render
 
 _REPORT_CAP = 2000     # per-source char bound for the priming "Verified Data Analysis Report"
 _ITEM_CAP = 2000       # max chars rendered per candidate
+# A hypothesis candidate is a whole seed STATEMENT, not a rendered summary, so it gets the board's
+# own per-seed bound plus room for the row's framing rather than `_ITEM_CAP`. Named because it was
+# inlined twice as a bare `4_020` keyed on `kind == "hypothesis"`, in a module that already had a
+# named constant for exactly this budget — so a reader met two magic numbers and one name for one
+# concept. Derived from `BOARD_SEED_CHARS_MAX` so it cannot drift from what the board will show.
+_HYPOTHESIS_ITEM_CAP = BOARD_SEED_CHARS_MAX + 20
 _MAX_ITEMS = 20        # cap on candidates presented together in one predictive call (prompt-size bound;
                        # items beyond it are TRUNCATED before the call — never scored, never in `order`
                        # (a caller indexing its own longer list simply never sees those indices ranked)
@@ -117,7 +124,7 @@ def rank(client, report: str, items: list[str], *, goal: str = "", direction: st
         msgs = [{"role": "system", "content": _rank_system(prompts, kind)},
                 {"role": "user", "content": _rank_user_msg(
                     report, items, goal, direction,
-                    item_cap=4_020 if kind == "hypothesis" else _ITEM_CAP)}]
+                    item_cap=_HYPOTHESIS_ITEM_CAP if kind == "hypothesis" else _ITEM_CAP)}]
         out = parse_structured(client, msgs, _Ranking, parser or "tool_call")
     except Exception:  # noqa: BLE001 — advisory predictor: fall back on ANY error (parse/transport)
         return None
@@ -191,7 +198,7 @@ def rank_agentic(client, tools, report: str, items: list[str], *, goal: str = ""
                  + " You MAY consult tools to check actual results before deciding; then call `emit`."},
                 {"role": "user", "content": _rank_user_msg(
                     report, items, goal, direction,
-                    item_cap=4_020 if kind == "hypothesis" else _ITEM_CAP)}]
+                    item_cap=_HYPOTHESIS_ITEM_CAP if kind == "hypothesis" else _ITEM_CAP)}]
         box: dict = {}
 
         def _finalize(args):
@@ -445,10 +452,13 @@ class ForesightPanelResearcher(WrapsResearcher):
         considered_chars = 0
         for card in rotated:
             size = len(card.seed_statement or "")
-            if size and size <= 4_000 and considered_chars + size <= 21_000:
+            # Same per-seed bound the board's prompt builders apply — a seed too large to SHOW is
+            # not a seed worth ranking. The 21k total and the 20-card window are this call's own
+            # budget and deliberately not the builders' (see `BOARD_SEED_CHARS_MAX`'s note).
+            if size and size <= BOARD_SEED_CHARS_MAX and considered_chars + size <= 21_000:
                 window.append(card)
                 considered_chars += size
-            if len(window) == 20:
+            if len(window) == _MAX_ITEMS:
                 break
         if len(window) < 2:
             setattr(self.base, "_hyp_order", [card.id for card in rotated])

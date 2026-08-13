@@ -1880,3 +1880,17 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
                      diverged=bool(_sig.get("diverged")))
 
+
+# PUBLIC ALIASES for the three helpers `engine/metric_salvage.py` needs. They were reached as
+# `command_eval._violations` / `._drift` / `._artifacts_written_elsewhere` from another package,
+# which put a cross-package contract on names whose leading underscore says there is none: a rename
+# or signature change here — exactly what a refactor is free to do to a private helper — breaks the
+# salvage gate, and because `salvage_gates` is wrapped in `except Exception`, the breakage degrades
+# to "constraint reader raised" / "no drift" rather than a red test. A salvaged metric would then be
+# admitted under `select` with the operator's hard bounds silently unevaluated.
+#
+# Aliases rather than renames: the private spellings have many in-module call sites and appear in
+# comments across the tree, and this file's own callers are not the ones at risk.
+constraint_violations = _violations
+metric_drift_exceeds = _drift
+artifacts_written_elsewhere = _artifacts_written_elsewhere

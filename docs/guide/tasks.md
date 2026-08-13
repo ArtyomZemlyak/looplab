@@ -308,7 +308,7 @@ exact file type the incident above was about. So does a non-Python child (`subpr
 or a stage command that is not python), a child started with `python -S`/`-E`/`-I`, and a read through
 a symlink or hardlink planted in the workdir. Closing those needs a kernel boundary rather than a
 Python hook; the options, and what each costs, are in
-[the coverage audit](../34-fence-coverage-audit-2026-08-13.md).
+[the coverage audit](../38-fence-coverage-audit-2026-08-13.md).
 
 The one legitimate refusal is a large **untracked** in-tree input that `seed_mode: auto` does not
 copy into the workdir. Fix it by declaring a `dataset`/`references` mount or setting

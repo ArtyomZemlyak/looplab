@@ -43,8 +43,22 @@ export function flattenSpanTree(roots) {
     const index = rows.length
     // `parent` is the exact logical row index; visual indentation follows aria-level rather than
     // pretending a sibling tool is a child of the preceding generation.
-    rows.push({ key, span, parent: task.parent, level: task.level, pos: task.pos, size: task.size,
-      search: searchText(span) })
+    // `search` is LAZY. It was built eagerly for every row during the flatten, and the flatten
+    // re-runs whenever a new trace payload arrives — every 4 s while a node is building. Each index
+    // is up to 2 KB assembled from `Object.entries` over the attributes plus up to 32 events, so a
+    // 512-span window rebuilt ~1 MB of transient strings per tick, and 4096 at the ceiling, to feed
+    // a matcher that returns `[]` immediately whenever the query is empty — which is almost always.
+    // Computed on first read and memoized per row, so a search still pays exactly once per span.
+    const row = { key, span, parent: task.parent, level: task.level, pos: task.pos, size: task.size }
+    let searchIndex = null
+    Object.defineProperty(row, 'search', {
+      enumerable: true,
+      get() {
+        if (searchIndex === null) searchIndex = searchText(span)
+        return searchIndex
+      },
+    })
+    rows.push(row)
     push(span.children, index, task.level + 1, task.path)
   }
   return rows

@@ -656,3 +656,27 @@ def test_an_unreadable_shared_store_does_not_crash_loop_the_run_at_startup(tmp_p
     assert rows[0].data["phase"] == "run_start" and "Permission denied" in rows[0].data["error"]
     assert eng._prior_note_text == ""                        # degraded to "no prior", not crashed
     assert eng._lessons_seen_stamp is None                   # so the next cadence RETRIES the store
+
+
+def test_a_bare_cr_inside_a_record_is_not_a_record_boundary(tmp_path):
+    """The bounded window and the purge must agree on how many rows a store HAS.
+
+    `bytes.splitlines` splits on bare CR, form feed and vertical tab as well as LF, so a lesson whose
+    text contains a bare CR read as TWO rows through `core/memory_window.py` and ONE through
+    `core/jsonlio.py::read_jsonl_lenient` — which `serve/memory_cascade.py` uses to decide what to
+    DELETE from that same store. Only `\n` delimits a JSONL record; everything else is payload, and
+    `jsonlio` says so in as many words.
+    """
+    import json as _json
+
+    from looplab.core.memory_window import read_memory_jsonl_window
+
+    store = tmp_path / "lessons.jsonl"
+    statement = "before\rafter"          # a bare CR, inside the value
+    store.write_bytes(_json.dumps({"statement": statement}).encode() + b"\n")
+
+    rows, receipt = read_memory_jsonl_window(store)
+
+    assert len(rows) == 1, "a bare CR inside a record is not a record boundary"
+    assert rows[0][1]["statement"] == statement, "the payload survives byte for byte"
+    assert receipt["skipped"] == 0, "nothing was dropped as malformed"

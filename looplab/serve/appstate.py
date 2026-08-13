@@ -561,6 +561,14 @@ class AppState:
                 # opens is the one that is live now.
                 trace_ids[str(node_id)] = event.trace_id
         idx = get_index(rd / "spans.jsonl")
+        # KNOWN COST, deliberately not narrowed here — see docs/34 (CARD-TRACE-SCAN). This copies the
+        # WHOLE run's light span list (a 1 GB run's index is ~220 MB of dicts) and `project_card_trace`
+        # then rescans it once per owned node, so a card owning 5 nodes on a 200k-span run does ~1M
+        # predicate evaluations on the request thread. It cannot simply be given the owned traces:
+        # research is matched TWO ways and the first is "a `propose` span carrying this card_id",
+        # which may live in any trace, so a trace-scoped selection would silently drop the research
+        # section for the draft/debug/improve paths. Narrowing it properly needs a card_id (or span
+        # name) dimension on `SpanIndex`, which is an index-schema change, not a call-site one.
         spans = idx.light_spans() if idx is not None else []
         return project_card_trace(spans, card_id=str(card_id), node_ids=node_ids,
                                   node_trace_ids=trace_ids, _normalized=idx is not None)

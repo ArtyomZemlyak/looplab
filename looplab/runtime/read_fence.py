@@ -3,7 +3,7 @@ operator's editable SOURCE tree.
 
 It is still called the READ fence, because that is the defect it was built for and the name is in
 `Settings.read_fence`, in every snapshot and in the docs. The mutation half arrived on 2026-08-13
-(`docs/34-fence-coverage-audit-2026-08-13.md`) and is not an extension of the idea, it is the same
+(`docs/38-fence-coverage-audit-2026-08-13.md`) and is not an extension of the idea, it is the same
 idea applied to the same paths: `open` is not the only way to touch a file.
 
 WHY THIS EXISTS (the defect it closes, measured on `runs/rubertlite-dr-unified-v6`)
@@ -96,7 +96,7 @@ permitted and every bare relative name after it read the tree — which made the
 justification false.
 
 What no CPython audit hook can reach, and what therefore stays open (all measured; the options and
-their prices are in `docs/34-fence-coverage-audit-2026-08-13.md`):
+their prices are in `docs/38-fence-coverage-audit-2026-08-13.md`):
 * NATIVE readers. `safetensors.safe_open`, an HDF5 read through `h5py`, `pyarrow`, a `ctypes` call
   into libc — none of them raises a CPython audit event, so they read straight through. This is not
   a library list to be extended; it is every reader that does not go through CPython's `open`, and

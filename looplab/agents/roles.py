@@ -636,6 +636,19 @@ def _clamp_fill(idea: Idea, bounds: Optional[dict]) -> Idea:
     return idea
 
 
+# THE BOARD PROMPT WINDOW, named once. These bounds were four sets of bare literals across three
+# modules — both builders below, `search/foresight.py`'s prioritization window, and
+# `engine/research_cadence.py::DEEP_RESEARCH_OPEN_BELIEF_CAP`, whose docstring justified its value by
+# reading THIS file's `5`. So raising the window here silently invalidated the writer-side cap that
+# bounds how many beliefs a memo may register, and nothing went red.
+#
+# Only the two genuinely shared bounds live here. The TOTAL char budgets stay local to each surface
+# (20k for the claimable window, 8k for the context-only one, 21k for foresight's ranking call): they
+# are different budgets for different prompts and collapsing them would assert a sameness that is not
+# there.
+BOARD_SEED_CHARS_MAX = 4_000    # a single seed statement larger than this is skipped, not truncated
+BOARD_PROMPT_CARDS = 5          # whole rows either builder will show — the number the writer cap reads
+
 def next_board_prompt_cards(
     state: RunState, hyp_order: Optional[list[str]] = None, *, attempt: int = 0,
 ) -> list:
@@ -657,16 +670,17 @@ def next_board_prompt_cards(
     used = 0
     for card in cards:
         seed = card.seed_statement or ""
-        if not seed or len(seed) > 4_000 or used + len(seed) > 20_000:
+        if not seed or len(seed) > BOARD_SEED_CHARS_MAX or used + len(seed) > 20_000:
             continue
         selected.append(card)
         used += len(seed)
-        if len(selected) == 5:
+        if len(selected) == BOARD_PROMPT_CARDS:
             break
     return selected
 
 
-def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -> list:
+def attempted_board_prompt_cards(state: RunState, shown=(), *,
+                                 limit: int = BOARD_PROMPT_CARDS) -> list:
     """The board rows a proposer must CHECK AGAINST: research questions that already have work.
 
     `next_board_prompt_cards` above shows only `open_research_beliefs()` — open, **untested** cards,
@@ -723,7 +737,7 @@ def attempted_board_prompt_cards(state: RunState, shown=(), *, limit: int = 5) -
     used = 0
     for card in reversed(rows):
         seed = card.seed_statement or ""
-        if len(seed) > 4_000 or used + len(seed) > 8_000:
+        if len(seed) > BOARD_SEED_CHARS_MAX or used + len(seed) > 8_000:
             continue
         selected.append(card)
         used += len(seed)

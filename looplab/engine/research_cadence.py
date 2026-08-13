@@ -20,6 +20,7 @@ import logging
 import uuid
 from typing import Iterable, Optional
 
+from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
@@ -37,11 +38,15 @@ _LOG = logging.getLogger(__name__)
 
 # The open belief board is a QUEUE the search spends, not a scratchpad the research stage fills.
 # Sized to the window every prompt that reads the board can actually SHOW — `next_board_prompt_cards`
-# and `attempted_board_prompt_cards` both stop at five whole rows — because a belief the model cannot
-# see is a belief it re-proposes in new words, which is precisely how the measured board reached
-# eleven cards for five ideas. Untested beliefs leave this population as soon as they get evidence,
-# so the cap throttles the WRITER, it does not close the board.
-DEEP_RESEARCH_OPEN_BELIEF_CAP = 5
+# and `attempted_board_prompt_cards` both stop at `BOARD_PROMPT_CARDS` whole rows — because a belief
+# the model cannot see is a belief it re-proposes in new words, which is precisely how the measured
+# board reached eleven cards for five ideas. Untested beliefs leave this population as soon as they
+# get evidence, so the cap throttles the WRITER, it does not close the board.
+#
+# DERIVED, not copied. This value's whole justification is the reader's row cap, and it used to be a
+# bare `5` beside a comment that quoted the other file's literal — so raising the prompt window left
+# this cap silently wrong, which is the exact drift the comment was written to prevent.
+DEEP_RESEARCH_OPEN_BELIEF_CAP = BOARD_PROMPT_CARDS
 
 
 def normalized_belief_key(statement) -> str:
@@ -60,6 +65,12 @@ def normalized_belief_key(statement) -> str:
     BELIEF identity needs the model (`_maybe_merge_hypotheses`), so the deterministic half of this
     fix does what determinism can do — exact restatements and a hard bound — and says so.
     """
+    #
+    # SIBLING, and the differences are load-bearing: `engine/lesson_hygiene.py::normalize_statement`
+    # is the same collapse for LESSON identity, with `.lower()` instead of `.casefold()` and a
+    # 160-char cap. Neither may be folded into the other — the cap fuses two research DIRECTIONS
+    # that share a prefix, which is worse here than a duplicate card, while widening lesson identity
+    # re-buckets a shipped cross-run store. That docstring carries the same note.
     return " ".join(str(statement or "").split()).casefold()
 
 

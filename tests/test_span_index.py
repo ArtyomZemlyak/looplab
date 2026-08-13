@@ -152,22 +152,22 @@ def test_conversation_identical_via_node_offsets(run):
         assert got["stages"]                                     # non-empty (sanity)
 
 
-def test_node_window_revision_tracks_full_rows_but_ignores_foreign_appends(run):
+def test_node_window_snapshot_tracks_full_rows_but_ignores_foreign_appends(run):
     """The conversation cursor is exact for one selected window, not global spans mtime."""
     from looplab.core.tracing import JsonlSpanExporter
 
     rd, source, _spans = run
     idx = get_index(source)
-    original, total = idx.node_window_revision(0, 512, generation=0)
+    original, total, _ = idx.node_window_snapshot(0, 512, generation=0)
     assert total == len(_spans_for(0, "tr0"))
 
     exporter = JsonlSpanExporter(source)
     exporter.export(_gen(1, "tr1", "foreign-late", "root1", 20))
-    foreign, foreign_total = get_index(source).node_window_revision(0, 512, generation=0)
+    foreign, foreign_total, _ = get_index(source).node_window_snapshot(0, 512, generation=0)
     assert (foreign, foreign_total) == (original, total)
 
     exporter.export(_gen(0, "tr0", "own-late", "root0", 21))
-    own, own_total = get_index(source).node_window_revision(0, 512, generation=0)
+    own, own_total, _ = get_index(source).node_window_snapshot(0, 512, generation=0)
     assert own != original and own_total == total + 1
 
     # A cold reader can derive the same candidate, but cannot use untrusted persisted digests for a
@@ -184,10 +184,10 @@ def test_node_window_revision_tracks_full_rows_but_ignores_foreign_appends(run):
         own, own_total, True)
 
 
-def test_node_window_revision_fails_closed_across_same_inode_and_atomic_rewrites(run):
+def test_node_window_snapshot_fails_closed_across_same_inode_and_atomic_rewrites(run):
     """Full-row rewrites rotate the revision even when ids/lengths or all bytes stay the same."""
     _rd, source, _spans = run
-    before = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    before = get_index(source).node_window_snapshot(0, 512, generation=0)[0]
     raw = source.read_bytes()
     rewritten = raw.replace(b'"output":"OOOO', b'"output":"PPPP', 1)
     assert len(rewritten) == len(raw) and rewritten != raw
@@ -195,13 +195,13 @@ def test_node_window_revision_fails_closed_across_same_inode_and_atomic_rewrites
         stream.write(rewritten)
         stream.flush()
         os.fsync(stream.fileno())
-    after_in_place = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    after_in_place = get_index(source).node_window_snapshot(0, 512, generation=0)[0]
     assert after_in_place != before
 
     replacement = source.with_name("spans.replacement")
     replacement.write_bytes(source.read_bytes())
     os.replace(replacement, source)
-    after_replace = get_index(source).node_window_revision(0, 512, generation=0)[0]
+    after_replace = get_index(source).node_window_snapshot(0, 512, generation=0)[0]
     assert after_replace != after_in_place
 
 
@@ -832,9 +832,9 @@ def test_unavailable_windows_change_time_disables_warm_and_persisted_reuse(
 
     monkeypatch.setattr(span_index, "_load_persisted", persisted_reuse_forbidden)
     first = get_index(source)
-    first_revision = first.node_window_revision(0, 512, generation=0)[0]
+    first_revision = first.node_window_snapshot(0, 512, generation=0)[0]
     second = get_index(source)
-    second_revision = second.node_window_revision(0, 512, generation=0)[0]
+    second_revision = second.node_window_snapshot(0, 512, generation=0)[0]
 
     assert first is not trusted and second is not first
     assert first.source_epoch is None and second.source_epoch is None
@@ -854,7 +854,7 @@ def test_windows_growth_rebuilds_before_trusting_creation_time_receipts(
     monkeypatch.setattr(
         span_index, "_windows_change_time", lambda _fd: state["token"])
     initial = get_index(source)
-    original_revision = initial.node_window_revision(0, 512, generation=0)[0]
+    original_revision = initial.node_window_snapshot(0, 512, generation=0)[0]
     row = initial.by_sid["g0_1"]
     off, length = initial.meta[row]
     before = source.stat()
@@ -899,7 +899,7 @@ def test_windows_growth_rebuilds_before_trusting_creation_time_receipts(
     assert verdicts and all(v is None for v in verdicts), (
         "a broken change-token chain must refuse the receipt top-up, not stitch through it")
     assert refreshed is not initial
-    assert refreshed.node_window_revision(0, 512, generation=0)[0] != original_revision
+    assert refreshed.node_window_snapshot(0, 512, generation=0)[0] != original_revision
     assert (refreshed.full_span("g0_1") or {})["attributes"]["output"].startswith("PPPP")
     assert refreshed.full_span("foreign-after-rewrite") is not None
 

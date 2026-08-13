@@ -60,12 +60,61 @@ def node_attempt(state, nid: int) -> Optional[int]:
     them forgot. Duck-typed on `state` (a folded `RunState`) so `core` gains no new dependency.
 
     `None` means the node is neither folded nor building — there is no attempt to fence against."""
-    node = state.nodes.get(nid)
+    return _node_attempt(state.nodes, state.buildings, state.building, nid,
+                         read=lambda node: getattr(node, "attempt", 0))
+
+
+def node_attempt_from_payload(payload_state: dict, nid: int) -> Optional[int]:
+    """The SAME rule, over the SERIALIZED `/state` payload instead of a folded `RunState`.
+
+    `serve/routers/runs.py` needs the attempt from its metadata-keyed payload cache — four fresh
+    folds every four seconds would defeat the indexed trace path — and had a second, untyped
+    derivation for it: dict spelunking that re-guessed key types (`nodes.get(str(nid), nodes.get(nid))`),
+    re-guessed the `buildings`/`building` marker shape, and depended on `_public_state_value` not
+    scrubbing `generation`. Five routes fence a reset on this answer and there were two ways to
+    compute it, so renaming a `RunState` field or changing the marker shape moved only one of them —
+    and two routes would then disagree about the same reset, one 409ing while the other served the
+    superseded attempt. One rule, two input shapes.
+    """
+    state = payload_state if isinstance(payload_state, dict) else {}
+    nodes = state.get("nodes") if isinstance(state.get("nodes"), dict) else {}
+    raw_buildings = state.get("buildings")
+    if isinstance(raw_buildings, dict):
+        buildings = raw_buildings
+    elif isinstance(raw_buildings, list):
+        buildings = {row.get("node_id"): row for row in raw_buildings if isinstance(row, dict)}
+    else:
+        buildings = {}
+    building = state.get("building") if isinstance(state.get("building"), dict) else None
+    return _node_attempt(
+        _KeyEither(nodes), _KeyEither(buildings), building, nid,
+        read=lambda node: node.get("attempt", 0) if isinstance(node, dict) else 0)
+
+
+class _KeyEither:
+    """A read-only mapping view that answers for either `nid` or `str(nid)`.
+
+    The payload is JSON, so its integer node keys have become strings; the folded state's have not.
+    Normalizing at the boundary keeps the shared rule below free of that difference instead of
+    letting each caller re-guess it."""
+
+    def __init__(self, mapping: dict):
+        self._mapping = mapping or {}
+
+    def get(self, key):
+        if key in self._mapping:
+            return self._mapping[key]
+        return self._mapping.get(str(key))
+
+
+def _node_attempt(nodes, buildings, building, nid: int, *, read) -> Optional[int]:
+    """The one rule: a folded node's own attempt, else its pre-create building marker's generation."""
+    node = nodes.get(nid)
     if node is not None:
-        attempt = getattr(node, "attempt", 0)
+        attempt = read(node)
         return attempt if type(attempt) is int and attempt >= 0 else 0
-    marker = state.buildings.get(nid)
-    if marker is None and state.building and state.building.get("node_id") == nid:
-        marker = state.building
+    marker = buildings.get(nid)
+    if marker is None and building and building.get("node_id") == nid:
+        marker = building
     raw = marker.get("generation") if isinstance(marker, dict) else None
     return raw if type(raw) is int and raw >= 0 else (0 if marker is not None else None)
