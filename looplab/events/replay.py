@@ -2598,7 +2598,7 @@ def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
     # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
     #
-    # REVIEW (mega-review 2026-08-13): the bounds below drop an over-cap or non-string LEGACY row
+    # FOLD DELTA ON OLD LOGS, stated: the bounds below drop an over-cap or non-string LEGACY row
     # ENTIRELY — not just its journal entry but also its card-identity registration and the
     # abandoned-reopen side effect that the pre-bounds handler executed for any truthy statement.
     # That is a fold-output change on old logs (a previously reopened hypothesis stays abandoned;

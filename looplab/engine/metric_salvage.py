@@ -896,7 +896,7 @@ def recheckable_expect(stages, stage: str, changed) -> dict:
     name = str(stage or "")
     if not name:
         return {}
-    # REVIEW (mega-review 2026-08-13), latent gap in the guard below: `written` is only the CHANGED
+    # LATENT GAP in the guard below, unreachable today: `written` is only the CHANGED
     # set, but the repair's commit path (`_repair_salvaged_cause` -> `_write_node_files`)
     # re-materializes EVERY `node.files` entry with a fresh mtime after the stage start — so a
     # corrected `expect.files` naming an UNCHANGED node source file (e.g. `train.py`) would pass

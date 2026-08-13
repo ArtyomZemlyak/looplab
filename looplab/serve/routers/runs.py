@@ -1911,7 +1911,7 @@ def build_router(srv) -> APIRouter:
         a renamed field or a changed marker shape moved only one of them, and two routes would then
         disagree about the same reset.
 
-        REVIEW (mega-review 2026-08-13): "an unchanged log is a stat+lookup" is the FINISHED-run
+        KNOWN COST, not a claim this docstring makes lightly: "an unchanged log is a stat+lookup" is the FINISHED-run
         case. On a LIVE run every append changes the events-file identity, so the cache misses on
         essentially every poll, and each node_logs/node_trace/conversation request pays up to two
         full fold + model_dump + public-card-projection rebuilds (before/after CAS) just to read

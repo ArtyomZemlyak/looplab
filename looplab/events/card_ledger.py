@@ -1844,14 +1844,14 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
             continue
         raw_index = d.get("_event_index")
         drop_index = raw_index if type(raw_index) is int and raw_index >= 0 else None
-        # REVIEW (mega-review 2026-08-13): `canon_at` makes the drop's resolution depend on the
+        # ORDER-DEPENDENT BY DESIGN: `canon_at` makes the drop's resolution depend on the
         # LANDED ORDER of the drop vs the merge receipt — deliberate in-log semantics, but note
         # `hypothesis_merged` is in NON_CARD_SELECTION_BACKGROUND_APPENDABLE (legacy mode), so its
         # byte position vs a concurrent operator `card_dropped` control append is race-determined
         # at write time, and per invariant 1's own question ("does any reader key on its
-        # position?") this reader turned that answer from no to yes. The types.py comment on that
-        # registry was not updated, and the splice-neutrality proof does not model a racing drop —
-        # both should move with any further use of `canon_at`.
+        # position?") this reader turned that answer from no to yes. `types.py` now records that on
+        # the registry itself; the splice-neutrality proof still does not model a racing drop, so
+        # any further use of `canon_at` has to re-ask the question there too.
         cid = aliases.canon_at(bounded_id, drop_index)
         if cid:
             dropped[cid] = d

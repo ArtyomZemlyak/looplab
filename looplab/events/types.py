@@ -498,6 +498,17 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
 # Card ownership/lifecycle input when native Card selection landed, so it is not universally neutral.
 # The overlap call site must prove Card-driven selection is off; Card mode performs consolidation only
 # on the joined main-task decision boundary.
+#
+# ITS BYTE POSITION IS NOW LOAD-BEARING, which is invariant #1's real question ("does any reader key
+# on its position?") answered YES since `card_ledger`'s `aliases.canon_at`: a `card_dropped` resolves
+# its target through the merge edges durable AT THAT POINT, so a drop landing before vs after a
+# merge receipt folds to a different card. In LEGACY mode this event may be appended from the
+# concurrent research task while an operator `card_dropped` control append races it, and neither
+# writer orders against the other. The Card-mode gate is what keeps that unreachable where it would
+# matter — consolidation happens on the joined main-task boundary — and it is the reason this
+# registry is conditional rather than a plain extension of BACKGROUND_APPENDABLE. Any further use of
+# `canon_at` has to re-ask this question, and `tests/test_background_appendable.py`'s
+# splice-neutrality proof does not model a racing drop.
 NON_CARD_SELECTION_BACKGROUND_APPENDABLE: frozenset[str] = frozenset({
     EV_HYPOTHESIS_MERGED,
 })

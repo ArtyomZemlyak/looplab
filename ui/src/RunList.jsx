@@ -53,6 +53,11 @@ const RUN_DELETION_TIMEOUT_MS = 12_000
 // purpose: it is a preview, and a slow one must leave the dialog usable rather than hold it open.
 const MEMORY_ATTRIBUTION_TIMEOUT_MS = 8_000
 const RUN_DELETION_POLL_MS = 2_500
+// How many `RUN_DELETION_POLL_MS` waits a BATCH gives one accepted-but-unfinished deletion before it
+// stops and hands the operator the recovery record. Bounded rather than open-ended: the batch holds
+// the operator's attention, and a deletion that is still working after this long is one they should
+// be told about rather than watched indefinitely.
+const BULK_DELETION_PENDING_POLLS = 8
 const LIST_SORT_KEYS = new Set(['time', 'name', 'metric', 'task', 'nodes', 'phase'])
 // The run list's four representations of ONE scoped run set. `map` is the KEY, `Lineage` is the label
 // — see the view-toggle below for why the key must not follow the label.
@@ -2260,7 +2265,18 @@ export default function RunList({ onOpen, onGlobalNavigate,
         break
       }
       updateDeletionRecovery({ runId: intent.runId, kind: 'active', intent })
-      const verdict = await runDeletionRequest(intent, { initialRequest: true, quiet: true })
+      let verdict = await runDeletionRequest(intent, { initialRequest: true, quiet: true })
+      // A `pending` verdict is the server ACCEPTING the deletion (202) and still working on it —
+      // not a refusal. Stopping the batch on it degraded bulk delete to one run per press, with an
+      // error-toned notice about nothing, on any deployment where deletions routinely go async.
+      // The single-run flow already waits; the batch does the same, bounded. The POST carries the
+      // persisted operation identity and is idempotent, so re-issuing it RESUMES the same server
+      // state machine rather than starting a second deletion.
+      for (let attempt = 0; verdict?.outcome === 'pending'
+            && attempt < BULK_DELETION_PENDING_POLLS; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, RUN_DELETION_POLL_MS))
+        verdict = await runDeletionRequest(intent, { quiet: true }) || verdict
+      }
       if (verdict?.outcome === 'deleted') {
         state.done.push(target.runId)
         // A cascade that only partly ran is the ONE thing `quiet` must not swallow. The run is gone,
@@ -2273,14 +2289,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
         setBulkDeleteState({ ...state })
         continue
       }
-      // REVIEW (mega-review 2026-08-13): a 'pending' verdict lands here too — a deletion the
-      // server ACCEPTED (202) and is still executing stops the whole batch with an error-toned
-      // notice, and the batch never polls the recovery record it just saved, even though the
-      // single-run flow has exactly that machinery (RUN_DELETION_POLL_MS). On a deployment where
-      // deletions routinely go async, bulk delete degrades to one run per press with a scary
-      // notice about nothing. 'pending' should wait-and-poll, not stop-as-failure.
+      // Still pending after the budget above is a real stop — but it is an UNFINISHED deletion with
+      // a saved recovery record, not a rejected one, and the notice has to say which.
       state.stoppedAt = { runId: target.runId,
-        reason: verdict?.reason || 'the deletion did not complete' }
+        reason: verdict?.outcome === 'pending'
+          ? 'the server is still working on it; its recovery record is saved and can be resumed'
+          : (verdict?.reason || 'the deletion did not complete') }
       break
     }
     // STOP AT THE FIRST FAILURE, deliberately. Whatever refused one deletion — an active engine, a
