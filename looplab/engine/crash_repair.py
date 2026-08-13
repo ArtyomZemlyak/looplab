@@ -25,6 +25,11 @@ from looplab.core.models import RunState, normalize_researcher_footprint
 from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
                                    UNANSWERABLE_TRIAGE_ACTION, _rule_triage, _TRIAGE_REASK_LIMIT,
                                    coerce_triage_action, is_transport_failure_verdict)
+# The verification verdicts this module RENDERS (it never decides one). Two vocabularies live side
+# by side in this file now and they are not the same kind of thing: `AGENT_TRIAGE_ACTIONS` above is
+# what a model may answer, `REPAIR_*` below is what the engine measured. See
+# `engine/repair_verify.py`'s docstring for why they must not be merged.
+from looplab.engine.repair_verify import REPAIR_INERT, REPAIR_UNMET
 
 
 def _accepted_kwargs(fn, candidates: dict) -> dict:
@@ -67,11 +72,29 @@ def _format_repair_log(repair_log) -> str:
         changed = ("(not recorded — this attempt predates the change-set column)"
                    if "changed" not in r
                    else ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing")
+        # THE ENGINE'S OWN VERDICT ON THAT ROW, said in the engine's voice. `changed: nothing` is
+        # already in front of the judge and a live model DID once read it correctly — v2 node 2
+        # attempt 3's rationale opens "The 3 prior attempts never actually applied any file change"
+        # — but it is a passive column three of its siblings ignored. So the two verdicts that mean
+        # something get a sentence.
+        #
+        # Rendered ONLY for `inert`/`unmet`: a `verified` row, an `unstated` one and a row with no
+        # verdict at all (a legacy log, a salvage marker) all render byte-identically to what this
+        # prompt has always been. Prompt text is a contract (CLAUDE.md) — a new fact earns a new
+        # sentence, it does not get to reword the existing ones.
+        note = ""
+        if r.get("verified") == REPAIR_INERT:
+            note = ("\n    THE ENGINE COMPARED THE BYTES: this attempt changed no file at all, so "
+                    "the evaluation after it re-ran inputs identical to the one before it.")
+        elif r.get("verified") == REPAIR_UNMET and r.get("unmet"):
+            note = ("\n    the engine could not find what this fix said it would change ("
+                    + ", ".join(str(u) for u in (r.get("unmet") or [])[:6])
+                    + ") anywhere in what it actually changed.")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"
             f"    it changed: {changed} | pipeline stages passed before the failure: "
-            f"{r.get('stages_passed')}")
+            f"{r.get('stages_passed')}{note}")
     return "\n".join(out)
 
 

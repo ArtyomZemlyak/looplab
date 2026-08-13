@@ -122,7 +122,19 @@ class _ScriptedDev:
         self.repair_calls += 1
         if self.sources:
             return self.sources.pop(0)
-        return self.first if self.cycle else _GOOD
+        if not self.cycle:
+            return _GOOD
+        # A CYCLING DEVELOPER STILL HAS TO CHANGE SOMETHING. Every test below that passes
+        # `cycle=True` is about the JUDGE — "an alive model that answers 'repair' forever is bounded
+        # by the operator's cap", "0 means the engine ceiling", "the budget survives a resume" — and
+        # the developer is a stand-in whose only job is to keep the node crashing the same way. It
+        # used to return `self.first` byte for byte, which since 2026-08-13 is a DIFFERENT condition
+        # with its own, earlier rung: `engine/repair_verify.py` proves an empty change set and stops
+        # the node after two in a row, so every one of these cases would terminalize at attempt 2 on
+        # a bound that has nothing to do with what it is testing. The per-attempt marker is a real
+        # byte change that leaves the crash — a lazy import of a name that does not exist — and
+        # therefore the error text the judge scripts key on completely untouched.
+        return f"{self.first}# repair attempt {self.repair_calls}\n"
 
 
 def _drive(tmp_path, dev, judge=None, *, wall=120, **kw):
