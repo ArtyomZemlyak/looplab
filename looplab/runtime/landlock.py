@@ -1,0 +1,315 @@
+"""LANDLOCK — a kernel-enforced READ ALLOW-LIST for one eval process and everything it spawns.
+
+WHY THIS EXISTS, AND WHY IT IS NOT `read_fence.py`
+--------------------------------------------------
+`runtime/read_fence.py` is the shipped source-tree fence: a generated `sitecustomize.py` whose
+`sys.addaudithook` refuses a Python `open` under an editable source root. It is the MESSAGE rung and
+it stays — its refusal is a plain non-`OSError` carrying an actionable `REFUSAL_MESSAGE`, which is
+exactly what the repair loop needs and exactly what a kernel `EACCES` is not.
+
+What it cannot do is see a read that never reaches Python. Measured 2026-08-13 on this box, against
+the 92 MB foreign checkpoint from the `rubertlite-dr-unified-v6` node 4 incident:
+
+    safetensors.torch.load_file("<the foreign model.safetensors>")
+      -> 55 tensors loaded
+      -> audit 'open' events naming the file: NONE
+      -> total audit 'open' events during the load: 0
+
+`safetensors` is Rust; the weights read raises zero audit events. Doc 31 reports that its
+reproduction of the real `SentenceTransformer` load WAS refused, which is consistent — `transformers`
+reads `config.json` through Python `open` before the Rust loader touches the weights. Both are true,
+and together they say the fence's coverage of this incident is a property of a third-party library's
+file ORDERING, not a property of the fence. A loader that reads one self-describing artifact natively
+walks straight through.
+
+Landlock closes that: the kernel checks the path walk, so `libc.fopen`, a Rust `File::open`, a child
+`cat` and a `torchrun` rank are all covered, inherited across `fork`/`exec` with no `PYTHONPATH`
+trick and no `LD_PRELOAD` packaging.
+
+MEASURED ON THIS BOX (2026-08-13, kernel 6.1.0-22)
+--------------------------------------------------
+    landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION) -> 2   (ABI 2)
+    NoNewPrivs already 1
+
+Enforcement, one process, ruleset allowing `$WD` and not `$SRC`:
+
+    | reader                                   | baseline | under Landlock                |
+    | Python `open()`                          | OK       | PermissionError [Errno 13]    |
+    | subprocess.run(["cat", ...]) — a CHILD   | rc=0     | rc=1, "Permission denied"     |
+    | ctypes libc `fopen()` — pure native      | OK       | refused, errno 13             |
+
+Cost (open + read 4 KiB, best-of-5 over 20,000 iterations, two independent runs):
+
+    | ruleset                    | 4-component path      | 10-component path | setup     |
+    | none                       | 4,784 / 4,749 ns      | 5,054 ns          | -         |
+    | allow-list, 12 rules       | 4,886 / 4,844 (+2.1%) | 5,302 (+4.9%)     | 0.12-0.15 ms |
+    | deny-by-complement, 55     | 4,874 / 4,843 (+1.9%) | 5,406 (+7.0%)     | 10-24 ms  |
+
+That +2.1 % is the number that supersedes the CONCLUSION of `read_fence.py`'s +88 % `realpath`
+measurement. The +88 % is real and stands — it is the cost of inode-grade resolution in PYTHON, per
+open, in an audit hook. The kernel does the equivalent discrimination inside its own path walk for
++2.1 %, i.e. cheaper than the +2.8 % prefix compare the +88 % figure was rejected in favour of. The
+measurement is not overturned; the inference "therefore we cannot have an inode fence" is.
+
+Mount namespaces were the other candidate and are DEAD on this host, for a reason no engineering
+fixes: `cat /proc/self/attr/current` -> `cri-containerd.apparmor.d (enforce)`, and that profile
+denies `mount(2)` unconditionally, so a namespace can be created and is then useless (no bind, no
+remount-ro, no overlay upper, no tmpfs). There is no `docker`, no `bwrap`, no `fuse-overlayfs`, no
+`proot` either.
+
+WHY THIS SHIPS OFF BY DEFAULT
+------------------------------
+The single largest unknown in the whole design is unretired: **nobody has run a Landlock allow-list
+through a real GPU eval.** The numbers above are `open`/`read` microbenchmarks. torch, CUDA, NCCL,
+`/dev/nvidia*`, `/dev/shm`, `/sys/class` and the geesefs read surfaces were never exercised. A
+ruleset that is missing one of those does not degrade — it refuses, mid-training, as an `EACCES`
+that a native library may well swallow. `Settings.landlock` therefore defaults to `"off"`, and
+`looplab landlock-check` (cli/inspect_cmds) is the way to validate a candidate ruleset on one real
+eval before anyone flips it. What would justify the flip is written down in that setting's own
+comment and in `docs/guide/configuration.md`.
+
+TWO RESIDUALS, STATED
+---------------------
+1. **Landlock refuses with `EACCES` -> `PermissionError` -> an `OSError`.** That is precisely the
+   shape `read_fence.py` deliberately refuses to be, because `except OSError: <fall back>` is THE
+   idiom around a file read and would turn a refusal into a silent skip. This is why the audit hook
+   is NOT deleted: it stays the first rung and fires before the syscall for Python opens, with the
+   actionable message. Landlock catches what the hook cannot see — native readers — where no Python
+   `except OSError` is in play. A native library may still swallow its own EACCES; unmeasured.
+2. **An allow-list built by ENUMERATION fails closed in an unpredictable place.** Measured: of 211
+   candidate top-level rules for a deny-by-complement construction only 55 were accepted, because a
+   path that fails to `open(O_PATH)` is silently OMITTED from the ruleset — i.e. silently DENIED. So
+   `add_rules` REPORTS every rule it could not add rather than dropping it, and the allow-list is
+   derived from the operator's declared mounts (`runtime/read_allowlist.py`), never enumerated.
+
+Layering: `runtime` imports nothing above `core`; this module imports only stdlib + ctypes.
+"""
+from __future__ import annotations
+
+import ctypes
+import errno
+import os
+from typing import Iterable, Optional
+
+# syscall numbers, x86_64/aarch64 (the only architectures this engine runs on). Landlock's three
+# syscalls were added in 5.13 and have the same numbers on both.
+_SYS_LANDLOCK_CREATE_RULESET = 444
+_SYS_LANDLOCK_ADD_RULE = 445
+_SYS_LANDLOCK_RESTRICT_SELF = 446
+
+# `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` returns the ABI version.
+_LANDLOCK_CREATE_RULESET_VERSION = 1 << 0
+_LANDLOCK_RULE_PATH_BENEATH = 1
+
+# The filesystem access bits, ABI 1 unless noted. We only ever GRANT; anything not granted on a
+# handled bit is denied for the whole process tree.
+FS_EXECUTE = 1 << 0
+FS_WRITE_FILE = 1 << 1
+FS_READ_FILE = 1 << 2
+FS_READ_DIR = 1 << 3
+FS_REMOVE_DIR = 1 << 4
+FS_REMOVE_FILE = 1 << 5
+FS_MAKE_CHAR = 1 << 6
+FS_MAKE_DIR = 1 << 7
+FS_MAKE_REG = 1 << 8
+FS_MAKE_SOCK = 1 << 9
+FS_MAKE_FIFO = 1 << 10
+FS_MAKE_BLOCK = 1 << 11
+FS_MAKE_SYM = 1 << 12
+FS_REFER = 1 << 13          # ABI 2 — and it is ONLY grantable on a ruleset that handles it
+
+# What each declared mode grants. A READ mount gets read+exec (an allow-listed site-packages or a
+# base-model cache must stay importable and, for a venv's `bin/`, executable); a READWRITE mount gets
+# the whole ABI-1 set. `FS_REFER` is deliberately NOT handled: it is the ABI-2 rename/link-across-
+# directories right, and a ruleset that HANDLES it forbids every cross-directory rename that is not
+# explicitly re-granted — which would break `os.replace` in a checkpoint writer for no security we
+# are asking for here. Not handling a bit means the kernel does not police it at all.
+_READ = FS_READ_FILE | FS_READ_DIR | FS_EXECUTE
+_WRITE = (_READ | FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
+          | FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK | FS_MAKE_SYM)
+# The set the ruleset HANDLES — i.e. the set that is denied where it is not granted. Exactly the
+# union above, so `handled \ granted` is what a rule refuses and nothing else is policed.
+_HANDLED = _WRITE
+
+MODES = ("read", "readwrite")
+
+# The policy rungs. `off` is the default (see the module docstring); `enforce` applies the ruleset in
+# the child before `exec`. There is no `warn` rung and there cannot be one: Landlock has no audit
+# mode in ABI 2 — the kernel either refuses or it does not. The warn-shaped rung is the audit hook in
+# `read_fence.py`, which is a different mechanism and stays.
+POLICIES = ("off", "enforce")
+
+# The env var `engine/resources.py` stamps a launch's allow-list into and `runtime/sandbox.py`
+# consumes at the Popen choke point. `os.pathsep`-joined `mode:path` entries, so it survives the
+# str-only child environment without a second serialization format.
+LANDLOCK_ENV = "LOOPLAB_LANDLOCK"
+
+
+class LandlockUnavailable(RuntimeError):
+    """This kernel/process cannot apply a Landlock ruleset, with the reason as the message.
+
+    NOT an `OperatorRefusal`: on the default `off` rung nobody ever sees it, and under `enforce` the
+    caller decides whether an unavailable kernel is a refusal (the CLI check) or a logged degradation
+    (the launch path). Deriving it from `RuntimeError` keeps it out of every `except OSError` around
+    a file read — the same reasoning `read_fence.ReadFenceRefusal` records.
+    """
+
+
+class _PathBeneathAttr(ctypes.Structure):
+    _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int32)]
+
+
+class _RulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+
+def _libc():
+    return ctypes.CDLL(None, use_errno=True)
+
+
+def abi_version() -> Optional[int]:
+    """The kernel's Landlock ABI version, or None when Landlock is not available at all.
+
+    `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` is the documented probe and
+    it allocates nothing, so this is safe to call anywhere (the CLI check, a test skip guard).
+    """
+    try:
+        lib = _libc()
+        rc = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_CREATE_RULESET), None,
+                         ctypes.c_size_t(0), ctypes.c_uint32(_LANDLOCK_CREATE_RULESET_VERSION))
+    except (OSError, AttributeError, ValueError):
+        return None
+    return int(rc) if rc > 0 else None
+
+
+def unavailable_reason() -> Optional[str]:
+    """Why a ruleset could not be applied here — or None when it could.
+
+    Three separate facts, reported separately because the fixes differ: no Landlock in the kernel, an
+    ABI too old for the bits we grant, and `no_new_privs` unset (which `restrict_self` requires and
+    which we set ourselves in the child, so it is informational rather than fatal).
+    """
+    abi = abi_version()
+    if abi is None:
+        return ("this kernel has no Landlock support (landlock_create_ruleset returned no version); "
+                "Landlock needs Linux 5.13+ with CONFIG_SECURITY_LANDLOCK=y")
+    if abi < 1:
+        return f"Landlock ABI {abi} is older than the ABI 1 this ruleset needs"
+    return None
+
+
+def _grant(mode: str) -> int:
+    if mode not in MODES:
+        raise ValueError(f"landlock mode {mode!r} is not one of {MODES!r}")
+    return _READ if mode == "read" else _WRITE
+
+
+def build_ruleset(allow) -> tuple:
+    """`(ruleset_fd, added, skipped)` for `allow` = an iterable of `(path, mode)`.
+
+    `skipped` is `[(path, reason)]` and is the half that must never be silent. A path that cannot be
+    `open(O_PATH)`ed — because it does not exist on this box, or is a dangling symlink — simply
+    contributes no rule, and under an ALLOW-list that means the kernel denies it. Measured: 211
+    candidate rules produced 55 accepted rules that way, i.e. 156 silent denials. The caller decides
+    what to do about a skip; this function only refuses to hide it.
+
+    The caller owns the returned fd and must `os.close` it (`apply` does).
+    """
+    reason = unavailable_reason()
+    if reason is not None:
+        raise LandlockUnavailable(reason)
+    lib = _libc()
+    attr = _RulesetAttr(handled_access_fs=_HANDLED)
+    ctypes.set_errno(0)
+    fd = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_CREATE_RULESET), ctypes.byref(attr),
+                     ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
+    if fd < 0:
+        raise LandlockUnavailable(
+            f"landlock_create_ruleset failed: {os.strerror(ctypes.get_errno())}")
+    added, skipped = [], []
+    try:
+        for path, mode in allow:
+            access = _grant(mode)
+            try:
+                pfd = os.open(str(path), os.O_PATH | os.O_CLOEXEC)   # type: ignore[attr-defined]
+            except OSError as exc:
+                skipped.append((str(path), exc.strerror or str(exc)))
+                continue
+            try:
+                rule = _PathBeneathAttr(allowed_access=access, parent_fd=pfd)
+                ctypes.set_errno(0)
+                rc = lib.syscall(ctypes.c_long(_SYS_LANDLOCK_ADD_RULE), ctypes.c_int(fd),
+                                 ctypes.c_uint32(_LANDLOCK_RULE_PATH_BENEATH),
+                                 ctypes.byref(rule), ctypes.c_uint32(0))
+                if rc != 0:
+                    skipped.append((str(path), os.strerror(ctypes.get_errno())))
+                else:
+                    added.append((str(path), mode))
+            finally:
+                os.close(pfd)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, added, skipped
+
+
+def apply(allow, *, strict: bool = True) -> list:
+    """Restrict THIS process (and everything it spawns) to `allow`. Returns the rules added.
+
+    Irreversible by design — that is what makes it safe to call in a `preexec_fn` between `fork` and
+    `exec`. `strict` refuses rather than enforcing a ruleset that lost rules: under an allow-list a
+    lost rule is a DENIAL, and enforcing a partial allow-list is how legitimate work dies in a place
+    nobody can predict (see `build_ruleset`).
+
+    `PR_SET_NO_NEW_PRIVS` is set here rather than assumed: `landlock_restrict_self` requires it, and
+    setting it is harmless for an eval (nothing in a candidate's pipeline legitimately gains
+    privileges through setuid).
+    """
+    fd, added, skipped = build_ruleset(allow)
+    try:
+        if skipped and strict:
+            raise LandlockUnavailable(
+                "landlock allow-list is incomplete, refusing to enforce a ruleset that would deny "
+                "paths it was asked to allow: "
+                + "; ".join(f"{p} ({why})" for p, why in skipped[:8]))
+        lib = _libc()
+        ctypes.set_errno(0)
+        if lib.prctl(ctypes.c_int(38), ctypes.c_ulong(1), ctypes.c_ulong(0),
+                     ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:   # PR_SET_NO_NEW_PRIVS = 38
+            raise LandlockUnavailable(
+                f"prctl(PR_SET_NO_NEW_PRIVS) failed: {os.strerror(ctypes.get_errno())}")
+        ctypes.set_errno(0)
+        if lib.syscall(ctypes.c_long(_SYS_LANDLOCK_RESTRICT_SELF),
+                       ctypes.c_int(fd), ctypes.c_uint32(0)) != 0:
+            err = ctypes.get_errno()
+            raise LandlockUnavailable(
+                f"landlock_restrict_self failed: {os.strerror(err)}"
+                + (" (E2BIG usually means too many stacked rulesets)" if err == errno.E2BIG else ""))
+    finally:
+        os.close(fd)
+    return added
+
+
+def parse_env(value: Optional[str]) -> list:
+    """`[(path, mode)]` from the `os.pathsep`-joined `mode:path` spelling `LANDLOCK_ENV` carries.
+
+    Total over junk: an entry that is not `mode:path` with a known mode is DROPPED rather than
+    raising, because this is parsed inside a `preexec_fn` between fork and exec, where an exception
+    becomes a launch failure with a traceback nobody can read. A dropped entry becomes a `skipped`
+    rule at `apply` time only if it named a real path, and `strict` then refuses the launch — so the
+    failure is still loud, just at the rung that can describe it.
+    """
+    out: list = []
+    for item in (value or "").split(os.pathsep):
+        if not item:
+            continue
+        mode, sep, path = item.partition(":")
+        if not sep or mode not in MODES or not path:
+            continue
+        out.append((path, mode))
+    return out
+
+
+def format_env(allow: Iterable) -> str:
+    """The `LANDLOCK_ENV` spelling of an allow-list. Inverse of `parse_env`."""
+    return os.pathsep.join(f"{mode}:{path}" for path, mode in allow)
