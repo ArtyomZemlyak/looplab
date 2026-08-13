@@ -583,21 +583,23 @@ class EvalDispatchMixin:
         passes an EXPLICIT value (a stage name to reuse-into, or None for a full re-run) computed by
         its safe-reuse predicate — passing explicitly avoids the transient `rerun_stage` being reset
         by the loop's re-fold."""
+        # THE DECLARED ENVIRONMENT, composed ONCE and BEFORE anything spawns (F1d). Run level
+        # (`Settings.eval_env`) then task level (`cmd.env`), most specific last; the per-stage layer
+        # is applied by `_run_stages`, which is the only layer that differs per child.
+        #
+        # It goes in HERE, above the branch, rather than at any spawn site, because `env` is the
+        # single dict this method hands to EVERY execution path: the command-eval tiers below
+        # (`make_docker_wrap(env=…)` turns it into the container's `-e` pairs, `run_command_eval(env=…)`
+        # overlays it on the subprocess tier's secret-filtered host base) AND `self.sandbox.run(…)` on
+        # the solution.py path. Composing it once is what makes them agree by construction rather than
+        # by three matching edits — and it is what makes `eval_env`'s promise ("every eval of every
+        # node") true for a non-repo task too. It lands on top of the engine's own env (the GPU pin,
+        # the read-fence marker), which is safe because `validate_env_map` refuses every name the
+        # engine owns, so a declaration can never overwrite one.
+        env = self._declared_eval_env(env, self._eval_spec)
         if self._eval_spec:
             from looplab.runtime import command_eval
             es = self._eval_spec
-            # THE DECLARED ENVIRONMENT, composed ONCE and BEFORE anything spawns (F1d). Run level
-            # (`Settings.eval_env`) then task level (`cmd.env`), most specific last; the per-stage
-            # layer is applied by `_run_stages`, which is the only layer that differs per child.
-            #
-            # It goes in HERE rather than at either spawn site because `env` is the single dict this
-            # method hands to BOTH tiers — `make_docker_wrap(env=…)` turns it into the container's
-            # `-e` pairs and `run_command_eval(env=…)` overlays it on the subprocess tier's
-            # secret-filtered host base. Composing it once is what makes the two tiers agree by
-            # construction rather than by two matching edits. It lands on top of the engine's own
-            # env (the GPU pin, the read-fence marker), which is safe because `validate_env_map`
-            # refuses every name the engine owns, so a declaration can never overwrite one.
-            env = self._declared_eval_env(env, es)
             self._ensure_run_setup()             # one-time run-level dep install (before the first eval)
             prof = profile or (node.idea.eval_profile if node is not None else None)
             # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node

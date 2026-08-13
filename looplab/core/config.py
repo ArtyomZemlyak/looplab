@@ -531,7 +531,8 @@ class Settings(BaseSettings):
     # the eval and surfaced to the Developer so its code can emit periodic progress to stay alive.
     eval_stall_timeout_s: float = Field(default=1800.0, ge=0)
     # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — the per-node
-    # `setup`, the single `command`, and every stage, on BOTH sandbox tiers. The run-wide half of the
+    # `setup`, the single `command`, and every stage on BOTH sandbox tiers, and the solution.py
+    # sandbox path for a non-repo task (the composition sits above that branch, not inside it). The run-wide half of the
     # same contract the task's `cmd.env` and a stage's own `env` carry (most specific wins:
     # this < cmd.env < stages[].env), validated by the one shared rule
     # `core/envsafe.py::validate_env_map`. Deliberately NOT the run-level `run_setup`: that runs once

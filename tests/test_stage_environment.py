@@ -107,6 +107,10 @@ def test_the_engine_composes_run_and_task_level_before_either_tier_sees_it():
     n, base = _N(), {"CUDA_VISIBLE_DEVICES": "0"}
     assert n._declared_eval_env(None, {}) is None
     assert n._declared_eval_env(base, {"env": {}}) is base
+    # …and it tolerates the NON-repo eval spec, which is `None`: the composition sits ABOVE the
+    # branch in `_run_eval` so `Settings.eval_env` reaches the solution.py sandbox path too, which
+    # is what makes the field's promise ("every eval of every node") true for a non-repo task.
+    assert e._declared_eval_env(None, None) == {"VS_LOCAL_DATA_ROOT": "/data/run", "A": "run"}
 
 
 # ------------------------------------------------------------------ 2. the two tiers agree
