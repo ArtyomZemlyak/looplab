@@ -28,30 +28,14 @@ from typing import Optional, Protocol
 from looplab.core.errors import ConfigRefusal
 from looplab.runtime.read_fence import FENCE_DIR_ENV, prepend_pythonpath
 
-# Env-var NAMES that look like a secret — redacted from the child process environment so generated
-# code can't read (and persist into the event log) the operator's keys/tokens. Name-based, so it
-# never touches PATH/SYSTEMROOT/TEMP etc. that a process legitimately needs.
-# `core/config.py::_SECRET_ENV_NAME` is the stricter sibling that validates a profile's `api_key_env`;
-# `tests/test_secret_env_pattern.py` pins the two, and this one must stay the LOOSER of the pair.
-SECRET_ENV = re.compile(
-    r"(KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIAL|API_KEY|AUTH|COOKIE|WEBHOOK|DSN)",
-    re.IGNORECASE)
-# ...and the class of secret NO name pattern can catch: a connection string carrying inline
-# credentials (`postgres://user:pw@host/db`) under a perfectly innocent name — DATABASE_URL,
-# MONGO_URI, *_DSN. Matching those names would also strip LOOPLAB_LLM_BASE_URL and every other
-# legitimate endpoint, so the VALUE is what is screened: userinfo in the authority is what makes it a
-# credential. A plain `https://host/v1` has none and is untouched.
-_CREDENTIAL_URL_VALUE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.\-]*://[^/\s@]*:[^/\s@]*@")
-
-
-def is_secret_env(name: str, value: str = "") -> bool:
-    """Whether a variable must be withheld from a child process (candidate code, agent shell, pip).
-
-    Two independent screens: a NAME that declares itself a secret, and a VALUE that is a URL with
-    inline credentials. A `print(os.environ)` or a stack trace in generated code would otherwise
-    exfiltrate either into the durable stdout tail, on every tier that spawns a child."""
-    return bool(SECRET_ENV.search(str(name or ""))) or bool(
-        _CREDENTIAL_URL_VALUE.match(str(value or "")))
+# THE secret screen — MOVED to `core/envsafe.py`, re-exported here and NOT copied. Every existing
+# `from looplab.runtime.sandbox import is_secret_env` (eight modules, `tests/test_secret_env_pattern.py`)
+# resolves to the SAME object, so this stays the one spelling of "withhold this from a child process".
+# It moved because the DECLARED ENVIRONMENT rule needs the same screen and its third declarer is
+# `core/config.py::Settings.eval_env`, which may not import `runtime` (the layering rule that is also
+# why `config._SECRET_ENV_NAME` — the stricter api_key_env sibling — is a duplicate rather than an
+# import). One home beats a third copy; `tests/test_secret_env_pattern.py` is still the joint.
+from looplab.core.envsafe import SECRET_ENV, is_secret_env  # noqa: F401 (re-export)
 
 
 def git_subprocess_env() -> dict[str, str]:

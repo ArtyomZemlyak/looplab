@@ -996,6 +996,16 @@ class RunState(BaseModel):
     # T2 trust enforcement (folded from run_started; "audit" for old logs). "gate"/"block" make
     # best-selection exclude nodes flagged for a reward-hack / data-leakage signal (not critic).
     trust_gate: str = "audit"
+    # F1d: the RUN-LEVEL DECLARED ENVIRONMENT this run's evals actually ran under, pinned by
+    # `run_started` (`{}` on old logs and on every run that declared none — the writer omits the key
+    # in that case, so the default payload stays byte-identical). It is folded because it SHAPES
+    # RESULTS: `VS_LOCAL_DATA_ROOT` decides which corpus a node trained on, and a resume that read a
+    # different value from live config would silently produce results incomparable with the ones
+    # already in the log. `Engine._repin_declared_env` is the consumer (invariant #6). Excluded from
+    # the public dump for the same reason `card_driven_selection` is: it is re-entry authority, not
+    # search state, and dumping it would put the operator's declaration into every state payload the
+    # UI serves.
+    eval_env: dict = Field(default_factory=dict, exclude=True)
     # Layer 3 queue owner pinned by run_started. False on old logs preserves the policy/pilot path;
     # replay never infers this selection-affecting treatment from a mutable config snapshot.
     card_driven_selection: bool = Field(False, exclude=True)

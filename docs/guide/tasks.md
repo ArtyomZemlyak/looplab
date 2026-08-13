@@ -104,6 +104,72 @@ one of the two *declarations*. Deleting the `needs` entry is explicitly not a fi
 identical failure into the stage's own loader, later and more expensively. Omit `needs` entirely for a
 stage that reads only the workspace it was seeded with — an empty declaration asserts nothing.
 
+### Declaring an eval's environment
+
+**A stage can declare what it needs SET, and so can the task and the run.** `expect` states what a
+stage writes and `needs` what it reads; until 2026-08-13 nothing could say what it needs in its
+*environment*, so an environment variable's only home was CODE. What that cost, measured: on
+`rubertlite-dr-unified-v6` node 0 crashed on its first attempt because `VS_LOCAL_DATA_ROOT` was unset
+and the data loader reached for S3 instead of the local corpus. The repair was correct and took three
+minutes. Then **node 1 hit the identical error** — a node is seeded from the SOURCE repo, never from a
+sibling node, so every node in the run rediscovers the same fact and spends one repair attempt on it.
+
+Three levels, most specific wins:
+
+```yaml
+settings:
+  eval_env:                                  # RUN level: every stage of every node
+    VS_LOCAL_DATA_ROOT: /home/jovyan/data/dr-local
+task:
+  cmd:
+    env:                                     # TASK level: every stage of this eval
+      OMP_NUM_THREADS: "8"
+    stages:
+      - name: train
+        command: ["python", "train.py", "%params%"]
+        env: { WANDB_MODE: offline }         # STAGE level: this stage only
+```
+
+On the command line the run level is `-s eval_env=NAME=VALUE`, comma-separated for several:
+
+```bash
+looplab run task.yaml -s eval_env=VS_LOCAL_DATA_ROOT=/home/jovyan/data/dr-local
+```
+
+which is the same thing as exporting it in the launching shell **except that it is written down**. A
+declared environment lands in `task.snapshot.json` (the two task levels) and in `config.snapshot.json`
+plus the `run_started` event (the run level), so a resume reproduces the environment its earlier nodes
+were evaluated under rather than re-reading whatever live config now says (engine invariant #6), and a
+reader of the log can see what the nodes actually ran under. If the two disagree on a resume, the
+**record wins** and the engine says so at WARNING; run a NEW run to evaluate under a different
+environment, because the comparison the existing nodes belong to no longer holds. Both sandbox tiers
+get it: the subprocess tier merges it into the child's environment, the Docker tier forwards it as
+`-e` pairs.
+
+Three things it refuses, all at declaration time:
+
+* **The Developer may not declare it.** `env` is operator-only — on `cmd.stages[].env`, `cmd.env` or
+  `eval_env`. An agent that could set environment for its own protected `score` stage would have
+  another route around the scorer freeze (`PYTHONPATH` alone re-points every import that stage makes),
+  so `declare_stages` refuses the key by name and points at the operator surface.
+* **Names LoopLab owns.** `CUDA_VISIBLE_DEVICES` is the GPU pin the engine reconciles with the host
+  pool lease and the container's `--gpus`; `LOOPLAB_*` is the engine's own settings namespace and
+  includes `LOOPLAB_READ_FENCE_DIR`, the marker that installs the [source-tree read
+  fence](generating-code.md). A declared value would silently override the run's own treatment.
+* **Anything that looks like a credential** — by name (`*_TOKEN`, `*_KEY`, `*_PASSWORD`, `AUTH`,
+  `COOKIE`, `WEBHOOK`, `DSN`, …) or by value (a URL carrying inline `user:password@`). This is the
+  one place the refusal is about *durability rather than danger*: a declared environment is written
+  verbatim into files that get exported, rendered in the UI and pasted into bug reports, and there is
+  no redaction that would keep it both safe and reproducible. **LoopLab has no secret store and is not
+  adding one here.** LoopLab's own credentials keep their existing boundary (`LOOPLAB_LLM_API_KEY`, a
+  profile's `api_key_env` — runtime-only fields that are never snapshotted and are refused by
+  `--set`); a credential your *eval's* code needs has no such boundary, because the eval sandbox is
+  where agent-written code runs. Export it in the launching shell if you accept that — what this
+  refuses to do is write it down.
+
+It applies to the per-node `setup`, the single `command` and every stage. It is deliberately **not**
+applied to the run-level `run_setup`, which runs once in your own source tree before any node exists.
+
 **Each stage may declare what its success MEANS — `expect`.** Exit 0 is not evidence a stage worked: a
 mining stage that produced hard negatives for 1.2% of the queries exits 0 exactly like one that produced
 100%, and the next stage consumes the 1.2% as if it were whole (this happened on a real run, and the
@@ -617,7 +683,8 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `data` / `dataset` | `name → path` map, **read-only symlink-mounted** at `./name` by default; a value may be a [per-source permission object](#per-source-data-permissions). `~`/`$VARS` expand |
 | `references` | Read-only inputs: `[{name, path, mount}]` — `mount: true` exposes the source at `./name` as a **read-only symlink** (and a read-only bind mount under the Docker tiers), **not** a copy (`engine/workspace.py:183-185`, `engine/eval_dispatch.py:151-153`); `false` is context-only. Edits under `./name` therefore reach your source — the read-only mount is what prevents that. |
 | `editables` | Multi-repo workspace: extra editable repos, each mounted at its own `name/` subdir |
-| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, needs?, expect?}` — `needs` lists the workdir-relative files the stage READS (checked before it starts) and `expect` is the stage's success contract (`{files?, assert?}`, see above); declaring either on an operator stage is how you hold a stage the agent may not edit to a condition |
+| `eval.stages` | Operator-declared ordered pipeline (`data_prep` → `train` → …). When set, these **are** the canonical stages and the Developer's own `looplab_stages.json` is ignored; the LAST stage's stdout carries the metric. Each stage is `{name, command:[argv], timeout?, check?, needs?, expect?, env?}` — `needs` lists the workdir-relative files the stage READS (checked before it starts) and `expect` is the stage's success contract (`{files?, assert?}`, see above); declaring either on an operator stage is how you hold a stage the agent may not edit to a condition. `env` is the stage's declared environment and is OPERATOR-ONLY (see [Declaring an eval's environment](#declaring-an-evals-environment)) |
+| `eval.env` | The DECLARED ENVIRONMENT for this task's eval: `{NAME: value}` applied to `setup`, the single `command` and EVERY stage, with a stage's own `env` overlaying it. This is where a fact about the **repo** belongs — "the local corpus lives at …" is true of the repo, not of the engine — and stating it once means every node inherits it instead of each one rediscovering it by crashing. It rides in `task.snapshot.json`, so a resume re-applies the same environment the results were produced under. Operator-only, and a secret-shaped name or value is refused: see [Declaring an eval's environment](#declaring-an-evals-environment) |
 | `eval.cwd` | Working directory for the eval, relative to the node eval workdir (default `.`) |
 | `eval.setup_timeout` | Per-node `eval.setup` budget in seconds (default `600`) |
 | `eval.run_setup` | **Run-level** setup: runs ONCE at run start in the editable repo root, not per node — the autonomy default when deps don't change between experiments. A failure aborts the run. **You usually do not need to set this.** When your first editable repo ships a `requirements.txt`, LoopLab derives `python -m pip install -r requirements.txt` and runs it here by default, so the repo's pinned versions are the versions the eval gets (`auto_install_deps`, on by default, `trusted_local` only). Setting it explicitly **replaces** that default entirely — nothing is prepended or merged — which is how you install something else, or nothing |

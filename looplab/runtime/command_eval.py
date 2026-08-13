@@ -28,6 +28,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+# The DECLARED ENVIRONMENT rule lives in `core/envsafe.py` — `core/config.py::Settings.eval_env`
+# is the third declarer of the same contract and `core` may not import `runtime`, so the rule sits
+# where all three can reach it. Re-exported here because THIS is where the stage contract is read.
+from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa: F401 (re-export)
+                                  MAX_STAGE_ENV_VARS, merge_env, validate_env_map)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
                                      finite_timeout, json_line_extras,
@@ -180,6 +185,7 @@ def _validate_expect(nm: str, expect) -> tuple[Optional[dict], Optional[str]]:
                       "stage produces) and/or `assert` (one line stating what its success MEANS), or "
                       "drop the key.")
     return clean, None
+
 
 # STALL watchdog window: a stage (train/eval) that emits NOTHING for this long while still ALIVE is
 # treated as hung (a distributed/DataParallel finalize deadlock, a wedged CUDA op, a lock never
@@ -890,7 +896,8 @@ def cap_gpu_flags(argv: list) -> list:
     return out
 
 
-def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Optional[str]]:
+def validate_stages(stages, *, reserved: tuple = (),
+                    allow_env: bool = False) -> tuple[Optional[list], Optional[str]]:
     """Validate a stage list ({name, command:[argv...], timeout?, check?}) into its canonical clean
     form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
     definition of "a valid stage", shared by the Developer's `declare_stages` tool (authoring time),
@@ -898,7 +905,12 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
     (consume time) — so the two ends of the manifest handshake can't drift: a stage one side accepts
     is never silently dropped or re-interpreted by the other. `reserved` names are refused — the
     engine appends the operator's protected `score` stage to a DEVELOPER manifest, so the tool passes
-    ("score",); operator-declared stages reserve nothing (the operator owns scoring)."""
+    ("score",); operator-declared stages reserve nothing (the operator owns scoring).
+
+    `allow_env` is the OTHER half of the same declarer distinction, and it defaults to False for the
+    opposite reason `reserved` defaults to empty: a stage `env` is operator-only (see the DECLARED
+    ENVIRONMENT block), so the fail-closed direction is to refuse it and let the four operator call
+    sites opt in explicitly. A new call site that forgets gets the refusal, not the smuggle."""
     if not isinstance(stages, list) or not stages:
         return None, "`stages` must be a non-empty array of {name, command:[argv...]} objects."
     if len(stages) > MAX_STAGE_COUNT:
@@ -958,6 +970,25 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
                 return None, err
             if needs:
                 st["needs"] = needs
+        if s.get("env") is not None:
+            # The stage's DECLARED ENVIRONMENT — see the block above `MAX_STAGE_ENV_VARS`. REFUSED
+            # rather than dropped when this declarer may not set it: silently ignoring the key would
+            # leave a manifest that reads as if the stage carries an environment nothing applies,
+            # which is the same failure `expect`'s closed key set exists to end — and here it would
+            # also hide the trust boundary from the agent that just tried to cross it.
+            if not allow_env:
+                return None, (
+                    f"stage {nm!r} may not declare `env`: the environment a stage runs in is the "
+                    "OPERATOR's to set, not the Developer's (an agent that can set environment for "
+                    "the protected `score` stage has a route around the scorer freeze). Ask the "
+                    "operator to put it on the task's `cmd.stages[].env`, `cmd.env`, or the run's "
+                    "`eval_env` setting. If your code needs a value, read it with a documented "
+                    "default instead.")
+            envmap, err = validate_env_map(f"stage {nm!r} `env`", s["env"])
+            if err is not None:
+                return None, err
+            if envmap:
+                st["env"] = envmap
         clean.append(st)
     return clean, None
 
@@ -1240,7 +1271,11 @@ def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Option
     truth for reading a materialized dev manifest, shared by the eval's `_resolve_stages` (consume
     time) and the repo-Developer's implement-prompt `_materialized_stage_list` (authoring time) — so
     the two can't drift and advertise a pipeline different from the one the eval runs (M7). An invalid
-    manifest the eval would DROP to the single command returns None here too."""
+    manifest the eval would DROP to the single command returns None here too. It keeps
+    `validate_stages`' fail-closed `allow_env=False`: this is the DEVELOPER's manifest, and a stage
+    `env` in it is refused — which, at THIS reader, means the whole manifest is dropped rather than
+    the key. The loud version of that refusal is at the authoring tool (`declare_stages`), which is
+    where an agent that tries it actually gets told why."""
     dev = manifest_obj.get("stages") if isinstance(manifest_obj, dict) else manifest_obj
     if not isinstance(dev, list) or not dev:
         return None
@@ -1352,49 +1387,66 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         spec = f"type=bind,src={ap},dst={ap}" + (",readonly" if ro else "")
         extra += ["--mount", spec]
 
-    def wrap(argv: list[str], host_cwd: str) -> list[str]:
-        rel = os.path.relpath(Path(host_cwd).resolve(), root).replace(os.sep, "/")
-        if rel == ".." or rel.startswith("../"):     # cwd outside the mounted root -> never escape
-            raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
-        cdir = "/work" if rel in (".", "") else f"/work/{rel}"
-        # Forward engine-provided env INTO the container: `docker run` does not inherit the host
-        # client's environment, so without `-e` the LOOPLAB_EVAL_SEED (and any eval env) never
-        # reaches the eval — every confirm seed would read the default seed and the variance gate
-        # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
-        # `docker_gpu_env` is the shared choke point that reconciles the GPU/CPU env AND strips
-        # secret-named host vars (its SECURITY note) — so both this tier and DockerSandbox.run get the
-        # same fail-closed `-e` boundary; nothing extra to filter here.
-        envs: list[str] = []
-        for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
-            envs += ["-e", f"{k}={v}"]
-        # MAKE `setup` STICK. Every call here is its own `docker run --rm`, so a dependency the
-        # task's `eval.setup` installs used to die with that container and the eval ran in a pristine
-        # one — "installs dependencies before each eval" silently installed nothing, and every node
-        # failed on `ModuleNotFoundError` while the operator paid for the repair loop. The mount root
-        # is the NODE's workdir (eval_dispatch passes it), so a directory inside it is per-node,
-        # already writable by that node's own container, and carries nothing between nodes.
-        # `PYTHONUSERBASE` + `PIP_USER` is the mechanism rather than PIP_TARGET/PYTHONPATH because
-        # Python adds the user site directory to sys.path natively — no version-dependent path for us
-        # to reconstruct and get wrong. Deliberately NOT also overriding PATH: the value would have to
-        # be spelled out in full from out here, which would clobber an image that puts its interpreter
-        # somewhere non-standard (conda images — the MLE-bench tier — are exactly that), so persisting
-        # console scripts is not worth breaking those. KNOWN LIMITS: importable Python packages
-        # persist; a setup-installed console script and anything `apt-get` installs do not.
-        envs += ["-e", f"PYTHONUSERBASE={_DOCKER_DEPS_DIR}", "-e", "PIP_USER=1"]
-        # Resource + privilege hardening comes from the ONE builder both untrusted Docker tiers
-        # share (`sandbox.docker_run_argv`), so this command-eval path and the solution.py path
-        # cannot drift apart again — they had, and this tier once ran with default caps as root.
-        # The two docs (generating-code.md untrusted-tier command, configuration.md
-        # sandbox_memory/cpus rows) promise exactly those flags for this tier; the engine threads
-        # settings.sandbox_* into `mem`/`cpus` here.
-        return docker_run_argv(
-            image, network=network, mount_root=str(root), workdir=cdir, runtime=runtime,
-            gpu_args=gpu_args, mem=mem, cpus=cpus, env_args=envs,
-            extra_mounts=extra) + list(argv)
+    def _build(env: Optional[dict]):
+        """The wrap closure over ONE environment. Parametrized (rather than closing over the
+        `make_docker_wrap` argument directly) so a stage that declares its own `env` can get a wrap
+        that forwards it — see `rebind_env` below. `gpu_args` stays computed ONCE from the engine's
+        env: the GPU pin is the engine's, `validate_env_map` refuses a declared CUDA_VISIBLE_DEVICES,
+        and re-deriving `--gpus` per stage from a declaration would be exactly the override it refuses.
+        """
 
-    wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout
-    wrap._mount_root = str(root)   # host_score guards the held-out labels against the MOUNTED root
-    return wrap
+        def wrap(argv: list[str], host_cwd: str) -> list[str]:
+            rel = os.path.relpath(Path(host_cwd).resolve(), root).replace(os.sep, "/")
+            if rel == ".." or rel.startswith("../"):     # cwd outside the mounted root -> never escape
+                raise ValueError(f"eval cwd {host_cwd!r} is outside the mounted workspace {str(root)!r}")
+            cdir = "/work" if rel in (".", "") else f"/work/{rel}"
+            # Forward engine-provided env INTO the container: `docker run` does not inherit the host
+            # client's environment, so without `-e` the LOOPLAB_EVAL_SEED (and any eval env) never
+            # reaches the eval — every confirm seed would read the default seed and the variance gate
+            # would collapse. Mirrors DockerSandbox.run's `-e` forwarding.
+            # `docker_gpu_env` is the shared choke point that reconciles the GPU/CPU env AND strips
+            # secret-named host vars (its SECURITY note) — so both this tier and DockerSandbox.run get the
+            # same fail-closed `-e` boundary; nothing extra to filter here.
+            envs: list[str] = []
+            for k, v in docker_gpu_env(env, gpu_args=gpu_args).items():
+                envs += ["-e", f"{k}={v}"]
+            # MAKE `setup` STICK. Every call here is its own `docker run --rm`, so a dependency the
+            # task's `eval.setup` installs used to die with that container and the eval ran in a pristine
+            # one — "installs dependencies before each eval" silently installed nothing, and every node
+            # failed on `ModuleNotFoundError` while the operator paid for the repair loop. The mount root
+            # is the NODE's workdir (eval_dispatch passes it), so a directory inside it is per-node,
+            # already writable by that node's own container, and carries nothing between nodes.
+            # `PYTHONUSERBASE` + `PIP_USER` is the mechanism rather than PIP_TARGET/PYTHONPATH because
+            # Python adds the user site directory to sys.path natively — no version-dependent path for us
+            # to reconstruct and get wrong. Deliberately NOT also overriding PATH: the value would have to
+            # be spelled out in full from out here, which would clobber an image that puts its interpreter
+            # somewhere non-standard (conda images — the MLE-bench tier — are exactly that), so persisting
+            # console scripts is not worth breaking those. KNOWN LIMITS: importable Python packages
+            # persist; a setup-installed console script and anything `apt-get` installs do not.
+            envs += ["-e", f"PYTHONUSERBASE={_DOCKER_DEPS_DIR}", "-e", "PIP_USER=1"]
+            # Resource + privilege hardening comes from the ONE builder both untrusted Docker tiers
+            # share (`sandbox.docker_run_argv`), so this command-eval path and the solution.py path
+            # cannot drift apart again — they had, and this tier once ran with default caps as root.
+            # The two docs (generating-code.md untrusted-tier command, configuration.md
+            # sandbox_memory/cpus rows) promise exactly those flags for this tier; the engine threads
+            # settings.sandbox_* into `mem`/`cpus` here.
+            return docker_run_argv(
+                image, network=network, mount_root=str(root), workdir=cdir, runtime=runtime,
+                gpu_args=gpu_args, mem=mem, cpus=cpus, env_args=envs,
+                extra_mounts=extra) + list(argv)
+
+        wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout
+        wrap._mount_root = str(root)   # host_score guards the held-out labels against the MOUNTED root
+        # THE TWO TIERS MUST AGREE. On the subprocess tier a stage's declared `env` reaches the child
+        # by being merged into `run_argv`'s env dict; `docker run` inherits NOTHING from the host
+        # client, so on this tier the only way in is another `-e` pair — i.e. a different wrap. This
+        # is what `_run_stages` asks for when a stage declares `env`, and its absence is what
+        # `_stage_wrap` treats as "this wrap cannot carry the declaration", refusing the stage rather
+        # than running it in an environment the operator did not declare.
+        wrap.rebind_env = lambda extra: _build(merge_env(env, extra))
+        return wrap
+
+    return _build(env)
 
 
 def _violations(out, wd, constraints, wrap, since=None) -> list[dict]:
@@ -1581,6 +1633,44 @@ def _stage_check_outcome(verdict) -> tuple:
             return "", ""          # a verdict with nothing to say is not a failure
         return coerce_stage_check_kind(kind), concern
     return STAGE_CHECK_UNSTRUCTURED, str(verdict)
+# What `_run_stages` reports when a stage declares `env` and the tier it is about to run on cannot
+# carry the declaration into the child. Only reachable on a DOCKER wrap that predates `rebind_env`
+# (an operator-supplied or test double marked `_docker`): the subprocess tier merges the map into
+# `run_argv`'s env dict and always can. The refusal is loud and terminal on purpose — running the
+# stage with the declaration silently dropped is how the two tiers would stop agreeing, and the
+# failure that would produce (a loader reaching S3 because VS_LOCAL_DATA_ROOT is unset) is exactly the
+# one this field exists to prevent, except now with a declaration in the manifest saying it can't happen.
+#
+# It is phrased for the OPERATOR, and says so, for the same reason `eval_stages.PROTECTED_SCRIPT_MISSING`
+# does: it exits non-zero, so `triage._failure_reason` classifies it as `crash` and the inline-repair
+# loop would otherwise spend its whole budget asking the Developer to fix something no edit can reach —
+# the declaration is the operator's and so is the wrap.
+STAGE_ENV_UNSUPPORTED = ("stage {stage!r} declares `env` but this run's container wrap cannot forward "
+                         "environment into the container, so the declared variables would silently "
+                         "not be set. Refusing rather than running the stage in an environment the "
+                         "task did not declare. This is NOT a repairable code error and the agent "
+                         "must not be asked to fix it: the declaration belongs to the operator and "
+                         "so does the sandbox tier. Fix the TASK — drop the stage's `env` (and set it "
+                         "through `eval_env` / `cmd.env` instead), or run on a tier whose wrap can "
+                         "carry it.")
+
+
+def _stage_wrap(ex: "_EvalExec", stage_env: dict):
+    """`(wrap_argv, problem)` for a stage whose declared `env` must reach the child on THIS tier.
+
+    The subprocess tier needs nothing here — its env travels as `run_argv`'s dict — so a run with no
+    container wrap (and any non-docker passthrough wrap, which the same dict reaches) keeps
+    `ex.wrap_argv` unchanged and is byte-identical to a run without the declaration. A REAL docker
+    wrap has to be rebound, because `docker run` inherits none of the host client's environment;
+    `make_docker_wrap` grows exactly that seam. A wrap that claims to be docker and cannot be rebound
+    is refused (see `STAGE_ENV_UNSUPPORTED`) — never run with the declaration dropped."""
+    if not stage_env or not getattr(ex.wrap, "_docker", False):
+        return ex.wrap_argv, None
+    rebind = getattr(ex.wrap, "rebind_env", None)
+    if not callable(rebind):
+        return None, STAGE_ENV_UNSUPPORTED
+    stage_wrap = rebind(stage_env)
+    return (lambda argv, hc: stage_wrap(argv, hc)), None
 
 
 def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
@@ -1640,6 +1730,11 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
     behind a model call that may be unwired, rate-limited, or simply absent — an operator running
     without a reflect client still gets artifact verification, which is most of the value for none
     of the cost.
+
+    DECLARED ENVIRONMENT (`env`): the per-stage overlay on top of `ex.env` (which already carries the
+    run- and task-level layers). It is resolved per stage rather than hoisted, because it is the one
+    stage field that changes what the CHILD PROCESS is, and both tiers have to be given it the way
+    that tier accepts — see `_stage_wrap`.
     """
     _run_from = 0
     if start_stage:
@@ -1684,6 +1779,28 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stderr=f"stage '{_sname}' failed its declared input contract: {_input_problem}",
                 stages=stage_results, failed_stage=_sname)
             return run
+        # THE DECLARED ENVIRONMENT, resolved for THIS stage. `ex.env` already carries the run- and
+        # task-level layers (the engine composed them into the process env before the eval started);
+        # this is the per-stage overlay, applied last because it is the most specific. `isinstance`
+        # for the same reason `needs` uses it: `run_command_eval(stages=...)` is public, and a raw
+        # string must degrade to "no declaration" rather than being iterated.
+        _senv_decl = _stg.get("env") if isinstance(_stg.get("env"), dict) else {}
+        _senv = merge_env(ex.env, _senv_decl) if _senv_decl else ex.env
+        _swrap_argv, _env_problem = _stage_wrap(ex, _senv_decl)
+        if _env_problem:
+            # The two exit codes differ ON PURPOSE and neither is a typo. The stage ROW carries 0
+            # because no process ran — the same value the `needs_failed` row uses, and the only
+            # honest one for a command that was never spawned. The `RunResult` carries 2, which is
+            # what `eval_stages.PROTECTED_SCRIPT_MISSING` uses for the other refusal no agent edit
+            # can satisfy: a zero there would send this down the "exit 0 but no metric" path and have
+            # the repair loop ask the Developer to make the metric appear.
+            stage_results.append({"name": _sname, "status": "env_unsupported", "exit_code": 0,
+                                  "seconds": 0.0, "concern": _env_problem.format(stage=_sname)})
+            run.early = RunResult(
+                exit_code=2, stdout=run.out, metric=None, timed_out=False,
+                stderr=_env_problem.format(stage=_sname),
+                stages=stage_results, failed_stage=_sname)
+            return run
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
         # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
@@ -1711,7 +1828,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # an accepted self-reported metric; read the out-of-band flag instead.
             run.signals = {}
             run.rc, run.out, run.err, run.timed_out = run_argv(
-                ex.wrap_argv(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace, ex.env,
+                _swrap_argv(ex.bound(_scmd, _sto), str(ex.wd)), ex.wd, _sto + ex.grace, _senv,
                 ex.max_output_bytes, ex.cancel,
                 log_path=ex.log(f"{_sname}.log"), health_check=True,
                 stall_timeout=_stall_window_for(ex.stall_timeout, _sto, ex.stall_cap),

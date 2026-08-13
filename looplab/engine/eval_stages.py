@@ -128,7 +128,10 @@ class EvalStagesMixin:
             # cmd declares stages → canonical, dev file ignored. EvalSpec validated these at submit
             # time; re-run the shared validator anyway (an old/hand-edited snapshot bypasses pydantic)
             # and fall back to the single command on a bad list rather than run a half-parsed pipeline.
-            clean, err = command_eval.validate_stages(task_stages)
+            # `allow_env=True`: this branch reads the OPERATOR's own declared pipeline, which is
+            # the only declarer allowed a stage `env`. The developer-manifest branch below goes
+            # through `materialized_stages`, which keeps the fail-closed default.
+            clean, err = command_eval.validate_stages(task_stages, allow_env=True)
             if err is None:
                 return _expand(clean)
             # A BAD operator list falls back to the SINGLE COMMAND, and must not fall THROUGH to the

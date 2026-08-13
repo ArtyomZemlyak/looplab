@@ -873,7 +873,12 @@ class LLMRepoDeveloper:
         if not ev.get("stages"):
             return []
         from looplab.runtime.command_eval import validate_stages
-        return validate_stages(ev["stages"])[0] or []
+        # `allow_env=True`: these are the OPERATOR's stages, read here only to describe the
+        # pipeline to the Developer. Validating them under the Developer's own fail-closed rule
+        # would drop the whole operator pipeline out of the prompt the moment the operator
+        # declared an `env`, and the agent would be told it may author stages the engine will
+        # ignore (M7 — this reader and `_resolve_stages` must accept the same thing).
+        return validate_stages(ev["stages"], allow_env=True)[0] or []
 
     def _stage_note(self, operator_stages, declared, carried_over, manifest_protected) -> str:
         """The three-way pipeline note the implement sessions read (doc 25 RA-07).
@@ -980,6 +985,14 @@ class LLMRepoDeveloper:
             "passed. Write the same path string the stage's own code will open. If a stage genuinely "
             "reads nothing but the repo it was seeded with, omit `needs` — an empty declaration is "
             "worse than none.\n\n"
+            "YOU MAY NOT DECLARE `env`, AND YOU SHOULD NOT BAKE ONE INTO THE REPO EITHER. The "
+            "environment a stage runs in is the OPERATOR's to set (they have `cmd.stages[].env`, "
+            "`cmd.env` and the run's `eval_env`), and a stage `env` from you is refused. If a stage "
+            "needs a variable the environment does not have, the right fix in YOUR code is to read it "
+            "with a documented default; adding `os.environ.setdefault(...)` at import to make one node "
+            "work is not, because the next node is seeded from the SOURCE repo and will hit the "
+            "identical failure — that has happened, and it cost one repair attempt per node. Say in "
+            "your notes which variable was missing so the operator can declare it once for the run.\n\n"
             "GIVE EVERY STAGE AN `expect` — this is what makes a stage's success mean something. A stage "
             "that exits 0 has proved nothing: a mining stage that covered 1.2% of the queries exits 0 "
             "exactly like one that covered 100%, and the next stage consumed the 1.2% as if it were "

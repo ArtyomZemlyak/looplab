@@ -74,6 +74,11 @@ class EngineOptions:
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     eval_stall_timeout_s: float = 1800.0  # #6: silence-before-kill CAP for an eval stage; 0 disables
     eval_deadline_grace_s: float = 0.0   # one-shot judge-granted extension at the deadline; 0 = off
+    # F1d RUN-LEVEL DECLARED ENVIRONMENT: {NAME: value} set for every eval of every node (setup, the
+    # single command, and every stage), under the task's `cmd.env` and a stage's own `env`. A
+    # `default_factory` rather than a bare `{}` because this dataclass is frozen but its FIELD
+    # DEFAULT would still be one shared mutable object across every Engine in the process.
+    eval_env: dict = dataclasses.field(default_factory=dict)
     confirm_top_k: int = 0
     confirm_seeds: int = 0
     confirm_seed_base: int = 1           # D1: first confirm seed; 1 keeps confirm splits disjoint

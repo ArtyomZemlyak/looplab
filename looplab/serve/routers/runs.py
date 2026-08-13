@@ -751,7 +751,7 @@ def _operator_stage_names(rd: Path) -> tuple:
             # falls back to the Developer-manifest + protected-`score` path — mirror it exactly, or
             # this panel would render phantom stage bands for a pipeline the engine never ran AND
             # miss the manifest stages it actually did run.
-            clean, err = validate_stages(es["stages"])
+            clean, err = validate_stages(es["stages"], allow_env=True)
             if err is None:
                 names = tuple(str(s["name"]) for s in clean)
     except Exception:  # noqa: BLE001 - no/foreign/kind-less snapshot -> fall back to the manifest
@@ -3372,13 +3372,34 @@ def build_router(srv) -> APIRouter:
             k for k, value in pinned.items()
             if run_start_pinned_disagreement(k, effective.get(k), value))
         effective.update({k: pinned[k] for k in mismatches})
+        # The declared environment gets the SAME overlay for the same reason, one layer down from
+        # `RUN_START_PINNED_FIELDS` (see the read-only note below for why it is not a member). It
+        # needs one: `looplab run --out <existing dir>` rewrites `config.snapshot.json` from the
+        # LAUNCH settings and never reads it back, while `Engine._repin_declared_env` restores the
+        # environment from `run_started` — so a re-entry spelling a different value leaves the
+        # snapshot holding one the engine does not use, and this panel is where an operator would
+        # read it and believe it.
+        _recorded_env = getattr(srv.state(rd), "eval_env", None)
+        if isinstance(_recorded_env, dict) and _recorded_env:
+            if effective.get("eval_env") != _recorded_env:
+                mismatches = sorted([*mismatches, "eval_env"])
+            effective["eval_env"] = dict(_recorded_env)
         effective["_looplab_config_meta"] = {
             "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
             "snapshot_mismatch_fields": mismatches,
             # A profile is expanded into explicit snapshot values at launch. Changing only its name
             # later cannot reapply that bundle truthfully, so the server declares it read-only.
-            "run_read_only_fields": ["profile"],
+            #
+            # `eval_env` is read-only for the OTHER reason a field can be: the engine restores it
+            # from `run_started` at every re-entry (`_repin_declared_env`, invariant #6), so a PUT
+            # here would be accepted, written, and then have no effect on the running or resumed
+            # engine. It is deliberately NOT in `RUN_START_PINNED_FIELDS` — that set drives a
+            # per-field equality loop against `run_started`'s payload in
+            # `search/speculation_quality.py`, and this key is ABSENT from that payload whenever no
+            # environment was declared, which is every calibration run. So the refusal is stated
+            # here instead of inherited, and the PUT enforces it explicitly below.
+            "run_read_only_fields": ["eval_env", "profile"],
         }
         return effective
 
@@ -3472,6 +3493,16 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(422, "profile can't be changed per-run after launch — the snapshot "
                                      "already contains the expanded profile; set the individual "
                                      "fields (trust_gate, confirm_top_k, …) instead")
+        # The declared environment shapes RESULTS — it is why a node read one corpus and not another
+        # — so re-entry takes it from `run_started` and not from this snapshot. Accepting the write
+        # silently would be the worst of the three options: the operator would see it saved, and the
+        # run would go on evaluating under the old one.
+        if "eval_env" in incoming and incoming["eval_env"] != updated.get("eval_env"):
+            raise HTTPException(422, "eval_env can't be changed per-run after launch — every node in "
+                                     "this run was evaluated under the environment `run_started` "
+                                     "recorded, and re-entry restores it from there, so a change "
+                                     "here would be saved and then ignored. Start a NEW run to "
+                                     "evaluate under a different environment")
 
         changed = {}
         for key, value in incoming.items():

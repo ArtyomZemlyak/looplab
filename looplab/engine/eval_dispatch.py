@@ -548,6 +548,27 @@ class EvalDispatchMixin:
                 binds.append((ref["path"], True))         # references are read-only by definition
         return binds or None
 
+    def _declared_eval_env(self, env, es) -> Optional[dict]:
+        """Fold the run- and task-level DECLARED ENVIRONMENT into the child env for one eval.
+
+        Returns the argument UNCHANGED — including `None` — when nothing is declared, which keeps
+        every run that declares no environment byte-identical: `None` is the sentinel three call
+        sites and `tests/test_gpu_resources.py` read as "unpinned, whole box, legacy behaviour", and
+        materializing it into `{}` for a run with no declaration would rewrite that for nothing.
+
+        Both layers were validated where they were WRITTEN (`Settings.eval_env`'s field validator and
+        `EvalSpec.env`'s), by the one shared rule. They are re-read from a snapshot here rather than
+        re-validated, on the same reasoning as `_resolve_stages`: an old or hand-edited snapshot must
+        stay resumable. What that costs is bounded — a hand-edited snapshot can name a variable the
+        validator would have refused — and it is the same trust an operator already has over
+        `cmd.command` itself, which is an argv the eval executes.
+        """
+        from looplab.runtime.command_eval import merge_env
+        declared = merge_env(getattr(self, "_eval_env", None), (es or {}).get("env"))
+        if not declared:
+            return env
+        return {**(env or {}), **declared}
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
         otherwise the classic solution.py sandbox path. Both return a `RunResult`, so all
@@ -562,6 +583,20 @@ class EvalDispatchMixin:
         passes an EXPLICIT value (a stage name to reuse-into, or None for a full re-run) computed by
         its safe-reuse predicate — passing explicitly avoids the transient `rerun_stage` being reset
         by the loop's re-fold."""
+        # THE DECLARED ENVIRONMENT, composed ONCE and BEFORE anything spawns (F1d). Run level
+        # (`Settings.eval_env`) then task level (`cmd.env`), most specific last; the per-stage layer
+        # is applied by `_run_stages`, which is the only layer that differs per child.
+        #
+        # It goes in HERE, above the branch, rather than at any spawn site, because `env` is the
+        # single dict this method hands to EVERY execution path: the command-eval tiers below
+        # (`make_docker_wrap(env=…)` turns it into the container's `-e` pairs, `run_command_eval(env=…)`
+        # overlays it on the subprocess tier's secret-filtered host base) AND `self.sandbox.run(…)` on
+        # the solution.py path. Composing it once is what makes them agree by construction rather than
+        # by three matching edits — and it is what makes `eval_env`'s promise ("every eval of every
+        # node") true for a non-repo task too. It lands on top of the engine's own env (the GPU pin,
+        # the read-fence marker), which is safe because `validate_env_map` refuses every name the
+        # engine owns, so a declaration can never overwrite one.
+        env = self._declared_eval_env(env, self._eval_spec)
         if self._eval_spec:
             from looplab.runtime import command_eval
             es = self._eval_spec

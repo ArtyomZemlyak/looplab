@@ -100,6 +100,15 @@ _UNCURATED_OPEN_KEYED = frozenset({
     "llm_reasoning_extra", "role_profiles",
 })
 _UNCURATED_LEGACY_ALIAS = frozenset({"max_parallel", "parallel_build"})
+# The RUN-LEVEL DECLARED ENVIRONMENT (F1d). Open-keyed like the group above — the keys are arbitrary
+# variable NAMES, so the control would be a JSON blob editor — but it is its own row here because the
+# reason to keep it out of a browser form is stronger than "no good widget": the field REFUSES a
+# secret-shaped name or value on purpose (`core/envsafe.py::validate_env_map`), and a text box
+# labelled "environment variables" inside the settings UI is precisely the affordance that invites
+# someone to paste a token into a value this server then writes to `config.snapshot.json` and to
+# `run_started`. It belongs in the config file / `-s eval_env=NAME=VALUE`, where the refusal reaches
+# the operator at launch rather than after a save.
+_UNCURATED_OPERATOR_DECLARED_ENV = frozenset({"eval_env"})
 _UNCURATED_NOT_TYPED_BY_AN_OPERATOR = frozenset({
     "llm_api_key_base_url", "speculation_gate_receipt",
 })
@@ -130,6 +139,11 @@ SETTINGS_UI_SCHEMA_UNCURATED_FIELDS: dict[str, str] = {
         _UNCURATED_SECOND_ORDER,
         "second-order tuning (cadence, sampling temperature, retry cap, sandbox limit) whose parent "
         "feature already has a row and whose default is not a behaviour the form describes"),
+    **dict.fromkeys(
+        _UNCURATED_OPERATOR_DECLARED_ENV,
+        "open key set AND a value the form should not invite: it refuses secret-shaped names on "
+        "purpose, and a browser field labelled 'environment variables' is how one gets pasted into "
+        "a run's durable snapshot — declared in the config file or `-s eval_env=NAME=VALUE`"),
 }
 
 
