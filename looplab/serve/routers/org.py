@@ -11,9 +11,11 @@ from fastapi.responses import JSONResponse
 from looplab.serve.deletion_service import (
     begin_or_resume_run_deletion, deletion_cascade_requested, get_run_deletion,
     validate_deletion_request)
+from looplab.serve.deletion_transaction import load_deletion_identity, save_deletion_identity
 from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_memory,
                                           known_memory_dirs, memory_dir_is_known,
-                                          purge_attributable_memory, run_memory_identity)
+                                          purge_attributable_memory, run_memory_identity,
+                                          unreadable_identity_receipt)
 from looplab.serve.http import json_object
 from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
@@ -288,6 +290,16 @@ def build_router(srv) -> APIRouter:
                         "message": "This run id now names a different run incarnation."})
                 return purge_attributable_memory(
                     ident["memory_dir"], ident["run_id"], ident["run_uid"])
+            # EITHER is enough, and that is deliberate rather than an oversight: a `run_uid` of ""
+            # is the LEGACY answer ("this run predates uid stamping"), which is the case this
+            # endpoint has to keep serving — a pre-uid run's rows are otherwise unpurgeable
+            # forever, and `tests/test_run_deletion_memory_cascade.py` drives exactly that.
+            #
+            # What made the old shape dishonest was not this guard but the RECEIPT: a purge that
+            # fell back to bare-name matching still reported `identity: "run_uid"`, so the one case
+            # that can take a still-existing run's rows out of a shared store was labelled as
+            # exactly keyed. `memory_cascade._identity_label` now answers `run_id` / `mixed` /
+            # `run_uid`, and the receipt carries a `name_matched` count per store.
             if not run_uid and not memory_dir:
                 raise HTTPException(400, {
                     "code": "memory_purge_identity_required",
@@ -303,7 +315,13 @@ def build_router(srv) -> APIRouter:
             # which is also why the refusal is separate from the identity one above — "I do not know
             # that store" and "you told me nothing" are different answers.
             store = memory_dir or _memory_dir()
-            if not memory_dir_is_known(store, known_memory_dirs(
+            # `known_memory_dirs` is EVALUATED LAZILY, past the two cheap answers. It scans the whole
+            # runs root and JSON-parses every surviving run's `config.snapshot.json` — ~100 syscalls
+            # and 46 parses on the shipped corpus, on the geesefs/S3 mount where an `lstat` costs
+            # 0.4-950 ms — and Python evaluates an argument before the call, so it ran
+            # unconditionally, including in the overwhelmingly common case where `store` IS the
+            # server's own default and is in the set by construction.
+            if store != _memory_dir() and not memory_dir_is_known(store, known_memory_dirs(
                     srv.root, fallback_memory_dir=_memory_dir())):
                 raise HTTPException(400, {
                     "code": "memory_purge_store_unknown",
@@ -328,19 +346,24 @@ def build_router(srv) -> APIRouter:
             # never have written to, and report a clean success. Guessing an identity is the one
             # thing this cascade exists not to do.
             #
-            # REVIEW (mega-review 2026-08-13): the identity read here is NEVER persisted — the
-            # durable deletion receipt is a closed key set (`deletion_transaction._RECEIPT_KEYS`,
-            # loader refuses extras) with no run_uid/memory_dir, and on a 202 this request's local
-            # is simply discarded. So any deletion that COMPLETES on a retry after the directory is
-            # gone (the four documented "left the workspace but pending" phases, or a crash
-            # mid-transaction) loses the uid permanently, and the failure block below then tells
-            # the operator to pass "the run_uid and memory_dir from the original deletion receipt"
-            # — fields no receipt or 202 body ever contained. The only survivor is the volatile UI
-            # notice from a succeeded-with-partial-purge response (same page session only). The
-            # identity read on the FIRST attempt should be stored beside the receipt (a sidecar,
-            # since the receipt schema is deliberately closed) so the retry can finish the cascade
-            # uid-keyed instead of degrading to the bare-name matching 61021d2 eliminated.
-            return {**_identity(run_id), "read_from_run": _plain_run_dir(run_id).is_dir()}
+            # PARKED FOR THE RETRY, and read back when this attempt can no longer see the run.
+            # Both facts the purge needs (`run_uid`, and the run's OWN `memory_dir`) live only
+            # inside the run directory, so a deletion that COMPLETES on a retry after the workspace
+            # is gone — the four documented "pending" phases, or a crash mid-transaction — used to
+            # lose the uid permanently and then instruct the operator to pass it back from a
+            # receipt that never carried it. `deletion_identity_path` is that sidecar.
+            rd = _plain_run_dir(run_id)
+            if rd.is_dir():
+                ident = {**_identity(run_id), "read_from_run": True}
+                save_deletion_identity(srv, rd, operation_id, ident)
+                return ident
+            parked = load_deletion_identity(srv, rd, operation_id)
+            if parked:
+                # Read from THIS operation's own sidecar, so it is the identity the first attempt
+                # observed — not a guess assembled from the directory name and the server's current
+                # global store, which is the one thing this cascade exists not to do.
+                return {**parked, "read_from_run": True, "identity_source": "sidecar"}
+            return {**_identity(run_id), "read_from_run": False}
 
         identity = (await anyio.to_thread.run_sync(_identity_before_deletion)) if cascade else {}
         result = await anyio.to_thread.run_sync(lambda: begin_or_resume_run_deletion(
@@ -356,15 +379,12 @@ def build_router(srv) -> APIRouter:
             # Read BEFORE the deletion, used after: `run_uid` and the run's own `memory_dir` live in
             # the run directory, which no longer exists by the time the purge runs.
             if not identity.get("read_from_run"):
-                result = {**result, "memory": {
-                    "schema": MEMORY_CASCADE_SCHEMA, "run_id": run_id, "run_uid": "",
-                    "memory_dir": "", "identity": "unknown", "ok": False,
-                    "deleted": 0, "kept": 0, "stores": [], "failures": [{
-                        "store": "identity",
-                        "error": ("the run directory was already gone when this attempt read its "
-                                  "identity, so the purge would have guessed one; POST "
-                                  f"/api/runs/{run_id}/memory-purge with the run_uid and memory_dir "
-                                  "from the original deletion receipt")}]}}
+                result = {**result, "memory": unreadable_identity_receipt(
+                    run_id,
+                    "the run directory was already gone when this attempt read its identity and no "
+                    "sidecar from the original attempt survived, so the purge would have guessed "
+                    f"one; POST /api/runs/{run_id}/memory-purge with the run_uid and memory_dir "
+                    "from this run's records")}
             else:
                 result = {**result, "memory": await anyio.to_thread.run_sync(
                     lambda: purge_attributable_memory(

@@ -58,6 +58,8 @@ PRESERVED_TIERS: tuple[tuple[str, str], ...] = (
 # A row that was never this run's is not a "skip" — it is somebody else's row, and counting it as
 # kept would tell the operator the cascade refused thousands of rows it was never asked about.
 NOT_THIS_RUN = "written by another run"
+
+
 class _Everything(frozenset):
     """A membership test that answers True for anything.
 
@@ -104,15 +106,26 @@ class RunIdentity:
             # A row that names its incarnation is matched ONLY on that. Falling back to `run_id` here
             # is what destroyed the other run's rows: two incarnations named `demo` are two runs.
             return bool(self.run_uid) and row_uid == self.run_uid
-        # REVIEW (mega-review 2026-08-13): this legacy fallback fires even when the CALLER has a
-        # uid, and the receipt's `identity` field keys on the caller alone — so a uid-keyed delete
-        # of checkout B's 'demo' destroys checkout A's uid-less legacy 'demo' rows in a shared
-        # store while the receipt asserts `identity: "run_uid"` (reproduced live; the class
-        # docstring's "ambiguity is disclosed" promise holds only in the all-legacy case, and
-        # `tests/test_memory_cascade.py` pins the misleading label for the mixed case). The
-        # fallback itself is deliberate; the disclosure is not kept — count name-matched deletions
-        # separately in the receipt, or refuse them when the caller is uid-keyed.
+        # The LEGACY fallback, and it fires even for a uid-keyed caller — deliberately, because a
+        # row written before `run_uid` existed has no other identity and would otherwise be
+        # uncascadable forever. What it costs is real and is NOT hypothetical: two checkouts sharing
+        # `~/.looplab/memory`, both holding a run directory named `demo`, and deleting the one that
+        # has a uid also deletes the other's uid-less rows.
+        #
+        # That residual is disclosed rather than hidden — see `name_matched` on the receipt and
+        # `identity: "mixed"`. Before, `identity` keyed on the CALLER alone and asserted `run_uid`
+        # for a purge that had in fact matched rows by directory name, so the class docstring's
+        # "the ambiguity is disclosed" promise held only in the all-legacy case.
         return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
+
+    def name_matched(self, row: dict) -> bool:
+        """Was this row attributed by directory NAME while a uid was available to key on?
+
+        The disclosure predicate. False for a legacy caller (`identity` already says `run_id`, so
+        every match is by name and counting them adds nothing) and false for any row carrying a
+        uid. True exactly for the mixed case the receipt used to misreport."""
+        return (bool(self.run_uid) and not _text(row.get("run_uid"))
+                and bool(self.run_id) and _text(row.get("run_id")) == self.run_id)
 
     @property
     def legacy_only(self) -> bool:
@@ -453,27 +466,45 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
     return [(filename, label, predicates[filename]) for filename, label in CASCADED_TIERS]
 
 
-def _tier_from_verdicts(verdicts: Iterable[tuple[dict, str]]) -> dict:
+def _tier_from_verdicts(verdicts: Iterable[tuple[dict, str]], run: "RunIdentity") -> dict:
     """The tier counts, from verdicts a caller has ALREADY computed.
 
     Split out because the purge needs the same per-row answer twice — once to count what it will
     delete, once to select the survivors it rewrites — and it was evaluating the predicate a second
     time over the whole store to get the second one, inside the interprocess lock every concurrent
     run's finalize is waiting on.
+
+    `name_matched` counts the rows this tier attributed by directory NAME while a `run_uid` was
+    available. It is the disclosure the class docstring promises: without it a purge that fell back
+    to bare-name matching still reported `identity: "run_uid"`, so the one case where a shared store
+    can lose another checkout's rows was the case the receipt described as exactly keyed.
     """
-    deletable, kept, reasons = 0, 0, {}
-    for _row, reason in verdicts:
+    deletable, kept, named, reasons = 0, 0, 0, {}
+    for row, reason in verdicts:
         if not reason:
             deletable += 1
+            if run.name_matched(row):
+                named += 1
         elif reason != NOT_THIS_RUN:
             kept += 1
             reasons[reason] = reasons.get(reason, 0) + 1
-    return {"deletable": deletable, "kept": kept,
+    return {"deletable": deletable, "kept": kept, "name_matched": named,
             "reasons": [{"reason": r, "rows": n} for r, n in sorted(reasons.items())]}
 
 
 def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity") -> dict:
-    return _tier_from_verdicts((row, keep_reason(row, run)) for row in rows)
+    return _tier_from_verdicts(((row, keep_reason(row, run)) for row in rows), run)
+
+
+def _identity_label(run: "RunIdentity", name_matched: int) -> str:
+    """What the receipt's `identity` field says this purge was really keyed on.
+
+    Three values, not two. `mixed` is the one that was missing: a uid-keyed caller that nonetheless
+    matched legacy rows by directory name reported `run_uid`, which is the label an operator reads
+    as "this could not have touched another run"."""
+    if run.legacy_only:
+        return "run_id"
+    return "mixed" if name_matched else "run_uid"
 
 
 def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str = "") -> dict:
@@ -488,12 +519,12 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
     run = RunIdentity(run_id, run_uid)
     base = Path(memory_dir) if memory_dir else None
     empty = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
-             "identity": "run_id" if run.legacy_only else "run_uid", "available": False,
-             "deletable": 0, "kept": 0, "stores": [], "unreadable": [],
+             "identity": _identity_label(run, 0), "available": False,
+             "deletable": 0, "kept": 0, "name_matched": 0, "stores": [], "unreadable": [],
              "preserved": [{"store": s, "reason": r} for s, r in PRESERVED_TIERS]}
     if not run.run_id or base is None or not base.is_dir():
         return empty
-    stores, unreadable, total_deletable, total_kept = [], [], 0, 0
+    stores, unreadable, total_deletable, total_kept, total_named = [], [], 0, 0, 0
     for filename, label, keep_reason in _tier_rules(base, run):
         path = base / filename
         if not path.exists():
@@ -508,8 +539,10 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
         tier = _survey_tier(rows, keep_reason, run)
         total_deletable += tier["deletable"]
         total_kept += tier["kept"]
+        total_named += tier["name_matched"]
         stores.append({"store": label, "file": filename, **tier})
     return {**empty, "available": True, "deletable": total_deletable, "kept": total_kept,
+            "name_matched": total_named, "identity": _identity_label(run, total_named),
             "stores": stores, "unreadable": unreadable}
 
 
@@ -551,6 +584,20 @@ def _reelect_active_cases(rows: list[dict]) -> list[dict]:
     return changed
 
 
+def unreadable_identity_receipt(run_id: str, reason: str) -> dict:
+    """The cascade receipt for "this run's identity could not be established", built HERE.
+
+    Same envelope as `purge_attributable_memory`'s, because the UI reads one shape for both
+    (`memoryCascadeModel.cascadeOutcome` / `bulkOutcomeNotice`). The router used to hand-build all
+    ten keys, which meant every field added to the real receipt — `memory_dir` was added precisely
+    because a client could not retry without it — had to be remembered in a second place, and the
+    failure path is the one where a missing field silently offers a retry that cannot succeed."""
+    return {"schema": MEMORY_CASCADE_SCHEMA, "run_id": _text(run_id), "run_uid": "",
+            "memory_dir": "", "identity": "unknown", "ok": False,
+            "deleted": 0, "kept": 0, "stores": [],
+            "failures": [{"store": "identity", "error": str(reason)}]}
+
+
 def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
                               run_uid: str = "") -> dict:
     """Delete exactly the rows `attributable_memory` reports as deletable. Idempotent.
@@ -575,8 +622,8 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
     # untouched in the store it was actually launched with.
     result = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
               "memory_dir": str(base) if base is not None else "",
-              "identity": "run_id" if run.legacy_only else "run_uid", "ok": True,
-              "deleted": 0, "kept": 0, "stores": [], "failures": []}
+              "identity": _identity_label(run, 0), "ok": True,
+              "deleted": 0, "kept": 0, "name_matched": 0, "stores": [], "failures": []}
     if not run.run_id or base is None or not base.is_dir():
         result["ok"] = False
         result["failures"].append({"store": "memory_dir", "error": "no cross-run memory directory"})
@@ -594,7 +641,7 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
                 # ONE predicate pass. `keep_reason` reaches into `evidence_refs` and re-derives a
                 # claim identity per row, and this runs while holding the store's interprocess lock.
                 verdicts = [(row, keep_reason(row, run)) for row in rows]
-                tier = _tier_from_verdicts(verdicts)
+                tier = _tier_from_verdicts(verdicts, run)
                 if not tier["deletable"]:
                     result["kept"] += tier["kept"]
                     continue
@@ -612,8 +659,11 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
                     loads=json.loads, dumps=json.dumps)
             result["deleted"] += tier["deletable"]
             result["kept"] += tier["kept"]
+            result["name_matched"] += tier["name_matched"]
+            result["identity"] = _identity_label(run, result["name_matched"])
             result["stores"].append({"store": label, "file": filename,
-                                     "deleted": tier["deletable"], "kept": tier["kept"]})
+                                     "deleted": tier["deletable"], "kept": tier["kept"],
+                                     "name_matched": tier["name_matched"]})
         except Exception as exc:  # noqa: BLE001 — one locked store must not hide the others' work
             result["ok"] = False
             result["failures"].append({"store": label, "file": filename,
@@ -639,6 +689,7 @@ def _row_identity(row: Any) -> str:
 __all__ = [
     "MEMORY_CASCADE_SCHEMA", "NOT_THIS_RUN", "PRESERVED_TIERS", "attributable_memory",
     "purge_attributable_memory", "merged_concept_ids", "run_memory_identity",
+    "unreadable_identity_receipt",
     "known_memory_dirs", "memory_dir_is_known",
     "lesson_keep_reason", "note_keep_reason", "case_keep_reason",
     "claim_keep_reason", "capsule_keep_reason",
