@@ -1217,13 +1217,21 @@ def _confined_input(workdir, rel) -> Optional[Path]:
     model can apply ("do not delete the declaration to make this pass"), so the repair loop burnt
     its attempts on a contract the engine's own seeding made unsatisfiable.
 
-    Safe to be lexical HERE, and only here, because of what this path does with the answer: it
-    `stat()`s it. It never opens the file, never parses it, never hands it to `runpy` — which are
-    the three things `_confined`'s docstring names as what containment is guarding (an answer-key
-    read, a planted result, code execution). What a stage may actually READ is owned by
-    `runtime/read_fence.py`, which allow-lists mount SOURCES for exactly the same reason. The
-    escaping shapes that matter are still refused: `..` and absolute paths are rejected by
-    `_validate_rel_paths` at authoring time and again below."""
+    Safe to be lexical HERE, and only here, for two reasons that have to hold together:
+
+      * WHAT THIS PATH DOES WITH THE ANSWER is `stat()` it. It never opens the file, never parses
+        it, never hands it to `runpy` — the three things `_confined`'s docstring names as what
+        containment guards (an answer-key read, a planted result, code execution). What a stage may
+        actually READ is owned by `runtime/read_fence.py`, which allow-lists mount SOURCES for the
+        same reason this does.
+      * AND IT GRANTS THE CANDIDATE NOTHING IT DOES NOT ALREADY HAVE. The residual is a symlink the
+        candidate plants inside its own workdir pointing out: it can then learn that some path
+        exists and is non-empty, from the refusal message. But the candidate AUTHORS AND RUNS the
+        stage command — it can `os.stat` anything its process can reach, directly and without a
+        declaration. This is an existence oracle over a capability it already holds, not a new one.
+
+    The escaping shapes that ARE a capability question — an absolute path, a `..` traversal, a
+    drive letter, a NUL — are refused here and again by `_validate_rel_paths` at authoring time."""
     text = normalize_declared_path(rel)
     if not text or "\x00" in text or os.path.isabs(text) or (len(text) > 1 and text[1] == ":"):
         return None
