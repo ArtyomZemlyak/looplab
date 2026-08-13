@@ -126,8 +126,9 @@ before the next stage runs, and has two halves:
   previous attempt's file.
 * **`assert`** — one line stating the condition, in the declarer's own words, checked against what the
   stage **prints** by the inter-stage checker. Declaring it opts that stage's check in (`check: true` is
-  not additionally required) and narrows the checker's quality-judgement ban to exactly this sentence:
-  the checker may fail the stage for not meeting its declared condition, and for nothing else. State the
+  not additionally required) and is the ONLY thing that unlocks the checker's
+  `declared_condition_violated` verdict — without a declaration that verdict is refused and degrades to
+  `inconclusive`, because a checker may not invoke a contract that does not exist. State the
   **work**, never the result quality — `"recall beats 0.85"` is the search's judgement, not a stage's,
   and the checker will not enforce it.
 

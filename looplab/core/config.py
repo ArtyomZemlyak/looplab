@@ -530,6 +530,25 @@ class Settings(BaseSettings):
     # non-Python stage (block-buffered stdout, a script that logs only to its own file). Threaded into
     # the eval and surfaced to the Developer so its code can emit periodic progress to stay alive.
     eval_stall_timeout_s: float = Field(default=1800.0, ge=0)
+    # Eval DEADLINE GRACE (seconds): the most extra wall clock a live-log judge may buy for a stage
+    # that has reached its time budget, ONCE per command. `0` (the default) keeps the unconditional
+    # tree-kill this always was, byte-for-byte.
+    #
+    # It exists because a deadline is a number that cannot see a progress bar. All four
+    # `stage_finished.status == "timeout"` rows in the shipped corpus land EXACTLY on their 4 h / 6 h
+    # / 8 h wall and together discarded 22.0 GPU-hours, and the entire captured record of
+    # `rubertlite-dense-retrieval` node 72 — a 12.45-hour node, five repairs, 6 h on its final
+    # attempt — ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, a stage two
+    # seconds from writing its checkpoint and a stage that will never finish present the identical
+    # fact (elapsed >= timeout); only something reading the log can separate them.
+    #
+    # DEFAULT OFF, deliberately, and this is the one place to argue about it: the judge reads the
+    # CANDIDATE'S OWN live log, so a solution that prints a convincing progress bar can buy exactly
+    # this many seconds. That is a bounded spend and nothing else — it cannot buy a metric (the
+    # operator's reader over the protected `score` stage is untouched) and it cannot buy a second
+    # grace. Still, it is money, so the operator opts in rather than discovering it on a bill.
+    # `runtime/sandbox.py::_granted_grace` is where the clamp is enforced.
+    eval_deadline_grace_s: float = Field(default=0.0, ge=0)
     # Sandbox tier (ADR-13): "trusted_local" (subprocess, no Docker) for the CLI;
     # "untrusted" (Docker --network none, shared-kernel runtime) for hosted/multi-tenant UI;
     # "hostile" (untrusted + a true-isolation OCI runtime, gVisor `runsc` by default / Kata) for
