@@ -268,9 +268,18 @@ class LessonDistillMixin:
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
-        from looplab.engine.memory import promotable_skill_statement, write_auto_skill
+        from looplab.engine.memory import (promotable_skill_statement, unreliable_metric_ids,
+                                           write_auto_skill)
         sk_dir = base / "skills"
         skills: list[str] = []
+        # A SKILL CARD IS A CROSS-RUN CLAIM TOO, and its evidence list is the one place a card's own
+        # feasibility filter does not reach. `_evidence_verdict` (events/card_ledger.py) already
+        # requires `n.feasible` to make a card `supported` with a positive Δ, so a salvaged node
+        # cannot be why this loop fires — but `h.evidence` is the RAW id list, and
+        # `distill_skill_body` renders `#id op metric=X` for up to four of them and picks the
+        # best-metric one as the code to quote. That put an unmeasured number, and the code that
+        # never earned it, into a `skills/*.md` a later run reads as a verified best practice.
+        skill_unreliable = unreliable_metric_ids(final)
         # Distil skills from canonical Card work items. Several retry cards may share one belief; the
         # skill store's stable title/path makes a repeated statement an idempotent overwrite. `verdict`
         # is the research status (compatible with old Hypothesis.status via `_evidence_verdict`). Use the DISPLAY
@@ -286,7 +295,8 @@ class LessonDistillMixin:
         for h in final.research_cards():
             if (h.verdict == "supported" and (h.best_delta or 0) > 0
                     and promotable_skill_statement(h.statement)):
-                ev = [final.nodes[i] for i in h.evidence if i in final.nodes]
+                ev = [final.nodes[i] for i in h.evidence
+                      if i in final.nodes and i not in skill_unreliable]
                 write_auto_skill(sk_dir, h.statement,
                                  self._e._distill_skill_body(final, h, ev), fp, final.task_id)
                 skills.append(h.statement)

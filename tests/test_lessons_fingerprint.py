@@ -857,3 +857,42 @@ def test_a_salvaged_node_still_teaches_what_it_broke_on(monkeypatch):
     # re-derives this batch instead of leaving a stale conclusion in the shared store.
     assert lessons and 1 in lessons[0]["evidence"]
     assert "1" in (lessons[0]["evidence_sig"] or {})
+
+
+def test_an_auto_skill_card_never_quotes_an_unmeasured_number(tmp_path):
+    """The M4 skill store is the third cross-run writer that reaches a NODE. `_evidence_verdict`
+    already needs a feasible node to make a card `supported` with a positive Δ, so a salvaged node
+    cannot be why a skill is drafted — but `h.evidence` is the RAW id list, and `distill_skill_body`
+    renders `#id op metric=X` for up to four of them and picks the best-metric one as the code to
+    quote. So the unmeasured number, and the code that never earned it, went into a `skills/*.md`
+    a later run reads as a verified best practice."""
+    from looplab.core.models import Card
+    from looplab.engine.lessons import LessonMemory
+
+    state = _lineage_state(violations=_SALVAGE_ROW, provenance=_SALVAGE_PROV)
+    state.nodes[0].code = "measured_code = 1\n"
+    state.nodes[1].code = "unmeasured_code = 1\n"
+    state.cards["c1"] = Card(id="c1", statement="warm up the learning rate before the first epoch",
+                             verdict="supported", best_delta=0.45, evidence=[0, 1])
+    mem_dir = tmp_path / "mem"
+
+    mem = LessonMemory.__new__(LessonMemory)
+    mem._e = type("_E", (), {
+        "_reflection_priors": True, "memory_dir": str(mem_dir), "_comparative_lessons_on": False,
+        "task": None,
+        "store": type("_S", (), {"read_all": lambda self: [],
+                                 "append": lambda self, *a, **k: None})(),
+        "_reflect_client": lambda self: None,
+        "_task_fingerprint": lambda self, *a: ["kind:toy"],
+        "_causal_meta_note": lambda self, *a: "note",
+        "_reflect_lessons": lambda self, *a: [],
+        "_append_lessons": lambda self, *a, **k: None,
+        "_distill_skill_body": lambda self, final, h, ev: mem.distill_skill_body(final, h, ev),
+    })()
+
+    mem.write_reflection_note(state)
+
+    body = "\n".join(p.read_text(encoding="utf-8") for p in (mem_dir / "skills").glob("*.md"))
+    assert body, "the card qualifies, so a skill card must have been drafted"
+    assert "#0 draft" in body, "the MEASURED evidence still grounds the card"
+    assert "#1" not in body and "0.95" not in body
