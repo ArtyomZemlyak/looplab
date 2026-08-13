@@ -560,6 +560,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         asha_live_kill_confidence = _opt("asha_live_kill_confidence")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         eval_stall_timeout_s = _opt("eval_stall_timeout_s")
+        eval_env = _opt("eval_env")
         confirm_seed_base = _opt("confirm_seed_base")
         coverage_context = _opt("coverage_context")
         concept_pivot = _opt("concept_pivot")
@@ -998,6 +999,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Eval stall watchdog cap (seconds); 0 disables. Threaded into command_eval and surfaced to the
         # Developer so its code can emit periodic progress to avoid a false silence-kill.
         self.eval_stall_timeout_s = float(eval_stall_timeout_s)
+        # F1d RUN-LEVEL DECLARED ENVIRONMENT. Copied, never aliased: `EngineOptions` is frozen but
+        # its dict is not, and `_repin_declared_env` REPLACES this on a resume with what
+        # `run_started` recorded (invariant #6) — mutating the caller's Settings dict from here
+        # would rewrite the launch config object a UI process may still be serving.
+        self._eval_env: dict = dict(eval_env or {})
         self._train_monitor = bool(train_monitor)
         self._train_monitor_interval_s = train_monitor_interval_s
         self._train_monitor_kill = bool(train_monitor_kill)
@@ -1428,6 +1434,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # The settled widths are the same kind of boundary and are restored first, so every later
         # decision in this invocation runs at the width the run's own log was written under.
         self._repin_settled_widths(state)
+        self._repin_declared_env(state)
         self._require_pinned_speculation_receipt(state)
         if self._speculation_gate_calibration and events:
             # The hidden bootstrap is launch-only.  Even an exact prior calibration envelope cannot be
@@ -2429,6 +2436,43 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """
         return {"eval_parallel": self._eval_parallel, "llm_parallel": self._llm_parallel}
 
+    def _repin_declared_env(self, entry: RunState) -> None:
+        """Restore the RUN-LEVEL DECLARED ENVIRONMENT `run_started` recorded (engine invariant #6).
+
+        This is the strict reading of that invariant and not a convenience: a declared variable is
+        the reason a node read one corpus rather than another (`VS_LOCAL_DATA_ROOT` is the measured
+        case), so a resume that took a DIFFERENT value from live config would keep appending nodes
+        to a log whose earlier nodes were evaluated under other conditions — and nothing in the run
+        would say so. The log wins, always, for the whole rest of the run.
+
+        Called from `_enter_run` beside `_repin_settled_widths`, and BEFORE any append, for the same
+        reason: what the log recorded has to be in force before this invocation decides anything.
+
+        ADOPT, never refuse. The widths refuse a contradicting re-entry because a width is a
+        LAUNCH knob the operator re-spells on the resume command line and a silent adoption there
+        would ignore something they typed; this value is normally spelled once, in a config file the
+        resume re-reads on its own, so refusing would turn an unchanged file into a hard stop. The
+        operator IS told at WARNING when the two disagree, and the way to run under a different
+        environment is a new run — which is the honest answer, because the comparison the old nodes
+        belong to no longer holds.
+
+        A run that recorded NOTHING (an old log, or one launched with no declaration) keeps this
+        process's own launch value untouched: inventing "the log said empty, so drop yours" would
+        make the very first resume of a run started before this field existed silently lose an
+        environment the operator has since declared, which is a regression rather than a pin.
+        """
+        recorded = getattr(entry, "eval_env", None)
+        if not isinstance(recorded, dict) or not recorded:
+            return
+        live = dict(getattr(self, "_eval_env", None) or {})
+        if live != recorded:
+            _LOG.warning(
+                "resume: this run's run_started recorded eval_env=%s; the launch config says %s. "
+                "The RECORD wins (engine invariant #6) — every node in this log was evaluated under "
+                "the recorded environment and results have to stay comparable. Start a NEW run to "
+                "evaluate under a different one.", sorted(recorded), sorted(live))
+        self._eval_env = dict(recorded)
+
     def _repin_settled_widths(self, entry: RunState, *, source: Optional[str] = None) -> None:
         """Restore the widths ``run_started`` pinned, or refuse a re-entry that contradicts them.
 
@@ -2560,6 +2604,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # restores this shared contract from the fold rather than accepting a later
                             # snapshot edit that would mix incomparable scores or selection rules.
                             **self._run_start_pinned_values(),
+                            # F1d: the run-level DECLARED ENVIRONMENT, when there is one. ABSENT
+                            # otherwise, which keeps the default `run_started` payload BYTE-IDENTICAL
+                            # — the same discipline `_run_start_pinned_values` follows for the Card
+                            # selector flag, and here it is load-bearing twice over:
+                            # `search/speculation_quality.py::_CALIBRATION_RUN_STARTED_FIELDS`
+                            # compares the payload's key SET for equality, so an unconditional new key
+                            # would revoke every issued calibration receipt, and the calibration
+                            # profile declares no environment.
+                            **({"eval_env": dict(self._eval_env)} if self._eval_env else {}),
                             # The SETTLED widths, not their AUTO sentinel: re-entry must never
                             # re-derive this run's execution treatment from a different box.
                             **self._run_start_settled_widths(),

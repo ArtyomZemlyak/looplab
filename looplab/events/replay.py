@@ -375,6 +375,17 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.dirty_inputs = _di if isinstance(_di, list) else []   # P0-5 uncommitted-input enumeration
     _tg = str(d.get("trust_gate", "audit")).strip().lower()
     st.trust_gate = _tg if _tg in ("audit", "gate", "block") else "audit"
+    # F1d: the run-level DECLARED ENVIRONMENT the evals ran under. Absent on old logs and on every
+    # run that declared none -> `{}` -> the engine keeps its own launch value, i.e. byte-identical
+    # legacy behaviour. Coerced to `{str: str}` here rather than trusted: this is read back by
+    # `Engine._repin_declared_env` and handed to a child PROCESS, so a hand-edited row carrying a
+    # list or a nested object must degrade to "nothing declared" instead of reaching `subprocess`
+    # as an unusable env dict — the fold has no exception handler and cannot raise.
+    _ee = d.get("eval_env")
+    st.eval_env = ({str(k): str(v) for k, v in _ee.items()
+                    if isinstance(k, str) and isinstance(v, (str, int, float))
+                    and not isinstance(v, bool)}
+                   if isinstance(_ee, dict) else {})
     # Layer 3 queue ownership is selection-affecting and therefore pinned by the event log. Accept
     # only the JSON boolean true: strings and integers in malformed/legacy rows fail closed to the
     # byte-identical policy/pilot path.

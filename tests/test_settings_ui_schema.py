@@ -104,7 +104,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # paid-but-behaviorally-inert task-facet call from the concept/claim curation umbrella. The
     # literal is a review tripwire, not a gate (the gate is the two-way reconciliation), and the
     # separate default-off warning row is part of this same contract.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 199
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 200
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}

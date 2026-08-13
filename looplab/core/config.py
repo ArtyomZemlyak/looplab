@@ -530,10 +530,13 @@ class Settings(BaseSettings):
     # non-Python stage (block-buffered stdout, a script that logs only to its own file). Threaded into
     # the eval and surfaced to the Developer so its code can emit periodic progress to stay alive.
     eval_stall_timeout_s: float = Field(default=1800.0, ge=0)
-    # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — `setup`, the
-    # single `command`, and every stage. The run-wide half of the same contract the task's `cmd.env`
-    # and a stage's own `env` carry (most specific wins: this < cmd.env < stages[].env), validated by
-    # the one shared rule `runtime/command_eval.py::validate_env_map`.
+    # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — the per-node
+    # `setup`, the single `command`, and every stage, on BOTH sandbox tiers. The run-wide half of the
+    # same contract the task's `cmd.env` and a stage's own `env` carry (most specific wins:
+    # this < cmd.env < stages[].env), validated by the one shared rule
+    # `core/envsafe.py::validate_env_map`. Deliberately NOT the run-level `run_setup`: that runs once
+    # in the operator's own source tree before any node exists, so it is not an eval, and a
+    # dependency install has its own environment handling in `runtime/deps.py`.
     #
     # WHY IT IS A SETTING AND NOT ONLY A SHELL EXPORT (backlog F1d). `VS_LOCAL_DATA_ROOT` being unset
     # crashed `rubertlite-dr-unified-v6` node 0 in `botocore ListObjects`; the repair was correct and
