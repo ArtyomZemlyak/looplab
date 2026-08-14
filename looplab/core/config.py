@@ -349,6 +349,28 @@ def default_agent_control() -> dict[str, list[str]]:
 # without adding it here is a red test, not a backend that silently downgrades to the default.
 DEVELOPER_BACKENDS: tuple[str, ...] = ("default", "aider", "continue", "goose", "opencode")
 
+# Runtime-only ALIASES of a backend above — the extra spellings a LIVE Developer swap accepts, which
+# `Settings` deliberately does NOT (`developer_backend="llm"` is still a refusal, because an alias has
+# no preset and `test_every_configurable_backend_exists` would then have to admit a silent downgrade).
+# It exists because the live-swap vocabulary had THREE homes and they disagreed: `engine/strategy.py`
+# offered the Strategist `["default", "llm", *PRESETS]`, `agents/factory.py::make_developer_factory`
+# resolved the bare literal `"llm"` to `"default"`, and `agents/strategist.py` held a branch naming a
+# fourth spelling (`"agentless"`) that appears in NO list — permanently dead, and had it ever fired,
+# `validate_strategy` would have dropped the field with no refusal receipt anywhere (see that
+# function's docstring for what a dropped developer costs). One registry, read by both sides.
+#
+# `engine/strategy.py::_available_developers` builds the offered vocabulary from these two constants
+# and `make_developer_factory` resolves through this map; `tests/test_developer_backend_registry.py`
+# checks BOTH directions AND scans the tree for a developer literal that is in neither, so a
+# reintroduced `"agentless"` arm is a red test rather than an `if` that can never be true.
+DEVELOPER_BACKEND_ALIASES: dict[str, str] = {"llm": "default"}
+
+
+def developer_switch_names() -> tuple[str, ...]:
+    """Every name a LIVE Developer swap may be asked for, `default` first (the in-house Developer is
+    the fallback every caller degrades to when no factory is wired). Canonical names then aliases."""
+    return (*DEVELOPER_BACKENDS, *DEVELOPER_BACKEND_ALIASES)
+
 
 def _parser_names() -> tuple[str, ...]:
     """The structured-output parser vocabulary, read from the registry that actually resolves it.

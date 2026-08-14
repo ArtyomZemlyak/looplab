@@ -572,6 +572,91 @@ def test_refused_developer_switch_records_actual_backend_and_resume_does_not_ret
     assert resumed._developer_name == state.active_strategy["developer"] == "opencode"
 
 
+def _developer_decision_effect(tmp_path, name, *, factory=True):
+    """Drive ONE real Strategist decision naming `name` through the engine's own consult path and
+    report what the engine DID with it: which backends the factory was asked for, which Developer is
+    live afterwards, and what the durable `strategy_decision` says. No stubs below the strategist."""
+    built: list[str] = []
+
+    class _Stub:
+        def decide(self, state, ctx):
+            self.seen = list(ctx.available_developers)
+            return {"policy": "mcts", "developer": name, "source": "rule",
+                    "rationale": f"switch developer to {name}"}
+
+    stub = _Stub()
+    eng = _engine(tmp_path / f"dev-{name}", strategist=stub, strategist_every=1,
+                  developer_factory=((lambda n: built.append(n) or object()) if factory else None))
+    eng.store.append("run_started", {
+        "run_id": "r", "task_id": "toy", "goal": "g", "direction": "min"})
+    state = fold(eng.store.read_all())
+    state.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                           status=NodeStatus.evaluated, metric=1.0)}
+    before = eng.developer
+    out = eng._maybe_consult_strategist(state)
+    event = next((e for e in eng.store.read_all() if e.type == "strategy_decision"), None)
+    return {
+        "offered": stub.seen,
+        "factory_calls": built,
+        "swapped": eng.developer is not before,
+        "live_backend": eng._developer_name,
+        "active": out.active_strategy,
+        "application": (event.data.get("developer_application") if event else None),
+        "recorded": (event.data.get("strategy") if event else None),
+    }
+
+
+def test_a_registered_developer_decision_reaches_the_engine(tmp_path):
+    """The positive control, for BOTH kinds of registered name: a canonical backend and the `llm`
+    alias. The property is not "validate_strategy kept the field" — it is that the swap HAPPENED
+    (factory called, live Developer replaced, `_developer_name` moved) and that the durable record
+    carries an `applied` receipt a resume can re-enter under."""
+    for name in ("opencode", "llm"):
+        r = _developer_decision_effect(tmp_path, name)
+        assert name in r["offered"], r["offered"]
+        assert r["factory_calls"] == [name] and r["swapped"], r
+        assert r["live_backend"] == name
+        assert r["active"]["developer"] == name
+        assert r["application"] == {"status": "applied",
+                                    "requested_backend": name, "applied_backend": name}
+
+
+def test_an_unknown_developer_decision_is_dropped_and_leaves_no_receipt(tmp_path):
+    """The NEGATIVE control, and the expensive case — pinned as it actually behaves, not as one
+    might hope. `agentless` (the name the dead RuleStrategist arm proposed) and a plain typo are
+    both DROPPED by `validate_strategy` before `_prepare_strategy_developer` can see them, so:
+
+    * the factory is never asked, the live Developer never moves — correct, nothing else exists;
+    * but there is NO `developer_application` receipt, because that refusal record is written by
+      `_prepare_strategy_developer` and it only ever receives what survived the whitelist;
+    * and the decision's own RATIONALE is recorded verbatim beside a strategy with no `developer`.
+
+    So the durable history reads as a Developer switch that never happened. That is why the fix is
+    upstream — ONE vocabulary in `core/config.py`, with a source scan (see
+    `tests/test_developer_backend_registry.py`) that makes a producer naming an unregistered backend
+    a red test rather than a decision the run silently loses."""
+    for name in ("agentless", "ghost"):
+        r = _developer_decision_effect(tmp_path, name)
+        assert name not in r["offered"], f"{name} is registered now — re-point this test"
+        assert r["factory_calls"] == [] and not r["swapped"]
+        assert r["live_backend"] == "default"
+        assert "developer" not in r["active"] and "developer" not in r["recorded"]
+        assert r["application"] is None
+        # The rationale survives the field it explains — the whole cost, in one assertion.
+        assert r["recorded"]["rationale"] == f"switch developer to {name}"
+        assert r["recorded"]["policy"] == "mcts"      # the REST of the decision did apply
+
+
+def test_without_a_factory_no_developer_is_offered_at_all(tmp_path):
+    """A real backend is unreachable when nothing can build it, and it is dropped the same silent
+    way. `_prepare_strategy_developer`'s `factory_unavailable` refusal is therefore unreachable from
+    the consult path by construction — it serves the direct `_record_strategy` callers above."""
+    r = _developer_decision_effect(tmp_path, "opencode", factory=False)
+    assert r["offered"] == ["default"]
+    assert r["factory_calls"] == [] and not r["swapped"]
+    assert "developer" not in r["active"] and r["application"] is None
+
+
 def test_resume_refuses_when_a_recorded_developer_backend_cannot_be_rebuilt(tmp_path):
     """A successfully recorded backend is mandatory treatment on re-entry, never a fallback hint."""
     import pytest

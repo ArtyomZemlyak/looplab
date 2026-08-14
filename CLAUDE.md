@@ -221,6 +221,18 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   drives the registry AND re-derives it from each reader's own `spec.get` reads, so a new reader
   goes red rather than silently escaping the table; `spec_kind` is the same rule for the DISPATCH,
   where an unhashable `kind` crashed the submit-time refusal itself);
+  the Developer live-swap vocabulary `core/config.py::DEVELOPER_BACKENDS` + `DEVELOPER_BACKEND_ALIASES`
+  (published as `developer_switch_names()`) — deliberately WIDER than the launch set `Settings`
+  validates against, by exactly the aliases (`llm` -> `default`), because an alias has no coding-agent
+  preset and admitting it at launch would be the silent downgrade the closed set exists to stop.
+  `engine/strategy.py::_available_developers` offers it and `agents/factory.py::make_developer_factory`
+  resolves through it; those were three hand-written lists and they disagreed, which is how
+  `agents/strategist.py` came to hold `if "agentless" in ctx.available_developers` — a decision arm
+  that could never fire. The guard's second direction is what that needed: an AST scan for a
+  membership test or a Strategy dict naming a developer the registry does not hold. A dropped
+  `developer` is the reason it has to be a red test — `validate_strategy` removes an unregistered
+  name BEFORE `_prepare_strategy_developer` can write its `refused` receipt, so the run records the
+  rationale for a switch with no switch and no refusal;
   background-appendable events `events/types.py::BACKGROUND_APPENDABLE`, its thread-side sibling
   `SETUP_THREAD_APPENDABLE`, and its Card-conditional extension
   `NON_CARD_SELECTION_BACKGROUND_APPENDABLE` (legacy Hypothesis/Policy selection ONLY — the call site

@@ -90,7 +90,11 @@ def _set_role_client(obj, client) -> None:
 def make_developer_factory(task: TaskAdapter, settings):
     """Return backend-switching Developer factory; lazily gate in-process targets before build."""
     def factory(backend: str):
-        b = "default" if backend == "llm" else backend
+        # Resolve through the shared alias registry, not a bare `"llm"` literal: the alias map is what
+        # `engine/strategy.py::_available_developers` offers the Strategist from, so a spelling added
+        # to one and not the other is exactly the three-way disagreement that registry closed.
+        from looplab.core.config import DEVELOPER_BACKEND_ALIASES
+        b = DEVELOPER_BACKEND_ALIASES.get(backend, backend)
         s = settings.model_copy(update={"developer_backend": b})
         if b == "default" and settings.developer_backend != "default":
             from looplab.agents.preflight import preflight_in_process_developer_replacement

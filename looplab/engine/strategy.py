@@ -73,9 +73,23 @@ class StrategyCadenceMixin:
                                       "llm_lane_limits")}
 
     def _available_developers(self) -> list[str]:
-        from looplab.agents.cli_agent import PRESETS
-        names = ["default", "llm", *PRESETS]
-        return names if self.developer_factory is not None else names[:1]
+        """The developer-backend vocabulary the Strategist may choose from — and the ONLY gate on it,
+        since `validate_strategy` drops a `developer` this list does not contain.
+
+        Derived from `core.config`'s registry rather than re-spelled here: this list, the closed
+        `DEVELOPER_BACKENDS` set `Settings` validates against, and the alias `make_developer_factory`
+        resolves are three views of ONE vocabulary, and while they were three hand-written lists they
+        disagreed (`agents/strategist.py` held an `"agentless"` arm that is in none of them and could
+        never fire). Reading the registry also drops the `agents.cli_agent` import this engine module
+        used to need for `PRESETS` — `DEVELOPER_BACKENDS` is asserted equal to it at that module's
+        import and by `tests/test_developer_backend_registry.py`, in both directions.
+
+        With no `developer_factory` wired nothing can be swapped, so only the in-house Developer is
+        offered — otherwise every proposal would be dropped by validation instead of recording the
+        `factory_unavailable` refusal `_prepare_strategy_developer` would have written."""
+        from looplab.core.config import developer_switch_names
+        names = list(developer_switch_names())
+        return names if self.developer_factory is not None else ["default"]
 
     def _strategy_ctx(self, state: RunState) -> StrategyContext:
         max_es = state.budget_overrides.get("max_eval_seconds", self.max_eval_seconds)

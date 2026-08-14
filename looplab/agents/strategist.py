@@ -89,7 +89,11 @@ Strategy = TypedDict(
     {
         "policy": str,          # "greedy"|"evolutionary"|"mcts"|"asha" (whatever make_policy knows)
         "policy_params": dict,  # {"c":1.4} | {"eta":3} | {"n_seeds":4} ...
-        "developer": str,       # "default"|"llm"|"opencode"|... (whatever the dev factory knows)
+        # The CLOSED live-swap vocabulary `core/config.py::developer_switch_names()` publishes —
+        # `DEVELOPER_BACKENDS` plus its runtime aliases, offered as `ctx.available_developers`. Not
+        # "whatever the dev factory knows": the factory is handed whatever survives validation, so an
+        # unregistered name never reaches it (it is dropped, silently — see `validate_strategy`).
+        "developer": str,       # "default"|"llm"|"opencode"|"aider"|"goose"|"continue"
         "operators": dict,      # {"ablate_every":int, "merge_mode":str, "complexity_cue":bool, ...}
         "fidelity": str,        # "smoke"|"full"|"adaptive"
         "card_scoring": dict,   # atomic {stance, novelty_weight, coverage_weight} Card treatment
@@ -250,6 +254,16 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
         # keep only scalar numeric/bool params (defense against arbitrary payloads)
         out["policy_params"] = {str(k): v for k, v in pp.items()
                                 if isinstance(v, (int, float, bool))}
+    # `developer` is the one whitelisted field whose DROP is invisible downstream, and that is worth
+    # knowing before adding a producer. Driven: a decision naming an unregistered backend keeps its
+    # policy/fidelity and its RATIONALE ("switch developer to agentless") and is recorded with no
+    # `developer` and no `developer_application` receipt — `_prepare_strategy_developer` only ever
+    # sees what survived here, so its `refused` receipt cannot fire for a name it never receives.
+    # The durable history then reads as a switch that happened. Raising instead is wrong (this is the
+    # paranoid whitelist over model output; a hallucinated name must not take the run down), so the
+    # rule is upstream: the vocabulary has ONE home (`core/config.py::developer_switch_names`) that
+    # `ctx.available_developers` is derived from, and `tests/test_developer_backend_registry.py`
+    # source-scans for a producer naming anything outside it.
     dev = strat.get("developer")
     if isinstance(dev, str) and dev in ctx.available_developers:
         out["developer"] = dev
@@ -400,14 +414,21 @@ class RuleStrategist:
                     "source": "rule"}
 
         # High failure rate -> stop spending breadth on broken code; deepen repair, narrow search.
+        # This rule used to end by proposing the C5 `agentless` developer, guarded on that name being
+        # in `ctx.available_developers` and commented "only when C5 has landed". That arm could never
+        # fire — the name is in NO developer vocabulary (`core/config.py::DEVELOPER_BACKENDS`, its
+        # alias map, and therefore `engine/strategy.py::_available_developers`). It is
+        # removed rather than left as a promise the code cannot keep: had it ever been reached,
+        # `validate_strategy` would have dropped the field and recorded THIS rationale with no
+        # developer and no `developer_application` receipt — a decision the run's own history says
+        # was made and was not. C5 (localize -> generate-N -> validate) and exactly what is still
+        # missing are written down in `docs/BACKLOG.md` Theme C; landing it means adding the backend
+        # to the registry, whereupon `_available_developers` offers it here with no edit to this rule.
         if ctx.failure_rate > 0.4:
-            strat: Strategy = {"policy": "greedy", "fidelity": "adaptive",
-                               "rationale": f"high failure rate ({ctx.failure_rate:.0%}): "
-                                            "narrow to greedy + deeper repair",
-                               "source": "rule"}
-            if "agentless" in ctx.available_developers:
-                strat["developer"] = "agentless"   # only when C5 has landed
-            return strat
+            return {"policy": "greedy", "fidelity": "adaptive",
+                    "rationale": f"high failure rate ({ctx.failure_rate:.0%}): "
+                                 "narrow to greedy + deeper repair",
+                    "source": "rule"}
 
         # D3 (FML-bench): the adaptive greedy⇄broad cycle beats every FIXED strategy. The stall
         # rule below broadens the search when the leader stops moving; THIS rule closes the loop —
