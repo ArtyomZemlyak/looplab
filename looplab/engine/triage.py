@@ -111,7 +111,10 @@ def _failure_reason(res) -> str:
     crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
     run that simply printed no metric. Ordered most-specific first. (The "idea_rejected" reason
     is NOT classified here — it is set by `_evaluate` when the crash-triage agent judges the idea
-    fundamentally wrong, which then steers `debug_action` away from that lineage.)"""
+    fundamentally wrong, which ends the node. It used to steer `debug_action` away from that
+    lineage; F5 deleted the Debug node on 2026-08-13 and NO failed leaf is bred from now, so what
+    still reads the reason is the fold's historical debug-anchor map,
+    `events/card_ledger.py::_card_debuggable_leaf_candidate_ids`.)"""
     if getattr(res, "drift", None) is not None:
         return "drift"
     if res.timed_out:

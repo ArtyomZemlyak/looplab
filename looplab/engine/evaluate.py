@@ -2356,8 +2356,8 @@ class EvaluateMixin:
                         f"the last {_inert} repair attempts changed nothing at all — the engine "
                         "compared the repaired files against the ones already on disk and they are "
                         "byte-identical, so re-evaluating would re-run inputs this node has already "
-                        "run; abandoning in-node repair (a budgeted inter-node debug node can still "
-                        "pick it up)"))
+                        "run; abandoning in-node repair — the node ends here, and the loop's next "
+                        "proposal is fresh work rather than another attempt at this one"))
                     break
                 _stages = self._resolved_stages(node, workdir)
                 # `deleted` and the eval spec's `cwd` ride along so the predicate can fail closed on
@@ -2417,8 +2417,9 @@ class EvaluateMixin:
                              if _rolled_back else
                              "repair keeps changing earlier-stage (training) code — "
                              f"{full_retrains} full re-train(s) already spent")
-                            + "; abandoning in-node repair to avoid burning compute "
-                            "(a budgeted inter-node debug node can still pick it up)")
+                            + "; abandoning in-node repair to avoid burning compute — the node ends "
+                            "here, and the loop's next proposal is fresh work rather than another "
+                            "attempt at this one")
                         break
                     full_retrains += 1
                     # Recorded HERE, where the compute is actually committed, so a resume reads the

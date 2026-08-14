@@ -882,8 +882,11 @@ def _card_debug_leaf_children(st: RunState) -> dict[int, frozenset[int]]:
     The parent side is deliberately NOT filtered here (see ``_card_debuggable_leaf_candidate_ids``):
     a failed node the policy cannot see stays a candidate, so replay is at worst MORE permissive than
     the policy about the anchor itself.  That direction cannot run away — the lane never proposes
-    such a parent, and ``card_selection.eligible_cards`` rechecks every ready debug Card against the
-    live ``debug_action`` before it can be claimed, so it fails closed at the claim instead.
+    such a parent, and ``card_selection.eligible_cards`` refuses every ready debug Card at
+    ``_live_card_action``'s default branch before it can be claimed, so it fails closed at the claim
+    instead.  That recheck used to be against the live ``debug_action``; F5 deleted it, and a
+    historical ``debug`` Card is simply never live — a strictly stronger refusal than the one this
+    paragraph was written for, reached by the default branch rather than by a special case.
     """
     children: dict[int, set[int]] = {}
     for node in st.nodes.values():
