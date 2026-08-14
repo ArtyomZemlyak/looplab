@@ -1880,7 +1880,8 @@ def _apply_card_drops(st: RunState, ledger: _CardLedger, aliases: _CardAliases) 
     return dropped
 
 
-def _card_building_ids(st: RunState, ledger: _CardLedger, aliases: _CardAliases) -> set[str]:
+def _card_building_ids(st: RunState, ledger: _CardLedger,
+                       aliases: _CardAliases) -> dict[str, list[int]]:
     cards = ledger.cards
     _canon = aliases.canon
 
@@ -1900,8 +1901,15 @@ def _card_building_ids(st: RunState, ledger: _CardLedger, aliases: _CardAliases)
     # fold's readiness is what lets the FIRST one (including a crash-recovery re-entry) proceed, so the
     # two are not the same question. `tests/test_card_selection_guard.py::
     # test_an_outstanding_build_request_leaves_its_card_claimable_by_the_head_servicer` locks this.
-    building_card_ids: set[str] = set()
-    for marker in st.buildings.values():
+    #
+    # Returns canonical card id -> the marker NODE ids it owns, ascending. It was a bare `set[str]`
+    # until the status lane learned to publish its own subject (`Card.status_nodes`): both consumers
+    # only ever ask `cid in …`, which a mapping answers identically, and the ids were already in hand
+    # here. A `building` card is the ONE lane whose node is not in `Card.evidence` (see the paragraph
+    # above — a reservation is not evidence), so without this it was also the one lane that could
+    # name nothing at all.
+    building_card_nodes: dict[str, list[int]] = {}
+    for node_id, marker in st.buildings.items():
         if not isinstance(marker, dict):
             continue
         marker_card_id = _card_id(marker.get("card_id"))
@@ -1909,41 +1917,100 @@ def _card_building_ids(st: RunState, ledger: _CardLedger, aliases: _CardAliases)
             continue
         canonical_id = _canon(marker_card_id)
         if canonical_id in cards:
-            building_card_ids.add(canonical_id)
-    return building_card_ids
+            owned = building_card_nodes.setdefault(canonical_id, [])
+            if type(node_id) is int and node_id not in owned:
+                owned.append(node_id)
+    for owned in building_card_nodes.values():
+        owned.sort()
+    return building_card_nodes
 
 
 def _apply_card_status(st: RunState, ledger: _CardLedger, dropped: dict[str, dict],
-                       building_card_ids: set[str]) -> None:
+                       building_card_nodes: Mapping[str, list[int]]) -> None:
     cards = ledger.cards
 
     # 6) lifecycle `status` lane (frozen vocab; DISTINCT from the verdict). Dropped/merged-away wins;
-    #    else an explicit node_building.card_id reservation -> building; else a pending node -> running;
-    #    else evidence all trust-gated/breed-excluded/infeasible -> gated; else terminal evidence ->
-    #    evaluated; no evidence -> proposed.
+    #    else an explicit node_building.card_id reservation -> building; else a pending node whose
+    #    evaluation is PROVABLY not started -> coded, and any other pending node -> running; else
+    #    evidence all trust-gated/breed-excluded/infeasible -> gated; else evidence all FAILED (no
+    #    experiment reached a result) -> failed; else terminal evidence -> evaluated; no evidence ->
+    #    proposed.
+    #
+    # Every branch also stamps `Card.status_nodes` — the node ids THIS branch read. A status is a
+    # RECORD-side statement (docs/36): the operator reads it to decide whether to intervene, so it
+    # owes them the subject it is about. Derived here rather than beside `evidence` so it cannot
+    # drift from the lane it explains: one branch writes both, in one pass.
     for cid, c in cards.items():
         if cid in dropped or c.merged_into:
             c.status = "dropped"
+            c.status_nodes = []
             continue
         ev_nodes = [st.nodes[i] for i in c.evidence if i in st.nodes and not st.nodes[i].tombstoned]
-        if cid in building_card_ids:
+        # THE PENDING SPLIT, and it is the whole of the 2026-08-14 report. `card-2` on
+        # `runs/rubertlite-dr-unified-v7` read `running` while node 2 had been BUILT and never
+        # dispatched: `speculation_depth: 2` builds ahead ON PURPOSE, so admitted-but-not-started is a
+        # state the design produces deliberately and the board had no word for. A pending node is only
+        # PROVABLY not-started when its creator PROMISED the durable eval-start boundary
+        # (`Node.eval_start_boundary`, stamped on `node_created`) and no `node_eval_started` row was
+        # ever appended — exactly the pair `core/models.py::is_unevaluated_speculative_discard` proves
+        # the Layer-5 refund from, and for exactly the same reason: without the promise the absence of
+        # a boundary is not evidence, merely silence, and a log written before the boundary existed
+        # says the same nothing about a node whose sandbox has been training for forty minutes.
+        # FAIL CLOSED, and note which way closed points here — an unproven pending node keeps the
+        # `running` lane it has always had (3 of the 4 pending cards in the 45-run corpus), because
+        # the defect being removed is a claim that work is HAPPENING, and only a proven boundary can
+        # withdraw that claim without inventing a second one.
+        started_ids: list[int] = []
+        built_ids: list[int] = []
+        for n in ev_nodes:
+            if n.status is not NodeStatus.pending:
+                continue
+            if (getattr(n, "eval_start_boundary", False) is True
+                    and getattr(n, "eval_started", False) is not True):
+                built_ids.append(n.id)
+            else:
+                started_ids.append(n.id)
+        if cid in building_card_nodes:
             c.status = "building"
+            c.status_nodes = list(building_card_nodes[cid])
         elif not ev_nodes:
             c.status = "proposed"
-        # every pending Node collapses directly to running, so the frozen coded lane advertised by the
-        # model/UI is unreachable. A durable evaluation-start boundary now EXISTS —
-        # `events/types.py::EV_NODE_EVAL_STARTED`, folded to `Node.eval_started` by
-        # `_on_node_eval_started` — but it is stamped only on speculative attempt-zero lifecycles (see
-        # `Node.eval_start_boundary`) and this branch reads neither field, so the reason the lane cannot
-        # be derived is now THIS projection rather than missing evidence. Split the pending branch on
-        # `eval_started` (and widen the boundary past speculative nodes if the lane must be general), or
-        # remove the lane until coded-versus-running can be represented truthfully.
-        elif any(n.status is NodeStatus.pending for n in ev_nodes):
+            c.status_nodes = []
+        elif started_ids:
+            # A card with one running node and one merely built IS running: work is happening for it.
             c.status = "running"
+            c.status_nodes = sorted(started_ids)
+        elif built_ids:
+            # `coded` — "code exists and is waiting to run". A lane the model, the UI's CARD_COLUMNS
+            # table and BOTH engine readers (`search/card_selection.py`'s `{"coded", "running"}` pair)
+            # have carried as RESERVED since the board shipped, waiting on precisely this evidence.
+            # Occupying it is therefore behaviour-neutral by construction: `coded` is a strict subset
+            # of what was `running`, and every consumer already treats the two identically.
+            c.status = "coded"
+            c.status_nodes = sorted(built_ids)
         elif all((n.id in st.breed_excluded) or (not n.feasible) for n in ev_nodes):
             c.status = "gated"
+            c.status_nodes = sorted(n.id for n in ev_nodes)
+        elif all(n.status is NodeStatus.failed for n in ev_nodes):
+            # THE TERMINAL TWIN of the pending split. `evaluated` says "evidence has reached a
+            # verdict"; for a card whose every experiment FAILED, nothing was measured and the card's
+            # own `verdict` already says so ("open" — `_evidence_verdict`'s all-failed branch), so the
+            # two lanes contradicted each other. 21 of the 128 terminal cards in the 45-run corpus
+            # were in this state, and 3 of them are the strongest form: a speculative build the
+            # Layer-5 refund PROVED never ran (`is_unevaluated_speculative_discard`) — the same
+            # false claim as card-2's, from the other end of the lifecycle.
+            #
+            # ONE lane covers both the crash and the discard on purpose. They share the only statement
+            # that is true of both ("the experiments ended without a result"); splitting them would
+            # mint a second word for a distinction the card's attempts pane, `error_reason` and the
+            # refund receipt already carry. It is placed AFTER `gated` so it can only ever take cards
+            # that read `evaluated` today — `gated` is the lane that feeds `actionable=False` and the
+            # `card_terminal` selection blocker, and no card may cross INTO or OUT of it here.
+            c.status = "failed"
+            c.status_nodes = sorted(n.id for n in ev_nodes)
         else:
             c.status = "evaluated"
+            c.status_nodes = sorted(n.id for n in ev_nodes)
 
 
 def _card_enrichment_order(row: Mapping) -> tuple[int, int]:
@@ -2370,7 +2437,7 @@ def _apply_card_actionable(ledger: _CardLedger) -> None:
 
 
 def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: _CardAliases,
-                                    building_card_ids: set[str]) -> None:
+                                    building_card_nodes: Mapping[str, list[int]]) -> None:
     cards = ledger.cards
     card_origins = ledger.card_origins
     card_registrations = ledger.card_registrations
@@ -2464,7 +2531,7 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
         freshness = _card_action_freshness(st, c)
 
         work_states: set[str] = set()
-        if cid in building_card_ids:
+        if cid in building_card_nodes:
             # status='building' is a display lane, not a queue exclusion proof. Carry the exact marker
             # link into selection provenance so a future consumer fails closed on this in-flight owner.
             work_states.add("in_flight")
@@ -2576,12 +2643,12 @@ def derive_cards(
     control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
-    building_card_ids = _card_building_ids(st, ledger, aliases)
-    _apply_card_status(st, ledger, dropped, building_card_ids)
+    building_card_nodes = _card_building_ids(st, ledger, aliases)
+    _apply_card_status(st, ledger, dropped, building_card_nodes)
     _apply_card_enrichment(st, ledger, aliases, card_enrichment_omissions)
     _apply_card_ranking(st, identity, ledger, aliases)
     _apply_card_operator_overlays(st, ledger, aliases)
     _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
-    _apply_card_selection_readiness(st, ledger, aliases, building_card_ids)
+    _apply_card_selection_readiness(st, ledger, aliases, building_card_nodes)
     _publish_visible_cards(st, ledger, control_ids)

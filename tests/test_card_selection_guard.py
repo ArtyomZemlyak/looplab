@@ -748,8 +748,12 @@ def test_legacy_hash_and_node_only_card_id_are_never_native_identity():
     [
         (None, "running", "work_in_flight"),
         (("node_evaluated", {"node_id": 2, "metric": 0.6}), "evaluated", "work_terminal"),
+        # A superseded speculation reads `failed` since 2026-08-14, not `evaluated` — it produced no
+        # result and the lane now says so. What this test is ABOUT is unmoved and that is the point:
+        # both terminal lanes earn `work_terminal`, both stay `selection_ready=False`, and both stay
+        # `actionable` for board compatibility. The display split may not become a queue change.
         (("node_failed", {"node_id": 2, "reason": "superseded", "eval_seconds": 0}),
-         "evaluated", "work_terminal"),
+         "failed", "work_terminal"),
     ],
 )
 def test_linked_running_evaluated_and_superseded_work_is_not_selection_ready(
@@ -780,7 +784,7 @@ def test_linked_running_evaluated_and_superseded_work_is_not_selection_ready(
     assert card.selection_ready is False
     # Evaluated/superseded work may remain actionable for board compatibility, which is exactly why
     # callers must never substitute this legacy flag for selection_ready.
-    if expected_status == "evaluated":
+    if expected_status in {"evaluated", "failed"}:
         assert card.actionable is True
 
 

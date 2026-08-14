@@ -45,10 +45,31 @@ test('an elected-but-not-yet-started head occupies the optional Speculating lane
   assert.ok(!cardLanes(cardRows(live({ card_authoring: [] }))).some(([s]) => s === 'speculating'))
 })
 
+test('the two lanes the fold learned to derive appear only once occupied', () => {
+  // `coded` and `failed` are CARD_OPTIONAL_STATUSES: `coded` was RESERVED-and-unreachable until the
+  // fold's pending branch was split on the durable eval-start boundary (card-2 on
+  // runs/rubertlite-dr-unified-v7 read "Running" for a node that had been pre-built and never
+  // dispatched), and `failed` splits the cards that produced no result out of Evaluated. A serial
+  // run reaches neither, and an empty column is a question the operator has to answer to ignore.
+  const board = statuses => cardLanes(cardRows({
+    engine_running: true,
+    cards: Object.fromEntries(statuses.map((status, i) => [`card-${i}`, proposed(`card-${i}`, { status })])),
+  })).map(([status]) => status)
+
+  assert.ok(!board(['running', 'evaluated']).includes('coded'))
+  assert.ok(!board(['running', 'evaluated']).includes('failed'))
+  assert.ok(board(['coded', 'running']).includes('coded'))
+  assert.ok(board(['evaluated', 'failed']).includes('failed'))
+  // Dropped stays LAST however many optional lanes open up (cardLanes re-appends it).
+  assert.equal(board(['coded', 'failed', 'dropped']).at(-1), 'dropped')
+})
+
 test('the fold wins whenever it has anything to say', () => {
   // A stale/duplicated head must never pull a card BACK out of a replay-derived lane. Each of these
   // is a fact about the log; the overlay is a fact about a process that is running right now.
-  for (const folded of ['building', 'running', 'evaluated', 'gated', 'dropped', 'coded']) {
+  // `coded` and `failed` are in this list for the same reason as the rest — they are replay facts
+  // now, not reserved spellings.
+  for (const folded of ['building', 'running', 'evaluated', 'failed', 'gated', 'dropped', 'coded']) {
     const rows = cardRows(live({ cards: { 'card-0': proposed('card-0', { status: folded }) } }))
     assert.equal(rows[0].status, folded, `overlay overrode the folded ${folded} lane`)
     assert.equal(rows[0].authoring, undefined)

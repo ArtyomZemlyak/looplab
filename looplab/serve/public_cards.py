@@ -35,7 +35,8 @@ _SKIP = object()
 # this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "belief_id", "retry_of", "status", "verdict", "actionable", "identity", "selection_provenance",
+    "id", "belief_id", "retry_of", "status", "status_nodes", "verdict", "actionable", "identity",
+    "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
@@ -71,7 +72,11 @@ _NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
 _REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", "claim_refs"}
-_INT_LIST_FIELDS = {"evidence", "parent_ids"}
+# `status_nodes` rides the same projector as `evidence`: the node ids the lifecycle lane was derived
+# from. It is published because the board's own claim has to be checkable — an operator reading
+# "Running" must be able to name the node that is running, and until it existed a `building` card
+# named no node anywhere on the wire (a reservation is deliberately not evidence).
+_INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes"}
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}
 _PRIOR_RUN_KEYS = {

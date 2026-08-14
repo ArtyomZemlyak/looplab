@@ -276,15 +276,28 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
   `critic:hardcoded_metric` is the narrow high-precision critic exception.
 - **Cards board** — the run's bounded work-item projection, grouped into the replay-derived lifecycle
-  lanes (proposed / building / running / evaluated / gated / dropped) — *except while a build is in
+  lanes (proposed / building / **coded** / running / evaluated / **failed** / gated / dropped) —
+  *except while a build is in
   flight*, where the derived, never-folded `state.card_authoring` overlay replaces the folded status
   with the live authoring phase and the row keeps `authoring.folded_status` alongside it. The fold
   cannot express that head at all: folding the build *request* would make the servicer of that head
   unable to claim it, which is why the board once called a 2,128-second build "not started" for all
-  but 0.3 s of it. A **speculative pre-build is not a separate lane** — it rides those same six. `coded` is the one reserved lane the fold still never
-  produces: the log now *does* carry a durable eval-start boundary (`node_eval_started`, appended for
-  speculative prefetch nodes at the dispatch decision), but the card projection collapses every pending
-  node straight to `running`, so nothing distinguishes coded-but-not-started from running. Unknown future
+  but 0.3 s of it. A **speculative pre-build is not a separate lane** — it rides those same lanes,
+  and since 2026-08-14 it rides the right one. `coded` ("an experiment is built and waiting to run —
+  it has NOT started") stopped being reserved when `_apply_card_status` split its pending branch on
+  the durable eval-start boundary: a node whose creator promised `node_eval_started`
+  (`Node.eval_start_boundary`) and for which no such row exists is *provably* not running, which is
+  exactly what `speculation_depth ≥ 2` produces on purpose. A pending node that promised nothing
+  keeps `running` — silence is not evidence. `failed` ("every experiment ended without producing
+  one") is the same correction at the terminal end: a card whose experiments only crashed, or whose
+  speculative build was discarded before it ever ran, used to sit under Evaluated ("evidence has
+  reached a verdict") while its own **verdict** simultaneously read `open`. Neither lane is an
+  exclusion: `actionable`, `selection_ready` and every selection blocker are unchanged by both, and
+  `gated` is deliberately still evaluated *before* `failed` so no card can cross into or out of the
+  one lane that does exclude. Both are `CARD_OPTIONAL_STATUSES` — rendered only when occupied, so a
+  serial run's board is unchanged. Each card also publishes `status_nodes`, the node ids the lane was
+  derived from, so the board's claim is checkable; for a `building` card that is the reserved
+  `node_building` node, which `evidence` deliberately never carries. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately
