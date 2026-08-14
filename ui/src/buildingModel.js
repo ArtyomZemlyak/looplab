@@ -147,7 +147,15 @@ const PHASE_TEXT = {
   'build|novelty': (r) => `Checking experiment${r.nodeId != null ? ` #${r.nodeId}` : ''} is not a repeat…`,
   'build|reserve': (r) => `Reserving experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
   'build|implement': (r) => `Writing code for experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
-  'build|repair': (r) => `Repairing experiment${r.nodeId != null ? ` #${r.nodeId}` : ''}…`,
+  // NO `build|repair` row, and its absence is load-bearing rather than an oversight. That phase
+  // existed for one day: it bracketed `developer.repair` inside the `debug` operator's build branch,
+  // and F5 deleted that branch on 2026-08-13. `events/types.py::PROGRESS_PHASES` dropped it in the
+  // same change and `assert_progress_phase` now REFUSES the triple at every append site — so the row
+  // that stayed here was a label for a state nothing can emit, which is the same dead-vocabulary
+  // shape as a styled CSS class no component renders. `tests/test_phase_progress.py` derives this
+  // table from the registry, so the two can no longer drift in either direction: an unlabelled phase
+  // would render as the caller's fallback text, and a labelled non-phase is dead code that reads as
+  // coverage.
   // A RESUME is the other blank wait and it is deliberately absent, not forgotten. The engine cannot
   // emit a beacon from its run prologue: that is where the authorization fences, the finalize-scope
   // reconciliation and the width pins all read the raw log, and appended rows moved a PAID finalize

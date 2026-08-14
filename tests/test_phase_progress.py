@@ -202,3 +202,40 @@ def test_enabled_false_runs_the_body_and_emits_nothing(tmp_path):
     # A fact only the BODY can know reaches the `finished` row, never the already-appended `started`.
     assert "events" not in engine.store.read_all()[0].data
     assert engine.store.read_all()[1].data["events"] == 7
+
+
+def test_the_browser_label_table_names_exactly_the_phases_this_engine_emits():
+    """The UI's word for each beacon lives in `ui/src/buildingModel.js::PHASE_TEXT`, and NOTHING held
+    it against the registry that decides which beacons exist. Both directions cost something and
+    neither goes red on its own:
+
+      * a phase with NO row renders as `phaseLabel(...) === null`, i.e. the caller's generic
+        fallback — the very "Planning next experiment…" blankness the beacon was added to remove,
+        arriving as a silent regression the day a phase is added;
+      * a row with NO phase is a label for a state nothing can emit. `assert_progress_phase` REFUSES
+        an unregistered triple at every append site, so such a row is unreachable code that reads as
+        coverage. `build|repair` was in exactly that state: the phase it named was deleted with the
+        `debug` operator's build branch on 2026-08-13 and the label stayed, so the strip advertised a
+        "Repairing experiment #N…" state the engine can no longer produce.
+
+    This test lives in the PYTHON suite on purpose. `PROGRESS_PHASES` is Python and `python -m pytest`
+    is what runs on every change here; a cross-check parked only in `ui/test/` is the half that gets
+    skipped, which is how the two tables drifted in the first place.
+    """
+    import re
+    from pathlib import Path
+
+    model = (Path(__file__).resolve().parents[1] / "ui" / "src" / "buildingModel.js").read_text()
+    body = model.split("const PHASE_TEXT = {", 1)
+    assert len(body) == 2, "PHASE_TEXT must stay findable — the label table moved or was renamed"
+    # Stop at the closing brace of the object literal, so the module's later exports are not scanned.
+    literal = body[1].split("\n}", 1)[0]
+    # Comments carry example keys; a guard test must not be satisfiable by one (CLAUDE.md).
+    code = "\n".join(line for line in literal.splitlines()
+                     if not line.lstrip().startswith("//"))
+    labelled = set(re.findall(r"^\s*'([a-z_]+\|[a-z_]+)'\s*:", code, re.M))
+    registered = {f"{stage}|{phase}"
+                  for stage, phases in PROGRESS_PHASES.items() for phase in phases}
+    assert labelled == registered, (
+        f"unlabelled phases render the caller's fallback: {sorted(registered - labelled)}; "
+        f"labels for phases nothing emits are dead: {sorted(labelled - registered)}")

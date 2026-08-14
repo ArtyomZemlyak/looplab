@@ -27,6 +27,7 @@ service does with a move that did not finish.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import shutil
@@ -378,3 +379,100 @@ def test_the_absorbing_quarantine_ambiguous_phase_is_untouched():
         dt._check_transition(receipt, {"phase": "succeeded"})
     source = deletion_service.__dict__["_wedged"].__doc__
     assert "quarantine_ambiguous" in source and "does not move" in source
+
+
+def _one_directory_scans_empty(monkeypatch, name: str):
+    """A directory that reports EMPTY exactly once, and really is not.
+
+    The mid-walk arrival this module's own contract names: the walk sees nothing in `<name>`, marks
+    it emptied, and the `rmdir` that follows meets the entry that arrived in between — a real
+    `ENOTEMPTY` from the real filesystem, not a raised stub. Once armed it fires for ONE scan per
+    directory; every later scan is the real thing, which is the whole point of calling it a race.
+
+    Returns the `arm` switch rather than arming itself: the interrupted-move fixture walks the tree
+    with `rglob`, which goes through `os.scandir` too, so an always-on hide would be spent inside the
+    move instead of inside the absorption this is about.
+    """
+    real = os.scandir
+    hidden: set[str] = set()
+    armed: list[bool] = [False]
+
+    def _scandir(path):
+        resolved = str(path)
+        if armed[0] and Path(resolved).name == name and resolved not in hidden:
+            hidden.add(resolved)
+            return contextlib.nullcontext([])
+        return real(path)
+
+    monkeypatch.setattr(deletion_service.os, "scandir", _scandir)
+    return lambda: armed.__setitem__(0, True)
+
+
+def test_a_mid_walk_arrival_keeps_the_retry_promise_it_can_actually_keep(tmp_path, monkeypatch):
+    """The OVER-correction, and it is the same lie pointing the other way.
+
+    `retryable: false` carries the sentence "Retrying before that cannot change the answer", and the
+    UI acts on it — `RunList.jsx::finishRunDeletionReceipt` returns `blocked`, the bulk runner STOPS
+    the batch on it, and the operator is told the deletion "cannot continue until its storage is
+    resolved by hand". For a state that is a RACE that is a worse answer than the original wedge: it
+    sends a person to remove files out of a fenced run directory that the next press would have
+    absorbed by itself.
+
+    And a race is exactly what `_absorb_quarantine_residue` is for. Its own docstring says a
+    directory that gains an entry mid-walk "turns into an ENOTEMPTY refusal instead of a deletion
+    nobody authorized" — the refusal is right, the permanence claimed about it was not. Two of this
+    walk's reasons are proofs about the filesystem (a link, a non-regular file, a name the quarantine
+    already holds) and those keep `retryable: false`; every `OSError` on the `fuse.geesefs` mount
+    that motivated the whole function is a retry the server can still honour.
+    """
+    run_dir = _run(tmp_path)
+    _interrupted_geesefs_move(monkeypatch)
+    arm = _one_directory_scans_empty(monkeypatch, "__pycache__")
+    client = TestClient(make_app(tmp_path))
+    body = _identity(run_dir)
+
+    client.post(f"/api/runs/{RUN}/deletions", json=body)
+    arm()                       # the entry arrives while THIS attempt's walk is in flight
+    racy = client.post(f"/api/runs/{RUN}/deletions", json=body).json()
+
+    assert racy["code"] == "delete_quarantine_conflict"
+    assert any("could not be removed" in entry for entry in racy["blocking_entries"]), (
+        "the ENOTEMPTY has to be the reason, or this test is proving something else")
+    assert racy["retryable"] is True, (
+        "a directory that gained an entry mid-walk is absorbed by the NEXT attempt; telling the "
+        "operator a retry cannot change it sends them to edit a fenced run directory by hand")
+    assert "cannot change the answer" not in racy.get("remediation", "")
+    assert racy["phase"] == "quarantining", "the monotonic index still does not move"
+
+    # …and the promise is kept: nothing touches the tree between these two lines either.
+    assert client.post(f"/api/runs/{RUN}/deletions", json=body).json()["status"] == "succeeded"
+    assert not run_dir.exists()
+
+
+def test_every_residue_reason_declares_whether_a_retry_could_move_it(tmp_path):
+    """The classification is a REGISTRY of one bit per refusal, and an unmarked reason is the way
+    this defect returns. `_residue_is_wedged` fails safe — an entry with no marker reads as racy, so
+    a forgotten one keeps offering a retry rather than declaring a run permanently owned — which is
+    exactly why nothing else would go red. Derived from the walk's own reasons rather than pinned.
+    """
+    source = tmp_path / "source"
+    quarantine = tmp_path / "quarantine"
+    quarantine.mkdir()
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "kept.bin").write_text("residue", encoding="utf-8")
+    os.symlink(tmp_path, source / "elsewhere")
+    (quarantine / "sub").mkdir()
+    (quarantine / "sub" / "taken.bin").write_text("not this move's", encoding="utf-8")
+    (source / "sub" / "taken.bin").write_text("collides by name", encoding="utf-8")
+
+    blocked = _absorb_quarantine_residue(source, quarantine)
+
+    assert blocked, "the fixture must actually block"
+    assert all(hasattr(entry, "permanent") for entry in blocked), (
+        f"unmarked residue reasons: {[e for e in blocked if not hasattr(e, 'permanent')]}")
+    # Both proofs here, so this residue really is wedged and must keep saying so.
+    assert deletion_service._residue_is_wedged(blocked) is True
+    assert deletion_service._residue_is_wedged([]) is False
+    # …and one racy reason is enough to keep the retry promise.
+    assert deletion_service._residue_is_wedged(
+        [*blocked, deletion_service._Residue("a mount hiccup", permanent=False)]) is False

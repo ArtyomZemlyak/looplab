@@ -919,10 +919,22 @@ export function boundedLedgerText(value, max = 360) {
 // the concept sections of the atlas envelope (`explored`/`thin_coverage` — up to 24 rows carrying 6
 // run references each) and the `concept_capsules.jsonl` read receipt beside them are no longer
 // listed. They are still SERVED; nothing renders them, so nothing keeps them.
+//
+// THE OTHER DIRECTION IS THE ONE THAT BITES, and it had: a field this list omits that something
+// DOES render is not a smaller payload, it is a render branch no server response can reach — and it
+// is silent, because the field simply arrives `undefined`. Five of `CrossRunClaim`'s were in exactly
+// that state (`decision`/`note`/`by`/`at`, `polarity`, `sources`, `verification`,
+// `evidence_digest`), so `ClaimsCuration.jsx`'s Decision line, the polarity half of its metric line
+// and its whole "Sources and verification" disclosure were dead markup while
+// `claimsCurationModel.js::normalizeClaim` went on bounding and validating all five. On a Claims &
+// Curation screen the steward's own verdict — who ratified a claim, when, and why — is the thing an
+// operator came for. `ui/test/claimsCuration.test.js` now derives the model's wire reads and fails
+// on any name that is not here, so the two halves cannot drift apart again.
 const CROSS_RUN_STATE_FIELDS = `portfolio_id n_runs n_contested
   claim_source contradictions
   revisions claims n revision v status complete entries limit source_complete
-  runs run_id metric
+  runs run_id metric polarity sources verification evidence_digest
+  decision note by at
   claim_uid statement epistemic maturity decision_fresh n_support n_oppose n_unverified
   n_contradicts support oppose unverified contradicts scopes receipt_known read_complete
   research_source_complete lessons research snapshot_digest rows_total rows_retained
