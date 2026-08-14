@@ -26,9 +26,9 @@ import anyio
 import pytest
 
 from looplab.adapters.repo_task import EvalSpec, RepoTask
-from looplab.core.models import (EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED, EXTRA_METRIC_UNKNOWN,
-                                 declared_extra_metrics_only, extra_metric_channel,
-                                 normalize_extra_metric_channels)
+from looplab.core.models import (EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED, EXTRA_METRIC_ENGINE,
+                                 EXTRA_METRIC_UNKNOWN, authenticated_extra_metrics_only,
+                                 extra_metric_channel, normalize_extra_metric_channels)
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -209,14 +209,18 @@ def test_the_gate_drops_the_undeclared_values_and_keeps_the_declared_one(tmp_pat
 
 
 def test_the_gate_is_expressed_over_the_tag_so_the_two_cannot_drift():
-    """`declared_extra_metrics_only` keeps ONLY what is tagged `declared` — an `unknown` value is
-    dropped with the auto ones, because a reader that cannot prove a value was declared must not
-    admit it here either."""
-    extras = {"declared_one": 1.0, "auto_one": 2.0, "untagged": 3.0}
-    channels = {"declared_one": EXTRA_METRIC_DECLARED, "auto_one": EXTRA_METRIC_AUTO}
-    kept, kept_channels = declared_extra_metrics_only(extras, channels)
-    assert kept == {"declared_one": 1.0}
-    assert kept_channels == {"declared_one": EXTRA_METRIC_DECLARED}
+    """`authenticated_extra_metrics_only` keeps what the CANDIDATE did not author — an `unknown`
+    value is dropped with the auto ones, because a reader that cannot prove where a value came from
+    must not admit it here either. It keeps `engine` beside `declared`, and each kept value keeps
+    its OWN channel: flattening them to `declared` would relabel a harness diagnostic as an
+    operator's reading."""
+    extras = {"declared_one": 1.0, "auto_one": 2.0, "untagged": 3.0, "probe_one": 4.0}
+    channels = {"declared_one": EXTRA_METRIC_DECLARED, "auto_one": EXTRA_METRIC_AUTO,
+                "probe_one": EXTRA_METRIC_ENGINE}
+    kept, kept_channels = authenticated_extra_metrics_only(extras, channels)
+    assert kept == {"declared_one": 1.0, "probe_one": 4.0}
+    assert kept_channels == {"declared_one": EXTRA_METRIC_DECLARED,
+                             "probe_one": EXTRA_METRIC_ENGINE}
 
 
 def test_the_gate_is_on_by_default(tmp_path):
@@ -288,3 +292,120 @@ def test_the_flag_is_not_pinned_in_run_started(tmp_path):
     from looplab.search.speculation_quality import _CALIBRATION_RUN_STARTED_FIELDS
     assert "auto_extra_metrics" not in _CALIBRATION_RUN_STARTED_FIELDS
     assert "auto_extra_metrics" not in orch.RUN_START_PINNED_FIELDS
+
+
+# ------------------------------------------- the THIRD channel: the engine's own spliced diagnostic
+#
+# The residual today's tagging left open, stated in its own words: "tagging makes that visible; it
+# does not stop a version number from being CALLED a metric." Re-measured over the WHOLE corpus (238
+# `*.jsonl` under `runs/`, not the three logs the first count sampled): 1,642 values, 10 distinct
+# keys, 1,636 of them the CUDA probe's four. The separating property is not the key's name and not
+# its shape — it is who authored the print statement, which the engine can answer, byte-exactly, for
+# the source it splices itself.
+
+
+def test_the_probe_declares_its_own_keys_only_behind_its_byte_exact_source():
+    """THE RULE, as a truth table. The key set is consulted ONLY after the artifact's source is
+    authenticated — so the name alone can never promote anything."""
+    from looplab.agents.calibration import (SPECULATION_CUDA_PROBE_CODE_PREFIX,
+                                            SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
+                                            engine_declared_extra_metric_keys)
+
+    assert engine_declared_extra_metric_keys(SPECULATION_CUDA_PROBE_CODE_PREFIX + "print(1)\n") == (
+        frozenset(SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS))
+    # THE TRAP THIS CLOSES, and the reason a name list would have been wrong: an agent-authored
+    # script printing the probe's own key names declares nothing at all.
+    assert engine_declared_extra_metric_keys(
+        'import json; print(json.dumps({"speculation_cuda_probe_v": 1}))\n') == frozenset()
+    # One byte off the front is not the engine's source.
+    assert engine_declared_extra_metric_keys(
+        " " + SPECULATION_CUDA_PROBE_CODE_PREFIX) == frozenset()
+    # Total: a caller may pass whatever it has, and the fail-safe answer is always `auto`.
+    for junk in (None, 123, b"bytes", ["code"]):
+        assert engine_declared_extra_metric_keys(junk) == frozenset()
+
+
+def test_the_real_calibration_artifact_tags_its_four_keys_engine_and_nothing_else(tmp_path):
+    """Driven against the artifact the calibration DEVELOPER really builds, not a reconstruction —
+    and with a genuine measurement printed beside the probe's keys, because the whole claim is that
+    the two populations separate. `stdout_extra_metric_channels` takes the exact bytes the sandbox
+    is about to run, which is the one place source and output meet."""
+    from looplab.agents.roles import (SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
+                                      ToyObjectiveDeveloper)
+    from looplab.core.models import Idea
+    from looplab.runtime.sandbox import stdout_extra_metric_channels
+
+    code = ToyObjectiveDeveloper(calibration_gpu_probe=True).implement(
+        Idea(operator="draft", params={"x": 1.25, "y": -2.5}, rationale="t",
+             footprint={"gpus": 1}))
+    extras = {**{k: 1.0 for k in SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS}, "train_auc": 0.99}
+
+    channels = stdout_extra_metric_channels(extras, code)
+    assert channels == {**{k: EXTRA_METRIC_ENGINE for k in SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS},
+                        "train_auc": EXTRA_METRIC_AUTO}
+    # The SAME extras off an ordinary artifact stay `auto` in every position.
+    assert set(stdout_extra_metric_channels(extras, "print('hi')\n").values()) == {EXTRA_METRIC_AUTO}
+
+
+def test_a_solution_tier_run_of_engine_owned_source_records_engine_end_to_end(tmp_path, monkeypatch):
+    """The capture site DRIVEN — a real subprocess, a real stdout line, a real `RunResult`.
+
+    The CUDA prefix cannot run without a device, so the engine-owned source here is a stand-in
+    spliced the same way; what is real is the whole path from `code` through `json_line_extras` to
+    the recorded channel map. The byte-exact half of the rule is the test above."""
+    import looplab.agents.calibration as calibration_mod
+
+    probe = "# engine-owned probe source\n"
+    # The sandbox resolves the classifier through the calibration MODULE on every call, so the probe
+    # that owns the declaration is also the one seam a test patches — there is no copy in `runtime`
+    # that could answer differently.
+    monkeypatch.setattr(
+        calibration_mod, "engine_declared_extra_metric_keys",
+        lambda code: (frozenset({"harness_v", "device_count"})
+                      if isinstance(code, str) and code.startswith(probe) else frozenset()))
+
+    code = probe + ('import json; print(json.dumps('
+                    '{"metric": 1.0, "harness_v": 2.0, "device_count": 1.0, "recall": 0.25}))\n')
+    res = SubprocessSandbox().run(code, str(tmp_path))
+
+    assert res.extra_metrics == {"harness_v": 2.0, "device_count": 1.0, "recall": 0.25}
+    assert res.extra_metrics_provenance == {"harness_v": EXTRA_METRIC_ENGINE,
+                                            "device_count": EXTRA_METRIC_ENGINE,
+                                            "recall": EXTRA_METRIC_AUTO}
+
+
+def test_the_gate_no_longer_deletes_the_cuda_proof_the_receipt_path_re_derives():
+    """WHY THE THIRD CHANNEL IS WORTH A CHANNEL, proved against the real validator.
+
+    `search/speculation_quality.py::_validate_cuda_probe_artifact` admits a calibration node by its
+    EXACT extra-metric key schema. Before the engine channel existed, the only way to express
+    `auto_extra_metrics=false` was "keep the declared ones", which dropped all four probe keys and
+    made the validator refuse — so the gate and the calibration receipt could not both be had. Now
+    the gate keeps them, because they were never the candidate's numbers."""
+    from looplab.agents.calibration import (SPECULATION_CUDA_PROBE_CODE_PREFIX,
+                                            SPECULATION_CUDA_PROBE_DEVICE_COUNT_METRIC,
+                                            SPECULATION_CUDA_PROBE_STATIC_EXTRA_METRICS)
+    from looplab.core.models import NodeStatus
+    from looplab.search.speculation_quality import _validate_cuda_probe_artifact
+
+    extras = {**dict(SPECULATION_CUDA_PROBE_STATIC_EXTRA_METRICS),
+              SPECULATION_CUDA_PROBE_DEVICE_COUNT_METRIC: 1}
+    channels = {k: EXTRA_METRIC_ENGINE for k in extras}
+
+    kept, kept_channels = authenticated_extra_metrics_only(extras, channels)
+    assert kept == extras, "the gate must not delete the engine's own proof"
+    assert set(kept_channels.values()) == {EXTRA_METRIC_ENGINE}
+
+    class _Node:
+        code = SPECULATION_CUDA_PROBE_CODE_PREFIX + "print('x')\n"
+        status = NodeStatus.evaluated
+        extra_metrics = kept
+
+    _validate_cuda_probe_artifact(_Node())        # accepts — no exception is the assertion
+
+    # ...and the counter-proof: keeping only `declared` is what used to happen, and it refuses.
+    class _Stripped(_Node):
+        extra_metrics = {}
+
+    with pytest.raises(ValueError):
+        _validate_cuda_probe_artifact(_Stripped())

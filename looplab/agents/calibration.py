@@ -143,3 +143,59 @@ if _looplab_cuda_cleanup_failures:
 _looplab_cuda_device_count_value = int(_looplab_cuda_count.value)
 
 '''
+
+
+def engine_declared_extra_metric_keys(code: object) -> frozenset[str]:
+    """The extra-metric keys the ENGINE put on this artifact's stdout line, not the candidate.
+
+    THE PROBLEM THIS ANSWERS. `runtime/sandbox.py::json_line_extras` harvests every numeric key off
+    an artifact's final JSON line, and the record then calls each of them a metric. Measured over
+    the preserved corpus (238 logs under `runs/`, 1642 recorded values, 10 distinct keys), the
+    population that arrives through that door is not one population but two:
+
+      * 1636 values / 4 keys — `speculation_cuda_probe_v`, `device_count`, `alloc_bytes`,
+        `device_ordinal`. A schema VERSION, a hardware inventory count and two request constants.
+        None of them measures the experiment. Every one of them was printed by THIS module's source.
+      * 6 values / 6 keys — `train_auc`, `test_auc`, `cv_mean_auc`, `cv_std_auc`, `std`,
+        `overfitting_gap`. Genuine measurements, printed by an agent-authored script.
+
+    WHAT ACTUALLY SEPARATES THEM, after the alternatives were tried against that corpus:
+
+      * NOT the name. A name list is the heuristic `json_line_extras` already carries (`trials`,
+        `params`, `seconds`, `epoch`, `step`); adding four entries is the same heuristic one entry
+        longer, and it is wrong in both directions — `alloc_bytes` and `device_count` are perfectly
+        good measurements for a memory benchmark, and an agent that prints
+        `{"metric": x, "device_count": 8}` would be silently promoted by a name match.
+      * NOT the shape. "A value that never varies is a constant, not a measurement" is untestable
+        here (each of the 6 genuine values occurs exactly ONCE, so all ten keys are trivially
+        constant), prospectively false (`device_count` IS a measurement of the box — the receipt
+        validator range-checks it), and undecidable at capture anyway: variance is a cross-node
+        property, so a capture-time tag derived from it would change as later nodes arrived and the
+        record would stop being deterministic.
+      * WHO WROTE THE PRINT STATEMENT. That is the one property that separates the two populations
+        cleanly, and the engine can answer it for exactly the artifacts it authored itself.
+
+    So this is not a key registry with a name check bolted on: the key set is consulted ONLY after
+    the artifact's source is authenticated as engine-owned, byte-exactly, by the same
+    `SPECULATION_CUDA_PROBE_CODE_PREFIX` comparison `search/speculation_quality.py::
+    _validate_cuda_probe_artifact` uses to admit the proof downstream. An agent script that prints
+    `speculation_cuda_probe_v` stays `auto`, because its source does not carry the prefix.
+
+    NOT AN IN-SOURCE MARKER, deliberately, though the probe already carries one
+    (`# LOOPLAB_FOOTPRINT:`) and a `# LOOPLAB_EXTRA_METRICS: [...]` line would be the obvious
+    generalization. The candidate WRITES its own source, so a self-declaring comment is a
+    self-promotion primitive: any agent could tag its numbers authenticated. The byte-exact prefix
+    check is what makes the declaration the engine's rather than the artifact's, and once it is
+    required the marker adds nothing.
+
+    THE HONEST LIMIT. This removes the ambiguity only where the engine authored the writer. For an
+    agent-authored artifact nothing available at capture separates a diagnostic from a measurement —
+    a script printing `{"metric": .9, "seed": 42, "n_train": 5000, "val_auc": .88}` offers no signal
+    that `seed` is bookkeeping and `val_auc` is a result — and there `auto` remains the complete and
+    correct answer: the candidate said it, nobody checked it. Total by construction (any non-string,
+    any other artifact) so a caller can pass whatever code it has, and the fail-safe direction is
+    always `auto`.
+    """
+    if not isinstance(code, str) or not code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX):
+        return frozenset()
+    return frozenset(SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS)
