@@ -36,12 +36,12 @@ plane is deterministic, and the Search / Memory / Knowledge stores feed the loop
 - **Offline, or any OpenAI-compatible LLM** — no keys or Docker for local runs; change `base_url` to drive it with Ollama, vLLM, SGLang, or OpenAI. See [LLM & coding agents](docs/guide/llm-and-agents.md).
 - **Describe the task in words** — Genesis (the LLM planner) authors the whole task from a `--goal`, including where your data lives. See [Generating code](docs/guide/generating-code.md).
 - **Nine task adapters** — from a toy objective to your own dataset, an existing repo, or real Kaggle competitions. See [Tasks](docs/guide/tasks.md).
-- **The agent writes and repairs the code** — on a fresh repo node the Developer runs three phases (**stages → plan → implement**): it declares the eval pipeline, decomposes the work into atomic steps, then writes the code; a self-repair operator feeds failing code plus stderr back to fix it in one focused session. See [Generating code](docs/guide/generating-code.md).
+- **The agent writes and repairs the code** — on a fresh repo node the Developer runs three phases (**stages → plan → implement**): it declares the eval pipeline, decomposes the work into atomic steps, then writes the code, and it can **run a short probe program against the real environment** while it authors instead of guessing at an API (`developer_probe`, on). A failure is then repaired **inside the node that failed** — there is no separate Debug node — and what stops the repair loop is a **judgment, not a count**: `inline_repair_attempts` now defaults to `0` (no count cap), and the loop ends when the crash-triage model says it no longer knows how to fix this, when the Developer itself answers *"stuck"*, or when the repair critic finds the attempts circling one cause. See [Generating code](docs/guide/generating-code.md).
 - **Cross-run memory and knowledge** — cases, lessons, causal meta-notes, skills, and a knowledge base accumulate across runs, both injected into prompts and **agentically retrievable**. See [Memory & knowledge](docs/guide/memory.md).
-- **Adaptive search** — MCTS/ASHA policies, a novelty gate, and stagnation-driven broadening of the idea space. See [Concepts](docs/guide/concepts.md).
-- **Trust tiers and sandbox** — a subprocess sandbox by default (no Docker), a `--network none` Docker tier for untrusted code, and reward-hack / leakage gates on scoring. See [Deployment](docs/guide/deployment.md).
-- **Live web UI and terminal control plane** — a React control plane with a full execution trace, or steer runs by chat from the terminal. See [Web UI](docs/guide/ui.md).
-- **Verified, returnable results** — held-out grading, MLE-bench scoring, and a returnable [live-scenario suite](docs/guide/live-scenarios.md); export the champion to MLflow or a notebook.
+- **Adaptive search** — MCTS/ASHA policies, a novelty gate, and stagnation-driven broadening of the idea space. The **research decides the run's width** (`proposal_width`, on): the box settles it at launch, then the hardware the open proposals actually declare re-pins it. And production is paced by **occupancy**, not by a node count — while an evaluation is running and the board behind it is thin, the engine keeps proposing, so a multi-hour eval no longer stalls the pipeline behind it. See [Concepts](docs/guide/concepts.md).
+- **Trust tiers and sandbox** — a subprocess sandbox by default (no Docker), a `--network none` Docker tier for untrusted code, and reward-hack / leakage gates on scoring. Each candidate also runs in **its own copy** of your code and may only read that copy — see [What a node may read](#what-a-node-may-read). See [Deployment](docs/guide/deployment.md).
+- **Live web UI and terminal control plane** — a React control plane with a full execution trace, or steer runs by chat from the terminal. The chat can also **keep watching for you**: ask it to tell you when a run finishes, and the watch is a durable record that survives a page reload, a closed tab and a server restart. See [Web UI](docs/guide/ui.md).
+- **Verified, returnable results** — held-out grading, MLE-bench scoring, and a returnable [live-scenario suite](docs/guide/live-scenarios.md); export the champion to MLflow or a notebook. A metric can also name **what it is a claim about** (`eval.metric.subject`), which the engine binds to that artifact's content identity as the score stage starts.
 
 ---
 
@@ -122,7 +122,14 @@ task:
 settings:
   backend: llm
   max_nodes: 20
+  eval_env: {DATA_ROOT: /data/local}   # env vars set for every eval stage of every node
 ```
+
+`eval_env` is the run-level **declared environment**: those variables are set for every stage of
+every node's evaluation, on both sandbox tiers (`-s eval_env=NAME=VALUE` on the command line,
+comma-separated for several). Secret-shaped names are refused rather than redacted — a declared
+environment is written verbatim into the run's config snapshot, and LoopLab has no secret store to
+route one to.
 
 Open `runs/demo/tree.html` for a static lineage view of every candidate the loop tried.
 
@@ -206,6 +213,29 @@ The sandbox tier is chosen by **trust mode**, not your environment:
 
 A one-command Docker Compose stack (LLM + UI + engine) is available for the hosted scenario — see
 [Deployment](docs/guide/deployment.md).
+
+## What a node may read
+
+Every candidate runs in **its own copy** of your repo, and a node's eval may read only that copy —
+plus the run directory, the data and reference paths you declared, and the usual machine tiers
+(interpreter, site-packages, model cache, `/tmp`). Reading back into your editable **source tree** is
+refused, loudly, in the child process, with a message naming the fix.
+
+That boundary exists because "did the node produce this number?" is not the same question as "did the
+stage write its output file?". A run once trained a good model and then scored *a human's* checkpoint
+that an absolute path in an editable config still pointed at — the artifact contract passed, and the
+foreign number is what got recorded.
+
+| setting | default | what it does |
+|---|---|---|
+| `read_fence` | **`deny`** | Refuse reads of the editable source tree from inside the node's eval. `warn` logs and lets the read through (the honest setting for one run while you find out what your pipeline actually reads); `off` installs nothing. No-op for a task with no editable source |
+| `metric_subject` | **`audit`** | Record what the metric is *about*: `eval.metric.subject` names a workdir-relative artifact, bound to its content identity at the score stage's start. `audit` records and never blocks; **`require`** additionally makes an *unbound* metric unselectable — off by default because no shipped task declares a subject yet, so requiring one today would leave a run with no champion; `off` records nothing |
+| `landlock` | **`off`** | A **kernel** read allow-list applied to the eval process and everything it spawns, so a native reader (`safetensors`, a non-Python child) is covered too — the audit hook behind `read_fence` can only see reads that reach Python. Off because no real GPU eval has been completed under it yet; validate a run's derived ruleset with `looplab landlock-check RUN_DIR` before turning it on |
+
+The one real false positive is a large untracked in-tree input that a node's copy does not carry: the
+run then fails loudly, naming all three fixes — a `data:` mount, a `references:` mount, or
+`seed_mode: "all"`. Details in [Tasks](docs/guide/tasks.md) and
+[Configuration](docs/guide/configuration.md).
 
 ## Documentation
 

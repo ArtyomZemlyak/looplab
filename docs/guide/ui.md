@@ -218,6 +218,32 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   read-only watch is re-armed automatically; one that could have MUTATED is left `interrupted` with
   the reason, because its turn may have applied half a change and re-entering it would apply the
   other half twice.
+
+    **What you actually do.** You arm a watch by *typing* — there is no "new watch" button, and the
+    UI has no client binding for the POST route; your sentence becomes a `watch_run` / `watch_every`
+    tool call. What you get back is a **strip above the thread** listing every standing watch: what
+    it is waiting for, its status, when it next checks, its wake-up count against its budget, the
+    standing instruction, and a **Stop** button. It hides itself when nothing is standing, polls
+    every 5 s while anything is active and every 30 s otherwise, and keeps the last known list rather
+    than blanking if a poll fails. A settled watch ages out of the strip after ten minutes — except
+    an `interrupted` one, which never does, because that is the single status that asks you for
+    something: check what its half-applied turn did, then re-arm it.
+
+    **The two conditions behave differently on purpose.** A **run-state** watch is *one-shot*: it
+    fires when the server first observes one of the states you named and then retires as `done` —
+    "watch it again" is a new watch. A **schedule** repeats every N seconds (15 s to 24 h; 300 s if
+    you do not say) until it exhausts its wake-up budget or its lifetime, and only a schedule shows a
+    budget in the strip. The other statuses are `armed`, `waking`, `cancelled`, `expired` (budget or
+    lifetime reached) and `failed` (the run vanished, or the wake-up turn raised). Every bound is
+    **refused rather than clamped** — a 2-second interval, a ninth active watch on one chat, an
+    unknown run state — and the refusal is one sentence naming the fix, both in chat and as an HTTP
+    `400 {"code": "watch_refused"}`. A wake-up may not arm further watches, so a watch population
+    cannot grow itself.
+
+    The implementation is `looplab/serve/assistant_watch.py`, and it deliberately holds no domain
+    authority: it appends no event and names no control intent, its only import above `core` is the
+    run-phase vocabulary its trigger waits on, and the *server* — not the agent — evaluates the
+    trigger, so an agent can never be woken because it declared its own wake condition met.
 - **A cut-short turn says so** — a long turn can end for five reasons that are not "the model
   finished": the wall clock, the turn budget, stuck-detection, a model that will not emit, and the
   convergence ceiling. All five now append a notice naming which one and how far it got, and set
@@ -266,14 +292,17 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   that test the same hypothesis, while the distinct-belief projection avoids duplicate prompt/ranking rows. The
   operator **+ Add** / **abandon** affordances write `hypothesis_added` / `hypothesis_updated` control
   events that seed and update cards.
-  Note the board still renders **one row per work item**, and a `debug` RETRY of a failed card is a
-  separate work item with its own action digest — correctly, since a repair build is a different
-  executable action. Two such rows therefore show the same hypothesis twice (measured live in
-  `runs/rubert-dr-0807`: a draft card and its debug retry, byte-identical but for `idea.operator`).
-  The fold now derives the join the board needs — `Card.belief_id` (the seed-statement digest two work
-  items share) and `Card.retry_of` (the card a debug card repairs) — but neither is on the wire yet:
-  `serve/public_cards.py::_FIELDS` is an explicit allow-list, so publishing them is a deliberate
-  separate step. Until then the board can group by the already-published `seed_statement`.
+  Note the board renders **one row per work item**. That used to mean a hypothesis could appear
+  twice: a `debug` RETRY of a failed card was its own work item with its own action digest —
+  correctly, since a repair build was a different executable action — so a draft card and its debug
+  retry sat side by side, byte-identical but for `idea.operator` (measured live in
+  `runs/rubert-dr-0807`). **The Debug node was removed on 2026-08-13**, and nothing mints a `debug`
+  idea any more, so no new run produces that pair; runs from before it still show one, and the
+  mint-side attach gate is kept fail-closed for a retry operator reintroduced under another name.
+  The join the board needs is derived by the fold and **is** published: `Card.belief_id` (the
+  seed-statement digest two work items share) and `Card.retry_of` (the card a retry repairs — `None`
+  on every card a current run produces) are both in `serve/public_cards.py::_FIELDS`, the explicit
+  wire allow-list.
 - **Inspector context** — the Inspector is one component mounted from three hosts (the Lineage
   workspace, the Cards board's detail pane and the Concepts tree's), and it takes its host awareness
   as callbacks rather than a view name. **Show in Lineage** appears only when that jump goes
