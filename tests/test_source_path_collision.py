@@ -247,6 +247,31 @@ def test_an_unparseable_or_expectless_manifest_yields_no_declaration_and_no_refu
         assert manifest_path_collisions(f"{SRC}/anything/at/all", text, [(".", SRC)]) == []
 
 
+@pytest.mark.parametrize("text", [
+    "5", "true", "1.5", "null", '"hi"',                 # a parseable NON-object document
+    '{"stages": 7}', '{"stages": 1.5}', '{"stages": true}',   # parseable, `stages` not a list
+    '{"stages": {"a": {"name": "t"}}}',
+    '{"stages": [{"name": "t", "expect": 7}]}',         # `expect` not an object
+    '{"stages": [{"name": "t", "expect": {"files": 3}}]}',    # `files` not a list
+])
+def test_a_parseable_but_wrongly_shaped_manifest_is_silence_and_not_a_crash(text):
+    """The sibling above covers UNPARSEABLE text. This covers the harder half: JSON that parses
+    fine and is the wrong SHAPE.
+
+    The manifest is model-authored and `looplab_stages.json` is an accepted hand-written Developer
+    surface, so `declare_stages`' validation is not on this path. `declared_output_paths` is then
+    called from `_write` on every SUBSEQUENT write in the session, and `tool_loop._run_tool_call`
+    does not contain a tool exception — so a raise here surfaces as a Developer CRASH, which is a
+    node terminal plus a run-level auto-pause. Driven through the real tool, not the helper alone:
+    the manifest write must succeed, the next write must return a string, and nothing may raise.
+    """
+    assert declared_output_paths(text) == []
+    assert manifest_path_collisions(f"{SRC}/anything/at/all", text, [(".", SRC)]) == []
+    w = _tools()
+    assert w.execute("write_file", {"path": "looplab_stages.json", "content": text}).startswith("wrote")
+    assert w.execute("write_file", {"path": "train.py", "content": "print(1)\n"}).startswith("wrote")
+
+
 def test_the_refusal_names_both_ways_out():
     """A refusal naming only the path is answered with a different absolute path. It has to say that
     the DECLARATION is equally movable, and it has to name the mount channel — which is the same
