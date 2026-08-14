@@ -540,13 +540,15 @@ class ForesightPanelResearcher(WrapsResearcher):
         was legitimately SHOWN went missing and the proposal fell back to statement-hash linkage —
         resurrecting exactly the lost-claim/twin-card shape the Card work closed.
 
-        Both base researchers publish `_visible_board_cards` — INSIDE `propose`, as its last act
-        before returning. So this must be read AFTER the call whose Idea it is about to bind, never
-        before: reading it first binds against the PREVIOUS call's window, which is not a drift but
-        a guaranteed one-call lag, and for k>1 it binds all k ideas — each from a different base
-        attempt — against one stale window. `_bind_base_proposal` is the only caller for that
-        reason. The recomputation is a fallback for a base that publishes nothing, where this
-        panel's own cursor is the sole rotation there is."""
+        Both base researchers publish `_visible_board_cards` INSIDE `propose` — right after
+        bumping `_board_prompt_attempt`, before the prompt is even assembled, so it is already the
+        CURRENT call's window by the time the model is asked and it survives the `except`/fallback
+        path that still returns an Idea. What matters here is only that the assignment happens
+        inside the call: reading it BEFORE `propose` therefore yields the PREVIOUS call's window,
+        which is not a drift but a guaranteed one-call lag, and for k>1 binds all k ideas — each
+        from a different base attempt — against one stale window. `_bind_base_proposal` is the only
+        caller for that reason. The recomputation is a fallback for a base that publishes nothing,
+        where this panel's own cursor is the sole rotation there is."""
         published = getattr(self.base, "_visible_board_cards", None)
         if isinstance(published, list):
             return published

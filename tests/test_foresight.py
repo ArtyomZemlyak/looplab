@@ -360,8 +360,13 @@ def test_board_prompt_window_rotates_without_new_nodes():
 
 
 class _RotatingBase:
-    """A base researcher shaped like the real ones: it publishes the window it showed the model
-    INSIDE `propose`, as its last act, and rotates that window on every call."""
+    """A base researcher shaped like the real ones (`roles.LLMResearcher`, `agent.ToolUsingResearcher`).
+
+    The publication point is copied deliberately: both bump `_board_prompt_attempt` and assign
+    `_visible_board_cards` at the TOP of `propose`, before the prompt is assembled — not on the way
+    out. A stub that published on the way out would make the panel's read-before-call look correct
+    for the wrong reason, since the attribute would then still hold the previous window either way.
+    """
 
     def __init__(self, state):
         self._state = state
@@ -373,11 +378,10 @@ class _RotatingBase:
         attempt = self._board_prompt_attempt
         self._board_prompt_attempt = attempt + 1
         window = next_board_prompt_cards(state, attempt=attempt)
-        # The claim the model makes is for a card in the window it was ACTUALLY shown.
-        claimed = window[-1]
-        self._visible_board_cards = window
+        self._visible_board_cards = window            # published BEFORE the model is asked
         self.shown.append([card.id for card in window])
-        return Idea(operator="draft", card_id=claimed.id, hypothesis="fresh statement")
+        # The claim the model makes is for a card in the window it was ACTUALLY shown.
+        return Idea(operator="draft", card_id=window[-1].id, hypothesis="fresh statement")
 
     def __getattr__(self, name):                 # the panel forwards hints onto the base
         raise AttributeError(name)

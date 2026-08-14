@@ -119,13 +119,38 @@ class RunIdentity:
         return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
 
     def name_matched(self, row: dict) -> bool:
-        """Was this row attributed by directory NAME while a uid was available to key on?
+        """Did attributing this row rest on a directory NAME while a uid was available to key on?
 
-        The disclosure predicate. False for a legacy caller (`identity` already says `run_id`, so
-        every match is by name and counting them adds nothing) and false for any row carrying a
-        uid. True exactly for the mixed case the receipt used to misreport."""
-        return (bool(self.run_uid) and not _text(row.get("run_uid"))
-                and bool(self.run_id) and _text(row.get("run_id")) == self.run_id)
+        The disclosure predicate behind `name_matched` / `identity: "mixed"`. False for a legacy
+        caller — `identity` already says `run_id`, so every match is by name and counting them adds
+        nothing.
+
+        TWO PLACES a name can decide it, and reading only the first understated the disclosure: the
+        ROW itself may be uid-less, and a row that DOES carry this run's uid may still be attributed
+        through a uid-less `evidence_refs` entry (`lesson_keep_reason` treats a bare-name ref as a
+        self-reference, which is what makes the row deletable). A purge that deleted such a row
+        reported `identity: "run_uid"` — "this could not have touched another run" — over a decision
+        a directory name made. `_name_matched_refs` is the second half."""
+        if not (self.run_uid and self.run_id):
+            return False
+        if not _text(row.get("run_uid")):
+            return _text(row.get("run_id")) == self.run_id
+        return self._name_matched_refs(row)
+
+    def _name_matched_refs(self, row: dict) -> bool:
+        """True when a uid-less `evidence_refs` entry naming this run's DIRECTORY decided the row.
+
+        Only reached for a row that carries this run's uid, so the row's own attribution is exact;
+        what is inexact is the corroboration test that let it be deleted."""
+        refs = row.get("evidence_refs")
+        if not isinstance(refs, (list, tuple)):
+            return False
+        for ref in refs[:256]:
+            if not isinstance(ref, dict):
+                continue
+            if not _text(ref.get("run_uid")) and _text(ref.get("run_id")) == self.run_id:
+                return True
+        return False
 
     @property
     def legacy_only(self) -> bool:
@@ -313,14 +338,17 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
             # coincidence.
             #
             # A BARE-NAME REF STILL NAME-MATCHES, deliberately, and this is the same single ambiguity
-            # `RunIdentity.owns` resolves the same way one level up — a uid-less row carrying this
-            # run's directory name is treated as this run's and DISCLOSED (`name_matched`,
-            # `identity: "mixed"`). Resolving it the other way here (only a legacy-keyed caller may
-            # name-match) looked more careful and was strictly worse: this run's OWN pre-uid
-            # `evidence_refs` — the exact shape a mixed-generation store is full of — then read as
-            # another run's corroboration, so the row was KEPT and the receipt told the operator it
-            # survived because other runs support it, which no row said. One ambiguity, one rule,
-            # one disclosure.
+            # `RunIdentity.owns` resolves the same way one level up. Resolving it the other way here
+            # (only a legacy-keyed caller may name-match) looked more careful and was strictly
+            # worse: this run's OWN pre-uid `evidence_refs` — the exact shape a mixed-generation
+            # store is full of — then read as another run's corroboration, so the row was KEPT and
+            # the receipt told the operator it survived because other runs support it, which no row
+            # said.
+            #
+            # And it IS disclosed: `RunIdentity.name_matched` counts a row whose deletion rested on
+            # a uid-less ref, not only a uid-less row, so `identity` answers `mixed` rather than
+            # claiming the purge was exactly uid-keyed. One ambiguity, one rule, one disclosure —
+            # which was a claim before that predicate had its second half.
             ref_uid = _text(ref.get("run_uid"))
             ref_id = _text(ref.get("run_id"))
             if ref_uid:

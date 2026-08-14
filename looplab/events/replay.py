@@ -2873,11 +2873,14 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 # so the same 4,096 keys win on every fold. That is fine for the fold — it is the
                 # bound doing its job — but it makes the omission a DURABLE fact the writer has to
                 # see, which is what `card_enrichment_omissions` carries out to `derive_cards` and
-                # what `Card._card_enrichment_complete` publishes. `research_cadence`'s
-                # reconciliation now refuses to re-append against a card marked incomplete;
-                # without that gate it re-emitted a byte-identical `card_enriched` on every cadence
-                # pass for the rest of the run (measured: appends-per-pass 0,1,2,3,4… versus a
-                # control converging at one).
+                # what `Card._card_enrichment_complete` publishes to a READER.
+                #
+                # The WRITER does not gate on that flag: it is set for ANY omission and never
+                # clears, so using it would freeze every later enrichment of the card, including
+                # keys this journal would still accept. `research_cadence` instead memoizes the
+                # exact (card, subject, delta) it has already appended and watched not take — which
+                # is what stops the re-append loop this bound would otherwise create (measured:
+                # appends-per-pass 0,1,2,3,4… versus a control converging at one).
                 ctx.card_enrichment_omissions.setdefault(candidate_key, 1)
 
 

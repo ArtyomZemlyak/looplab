@@ -712,13 +712,15 @@ def _hook(event, args):
     # pre-event hook can have. A stale True costs one `abspath` per relative open and decides
     # nothing: `_fenced` re-checks the resolved path either way.
     if bad is not None:
-        _report(bad, event, _MESSAGE)
-        _CWD_REACHES_ROOT = True
-    else:
-        # `os.fchdir` hands an already-open fd. `_fenced_dir` resolves it through /proc/self/fd, but
-        # a platform or a race where that fails leaves nothing proving the target is outside a root,
-        # so pay the `abspath` on relative opens rather than guess.
-        _CWD_REACHES_ROOT = args[0].__class__ is int
+        _report(bad, event, _MESSAGE)    # under `deny` this RAISES: the chdir never happens at all
+    # `os.fchdir` hands an already-open fd. `_fenced_dir` resolves it through /proc/self/fd, but a
+    # platform or a race where that fails leaves nothing proving the target is outside a root, so
+    # pay the `abspath` on relative opens rather than guess. The leading `_CWD_REACHES_ROOT or` is
+    # what makes this the monotonic assignment the comment above describes: written as a plain
+    # `= args[0].__class__ is int` it CLEARS the flag whenever the target is outside every root,
+    # which is the pre-event guess this whole block exists to refuse to make.
+    _CWD_REACHES_ROOT = (
+        _CWD_REACHES_ROOT or bad is not None or args[0].__class__ is int)
 
 
 def _chain():

@@ -892,6 +892,55 @@ def test_the_bound_separates_a_read_from_a_mutation_of_the_same_path(tmp_path):
     assert "may not create, delete, rename, truncate, link or change" in err
 
 
+def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
+    """The `os.chdir` audit event fires BEFORE the chdir, so its target proves nothing about where
+    the process will actually stand. Re-deriving `_CWD_REACHES_ROOT` from that pre-event cleared the
+    flag for a chdir that then FAILED — and `try: os.chdir(cfg.output_dir) except OSError: pass`
+    around a directory that does not exist yet is ordinary generated-training-code shape. The
+    process was still standing in the repo the launcher put it in, and every relative read took the
+    fast bail: the v6-node-4 read, allowed under policy `deny`, with nothing logged."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, fence)                                    # cwd IS the source tree
+    assert rc != 0 and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+
+    # …and the flag only ever moves toward MORE checking. This half has to DISCRIMINATE, which a
+    # read of a harmless relative name after `chdir("/tmp")` does not: that path is outside every
+    # root, so it is allowed whether the flag was cleared (fast bail) or kept (abspath, then
+    # `_fenced` says no). Read the SOURCE TREE by a relative name instead — with the flag cleared
+    # the `..` escape would still be normalized, so the discriminating case is a chdir out followed
+    # by a chdir BACK IN, which under a clearing implementation leaves the flag False.
+    target = "experiments/baseline/final/model.safetensors"
+    rc2, out2, err2, _to2 = _run(f"""
+        import os
+        os.chdir("/tmp")                 # a real, SUCCESSFUL move out of the tree
+        os.chdir({str(src)!r})           # …and back in; under `deny` this refusal is the fence
+        print(open({target!r}).read())
+        """, src, fence)
+    assert rc2 != 0 and CHECKPOINT not in out2
+    assert "LoopLabSourceReadRefused" in err2, (
+        "a chdir back INTO the tree must be refused, and the read after it must never be reached")
+
+    # The plain outside-the-tree case still works, so the monotonic flag costs correctness nothing.
+    rc3, out3, _err3, _to3 = _run("""
+        import os
+        os.chdir("/tmp")
+        try:
+            print(open('x-not-here.txt').read())
+        except FileNotFoundError:
+            print("relative reads outside the tree still work")
+        """, src, fence)
+    assert rc3 == 0 and "still work" in out3
+
+
 def test_settings_vocabulary_matches_the_module(tmp_path):
     """`core` cannot import `runtime`, so the policy vocabulary is spelled twice. Pin them equal —
     a third rung added on one side only would be accepted by config and ignored by the fence."""

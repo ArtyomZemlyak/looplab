@@ -733,10 +733,18 @@ class ResearchCadenceMixin:
                 attempted = getattr(self, "_card_enrichment_attempted", None)
                 if attempted is None:
                     attempted = self._card_enrichment_attempted = set()
-                fingerprint = (card_id, canonical_json_digest(delta))
+                # KEYED ON THE SUBJECT TOO, not just (card, delta). A row is fenced by
+                # card/node/generation/proposal_ref — `_footprint_receipt_exists` checks all four —
+                # so two DIFFERENT nodes under one card legitimately produce byte-identical deltas,
+                # and a (card_id, delta) key suppressed the second one permanently. That is the
+                # newest materialized node's Developer-finalization receipt, which the sorted
+                # traversal above exists to write.
+                # `proposal_ref` is a dict, so it goes THROUGH the digest rather than into the
+                # tuple — the fence is its value, not its identity.
+                fingerprint = (card_id, subject[0].id, subject[0].attempt,
+                               canonical_json_digest({"ref": subject[1], "delta": delta}))
                 if fingerprint in attempted:
                     continue
-                attempted.add(fingerprint)
             if not delta:
                 continue
             node, proposal_ref = subject
@@ -747,6 +755,10 @@ class ResearchCadenceMixin:
                 "proposal_ref": proposal_ref,
                 **delta,
             })
+            # AFTER the append, never before: the memo's premise is "a delta that was written and
+            # the fold then refused". Recording it first meant an append that RAISED (ENOSPC, EIO)
+            # permanently suppressed a delta no row ever carried.
+            attempted.add(fingerprint)
             appended = True
         return fold(self.store.read_all()) if appended else state
 
