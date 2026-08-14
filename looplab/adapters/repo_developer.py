@@ -859,6 +859,42 @@ class LLMRepoDeveloper:
         has_cmd = bool(ev.get("command") or ev.get("stages"))
         return ev, has_cmd
 
+    def _time_budget_note(self) -> str:
+        """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
+
+        The Researcher picks epochs; THIS role picks the batch size, writes the loop and declares the
+        `train` stage's `timeout` — so it is the pair that decides wall clock, and until now only the
+        Researcher was ever told the number (`engine/proposal_cues.py::_cue_experiment_time_budget`).
+        Measured on `rubertlite-dr-unified-v7` node 0: told "give `train` a GENEROUS timeout" against a
+        budget it could not see, the Developer declared `timeout: 172800` — 48 h against the operator's
+        21600 s — and paced a schedule at 7 h 50 m. Neither number is refused anywhere: `_run_stages`
+        takes a declared stage timeout as a FALLBACK-replacement, never a clamp, so the generous leash
+        is real and is exactly why the budget has to be stated rather than enforced here.
+
+        Derived from `command_eval.eval_spec_time_budget`, the SAME rule the engine quotes to the
+        Researcher, because two roles sizing one schedule between them must be given one number. Empty
+        when the task declares no eval spec at all (an onboarding/toy dev has no budget to state).
+        """
+        from looplab.runtime.command_eval import eval_spec_time_budget
+        try:
+            budget = eval_spec_time_budget(self._cmd_context()[0])
+        except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
+            return ""
+        if budget is None:
+            return ""
+        span = f"{budget:.0f}s" + (f" (~{budget / 3600.0:.1f}h)" if budget >= 600.0 else "")
+        return (
+            f"\n\nWALL-CLOCK BUDGET — one evaluation of this node gets {span}, end to end: every stage "
+            "you declare plus the protected scoring step. The schedule and the batch size YOU choose are "
+            "what decide whether it fits, so estimate before you commit (total_steps x per-step time) and "
+            "cut the SCHEDULE if it does not — fewer epochs or steps, a subsample, a larger batch if the "
+            "memory allows. An experiment still running at that wall is killed with NO metric, and every "
+            "GPU-hour it spent is discarded: a shorter run that REPORTS A NUMBER beats a longer one that "
+            "reports nothing. A stage `timeout` longer than the budget is not more budget — it only "
+            "removes the guard, and a stage that outlives the budget spends GPU-hours the run was never "
+            "planned around. Do not shrink the experiment past the point where it answers the "
+            "researcher's question; shrink the schedule, and say in your notes what you cut.")
+
     def _operator_stage_list(self) -> list:
         """The validated OPERATOR-declared `cmd.stages` pipeline, or []. Gated on the SAME shared
         validation the engine's _resolve_stages applies at consume time (NOT truthiness): a VALID
@@ -974,7 +1010,10 @@ class LLMRepoDeveloper:
             "stages for data/feature PREPARATION, TRAINING (a fresh model every node — the pipeline must "
             "not point at another experiment's checkpoint), and TESTING; bake this node's "
             "hyperparameters into the `train` command (or use "
-            "`%params%`). Give training a generous timeout.\n\n"
+            "`%params%`). Give training a generous timeout."
+            # docs/29 F1h: spliced AFTER the generous-timeout ask, never instead of it — "generous"
+            # without a ceiling is what produced a 48-hour `train` stage on a 6-hour budget.
+            + self._time_budget_note() + "\n\n"
             "GIVE EVERY STAGE ITS `needs` — the workdir-relative files it READS and cannot run without: "
             "what an earlier stage produces, plus whatever the seeded workdir must already contain. The "
             "engine checks them BEFORE the stage starts, so a pipeline whose stages disagree about where "
@@ -1108,7 +1147,11 @@ class LLMRepoDeveloper:
                if (_results := self._results_context()) else "")
             + _REPO_DEV_SOURCE_HEADER + self._repo_context())
         user = (f"Experiment concept (the researcher's idea): {idea.rationale}\nHyperparameters to use: {params}.\n"
-                "Design and implement the eval entrypoint (and any edits) now with write_file, then call done.")
+                "Design and implement the eval entrypoint (and any edits) now with write_file, then call done."
+                # docs/29 F1h: the STAGES phase declares the leash, but the CODE written here is where the
+                # schedule and the batch size are actually chosen — and a repair session (which skips the
+                # stages phase entirely) reaches this path and nothing else.
+                + self._time_budget_note())
         if base:
             cap_each, cap_total, used = 8000, 24000, 0
             parts = []

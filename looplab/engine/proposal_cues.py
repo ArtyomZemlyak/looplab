@@ -38,23 +38,16 @@ class ProposalCuesMixin:
 
         Fixes the pre-fix cue, which read `self.timeout` unconditionally and printed '~30s (~0.0h)' for a
         multi-hour repo training whose real per-profile budget was 600s-18000s — the exact opposite of what
-        the same cue then tells the Researcher to size against."""
-        from looplab.runtime.sandbox import finite_timeout
-        es = getattr(self, "_eval_spec", None) or {}
-        if es:
-            vals = []
-            base = es.get("timeout")
-            if base is not None:
-                vals.append(base)
-            for prof in (es.get("profiles") or {}).values():
-                if isinstance(prof, dict) and "timeout" in prof:
-                    vals.append(prof["timeout"])
-            if not vals:                    # eval_spec active but no explicit budget -> build_command's default
-                vals.append(600.0)
-            cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
-        else:
-            cand = self.timeout if isinstance(self.timeout, (int, float)) else 0.0
-        return cand if isinstance(cand, (int, float)) and math.isfinite(cand) and cand > 0 else None
+        the same cue then tells the Researcher to size against.
+
+        THE DERIVATION MOVED (docs/29 F1h) to `engine/shared.py::effective_eval_time_budget`, unchanged,
+        because it grew two more readers: the `_time_budget_hint` registry cue below and — through
+        `command_eval.eval_spec_time_budget`, which `adapters` may import and `engine` may not be imported
+        BY — the repo Developer's stage-authoring prompt. Two roles that size ONE schedule between them
+        must be quoted one number; that is the whole finding, and a second hand-copied derivation is how
+        they come to disagree. This method stays as the name this cue reads, not as a second rule."""
+        from looplab.engine.shared import effective_eval_time_budget
+        return effective_eval_time_budget(self)
 
     # The proposal cues, IN PROMPT ORDER. Order is a contract twice over: `hint` is prompt text the
     # Researcher reads top-down, and `steering` becomes the Card's public `_steering_context` list, so
@@ -375,6 +368,7 @@ class ProposalCuesMixin:
         if sweep_hint:
             steering.append({"kind": "sweep"})
         self._stamp_gpu_budget_hint(researcher=_r)
+        self._stamp_time_budget_hint(researcher=_r)
         self._stamp_novelty_hint(state, self._novelty_stance, researcher=_r)
         strategy_cue = {"kind": "strategy"}
         if self._novelty_stance in {"explore", "balanced", "exploit"}:
@@ -462,6 +456,118 @@ class ProposalCuesMixin:
         _r = researcher if researcher is not None else self.researcher
         try:
             setattr(_r, "_gpu_budget_hint", self._gpu_budget_hint_text())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _time_budget_hint_text(self) -> str:
+        """The per-eval WALL-CLOCK ceiling the Researcher sizes the SCHEDULE against, as prose.
+
+        docs/29 F1h — F1b one axis over, and the same sentence: a role asked to size a request against a
+        budget it cannot see will get it wrong at some rate. Measured on `rubertlite-dr-unified-v7`
+        (2026-08-14): node 0's second attempt paced at `50/35300 [00:42<7:50:00, 1.25it/s]`, i.e. a
+        schedule needing 7 h 50 m against a 21600 s (6 h) per-eval budget. The operator had to hand the
+        run that arithmetic themselves, through a control-plane `hint`.
+
+        WHAT IT ADDS, given the run already speaks about time. `_cue_experiment_time_budget` above has
+        announced the repo-task budget since before this hint existed, and v7's own `spans.jsonl` carries
+        it 54 times verbatim ("must finish within ~21600s (~6.0h)"), so the honest claim is NOT that the
+        engine was silent — it is F1b's own correction one more time. What was missing is three things,
+        and each is a different fact:
+
+        * that cue is gated on `self._repo_spec`, so on the SCRIPT-SOLUTION path — where `Settings.timeout`
+          is the whole budget and `_EVAL_TIMEOUT_GUIDANCE` invites an `eval_timeout` request — no number
+          reached the role at all;
+        * the role's own `eval_timeout` is governed and clamped, and NOTHING said so. Ungranted
+          (`agent_control.timeout` without `researcher`) it is ignored outright; granted, it is hard-capped
+          at `max_eval_timeout`. A prompt that asks for a number and never states what may be done with it
+          is the F1b defect exactly;
+        * the FRAMING. A bare ceiling invites the mistake in the other direction — a schedule so short it
+          measures nothing — which is why `_FOOTPRINT_GUIDANCE` had to be reworded for F1b. The operator's
+          own wording is the honest one and is spliced here: a shorter run that REPORTS A NUMBER beats a
+          longer one that reports nothing, and that is not licence to propose something too small to
+          answer the question.
+
+        `eval_deadline_grace_s` is named only when it is ON (default `0.0` says nothing), and named as a
+        RESCUE rather than as budget: a judge-granted extension does not change the number to plan
+        against, and a ceiling that reads as "you have more than this" would re-open the defect from the
+        other side.
+        """
+        budget = self._experiment_time_budget()
+        if budget is None:
+            return ""
+        span = f"{budget:.0f}s" + (f" (~{budget / 3600.0:.1f}h)" if budget >= 600.0 else "")
+        # The SCOPE clause differs because the two paths kill at different places: a repo pipeline spends
+        # the budget across every stage it declares plus the protected `score` stage, while a sandbox
+        # solution is one process.
+        if getattr(self, "_eval_spec", None):
+            scope = ", covering every pipeline stage plus the protected scoring step, end to end"
+            lever = (" A longer `timeout` on a stage is not more budget: it only removes the guard, and a "
+                     "stage that outlives the budget is spending GPU-hours the run was never planned "
+                     "around. If the schedule does not fit, propose the smaller schedule.")
+        else:
+            scope = ""
+            lever = self._eval_timeout_headroom_text(budget)
+        return (
+            f"\nTIME BUDGET — one evaluation of this experiment gets {span} of wall clock{scope}. "
+            "An experiment still running at that "
+            "wall is KILLED with NO metric at all, so every GPU-hour it spent is discarded and the run "
+            "learns nothing from it: a shorter experiment that REPORTS A NUMBER beats a longer one that "
+            "reports nothing. Size the SCHEDULE to finish inside the budget — fewer epochs or steps, a "
+            "subsample, or a larger batch if the memory allows — and estimate before you commit "
+            "(total_steps x per-step time, plus data prep and scoring). That is not licence to propose "
+            "something too small to answer the question: an experiment that finishes and measures "
+            "nothing is the same waste in the other direction, so cut the SCHEDULE, never the "
+            "comparison." + lever + self._deadline_grace_text())
+
+    def _eval_timeout_headroom_text(self, budget: float) -> str:
+        """What the Researcher's OWN `eval_timeout` may do to the budget on the sandbox path.
+
+        The two answers are opposite instructions, and the role can derive neither: `agent_control`
+        decides whether the field is honoured at all (`_agent_may("researcher", "timeout")`) and
+        `max_eval_timeout` is the operator-owned hard clamp applied after that gate
+        (`engine/shared.py::effective_researcher_eval_timeout`). `_EVAL_TIMEOUT_GUIDANCE` asks for the
+        number in both worlds and scopes it in neither, so an ungranted run reads "set eval_timeout to
+        300-1800" and gets the run default anyway, silently."""
+        may = getattr(self, "_agent_may", None)
+        if not (callable(may) and may("researcher", "timeout")):
+            return (" That budget is fixed for this run: an `eval_timeout` you set is NOT honoured here, "
+                    "so leave it null and size the experiment to the number above.")
+        try:
+            ceiling = float(getattr(self, "max_eval_timeout", 3600.0))
+        except (TypeError, ValueError, OverflowError):
+            return ""
+        if not math.isfinite(ceiling) or ceiling <= 0 or ceiling <= budget:
+            return ""
+        return (f" This experiment MAY ask for longer by setting `eval_timeout`, up to {ceiling:.0f}s — "
+                "a larger request is clamped to that ceiling, never granted, so asking for more than "
+                "that buys nothing.")
+
+    def _deadline_grace_text(self) -> str:
+        """The `eval_deadline_grace_s` clause — present only when the operator turned it on.
+
+        A judge-granted extension is a RESCUE for a stage that is demonstrably about to finish, clamped
+        to the operator's own number in the runtime (`sandbox._granted_grace`). It does not change the
+        number to plan against, and announcing it as though it did would hand back exactly the margin
+        this hint exists to state. Silent at the `0.0` default so the shipped prompt gains nothing."""
+        try:
+            grace = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return ""
+        if not math.isfinite(grace) or grace <= 0:
+            return ""
+        return (f" (At the deadline a judge may grant a stage that is demonstrably about to finish up to "
+                f"{grace:.0f}s more. That is a rescue, not budget — plan as if it does not exist.)")
+
+    def _stamp_time_budget_hint(self, researcher=None) -> None:
+        """Stamp `_time_budget_hint` (RESEARCHER_HINT_ATTRS) onto the active Researcher.
+
+        Set UNCONDITIONALLY, empty included, and per proposal — the same two reasons as
+        `_stamp_gpu_budget_hint`, and the second one is if anything sharper here: `self.timeout` is
+        retuned mid-run by an operator's `budget_extend{timeout}` and by a granted Strategist decision,
+        so a stale budget on a pooled role instance would outlive the retune that changed it."""
+        _r = researcher if researcher is not None else self.researcher
+        try:
+            setattr(_r, "_time_budget_hint", self._time_budget_hint_text())
         except Exception:  # noqa: BLE001
             pass
 
