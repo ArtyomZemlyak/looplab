@@ -170,6 +170,44 @@ site that proves it is open.
    fire. **Cost:** the Strategist's `developer` decision has a permanently unreachable arm — a
    silent capability gap, not a red test — plus the localize→generate-N→validate pipeline itself.
    Its two building blocks already exist (`engine/localize.py`, `search/best_of_n.py`).
+   **[2026-08-14 — the DISAGREEMENT half is CLOSED; the BACKEND half is not.** All three citations
+   were real. The vocabulary now has one home: `core/config.py::DEVELOPER_BACKENDS` +
+   `DEVELOPER_BACKEND_ALIASES` (`llm` -> `default`, published as `developer_switch_names()`), which
+   `_available_developers` derives from and `make_developer_factory` resolves through instead of the
+   bare `"llm"` literal; `tests/test_developer_backend_registry.py` guards both directions and
+   AST-scans the tree, so a re-introduced `agentless` arm names its own file and line. The dead
+   branch is REMOVED with a comment saying why (an unreachable `if` is a promise the code cannot
+   keep). **What was measured, and is the reason it was a guard and not a lint:** an unregistered
+   `developer` is dropped by `validate_strategy` *before* `_prepare_strategy_developer` runs, so the
+   `developer_application: {status: "refused", …}` receipt — which exists, and fires for a factory
+   refusal — cannot fire for an unknown NAME. Driven end-to-end through `_maybe_consult_strategist`:
+   `{"policy": "mcts", "developer": "agentless", "rationale": "switch developer to agentless"}` is
+   recorded with the policy applied, the rationale VERBATIM, no `developer` field and no receipt of
+   any kind. The history reads as a switch that never happened.
+   **STILL OPEN — exactly what an `agentless` backend needs** (nothing below is built):
+   (a) a `Developer` object composing localize -> generate-N -> validate. `engine/localize.py` and
+   `search/best_of_n.py` exist but neither is a Developer: `BestOfNDeveloper`
+   (`agents/factory.py:483-487`) wraps an existing Developer and re-runs its `implement`, and
+   localize is engine-side, so the new class owns the *sequencing* and the file-scope hand-off;
+   (b) a construction site in `agents/factory.py::make_roles` keyed on `developer_backend`, since
+   `PRESETS` membership is what routes a name to the external-CLI path today and `agentless` is
+   neither a preset nor the in-house default — a third branch, not a preset entry. Note the same
+   binary predicate gates three other decisions in that file (`:348` in-process build, `:461` sweep
+   offer, `:487` the `BestOfNDeveloper` wrap), so a new name falls into the in-house side of all
+   three by default — including a best-of-N wrap the agentless pipeline already does itself;
+   (c) the registry entry (`DEVELOPER_BACKENDS`), which is what makes it `Settings`-configurable AND
+   what makes `_available_developers` offer it to the Strategist — with no edit to `strategist.py`,
+   because the removed arm's `if` is now expressible as a plain membership test on a name that
+   really exists. Note `test_every_configurable_backend_exists` demands a matching `PRESETS` key, so
+   landing (c) means extending that test's `{"default"}` exemption to the in-house family;
+   (d) the C2 knobs already present (`best_of_n`, `best_of_n_listwise`) either reused or given
+   agentless-specific spellings, plus a docs row for whichever;
+   (e) a producer that can actually ASK for it — today the LLM Strategist's `_StrategyOut` has no
+   `developer` field and the operator `set_strategy` control refuses one, so the only live producer
+   of a `developer` decision is a rule-based/custom Strategist. Selecting it "by the A7 Strategist
+   per phase/node", as this row asks, needs that field added to the structured schema and spliced
+   into `_strategist_brief` (which today never mentions developers at all).
+   Deliberately NOT built here: it is a feature with real blast radius, and the box is mid-GPU-run.]
 6. **The schema-aligned parser is a fallback, not the default (P0, S).** `core/parse.py:195
    ::_coerce_to_model` IS a real error-correcting SAP (case-insensitive key match, per-field
    coercion, extras dropped) — but `core/config.py:1483` is `llm_parser: str = "tool_call"` and
@@ -320,7 +358,7 @@ site that proves it is open.
 | `search/policy.py:722` (`"bohb": _make_asha`) | `search/policy.py:696` |
 | `adapters/mlebench.py:102` (`grader._Y`) | `adapters/mlebench.py:123`, and now only the synthetic fixture's `_GRADER_TEMPLATE` under `host_graded=False` |
 | `stage_completed` (D5) | **no such event.** The registry name is `events/types.py:224::EV_STAGE_FINISHED = "stage_finished"` |
-| `developer_backend = llm \| agentless \| <agent>` | `agentless` is not in `core/config.py:350::DEVELOPER_BACKENDS`; `agents/strategist.py:408` holds a branch that can never fire |
+| `developer_backend = llm \| agentless \| <agent>` | `agentless` is not in `core/config.py::DEVELOPER_BACKENDS` and no backend implements it. `llm` IS real, but as a live-SWAP alias of `default` (`core/config.py::DEVELOPER_BACKEND_ALIASES`), never a launch value. The `agents/strategist.py` branch that could never fire was removed 2026-08-14; §0.1 item 5 records what an `agentless` backend still needs |
 | `trust/` owns redaction | it does not — `core/redact.py::redact_secrets`, reached via `engine/audit.py:269::_redact`. (`CLAUDE.md`'s package map still says `trust/ … redaction`.) |
 | **A4 is one ID** | **a FIFTH namespace collision the caveat block does not list:** ★Shipped's *"A4 failure-reflection"* and §2's *"A4 LATS-style MCTS"* are different items. Caveat 2 lists C2/C3/C5 and the §6 `D1–D5`; add A4. |
 
@@ -762,12 +800,20 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   closed enum is `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose",
   "opencode")` — **no `llm`, no `agentless`**. The default `"default"` is the full agentic
   multi-phase in-house Developer (`adapters/repo_developer.py`, STAGES→PLAN→IMPLEMENT), which is the
-  opposite of what this row asks for. `agents/strategist.py:408-409` already contains the branch
-  (`if "agentless" in ctx.available_developers`, commented *"only when C5 has landed"*) and it is
-  **dead**: `engine/strategy.py:75-77::_available_developers()` returns `["default", "llm",
+  opposite of what this row asks for. `agents/strategist.py:408-409` used to contain the branch
+  (`if "agentless" in ctx.available_developers`, commented *"only when C5 has landed"*) and it was
+  **dead**: `engine/strategy.py:75-77::_available_developers()` returned `["default", "llm",
   *PRESETS]` and never `"agentless"`. Both building blocks the pipeline needs already shipped —
   localize (`engine/localize.py`) and generate-N (`search/best_of_n.py`) — so what is missing is the
-  backend that composes them.]
+  backend that composes them.
+  **UPDATE 2026-08-14:** the dead branch and the three-way vocabulary disagreement behind it are
+  fixed (one registry, `DEVELOPER_BACKENDS` + `DEVELOPER_BACKEND_ALIASES`, with a two-way
+  source-scan guard); `llm` is now a NAMED live-swap alias of `default` rather than a bare literal in
+  `make_developer_factory`. **The backend itself is untouched, and §0.1 item 5 is now the concrete
+  five-part statement of what it still needs** (the composing Developer, a third `make_roles` branch,
+  the registry entry + its test exemption, the knobs, and a producer that can ask for it — the LLM
+  Strategist's structured schema has no `developer` field and `set_strategy` refuses one, so "by the
+  A7 Strategist per phase/node" is itself unbuilt).]
 - ✅ **P1 · C2 best-of-N + selection (M).** N attempts, keep best (SWE-RM best-of-k +10pts). *Depends A1/A6.*
   **[2026-08-14 — DONE; collapses into ★Shipped.** `search/best_of_n.py` ("C2 · Best-of-N candidate
   selection"), execution-free reward `_score()` at `:16`; knobs `core/config.py:1182::best_of_n`

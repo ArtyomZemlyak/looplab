@@ -552,7 +552,7 @@ worth chasing; the clean-refund case is `charged_discards == 0`.
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `backend` | `LOOPLAB_BACKEND` | `llm` | `llm` (live model — the default; a real run needs a reachable endpoint, see **LLM endpoint** below) or `toy` (offline optimizer, no model calls at all). A CLOSED set: any other value — including a mis-cased `LLM` — is rejected at config time rather than falling through to the offline toy roles. |
-| `developer_backend` | `LOOPLAB_DEVELOPER_BACKEND` | `default` | `default`, or an external agent: `opencode` / `aider` / `goose` / `continue` |
+| `developer_backend` | `LOOPLAB_DEVELOPER_BACKEND` | `default` | `default`, or an external agent: `opencode` / `aider` / `goose` / `continue`. A CLOSED set (`core/config.py::DEVELOPER_BACKENDS`): a typo is refused at config time rather than falling through to the in-house Developer. The **live-swap** vocabulary is one name wider — see [Switching the Developer mid-run](#switching-the-developer-mid-run) |
 | `unified_agent` | `LOOPLAB_UNIFIED_AGENT` | `true` | One engine-facing control facade/object implements Researcher + Developer (+ Strategist/pilot) over stage-specific clients, tools and local contexts. It is not one shared cross-stage conversation identity |
 | `agent_drives_actions` | `LOOPLAB_AGENT_DRIVES_ACTIONS` | `true` | The agent picks the next macro action within a pure legal-action gate |
 | `card_driven_selection` | `LOOPLAB_CARD_DRIVEN_SELECTION` | `true` | The Card queue owns macro-action selection. Set `false` for the legacy policy/unified-pilot action path. The value is pinned by `run_started` (changing the selector on resume would mix two search treatments in one run); when both action flags are enabled, Card selection takes precedence over `agent_drives_actions`. **This flag alone maintains the queue** — it mints each proposal as durable, selectable Card *inventory* first and only then selects and builds it, independent of `speculation_depth`. That was not true before 2026-08-07: the only writer of selectable inventory sat behind the prefetch lane, so a run with the flag on and the depth settled to `0` silently fell back to `policy.next_actions` while `run_started` still recorded `card_driven_selection: true` (measured over the shipped corpus: **0** selection-ready Cards across 27 nodes in seven such runs). |
@@ -933,3 +933,26 @@ check leaves the current external Developer active. Active validation fallbacks 
 remain real startup consumers and are still checked before work begins.
 
 See [LLM & coding agents → External coding agents](llm-and-agents.md#external-coding-agents).
+
+### Switching the Developer mid-run
+
+The A7 Strategist may move a **running** run onto another Developer backend (governance key
+`developer`, granted to `strategist` by default — see **Agent governance**). That path accepts every
+`developer_backend` value above **plus one alias, `llm`**, which resolves to the in-house `default`
+Developer. The alias is deliberately *not* a launch setting: `LOOPLAB_DEVELOPER_BACKEND=llm` is
+refused, because an alias has no coding-agent preset and accepting it at launch would reintroduce the
+silent downgrade the closed set exists to stop. Both halves come from one registry,
+`core/config.py::DEVELOPER_BACKENDS` + `DEVELOPER_BACKEND_ALIASES` (published as
+`developer_switch_names()`), which `engine/strategy.py` offers the Strategist and
+`agents/factory.py::make_developer_factory` resolves through.
+
+A decision naming anything outside that vocabulary is **dropped** by the Strategist whitelist before
+it reaches the factory: nothing changes, and — unlike a factory *refusal*, which records a
+`developer_application: {status: "refused", …}` receipt on the `strategy_decision` event — there is
+no receipt, only the decision's own rationale. That is why the vocabulary has a single home with a
+two-way registry guard (`tests/test_developer_backend_registry.py`) rather than a list per layer.
+
+Two further limits are worth knowing: the operator `set_strategy` control does **not** accept a
+`developer` field at all (it is refused with `strategy has unknown field(s)`), and the LLM
+Strategist's structured-output schema has no `developer` field either — a live swap comes from a
+rule-based or custom Strategist, or from a task/config choice at launch.
