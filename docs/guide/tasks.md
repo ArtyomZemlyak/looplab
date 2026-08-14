@@ -232,6 +232,13 @@ What binding does and does not buy, stated plainly:
 * under `metric_subject: "require"` an **unbound** metric (no subject declared, or one that is missing,
   empty, stale, or escapes the workdir) carries the existing `metric_salvaged` violation, so the node is
   counted and visible and is never selectable;
+* `stale` means *this attempt* did not produce it — a leftover from an earlier repair attempt in the
+  workdir every attempt reuses. It is **not** applied when the engine ITSELF reused the earlier stages:
+  on a stage-scoped re-run (a repair that only touched the scorer, so `train` is skipped and its
+  checkpoint kept) the earlier attempt's artifact is the subject on purpose, and the freshness floor is
+  dropped for exactly that attempt — the same floor the constraint / extra-metric / cross-check readers
+  already use, derived once in `runtime/command_eval.py::attempt_freshness_floor`. The primary metric
+  read keeps its floor either way: it comes from the stage that *did* re-run;
 * it does **not** prove the score stage read the subject. Neither does `needs` — measured against the
   preserved node-4 workdir, `verify_stage_inputs` with a perfectly correct `needs` naming the node's own
   checkpoint returns "no problem", because the node really did write that file and the scorer read

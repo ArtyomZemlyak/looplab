@@ -1831,6 +1831,58 @@ def _call_stage_check(check_fn, stage: str, tail: str, assertion: str):
     return check_fn(stage, tail)
 
 
+def reused_stage_count(stages, start_stage) -> int:
+    """How many LEADING stages this attempt REUSES instead of running — the index `_run_stages`
+    starts its loop at, and the one fact "what counts as fresh for this attempt" turns on.
+
+    ONE derivation, because it was derived twice and the two disagreed. `_run_stages` resolves the
+    name against the stage list and an UNKNOWN name leaves it at 0 — a FULL re-run, the fail-safe
+    direction, since reusing on a typo would score a stale artifact. The freshness relaxation 300
+    lines below tested `start_stage` for mere TRUTHINESS. On a name that matches no stage (a typo, a
+    renamed stage, a `rerun_stage` carried onto a task with no `stages` at all) those two say
+    opposite things: the pipeline runs from the top and reuses nothing, while every secondary reader
+    has its freshness gate dropped anyway. Answer it once, from the stage list that decides it.
+    """
+    if not start_stage or not stages:
+        return 0
+    for i, s in enumerate(stages):
+        name = s.get("name") if isinstance(s, dict) else None
+        if str(name) == str(start_stage):
+            return i
+    return 0
+
+
+def attempt_freshness_floor(eval_started: float, stages=None,
+                            start_stage: Optional[str] = None) -> Optional[float]:
+    """The mtime an on-disk artifact must clear to be THIS attempt's, or None when there is no such
+    floor because the engine itself chose to REUSE an earlier attempt's stages.
+
+    THE FRESHNESS RULE IS NOT DELETED HERE, IT IS SCOPED. A normal attempt keeps it in full: an
+    artifact older than `eval_started` is a leftover from an earlier repair attempt in the
+    deliberately-reused workdir (v6 nodes ran up to 4 of them), and admitting it is how a number ends
+    up describing a checkpoint from two attempts ago. That is why `metric_subject.bind_one` enforces
+    freshness while `verify_stage_inputs` deliberately does not — an INPUT may legitimately predate
+    its stage, this attempt's NUMBER may not predate this attempt.
+
+    A STAGE-SCOPED RE-RUN IS THE ONE ATTEMPT THAT ARGUMENT DOES NOT COVER, and it is the engine's own
+    decision, not the candidate's: `_safe_reuse_start` proved the repair did not touch the earlier
+    stages, so it skipped them to avoid paying for the re-train (`inline_repair_retrain_cap` is the
+    budget that makes the skip worth having). The whole POINT of that skip is that the earlier
+    attempt's checkpoint IS this attempt's subject — so calling it `stale` here calls the engine's
+    own reuse a defect, and under `metric_subject="require"` it excludes the node from selection for
+    it. The reused stages' artifacts keep their prior-eval mtime by construction; no floor derived
+    from THIS attempt's clock can be satisfied by them.
+
+    Two callers, deliberately the same rule (`_run_stages`' subject binding at the score stage, and
+    the tail's secondary readers — constraints, extra metrics, the drift cross-check). What still
+    keeps its floor unconditionally is the PRIMARY metric read and the stall-salvage read beside it:
+    the number comes from the FINAL, re-RUN stage, so a no-op stage must never be able to promote an
+    old value. Same for `verify_stage_artifacts`, which is held to its own stage's start — a stage
+    that RAN owes fresh output whatever else the attempt reused.
+    """
+    return None if reused_stage_count(stages, start_stage) else eval_started
+
+
 def bind_metric_subject(subject, workdir, *, since: Optional[float], stages=None,
                         upto: Optional[int] = None, stage: str = "") -> dict:
     """The `metric_provenance` subject record for this eval — `runtime/metric_subject.bind`, called
@@ -1891,12 +1943,11 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
     stage field that changes what the CHILD PROCESS is, and both tiers have to be given it the way
     that tier accepts — see `_stage_wrap`.
     """
-    _run_from = 0
-    if start_stage:
-        for _i, _s in enumerate(stages):
-            if str(_s.get("name")) == str(start_stage):
-                _run_from = _i
-                break
+    # WHICH stages this attempt reuses, and therefore what counts as fresh for it — one derivation,
+    # shared with the tail's reader relaxation (see `attempt_freshness_floor`). The unknown-name
+    # fallback lives inside `reused_stage_count`.
+    _run_from = reused_stage_count(stages, start_stage)
+    _fresh_since = attempt_freshness_floor(eval_started, stages, start_stage)
     run = _EvalRun(stage_results=[])
     stage_results = run.stage_results
     for _i, _stg in enumerate(stages):
@@ -1964,8 +2015,14 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         #
         # It is a READ, not a side effect (invariant #3): one `stat` plus a bounded digest, no event,
         # nothing gated on it here. The enforcement lives at the terminal, in `engine/evaluate.py`.
+        #
+        # `_fresh_since`, NOT `eval_started`: on a stage-scoped re-run the subject is precisely the
+        # artifact the engine chose to REUSE, so binding it against this attempt's clock calls the
+        # engine's own reuse `stale` and — under `metric_subject="require"` — excludes the node from
+        # selection for it. The rule and the reason it is scoped rather than dropped are stated once,
+        # in `attempt_freshness_floor`, which the tail's secondary readers share.
         if subject and _i == len(stages) - 1:
-            run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=eval_started,
+            run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=_fresh_since,
                                                      stages=stages, upto=_i, stage=_sname)
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
@@ -2250,11 +2307,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # reached its final stage. The staged path binds at the SCORE stage's start (see `_run_stages`),
     # which is the reading that makes the record a claim about the number; a single command is BOTH
     # the producer and the scorer, so there is no earlier instant to bind at and "as it stands at the
-    # metric read" is the only honest one. `since=_eval_started` either way: an artifact that predates
-    # this attempt cannot be what this attempt's number is about.
+    # metric read" is the only honest one. `attempt_freshness_floor` either way: an artifact that
+    # predates this attempt cannot be what this attempt's number is about — unless this attempt is a
+    # stage-scoped re-run, where the earlier attempt's artifact IS the subject by construction. A
+    # single command reuses nothing (no stages), so that floor is `_eval_started`, unchanged.
     if subject and _run.metric_subject is None:
-        _run.metric_subject = bind_metric_subject(subject, str(wd), since=_eval_started,
-                                                  stages=stages, stage="")
+        _run.metric_subject = bind_metric_subject(
+            subject, str(wd), since=attempt_freshness_floor(_eval_started, stages, start_stage),
+            stages=stages, stage="")
     rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
     stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
@@ -2268,7 +2328,15 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # Pinned in BOTH directions (relaxed under start_stage, strict without it) by
     # tests/test_command_eval.py::
     # test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_under_start_stage.
-    _reader_since = None if start_stage else _eval_started
+    #
+    # THE SAME derivation the SUBJECT binding uses (`attempt_freshness_floor`), not a second spelling
+    # of it: this relaxation and the subject's freshness rule are one question — "what counts as
+    # produced by THIS attempt" — and while they were derived 300 lines apart they answered it
+    # differently, so a reuse the engine itself chose kept its constraint readers and lost its
+    # metric's referent. Deriving it here also fixed a real hole in this line's own rule: a
+    # `start_stage` naming no stage in the list reuses NOTHING, and the old truthiness test dropped
+    # the gate anyway.
+    _reader_since = attempt_freshness_floor(_eval_started, stages, start_stage)
     drift = None
     if enforce_drift and cross_check and m is not None:
         validate_cross_check(cross_check)
