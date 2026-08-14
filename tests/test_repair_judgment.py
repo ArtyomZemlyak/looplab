@@ -35,14 +35,15 @@ import pytest
 
 from looplab.core.models import (DEVELOPER_STUCK_PREFIX, developer_stuck_reason,
                                  is_developer_error, is_developer_stuck)
-from looplab.engine.evaluate import _UNLIMITED_REPAIR_CEILING
+from looplab.engine.evaluate import (_UNLIMITED_REPAIR_CEILING, _effective_repair_cap,
+                                     _repair_attempts_left)
 from looplab.engine.repair_judgment import (AGENT_CRITIC_ACTIONS, CRITIC_CONTINUE, CRITIC_STOP,
                                             CRITIC_ACTIONS, DEFAULT_CRITIC_ACTION,
                                             coerce_critic_action, critic_due,
                                             developer_stuck_contract, format_repair_trajectory,
                                             repair_floor_stop)
-from tests.test_repair_stop_decision import (_GOOD, _Judge, _ScriptedDev, _drive, _emits, _repairs,
-                                             _terminals)
+from tests.test_repair_stop_decision import (_GOOD, _Judge, _ScriptedDev, _drive, _emits,
+                                             _lazy_import_src, _repairs, _terminals)
 
 
 # --------------------------------------------------------------- the critic's verdict contract
@@ -112,6 +113,27 @@ def test_the_floors_are_the_floor_and_the_message_names_the_right_knob():
     assert repair_floor_stop(attempt=11, operator_cap=12, ceiling=50) is None
     capped = repair_floor_stop(attempt=12, operator_cap=12, ceiling=50)
     assert capped and "inline_repair_attempts" in capped and "12" in capped
+    # A CAP ABOVE THE CEILING IS LEGAL AND IS THE MIRROR OF THE RULE ABOVE. `inline_repair_attempts`
+    # is `ge=0` with NO upper bound, and `settings_ui_schema.json` has no `max` and explicitly
+    # invites "set a number here to get the old fixed cap back" — so an operator may spell 60, the
+    # node stops at the ceiling's 50, and the terminal must not tell them their setting is 0.
+    assert repair_floor_stop(attempt=49, operator_cap=60, ceiling=50) is None
+    over = repair_floor_stop(attempt=50, operator_cap=60, ceiling=50)
+    assert over and "50" in over
+    assert "is 0" not in over, over
+    assert "60" in over, over
+    # …and the number the JUDGE is told has to agree with the bound that will actually stop it.
+    # `_effective_repair_cap` stays UNCLAMPED on purpose (an explicit cap is the operator's number),
+    # so the remaining count is measured against `min(cap, ceiling)` instead — otherwise a run
+    # spelling 60 tells the judge it has 11 attempts left on the turn that is about to be its last.
+    assert _repair_attempts_left(0, _effective_repair_cap(60)) == _UNLIMITED_REPAIR_CEILING
+    assert _repair_attempts_left(49, _effective_repair_cap(60)) == 1
+    assert _repair_attempts_left(50, _effective_repair_cap(60)) == 0
+    # A cap BELOW the ceiling is the bound, and is counted down verbatim.
+    assert _repair_attempts_left(0, _effective_repair_cap(12)) == 12
+    assert _repair_attempts_left(11, _effective_repair_cap(12)) == 1
+    # No operator cap: the ceiling is the bound, which is what it always was.
+    assert _repair_attempts_left(0, _effective_repair_cap(0)) == _UNLIMITED_REPAIR_CEILING
     # THE OTHER TWO FLOORS ARE NOT HERE, on purpose, and this pins that they are not re-derived:
     # the eval-time budget is compared against a FRESH fold in `_evaluate` (a stale one undercounts
     # whatever a sibling burned under `eval_parallel > 1`), and the money ceiling raises
@@ -342,3 +364,31 @@ def test_the_critic_never_gets_a_verdict_that_extends_the_loop():
     assert "CRITIC_CONTINUE" not in src, (
         "the engine must not branch on `continue` — a critic that says nothing must be "
         "indistinguishable from a critic that is not wired")
+
+
+def test_a_cap_above_the_engine_ceiling_is_never_reached_and_the_terminal_says_so(tmp_path):
+    """The mirror of `test_an_always_repair_judge_under_zero_now_terminates`, driven.
+
+    `inline_repair_attempts` is `Field(ge=0)` with no upper bound and the settings UI schema offers
+    no `max` — it invites "set a number here to get the old fixed cap back" — so 60 is a legal
+    setting. The node stops at `_UNLIMITED_REPAIR_CEILING`, and the terminal used to read *"this run
+    sets no operator cap (inline_repair_attempts is 0 …)"* to an operator whose snapshot plainly
+    says 60, which is `repair_floor_stop`'s own stated invariant read backwards.
+    """
+    cap = _UNLIMITED_REPAIR_CEILING + 10
+    dev = _ScriptedDev([], first=_lazy_import_src("AlphaProcessor"), cycle=True)
+    evs, _ = _drive(tmp_path, dev, _Judge(), inline_repair_attempts=cap, wall=300)
+
+    # The CEILING bound it, not the operator's number.
+    assert len(_repairs(evs)) == _UNLIMITED_REPAIR_CEILING
+    terminal = _terminals(evs)
+    assert len(terminal) == 1 and terminal[0].type == "node_failed"
+    why = terminal[0].data["triage_rationale"]
+    assert "absolute ceiling" in why
+    assert "inline_repair_attempts is 0" not in why, why
+    assert str(cap) in why, why
+    # …and the judge was never told it had attempts the ceiling would not give it.
+    told = [row.data.get("attempts_left") for row in evs
+            if row.type == "node_repaired" and isinstance(row.data, dict)
+            and row.data.get("attempts_left") is not None]
+    assert all(value <= _UNLIMITED_REPAIR_CEILING for value in told), told
