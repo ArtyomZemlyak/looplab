@@ -313,7 +313,38 @@ Who is told, and what else they are told:
 | role | where | the extra fact it needs |
 |---|---|---|
 | Researcher (both prompts) | the `TIME BUDGET` cue, stamped per proposal | whether its own `eval_timeout` is honoured at all (`agent_control.timeout`) and how far it may raise the budget (`max_eval_timeout` clamps it) |
-| Developer (repo) | the stages + implement prompts | that a stage `timeout` longer than the budget is not more budget — nothing clamps it, so it runs, spending GPU-hours the run was not planned around |
+| Developer (repo) | the stages + implement prompts | that a stage `timeout` longer than the budget is not more budget — nothing clamps it at the wall, so it runs, spending GPU-hours the run was not planned around, and `declare_stages` therefore refuses to declare one |
+
+#### A declared stage `timeout` may not exceed the budget
+
+Being told the number was not enough, and the measurement says so: over every `looplab_stages.json`
+in `runs/` compared against its own run's `task.snapshot.json`, **17 of the 39 declarations that have
+both numbers exceed the operator's budget** — `rubertlite-dr-unified-v7` node 0 at 172800 s against
+21600 s (8.0x), `rubert-dr-0807` nodes 0-4/7 at 86400 s against 14400 s, and twelve more across five
+runs. `_run_stages` takes a declared stage `timeout` as a *fallback-replacement* for the budget,
+never a clamp, so every one of those leashes was real.
+
+So the bound is enforced **where the manifest is authored**, not at the wall:
+
+* `declare_stages` (the stages phase and the implement/repair tool) **refuses** a stage whose
+  `timeout` exceeds `eval_spec_time_budget`, naming both numbers and asking for the schedule to be
+  cut. Nothing is staged, and the Developer has spent no GPU seconds yet.
+* the rule is **per stage, not the sum of stages**: a stage `timeout` is a ceiling, not an estimate,
+  and the protected `score` stage runs at the operator's number *on top* of whatever precedes it. On
+  the corpus the sum rule buys one extra refusal out of 31 manifests and would fire on generous prep
+  ceilings nobody intended to spend.
+* a manifest that reaches the workdir another way — hand-written, **carried over from a parent** on
+  an improve/merge (v7 node 1's 90000 s is exactly this), or resumed from before the gate — is
+  **recorded and not killed**: `_resolve_stages` emits a `stage_timeout_over_budget` span naming the
+  stage, the declared seconds and the budget. Clamping there is the most expensive possible moment to
+  enforce a ceiling — on v7 node 0 it discards 21600 s of GPU time and returns no metric to avoid
+  6360 s of unbudgeted spend.
+* **if the budget is the thing that is wrong**, that span and the refusal are the evidence: they carry
+  the number the Developer *asked for*, which is the only signal an operator whose ceiling is too
+  small ever gets. Raise `cmd.timeout` (or the profile's) rather than expecting the node to overrun.
+
+The protected `score` stage is unaffected in every case: it is appended by the engine with the
+operator's own profile-resolved timeout and never with a declared one.
 
 `eval_deadline_grace_s` does **not** change the announced ceiling. When it is on (it ships at `0.0`,
 off) the prompts name it as a rescue for a stage demonstrably about to finish, to be planned against as
