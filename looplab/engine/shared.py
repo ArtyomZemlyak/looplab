@@ -52,6 +52,48 @@ def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
     return min(timeout, ceiling)
 
 
+def effective_eval_time_budget(engine) -> Optional[float]:
+    """The per-eval WALL-CLOCK ceiling one experiment has to fit, in seconds — or None (docs/29 F1h).
+
+    Its sibling above answers "what did the Researcher ASK for, and may it have it?"; this answers
+    "how long does an evaluation of this run actually get?", which is the question a role sizing a
+    training schedule needs and which no single field holds. Resolved the SAME way the dispatcher
+    resolves it (`engine/eval_dispatch.py::_run_eval`), so the announced number is the one the run
+    is planned around rather than one an operator typed into a field that does not reach this task:
+
+    * an ACTIVE eval spec (repo/command tasks) owns the budget through
+      `command_eval.eval_spec_time_budget` — `Settings.timeout` is not consulted at all on that
+      branch, and a cue that read it printed "~30s (~0.0h)" for a multi-hour repo training.
+    * otherwise (script-solution tasks in the sandbox) the run default `Settings.timeout` stands.
+      Deliberately the base number and NOT `timeout * sweep_timeout_mult`: the multiplier applies
+      only to a node whose Idea already carries a `space`, which does not exist at proposal time, and
+      quoting the stretched budget to an experiment that turns out not to be a sweep would overstate
+      it by 8x on the shipped default. A researcher-authored `eval_timeout` can raise it later —
+      `effective_researcher_eval_timeout` is that rule, governed by `agent_control.timeout` and
+      clamped by `max_eval_timeout` — which is why the hint that quotes this number also states the
+      headroom rather than pretending the default is a hard wall.
+
+    Read PER PROPOSAL, never cached at construction: `self.timeout` is mutable mid-run by an
+    operator's `budget_extend{timeout}` control (`_apply_control_overrides`) and by a granted
+    Strategist retune (`engine/strategy.py`), so a number captured in `Engine.__init__` would keep
+    quoting a budget nobody is running under — the same reason `_gpu_budget_hint` is stamped per
+    proposal (docs/29 F1b).
+
+    ``None`` means "not knowable, say nothing" — a partially built Engine, a non-numeric timeout, or
+    a non-finite/zero one. A plausible wrong ceiling is worse than none: the whole point is that the
+    role stops guessing.
+    """
+    from looplab.runtime.command_eval import eval_spec_time_budget
+
+    es = getattr(engine, "_eval_spec", None) or {}
+    if es:
+        return eval_spec_time_budget(es)
+    cand = getattr(engine, "timeout", None)
+    if isinstance(cand, bool) or not isinstance(cand, (int, float)):
+        return None
+    return float(cand) if math.isfinite(cand) and cand > 0 else None
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

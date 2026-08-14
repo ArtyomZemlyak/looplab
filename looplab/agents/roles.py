@@ -328,17 +328,22 @@ FACADE_STAGE_ATTRS: tuple[str, ...] = ("researcher", "developer", "stage_clients
 # the open-hypothesis board inside `_state_brief`, and `_novelty_stance` / `_steering_context` /
 # `_cross_run_advisory_receipt` are read structurally rather than concatenated as prose.
 #
-# `_gpu_budget_hint` is LAST on purpose. `_complexity_hint` already carries the GPU RESOURCE CONTRACT
-# cue, which announces the POOL SIZE ("this pool exposes at most 2 GPU(s)"); the budget states the
-# per-experiment CEILING derived from that pool and the run's settled eval width. A reader that saw
-# the pool and then the ceiling ends on the ceiling — which is the number it must actually declare.
+# The two BUDGET cues are LAST on purpose, and in this order. `_complexity_hint` already carries the
+# GPU RESOURCE CONTRACT cue, which announces the POOL SIZE ("this pool exposes at most 2 GPU(s)"), and
+# the experiment TIME-BUDGET cue; each budget states the CEILING for its own axis, and a reader that
+# saw the pool and then the ceiling ends on the ceiling — which is the number it must actually act on.
+# The two are independent: `_gpu_budget_hint` names no wall clock and `_time_budget_hint` names no
+# device count, so appending the second does not put a number after the first on the first's own axis.
+# `_time_budget_hint` goes last because the wall clock is the axis a proposal gets wrong LATEST — the
+# schedule is chosen after the hardware is (docs/29 F1h).
 RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
-    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint")
+    "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint",
+    "_time_budget_hint")
 
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt",
-    "_gpu_budget_hint")
+    "_gpu_budget_hint", "_time_budget_hint")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -348,6 +353,10 @@ handle in orchestrator.py `_node_audit_extra` and speculation.py's per-build cap
 `_gpu_budget_hint` in proposal_cues.py `_stamp_gpu_budget_hint` — the PER-EXPERIMENT GPU ceiling
 `_FOOTPRINT_GUIDANCE` asks the Researcher to size `footprint.gpus` against and, before this hint
 existed, could only learn from the operator's goal prose (docs/29 F1b);
+`_time_budget_hint` in proposal_cues.py `_stamp_time_budget_hint` — the same fact one axis over: the
+per-eval WALL-CLOCK ceiling the SCHEDULE has to fit, plus what this role's own `eval_timeout` may do
+about it (governed by `agent_control.timeout`, clamped by `max_eval_timeout`), which
+`_EVAL_TIMEOUT_GUIDANCE` asks for and scopes nowhere (docs/29 F1h);
 `_novelty_feedback` in engine/novelty.py's gate) and the
 foresight panel (search/foresight.py `_prioritize_board` sets `_hyp_order` — the predicted
 best-first board order — on its wrapped researcher). Readers: `LLMResearcher.propose` (below)

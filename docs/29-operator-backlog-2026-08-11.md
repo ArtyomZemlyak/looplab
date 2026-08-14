@@ -564,6 +564,110 @@ GPU at all — stays the prefetch's job, bounded by `speculation_depth`, because
 target is the width. And the eleven outer-loop cadences are still not individually audited for
 safety against a moving log (`docs/33` §8).
 
+### F1h · Tell BOTH roles what the per-eval TIME budget IS — F1b, one axis over
+
+**Observed live on `rubertlite-dr-unified-v7`, 2026-08-14.** Node 0's second attempt paced at
+
+```
+50/35300 [00:42<7:50:00, 1.25it/s]
+```
+
+i.e. the schedule needed **7 h 50 m** against a per-eval budget of **21600 s (6 h)**. The operator had
+to hand the run that arithmetic themselves, as a control-plane `hint` (`events.jsonl` seq 791): *"each
+evaluation gets 21600 s (6 h) of wall clock, hard … A shorter run that reports a number beats a longer
+one that reports nothing."*
+
+**The correction this entry has to make first, because it is F1b's own correction repeated.** The
+first framing of this ask was *"the TIME ceiling does not reach the roles at all"*. That is FALSE for
+the Researcher: `engine/proposal_cues.py::_cue_experiment_time_budget` has announced it on repo tasks
+since before F1b, and v7's own `spans.jsonl` carries the line **54 times verbatim** — *"each experiment
+(train+eval) must finish within ~21600s (~6.0h)"*, with the estimate-then-size advice attached. So the
+engine did speak; what it did not do is speak to everyone who decides, or say what the number allows.
+Three gaps, each a different fact:
+
+1. **The DEVELOPER was told nothing, anywhere** — and it is the role that picks the batch size, writes
+   the loop, and declares the `train` stage's `timeout`. v7 node 0's `looplab_stages.json` declares
+   `"timeout": 172800.0` — **48 hours against a 6-hour budget** — which is exactly what
+   `adapters/repo_developer.py`'s *"Give `train` a GENEROUS `timeout`"* asks for when no ceiling is
+   named. The Researcher picks epochs and the Developer picks the batch size; **the pair** determines
+   wall clock, and only one of them could see the budget.
+2. **The SCRIPT-solution path was silent for the Researcher too.** `_cue_experiment_time_budget` is
+   gated on `self._repo_spec`, so on sandbox tasks — where `Settings.timeout` *is* the whole budget and
+   `_EVAL_TIMEOUT_GUIDANCE` invites an `eval_timeout` request — no number reached the role at all.
+3. **Nothing scoped the Researcher's own `eval_timeout`.** It is ignored outright unless
+   `agent_control.timeout` grants `researcher`, and hard-clamped at `max_eval_timeout` when it is
+   granted (`engine/shared.py::effective_researcher_eval_timeout`). The prompt asks for the number in
+   both worlds and states neither — F1b's sentence exactly: *a role asked to size a request against a
+   budget it cannot see will get it wrong at some rate, and there is no reason for that rate to be
+   non-zero.*
+
+**WHICH NUMBER IS ANNOUNCED, and why that one.** The one the stage is actually killed at *by the
+engine's own resolution*, not the one an operator typed into a field this task never reads:
+`engine/shared.py::effective_eval_time_budget` resolves it the way `eval_dispatch::_run_eval` does. An
+ACTIVE eval spec owns it through the new `runtime/command_eval.py::eval_spec_time_budget` — the
+LARGEST of the base and every profile `timeout`, because a node runs under whichever profile it
+selects — and `Settings.timeout` is not consulted at all on that branch. Otherwise the run default
+`Settings.timeout` stands. Deliberately **not** `timeout * sweep_timeout_mult`: the multiplier applies
+only to an Idea that already carries a `space`, which does not exist at proposal time, and quoting the
+stretched budget would overstate it 8x on the shipped default. `None` — a partially built Engine, a
+non-finite or non-numeric timeout — prints **nothing**, on F1b's rule that a plausible wrong ceiling is
+worse than no ceiling.
+
+**ONE derivation, three readers.** It lives in `runtime/command_eval.py` (spec half) because the third
+reader is `adapters/repo_developer.py`, which may not import `engine`. The existing repo cue
+`_experiment_time_budget` now delegates instead of re-deriving: two prose statements of one budget,
+drifting inside a single prompt, is not a failure anyone would see.
+
+**A HONEST LIMIT THIS CHANGE DOES NOT CLOSE, and the reason it is a statement and not a clamp.**
+`command_eval._run_stages` takes a declared stage `timeout` as a REPLACEMENT for the budget, never a
+clamp (`finite_timeout(_stg.get("timeout", timeout), timeout)`), so v7's 48-hour leash is REAL — the
+train stage would not have been killed at 6 h; it would have overrun the budget the run was planned
+around, and the protected `score` stage is the only one the operator's number always binds. Clamping a
+declared stage timeout to the eval budget is the option-(b)-shaped policy change F1b declined for
+footprints, and it is declined here for the same reason: it would fence a legitimately long training,
+it changes execution rather than what a role plans, and it needs its own evidence. So both prompts say
+the true thing — *a longer stage `timeout` is not more budget; it only removes the guard.*
+
+**BUILT, 2026-08-14.** A new registry hint `_time_budget_hint`
+(`agents/roles.py::RESEARCHER_HINT_ATTRS` + `RESEARCHER_PROMPT_CUES`, so it reaches BOTH readers
+through the shared `collect_hint_cues` and all four wrappers through the shared `forward_hints`),
+stamped per proposal by `engine/proposal_cues.py::_stamp_time_budget_hint`. Per-proposal for a sharper
+version of F1b's reason: `self.timeout` is retuned mid-run by an operator's `budget_extend{timeout}`
+(`_apply_control_overrides`, every turn) and by a granted Strategist decision, and role instances are
+pooled across builds — a construction-time stamp would keep quoting a budget nobody is running under.
+Spliced LAST, after `_gpu_budget_hint`; the two do not fight for the final slot because neither names
+the other's quantity. On the sandbox path it also states the governed headroom (`up to {max_eval_timeout}s`,
+or *"an `eval_timeout` you set is NOT honoured here"* when ungranted). **The Developer got it too**:
+`adapters/repo_developer.py::_time_budget_note`, spliced into the STAGES phase *after* the untouched
+"generous timeout" ask (prompt strings are contracts) and into the implement/repair message, which is
+the only one a repair session reaches.
+
+**`eval_deadline_grace_s` (shipped 2026-08-13, default `0.0`).** Named only when it is ON, and named as
+a RESCUE: *"a judge may grant a stage that is demonstrably about to finish up to Ns more. That is a
+rescue, not budget — plan as if it does not exist."* The announced ceiling is unchanged by it. A
+ceiling that reads as "you have more than this" would re-open the defect from the other side.
+
+**The wording, and why it is not a bare number.** F1b had to reword `_FOOTPRINT_GUIDANCE` because a
+ceiling with no meaning read as discouragement; the same trap here is a schedule so short it measures
+nothing. The operator's own framing is spliced — *a shorter experiment that REPORTS A NUMBER beats a
+longer one that reports nothing* — with the guard attached: *that is not licence to propose something
+too small to answer the question … cut the SCHEDULE, never the comparison.*
+
+`tests/test_researcher_time_budget_hint.py` drives it end to end (the truth table, both real prompts,
+a real wrapper chain, a live `budget_extend` retune, both governance answers, the grace clause on and
+off, and the real Developer prompt).
+
+**NOT built, and it is the honest remainder.** The **script-path Developer** (`agents/roles.py::LLMDeveloper`,
+whose analogous surface is `_developer_footprint_guidance`) is still told nothing. Its only channel to
+engine facts is the `Idea`, and `idea.eval_timeout` is an unclamped REQUEST rather than the effective
+ceiling — announcing it would be exactly the "number an operator typed" this entry rejects. Giving it
+the real one needs a Developer-side inbound hint registry (the mirror of `RESEARCHER_HINT_ATTRS`,
+forwarded through `ValidatingDeveloper` / best-of-N / the facade), which does not exist; passing it at
+construction is refused on F1b's own recorded ground, since `Settings.timeout` moves mid-run. That is a
+separate change. Also unclosed: nothing yet tells either role the MEASURED per-step cost of this repo
+on this box before the first node pays for it — the repo cue's calibration line only exists once a node
+has finished.
+
 ## F2 · Give the Developer simple shell commands
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."

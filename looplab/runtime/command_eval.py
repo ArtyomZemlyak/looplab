@@ -1364,6 +1364,47 @@ def materialized_stages(manifest_obj, *, reserved: tuple = ("score",)) -> Option
     return clean if (err is None and clean) else None
 
 
+def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
+    """The OPERATOR-declared per-eval wall-clock ceiling of an eval spec, in seconds (docs/29 F1h).
+
+    The LARGEST of the base `timeout` and every profile `timeout`, because a node runs under
+    whichever profile it selects and the largest is therefore the real budget an experiment has to
+    fit. `600.0` when a spec is active but declares no timeout at all — that is `build_command`'s
+    own default, i.e. the number the eval would actually be given. ``None`` means "no spec, no
+    number": a caller with nothing to resolve must say nothing rather than a plausible wrong figure.
+
+    It lives HERE, beside `build_command`, because it is the same fact `build_command` resolves per
+    profile and because it has THREE readers that straddle the layering line: the engine's proposal
+    cue (`engine/proposal_cues.py::_experiment_time_budget`), the Researcher's TIME BUDGET hint
+    (`engine/shared.py::effective_eval_time_budget`), and the repo Developer's stage-authoring prompt
+    (`adapters/repo_developer.py`), which may not import `engine`. A role told one number while the
+    engine plans around another is exactly the defect F1h is about, so the derivation is shared
+    rather than re-spelled per reader.
+
+    NOT the number a STAGE is necessarily killed at, and the difference is load-bearing:
+    `_run_stages` takes each stage's own `timeout` and falls back to this one only when the stage
+    declares none (`finite_timeout(_stg.get("timeout", timeout), timeout)` — a fallback, never a
+    clamp). So a Developer-authored `looplab_stages.json` can declare a longer leash than the
+    operator's budget, and on `rubertlite-dr-unified-v7` node 0 it declared 172800 s against a
+    21600 s budget. This is the number the run is PLANNED around and the one the protected `score`
+    stage always runs under; a stage that outlives it is spending GPU-hours the run did not budget.
+    """
+    es = eval_spec or {}
+    if not es:
+        return None
+    vals = []
+    base = es.get("timeout")
+    if base is not None:
+        vals.append(base)
+    for prof in (es.get("profiles") or {}).values():
+        if isinstance(prof, dict) and "timeout" in prof:
+            vals.append(prof["timeout"])
+    if not vals:                        # spec active but no explicit budget -> build_command's default
+        vals.append(600.0)
+    cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
+    return cand if math.isfinite(cand) and cand > 0 else None
+
+
 def build_command(eval_spec: dict, params: Optional[dict] = None,
                   profile: Optional[str] = None) -> tuple[list[str], float]:
     """Build the eval argv + timeout from an eval_spec, an eval profile (smoke/full), and

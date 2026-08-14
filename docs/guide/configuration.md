@@ -163,7 +163,7 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 | `asha_live_quantile` | `LOOPLAB_ASHA_LIVE_QUANTILE` | `0.5` | The rank bar sits at this quantile along a WORST→BEST ordering of finished siblings' finals: `0.5` = the median; SMALLER lowers the bar toward the WORST peer so it is more conservative (`0.0` = only stop a node worse than the worst finished peer); LARGER is more aggressive |
 | `asha_live_min_siblings` | `LOOPLAB_ASHA_LIVE_MIN_SIBLINGS` | `3` | Minimum finished sibling nodes required before ASHA ranks at all (never acts on too little evidence) |
 | `asha_live_kill_confidence` | `LOOPLAB_ASHA_LIVE_KILL_CONFIDENCE` | `0.8` | Minimum confidence (0–1) required from the ASHA judge's `stop` verdict before a flagged node is actually killed. Once the rank test fires past the grace window, the judge is shown the node's live curve, the same-resource sibling values and computed bar, the objective's direction, the other metrics the run is printing, and the training monitor's latest health verdict, and answers `continue`/`watch`/`stop` (a fold-ignored `asha_verdict` diagnostic + span). Because it is consulted only INSIDE the rank gate it can never stop a node the quantile test would have spared — it can only spare one the quantile test would have killed |
-| `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |
+| `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) — the budget on the script-solution path only; a task with an active eval spec takes its per-eval budget from `cmd.timeout`/the profile timeouts instead. Whichever of the two applies is announced to the roles that spend it, per proposal — see [Both roles are told the per-eval TIME budget](#both-roles-are-told-the-per-eval-time-budget) |
 | `max_eval_timeout` | `LOOPLAB_MAX_EVAL_TIMEOUT` | `3600.0` | Hard ceiling for a Researcher-authored per-node `eval_timeout`, applied after the `agent_control.timeout` permission gate. The run-wide `timeout` remains the fallback when no permitted override is supplied. The one-hour default admits existing heavy-model requests while remaining below the sandbox's defensive 24-hour subprocess ceiling. |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `eval_stall_timeout_s` | `LOOPLAB_EVAL_STALL_TIMEOUT_S` | `1800.0` | STALL watchdog cap (seconds): a stage that is completely SILENT on stdout/stderr for this long — while still alive and below its wall-clock deadline — is tree-killed early with a STALLED marker (a hung dataloader/deadlock dies in minutes instead of burning a multi-hour timeout). The per-stage window is `min(this, the stage's own timeout)`. Set to `0` to DISABLE the watchdog (only the hard deadline applies) — for a legitimately quiet non-Python stage (block-buffered stdout, a script logging only to its own file). Threaded into the eval and surfaced to the Developer so its code emits periodic progress to stay alive |
@@ -288,6 +288,42 @@ declare, not a clamp: a declared footprint remains authoritative at admission.
   external scheduler — LoopLab does not coordinate across them.
 
 A plain repair/resume that needs no GPU is unaffected: a CPU-locked adapter never takes the lease.
+
+### Both roles are told the per-eval TIME budget
+
+The same question one axis over, and it has the same answer. Four fields interact — `timeout`,
+`max_eval_timeout`, a Researcher-authored per-node `eval_timeout` (gated by `agent_control.timeout`)
+and the task's own `cmd.timeout`/profile timeouts — so **no single field is the budget**, and a role
+sizing a training schedule against the wrong one produces a run that is killed with no metric at all.
+On `rubertlite-dr-unified-v7` a node paced at 7 h 50 m against a 6-hour budget while its own stage
+manifest declared a 48-hour `timeout`.
+
+`engine/shared.py::effective_eval_time_budget` resolves the number the way the eval dispatcher does,
+and every role that can spend it is quoted **that** number:
+
+* with an **active eval spec** (repo/command tasks) the budget is the largest of the base and profile
+  `timeout`s (`runtime/command_eval.py::eval_spec_time_budget`) — a node runs under whichever profile
+  it selects. `timeout` is not consulted at all on this branch.
+* otherwise the run default **`timeout`** stands. Not `timeout × sweep_timeout_mult`: the multiplier
+  applies only to an Idea that already carries a `space`, which does not exist when a proposal is made.
+* a number that is not knowable prints nothing. A plausible wrong ceiling is worse than none.
+
+Who is told, and what else they are told:
+
+| role | where | the extra fact it needs |
+|---|---|---|
+| Researcher (both prompts) | the `TIME BUDGET` cue, stamped per proposal | whether its own `eval_timeout` is honoured at all (`agent_control.timeout`) and how far it may raise the budget (`max_eval_timeout` clamps it) |
+| Developer (repo) | the stages + implement prompts | that a stage `timeout` longer than the budget is not more budget — nothing clamps it, so it runs, spending GPU-hours the run was not planned around |
+
+`eval_deadline_grace_s` does **not** change the announced ceiling. When it is on (it ships at `0.0`,
+off) the prompts name it as a rescue for a stage demonstrably about to finish, to be planned against as
+if it did not exist. And the wording is deliberately not a bare number in either prompt: *a shorter
+experiment that reports a number beats a longer one that reports nothing* — while cutting the SCHEDULE,
+never the comparison, since an experiment that finishes and measures nothing is the same waste in the
+other direction.
+
+The **script-solution Developer** is still told nothing; the reasoning is in
+[the operator backlog](../29-operator-backlog-2026-08-11.md).
 
 ### What blocked speculation from being the default (fixed 2026-08-05)
 

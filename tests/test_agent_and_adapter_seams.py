@@ -33,11 +33,14 @@ def test_the_subset_is_exactly_the_prose_cues():
     `_novelty_stance` / `_steering_context` / `_cross_run_advisory_receipt` are read structurally —
     none of them is concatenated into the user turn as prose.
 
-    `_gpu_budget_hint` (docs/29 F1b — the per-experiment GPU ceiling) is LAST, and the position is
-    part of the contract: `_complexity_hint` carries the GPU RESOURCE CONTRACT cue announcing the
-    POOL size, and the ceiling has to be the last number the model reads about devices."""
+    The two BUDGET cues are LAST, and the positions are part of the contract: `_complexity_hint`
+    carries the GPU RESOURCE CONTRACT cue announcing the POOL size and the experiment TIME-BUDGET cue,
+    and each ceiling has to be the last number the model reads on ITS OWN axis. They do not fight for
+    the final slot because neither names the other's quantity — `_gpu_budget_hint` (docs/29 F1b) names
+    no wall clock and `_time_budget_hint` (docs/29 F1h) names no device count."""
     assert RESEARCHER_PROMPT_CUES == (
-        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint")
+        "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint", "_gpu_budget_hint",
+        "_time_budget_hint")
 
 
 @pytest.mark.parametrize("module,holder,method", [
@@ -59,8 +62,11 @@ def test_the_tuple_is_declared_in_exactly_one_place():
     # RESEARCHER_HINT_ATTRS registry (prefixed by `_digest_cap`) are not counted as a second copy.
     # DERIVED from the registry rather than hand-copied: a hand-copied literal that goes stale when a
     # cue is added counts ZERO, which reads as "declared nowhere" and points at the wrong defect.
-    literal = '\n    ' + ', '.join(f'"{cue}"' for cue in RESEARCHER_PROMPT_CUES) + ')'
-    combined = inspect.getsource(roles_mod) + inspect.getsource(agent_mod)
+    # Whitespace-normalized on BOTH sides: the tuple outgrew one line when `_time_budget_hint` was
+    # added (docs/29 F1h), and a literal match against the raw source then counted ZERO — which reads
+    # as "declared nowhere" and points at the wrong defect just as loudly as a stale hand-copy would.
+    literal = ' ' + ', '.join(f'"{cue}"' for cue in RESEARCHER_PROMPT_CUES) + ')'
+    combined = ' '.join((inspect.getsource(roles_mod) + inspect.getsource(agent_mod)).split())
     assert combined.count(literal) == 1
 
 
