@@ -362,6 +362,16 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **The assistant's containerized shell is unhardened** (found 2026-08-14 while wiring
+  `sandbox_readonly_rootfs`). `tools/shell_tools.py:213` builds its OWN
+  `make_docker_wrap(root, image, network="none")` and passes neither `mem`/`cpus` nor
+  `readonly_rootfs`, so none of the container tier's limits reach it. Reachable — `serve/assistant.py`
+  constructs `ShellTools` for the operator's chat assistant (NOT the Developer, which has
+  `tools/dev_probe.py`'s Python probe and no shell at all). Lower severity than a candidate's code for
+  that reason: it runs under a trust mode with an approver rather than as untrusted output. The fix is
+  a constructor parameter plus settings plumbing that `mem`/`cpus` also lack today, which is why it was
+  left rather than half-wired.
+
 - **Three spellings of the RunResult timeout-nulling** — `runtime/sandbox.py:1314-1320`
   (`SubprocessSandbox`), `sandbox.py:1375-1381` (`DockerSandbox`), `runtime/command_eval.py:2286-2304`
   (a third spelling, `if not to` guards instead of the sandboxes' ternaries). They now cross-reference
