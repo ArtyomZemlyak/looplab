@@ -362,6 +362,33 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **The `engine` extra-metric channel authenticates against bytes the candidate authors** (found
+  2026-08-14 auditing the merge day against docs/36). `core/calibration.py:221
+  ::engine_declared_extra_metric_keys` grants `EXTRA_METRIC_ENGINE` — a member of
+  `EXTRA_METRIC_AUTHENTICATED` — on `code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX)`, and
+  `runtime/sandbox.py:1471`/`:1541` pass the candidate's own `solution.py` verbatim as that `code`.
+  The prefix is a public constant in the shipped tree, not a secret: driven, `tools/env_inspect.py
+  ::read_installed("looplab.core.calibration", 57, 14)` pages it out byte-for-byte with no package
+  allow-list, and `CliAgentDeveloper` (`agents/cli_agent.py:220`) is an external coding agent with a
+  real shell whose output IS `solution.py`. **Reproduction:**
+  `stdout_extra_metric_channels({"device_count": 8.0, "alloc_bytes": 4096.0, "my_auc": .99},
+  SPECULATION_CUDA_PROBE_CODE_PREFIX + '\nprint({"metric": .99, "device_count": 8})\n')` returns
+  `{'device_count': 'engine', 'alloc_bytes': 'engine', 'my_auc': 'auto'}`, and
+  `authenticated_extra_metrics_only` then keeps the first two under `auto_extra_metrics=false`.
+  **Bounded, and the bound is why this is residue rather than a P0:** it reaches only the probe's
+  four key names, it needs the prefix to actually EXECUTE (so a CUDA device), `extraMetricIsDeclared`
+  still answers false for `engine`, and nothing here touches the primary metric, the champion,
+  `feasible_nodes` or a violation. What it costs is the sentence the channel exists to make true —
+  the UI prints "Printed by LoopLab's own instrumentation … and verified against it" over a number
+  an agent printed, and the operator's own "authenticated only" switch admits it. **Not fixed
+  tonight on purpose:** the obvious narrowing (also require the exact key SET and the three static
+  values, as `speculation_quality.py:554-558::_validate_cuda_probe_artifact` does downstream) would
+  change what a partially-reporting calibration node is tagged, and under `auto_extra_metrics=false`
+  that strips the probe keys the receipt gate re-derives from `node_evaluated` — i.e. it can revoke
+  issued calibration receipts, which is exactly the careless RECORD-side change docs/36 warns about.
+  The honest alternative is to stop deriving the tag from the artifact's CONTENT and carry
+  "the engine spliced this" from the splicer, which needs a channel `runtime/` does not have today.
+
 - **The assistant's containerized shell is unhardened** (found 2026-08-14 while wiring
   `sandbox_readonly_rootfs`). `tools/shell_tools.py:213` builds its OWN
   `make_docker_wrap(root, image, network="none")` and passes neither `mem`/`cpus` nor
