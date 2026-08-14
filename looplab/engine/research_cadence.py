@@ -743,13 +743,18 @@ class ResearchCadenceMixin:
                 # the second one permanently, losing that node's Developer-finalization receipt.
                 #
                 # `lesson_refs`/`claim_refs`/`research_origin` are fenced by the CARD alone: the
-                # fold compares them against the card, not against any node. Keying THOSE on the
-                # subject does not fix anything and reintroduces the defect the memo exists to
-                # stop — a card-scoped delta the fold refused would be re-appended once per node the
-                # card ever materializes, i.e. the same unbounded re-append merely divided by a
-                # constant. So the subject (and its `proposal_ref`) enters the key only for the
-                # node-scoped half. `proposal_ref` is a dict, so it goes THROUGH the digest rather
-                # than into the tuple — the fence is its value, not its identity.
+                # delta is computed by comparing against `card.<field>`, never against a node. So
+                # keying those on the subject fixes nothing and reintroduces the defect the memo
+                # exists to stop. The subject for a card-scoped delta is `subjects.setdefault`'s —
+                # the card's LOWEST-numbered node, which adding nodes does not move — but its
+                # `proposal_ref` does move: an inline repair that finalizes a different held
+                # envelope rewrites the idea and the digest with it, and a card carrying a footprint
+                # takes the newest finalized node as subject instead. Each such move bought a
+                # refused card-scoped delta another byte-identical row: bounded rather than
+                # unbounded, which is the same re-append with a constant in front. So the subject
+                # (and its `proposal_ref`) enters the key only for the node-scoped half.
+                # `proposal_ref` is a dict, so it goes THROUGH the digest rather than into the
+                # tuple — the fence is its value, not its identity.
                 node_scoped = "footprint" in delta
                 fingerprint = (
                     card_id,

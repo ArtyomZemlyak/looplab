@@ -693,10 +693,10 @@ def _hook(event, args):
                 _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
                 return
         return
-    # The audit event fires BEFORE the chdir, so this re-derives `_CWD_REACHES_ROOT` from the
-    # TARGET — the flag that keeps `_resolve`'s relative fast bail correct rather than merely
-    # asserted. Under `warn` the chdir proceeds, so the flag must be set even though we do not stop
-    # it; under `deny` `_report` raises, the chdir never happens, and the assignment is skipped.
+    # `_CWD_REACHES_ROOT` is what keeps `_resolve`'s relative fast bail correct rather than merely
+    # asserted, so a chdir has to be able to TURN IT ON: under `warn` the chdir proceeds, and a
+    # process that has just moved into a fenced root must start paying the `abspath` on relative
+    # opens. It must never turn it OFF — see the MONOTONIC note below, which is the whole argument.
     global _CWD_REACHES_ROOT
     try:
         bad = _fenced_dir(args[0])
