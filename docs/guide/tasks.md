@@ -388,6 +388,31 @@ nothing to change. A scorer that reads its checkpoint path from an *editable* co
 still be pointed elsewhere; what holds that line is the **source-tree read fence**, not a wider
 `protect` list and not the stage `expect` contract.
 
+**Before any of that: a path that contradicts the node's own manifest is refused as it is written.**
+The fence is a *read-side* mechanism and it fires when a training process follows a bad path, hours
+after the path was authored. One shape of bad path is decidable from two things the Developer itself
+wrote, at the moment it writes the second one: an **absolute path into the editable source tree that
+names a file the node's own stage manifest declares its pipeline WRITES**. Those two cannot both be
+true — a node evaluates in its own materialized copy, so the source tree can never hold anything that
+node produced — so `write_file`, `edit_file` and `declare_stages` refuse it and say which two
+declarations disagree. The model fixes it for the price of one tool call, before a GPU is reserved.
+
+It is deliberately **not** a ban on absolute source paths, and the difference is measured. Over every
+authored working set in this project's `runs/` corpus (2,577 of them), a blanket ban refuses 8 nodes
+and 5 of those are legitimate — a committed base model, a teacher checkpoint used for distillation,
+a config naming a *different* experiment. The collision rule refuses 3, and they are exactly the 3
+nodes that produced a wrong or wasted result. The property that buys that: **a legitimate input is
+never a path the node declares it produces.** So if you genuinely need to read a large in-tree file
+the seeding does not copy, the answer is the same as everywhere else — declare a `data:` or
+`references:` mount, or `seed_mode: "all"` — and the refusal message says so.
+
+The operator's own side of this is a **warning, not a refusal**: an `eval.command` or
+`cmd.stages[].command` argv token naming the editable root absolutely is reported at submit
+(`looplab run`, `/api/start`), because it reaches your original tree rather than the node's copy, so
+every node reads the same bytes and no node's edits to it take effect. It stays a warning because
+there is no manifest to collide it against at submit time and a fixed input is legitimate. An
+absolute `eval.cwd` needs no rule at all — it is remapped onto the node workdir.
+
 **The source-tree read fence (`read_fence`, default `deny`).** A node runs in its own copy of your
 editable repo, so the source tree provably cannot contain anything that node's pipeline produced.
 The fence makes reading it impossible: a generated `sitecustomize.py` under

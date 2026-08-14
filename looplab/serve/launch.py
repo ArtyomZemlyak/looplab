@@ -470,8 +470,13 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     # leaves the score stage's CODE inside the Developer's edit surface, while the Developer's
     # prompt tells it the scoring cannot be rewritten. `adapter` may be an injected dict in tests —
     # the helper is total over that (it isinstance-checks a RepoTask and returns [] otherwise).
-    from looplab.adapters.repo_task import eval_entrypoint_unprotected
+    from looplab.adapters.repo_task import (eval_entrypoint_unprotected,
+                                            eval_source_tree_command_paths)
     warnings += tuple(eval_entrypoint_unprotected(adapter))
+    # docs/29 F1c's third piece: an argv token naming the editable SOURCE tree absolutely reaches
+    # the operator's original rather than the node's copy, so no node's edits to it ever take
+    # effect. Same channel, same totality over an injected dict `adapter`.
+    warnings += tuple(eval_source_tree_command_paths(adapter))
     token = _launch_token(
         run_id, canonical_task, effective, source_fp, referenced_paths,
         _sha(saved_settings), base_digest, seed_chat)

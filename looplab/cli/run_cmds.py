@@ -29,7 +29,7 @@ from looplab.engine.orchestrator import (
 from looplab.engine.finalize import finalize_run, incomplete_finalize_scope
 from looplab.events.replay import fold
 from looplab.adapters.repo_task import (eval_entrypoint_unprotected, eval_reader_path_errors,
-                                        eval_workspace_conflicts)
+                                        eval_source_tree_command_paths, eval_workspace_conflicts)
 from looplab.adapters.tasks import kinds_for, validate_task
 from looplab.adapters.toytask import ToyTask
 from looplab.search.speculation_calibration import canonical_speculation_toy_task
@@ -566,6 +566,8 @@ def _report_task_warnings(task, task_dict: dict) -> None:
     for field, p in _missing_task_paths(task_dict):
         typer.echo(f"⚠ task {field} does not exist on disk: {p}", err=True)
     for warning in eval_entrypoint_unprotected(task):
+        typer.echo(f"⚠ {warning}", err=True)
+    for warning in eval_source_tree_command_paths(task):
         typer.echo(f"⚠ {warning}", err=True)
 
 
