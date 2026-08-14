@@ -752,6 +752,11 @@ const exactRunDeletionReceipt = (value, intent) => {
     // Present only when a cascade was requested AND the deletion succeeded. Carried through rather
     // than validated field-by-field: it reports an outcome, and nothing is fenced on it.
     memory: value.memory && typeof value.memory === 'object' ? value.memory : null,
+    // A `pending` receipt says the operation is unfinished; `retryable` says whether pressing again
+    // can change that. Only an explicit `false` is read as "it cannot" — an older server that sends
+    // no flag, or any other value, keeps the retrying behaviour rather than inventing a dead end.
+    retryable: value.retryable === false ? false : true,
+    message: typeof value.message === 'string' ? value.message : '',
   }
 }
 
@@ -2037,14 +2042,25 @@ export default function RunList({ onOpen, onGlobalNavigate,
     deleteDialogFocusRef.current = null
     focusDeletionRecovery(intent.runId)
   }
-  // Returns a VERDICT — 'deleted' | 'pending' | 'rejected' | 'unknown' — for the batch runner, which
-  // has to decide whether to submit the next run. Every existing caller ignores it, and must: for a
-  // single deletion the notice and the recovery record already say everything.
+  // Returns a VERDICT — 'deleted' | 'pending' | 'blocked' | 'rejected' | 'unknown' — for the batch
+  // runner, which has to decide whether to submit the next run. Every existing caller ignores it,
+  // and must: for a single deletion the notice and the recovery record already say everything.
   const finishRunDeletionReceipt = async (intent, receipt, {
     fromDialog = false, shouldRestoreFocus = () => false, quiet = false,
   } = {}) => {
     if (receipt.status === 'pending') {
       persistDeletionPhase(intent, 'pending', receipt.phase)
+      // 'blocked' is 'pending' that a retry cannot move — the server said `retryable: false`, which
+      // it only does when nothing in its own process will ever touch what stands in the way. Polling
+      // it is the operator watching a progress line for a state machine that has stopped, so the
+      // batch takes the server's own sentence and stops on it instead.
+      if (receipt.retryable === false) {
+        if (!quiet) setDeletionNotice({ kind: 'error', text: receipt.message
+          || 'This deletion cannot continue until its storage is resolved by hand.' })
+        if (fromDialog) leaveDeleteDialogForRecovery(intent)
+        return { outcome: 'blocked', reason: receipt.message
+          || 'it cannot continue until its storage is resolved by hand' }
+      }
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
       return { outcome: 'pending', reason:
         'the server accepted it and is still working — it has a saved recovery' }
@@ -2187,6 +2203,14 @@ export default function RunList({ onOpen, onGlobalNavigate,
       if (fromDialog) setDeleteDialogBusy(false)
       deleteConfirmLockRef.current = false
     }
+    // THE RETURN. It was missing, and the batch — the one caller that reads it — therefore saw
+    // `undefined` for every run, including the ones the server had just deleted. `verdict?.outcome
+    // === 'deleted'` was never true, so no run ever entered `state.done`, every run took the stop
+    // branch, and `verdict?.reason || 'the deletion did not complete'` produced the notice the
+    // operator acted on: "Nothing was deleted" about a batch whose receipt read `phase: succeeded`
+    // and whose directory was gone. A destructive operation that under-reports what it did is worse
+    // than one that fails loudly, so this line is the whole of that defect.
+    return verdict
   }
   const confirmRunDeletion = async () => {
     if (!deleteDialog || deleteDialog.invalidated || deleteConfirmLockRef.current) return
@@ -2243,13 +2267,15 @@ export default function RunList({ onOpen, onGlobalNavigate,
       // Re-resolve against the CURRENT list: the row we planned from is one deletion older.
       const fresh = (runsRef.current || []).find(run => run.run_id === target.runId)
       if (!fresh) {
-        state.stoppedAt = { runId: target.runId, reason: 'it left the run list before its turn' }
+        state.stoppedAt = { runId: target.runId, outcome: 'not-submitted',
+          reason: 'it left the run list before its turn' }
         break
       }
       const generation = deletionGenerationOf(fresh)
       if (!RUN_GENERATION_RE.test(generation)
           || !Number.isSafeInteger(fresh.seq) || fresh.seq < -1) {
-        state.stoppedAt = { runId: target.runId, reason: 'its exact deletion identity is unavailable' }
+        state.stoppedAt = { runId: target.runId, outcome: 'not-submitted',
+          reason: 'its exact deletion identity is unavailable' }
         break
       }
       state.current = fresh.label || target.runId
@@ -2260,7 +2286,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
       if (!intent || !saveRunDeletionIntent(intent)) {
         // Same refusal as the single dialog: without a durable recovery record this tab cannot
         // identify the operation it is about to start, so it does not start it.
-        state.stoppedAt = { runId: target.runId, reason:
+        state.stoppedAt = { runId: target.runId, outcome: 'not-submitted', reason:
           'this tab could not preserve an exact recovery record' }
         break
       }
@@ -2290,8 +2316,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
         continue
       }
       // Still pending after the budget above is a real stop — but it is an UNFINISHED deletion with
-      // a saved recovery record, not a rejected one, and the notice has to say which.
-      state.stoppedAt = { runId: target.runId,
+      // a saved recovery record, not a rejected one, and the notice has to say which. The OUTCOME
+      // travels with the stop for the same reason: `undefined`/'unknown' means this tab never
+      // established what happened to THIS run, so the notice may not claim it still exists.
+      state.stoppedAt = { runId: target.runId, outcome: verdict?.outcome || 'unknown',
         reason: verdict?.outcome === 'pending'
           ? 'the server is still working on it; its recovery record is saved and can be resumed'
           : (verdict?.reason || 'the deletion did not complete') }

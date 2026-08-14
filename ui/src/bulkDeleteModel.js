@@ -73,12 +73,34 @@ export function bulkProgressLabel(state) {
   return `Deleting ${at} of ${total}${state.current ? ` — ${state.current}` : ''}…`
 }
 
+/** How many run ids a notice spells out before it starts counting. The dialog lists the whole plan;
+ *  this sentence also travels OUTSIDE the dialog, where "3 runs deleted" and "which three" are
+ *  different answers and only one of them tells the operator what to do next. */
+const NAMED_RUN_CAP = 5
+
+const namedRuns = ids => {
+  const shown = ids.slice(0, NAMED_RUN_CAP).map(id => `“${id}”`).join(', ')
+  const rest = ids.length - Math.min(ids.length, NAMED_RUN_CAP)
+  return rest ? `${shown} and ${rest} more` : shown
+}
+
 /**
- * The result. Three outcomes, kept apart on purpose:
- *   everything went   -> a plain confirmation
+ * The result. Four outcomes, kept apart on purpose:
+ *   everything went   -> a plain confirmation, NAMING the runs
  *   nothing went      -> the reason, with the run it stopped on
  *   some went         -> BOTH, because a batch that half-succeeded and reports only its failure
  *                        leaves the operator believing runs still exist that do not.
+ *   nothing CONFIRMED -> neither of the two above. The run that stopped the batch may itself have
+ *                        been deleted: `unknown` is what the transaction returns when the receipt
+ *                        said `succeeded` and the tab could not finish reading the refreshed list,
+ *                        or could not clear the recovery record. "Nothing was deleted" is a claim
+ *                        about the filesystem and this branch has no evidence for it.
+ *
+ * STOPPED AND NOTHING-DELETED ARE DIFFERENT FACTS. Until 2026-08-14 they read as one, because
+ * `runDeletionRequest` never returned its verdict: `done` stayed empty for every batch, so the
+ * partial branch below was unreachable and every stop — including one that followed a completed
+ * deletion — printed "Nothing was deleted." The operator was told nothing had happened about a run
+ * whose receipt read `phase: succeeded` and whose directory was already gone.
  */
 export function bulkOutcomeNotice(state) {
   if (!state) return null
@@ -111,20 +133,30 @@ export function bulkOutcomeNotice(state) {
   const retryable = retryableMemory
   const retryIdentity = retryable || { run_uid: '', memory_dir: '' }
   const retryRunId = unfinished && retryable ? String(unfinished.runId || '') : ''
+  const deleted = (state.done || []).map(id => String(id || ''))
   if (!stopped) {
     if (!done) return blocked ? { kind: 'error', retryRunId: '', text: tail.trim() } : null
     return { kind: unfinished ? 'error' : 'status', retryRunId,
       retryIdentity,
-      text: `${plural(done, 'run')} permanently deleted.${tail}${memoryTail}` }
+      text: `${plural(done, 'run')} permanently deleted: ${namedRuns(deleted)}.${tail}${memoryTail}` }
   }
   const why = String(stopped.reason || 'the deletion did not complete')
+  // The stopping run's OWN outcome. `unknown` is the one value that forbids a claim about it in
+  // either direction — see the block comment above.
+  const unsettled = stopped.outcome === 'unknown'
   if (!done) {
-    return { kind: 'error', retryRunId, retryIdentity,
-      text: `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}.${tail}${memoryTail}` }
+    const opening = unsettled
+      ? `No deletion is confirmed. “${stopped.runId}” stopped the batch: ${why}.`
+        + ` Its own outcome is not established — check that run before assuming it still exists.`
+      : `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}.`
+    return { kind: 'error', retryRunId, retryIdentity, text: `${opening}${tail}${memoryTail}` }
   }
   const untouched = Math.max(0, (state.total | 0) - done - 1)
   return { kind: 'error', retryRunId, retryIdentity, text:
-    `${plural(done, 'run')} deleted, then the batch stopped at “${stopped.runId}”: ${why}.`
+    `${plural(done, 'run')} deleted (${namedRuns(deleted)}), then the batch stopped at `
+    + `“${stopped.runId}”: ${why}.`
+    + (unsettled ? ' Its own outcome is not established — check that run before assuming it still'
+      + ' exists.' : '')
     + (untouched ? ` The remaining ${plural(untouched, 'run')} were not touched.` : '')
     + `${tail}${memoryTail}` }
 }
