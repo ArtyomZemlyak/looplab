@@ -1696,38 +1696,115 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     return CompositeTools(providers)
 
 
+# The boundary marker spliced onto the turn's own request. One string, named once: the directive
+# below POINTS AT it by name, so a marker that drifts from the sentence naming it would leave the
+# model hunting for a label that is not in the trace.
+TURN_BOUNDARY_MARK = "[current turn — answer this]"
+
 FINAL_ANSWER_DIRECTIVE = (
     "Now write your final answer to the user, in Markdown.\n"
     "\n"
-    "Answer the LAST user message only, and report only the work you did in THIS turn — everything "
-    "after that message. The earlier turns above are context you may rely on; do not re-summarize "
-    "them, do not recap what you did in previous turns, and do not open with a summary of the "
-    "conversation so far. Be concise."
+    "Answer the request marked `[current turn — answer this]` only, and report only the work you "
+    "did in THIS turn — everything after that marker. The earlier turns above are context you may "
+    "rely on; do not re-summarize them, do not recap what you did in previous turns, and do not "
+    "open with a summary of the conversation so far. Be concise."
 )
 
+# How much of the turn's request the directive restates verbatim. A request can be megabytes (an
+# attached file, a `@file:` expansion), and this block exists to NAME the turn, not to re-send its
+# payload — which is already in the trace above. Head+tail, because a UI-context preamble rides at
+# the front and the operator's actual sentence can be at either end.
+TURN_REQUEST_CAP = 4000
 
-def final_answer_messages(convo: list, *, directive: str = FINAL_ANSWER_DIRECTIVE) -> list:
+
+def _clip_request(text: str) -> str:
+    if len(text) <= TURN_REQUEST_CAP:
+        return text
+    head, tail = TURN_REQUEST_CAP * 3 // 4, TURN_REQUEST_CAP // 4
+    return f"{text[:head]}\n…\n{text[-tail:]}"
+
+
+def final_answer_directive(request: str = "") -> str:
+    """`FINAL_ANSWER_DIRECTIVE`, with the turn's OWN request spliced in when the caller can name it.
+
+    This is the authenticated half of the boundary (doc 36): the summariser's scope is fixed by the
+    code that started the turn, not by a slice the model picks out of the trace for itself. The
+    in-trace marker is the anchor when it survives; this restatement is what still names the turn
+    when it does not — `context_budget.truncate_history` REBUILDS a stale message dict with its
+    content middle-truncated, and `compact_history` can summarize the request away altogether, so on
+    a long turn (exactly the turn whose summary an operator reads) the boundary is not reliably in
+    the trace at all.
+    """
+    if not str(request or "").strip():
+        return FINAL_ANSWER_DIRECTIVE
+    return (f"{FINAL_ANSWER_DIRECTIVE}\n\nThat request, verbatim — this turn starts here and "
+            f"everything before it is earlier context:\n<<<\n{_clip_request(str(request))}\n>>>")
+
+
+def _boundary_index(msgs: list, boundary) -> Optional[int]:
+    """Where THIS turn's request sits in the trace, or None when it is no longer there.
+
+    IDENTITY first (`is`), because `run_turn` holds the very dict it appended and a compaction may
+    have replaced every other message around it. Content equality second, for a caller that rebuilt
+    the list. There is deliberately NO third guess: a boundary the caller NAMED and that is not in
+    the trace must come back None, so the directive's verbatim restatement carries it — falling back
+    to "the last user message" is what planted the marker on `drive_tool_loop`'s own control strings.
+    """
+    if boundary is None:
+        # UNAUTHENTICATED fallback, for a caller that cannot name its own boundary (a subagent, a
+        # replayed fragment). Note what it cannot see: the loop appends `user`-role NUDGES of its
+        # own ("Out of turn/time budget. Call `final_answer` NOW…", the stuck prompt, the plan
+        # reinjection), so on a cut-short turn the last user message is a machine control string.
+        return next((i for i in range(len(msgs) - 1, -1, -1)
+                     if (msgs[i] or {}).get("role") == "user"), None)
+    for i, m in enumerate(msgs):
+        if m is boundary:
+            return i
+    if isinstance(boundary, dict):
+        want = boundary.get("content")
+        for i, m in enumerate(msgs):
+            if (m or {}).get("role") == "user" and (m or {}).get("content") == want:
+                return i
+    return None
+
+
+def final_answer_messages(convo: list, *, boundary=None, directive: Optional[str] = None) -> list:
     """The message list for the streamed FINAL answer.
 
     The whole conversation stays as CONTEXT — a turn routinely depends on a file read or a decision
-    from three turns ago, and trimming it makes the model answer worse. What changed is the
+    from three turns ago, and trimming it makes the model answer worse. What changed first was the
     directive: it used to say "based on everything above", so the model dutifully summarized the
-    entire dialog and every turn's answer re-narrated the session. The operator's report was exactly
-    that, and it is a prompt bug rather than a context bug.
+    entire dialog and every turn's answer re-narrated the session.
 
-    The boundary is the LAST user message, which `run_turn` appends as this turn's instruction: the
-    work of this turn is everything after it. Marked explicitly rather than left implicit, because
-    "the last user message" is a thing the model has to FIND in a trace that may hold dozens of tool
-    results, and a trace with no user message at all (a subagent, a replayed fragment) must still
-    produce an answer rather than a broken pointer.
+    What changed SECOND, and is the reason the operator reported it again, is WHO decides where the
+    turn begins. The directive alone is advice; the boundary has to be a fact. It used to be found
+    by scanning backwards for a `user` message — but the messages after the request are not all the
+    model's: `drive_tool_loop` appends `user`-role control strings of its own (the emit nudge, the
+    stuck prompt, the "Out of turn/time budget" salvage, the plan reinjection). On any CUT-SHORT
+    turn — every one of `tool_loop.LOOP_CUTOFF_KINDS` — the scan therefore marked the LOOP's own
+    nudge and left the operator's actual request unmarked, which is worse than no marker: the model
+    is pointed at a machine control string and falls back to narrating the session.
+
+    So `run_turn` passes the request dict it appended and this marks THAT, or nothing. A boundary
+    that cannot be located (compaction rewrote or summarized it away) is named by the directive's
+    verbatim restatement instead — see `final_answer_directive`.
+
+    WHAT THE BOUNDARY MEANS FOR A WAKE-UP (`serve/assistant_watch.py`): a standing watch's turn is
+    started by a clock and nobody typed a user message for it, so "since the last user message" is
+    ill-defined — the last thing a human typed may be the message that armed the watch, hours and
+    several wake-ups ago, and scoping to it would make every wake-up re-narrate the whole session.
+    The boundary is the WAKE-UP's own instruction (`wakeup_instruction`, the preamble plus the
+    standing sentence), which `run_turn` appends exactly like a typed one and therefore authenticates
+    exactly like a typed one. Previous wake-up reports sit in the history as `assistant` turns —
+    context to rely on, never work to re-report.
     """
     marked = list(convo)
-    last_user = next((i for i in range(len(marked) - 1, -1, -1)
-                      if (marked[i] or {}).get("role") == "user"), None)
-    if last_user is not None:
-        body = (marked[last_user] or {}).get("content") or ""
-        marked[last_user] = {**marked[last_user],
-                             "content": f"[current turn — answer this]\n{body}"}
+    idx = _boundary_index(marked, boundary)
+    if idx is not None:
+        body = (marked[idx] or {}).get("content") or ""
+        marked[idx] = {**marked[idx], "content": f"{TURN_BOUNDARY_MARK}\n{body}"}
+    if directive is None:
+        directive = final_answer_directive(boundary.get("content") if isinstance(boundary, dict) else "")
     return marked + [{"role": "user", "content": directive}]
 
 
@@ -1866,7 +1943,12 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                 pass
         if role in ("user", "assistant") and body:
             convo.append({"role": role, "content": body})
-    convo.append({"role": "user", "content": grounded})
+    # THE TURN'S BOUNDARY, held as an object rather than re-found afterwards. This dict is what the
+    # final answer is about; everything the loop appends after it is the work of this turn. Keeping
+    # the reference is what makes the scope AUTHENTICATED (doc 36) instead of a slice the summariser
+    # locates for itself in a trace that by then also holds the loop's own `user`-role nudges.
+    turn_request = {"role": "user", "content": grounded}
+    convo.append(turn_request)
 
     steps: list[dict] = []
 
@@ -1955,10 +2037,12 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         m = {**m, "tool_calls": kept} if kept else \
                             {k: v for k, v in m.items() if k != "tool_calls"}
                 base.append(m)
-            # SCOPED to this turn. The old directive pointed the model at the entire trace, so every
-            # turn's answer re-summarized the session — see `final_answer_messages`, which owns the
-            # directive and the current-turn boundary so both are statable and testable.
-            stream_msgs = final_answer_messages(base)
+            # SCOPED to this turn, and the scope is this function's OWN `turn_request` — not a
+            # message the summariser goes looking for. The old directive pointed the model at the
+            # entire trace, and the scan that replaced it marked whichever `user` message came last,
+            # which on a cut-short turn is one of the loop's nudges. See `final_answer_messages`,
+            # which owns the directive, the boundary rule and what it means for a watch wake-up.
+            stream_msgs = final_answer_messages(base, boundary=turn_request)
             streamed = []
             for piece in client.complete_text_stream(stream_msgs):
                 if cancel_check and cancel_check():   # stop honored mid-stream too
