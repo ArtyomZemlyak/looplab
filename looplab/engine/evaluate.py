@@ -816,7 +816,7 @@ class EvaluateMixin:
         """
         sigs: list[dict] = []
         if self.reward_hack_detect:
-            from looplab.trust.reward_hack import detect_reward_hacks
+            from looplab.trust.reward_hack import detect_reward_hacks, grader_import_sanctioned
             protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
             # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
             # grader.py (an ASSET → calling `grader.score(...)` is the documented
@@ -825,19 +825,24 @@ class EvaluateMixin:
             # carries the operator's protect list, and a merely-PROTECTED grader.py
             # (protect=["grader.py"], no asset) means "hands off", not "import me" —
             # inference from the union would wrongly waive the import tells for it.
+            # Derived ONCE, by the rule that owns the asset-key normalization (`Grader.py`
+            # or a backslashed key must keep sanctioning the import), and handed to BOTH
+            # reward-hack detectors below: the hardened suite used to scan knowing nothing
+            # of the sanction, so it re-raised the import the detector had just waived and
+            # the union became one `reward_hack_suspected` that put an honest node outside
+            # `feasible_nodes()`. Two detectors reading ONE value cannot drift apart.
+            grader_import_ok = grader_import_sanctioned(self._assets)
             sigs += detect_reward_hacks(
                 scan_src, res.metric, state.direction,
                 protected_names=protected, stdout=res.stdout,
-                # Match the asset key NORMALIZED (path separators + case), exactly like
-                # the detector normalizes `protected_names` — the inference this call
-                # replaced got that normalization for free, so 'Grader.py' or a
-                # backslashed key must keep sanctioning the import here too.
-                grader_import_ok=any(str(a).replace("\\", "/").lower() == "grader.py"
-                                     for a in (self._assets or ())))
+                grader_import_ok=grader_import_ok)
             # 4.3: also apply the hardened exploit ruleset grown by `looplab harden`
-            # (hacker-fixer-solver) — each previously-discovered exploit stays guarded.
+            # (hacker-fixer-solver) — each previously-discovered exploit stays guarded,
+            # minus what this task's own eval contract sanctions (`scan` waives a match
+            # that is a grader import and NOTHING more; a rule matching a key access, a
+            # shell-out or a protected write still fires).
             if self._exploit_suite is not None:
-                sigs += self._exploit_suite.scan(scan_src)
+                sigs += self._exploit_suite.scan(scan_src, grader_import_ok=grader_import_ok)
             # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
             # writes to protected/frozen files — behavioral evidence a static scan of the
             # code can miss (a write via a helper, os.system, a template). Compares the

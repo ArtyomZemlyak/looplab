@@ -334,3 +334,44 @@ def detect_reward_hacks(code: str, metric: float | None, direction: str,
         signals.extend(detect_reward_hacks_ast(code))
 
     return signals
+
+
+def grader_import_sanctioned(assets) -> bool:
+    """Does the ENGINE's own asset set sanction importing the grader? (the `grader_import_ok` value)
+
+    The ONE derivation, because two detectors read the same waiver and an asymmetry between them is
+    the whole defect this exists to close (the hardened `ExploitSuite` re-raised the import the
+    detector had just waived, and the union became one `reward_hack_suspected` that put an honest
+    MLE-bench node outside `feasible_nodes`). Keyed on what the engine MATERIALIZED into the workdir
+    (`Engine._assets`) and on nothing the candidate wrote — a violation is a RECORD-side statement
+    over authenticated evidence (doc 36), so the sanction may only ever come from the host side.
+
+    Deliberately NOT the `protected_names` union: that also carries the operator's protect list, and
+    a merely-PROTECTED grader.py (protect=["grader.py"], no asset) means "hands off", not "import
+    me". Asset keys are matched NORMALIZED (path separators + case), exactly like the detector
+    normalizes `protected_names`, so `Grader.py` or a backslashed spelling still earns the waiver.
+    """
+    return any(str(a).replace("\\", "/").lower() == "grader.py" for a in (assets or ()))
+
+
+def sanctioned_grader_import_only(text: str) -> bool:
+    """Is `text` flagged ONLY by the grader-IMPORT tells a task's eval contract can sanction?
+
+    The rule a SECOND detector applies to its own match when the engine passed `grader_import_ok`:
+    `ExploitSuite.scan` hands the matched SPAN here, and the finding is dropped only if the span
+    both (a) carries an import tell and (b) is clean under the waived detector. So a hardened rule
+    matching exactly `import grader` is waived, while a rule whose match reaches ANY further —
+    `from grader import _Y`, `os.system('cat grader...')`, a write to grader.py — keeps firing,
+    because the span itself still says something the waiver never covered.
+
+    Matching on the span rather than eliding import lines from the code is the safer direction: a
+    rule whose pattern spans the import AND a key access still sees both, so the waiver can never
+    turn a real cheat into a miss. Pure, deterministic, and it reads the SAME
+    `_GRADER_IMPORT_PATTERNS` the detector waives, so the two cannot drift.
+    """
+    if not text:
+        return False
+    if not any(re.search(p, text, re.IGNORECASE) for p in _GRADER_IMPORT_PATTERNS):
+        return False
+    return not any(s.get("signal") == "grader_access"
+                   for s in detect_reward_hacks(text, None, "max", grader_import_ok=True))

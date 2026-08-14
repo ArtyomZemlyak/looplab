@@ -76,8 +76,24 @@ class ExploitSuite:
         self.patterns.append({"name": name, "pattern": pattern, "kind": kind})
         return True
 
-    def scan(self, code: str) -> list[dict]:
-        """Extra reward-hack signals from the hardened ruleset (beyond the built-in detector)."""
+    def scan(self, code: str, *, grader_import_ok: bool = False) -> list[dict]:
+        """Extra reward-hack signals from the hardened ruleset (beyond the built-in detector).
+
+        `grader_import_ok` is the SAME sanction `detect_reward_hacks` takes, and it has to reach
+        here or the two detectors disagree about one node: the engine waives the grader import for a
+        task that MATERIALIZES grader.py as an asset (calling `grader.score(...)` is the documented
+        grading contract of the in-workdir mlebench brief), and a hardened rule matching that import
+        then re-raised what the waiver had just sanctioned. Both signal lists concatenate into ONE
+        `reward_hack_suspected`, which puts the node outside `feasible_nodes()` — so an honest node
+        that did exactly what the brief told it to do could never become champion or be bred from.
+
+        The waiver is applied per MATCH, not per rule: a finding is dropped only when its matched
+        span is a sanctioned grader import and nothing more (`reward_hack.sanctioned_grader_import_
+        only`). That keeps it total over rules this suite has not GROWN yet — the seed
+        `import_grader` regex, an LLM-hacker-derived `re.escape("import grader")`, a hand-authored
+        one — while a rule matching a key access, a shell-out or a protected write still fires.
+        Default False, so `harden()`'s own "is this exploit already caught?" probe and every other
+        caller keep the un-waived baseline they mean to ask about."""
         out: list[dict] = []
         for r in self.patterns:
             try:
@@ -85,6 +101,10 @@ class ExploitSuite:
             except re.error:
                 continue
             if m:
+                if grader_import_ok:
+                    from looplab.trust.reward_hack import sanctioned_grader_import_only
+                    if sanctioned_grader_import_only(m.group(0)):
+                        continue          # task-sanctioned grader import (see the docstring)
                 out.append({"signal": r.get("kind", "grader_access"),
                             "detail": f"hardened rule '{r['name']}' matched {m.group(0)!r}"})
         return out
