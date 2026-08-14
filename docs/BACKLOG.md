@@ -389,6 +389,56 @@ site that proves it is open.
   The honest alternative is to stop deriving the tag from the artifact's CONTENT and carry
   "the engine spliced this" from the splicer, which needs a channel `runtime/` does not have today.
 
+- **The log-integrity receipt counts LINES and publishes them as RECORDS, and one line is up to 4096
+  events** (found 2026-08-14 auditing f78961a4). `eventstore.py:399::log_divergence` counts non-blank
+  complete LINES; `log_integrity` publishes those as `good_records`/`dropped_lines`, and
+  `integrity_sentence` (`:482-489`) and its browser mirror `ui/src/runIndex.js:45-56` both render
+  them as "records visible to replay" / "durable record(s) … NOT included". A batch envelope written
+  by `EventStore.append_many` carries up to 4096 events on ONE line, and `append_many` is on live
+  engine paths (`engine/audit.py:165`, `card_reservation.py:1131/1678/1822`, `orchestrator.py:3828`,
+  `speculation.py:1241/1994`) — i.e. every card-lane run. **Reproduction** (shipped writer, shipped
+  readers, driven): one `run_started` + three `append_many` batches of 5 + one `resume` = 5 physical
+  lines / **17 events**; delete one middle batch line; a fold then sees **6 events** and 11 are
+  invisible, while the receipt says `{good_records: 2, corrupt_line: 3, dropped_lines: 1}` and the
+  sentence every CLI and UI surface prints reads *"only 2 of 4 records are visible to replay and 1
+  durable record(s) behind that boundary are NOT included."* One missing record claimed, eleven
+  actually missing. **Cost:** this is the number whose entire job is to state the size of the loss,
+  and it understates it by the batch factor on exactly the runs that batch. An operator who reads
+  "1 record" concludes the boundary is cosmetic and goes on trusting `nodes`/`best_metric`; the
+  commit's own comment ("two surfaces disagreeing about the size of the log is the original defect
+  in miniature") describes what it reproduced. **Not fixed tonight:** counting events means decoding
+  each line behind the boundary and changes the wire MEANING of three fields across CLI, HTTP and
+  the UI at once, with `runIndex.js`'s `good + dropped + 1` arithmetic and the `corrupt_line`
+  (a genuine line number) having to move in the same change. Two smaller relatives found beside it,
+  worth folding into the same pass: the boundary row itself is a durable record replay excludes and
+  is counted in neither number (`good + dropped + 1` is the denominator, so the sentence's own
+  addition is one short); and `unreadable: True` is unreachable through every shipped surface —
+  `run_projections.py:147`'s `except Exception: continue` DROPS an unreadable run from `/api/runs`
+  entirely, so it reads as deleted rather than as "incomplete record", which is the opposite of the
+  direction `appstate.py:275-280` says it fails toward.
+
+- **The read-model watermark's digest covers `(seq, type)` only, so a content-edited log certifies
+  as `current`** (found 2026-08-14 auditing 1bfd3634). `readmodel.py:91::coverage_watermark` hashes
+  `[[seq, type], …]` and nothing about event DATA or run generation. **Reproduction** (driven):
+  build a readmodel over a 3-event log whose `node_evaluated.metric` is `53.05` (`nodes` row
+  `(0, 53.05)`), then edit that metric to `42.0` in place leaving seq and type untouched —
+  `readmodel_status` still answers `current`, `readmodel_is_current` still `True`, the digest is
+  byte-identical, and `fold()` of the same log now returns `42.0` while the certified projection
+  still says `53.05`. The module states what it hashes, so this is not a lie; the JUSTIFICATION is
+  the part that fails — "deterministic over the authenticated log: the bytes are immutable once
+  appended" (`:88-90`) — because the one divergent run in this corpus is a HAND-EDITED log, and the
+  commit merged one hour later (f78961a4) exists precisely because a log was edited. The same gap
+  covers identity: no generation token is in the preimage, so a reset producing an equal-length,
+  same-`(seq,type)` prefix certifies generation A's projection as current for generation B. **Cost:**
+  `readmodel.sqlite` is what external queries read and the code promises `ORDER BY metric` agrees
+  with `is_best` — a `current` stamp over a stale metric is a wrong champion presented as certified.
+  **Not fixed tonight:** adding a data digest or the generation token to the preimage changes the
+  digest of every readmodel already on disk, so all of them read `stale` until rebuilt — a migration
+  call, not a patch. Everything else about this artefact is fail-closed and driven clean: body and
+  watermark come from ONE materialized `rows = list(events)` (`:167-169`) in one transaction, so they
+  cannot name different sets; and an absent/duplicated/unparseable/unknown-version watermark, or an
+  empty digest on either side, all answer `unknown` and never `current`.
+
 - **The repair-rationale intake cap was raised at the wrong layer, so `_TRIAGE_RATIONALE_CAP` never
   binds** (found 2026-08-14 auditing 4b2bd547). That commit moved the intake bound to
   `crash_repair.py:60::_TRIAGE_RATIONALE_CAP = 2000` and applies it at `_ask_triage` (`:250`, `:261`,
