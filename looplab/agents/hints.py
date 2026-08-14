@@ -16,6 +16,13 @@ the proposal used to steer WHAT to try but not HOW it was built or which action 
 from __future__ import annotations
 
 
+# The literal every deep-research hint's text begins with. Shared with the writer
+# (`engine/research_cadence.py`) rather than spelled twice: it is the fallback identity of a row
+# whose `source` stamp predates the field, so a reworded writer that left this filter behind would
+# put model output back inside the operator-authority block.
+DEEP_RESEARCH_HINT_PREFIX = "deep-research directions: "
+
+
 def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
     """A prompt block listing standing directives oldest→newest with explicit precedence, or ""
     when there are none. The most recent directive is flagged as authoritative on conflict; only
@@ -23,9 +30,18 @@ def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
 
     `source="deep_research"` is model output, not operator authority. It remains in replay state
     and reaches proposal planning through the research memo/open-hypothesis channels, but must not
-    be relabelled here as an instruction from the operator."""
+    be relabelled here as an instruction from the operator.
+
+    TWO KEYS, because one of them is a stamp a durable row might predate. `source="deep_research"`
+    is the exact marker the writer sets; `DEEP_RESEARCH_HINT_PREFIX` is the text those rows have
+    always carried, and it is what catches a row folded from a log written before the stamp
+    existed. Without the second key such a row passes the filter and renders INSIDE the
+    operator-authority block ("the most recent is authoritative") — model output relabelled as an
+    operator instruction, on exactly the resumed and replayed runs this paragraph forbids it for.
+    The writer imports the prefix from here so the pair cannot drift."""
     rows = [h for h in (pending_hints or [])
-            if isinstance(h, dict) and h.get("source") != "deep_research"]
+            if isinstance(h, dict) and h.get("source") != "deep_research"
+            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)]
     hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
     hints = [h for h in hints if h]
     if not hints:

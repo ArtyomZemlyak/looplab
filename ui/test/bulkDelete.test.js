@@ -101,7 +101,9 @@ test('a half-purged memory store survives the batch and carries its retry', () =
   // Twenty runs, three locked stores, and the operator would never have learnt it happened.
   const notice = bulkOutcomeNotice({
     total: 3, done: ['a', 'b', 'c'], blocked: [], stoppedAt: null,
-    memoryFailures: [{ runId: 'b', memory: { ok: false } }, { runId: 'c', memory: { ok: false } }],
+    memoryFailures: [
+      { runId: 'b', memory: { ok: false, run_uid: 'u-b', memory_dir: '/m' } },
+      { runId: 'c', memory: { ok: false, run_uid: 'u-c', memory_dir: '/m' } }],
   })
   assert.equal(notice.kind, 'error', 'a clean-looking status would hide it')
   assert.equal(notice.retryRunId, 'b', 'the retry handle is what renders the button')
@@ -115,6 +117,21 @@ test('a half-purged memory store survives the batch and carries its retry', () =
   assert.match(notice.text, /3 runs permanently deleted/)
   assert.match(notice.text, /only partly removed for 2 runs/)
   assert.match(notice.text, /first: “b”/)
+})
+
+test('a purge with no recorded identity offers no retry button, because none could work', () => {
+  // The server refuses a body carrying NEITHER run_uid nor memory_dir
+  // (`memory_purge_identity_required`), because with both empty the purge falls back to matching a
+  // run's bare directory NAME — which the next run reuses. So a button offered for such a receipt
+  // 400s on every press and the catch re-offers the same empty identity, forever.
+  const notice = bulkOutcomeNotice({
+    total: 1, done: ['b'], blocked: [], stoppedAt: null,
+    memoryFailures: [{ runId: 'b', memory: { ok: false } }],
+  })
+  assert.equal(notice.kind, 'error', 'the half-purged store is still disclosed')
+  assert.equal(notice.retryRunId, '', 'no handle, so no button')
+  assert.deepEqual(notice.retryIdentity, { run_uid: '', memory_dir: '' }, 'one shape, still')
+  assert.match(notice.text, /only partly removed/)
 })
 
 test('a batch that stops on its LAST run does not claim 0 were left untouched', () => {

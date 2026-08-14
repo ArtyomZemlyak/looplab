@@ -31,8 +31,7 @@ from looplab.serve.engine_proc import (
     _fresh_run_launch_pending, _resolve_task_file, engine_write_lock_http,
     run_lifecycle_lock_http)
 from looplab.serve.appstate import (
-    _DELETE_FENCE_PREFIX, _DELETE_QUARANTINE_PREFIX, _DELETE_RECEIPT_PREFIX,
-    _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.http import json_object
@@ -1146,8 +1145,7 @@ async def durable_reset_run(
             or requested.name.lower() in _RESERVED_RUN_IDS
             or requested.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
-                _RESET_RECEIPT_PREFIX, _DELETE_FENCE_PREFIX,
-                _DELETE_RECEIPT_PREFIX, _DELETE_QUARANTINE_PREFIX))
+                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))
             or requested.parent != root or rd.parent != root
             or requested_identity != resolved_identity
             or stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode)

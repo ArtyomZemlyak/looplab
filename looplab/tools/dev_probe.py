@@ -421,7 +421,7 @@ class DevProbeTools:
         Policy is always `deny` and deliberately NOT `Settings.read_fence` — see rule 1 in the module
         docstring. Returns whether a fence was written: `False` means the task declares no editable
         source tree at all, i.e. there is nothing a probe could read that the node does not own."""
-        roots, allow, _dropped = read_fence.fence_inputs(self.repo_spec, allow=())
+        roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
         if not roots:
             return False
         (fence_dir / "sitecustomize.py").write_text(

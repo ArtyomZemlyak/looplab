@@ -17,11 +17,13 @@ from __future__ import annotations
 import stat
 
 from looplab.core.atomicio import file_identity
-from looplab.core.run_deletion import (RunDeletionStorageError, load_run_deletion_fence,
-                                       run_deletion_snapshot_token)
+from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
+                                       load_run_deletion_fence, run_deletion_snapshot_token)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
+from looplab.serve.deletion_transaction import (
+    DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.run_commands import run_generation_token
 
 
@@ -44,9 +46,13 @@ def run_summaries(srv, only=None) -> list:
     for rd in sorted(root.iterdir()) if root.exists() else []:
         if only is not None and rd.name not in only:
             continue
+        # IMPORTED from the writers rather than respelled: a hand-copied prefix does not fail when
+        # a writer's changes, it silently stops recognizing that writer's files, and here that means
+        # a deletion service file is scanned as a RUN — one `lstat`/`fold` per entry against
+        # something that was never a run directory. The identity sidecar was already missing.
         if rd.name.lower().startswith((
-                ".looplab-delete-fence-", ".looplab-delete-receipt-",
-                ".looplab-delete-quarantine-")):
+                RUN_DELETION_FENCE_PREFIX, DELETE_RECEIPT_PREFIX,
+                DELETE_QUARANTINE_PREFIX, DELETE_IDENTITY_PREFIX)):
             continue
         try:
             entry = rd.lstat()

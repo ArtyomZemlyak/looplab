@@ -16,6 +16,8 @@ human's checkpoint out of the editable source tree and scored it, and every gate
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -58,8 +60,8 @@ def _install(run_dir, src, *, policy="deny", allow=()):
     """Install a fence the way the engine does, via the same input derivation."""
     spec = {"editables": [{"name": ".", "path": str(src)}],
             "data": {name: {"path": str(p)} for name, p in allow}}
-    roots, allowed, dropped = read_fence.fence_inputs(spec, allow=[str(run_dir)])
-    assert not dropped
+    roots, allowed, dropped, swallowed = read_fence.fence_inputs(spec, allow=[str(run_dir)])
+    assert not dropped and not swallowed
     return read_fence.install(run_dir, roots=roots, allow=allowed, policy=policy)
 
 
@@ -301,7 +303,7 @@ def test_a_root_too_broad_to_fence_is_dropped_not_accepted():
     """Fencing `$HOME` or `/` would refuse reads the interpreter itself needs, so a run with such an
     editable is left UNFENCED rather than made unable to start python at all — and it is reported."""
     home = os.path.expanduser("~")
-    roots, _allow, dropped = read_fence.fence_inputs(
+    roots, _allow, dropped, _swallowed = read_fence.fence_inputs(
         {"editables": [{"name": ".", "path": home}, {"name": "x", "path": "/"},
                        {"name": "y", "path": "/usr"}]})
     assert roots == [] and len(dropped) == 3
@@ -761,6 +763,188 @@ def test_warn_lets_a_mutation_through_and_records_it(tmp_path):
     assert "LOOPLAB READ FENCE (warn)" in err
     rows = read_fence.violations(run_dir)
     assert len(rows) == 1 and rows[0].startswith("warn\t") and rows[0].endswith("\tos.remove")
+
+
+# ------------------------------------------------------- the cwd the fast bail rests on, and shapes
+
+
+def test_a_relative_read_from_a_cwd_inside_the_source_tree_is_refused(tmp_path):
+    """The fast bail for relative paths rested on "the cwd cannot be inside a root, because
+    `os.chdir` into one is refused". A launcher sets the cwd at process CREATION —
+    `subprocess.run(cwd=…)`, `bash -c 'cd <repo> && python …'` — and `fork_exec` does that chdir in
+    C, raising no audit event. So the premise was false and the whole fence was one `cd` away from
+    inert: this is the v6-node-4 read spelled relatively."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    code = "print(open('experiments/baseline/final/model.safetensors').read())"
+
+    unfenced_rc, unfenced_out, _err, _to = _run(code, src)
+    assert unfenced_rc == 0 and CHECKPOINT in unfenced_out, "control: the read succeeds unfenced"
+
+    fence = _install(run_dir, src)
+    rc, out, err, timed_out = _run(code, src, fence)          # cwd IS the source tree
+    assert rc != 0 and not timed_out and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+    # The refusal names the RESOLVED path, so the repair loop is told which file, not './x'.
+    assert str(src / "experiments" / "baseline" / "final" / "model.safetensors") in err
+
+
+def test_a_source_path_spelled_with_duplicate_or_dot_separators_is_refused(tmp_path):
+    """The roots are `realpath`-ed once and the hot path is a byte-exact prefix compare, so every
+    other spelling of the same file was silently allowed. `f"{root}/{sub}"` produces the duplicate
+    separator whenever root ends in one — this is ordinary composition, not an attack."""
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    base = str(src / "experiments" / "baseline" / "final")
+    for spelling in (base.replace(str(src), str(src) + "/") + "/model.safetensors",
+                     str(src) + "/./experiments/baseline/final/model.safetensors",
+                     base + "/./model.safetensors",
+                     base + "/../final/model.safetensors"):
+        rc, out, err, _to = _run(f"print(open({spelling!r}).read())", wd, fence)
+        assert rc != 0 and CHECKPOINT not in out, f"{spelling} bypassed the fence"
+        assert "LoopLabSourceReadRefused" in err
+
+
+def test_an_allow_prefix_that_contains_a_root_is_refused_and_reported(tmp_path):
+    """`_fenced` consults the allow tuple AFTER the root tuple, so an allow entry containing a root
+    does not narrow the fence — it disables it. Reachable by ordinary spelling: `--out .` beside an
+    editable `./repo` makes `resources.py` pass the repo's own parent as `allow=[run_dir]`."""
+    src, _sib, _run_dir, wd, _models = _world(tmp_path)
+    roots, allowed, dropped, swallowed = read_fence.fence_inputs(
+        {"editables": [{"name": ".", "path": str(src)}]}, allow=[str(tmp_path)])
+    assert roots and not dropped
+    assert allowed == [], "an ancestor of a root must never reach the allow tuple"
+    assert swallowed == [str(tmp_path) + os.sep], "…and it must be REPORTED, not silently dropped"
+
+    # A strict DESCENDANT is a real carve-out and still survives — that is what mounts rely on.
+    _r, kept, _d, _s = read_fence.fence_inputs(
+        {"editables": [{"name": ".", "path": str(src)}]}, allow=[str(src / "corpus")])
+    assert kept == [str(src / "corpus") + os.sep]
+
+    # …and the fence a swallowed allow-list would have disabled actually refuses.
+    fence = read_fence.install(tmp_path / "run", roots=roots, allow=allowed, policy="deny")
+    rc, out, _err, _to = _run(
+        f"print(open({str(src / 'experiments' / 'baseline' / 'final' / 'model.safetensors')!r}).read())",
+        wd, fence)
+    assert rc != 0 and CHECKPOINT not in out
+
+
+def test_an_unrecognised_policy_settles_to_deny_not_to_warn(tmp_path):
+    """`Settings` validates the enum; `EngineOptions.read_fence`, a hand-edited snapshot and a
+    Strategist value do not. The generated hook tests `_POLICY == "deny"` exactly, so an unknown
+    spelling used to fall through to the WARN branch: every source read allowed while the
+    operator's config said `deny`. Every sibling knob settles unknown to the CONSERVATIVE rung."""
+    assert [read_fence.settle_policy(v) for v in ("deny", "warn", "off", " OFF ")] == [
+        "deny", "warn", "off", "off"]
+    for rogue in ("Deny", "denied", "", None, "warn-only", 0, object()):
+        assert read_fence.settle_policy(rogue) == "deny"
+
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src, policy="Deny")             # capitalized: not in POLICIES
+    rc, out, err, _to = _run(
+        f"print(open({str(src / 'experiments' / 'baseline' / 'final' / 'model.safetensors')!r}).read())",
+        wd, fence)
+    assert rc != 0 and CHECKPOINT not in out and "LoopLabSourceReadRefused" in err
+
+
+def test_the_warn_rung_bounds_stderr_the_same_way_it_bounds_the_log(tmp_path):
+    """The 256-entry bound gated only `_seen.add`/`_record`, so once saturated `first` was True for
+    EVERY subsequent read — including repeats of one path. That inverts the guard: a write+flush
+    syscall pair per `open()` on the hot read path, flooding the captured stderr that `eval.log` and
+    the repair feedback are built from."""
+    log = tmp_path / "violations.log"
+    src = read_fence.render(("/src/repo/",), (), policy="warn", log=str(log))
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)                # probe name: no audit hook installed
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        for i in range(300):
+            ns["_report"](f"/src/repo/shard-{i}.bin", "open", ns["_MESSAGE"])
+        for _ in range(1000):
+            # the retry loop the bound exists for
+            ns["_report"]("/src/repo/hot.bin", "open", ns["_MESSAGE"])
+    lines = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
+    assert len(lines) == 256, f"stderr must honour the same bound as the log, got {len(lines)}"
+    assert len([ln for ln in log.read_text().splitlines() if ln.strip()]) == 256
+    # Both sinks stop at the SAME point, so neither can report a path the other omitted. The log's
+    # PATH is column 4 of five — the EVENT is last, since a read and a delete of one file are two
+    # incidents (which is also why `_seen` is keyed on the pair).
+    assert {ln.split("\t")[3] for ln in log.read_text().splitlines() if ln.strip()} == {
+        ln.split("refused: ", 1)[1].split(" is under", 1)[0] for ln in lines}
+
+
+def test_the_bound_separates_a_read_from_a_mutation_of_the_same_path(tmp_path):
+    """`_seen` is keyed by (event, path), not by path: a node that reads the operator's checkpoint
+    and then deletes it must produce BOTH lines, and each must carry its own message — the read one
+    says "use a workdir-relative path", which is not advice about a delete."""
+    log = tmp_path / "violations.log"
+    src = read_fence.render(("/src/repo/",), (), policy="warn", log=str(log))
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    captured = io.StringIO()
+    with contextlib.redirect_stderr(captured):
+        for _ in range(3):
+            ns["_report"]("/src/repo/model.bin", "open", ns["_MESSAGE"])
+            ns["_report"]("/src/repo/model.bin", "os.remove", ns["_MUTATION_MESSAGE"])
+    rows = [ln for ln in log.read_text().splitlines() if ln.strip()]
+    assert [ln.split("\t")[-1] for ln in rows] == ["open", "os.remove"]
+    err = captured.getvalue()
+    assert "Use a workdir-relative path" in err
+    assert "may not create, delete, rename, truncate, link or change" in err
+
+
+def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
+    """The `os.chdir` audit event fires BEFORE the chdir, so its target proves nothing about where
+    the process will actually stand. Re-deriving `_CWD_REACHES_ROOT` from that pre-event cleared the
+    flag for a chdir that then FAILED — and `try: os.chdir(cfg.output_dir) except OSError: pass`
+    around a directory that does not exist yet is ordinary generated-training-code shape. The
+    process was still standing in the repo the launcher put it in, and every relative read took the
+    fast bail: the v6-node-4 read, allowed under policy `deny`, with nothing logged."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, fence)                                    # cwd IS the source tree
+    assert rc != 0 and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+
+    # The same shape under `warn`, which is the half that proves the fence still SAW the read rather
+    # than that `deny` raised. It has to DISCRIMINATE, and two nearby spellings do not: a chdir back
+    # INTO the tree is refused by the chdir hook itself under `deny` whether the flag is monotonic or
+    # not, and a read of a harmless relative name after `chdir("/tmp")` is allowed either way. Under
+    # `warn` the read PROCEEDS in both implementations — so the observable that separates them is the
+    # violation LOG. With the flag cleared by the failed chdir, the relative name takes `_resolve`'s
+    # fast bail and nothing is ever recorded: the read is not merely allowed, it is invisible.
+    warn_run = tmp_path / "run-warn"
+    (warn_run / "nodes").mkdir(parents=True)
+    warn_fence = _install(warn_run, src, policy="warn")
+    rc2, out2, _err2, _to2 = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, warn_fence)
+    assert rc2 == 0 and CHECKPOINT in out2, "warn observes, it does not block"
+    logged = (warn_run / read_fence.FENCE_DIRNAME / read_fence.VIOLATION_LOG).read_text()
+    assert str(src / "experiments" / "baseline" / "final" / "model.safetensors") in logged, (
+        "a read the fence stopped resolving is a read nobody can review afterwards")
+
+    # The plain outside-the-tree case still works, so the monotonic flag costs correctness nothing.
+    rc3, out3, _err3, _to3 = _run("""
+        import os
+        os.chdir("/tmp")
+        try:
+            print(open('x-not-here.txt').read())
+        except FileNotFoundError:
+            print("relative reads outside the tree still work")
+        """, src, fence)
+    assert rc3 == 0 and "still work" in out3
 
 
 def test_settings_vocabulary_matches_the_module(tmp_path):

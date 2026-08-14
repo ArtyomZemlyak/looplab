@@ -111,3 +111,39 @@ def test_node_zero_gets_its_own_section_falsy_ids_are_still_ids():
                              node_trace_ids={"0": "t-node0"})
     assert out["nodes"][0]["spans"] > 0
     assert out["nodes"][0]["generations"] == 1
+
+
+def test_the_research_cap_keeps_the_OLDEST_rows_whatever_order_the_file_is_in():
+    """The cap is oldest-first, and the file order it must survive is not start order.
+
+    `by_trace` is iterated in span-file insertion order, and `spans.jsonl` is appended as spans
+    CLOSE — so file order tracks END time. A cap applied by stopping the match loop at N (which is
+    how the expensive `_rollup` was first bounded) therefore kept the first N ENCOUNTERED, and on a
+    long-first/short-last workload that drops the card's own FIRST proposal: the one row the
+    oldest-first rule exists to preserve.
+
+    Driven with starts DESCENDING in file order, which is exactly that shape.
+    """
+    from looplab.events.traceview import TRACE_CARD_RESEARCH_CAP
+
+    total = TRACE_CARD_RESEARCH_CAP + 44
+    spans = [{"span_id": f"s{i}", "trace_id": f"t{i}", "parent_id": None, "name": "propose",
+              "kind": "operation", "start": float(total - i), "duration_s": 0.1, "status": "OK",
+              "attributes": {"card_id": "card-0"}}
+             for i in range(total)]
+    out = project_card_trace(spans, card_id="card-0", node_ids=[])
+
+    starts = [row["start"] for row in out["research"]]
+    assert len(starts) == TRACE_CARD_RESEARCH_CAP
+    assert starts == sorted(starts), "the surviving rows are still oldest-first"
+    assert min(starts) == 1.0, (
+        "the card's own FIRST proposal was dropped — the cap kept the first rows ENCOUNTERED "
+        "rather than the oldest, and file order is close time, not start time")
+    assert max(starts) == float(TRACE_CARD_RESEARCH_CAP)
+
+    # …and the receipt reports the real total against what is visible, so the truncation is not
+    # something a reader has to infer.
+    projection = out["projection"]
+    assert projection["total_research"] == total
+    assert projection["visible_research"] == TRACE_CARD_RESEARCH_CAP
+    assert projection["truncated"] is True

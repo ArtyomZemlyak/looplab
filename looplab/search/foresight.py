@@ -526,29 +526,54 @@ class ForesightPanelResearcher(WrapsResearcher):
         except Exception:  # noqa: BLE001 — advisory: degrade to the self-reported confidence
             return None
 
+    def _base_board_window(self, state) -> list:
+        """The card window the BASE researcher actually showed the model, for re-binding.
+
+        `bind_idea_to_board_card` resolves a proposal's CARD_ID claim against a window and NULLS the
+        claim when the card is not in it. The base already bound the Idea it returned, against a
+        window derived from its own `_board_prompt_attempt`; re-binding here against a window from
+        this panel's independent `_board_attempt_cursor` therefore stripped valid claims whenever
+        the two cursors had drifted — and they drift as a matter of course, because the base
+        advances k per panel propose while the panel advances 1, and `_prioritize_board` skips its
+        increment on a <2-belief board. With more than 5 open beliefs the two 5-card rotations
+        differ in the rotated slot (reproduced: attempts 3 vs 1 over 7 cards), so a card the model
+        was legitimately SHOWN went missing and the proposal fell back to statement-hash linkage —
+        resurrecting exactly the lost-claim/twin-card shape the Card work closed.
+
+        Both base researchers publish `_visible_board_cards` INSIDE `propose` — right after
+        bumping `_board_prompt_attempt`, before the prompt is even assembled, so it is already the
+        CURRENT call's window by the time the model is asked and it survives the `except`/fallback
+        path that still returns an Idea. What matters here is only that the assignment happens
+        inside the call: reading it BEFORE `propose` therefore yields the PREVIOUS call's window,
+        which is not a drift but a guaranteed one-call lag, and for k>1 binds all k ideas — each
+        from a different base attempt — against one stale window. `_bind_base_proposal` is the only
+        caller for that reason. The recomputation is a fallback for a base that publishes nothing,
+        where this panel's own cursor is the sole rotation there is."""
+        published = getattr(self.base, "_visible_board_cards", None)
+        if isinstance(published, list):
+            return published
+        return next_board_prompt_cards(
+            state, getattr(self.base, "_hyp_order", None),
+            attempt=max(0, self._board_attempt_cursor - 1))
+
+    def _bind_base_proposal(self, state, parent):
+        """One base proposal, bound to the window the base showed the model FOR THAT CALL."""
+        idea = self.base.propose(state, parent)
+        return bind_idea_to_board_card(idea, self._base_board_window(state))
+
     def propose(self, state, parent):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
         self._forward_hints()
         if self.client is None:
-            visible_cards = next_board_prompt_cards(
-                state, getattr(self.base, "_hyp_order", None),
-                attempt=self._board_attempt_cursor)
             self._board_attempt_cursor += 1
-            return bind_idea_to_board_card(self.base.propose(state, parent), visible_cards)
+            return self._bind_base_proposal(state, parent)
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
-        visible_cards = next_board_prompt_cards(
-            state, getattr(self.base, "_hyp_order", None),
-            attempt=max(0, self._board_attempt_cursor - 1))
         if self.k == 1:
-            return bind_idea_to_board_card(
-                self.base.propose(state, parent), visible_cards)
-        ideas = [
-            bind_idea_to_board_card(self.base.propose(state, parent), visible_cards)
-            for _ in range(self.k)
-        ]
+            return self._bind_base_proposal(state, parent)
+        ideas = [self._bind_base_proposal(state, parent) for _ in range(self.k)]
         # Slice 3: the Strategist's novelty stance biases the K->1 pick. "balanced" (default) leaves
         # the ranking a pure predicted-metric choice — byte-identical to today; "explore" appends a
         # directive so that when candidates are close the ranker PREFERS the more novel/divergent one

@@ -1006,8 +1006,7 @@ def _spotcheck(idx: SpanIndex) -> bool:
 
 
 def _load_persisted(spans_path: Path, identity: tuple, size: int,
-                    mtime_ns: int, ctime_ns: int, source_change_token: int,
-                    source_handle=None) -> Optional[SpanIndex]:
+                    mtime_ns: int, ctime_ns: int, source_change_token: int) -> Optional[SpanIndex]:
     """Load `spans.index.jsonl` if it is a valid, current index for this spans.jsonl (fast cold path:
     read ~16 MB instead of re-parsing 1 GB). Returns None on any mismatch → caller rebuilds. Coverage
     is DERIVED from the records actually read (not trusted from the header), so a torn index tail just
@@ -1115,6 +1114,17 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int,
                 # the duplicates pass both `_spotcheck` (last row only) and `_read_full` (each copy
                 # points at a real, digest-matching source line). That is precisely the WRONG data
                 # this accelerator promises never to return, so it must not be reachable.
+                #
+                # THE RESIDUAL, stated because `max()` is the lesser of two evils rather than a
+                # clean answer: on an index whose rows are BOTH reordered and holed (`[off=5000…],
+                # [off=0…]`, i.e. torn and then partially rewritten), `covers` claims a region no
+                # row indexes, `_topup` resumes past it, and those spans are silently omitted. The
+                # mirror failure, and not fixable by comparing `off` against `last_end` — that ends
+                # the prefix at the reordered row while `covers` still names the hole. Closing it
+                # needs a CONTIGUITY rule (`off == last_end`), which this loop cannot assert today
+                # because a skipped record legitimately leaves a gap. The read-side digest keeps the
+                # omission from becoming wrong DATA; it does not make it visible. Worth revisiting
+                # with a covered-ranges receipt rather than one scalar.
                 last_end = max(last_end, off + length + 1)
     except OSError:
         return None
@@ -1237,8 +1247,11 @@ def _index_from_handle(p: Path, key: str, handle) -> SpanIndex:
     idx = None
     if not force_rebuild:
         assert source_change_token is not None
-        idx = _load_persisted(
-            p, identity, size, mtime_ns, ctime_ns, source_change_token, handle)
+        # No `handle`: this reads the INDEX file, and the one source read it performs (the
+        # spotcheck's `_read_full`) re-opens the pathname and relies on the identity CAS to reject a
+        # swapped inode. Accepting the caller's descriptor and never using it read as if the
+        # one-descriptor rationale extended here, which it does not.
+        idx = _load_persisted(p, identity, size, mtime_ns, ctime_ns, source_change_token)
     if idx is None:
         idx = SpanIndex(p)
         idx.identity = identity

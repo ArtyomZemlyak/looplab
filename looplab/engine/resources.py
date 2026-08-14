@@ -781,7 +781,8 @@ class ResourceSchedulingMixin:
         if policy == "off" or not (spec or {}).get("editables"):
             self._read_fence_cache = None
             return None
-        roots, allow, dropped = read_fence.fence_inputs(spec, allow=[str(self.run_dir)])
+        roots, allow, dropped, swallowed = read_fence.fence_inputs(
+            spec, allow=[str(self.run_dir)])
         try:
             resolved = read_fence.install(self.run_dir, roots=roots, allow=allow, policy=policy)
         except OSError as exc:
@@ -794,6 +795,14 @@ class ResourceSchedulingMixin:
             # A dropped root is the one case where the operator's fence silently shrinks, so say so.
             _LOG.warning("read fence ignoring editable root(s) %s: fencing a path that broad would "
                          "refuse reads the interpreter itself needs", ", ".join(dropped))
+        if swallowed:
+            # The other way a fence evaporates: an allow prefix CONTAINING a root (`--out .` beside
+            # an editable `./repo` makes the run dir the repo's parent). `fence_inputs` refuses
+            # those rather than letting them disable the fence, and this is the diagnostic that
+            # keeps the refusal from being as silent as the hole it replaced.
+            _LOG.warning("read fence ignoring allow prefix(es) %s: each CONTAINS an editable root, "
+                         "so honoring it would disable the fence for the whole source tree",
+                         ", ".join(swallowed))
         self._read_fence_cache = resolved
         return resolved
 

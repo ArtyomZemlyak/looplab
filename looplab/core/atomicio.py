@@ -232,7 +232,16 @@ def _windows_move_write_through(
         raise OSError(code, "durable Windows rename failed", dst)
 
 
-def durable_no_replace_rename(source, destination, *, label: str) -> None:
+# The errnos that mean "this filesystem/kernel does not implement RENAME_NOREPLACE", as opposed to
+# "this rename failed". EINVAL is Linux's answer to an unrecognised flag and is what `fuse.geesefs`
+# returns here (measured 2026-08-13); ENOSYS/EOPNOTSUPP are what a filesystem returns when it does
+# not implement `renameat2` at all. Deliberately NOT EPERM — that is a real permission answer and
+# treating it as "unsupported" would silently downgrade a rename the kernel meant to refuse.
+_RENAME_FLAG_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP})
+
+
+def durable_no_replace_rename(source, destination, *, label: str,
+                              unique_destination: bool = False) -> None:
     """Rename one SIBLING path to a name that must not already exist, durably (doc 25 SC-05).
 
     Both callers — the reset route archiving a replaced event log, and the deletion service moving a
@@ -253,6 +262,33 @@ def durable_no_replace_rename(source, destination, *, label: str) -> None:
 
     `label` names the operation in the error ("replay archive", "deletion quarantine"): the two
     callers' messages were the ONLY thing that differed between the copies.
+
+    `unique_destination` — WHERE THE FILESYSTEM CANNOT PROVIDE THE FLAG AT ALL, and why this is a
+    per-caller answer rather than a global fallback.
+
+    MEASURED 2026-08-13 on this box: every LoopLab run lives under a `fuse.geesefs` mount, and there
+    `renameat2(..., RENAME_NOREPLACE)` returns EINVAL while the SAME rename with `flags=0` succeeds.
+    FUSE does not implement the flag; the kernel refuses the call, not the operation. Failing closed
+    then does not protect anything — it makes the operation IMPOSSIBLE. Run deletion had therefore
+    never once worked on this deployment: every attempt stalled at `phase: quarantining` with
+    `[Errno 22]`, the operator saw "the deletion did not complete", and 9.6 GB of runs they had asked
+    to remove were still on disk.
+
+    The fallback is legitimate ONLY when the destination name cannot be produced by anyone else, and
+    the two callers genuinely differ:
+
+    * The deletion quarantine is `.looplab-delete-quarantine-<64-hex run key>.<operation UUIDv4>`.
+      No other operation can construct that name; the only writer that can is another attempt at the
+      SAME operation id, for which arriving at the same destination is the idempotent outcome the
+      receipt machinery already expects. -> `unique_destination=True`.
+    * The replay archive is `<name>.reset-<millisecond stamp>`, chosen by a probe-then-use loop over
+      `lexists`. That is EXACTLY the TOCTOU the kernel flag closes, and two resets inside one
+      millisecond (or a clock that steps back) really can collide. -> keeps failing closed.
+
+    So the degradation is narrow, stated, and only reached after the kernel says the primitive is
+    unavailable — never as a first choice, and never on a `destination already exists` answer, which
+    remains a hard refusal. This is the same inversion `exchange_paths_if_supported` documents in the
+    other direction: what a missing primitive costs depends on what the caller needed it FOR.
     """
     source = Path(source)
     destination = Path(destination)
@@ -292,7 +328,19 @@ def durable_no_replace_rename(source, destination, *, label: str) -> None:
             errno.ENOTSUP, "atomic no-replace rename is unavailable", str(destination))
     if result != 0:
         code = ctypes.get_errno() or errno.EIO
-        raise OSError(code, f"durable no-replace {label} rename failed", str(destination))
+        # "The kernel refused the FLAG" and "the kernel refused the RENAME" are different answers and
+        # only the first is eligible for the fallback: EINVAL is what Linux returns for an
+        # unrecognised flag, ENOSYS/EOPNOTSUPP what a filesystem returns when it does not implement
+        # `renameat2`. Everything else (EXDEV, ENOTEMPTY, EACCES, EBUSY…) is a real failure of THIS
+        # rename and must keep raising.
+        if not (unique_destination and code in _RENAME_FLAG_UNSUPPORTED):
+            raise OSError(code, f"durable no-replace {label} rename failed", str(destination))
+        # Re-check immediately before, so a destination that appeared while we were asking the kernel
+        # about flags is still refused rather than replaced.
+        if os.path.lexists(destination):
+            raise FileExistsError(errno.EEXIST, f"{label} destination already exists",
+                                  str(destination))
+        os.rename(source, destination)
     strict_fsync_parent(destination)
 
 

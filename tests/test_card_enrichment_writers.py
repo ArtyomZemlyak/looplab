@@ -474,3 +474,119 @@ def test_direct_card_id_short_circuits_the_hash_collision_fallback(tmp_path):
 
     card_event = [e for e in store.read_all() if e.type == "card_ranked"][-1]
     assert card_event.data["order"] == [beta_hash]   # ONLY the named card, not the hash-collision peer
+
+
+def _one_card_run(tmp_path, idea):
+    """A store carrying `run_started` + the Card `idea` belongs to, ready for node rows."""
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "max",
+    })
+    action = Engine._card_action(idea, [], {}, None, None, scored_against_empty=True)
+    store.append("card_added", Engine._card_added_payload(
+        idea.card_id, idea.hypothesis, action, idea,
+        source="researcher", at_node=0, steering_context=[],
+    ))
+    return store
+
+
+def test_two_nodes_under_one_card_each_get_their_own_footprint_receipt(tmp_path):
+    """The enrichment memo is keyed on the SUBJECT for the node-scoped half of a delta.
+
+    `footprint` is fenced by card/node/generation/proposal_ref — `_footprint_receipt_exists` checks
+    all four — so two nodes under one card with the SAME idea produce byte-identical footprint
+    deltas by construction. A memo keyed on (card_id, delta) alone therefore suppressed the second
+    node's Developer-finalization receipt permanently: the delta digest matches, the memo says
+    "already tried", and node 1 never gets a row. Node 0's row is not a substitute — the fold's own
+    candidate key carries `node_id`, so nothing about node 0's receipt says anything about node 1's.
+    """
+    idea = Idea(operator="draft", hypothesis="fit a two GPU model", card_id="card-1",
+                footprint={"gpus": 2, "gpu_mem_mib": 12_000})
+    store = _one_card_run(tmp_path, idea)
+    engine = Engine.__new__(Engine)
+    engine.store = store
+
+    for node_id in (0, 1):
+        store.append("node_created", {
+            "node_id": node_id, "generation": 0, "operator": "draft", "parent_ids": [],
+            "idea": durable_idea_payload(idea), "code": "print('ok')", "files": {},
+            "footprint_finalized": True,
+        })
+        engine._sync_card_enrichments(fold(store.read_all()))
+
+    rows = [row.data for row in store.read_all() if row.type == "card_enriched"]
+    assert [row["node_id"] for row in rows] == [0, 1], (
+        "each node's own finalization receipt must be written; the deltas are identical by design")
+    # …and they really are identical apart from the fence, which is what makes the memo key the
+    # only thing standing between this and a lost receipt.
+    assert {row["footprint"]["gpus"] for row in rows} == {2}
+    assert len({row["proposal_ref"]["digest"] for row in rows}) == 1
+
+    # A third pass with no new node appends nothing: the memo still stops the re-append it exists
+    # to stop, so keying it on the subject did not simply switch the loop back on.
+    engine._sync_card_enrichments(fold(store.read_all()))
+    assert len([row for row in store.read_all() if row.type == "card_enriched"]) == 2
+
+
+def test_a_card_scoped_delta_the_fold_refuses_is_attempted_once_per_card_not_per_ref(
+        tmp_path, monkeypatch):
+    """…and the subject is left OUT of the key for the CARD-scoped half, for the opposite reason.
+
+    `lesson_refs` is fenced by the card: the delta is computed by comparing against
+    `card.lesson_refs`, never against a node. When the enrichment journal is at its cap a new
+    candidate key is refused on every fold — the fold replays the same prefix, so the same keys win
+    forever — and the delta, recomputed from the folded card, is non-empty again on the very next
+    pass. That is the unbounded re-append the memo exists to stop.
+
+    The subject for a card-scoped delta is the card's LOWEST-numbered node, so adding nodes does not
+    move it. What does move it is that node's own `proposal_ref`: an inline repair that finalizes a
+    different held envelope rewrites the idea, and the digest changes with it. With the subject in
+    the key, each such repair buys the refused delta another byte-identical row — bounded by the
+    repair count rather than unbounded, which is the same defect with a constant in front. The delta
+    here never mentions the node, so neither does its key.
+
+    The cap is lowered rather than 4,096 rows built, but the refusal path is the production one."""
+    idea = Idea(operator="draft", hypothesis="a card whose lesson link will be refused",
+                card_id="card-1")
+    store = _one_card_run(tmp_path, idea)
+    store.append("node_created", {
+        "node_id": 0, "generation": 0, "operator": "draft", "parent_ids": [],
+        "idea": durable_idea_payload(idea), "code": "print('ok')", "files": {},
+    })
+    lesson = research_lesson_receipt({
+        "statement": "a lesson the journal has no room for", "outcome": "supported",
+        "evidence": [0],
+    }, fold(store.read_all()))
+    assert valid_advisory_ref(lesson.get("lesson_id"), "lesson")
+    store.append("lessons_distilled", {
+        "at_node": 1, "trigger": "cadence", "count": 1, "lessons": [lesson],
+    })
+
+    engine = Engine.__new__(Engine)
+    engine.store = store
+    monkeypatch.setattr("looplab.events.replay.CARD_ENRICHMENT_JOURNAL_MAX", 0)
+
+    def _sync():
+        state = fold(store.read_all())
+        assert not state.cards["card-1"].lesson_refs, "the fold must be refusing the link"
+        engine._sync_card_enrichments(state)
+
+    _sync()
+    _sync()                                   # the memo's own job: a second pass appends nothing
+    assert len([row for row in store.read_all() if row.type == "card_enriched"]) == 1
+
+    # Two inline repairs, each finalizing a different held envelope, so the subject's proposal_ref
+    # moves twice. The card-scoped delta is unchanged and still refused.
+    for gpus in (1, 2):
+        store.append("node_repaired", {
+            "node_id": 0, "generation": 0, "attempt": gpus,
+            "code": f"print('repair {gpus}')",
+            "idea_footprint": {"gpus": gpus, "gpu_mem_mib": 8_000 * gpus},
+        })
+        assert idea_proposal_ref(fold(store.read_all()).nodes[0].idea) != idea_proposal_ref(idea), (
+            "control: the repair must actually move the subject's proposal digest")
+        _sync()
+
+    rows = [row.data for row in store.read_all() if row.type == "card_enriched"]
+    assert [row["lesson_refs"] for row in rows] == [[lesson["lesson_id"]]], (
+        "a refused CARD-scoped delta is attempted once for the card, not once per proposal digest")

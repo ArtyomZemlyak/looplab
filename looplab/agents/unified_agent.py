@@ -300,7 +300,8 @@ class UnifiedAgent(WrapsDeveloper):
     # --------------------------------------------------- Crash triage (in-node repair)
     _TRIAGE_SYSTEM = (
         "You are debugging an autonomous ML research loop. One experiment node just FAILED at "
-        "runtime (the error is tagged with its kind: crash, timeout, oom, diverged, or stalled). "
+        "runtime (the error is tagged with its kind: crash, timeout, oom, diverged, stalled, or "
+        "needs_failed). "
         "Decide what to do BEFORE "
         "spending another eval:\n"
         "  - 'repair': the SAME idea is sound — fix the code and re-run in place. Choose this for a "
@@ -317,6 +318,11 @@ class UnifiedAgent(WrapsDeveloper):
         "auxiliary term), and 'stalled' means the stage stayed alive and produced no output at all "
         "(remove the hang, or emit a heartbeat so the next run shows where it stopped). Neither is "
         "evidence the idea is wrong, and neither is fixed by a smaller batch.\n"
+        "    'needs_failed' is a DECLARATION mismatch, not a runtime error: the stage said it "
+        "reads a path (`needs`) that was not there when it was about to start, so nothing ran and "
+        "there is no traceback. Either an earlier stage wrote the artifact somewhere else or this "
+        "stage names a path it does not really read — fix whichever is wrong, and never by "
+        "deleting the declaration.\n"
         "  - 'reject_idea': the idea itself is fundamentally flawed (e.g. the approach can't work, or "
         "nearby configs crash the same way) — abandon this lineage so the loop tries a different idea.\n"
         "  - 'abandon': stop here without judging the idea (e.g. not worth another attempt).\n"

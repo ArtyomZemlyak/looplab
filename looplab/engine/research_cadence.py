@@ -20,9 +20,11 @@ import logging
 import uuid
 from typing import Iterable, Optional
 
+from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import deep_research_window
 from looplab.events.replay import fold
@@ -493,8 +495,11 @@ class ResearchCadenceMixin:
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
+            # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
+            # whose `source` stamp is missing (a log older than the field) is recognised by this
+            # text alone, so the two must not be spelled separately.
             self.store.append(EV_HINT, {
-                "text": "deep-research directions: " + "; ".join(directions[:5]),
+                "text": DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5]),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
@@ -707,6 +712,58 @@ class ResearchCadenceMixin:
                 if not _footprint_receipt_exists(
                         card_id, fp_node, fp_proposal_ref, footprint):
                     delta["footprint"] = footprint
+            # DO NOT RE-APPEND A DELTA THAT ALREADY DID NOT TAKE. `replay._on_card_enriched`
+            # bounds the enrichment journal at 4,096 keys, and a NEW key refused at that cap is
+            # refused on every subsequent fold — the fold replays the same log prefix, so the same
+            # 4,096 keys win forever. The delta below is computed from the FOLDED card, so a refused
+            # key makes it non-empty again on the very next pass and the reconciliation re-appended
+            # a byte-identical `card_enriched` for the rest of the run (reproduced: appends-per-pass
+            # 0,1,2,3,4… against a control converging at one — unbounded growth of a log every fold
+            # re-reads).
+            #
+            # Keyed on the EXACT delta, not on the card. Gating on `_card_enrichment_complete`
+            # instead was too broad in a way that costs the operator real information: that flag is
+            # set for ANY omission and never clears, so a card that once had one key refused could
+            # never receive a lesson-ref or origin correction the fold would have accepted, and
+            # `public_cards` reported it enrichment-incomplete forever with no path back. A memo of
+            # what THIS process already tried and watched fail stops the loop without freezing the
+            # card. Runtime-only and bounded by the card/delta space; a restart retries once more,
+            # which is the correct amount of forgetting for a non-durable memo.
+            if delta:
+                attempted = getattr(self, "_card_enrichment_attempted", None)
+                if attempted is None:
+                    attempted = self._card_enrichment_attempted = set()
+                # THE KEY CARRIES THE SUBJECT EXACTLY WHEN THE DELTA DOES, and the two halves of
+                # this delta are scoped differently.
+                #
+                # `footprint` is fenced by card/node/generation/proposal_ref —
+                # `_footprint_receipt_exists` checks all four — so two DIFFERENT nodes under one
+                # card legitimately produce byte-identical footprint deltas as the newest
+                # materialized node advances across passes, and a (card_id, delta) key suppressed
+                # the second one permanently, losing that node's Developer-finalization receipt.
+                #
+                # `lesson_refs`/`claim_refs`/`research_origin` are fenced by the CARD alone: the
+                # delta is computed by comparing against `card.<field>`, never against a node. So
+                # keying those on the subject fixes nothing and reintroduces the defect the memo
+                # exists to stop. The subject for a card-scoped delta is `subjects.setdefault`'s —
+                # the card's LOWEST-numbered node, which adding nodes does not move — but its
+                # `proposal_ref` does move: an inline repair that finalizes a different held
+                # envelope rewrites the idea and the digest with it, and a card carrying a footprint
+                # takes the newest finalized node as subject instead. Each such move bought a
+                # refused card-scoped delta another byte-identical row: bounded rather than
+                # unbounded, which is the same re-append with a constant in front. So the subject
+                # (and its `proposal_ref`) enters the key only for the node-scoped half.
+                # `proposal_ref` is a dict, so it goes THROUGH the digest rather than into the
+                # tuple — the fence is its value, not its identity.
+                node_scoped = "footprint" in delta
+                fingerprint = (
+                    card_id,
+                    subject[0].id if node_scoped else None,
+                    subject[0].attempt if node_scoped else None,
+                    canonical_json_digest({"ref": subject[1], "delta": delta} if node_scoped
+                                          else {"delta": delta}))
+                if fingerprint in attempted:
+                    continue
             if not delta:
                 continue
             node, proposal_ref = subject
@@ -717,6 +774,10 @@ class ResearchCadenceMixin:
                 "proposal_ref": proposal_ref,
                 **delta,
             })
+            # AFTER the append, never before: the memo's premise is "a delta that was written and
+            # the fold then refused". Recording it first meant an append that RAISED (ENOSPC, EIO)
+            # permanently suppressed a delta no row ever carried.
+            attempted.add(fingerprint)
             appended = True
         return fold(self.store.read_all()) if appended else state
 

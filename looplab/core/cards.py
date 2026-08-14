@@ -412,6 +412,7 @@ CARD_IDEA_CONCEPT_FIELDS = ("concept_mode", "concepts", "concepts_added", "conce
 # One semantic boundary for every Card producer, replay path, identity digest, and public projection.
 # The UTF-8 cap is deliberately the worst-case encoding size of the character cap, so valid Unicode
 # statements are never accepted by one layer and rejected by another.
+#
 CARD_STATEMENT_MAX_CHARS = 4_000
 CARD_STATEMENT_MAX_UTF8_BYTES = 16_000
 

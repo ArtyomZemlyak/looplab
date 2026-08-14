@@ -739,10 +739,102 @@ Every discard is still refunded and `charged_discards` is still 0 on both. The o
 (`looplab run --backend toy`) produces an identical event-type inventory and the identical champion on
 both trees.
 
-**Left undone.** §5's serial gap is only made *addressable*, exactly as §7's table promised — the
-board can now be refilled mid-eval, but nothing yet makes the card-producing cadences fire *because*
-an evaluation is running. They stay node-count-paced. F1g's last paragraph states what closing the
-rest of that 167.7 GPU-h would take. §8's open items are unchanged: the both-latches-off control
-still has no live-proposal-lane demonstration in the scratchpad, and the eleven outer-loop cadences
-were not individually audited for safety against a moving log — the structural argument
-(at_node-idempotent and event-gated) is what this change rests on.
+**Left undone (closed 2026-08-14 — see §10).** §5's serial gap is only made *addressable*, exactly
+as §7's table promised — the board can now be refilled mid-eval, but nothing yet makes the
+card-producing cadences fire *because* an evaluation is running. They stay node-count-paced. F1g's
+last paragraph states what closing the rest of that 167.7 GPU-h would take. §8's open items are
+unchanged: the both-latches-off control still has no live-proposal-lane demonstration in the
+scratchpad, and the eleven outer-loop cadences were not individually audited for safety against a
+moving log — the structural argument (at_node-idempotent and event-gated) is what this change rests
+on.
+
+---
+
+## 10 · Occupancy-paced production (2026-08-14) — §9's remainder, and where the pace actually was
+
+§9 left the serial gap addressable and unaddressed, and named the wrong site for it: "nothing yet
+makes the card-producing CADENCES fire because an evaluation is running." Two things are wrong with
+that sentence, and finding out which cost the first half of this change.
+
+**`_run_cadences` was not the binding pace.** Since §9 it runs on every outer turn, evaluations in
+flight or not. Of its members, the two that produce Card material are `_maybe_merge_hypotheses`
+(paced on the SIZE of the open belief board, not on a node count) and `_sync_card_enrichments`
+(ungated, every turn). The genuinely node-count-paced ones — coverage, concept coverage, Strategist,
+deep research, report, lessons — refill the board only indirectly. Making them occupancy-due would
+have been a change to six paid cadences for a second-order effect.
+
+**The binding pace is one lane lower, and it is stricter than a node count.** Instrumented on a real
+`Engine.run` over the toy quadratic with evaluations scaled to the GPU-run shape (3 s evaluations
+against 0.6 s builds, `eval_parallel=2`, no isolated producer pair — the state §5 describes, where
+the session's raw lane cannot mint), the outer loop's own trace reads the same on every single turn
+for the whole of every evaluation:
+
+```
+ 0.71  session_exit   inflight [[0,0]]
+ 0.71  cadences       nodes 1              <- reachable, as §9 promised
+ 0.71  select         ["evaluate"]         <- for node 0, which is ALREADY running
+ 0.71  session_enter  inflight [[0,0]]
+ 3.77  session_exit   inflight []          <- 3 s later: the terminal
+ 3.78  select         ["draft","draft"]    <- the FIRST create action since node 0 existed
+ 3.79  stage_card_creates card-1
+ 4.40  node_created 1                      <- built serially, after the terminal
+```
+
+A Node under evaluation is still `pending` in the fold, so `card_next_actions` answers with its
+evaluate action — which the turn cannot start — and the run loop's `creates` branch is skipped
+whenever any evaluate action exists. `_stage_card_creates`, which §9 itself identifies as the ONLY
+writer of Card inventory, therefore fired **once in a whole 12-node run**, at node 0. Production was
+gated on occupancy ZERO. That is not a node-count pace at all; it is the exact inverse of the pace
+the run needs, and it is why §9's fix could reach the boundary and still find nothing to build.
+
+**What shipped.** `engine/cadence.py::occupancy_due(inflight, queued, width)` — the second clock,
+sited next to `cadence_due` so the two rules are read together. It is due when an evaluation is
+running and the supply behind it (in-flight evaluations plus pending Nodes not yet admitted) does not
+cover the width. `Engine._occupancy_paced_creates` is its one consumer: when a turn planned no create
+and every evaluate action names a Node already in flight, it re-asks the SESSION's own two producer
+queries — `speculative_card_actions` first, `speculative_raw_actions` only if no durable Card owns
+the next action — with the running Nodes masked, bounded to the free slots.
+
+**The half that is easy to get wrong, and did not work without it.** The masked selection must be
+carried through to the CLAIM. `_claim_existing_card_builds` re-derives the lane under `_id_lock`, and
+re-deriving it unmasked while an evaluation runs asks a different question: `forced_card_actions`
+answers with the running Node's evaluate lane, the comparison reads `['card-1'] -> []`, and after
+`_CARD_CLAIM_RETIRE_AFTER` turns the Card is durably `card_auto_dropped` as "unclaimable". Measured
+with only the inventory half in place: 246 Cards minted and retired in one run, and the nodes still
+built serially after each terminal — i.e. **no improvement, plus a spin**. This is `CardSessionGates`'
+own failure mode (two copies of one rule that must keep agreeing) one lane over, and it is why the
+mask is a parameter rather than a second predicate.
+
+**No new event.** §9's `_proposal_authority_seq` note is the reason to check, and the answer is that
+nothing needs recording: "an evaluation is running and the board has nothing selectable" is derivable
+from `Engine._eval_inflight` plus the fold. A folded row would move the fence and discard paid
+proposals. A diagnostic row is excluded from the fence today, but would be an append per poll turn
+for hours, recording that nothing happened. And the pace has no mark to fence — which is the same
+property that keeps it from colliding with `cadence_due`/`already_covered_at`: a pace that recorded
+an `at_node` would close the node-count window for a full `every` nodes and make the at_node twin
+refuse the next starvation at the same count, i.e. it would be a node-count rule renamed.
+
+**Measured.** A/B on one tree, the A arm with the pace disabled, same harness, same 12 evaluations,
+identical event-type inventory (12 `card_added` / `node_building` / `node_created` / `node_evaluated`,
+0 `card_auto_dropped` on both):
+
+| | max occupancy | at occupancy 2 | serial gap | slot utilisation | wall |
+|---|---|---|---|---|---|
+| pace off | 1 | 0.00 s | 8.14 s (18.1 %) | 40.9 % | 45.0 s |
+| pace on | **2** | 15.09 s | **0.82 s (3.4 %)** | **79.8 %** | **24.0 s** |
+
+Both arms of the same harness WITH an isolated producer pair (where the prefetch already fills the
+board) are indistinguishable — 79.4 % vs 79.2 % — so the pace stands down where it is not needed.
+The champion differs between the two arms (0.534 vs 0.320 on a `min` objective, 12 nodes either
+way): production now happens against a different snapshot, which is a treatment change of exactly the
+same category as the prefetch's, and it should be read that way rather than as a win.
+
+**`boundary_owed`.** Still a bool, so the debt is "a terminal landed", not "one turn per terminal";
+`_card_eval_one`'s comment claimed the stronger reading and now states the truth and three reasons
+it is left alone — the load-bearing one here being that the pace is width-COMPLETE (it asks for every
+free slot) and the outer loop is not rationed by the flag, so one hand-back refills a collapse of any
+size.
+
+**Left undone.** The width-1 lookahead — hiding a build behind an evaluation with no free GPU at all
+— stays the prefetch's job, bounded by `speculation_depth`, because the pace's supply target is the
+width. §8's open items are unchanged.

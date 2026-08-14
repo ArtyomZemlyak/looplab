@@ -1914,6 +1914,14 @@ def build_router(srv) -> APIRouter:
         answer; when it was spelled twice — once typed over `RunState`, once by dict spelunking here —
         a renamed field or a changed marker shape moved only one of them, and two routes would then
         disagree about the same reset.
+
+        KNOWN COST, not a claim this docstring makes lightly: "an unchanged log is a stat+lookup" is the FINISHED-run
+        case. On a LIVE run every append changes the events-file identity, so the cache misses on
+        essentially every poll, and each node_logs/node_trace/conversation request pays up to two
+        full fold + model_dump + public-card-projection rebuilds (before/after CAS) just to read
+        one node's attempt integer — on the 14k-event runs this file elsewhere measures, that is a
+        materially heavier poll than the pre-CAS route. Worth a narrow attempt-only projection (a
+        tail scan for the node's lifecycle rows) instead of the full state payload.
         """
         frame = _state_payload(rd)
         state = frame.get("state") if isinstance(frame, dict) else None
@@ -2708,9 +2716,18 @@ def build_router(srv) -> APIRouter:
         (422) rather than silently read as "default": it can only be a client defect, and a paging
         control that quietly ignores its own argument is how a dead pager looks from the outside.
 
-        ``attempt`` binds this CURRENT-node view to the lifecycle rendered by the Inspector. It is
-        checked before and after the read; old attempts remain available through attempt-history
-        evidence rather than being silently concatenated into the current conversation.
+        ``attempt`` binds this view to the lifecycle rendered by the Inspector, and is checked
+        before and after the read. An EXPLICIT EARLIER attempt is a HISTORICAL READ, served as asked
+        and echoed back — the same rule as the span-tree twin, because these are two VIEWS of one
+        trace surface and the Inspector's attempt picker switches between them over one selection.
+        Only an attempt this node has never REACHED is refused. Old attempts are never silently
+        concatenated into the current conversation: the generation fence applies to the span window
+        itself (`node_window_snapshot` / `full_spans_for_node`).
+
+        This paragraph used to say old attempts were reachable "through attempt-history evidence
+        rather than" here — the pre-relaxation contract, left behind when the `!=` fence became `>`.
+        Reading it as current would invite restoring a refusal that breaks the Inspector's attempt
+        picker and every historical Dock event row.
 
         ``before`` (a span id from `/nodes/{nid}/episodes`) SEEKS the window: the same `limit` spans,
         ending at the anchored step rather than at the node's newest one. `attempt` and `before`

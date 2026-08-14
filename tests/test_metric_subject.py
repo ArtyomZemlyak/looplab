@@ -352,8 +352,11 @@ def test_needs_alone_does_not_catch_the_incident_and_this_is_why_it_is_not_the_g
     from looplab.runtime.command_eval import verify_stage_inputs
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "model.bin").write_bytes(b"the node's own, correct, fresh checkpoint")
-    assert verify_stage_inputs(["out/model.bin"], str(tmp_path), stage="score",
-                               since=time.time()) is None
+    # No `since=`: `verify_stage_inputs` deliberately has NO freshness rule (its docstring says so —
+    # an input legitimately predates its stage), and passing one would contradict the very point this
+    # test makes. That absence is exactly WHY `needs` cannot be the gate: it is a presence check, the
+    # node really did write this file, and the stage read somewhere else anyway.
+    assert verify_stage_inputs(["out/model.bin"], str(tmp_path), stage="score") is None
 
 
 def test_the_run_report_names_an_unbound_node_rather_than_silently_excluding_it(tmp_path):

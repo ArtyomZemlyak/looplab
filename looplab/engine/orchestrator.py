@@ -54,6 +54,7 @@ from looplab.runtime.metric_subject import settle_mode as settle_metric_subject_
 from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_derived_width,
                                    settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
+from looplab.engine.cadence import occupancy_due
 from looplab.engine.card_reservation import CardReservationMixin, _BuildReservation
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
 from looplab.engine.confirm_phase import ConfirmPhaseMixin
@@ -108,7 +109,7 @@ from looplab.core.llm_broker import (LLMConcurrencyBroker, default_llm_lane_limi
                                      in_llm_lane, llm_broker_scope, llm_lane_scope)
 from looplab.search.card_selection import (
     META_CARD_ID, SpeculativeSelectionContext, card_budget_used, card_next_actions,
-    refunded_node_reservations, speculative_raw_actions,
+    refunded_node_reservations, speculative_card_actions, speculative_raw_actions,
 )
 from looplab.search.speculation_calibration import (
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
@@ -1834,6 +1835,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # go at the same experiment is the thing the operator deleted.
             creates = [a for a in actions
                        if a["kind"] in ("draft", "improve", "merge")]
+            # OCCUPANCY-PACED PRODUCTION (backlog F1g, doc 33 §10).  `_select_actions` answers
+            # "what should happen next" over the folded board, and a Node that is ALREADY being
+            # evaluated is still `pending` there — so for the whole of a multi-hour evaluation the
+            # selector returns an evaluate action naming a node this turn cannot start, `creates` is
+            # empty, and the branch below is skipped.  `_stage_card_creates`, the ONLY writer of Card
+            # INVENTORY, is therefore reachable only in the instants when NOTHING is running: measured
+            # on a toy-backend run of this shape it fired ONCE in a whole 12-node run, at node 0.
+            # Production was gated on occupancy ZERO, which is exactly backwards, and it is why F1f's
+            # fix — the outer loop now turns while evaluations burn — could reach the boundary and
+            # still find nothing to build.
+            if not creates:
+                creates = self._occupancy_paced_creates(state, evals)
 
             if creates:
                 # doc 25 ES-05: the 220-line branch that used to live here is now a §4 phase
@@ -2002,6 +2015,96 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return "break"
         return "continue"
 
+    def _running_eval_node_ids(self) -> set[int]:
+        """The Nodes whose evaluation is burning a slot RIGHT NOW, from the live adopted set.
+
+        Deliberately the LIVE set and not the durable `node_eval_started` boundary. The two answer
+        different questions and both are right for their own consumer: the durable row is what a
+        RESUMED process reads to tell a prefetch that never ran from one whose sandbox burned GPU
+        minutes (`_drop_stale_speculation`), and it stays true across the crash by design. What the
+        production pace needs is "is a device busy in THIS process", and after a crash the answer is
+        no — every one of those sandboxes died with the process that owned them. So a resumed run
+        reads occupancy 0 here, takes the ordinary create turn, and is right to.
+        """
+
+        return {node_id for node_id, _generation in (getattr(self, "_eval_inflight", None) or ())}
+
+    def _occupancy_paced_creates(self, state: RunState, evals: list[dict]) -> list[dict]:
+        """Production the run may do BECAUSE a GPU is busy and the board behind it is empty (F1g).
+
+        The turn reaching this point has no create action, and the reason is almost always that the
+        selector answered with an evaluate action for a Node that is already in flight — which this
+        turn cannot start, so the turn does nothing and the outer loop hands straight back to a
+        session that also has nothing to do. Meanwhile the device stays busy for hours, the board
+        stays empty, and the build latency that could have hidden behind the evaluation gets paid
+        serially after it (167.7 GPU-h across this box's corpus, backlog F1g).
+
+        THREE gates, and each of them is load-bearing.
+
+        1. `occupancy_due` (`engine/cadence.py`) — the pace itself: an evaluation is running and the
+           supply behind it does not cover the width. `queued` counts pending Nodes that are NOT in
+           flight, i.e. work already built and waiting for a slot; producing more of that is not what
+           an empty board means.
+        2. Nothing this turn could have STARTED instead. Every evaluate action names an already-
+           running Node, and no build/request is outstanding. If any of those is false the run is not
+           starved — it is about to admit or about to commit — and minting here would be inventory
+           bought against a decision that has not landed yet.
+        3. The masked SELECTION decides what, in the same two-lane order `card_next_actions` uses —
+           a durable Card that owns the next action first (`speculative_card_actions`), and only if
+           there is none, the counterfactual raw lane that mints one (`speculative_raw_actions`).
+           Both are the session's own producer queries, asked with the running Nodes hidden
+           (`ignored_pending_node_ids`), and reusing them is what keeps this from becoming a SECOND
+           selection authority — doc 33 option 4 is the write-up of why that is the expensive
+           mistake in this area. Both lanes are needed, and the first one is the half that actually
+           moves a GPU: minting a Card while the board is empty leaves inventory nobody builds,
+           because the forced evaluate action for the running Node masks it from `_select_actions`
+           on the very next turn too. Measured — with only the raw lane the card lands mid-eval and
+           the node is still built serially after the terminal, i.e. no change at all.
+
+        Bounded to the free slots, because the point is to fill them and not to run the search ahead
+        on unproven ideas: everything past that is the prefetch's job, which owns a calibrated depth
+        and a freshness drain and is reachable mid-evaluation since F1f.
+
+        NO NEW EVENT, and that is a decision rather than an omission. "An evaluation is running and
+        the board has nothing selectable" is already derivable — the live half from
+        `Engine._eval_inflight`, the durable half from the folded board — and a row saying so would
+        be a new writer for a fact nobody has to be told. A FOLDED row would move
+        `_proposal_authority_seq` and discard paid proposals; a DIAGNOSTIC row is excluded from that
+        fence today, but it would still be an append per poll turn for the whole of a multi-hour
+        evaluation, i.e. an unbounded log written to record that nothing happened. The condition is
+        also its own idempotence (see `occupancy_due`), so there is nothing for a receipt to fence.
+        """
+
+        if not self._card_inventory_enabled():
+            # Inventory is a Card-mode concept, and so is `_eval_inflight`: only the Card session
+            # populates it, so with the selector off this predicate is vacuous anyway. Saying so
+            # explicitly keeps the non-Card spine byte-identical rather than accidentally so.
+            return []
+        running = self._running_eval_node_ids()
+        queued = {node.id for node in state.pending_nodes()} - running
+        width = max(1, int(getattr(self, "_eval_parallel", 0) or 1))
+        if not occupancy_due(inflight=len(running), queued=len(queued), width=width):
+            return []
+        if any(action.get("node_id") not in running for action in evals):
+            return []                     # a slot could be filled from the board; do that instead
+        if state.buildings or self._head_request(state) is not None:
+            return []                     # a build is already answering this
+        # >= 1 by `occupancy_due`, which is the same arithmetic: it is due only while the supply is
+        # short of the width. Spelled out rather than hard-coded to 1 because filling EVERY freed
+        # slot from one turn is what keeps `boundary_owed`'s bool honest at width > 1.
+        free = width - len(running) - len(queued)
+        context = SpeculativeSelectionContext(
+            scoring=getattr(self, "_card_scoring", None),
+            ignored_pending_node_ids=running,
+            resource_envelope=self._resource_envelope(),
+        )
+        owned = speculative_card_actions(
+            state, self.policy, self.policy.max_nodes, context=context)
+        lane = owned or speculative_raw_actions(
+            state, self.policy, self.policy.max_nodes, context=context)
+        return [action for action in lane
+                if action.get("kind") in ("draft", "improve", "merge")][:free]
+
     async def _handle_create_actions(self, creates, state, *, created_no_terminal,
                                      no_mint_turns, decision_seq, max_es, max_s, start):
         """The `creates` branch of the run loop, lifted verbatim (doc 25 ES-05).
@@ -2092,12 +2195,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (`speculative_raw_actions` keeps its name: it is the COUNTERFACTUAL raw lane —
                 # "what would the policy do if no durable Card owned this?" — and it is pure
                 # selection over folded state with no dependency on the prefetch lane at all.)
+                #
+                # The running evaluations are masked (backlog F1g). Without it this re-derivation
+                # disagrees with the one that decided the turn: a Node under evaluation is still
+                # `pending`, so the raw lane's own fallback is that Node's evaluate action, which is
+                # not a create — `speculative_raw_actions` then returns nothing and an occupancy-paced
+                # turn falls through to the serial compatibility path with a lane it never staged.
+                # The mask is exactly the in-flight set, never `_acknowledged_pending_ids`' whole
+                # pending board: a pending Node NOT in flight is real work the consumer is about to
+                # admit, and hiding it would mint inventory against a slot that is already spoken for.
                 stageable = speculative_raw_actions(
                     state,
                     self.policy,
                     self.policy.max_nodes,
                     context=SpeculativeSelectionContext(
                         scoring=getattr(self, "_card_scoring", None),
+                        ignored_pending_node_ids=self._running_eval_node_ids(),
                         resource_envelope=self._resource_envelope(),
                     ),
                 )
@@ -2169,7 +2282,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # work in it would make the score-to-claim fence ambiguous, so fail closed.
             if not all(META_CARD_ID in action for action in creates):
                 return "continue", state, _no_mint_turns
-            _card_reservations = self._claim_existing_card_builds(creates)
+            # The mask travels with the lane (backlog F1g): a lane selected while an evaluation runs
+            # was selected with that Node hidden, and the claim must revalidate the SAME question or
+            # it retires the Card as unclaimable. Empty whenever nothing is in flight, which is every
+            # ordinary create turn — that path is byte-identical.
+            _card_reservations = self._claim_existing_card_builds(
+                creates, ignored_pending_node_ids=self._running_eval_node_ids())
             if _card_reservations is None:
                 # A refused claim used to be an unconditional retry, which is right for a transient
                 # refusal and a SPIN for a permanent one. Count it; the ledger retires a lane that has
@@ -5563,7 +5681,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             reason="proposal_rejected", drop_card=bool(current.idea.card_id))
                         self._discard_node_build_telemetry()
                         return
-                    self._drop_card_once(current.idea.card_id, reason="reproposed")
+                    # THE SAME OWNERSHIP CHECK the refusal path four lines up routes through (via
+                    # `_fail_reserved_build`). `_drop_card_once` has none of its own, so dropping
+                    # unconditionally destroyed a card that a DIFFERENT node had attached to — a
+                    # debug re-attempt landing on the same work item — and a dropped card is
+                    # unrecoverable, because `_retry_attach_card` refuses `dropped` forever. The
+                    # later repair then minted a byte-identical twin: exactly the duplicate work
+                    # item the attach disposition exists to prevent. Reproduced end-to-end (mint on
+                    # node 0, attach on node 1, `node_reset from_stage=propose` on node 0).
+                    # Fail-closed here means the superseded card survives as proposed inventory,
+                    # which is the cost `_reservation_minted_card`'s own docstring prices against
+                    # deleting somebody else's finished work item.
+                    if self._reservation_minted_card(events, node.id, current.idea.card_id):
+                        self._drop_card_once(current.idea.card_id, reason="reproposed")
                     if plan.disposition == "mint":
                         self.store.append(EV_CARD_ADDED, plan.payload)
                     self.store.append(EV_NODE_BUILDING, {

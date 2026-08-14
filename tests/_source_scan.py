@@ -120,6 +120,19 @@ def names_read(func) -> set[str]:
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
 
 
+def attributes_read(func) -> set[str]:
+    """Every DOTTED attribute LOADED in *func* (`self._inline_repair_reasons`, `res.diverged`).
+
+    `names_read`'s sibling for the case that matters most in this codebase: a gate that must consult
+    a SETTING reads it as `self.<field>`, which is an `ast.Attribute` and therefore invisible to a
+    bare-name scan. Same guarantee — a spelling that survives only in a comment is not an AST node
+    and is not in here — so a positive pin over this cannot be satisfied by commenting the gate out
+    and leaving its text behind."""
+    return {dotted for dotted in (
+        _dotted(node) for node in ast.walk(function_tree(func))
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load)) if dotted}
+
+
 def scan(pattern: re.Pattern | str, *, pkg: Path = PKG) -> dict[str, set[str]]:
     """``{captured name: {relative file, …}}`` for every match of *pattern*.
 

@@ -177,6 +177,15 @@ def eval_workspace_conflicts(task_or_spec, workspace_root) -> list[str]:
     return out
 
 
+# Wrappers that run the REST of their argv as a command, so the interpreter search may read through
+# them. Closed on purpose: each entry is a program whose contract is "exec what follows", which is
+# what makes `<wrapper> python score.py` still a readable `<interpreter> [flags] <target>` argv.
+# A launcher with its own flag grammar (`torchrun`, `deepspeed`, `accelerate`) is NOT here — see
+# `entrypoint_candidates`.
+_TRANSPARENT_LAUNCHERS = frozenset({"env", "nohup", "srun", "stdbuf", "setsid", "time", "ionice",
+                                    "nice", "chrt", "taskset"})
+
+
 def entrypoint_candidates(command) -> list[str]:
     """The cwd-relative file path(s) an eval `command` argv would actually EXECUTE, or [].
 
@@ -184,17 +193,25 @@ def entrypoint_candidates(command) -> list[str]:
       * `python -m pkg.mod`        -> ["pkg/mod.py", "pkg/mod/__main__.py"]
       * `python path/to/score.py`  -> ["path/to/score.py"]
     Both spellings of `-m` are returned because either one can be what the module name resolves to;
-    the caller keeps whichever EXISTS. `-m` wins over a later `.py` token, because
-    `python -m pkg.mod --out x.py` executes the module and not `x.py`.
+    the caller keeps whichever EXISTS. The argv is read the way CPython reads it — interpreter flags
+    up to the first non-flag token, which is the script — so `-m` wins over a later `.py` token
+    (`python -m pkg.mod --out x.py` executes the module), and a `-m` AFTER the script is the
+    script's own argument (`python train.py -m eval` executes `train.py`, not `eval.py`).
+
+    A transparent prefix that names the interpreter VERBATIM is read through — `srun python
+    score.py`, `env FOO=1 python -m pkg.mod`, `nohup python score.py` — because from that token on
+    the argv is the same `<interpreter> [flags] <target>` grammar.
 
     Deliberately narrow and purely syntactic — it never touches the filesystem, so its truth table
     can be stated. Anything else returns []: a shell wrapper (`bash run.sh`), a bare binary, an
-    installed console script, `python -c '...'`, the combined `python -mpkg.mod` spelling, an
-    absolute or escaping path. [] is NOT "nothing to protect"; it is "this argv does not say which
-    file the score stage runs", and `eval_entrypoint_unprotected` turns that into a submit-time
-    warning naming the command. Guessing wider would freeze a file the operator never meant to
-    freeze, which costs the Developer a whole repair attempt on a refusal it cannot act on — the
-    same cost `_declared_deps_brief` exists to avoid on the other side.
+    installed console script, a launcher that does NOT name an interpreter (`torchrun … score.py`,
+    `accelerate launch …`, `deepspeed …`, whose own flag grammar decides which token is the script),
+    `python -c '...'`, the combined `python -mpkg.mod` spelling, an absolute or escaping path. []
+    is NOT "nothing to protect"; it is "this argv does not say which file the score stage runs", and
+    `eval_entrypoint_unprotected` turns that into a submit-time warning naming the command. Guessing
+    wider would freeze a file the operator never meant to freeze, which costs the Developer a whole
+    repair attempt on a refusal it cannot act on — the same cost `_declared_deps_brief` exists to
+    avoid on the other side.
 
     The `.py`-token rule is deliberately the SAME rule `engine/eval_stages.py` already applies to a
     stage command (`_stage_reachable_files` / `_unrunnable_protected_scripts`): a workdir-relative
@@ -211,19 +228,77 @@ def entrypoint_candidates(command) -> list[str]:
     # cannot act on), and `eval_entrypoint_unprotected` fell silent for exactly the wrapper case that
     # warning exists to name. The docstring above already says `bash run.sh` returns []; this is what
     # makes that true. Say nothing rather than guess.
-    head = argv[0].replace("\\", "/").rsplit("/", 1)[-1].lower() if argv else ""
-    if not re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
-        return []
+    # Find the interpreter, ANCHORED AT argv[0] and walked forward only through a CLOSED set of
+    # transparent wrappers — `srun python score.py`, `env FOO=1 python score.py`,
+    # `nohup python -m pkg.mod`. Each of those runs the rest of the argv as a command, so from the
+    # interpreter token on it really is `<interpreter> [flags] <target>`.
+    #
+    # An unbounded scan for a python-looking token anywhere re-opens the wrapper hole the head-only
+    # check exists to close: `bash run_eval.sh --interpreter python3 --cfg configs/base.py` would
+    # find `python3` at index 3 and return `configs/base.py`, freezing a config the operator never
+    # named while the real scorer inside the shell script stays editable — and returning non-empty
+    # suppresses `eval_entrypoint_unprotected`, so nothing says so. All three costs at once.
+    #
+    # Deliberately NOT extended to launchers that do not name an interpreter (`torchrun … score.py`,
+    # `accelerate launch …`, `deepspeed …`): their own flag grammar decides which of
+    # `--nproc_per_node 2 score.py` is the script, we do not know it, and a wrong guess freezes a
+    # file the operator never named. Those return [] and `eval_entrypoint_unprotected` names them at
+    # submit time, which is the honest outcome rather than a confident wrong one.
+    start = -1
     for i, tok in enumerate(argv):
+        # THE ASSIGNMENT SHAPE IS TESTED FIRST, before the interpreter regex. `head` is the
+        # BASENAME, so `VIRTUAL_ENV=/opt/venvs/python3` has head `python3` and matched the
+        # interpreter pattern — anchoring `start` on an env assignment and losing the real
+        # entrypoint entirely (measured: `env VIRTUAL_ENV=/opt/venvs/python3 python train.py`
+        # returned []). `VIRTUAL_ENV`/`PYTHONHOME`/`CONDA_PREFIX` values ending in a `pythonN`
+        # component are ordinary in an ML environment, and the result is a silently unprotected
+        # scorer — the failure this whole function exists to prevent.
+        if i and "=" in tok and not tok.startswith("-"):
+            continue                      # `env`'s `VAR=value` assignments precede the command
+        head = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
+            start = i
+            break
+        if head in _TRANSPARENT_LAUNCHERS:
+            continue                      # `srun`/`env`/`nohup`: the command follows
+        return []                         # anything else owns the argv; we cannot read through it
+    if start < 0:
+        return []
+    # Read the interpreter's OWN flags, and stop at the first token that is neither a flag nor a
+    # flag's argument — that token is the script, and everything after it belongs to the program.
+    # Scanning the whole argv instead made `python train.py -m eval` resolve to `eval.py` (measured)
+    # while CPython runs `train.py`: `_entrypoint_protect` froze a file the operator never named,
+    # the REAL scorer stayed editable, and because the result was non-empty the unprotected-scorer
+    # warning never fired. Every cost the wrapper rule above exists to avoid, at once.
+    _TAKES_ARG = ("-W", "-X", "-Q", "--check-hash-based-pycs")
+    i = start + 1
+    while i < len(argv):
+        tok = argv[i]
         if tok == "-m":
             mod = argv[i + 1] if i + 1 < len(argv) else ""
             if not mod or not re.match(r"^[A-Za-z_]\w*(\.[A-Za-z_]\w*)*$", mod):
                 return []          # `-m` with a non-module argument: say nothing rather than guess
             stem = mod.replace(".", "/")
             return [stem + ".py", stem + "/__main__.py"]
-    for tok in argv:
-        if not tok.endswith(".py") or tok.startswith("-"):
+        if tok == "-c" or tok == "-":
+            return []              # no file is executed / stdin: nothing this can name
+        if tok in _TAKES_ARG:
+            i += 2
             continue
+        if tok.startswith("--"):
+            i += 1
+            continue
+        if tok.startswith("-") and len(tok) > 1:
+            # A short-option cluster. `-um pkg` really is `-u -m pkg`, and the combined `-mpkg.mod`
+            # spelling is documented as opaque — so any cluster carrying `m` or `c` is opaque too
+            # rather than silently parsed one way and executed the other.
+            if "m" in tok[1:] or "c" in tok[1:]:
+                return []
+            i += 1
+            continue
+        # The first non-flag token: this is the script CPython executes.
+        if not tok.endswith(".py"):
+            return []
         rel = tok.replace("\\", "/")
         while rel.startswith("./"):
             rel = rel[2:]
@@ -333,6 +408,21 @@ class EvalSpec(BaseModel):
     # ADDS, so an operator who protects `data/**` would silently give up the scorer freeze that
     # `protect` is the very vocabulary for — the surprising direction. This field says the thing
     # itself, and the run's `task.snapshot.json` records the decision.
+    #
+    # The run's `task.snapshot.json` records the decision FOR RUNS STARTED AFTER THIS FIELD EXISTED.
+    # A pre-field snapshot simply has no key, so a resumed run picks the `True` default up and its
+    # edit surface TIGHTENS mid-run: later nodes refuse edits earlier nodes were allowed, and
+    # `seed_protected_files` starts materializing a file earlier nodes never received. That is
+    # deliberate and is the one direction worth taking without asking — the resumed run gets the fix
+    # rather than keeping the hole it was started with, and the cost is a refusal the Developer can
+    # act on rather than a corrupt metric nobody can see. It is pinned by
+    # `tests/test_eval_entrypoint_protection.py::test_an_existing_runs_snapshot_reloads_with_the_freeze`.
+    #
+    # Contrast `config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, which pins the OPPOSITE answer at the
+    # Settings layer (`read_fence` is listed there). The two differ on what a wrong answer costs: an
+    # unexpected read-fence denial FAILS the node outright and buys paid repairs, while an
+    # unexpected entrypoint freeze refuses one edit and says why. Tightening is safe when the run
+    # can still make progress; it is not when the run stops.
     protect_entrypoint: bool = True
     metric: dict = Field(default_factory=lambda: {"kind": "stdout_json", "key": "metric"})
     params_style: str = "none"               # none | cli_overrides
@@ -514,9 +604,13 @@ class EvalSpec(BaseModel):
         being RESUMED, which `_grandfathered` reloads without re-validating precisely because a
         recorded run must keep reaching the treatment it had.
         """
-        from looplab.runtime.command_eval import _validate_rel_paths
+        # The cap became a REQUIRED argument upstream on 2026-08-14. A subject is an
+        # output-side declaration, so it takes `expect.files`' cap rather than `needs`'.
+        from looplab.runtime.command_eval import (MAX_STAGE_EXPECT_FILES,
+                                                  _validate_rel_paths)
         if isinstance(v, dict) and v.get("subject") is not None:
-            clean, err = _validate_rel_paths("score", "subject", v["subject"])
+            clean, err = _validate_rel_paths("score", "subject", v["subject"],
+                                                MAX_STAGE_EXPECT_FILES)
             if err is not None:
                 raise ValueError(
                     err.replace("stage 'score'", "eval.metric")

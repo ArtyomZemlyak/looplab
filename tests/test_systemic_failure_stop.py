@@ -10,11 +10,23 @@ The line is not "how many failed" but WHETHER ANYTHING HAS EVER WORKED, and the 
 the whole rule. A run with an evaluated node has proved its environment, libraries and data, so a
 later failure is about that one idea and only that node and its direction stop — this bound is off.
 A run with none has proved nothing, so the N-th failure is evidence about the run.
+
+COVERAGE IS THREE TIERS, and the first one is what CLAUDE.md's ladder actually asks for. The
+predicate truth table below is tier 2; the AST wiring scan in `test_orchestrator_internals` is tier
+3, which proves the call is in the TEXT and not that it executes;
+`test_a_run_where_nothing_ever_worked_really_stops_itself` drives a REAL Engine with a sandbox that
+always fails, through the threshold, to a stopped-run terminal. Without that last one a wiring
+regression that leaves the call textually present but behind a dead condition passes both other
+tiers — and the incident this guards cost 26 hours.
 """
 from __future__ import annotations
 
+import anyio
+
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.engine.orchestrator import systemic_failure_stop_reason
+from looplab.runtime.sandbox import RunResult
+from tests.factories import make_engine
 
 
 def _state(*nodes: Node, aborted=()) -> RunState:
@@ -126,3 +138,48 @@ def test_the_shipped_default_is_on_and_the_engine_reads_it_raw():
         assert engine.systemic_failure_stop == 0
         engine = make_engine(Path(d) / "b", systemic_failure_stop=7)
         assert engine.systemic_failure_stop == 7
+
+
+# --------------------------------------------------------------------------------------------
+# Tier 1: a real Engine, a sandbox that always fails, and the run stopping itself
+# --------------------------------------------------------------------------------------------
+
+class _AlwaysFailsSandbox:
+    """Every eval fails the same way — the shape of the guarded incident (one environment defect,
+    re-diagnosed from scratch by a fresh Developer on every node)."""
+
+    def __init__(self):
+        self.evals = 0
+
+    def run(self, code, workdir, timeout=30.0, env=None, cancel=None):
+        self.evals += 1
+        return RunResult(exit_code=1, stdout="", stderr="ModuleNotFoundError: no module named 'x'",
+                         metric=None, timed_out=False)
+
+
+def test_a_run_where_nothing_ever_worked_really_stops_itself(tmp_path):
+    """THE TIER-1 TEST. The predicate truth table above and the AST wiring scan in
+    `test_orchestrator_internals` both pass against a call that is present in the source and never
+    reached — a dead `if`, an early return above it, a threshold mis-plumbed on re-entry. Only
+    running the loop can tell the difference, and the failure mode it guards is a run that grinds on
+    for 26 hours and 1,705 provider calls over six failed nodes.
+
+    `max_nodes` is deliberately far above the stop threshold: if the bound does not fire, the run
+    ends on the node budget instead and the assertions below distinguish the two.
+    """
+    sandbox = _AlwaysFailsSandbox()
+    engine = make_engine(tmp_path / "run", sandbox=sandbox, max_nodes=24, n_seeds=3,
+                         systemic_failure_stop=3, inline_repair=False)
+    state = anyio.run(engine.run)
+
+    assert state.finished, "a run that has proved nothing must stop itself"
+    failed = [n for n in state.nodes.values() if n.status == NodeStatus.failed]
+    assert failed, "the driver must actually have failed nodes"
+    assert not [n for n in state.nodes.values() if n.status == NodeStatus.evaluated]
+    # The BOUND, not the node budget: it stops within a small multiple of the threshold, nowhere
+    # near `max_nodes`. A dead gate would run all 24.
+    assert len(state.nodes) < 24, (
+        f"the systemic stop never fired — the run built {len(state.nodes)} nodes and only "
+        "stopped on its node budget")
+    reason = systemic_failure_stop_reason(state, 3)
+    assert reason, "and the same predicate agrees about the state the run stopped in"

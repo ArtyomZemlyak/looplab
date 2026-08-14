@@ -16,7 +16,8 @@ import pytest
 
 from tests.factories import make_engine
 from looplab.adapters.toytask import ToyTask
-from looplab.core.models import Idea, card_ownership_receipt, idea_proposal_ref
+from looplab.core.models import (CARD_STATEMENT_MAX_CHARS, Idea, card_ownership_receipt,
+                                 idea_proposal_ref)
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -491,7 +492,10 @@ def test_mint_and_build_claim_tail_cas_rejects_a_pause_winning_after_plan(
 
 def test_invalid_long_and_oversized_batch_ideas_do_not_strand_a_valid_sibling(tmp_path):
     long_statement = _idea("placeholder", 1.0)
-    long_statement.hypothesis = "h" * 2_049
+    # From the shared constant, not a literal: the engine producers used to hardcode a
+    # 2,048 cap while the HTTP boundary and replay accepted 4,000, so an engine-minted
+    # 2,049-char hypothesis was silently refused Card ownership by one layer only.
+    long_statement.hypothesis = "h" * (CARD_STATEMENT_MAX_CHARS + 1)
     oversized_identity = _idea("bounded statement", 2.0)
     oversized_identity.rationale = "r" * 66_000
     valid = _idea("surviving sibling", 3.0)

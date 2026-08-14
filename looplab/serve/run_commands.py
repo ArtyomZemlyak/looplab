@@ -1499,7 +1499,16 @@ class RunCommandService:
             if not self._run_finished(rd, observation):
                 return False
             return True
+        # The pause branch consults `_run_finished` TOO, so the exception above is not
+        # unreachable for the one intent that reaches here. The fold never clears `paused` on
+        # `run_finished`, so a run that finished WHILE paused (an abort during the pause, the
+        # systemic-failure stop) kept a stale timed-out pause record unspent — `paused` is still
+        # True — and every later control answered 409 `command_retry_required` until the operator
+        # explicitly retried the pause. Recoverable, but it contradicted the rule the comment above
+        # states: once a run is finished, no control of any kind can still be driven.
         state = (observation or self._observe(rd)).state()
+        if bool(state.finished):
+            return True
         return not bool(state.paused)
 
     @staticmethod

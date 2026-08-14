@@ -110,6 +110,15 @@ declaration that is now being checked DIFFERENT from the one that failed"** — 
 failing stage's `expect.files` to have actually changed. That is a few lines, it is checkable, and
 it makes "the sentence was corrected" true by construction instead of by inference from a filename.
 
+> **NOTE (mega-review 2026-08-13, doc 40): this fix LANDED before this document did.** Commit `7e9a9a2`
+> ("the F1e re-check must prove the repair reached the declaration that failed", an ancestor of the
+> commit that landed this doc) shipped exactly the recommendation above:
+> `evaluate.py::_recheck_repaired_contract` now calls
+> `metric_salvage.declaration_actually_corrected(...)` before `verify_stage_artifacts`, so the §2
+> promotion race described as live is CLOSED at HEAD, and §1's "four gates" are now five. The
+> analysis is kept as written for its argument; do not re-diagnose or re-fix the race from this
+> page.
+
 ## 3. Where the number actually comes from, in each shape
 
 This is the question every option turns on, so it is worth being pedantic. `metric_salvage` reads

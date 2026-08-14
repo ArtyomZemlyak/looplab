@@ -54,11 +54,20 @@ def per_experiment_gpu_budget(pool, eval_parallel) -> Optional[int]:
     Cards declared `{"gpus": 2}`, `_resource_request_for_node` honoured the declaration (declared
     beats AUTO), and a run with `eval_parallel: 2` went serial at double the per-node cost.
 
-    This is the SAME share `engine/resources.py::_resource_request_for_node` already gives an
-    UNDECLARED footprint, generalized: that branch reads "pool and parallel > 1 -> one device, else
-    the whole box", which is exactly ``pool // eval_parallel`` at the AUTO widths those two branches
-    were written for. A declared footprint is still authoritative — this is what the Researcher is
-    TOLD, not a clamp — so the two can never disagree about a value one of them refuses.
+    NOT the same rule as `engine/resources.py::_resource_request_for_node`'s undeclared-footprint
+    branch, and the difference is worth stating because it is the obvious "unification" to reach
+    for. That branch is flat — ``pool_size and parallel > 1 and task_gpu_capable -> count = 1`` —
+    regardless of pool size, so the two agree only when ``eval_parallel == pool`` (the settled-AUTO
+    case they were both written for). On an 8-GPU box with an explicit ``eval_parallel: 2`` this
+    tells the Researcher the ceiling is 4 while a Card that leaves `footprint` unspecified is still
+    given exactly 1 device.
+
+    That gap is REAL and open: it is the prompt-vs-scheduler disagreement F1b was, one field over.
+    It is not closed here because the two answer different questions — this is what the Researcher is
+    TOLD (a declared footprint remains authoritative and is never clamped by it), while the branch in
+    `resources.py` is what an UNDECLARED one is GRANTED — and changing the grant is an admission
+    change that needs its own evidence. Do not "unify" them on the strength of this docstring;
+    either route the grant through this helper deliberately, or leave both spellings.
 
     ``None`` means "not knowable, say nothing": a caller with no settled width or no probed pool must
     print no number at all rather than a plausible wrong one. The three edge cases, each decided

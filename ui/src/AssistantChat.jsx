@@ -6,11 +6,10 @@ import { permissionPresentation } from './assistantPermission.js'
 import LaunchCard from './LaunchCard.jsx'
 import { launchDraftKey } from './launchDraftStore.js'
 import { OpIcon } from './icons.jsx'
+import { toolActivityProjection } from './assistantToolActivity.js'
 import './assistant-tool-activity.css'
 
 const RUN_MENTION_MAX = 32
-const TOOL_ACTIVITY_ITEM_MAX = 40
-const TOOL_ACTIVITY_LABEL_MAX = 240
 const runMentions = value => {
   const text = String(value || '')
   const re = /@run:([^\s.,;:!?)\]]{1,255})(?=$|[\s.,;:!?)\]])/g
@@ -66,43 +65,20 @@ const exactRecoveryAvailable = action => !!action
       && action.recovery_postimage_mode >= 0 && action.recovery_postimage_mode <= 0o7777
     : action.recovery_postimage_digest == null && action.recovery_postimage_mode == null)
 
-const boundedToolText = value => {
-  const clipped = value.slice(0, TOOL_ACTIVITY_LABEL_MAX)
-  const surrogateSafe = /[\uD800-\uDBFF]$/.test(clipped) ? clipped.slice(0, -1) : clipped
-  return surrogateSafe.replace(/\s+/g, ' ').trim()
-}
-
-const toolActivityLabel = item => {
-  if (typeof item === 'string') return boundedToolText(item)
-  if (!item || typeof item !== 'object' || Array.isArray(item)) return ''
-  const label = typeof item.label === 'string' ? boundedToolText(item.label) : ''
-  return label || (typeof item.tool === 'string' ? boundedToolText(item.tool) : '')
-}
-
-// Tool payloads may carry arguments, results and other implementation details. This projection reads
-// labels only, keeps the newest bounded window, and therefore caps both work and disclosure DOM.
-const toolActivityProjection = items => {
-  if (!Array.isArray(items) || items.length === 0) return { labels: [], total: 0, limited: false }
-  const start = Math.max(0, items.length - TOOL_ACTIVITY_ITEM_MAX)
-  const labels = []
-  for (let index = start; index < items.length; index += 1) {
-    const label = toolActivityLabel(items[index])
-    if (label) labels.push(label)
-  }
-  return { labels, total: items.length, limited: start > 0 }
-}
-
 function ToolActivity({ items, live = false }) {
-  const { labels, total, limited } = toolActivityProjection(items)
-  if (labels.length === 0) return null
+  // The window, the truncation and the numbering live in `assistantToolActivity.js` — pure
+  // decisions with a `node --test` sibling, because nothing in the suite mounts this component.
+  const { steps, total, limited } = toolActivityProjection(items)
+  if (steps.length === 0) return null
   const liveProps = live ? { 'aria-live': 'polite', 'aria-atomic': 'true' } : {}
   if (total <= 3 && !limited) {
     return <div className="asst-tool-line">
       <OpIcon name="gear" size={12} className="asst-tool-icon" />
-      <span className="asst-tool-label" {...liveProps}>{labels.join(' · ')}</span>
+      <span className="asst-tool-label" {...liveProps}>
+        {steps.map(step => step.label).join(' · ')}</span>
     </div>
   }
-  const summary = `${total} tool steps · ${labels[labels.length - 1]}`
+  const summary = `${total} tool steps · ${steps[steps.length - 1].label}`
   return <details className="asst-tool-disclosure">
     <summary className="asst-tool-toggle">
       <OpIcon name="gear" size={12} className="asst-tool-icon" />
@@ -110,9 +86,13 @@ function ToolActivity({ items, live = false }) {
       <OpIcon name="chevron-down" size={13} className="asst-tool-chevron" />
     </summary>
     <div className="asst-tool-body">
-      {limited && <p className="asst-tool-limit">Showing the latest {labels.length} of {total} steps.</p>}
-      <ol className="asst-tool-list" start={limited ? total - labels.length + 1 : undefined}>
-        {labels.map((label, index) => <li key={`${index}:${label}`}>{label}</li>)}
+      {limited && <p className="asst-tool-limit">Showing the latest {steps.length} of {total} steps.</p>}
+      {/* An explicit `value` per item, never a computed `start`: an unlabelled payload inside the
+          window is skipped but still counted in `total`, so `total - shown + 1` was the right first
+          ordinal only when every windowed item happened to carry a label. */}
+      <ol className="asst-tool-list">
+        {steps.map(step => <li key={`${step.position}:${step.label}`} value={step.position}>
+          {step.label}</li>)}
       </ol>
     </div>
   </details>

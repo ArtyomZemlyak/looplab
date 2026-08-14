@@ -23,6 +23,7 @@ reuse the persistent workdir exists for.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -141,16 +142,57 @@ def test_a_non_empty_directory_counts_as_present(tmp_path):
     assert verify_stage_inputs(["final"], str(tmp_path), stage="score") is None
 
 
+def test_an_input_under_an_engine_MOUNT_is_readable_not_an_escape(tmp_path):
+    """`engine/workspace.py::link_input` materializes a `mount:true` data/reference source as a
+    SYMLINK in the workdir pointing at the operator's path outside it. Resolving that link before
+    testing containment refused every declared input under a mount — so a repo task with
+    `data: {train: {path: /mnt/ds, mount: true}}` had every node terminate `needs_failed` before any
+    compute, while the sibling message forbids the only fix the model can apply ("do not delete the
+    declaration to make this pass"). The read fence allow-lists mount SOURCES for the same reason;
+    the two halves of one change must not disagree about mounts."""
+    wd, ds = tmp_path / "wd", tmp_path / "ds"
+    wd.mkdir()
+    ds.mkdir()
+    (ds / "train.parquet").write_text("rows")
+    os.symlink(ds, wd / "train", target_is_directory=True)
+
+    assert verify_stage_inputs(["train/train.parquet"], str(wd), stage="score") is None
+    # The contract still WORKS through the mount — a path that is really absent still reports.
+    missing = verify_stage_inputs(["train/absent.parquet"], str(wd), stage="score")
+    assert missing and "does not exist in the eval workdir" in missing
+    # …and a real escape is still refused, which is what containment was for.
+    assert verify_stage_inputs(["../ds/train.parquet"], str(wd), stage="score") is not None
+
+
+def test_the_producer_link_survives_two_legal_spellings_of_one_path(tmp_path):
+    """`ckpt/model.pt` and `ckpt/./model.pt` both validate, so keying the producer map on the raw
+    string lost the one sentence the feature exists to produce — the repair loop got the generic
+    message instead of "stage 'train' DECLARES this path as one of its own outputs"."""
+    stages = [{"name": "train", "command": ["x"], "expect": {"files": ["ckpt/model.pt"]}},
+              {"name": "score", "command": ["y"], "needs": ["ckpt/./model.pt"]}]
+    producers = stage_output_producers(stages, 1)
+    assert producers == {"ckpt/model.pt": "train"}
+    message = verify_stage_inputs(["ckpt/./model.pt"], str(tmp_path), stage="score",
+                                  producers=producers)
+    assert message and "DECLARES this path as one of its own outputs" in message
+
+
 def test_an_input_older_than_the_stage_is_NOT_stale(tmp_path):
-    """The rule `expect` has and `needs` deliberately does not. `since` is accepted and ignored; if
-    it ever starts filtering, a repair attempt that reuses a completed `train` stage would have its
-    checkpoint refused as an input by the very next stage."""
+    """The rule `expect` has and `needs` deliberately does not. If a freshness filter ever appears
+    here, a repair attempt that reuses a completed `train` stage would have its checkpoint refused
+    as an input by the very next stage.
+
+    There is no `since` parameter to pass: one was accepted and immediately `del`'d, which is worse
+    than absent — the next person adding a freshness rule passes it, sees no behaviour change and no
+    error, and debugs the caller. The signature assertion below is what keeps it absent."""
+    import inspect
     import os
     import time
     (tmp_path / "base.pt").write_text("weights")
     old = time.time() - 86_400
     os.utime(tmp_path / "base.pt", (old, old))
-    assert verify_stage_inputs(["base.pt"], str(tmp_path), stage="train", since=time.time()) is None
+    assert verify_stage_inputs(["base.pt"], str(tmp_path), stage="train") is None
+    assert "since" not in inspect.signature(verify_stage_inputs).parameters
 
 
 # --------------------------------------------------------------------------------------------

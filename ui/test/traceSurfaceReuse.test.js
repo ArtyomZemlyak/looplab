@@ -102,7 +102,11 @@ const installDom = () => {
 }
 
 const STATE = {
-  generation: RUN_GENERATION,
+  // NO `generation` KEY, deliberately. The folded RunState has no run-level `generation` — it is
+  // an envelope SIBLING of `state` in the /api/state payload — so stubbing one here produced a
+  // shape production never produces, and it masked the board reading `state?.generation` (always
+  // undefined live) instead of the `runGeneration` prop it already receives. The fence contract
+  // this file proves passed here and could never pass live. Keep it absent so it cannot again.
   cards: {
     'card-many': {
       id: 'card-many', status: 'evaluated', verdict: 'supported',

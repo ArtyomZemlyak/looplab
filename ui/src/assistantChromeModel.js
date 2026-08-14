@@ -61,6 +61,17 @@ export function contextUsage(messages = []) {
     const tokens = message?.tokens || {}
     // `context` is the peak SINGLE prompt of that turn; `prompt` SUMS the same context re-sent by
     // every call in the turn (billed, O(calls²)), so it is a cost number and never a window number.
+    //
+    // `context` ONLY — never a `tokens.prompt` fallback, and the omission is deliberate rather
+    // than an oversight in the move that introduced this function. `prompt` SUMS the same context
+    // re-sent by every call in a turn (O(calls²), and billed), so it is not an approximation of the
+    // window at all: reading it as one is what made a tool-heavy turn display a 50k context, and
+    // `test/assistantContextUsage.test.js` pins that it must not come back.
+    //
+    // THE COST, stated: a message persisted before the server emitted `context` — and any provider
+    // path with no peak — folds to last=0 and the chip disappears for that chat. A missing chip is
+    // the honest rendering of "this was never measured"; a wrong number is not, and it is the one
+    // an operator would act on.
     const value = Number(tokens.context || 0)
     if (Number.isFinite(value) && value > 0) {
       last = value
