@@ -5,7 +5,9 @@ moves (only the three `Engine.`-qualified staticmethod self-references became
 `EvalStagesMixin.`-qualified) and read engine attributes freely (`_eval_spec`,
 `_strategy_fidelity`, `_reflect_client`, `_idea_text`, …), exactly as they did inside the class.
 
-The cluster: manifest -> concrete stages (`_resolve_stages` / `_resolved_stages`), the static
+The cluster: manifest -> concrete stages (`_resolve_stages`, and over it `_eval_pipeline` — the ONE
+profile -> command -> chain derivation the eval DISPATCHER and every PLANNER share, of which
+`_resolved_stages` is the planners' total wrapper), the static
 import-reachability analysis behind safe stage reuse (`_imported_modules` /
 `_module_file_candidates` / `_stage_reachable_files` / `_safe_reuse_start`), and the LLM
 stage-check factory (`_stage_check_fn`). Heavy deps (command_eval, json) stay method-local so
@@ -287,22 +289,60 @@ class EvalStagesMixin:
                     out.append(row)
         return out
 
-    def _resolved_stages(self, node, workdir) -> list:
-        """Re-resolve the eval pipeline the way `_run_eval` does — used by the inline-repair reuse
-        predicate to inspect the stages' COMMANDS (which script each runs). [] for a single-command
-        eval (no reuse question). Deterministic given (node, workdir, eval_spec)."""
-        if not self._eval_spec:
-            return []
+    def _eval_pipeline(self, node, workdir, profile=None):
+        """WHAT AN EVAL WILL RUN: `(command, timeout, stages)` for this node at this profile — the
+        ONE derivation, called by both the side that RUNS it and the sides that PLAN against it.
+
+        Two readers, straddling the same line `runtime/command_eval.py::eval_spec_time_budget`
+        straddles (its docstring says so for the same reason):
+          • the DISPATCHER, `eval_dispatch.py::_run_eval`, which hands `stages`/`cmd`/`timeout`
+            straight to `run_command_eval`;
+          • the PLANNERS, through `_resolved_stages` below — the inline-repair reuse predicate, the
+            watchdogs' log plan (`train_monitor.eval_log_plan`) and the salvage re-check — all of
+            which need the chain BEFORE or independently of a run, which is why `RunResult.stages`
+            (the post-run per-stage OUTCOME record) cannot serve them.
+
+        It exists because there were TWO copies of this and they had already drifted: the planner
+        re-implemented the dispatcher's prologue WITHOUT its `profile` argument, so a planner asked
+        during a `confirm`/full pass would have planned the smoke chain. Latent when it was found
+        (2026-08-14 — the confirm phase is the only caller that passes a profile and it never plans,
+        and the only profile-sensitive part of the chain is the appended `score` stage's overrides +
+        timeout, which no planner reads), and fixed as ONE function anyway: a derivation kept in
+        step by hand comes apart at the next reader, and the next reader is the one who pays.
+
+        WHAT THE DISPATCHER KNOWS THAT A PLANNER CANNOT is exactly one thing, and it is an ARGUMENT
+        rather than private state: the caller-supplied `profile` (`confirm_phase.py` passes
+        `"full"`). So it is a parameter here and each side passes what it has. What deliberately
+        stays OUT is the dispatcher's two SIDE EFFECTS — `_ensure_run_setup` and `_sync_node_deps` —
+        because a question about what WOULD run must never install anything."""
         from looplab.runtime import command_eval
         es = self._eval_spec
-        prof = (node.idea.eval_profile if node is not None else None)
+        prof = profile or (node.idea.eval_profile if node is not None else None)
+        # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node
+        # didn't request a profile, use the strategy's. An explicit `profile` arg (confirm=full)
+        # always wins. "adaptive" leaves _strategy_fidelity None => the Idea's own profile.
         if prof is None and self._strategy_fidelity in ("smoke", "full"):
             prof = self._strategy_fidelity
         params = node.idea.params if node is not None else {}
+        cmd, timeout = command_eval.build_command(es, params, prof)
+        stages = self._resolve_stages(str(Path(workdir).resolve()), es, params,  # cmd-authoritative pipeline (+ %params% per stage)
+                                      score_cmd=cmd, score_timeout=timeout)      # profile/timeout survive pipeline mode
+        return cmd, timeout, stages
+
+    def _resolved_stages(self, node, workdir, profile=None) -> list:
+        """Re-resolve the eval pipeline the way `_run_eval` does — used by the inline-repair reuse
+        predicate to inspect the stages' COMMANDS (which script each runs). [] for a single-command
+        eval (no reuse question). Deterministic given (node, workdir, eval_spec, profile).
+
+        The PLANNER half of `_eval_pipeline`: the same derivation the dispatcher runs, minus its
+        side effects, plus the two things only a planner wants — the chain alone, and TOTALITY (a
+        resolution hiccup is "no reuse", never a crashed repair loop). `profile` must be the one the
+        eval will be DISPATCHED with; the default `None` is what `evaluate.py::_evaluate` passes to
+        `_run_eval`, and therefore the right answer for its three planning call sites."""
+        if not self._eval_spec:
+            return []
         try:
-            cmd, timeout = command_eval.build_command(es, params, prof)
-            return self._resolve_stages(str(Path(workdir).resolve()), es, params,
-                                        score_cmd=cmd, score_timeout=timeout) or []
+            return self._eval_pipeline(node, workdir, profile)[2] or []
         except Exception:  # noqa: BLE001 — a resolution hiccup must not crash the repair loop; no reuse
             return []
 

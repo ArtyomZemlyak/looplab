@@ -6174,7 +6174,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return self.workspace.sandbox_cwd(workdir, cwd_spec)
 
     # -------------------------------------------------------------- staged eval
-    # `_resolve_stages` / `_resolved_stages` / `_imported_modules` / `_module_file_candidates` /
+    # `_resolve_stages` / `_eval_pipeline` / `_resolved_stages` / `_imported_modules` / `_module_file_candidates` /
     # `_stage_reachable_files` / `_safe_reuse_start` / `_stage_check_fn` live in
     # looplab/engine/eval_stages.py (EvalStagesMixin — inherited, zero call-site churn).
 
