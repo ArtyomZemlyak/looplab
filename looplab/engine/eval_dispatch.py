@@ -641,6 +641,7 @@ class EvalDispatchMixin:
             wrap = (command_eval.make_docker_wrap(
                         root, self.docker_image,
                         mem=self.sandbox_memory or None, cpus=self.sandbox_cpus or None,
+                        readonly_rootfs=self.sandbox_readonly_rootfs,
                         runtime=("runsc" if self.trust_mode == "hostile" else None),
                         binds=self._data_binds(workdir),
                         env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)

@@ -70,6 +70,7 @@ ATTR_BY_FIELD = {
     "docker_image": "docker_image",
     "sandbox_memory": "sandbox_memory",
     "sandbox_cpus": "sandbox_cpus",
+    "sandbox_readonly_rootfs": "sandbox_readonly_rootfs",
     "seed_mode": "_seed_mode",
     "read_fence": "_read_fence",
     "n_seeds": "n_seeds",

@@ -122,7 +122,13 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # `read_fence` is one — the probe is an EXECUTION surface running inside the engine process, so
     # an operator has to be able to see that it exists and close it, and its timeout is the line
     # between "a question" and "a job that belongs in an eval stage".
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 210
+    # 210 -> 211 Settings with the catalogue UNCHANGED at 178 rows: `sandbox_readonly_rootfs` joins
+    # its four `sandbox_*` siblings in `_UNCURATED_SECOND_ORDER`. Uncurated for the same reason
+    # `sandbox_memory`/`sandbox_cpus` are — it is meaningless on the shipped `trusted_local` tier
+    # (there is no container filesystem to make read-only), so a form row would offer every operator
+    # a knob that does nothing on their box, and the operators who DO run the container tiers set
+    # them together in a config file.
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 211
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

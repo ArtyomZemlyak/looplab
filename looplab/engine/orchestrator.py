@@ -1099,6 +1099,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Mirror the solution.py DockerSandbox tier so both untrusted tiers bound memory/cpu.
         self.sandbox_memory = _opt("sandbox_memory")
         self.sandbox_cpus = _opt("sandbox_cpus")
+        # Container root-filesystem hardening for that same tier ("" = off; see
+        # `Settings.sandbox_readonly_rootfs`). Threaded into `make_docker_wrap` beside mem/cpus.
+        self.sandbox_readonly_rootfs = _opt("sandbox_readonly_rootfs")
         self._seed_mode = seed_mode or "auto"   # run-wide fallback for per-editable seeding
         # Source-tree READ FENCE policy (off|warn|deny) — read by `engine/resources.py`, which
         # materializes the fence lazily on the first eval and stamps its marker into the child env.
@@ -1139,6 +1142,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 raise EnvironmentRefusal(
                     f"trust_mode={trust_mode!r} needs the docker CLI to sandbox evals, but it was "
                     "not found on PATH. Install Docker or use trust_mode='trusted_local'.")
+            # Same rule, same place, for the OTHER value that can silently un-harden this tier: a
+            # `sandbox_readonly_rootfs` docker cannot mount refuses HERE rather than in the first
+            # node's first stage (`readonly_rootfs_argv` raises ConfigRefusal; "" is a no-op).
+            from looplab.runtime.sandbox import readonly_rootfs_argv as _ro_argv
+            _ro_argv(self.sandbox_readonly_rootfs)
         self._spec_activated = False
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.store = EventStore(self.run_dir / "events.jsonl")
