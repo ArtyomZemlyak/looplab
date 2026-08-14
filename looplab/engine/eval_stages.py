@@ -372,6 +372,36 @@ class EvalStagesMixin:
                 mods.append(base + nm if base.endswith(".") else f"{base}.{nm}")
         return mods
 
+    # Interpreter basenames whose `-m` means "run this dotted MODULE". Restricted rather than left as
+    # "any argv0", because `-m` is a flag other programs also spell (`make -m`, `sh -m`) and the
+    # module-entry rule below must never key on a token that is not a module name. A wrapper the list
+    # does not name (`bash -c "… python -m pkg.mod"` — the shape 10 of the 39 corpus rows have) keeps
+    # the historical OPAQUE answer: the module travels inside ONE shell-string token, and parsing a
+    # shell is not something this predicate may guess at.
+    _PY_INTERPRETER_RE = re.compile(r"^(python|pypy)[\d.]*$", re.I)
+
+    @staticmethod
+    def _module_entry_candidates(cmd: list) -> list:
+        """The dotted modules a stage command runs as its ENTRY POINT via `python -m <module>`.
+
+        `-m <module>` IS an import — CPython puts the process CWD first on `sys.path` for it, which is
+        the eval workdir — so the module's file is reachable by exactly the rule
+        `_module_file_candidates` already states for an `import`. Only the SEPARATE two-token spelling
+        is read; a glued `-mpkg.mod` is left alone and the stage stays opaque, because a bound that has
+        to guess where a flag ends is not a bound."""
+        out: list = []
+        if not cmd or not isinstance(cmd[0], str):
+            return out
+        argv0 = str(cmd[0]).replace("\\", "/").rsplit("/", 1)[-1]
+        if not EvalStagesMixin._PY_INTERPRETER_RE.match(argv0):
+            return out
+        for i, tok in enumerate(cmd):
+            if tok == "-m" and i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
+                mod = cmd[i + 1].strip()
+                if re.match(r"^[\w.]+$", mod) and not mod.startswith("."):
+                    out.append(mod)
+        return out
+
     @staticmethod
     def _module_file_candidates(mod: str, script_rel: str) -> list:
         """Repo-relative file paths a dotted import `mod` could resolve to, tried against BOTH the
@@ -405,8 +435,9 @@ class EvalStagesMixin:
         could have changed what an earlier (to-be-reused) stage produced.
 
         Returns None (OPAQUE → treat as UNSAFE, refuse reuse) when a stage runs something we can't
-        statically bound: a command with no local `.py` script token (`python -m pkg`, a shell wrapper, a
-        bare binary) or a `.py` path outside the workdir. Fail-closed by construction — a spuriously
+        statically bound: a command exposing no local entry point (a shell wrapper, a bare binary, or a
+        `python -m <module>` that resolves to NO file under the workdir — i.e. installed code) or a
+        `.py` path outside the workdir. Fail-closed by construction — a spuriously
         'reachable' file only forces a re-train, but a MISSED dependency would silently score a stale
         checkpoint (the invariant `_safe_reuse_start` exists to protect).
 
@@ -438,7 +469,34 @@ class EvalStagesMixin:
                     except Exception:  # noqa: BLE001 — an out-of-tree script we can't bound → opaque
                         return None
                 scripts.append(rel)
-            if cmd and not scripts:                              # runs SOMETHING but exposes no local .py → opaque
+            # `python -m pkg.mod` NAMES ITS ENTRY POINT BY IMPORT SYNTAX, and until 2026-08-14 that
+            # made the whole stage opaque — measured, that is the clause that actually binds on this
+            # box: of the 39 corpus repairs whose pipeline has no `.py` argv token, 29 run every such
+            # stage as `python -m <module>` resolving to a file inside the node's own workdir, and
+            # every `rubertlite-dr-unified-{v2,v6,v7,v8}` pipeline is that shape. The module resolves
+            # by the SAME rule as an import (CPython puts the process CWD — the eval workdir — first on
+            # `sys.path` for `-m`), so this is not a new modelling assumption, it is the existing one
+            # applied to the entry point instead of only to what the entry point imports.
+            #
+            # IT MUST RESOLVE TO A FILE THAT EXISTS UNDER THE WORKDIR, or the stage stays OPAQUE. That
+            # is the fail-closed half and it is the whole safety argument: `python -m pip`,
+            # `python -m pytest`, `python -m torch.distributed.run` name INSTALLED code this predicate
+            # cannot see, and admitting them would let a repair to a workdir `.py` that the installed
+            # tool loads dynamically read as "disjoint from the closure". Unresolvable → refuse, exactly
+            # as before.
+            for mod in EvalStagesMixin._module_entry_candidates(cmd):
+                # `<pkg>/__main__.py` is credited BESIDE the import candidates and is not optional:
+                # `python -m <pkg>` runs the package's `__main__.py`, which `_module_file_candidates`
+                # never emits (it answers "what does `import <pkg>` load", i.e. `__init__.py`). Seeding
+                # only the import candidates on a PACKAGE entry point credits an `__init__.py` that is
+                # routinely empty and MISSES the file that actually trains — the exact shape of a
+                # missed dependency, which is the failure direction that reuses a stale checkpoint.
+                cands = list(EvalStagesMixin._module_file_candidates(mod, ""))
+                cands.append("/".join(p for p in mod.split(".") if p) + "/__main__.py")
+                for cand in cands:
+                    if (wd / cand).exists():
+                        scripts.append(cand)
+            if cmd and not scripts:                    # runs SOMETHING, exposes no local entry → opaque
                 return None
             pending.extend(scripts)
         while pending:
@@ -484,7 +542,8 @@ class EvalStagesMixin:
         the stage MANIFEST that carries the argv), we must re-train — reusing a stale checkpoint would
         score a model that doesn't reflect the current code. Beyond the disjointness test, reuse is
         REFUSED outright whenever the predicate cannot PROVE the earlier stages' inputs are unchanged:
-          • an OPAQUE earlier stage (no resolvable local script: `python -m`, a shell wrapper);
+          • an OPAQUE earlier stage (no resolvable local entry point: a shell wrapper, a bare binary,
+            or a `python -m` naming installed code — see `_stage_reachable_files`);
           • the repair DELETED any file (`deleted`) — the closure can't see vanished modules;
           • any changed file is not a `.py` (config/data inputs are invisible to import reachability);
           • the eval runs under a non-default `cwd` (changed-file keys and stage-script paths resolve
@@ -492,6 +551,40 @@ class EvalStagesMixin:
         A false negative just re-trains (no worse than a full re-run); a false positive is a silent
         stale score, so the predicate is conservative by construction and fail-closed on anything it
         can't statically bound.
+
+        WHY THE NON-`.py` CLAUSE IS STILL HERE, having been examined against `needs` on 2026-08-14 and
+        REFUSED. The tempting widening is: a stage declares its inputs (`needs`), so a changed config
+        that is not among an earlier stage's `needs` provably cannot have altered what that stage
+        produced. It does not hold, for two independent reasons, and either one alone is fatal:
+
+          • `needs` IS NOT A BOUND, IT IS A PRECONDITION. `verify_stage_inputs` `stat()`s each declared
+            path BEFORE the command and reports the first one missing or empty; nothing anywhere checks
+            the converse. A stage may read any file it likes without declaring it —
+            `_confined_input`'s own docstring says so ("What a stage may actually READ is owned by
+            `runtime/read_fence.py`"), and that fence never fences the workdir, which is where a
+            candidate's config lives. So "not in `needs`" means "undeclared", never "unread", and
+            reusing on it is precisely the silent stale score this predicate exists to prevent.
+          • IT IS ALSO OPTIONAL AND ALL BUT UNUSED. Measured over every `runs/*/nodes/*/
+            looplab_stages.json` on this box: 2 of 129 stages declare `needs` at all (both on the live
+            v8 run, both added the day the field shipped), against 20 declaring `expect`. An absent
+            declaration must read as UNKNOWN, so the widening would decide almost every real case by
+            its default — and the fail-open default is the one that scores a stale checkpoint.
+
+        The measurement that shaped what WAS widened instead: replaying every `node_repaired` row in
+        `runs/` that carries a change-set column (75 of them), only 8 change a non-`.py`, non-manifest
+        file — all 8 are one `config.yaml` — and every one of those 8 sits on a pipeline that was
+        ALREADY refused for opacity. So the non-`.py` clause was never the binding one; `python -m` was
+        (39 opaque rows, 29 of them locally resolvable), and that is the clause this predicate now
+        bounds instead. Widening the non-`.py` clause would have bought zero of the corpus's repairs
+        and cost the invariant.
+
+        WHAT WOULD MAKE IT SAFE is an ENFORCEMENT rung, not a better reading of the declaration: run
+        each stage under a kernel read allow-list scoped to its OWN declared inputs (the pieces exist —
+        `runtime/read_allowlist.py` derives the set, `runtime/landlock.py` enforces one, today
+        workdir-wide and off by default). Then "a stage reads only what it declares" is true by
+        construction rather than by trust, and `needs` becomes the bound this clause could stand on.
+        That is `runtime/dev_probe.py`'s move — make the surface be the thing the fence can cover —
+        and it is the rung this file is waiting on.
 
         Interim heuristic, superseded long-term by the per-stage ARTIFACT DECLARATION design
         (docs/BACKLOG.md §6 'Deferred design work') — prefer extending that design over adding cases here."""
@@ -623,9 +716,14 @@ class EvalStagesMixin:
              "name it AND fix it" the contract rather than "name it and hope". It is decided with the
              SAME `_stage_reachable_files` closure `_safe_reuse_start` uses, read in the opposite
              direction: there, an intersection FORBIDS reuse; here, an EMPTY intersection forbids the
-             re-run. Where the closure is OPAQUE (a `python -m` stage, a shell wrapper) it cannot
-             prove nothing changed, so the rollback is ALLOWED — fail-open here, bounded by rungs 3
-             and by the retrain cap the caller charges.
+             re-run. Where the closure is OPAQUE (a shell wrapper, a bare binary, a `python -m` naming
+             installed code) it cannot prove nothing changed, so the rollback is ALLOWED — fail-open
+             here, bounded by rung 3 and by the retrain cap the caller charges. Note the 2026-08-14
+             entry-point widening TIGHTENS this rung in the same commit that loosens `_safe_reuse_start`
+             — a locally-resolvable `python -m` stage is now measured rather than waved through, so a
+             rollback naming it while changing nothing it reaches is refused by name instead of costing
+             a re-run. Both movements are the same fact (the stage became legible) pointed the way each
+             rung's own cost asymmetry already says it should be.
           5. PROTECTED — rung 4 with the reason named. When the suspect's script is one the operator
              protected, no repair can EVER satisfy rung 4, so the refusal has to name the operator's
              file instead of reading as "try harder". This composes with the preflight

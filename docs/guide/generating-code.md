@@ -237,7 +237,10 @@ re-trains from scratch (a stale checkpoint must never be scored — each node sc
 actually trained this run). The reuse check is strictly fail-closed: it must *prove* the earlier
 stages' inputs are unchanged, so a repair that **deletes** any file, changes any **non-`.py`** file
 (a config/params/data file — invisible to import reachability), or runs under a non-default
-`cmd.cwd` also forces a full re-run, as does an opaque stage (`python -m`, a shell wrapper).
+`cmd.cwd` also forces a full re-run, as does an opaque stage — a shell wrapper, a bare binary, or a
+`python -m <module>` naming code the engine cannot find inside the workdir. A `python -m pkg.mod`
+whose module DOES resolve to a workdir file is bounded like any other script (its entry file, its
+package `__main__.py`, and everything they import), so it no longer blocks reuse on its own.
 `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
 may burn before abandoning the node. (It used to abandon *to* the inter-node debug operator; that
 operator was removed on 2026-08-13 — a failure is repaired inside the node that failed, for as long

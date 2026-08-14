@@ -1392,6 +1392,41 @@ deliberately deferred, with rationale:
   in the manifest) is what makes those numbers exist, and it is a recommendation, not an enforcement.
   A cheaper model-free `assert` — a declared numeric relation the engine evaluates against a named
   key the stage prints — is the obvious next step and is not built.
+
+  **RE-EXAMINED 2026-08-14 against `needs`, and the CUT above stands.** `needs` (the stage's INPUT
+  declaration) looks like the missing half: if a changed config is not among an earlier stage's
+  declared inputs, that stage's inputs are provably unchanged by it, and the non-`.py` refusal could
+  be narrowed. It does not hold. `needs` IS NOT A BOUND — `verify_stage_inputs` `stat()`s the declared
+  paths before the command and nothing checks the converse, so a stage reads whatever it likes (the
+  read fence never fences the workdir, which is where a candidate's config lives) and "not in `needs`"
+  means UNDECLARED, never UNREAD. It is also optional and effectively unused: **2 of 129 stages across
+  every `runs/*/nodes/*/looplab_stages.json` declare it** (both on the live v8 run, both from the day
+  the field shipped), against 20 declaring `expect` — so an absent declaration must read as UNKNOWN
+  and the widening would decide nearly every real case by its default. That is the same fail-OPEN
+  trade the CUT names, one field over.
+
+  It would also have bought nothing. Replaying every `node_repaired` row in `runs/` that carries a
+  change-set column (75), only **8 change a non-`.py`, non-manifest file — all 8 are one
+  `config.yaml`** — and every one of those 8 sits on a pipeline that was ALREADY refused for opacity.
+  **Opacity, not the non-`.py` clause, was the binding refusal on this box**: 39 of the 75 rows run a
+  pipeline with no `.py` argv token, 29 of them spell every such stage `python -m <module>` resolving
+  inside the node's own workdir, and every `rubertlite-dr-unified-{v2,v6,v7,v8}` pipeline is that
+  shape. So what shipped instead is the ENTRY-POINT half of the closure (`_module_entry_candidates`):
+  `python -m pkg.mod` names its entry by import syntax and is bounded by the rule already used for
+  imports, credited with the package's `__main__.py` and refused outright when it resolves to no
+  workdir file. That is not a declaration and not a new modelling assumption — it is the existing one
+  applied to the entry point. On the historical corpus it flips **0 of the 27 decisions where reuse
+  was even possible**, because on every resolvable `-m` pipeline the repaired file really was inside
+  the train entry's import closure; its value is that the refusal is now a measurement instead of a
+  blanket, and the live v8 `mine` stage's closure is 7 files wide, so a later score-side `.py` repair
+  there keeps the hour of mining rather than discarding it.
+
+  **What would make `needs` load-bearing is an ENFORCEMENT rung, not a better reading**: run each
+  stage under a kernel read allow-list scoped to its own declared inputs. Both pieces exist —
+  `runtime/read_allowlist.py` derives the set, `runtime/landlock.py` enforces one — but today's
+  ruleset is workdir-wide and off by default, so the scoping and the migration (127 of 129 stages
+  declare nothing) are the work. That is `runtime/dev_probe.py`'s move: make the surface be the thing
+  the fence can cover. Until then the non-`.py` clause stays exactly as it is.
 - 🟡 **D5 · per-attempt stage-event accounting (S).** After an in-loop checkpoint-reuse re-eval,
   the node's only folded stage record is `train={reused, 0s}` — the attempt that actually spent
   the training wall-clock is never recorded for that node (the fold's guard only protects

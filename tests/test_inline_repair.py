@@ -263,22 +263,146 @@ def test_safe_reuse_none_when_first_stage_failed_or_no_stages(tmp_path):
 
 
 def test_stage_reachable_files_opaque_stage_forbids_reuse(tmp_path):
-    # A stage that runs SOMETHING with no local .py script (`python -m pkg`, a shell wrapper) is OPAQUE:
-    # we can't bound which files it reads, so its checkpoint must NEVER be reused — even if the repair's
-    # changed set looks disjoint. Fail-closed: _stage_reachable_files returns None and reuse is refused.
+    # A stage that runs SOMETHING this predicate cannot resolve to a file inside the workdir — a shell
+    # wrapper, a bare binary, a `python -m` naming INSTALLED code — is OPAQUE: we can't bound which
+    # files it reads, so its checkpoint must NEVER be reused, even if the repair's changed set looks
+    # disjoint. Fail-closed: _stage_reachable_files returns None and reuse is refused.
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)
+    sh_stage = [{"name": "train", "command": ["bash", "train.sh"]},
+                {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert Engine._stage_reachable_files([sh_stage[0]], tmp_path) is None       # shell wrapper -> opaque
+    assert e._safe_reuse_start(sh_stage, "score", {"looplab_eval.py"}, tmp_path) is None
+    # A `-m` module that resolves to NOTHING under the workdir is installed code we cannot see. This
+    # is the clause that keeps `python -m pip` / `python -m torch.distributed.run` refused, and it is
+    # what makes the entry-point widening below fail-CLOSED rather than fail-open.
+    inst = [{"name": "train", "command": ["python", "-m", "torch.distributed.run", "train_it"]},
+            {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert Engine._stage_reachable_files([inst[0]], tmp_path) is None
+    assert e._safe_reuse_start(inst, "score", {"looplab_eval.py"}, tmp_path) is None
+    # A wrapper that hides the module inside ONE shell-string token stays opaque too: parsing a shell
+    # is not something this predicate may guess at. This is the shape 10 of the 39 corpus rows have.
+    (tmp_path / "trainer").mkdir()
+    (tmp_path / "trainer" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "trainer" / "__main__.py").write_text("import loss\n", encoding="utf-8")
+    wrapped = [{"name": "train", "command": ["bash", "-c", "CUDA_VISIBLE_DEVICES=0 python -m trainer"]},
+               {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert Engine._stage_reachable_files([wrapped[0]], tmp_path) is None
+    assert e._safe_reuse_start(wrapped, "score", {"looplab_eval.py"}, tmp_path) is None
+
+
+def test_stage_reachable_files_bounds_a_python_dash_m_entry_point(tmp_path):
+    """`python -m pkg.mod` NAMES ITS ENTRY POINT BY IMPORT SYNTAX, so it is bounded by the same rule
+    as an import — CPython puts the process CWD (the eval workdir) first on `sys.path` for `-m`.
+
+    Measured 2026-08-14 over `runs/`: of the 39 `node_repaired` rows whose pipeline exposes no `.py`
+    argv token, 29 run every such stage as a locally-resolvable `python -m <module>`, and every
+    `rubertlite-dr-unified-{v2,v6,v7,v8}` pipeline is that shape. Until this landed, opacity — not the
+    non-`.py` clause — was what actually refused reuse on this box's GPU runs."""
+    _mk_repo(tmp_path)
+    (tmp_path / "vectorsearch").mkdir()
+    (tmp_path / "vectorsearch" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "vectorsearch" / "train.py").write_text(
+        "from vectorsearch.training import build_trainer\nimport loss\n", encoding="utf-8")
+    (tmp_path / "vectorsearch" / "training").mkdir()
+    (tmp_path / "vectorsearch" / "training" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "vectorsearch" / "training" / "build_trainer.py").write_text("b = 1\n", encoding="utf-8")
+    (tmp_path / "vectorsearch" / "evaluation").mkdir()
+    (tmp_path / "vectorsearch" / "evaluation" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "vectorsearch" / "evaluation" / "index.py").write_text("i = 1\n", encoding="utf-8")
+    stages = [{"name": "train", "command": ["python", "-m", "vectorsearch.train"]},
+              {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    reach = Engine._stage_reachable_files([stages[0]], tmp_path)
+    assert reach is not None                                   # no longer opaque
+    # the entry module, its package init, and the TRANSITIVE closure of what it imports
+    assert {"vectorsearch/train.py", "vectorsearch/__init__.py",
+            "vectorsearch/training/build_trainer.py", "loss.py"} <= reach
+    assert "vectorsearch/evaluation/index.py" not in reach      # never imported by the train entry
+    e = Engine.__new__(Engine)
+    # v7 node 0's actual repair: the score-side index module, disjoint from train → REUSE the training
+    assert e._safe_reuse_start(stages, "score", {"vectorsearch/evaluation/index.py"}, tmp_path) == "score"
+    # and the negative control on the same pipeline: a file the train entry DOES reach → full re-run
+    assert e._safe_reuse_start(stages, "score", {"vectorsearch/training/build_trainer.py"}, tmp_path) is None
+    assert e._safe_reuse_start(stages, "score", {"vectorsearch/train.py"}, tmp_path) is None
+
+
+def test_dash_m_package_entry_credits_dunder_main_not_only_dunder_init(tmp_path):
+    """`python -m <pkg>` runs `<pkg>/__main__.py`, which the IMPORT candidates never name — they answer
+    "what does `import <pkg>` load", i.e. `__init__.py`, which is routinely empty.
+
+    Seeding only those would credit an empty `__init__.py`, walk no imports from it, and report a
+    training whose whole body is `__main__.py` as reaching nothing — a MISSED dependency, i.e. the one
+    direction that reuses a stale checkpoint. This is the case the pre-2026-08-14 blanket opacity
+    refusal covered for free, and it has to survive the widening."""
     _mk_repo(tmp_path)
     (tmp_path / "trainer").mkdir()
     (tmp_path / "trainer" / "__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "trainer" / "__main__.py").write_text("import loss\n", encoding="utf-8")
-    m_stage = [{"name": "train", "command": ["python", "-m", "trainer"]},
-               {"name": "score", "command": ["python", "looplab_eval.py"]}]
-    assert Engine._stage_reachable_files([m_stage[0]], tmp_path) is None        # opaque -> sentinel
+    stages = [{"name": "train", "command": ["python", "-m", "trainer"]},
+              {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    reach = Engine._stage_reachable_files([stages[0]], tmp_path)
+    assert {"trainer/__init__.py", "trainer/__main__.py", "loss.py"} <= reach
     e = Engine.__new__(Engine)
-    # even a disjoint-looking change (only the score script) must NOT reuse across an opaque train stage
-    assert e._safe_reuse_start(m_stage, "score", {"looplab_eval.py"}, tmp_path) is None
-    sh_stage = [{"name": "train", "command": ["bash", "train.sh"]},
-                {"name": "score", "command": ["python", "looplab_eval.py"]}]
-    assert Engine._stage_reachable_files([sh_stage[0]], tmp_path) is None       # shell wrapper -> opaque
+    assert e._safe_reuse_start(stages, "score", {"loss.py"}, tmp_path) is None      # reached via __main__
+    assert e._safe_reuse_start(stages, "score", {"looplab_eval.py"}, tmp_path) == "score"
+
+
+def test_all_five_refusal_clauses_still_hold_on_a_dash_m_pipeline(tmp_path):
+    """The entry-point widening makes a `python -m` pipeline LEGIBLE; it must not make it EXEMPT.
+
+    Every clause is re-driven on the newly-bounded shape, because a widening that short-circuits one
+    of the other four would be indistinguishable from this one working — the predicate returns a
+    stage name either way, and the cost of the difference is a stale checkpoint reaching the record.
+    Modelled on the live `rubertlite-dr-unified-v8` node 0 pipeline (mine -> train -> score)."""
+    _mk_repo(tmp_path)
+    for sub in ("vs", "vs/data", "vs/evaluation"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "vs" / "mine_stage.py").write_text("from vs.data import negatives\n", encoding="utf-8")
+    (tmp_path / "vs" / "data" / "negatives.py").write_text("n = 1\n", encoding="utf-8")
+    (tmp_path / "vs" / "train.py").write_text("t = 1\n", encoding="utf-8")
+    (tmp_path / "vs" / "evaluation" / "index.py").write_text("i = 1\n", encoding="utf-8")
+    stages = [{"name": "mine", "command": ["python", "-m", "vs.mine_stage"]},
+              {"name": "train", "command": ["python", "-m", "vs.train"]},
+              {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    e = Engine.__new__(Engine)
+    ok = {"vs/evaluation/index.py"}          # disjoint from what `mine` reaches
+    assert e._safe_reuse_start(stages, "train", ok, tmp_path) == "train"     # the widening, working
+    # 1 — an OPAQUE earlier stage, both spellings that survive the widening
+    shell = [{"name": "mine", "command": ["bash", "-c", "python -m vs.mine_stage"]}] + stages[1:]
+    assert e._safe_reuse_start(shell, "train", ok, tmp_path) is None
+    inst = [{"name": "mine", "command": ["python", "-m", "torch.distributed.run"]}] + stages[1:]
+    assert e._safe_reuse_start(inst, "train", ok, tmp_path) is None
+    # 2 — any DELETION; 3 — any non-`.py` change; 3b — the stage manifest
+    assert e._safe_reuse_start(stages, "train", ok, tmp_path, deleted=["gone.py"]) is None
+    assert e._safe_reuse_start(stages, "train", {"configs/config.yaml"}, tmp_path) is None
+    assert e._safe_reuse_start(stages, "train", ok | {"looplab_stages.json"}, tmp_path) is None
+    # 4 — a non-default eval cwd; 5 — the FIRST stage failed, so nothing completed before it
+    assert e._safe_reuse_start(stages, "train", ok, tmp_path, cwd="sub") is None
+    assert e._safe_reuse_start(stages, "mine", ok, tmp_path) is None
+    # and the disjointness test itself, on a file the newly-bounded closure really does reach
+    assert e._safe_reuse_start(stages, "train", {"vs/data/negatives.py"}, tmp_path) is None
+
+
+def test_dash_m_is_read_only_from_a_python_interpreter_and_never_glued(tmp_path):
+    """`-m` is a flag other programs also spell, and a bound that keys on a token which is not a module
+    name is not a bound. Only `<python> -m <module>` as two separate tokens is read; anything else keeps
+    the historical OPAQUE answer."""
+    _mk_repo(tmp_path)
+    (tmp_path / "trainer").mkdir()
+    (tmp_path / "trainer" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "trainer" / "__main__.py").write_text("import loss\n", encoding="utf-8")
+    for cmd in (["make", "-m", "trainer"],            # not a Python interpreter
+                ["python", "-mtrainer"],              # glued: where the flag ends is a guess
+                ["python", "-m"],                     # nothing after the flag
+                ["python", "-m", "../trainer"],       # not a dotted module name
+                ["python", "-m", ".trainer"]):        # relative module: no anchor at the workdir root
+        assert Engine._stage_reachable_files([{"name": "t", "command": cmd}], tmp_path) is None, cmd
+    # the interpreter spelling IS matched across the versioned/vendored names
+    for exe in ("python", "python3", "python3.11", "/usr/bin/python3", "pypy3"):
+        reach = Engine._stage_reachable_files(
+            [{"name": "t", "command": [exe, "-m", "trainer"]}], tmp_path)
+        assert reach is not None and "trainer/__main__.py" in reach, exe
 
 
 def test_stage_reachable_files_transitive_and_subdir_imports(tmp_path):
@@ -332,6 +456,38 @@ def test_safe_reuse_fail_closed_on_non_py_change(tmp_path):
     e = Engine.__new__(Engine)
     assert e._safe_reuse_start(_STAGES, "score", {"config.yaml"}, tmp_path) is None
     assert e._safe_reuse_start(_STAGES, "score", {"looplab_eval.py", "params.json"}, tmp_path) is None
+
+
+def test_declared_needs_does_not_widen_the_non_py_clause(tmp_path):
+    """D2b: a stage's `needs` may NOT be read as "and nothing else" — examined 2026-08-14 and refused.
+
+    The tempting widening is that a changed config absent from an earlier stage's declared inputs
+    provably cannot have altered what that stage produced. `needs` cannot carry that weight:
+    `command_eval.verify_stage_inputs` `stat()`s the declared paths BEFORE the command and nothing
+    anywhere checks the converse, so a stage reads whatever it likes (the read fence never fences the
+    workdir, which is where a candidate's config lives). "Not in `needs`" means UNDECLARED, never
+    UNREAD. It is also optional and all but unused — 2 of 129 stages in `runs/` declare it — so the
+    widening would decide almost every real case by its default, and the fail-open default is the one
+    that scores a stale checkpoint.
+
+    Both directions are pinned: a declared `needs` that OMITS the changed config still forces the full
+    re-run, and one that names it obviously does too."""
+    _mk_repo(tmp_path)
+    e = Engine.__new__(Engine)
+    omits = [{"name": "train", "command": ["python", "train.py"],
+              "needs": ["data/train.parquet"],
+              "expect": {"files": ["ckpt/model.pt"]}},
+             {"name": "score", "command": ["python", "looplab_eval.py"],
+              "needs": ["ckpt/model.pt"]}]
+    assert e._safe_reuse_start(omits, "score", {"vectorsearch/configs/config.yaml"}, tmp_path) is None
+    names = [dict(omits[0], needs=["data/train.parquet", "vectorsearch/configs/config.yaml"]), omits[1]]
+    assert e._safe_reuse_start(names, "score", {"vectorsearch/configs/config.yaml"}, tmp_path) is None
+    # a stage that declares NO `needs` at all — the 127-of-129 case — is likewise no basis for reuse
+    bare = [{"name": "train", "command": ["python", "train.py"]},
+            {"name": "score", "command": ["python", "looplab_eval.py"]}]
+    assert e._safe_reuse_start(bare, "score", {"vectorsearch/configs/config.yaml"}, tmp_path) is None
+    # and the widening changes nothing about the `.py` half of the same pipeline, which still reuses
+    assert e._safe_reuse_start(omits, "score", {"looplab_eval.py"}, tmp_path) == "score"
 
 
 def test_safe_reuse_fail_closed_on_non_default_cwd(tmp_path):
