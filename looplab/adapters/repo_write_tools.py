@@ -132,6 +132,16 @@ def declared_output_paths(manifest_text: str) -> list[tuple]:
     purpose: this rule runs while the model is still authoring, and a manifest that would be dropped
     at consume time still states what the agent BELIEVES its pipeline writes, which is the half this
     comparison needs. An unparseable manifest yields [] and the check degrades to silence.
+
+    TOTAL over any JSON document, and that is the contract rather than an implementation detail: the
+    manifest is MODEL-AUTHORED (`declare_stages` validates, but a hand-written `looplab_stages.json`
+    is an accepted Developer surface — see `repo_task.py`'s stage intake), this runs from `_write`
+    on EVERY subsequent write in the session, and `agents/tool_loop.py::_run_tool_call` does not
+    contain a tool exception — so a raise here leaves the tool loop as a Developer crash, which
+    `orchestrator.py` turns into a node terminal AND a run-level auto-pause. Guarding only
+    `json.loads` was not enough: `{"stages": 7}` and a bare `5` are PARSEABLE and not iterable, and
+    a non-dict `expect` / a scalar `expect.files` are the same shape one level down. Each guard is a
+    type test rather than a wider `except`, so a real bug here still raises.
     """
     try:
         obj = json.loads(manifest_text or "")
@@ -139,10 +149,16 @@ def declared_output_paths(manifest_text: str) -> list[tuple]:
         return []
     stages = obj.get("stages") if isinstance(obj, dict) else obj
     out: list[tuple] = []
-    for s in (stages or []):
+    if not isinstance(stages, (list, tuple)):
+        return []                                 # `{"stages": 7}` / a bare scalar document
+    for s in stages:
         if not isinstance(s, dict):
             continue
-        for f in ((s.get("expect") or {}).get("files") or []):
+        expect = s.get("expect")
+        files = expect.get("files") if isinstance(expect, dict) else None
+        if not isinstance(files, (list, tuple)):
+            continue                              # `"expect": 7` / `"files": 3`
+        for f in files:
             if isinstance(f, str) and f.strip():
                 out.append((str(s.get("name") or "?"), f))
     return out
