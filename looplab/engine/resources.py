@@ -863,7 +863,7 @@ class ResourceSchedulingMixin:
         return out
 
     def _landlock_allow(self) -> Optional[str]:
-        """This run's KERNEL read allow-list as the `LOOPLAB_LANDLOCK` env string, or None.
+        """This run's KERNEL read allow-list as the `landlock.LANDLOCK_ENV` wire string, or None.
 
         None whenever the rung is `off` — which is the DEFAULT, so on every run today this method
         returns None and `_fenced_env` is byte-identical to what it was. See `Settings.landlock` for

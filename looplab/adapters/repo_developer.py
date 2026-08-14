@@ -1196,6 +1196,16 @@ class LLMRepoDeveloper:
         is_fresh_repo = error is None and getattr(self, "_editables", None)
         from looplab.agents.agent import CompositeTools
         from looplab.tools.env_inspect import EnvInspectTools
+        # THE REPAIR SESSION'S ANSWER, kept rather than discarded (F8). This method's return value is
+        # a SENTINEL CHANNEL on the repo path — the artifact travels on `last_files`, so `""` means
+        # "the files are the answer" and a non-empty string is a verdict the engine reads
+        # (`DEVELOPER_ERROR_PREFIX` was the only one). `engine/evaluate.py` appends
+        # `developer_stuck_contract(...)` to EVERY inline repair ask, including this one, and the
+        # model can answer it only through its `done` summary — which was fed to `run_phase` and
+        # then dropped, so `is_developer_stuck(new_code)` was asked about `""` and the declaration
+        # never reached the engine. The node fell to the INERT rung instead, which costs one more
+        # full evaluation before `INERT_REPAIR_LIMIT` abandons it (~2.7 h on the v4 node 6 link).
+        repair_verdict = ""
         try:
             operator_stages: list = []
             declared: list = []
@@ -1284,7 +1294,8 @@ class LLMRepoDeveloper:
                     if error:
                         self.last_rollback_stage = str((a or {}).get("rollback_stage", "")).strip()[:64]
                     return (a or {}).get("summary", "")
-                run_phase(self.client, tools, messages,
+                repair_verdict = run_phase(
+                          self.client, tools, messages,
                           self._repair_emit_spec() if error else self._emit_spec(),
                           label=("Developer·repair" if error else "Developer·implement"), handoff=False,
                           finalize=_finish,
@@ -1301,6 +1312,15 @@ class LLMRepoDeveloper:
         from looplab.core.models import developer_artifact_footprint
         self.last_footprint = developer_artifact_footprint(
             idea.footprint, "", self.last_files)
+        # A REPAIR ONLY, and only the exact sentinel. The build-time `implement` path has nothing to
+        # be stuck about and never carries the contract, so its summary stays discarded and a fresh
+        # implement is byte-identical. Everything else a repair summary might say is prose about an
+        # edit that already travelled on `last_files`; returning it would be handed to
+        # `_repair_provider_failure` as "not a program" and charge the provider-failure counter,
+        # which is the OPPOSITE verdict (it pauses the run over a provider that is answering fine).
+        from looplab.core.models import is_developer_stuck
+        if error is not None and is_developer_stuck(repair_verdict):
+            return repair_verdict
         return ""
 
     def implement(self, idea: Idea) -> str:

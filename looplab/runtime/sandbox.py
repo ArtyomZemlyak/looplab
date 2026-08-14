@@ -593,7 +593,7 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
         prepend_pythonpath(full_env, full_env.get(FENCE_DIR_ENV) or "")
         # KERNEL READ ALLOW-LIST (runtime/landlock.py), the rung the audit hook above cannot reach:
         # `safetensors`, a Rust `File::open`, a child `cat` and a `torchrun` rank raise no `open`
-        # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK`
+        # audit event at all. The engine hands a launch its derived allow-list in `LOOPLAB_LANDLOCK_ALLOWLIST`
         # (engine/resources.py); absent — which is the default, `Settings.landlock="off"` — nothing
         # here changes and the launch is byte-identical.
         #

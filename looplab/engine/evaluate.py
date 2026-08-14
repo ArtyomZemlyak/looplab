@@ -131,8 +131,29 @@ def _effective_repair_cap(inline_repair_attempts: int) -> int:
     A named rule with a truth table because "0 = unlimited" is a THREE-way decision the loop reads in
     three different places (the budget gate, the cap-out message, and the `attempts_left` the judge is
     told), and the three used to disagree: the gate treated 0 as no bound at all while the message
-    quoted `self._inline_repair_attempts` and the judge was told `None`."""
+    quoted `self._inline_repair_attempts` and the judge was told `None`.
+
+    DELIBERATELY NOT CLAMPED to `_UNLIMITED_REPAIR_CEILING`: an explicitly spelled cap is the
+    operator's number and is never widened OR narrowed here (pinned by
+    `tests/test_repair_stop_decision.py::test_zero_means_no_operator_cap_and_gets_the_engine_ceiling`).
+    `inline_repair_attempts` is `Field(ge=0)` with no upper bound, so a cap ABOVE the ceiling is
+    legal — and the bound that will actually stop the node is then the ceiling, not this number.
+    `repair_judgment.repair_floor_stop` owns that `min`, and anything quoting a REMAINING count has
+    to ask it rather than subtracting from this (see `_repair_attempts_left`)."""
     return int(inline_repair_attempts) or _UNLIMITED_REPAIR_CEILING
+
+
+def _repair_attempts_left(attempt: int, cap: int) -> int:
+    """How many repairs this node may still make — against the bound that will actually stop it.
+
+    `repair_floor_stop` stops at whichever of the operator cap and `_UNLIMITED_REPAIR_CEILING` comes
+    FIRST, so the remaining count the triage judge is told has to be measured against that same
+    minimum. Subtracting from `_effective_repair_cap` alone told a run spelling
+    `inline_repair_attempts: 60` that it had eleven attempts left on the turn that was about to be
+    its last — the exact inversion of the property this number was added for ("a stop and a cap-out
+    are not the same surprise"). Never negative: the loop reads it only below the floor, but a
+    number the model is shown must not be able to read as a negative allowance."""
+    return max(0, min(int(cap), _UNLIMITED_REPAIR_CEILING) - int(attempt))
 
 
 def _durable_row_belongs(d, node_id: int, generation: int) -> bool:
@@ -1987,7 +2008,8 @@ class EvaluateMixin:
                 # exactly the runs that carry the loosest bound was the least useful place to be coy.
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
-                                            depth=_depth, attempts_left=_repair_cap - attempt)
+                                            depth=_depth,
+                                            attempts_left=_repair_attempts_left(attempt, _repair_cap))
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))

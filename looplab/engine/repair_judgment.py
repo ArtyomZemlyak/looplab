@@ -148,9 +148,19 @@ def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int) -> Optio
         return (f"inline repair has spent its hard limit of {cap} attempt(s) on this node "
                 "(inline_repair_attempts)")
     if int(attempt) >= int(ceiling):
+        # THE MIRROR OF THAT RULE, and the case the single wording got wrong: an operator whose
+        # snapshot says 60 never chose "no cap" either. `inline_repair_attempts` is `Field(ge=0)`
+        # with NO upper bound, and `settings_ui_schema.json` has no `max` and explicitly invites
+        # "set a number here to get the old fixed cap back" — so a cap ABOVE the ceiling is legal,
+        # is unreachable, and stops at the ceiling. Telling that operator "inline_repair_attempts
+        # is 0" sends them to look for a setting they did not make, which is the same defect as
+        # implying they chose 50.
+        why = ("this run sets no operator cap (inline_repair_attempts is 0, the default since the "
+               "repair bound became a judgment), so the ceiling is what stopped it" if cap <= 0 else
+               f"this run's inline_repair_attempts is {cap}, which is ABOVE that ceiling and can "
+               "therefore never be reached — the ceiling is what stopped it")
         return (f"inline repair has spent the engine's absolute ceiling of {int(ceiling)} attempt(s) "
-                "on this node — this run sets no operator cap (inline_repair_attempts is 0, the "
-                "default since the repair bound became a judgment), so the ceiling is what stopped it")
+                f"on this node — {why}")
     return None
 
 

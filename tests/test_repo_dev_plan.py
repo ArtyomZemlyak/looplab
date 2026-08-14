@@ -448,3 +448,48 @@ def test_an_empty_output_flag_value_does_not_disable_the_missing_input_guard():
     covered = [{"command": ["python", "prep.py", "--outdir", "/nonexistent/prep"]},
                {"command": ["python", "train.py", "--train", "/nonexistent/prep/train.npy"]}]
     assert _missing_stage_input_paths(covered) == []
+
+
+def test_a_repo_repair_declaring_it_is_stuck_reaches_the_engine(monkeypatch):
+    """F8's Developer-verdict rung, driven on the path it was built for.
+
+    `engine/evaluate.py` appends `developer_stuck_contract(DEVELOPER_STUCK_PREFIX)` to EVERY inline
+    repair ask and then asks `is_developer_stuck(new_code)` about the RETURN VALUE. On this adapter
+    the artifact travels on `last_files`, so the return value is a sentinel channel — and the repair
+    session's `done` summary, the only place a repo Developer can put the declaration, was fed to
+    `run_phase` and then dropped on the floor by an unconditional `return ""`.
+
+    The cost of the drop is not "the rung is unused": the node falls to the INERT rung instead
+    (`verify_repair` sees an empty change set), which pays ONE MORE FULL EVALUATION before
+    `INERT_REPAIR_LIMIT` abandons it — the thing the declaration exists to skip.
+
+    Driven through the real `LLMRepoDeveloper.repair()`; only the tool loop is faked, and it answers
+    exactly as a complying model does — `done(summary=<the declaration>)`.
+    """
+    import looplab.agents.agent as agent_mod
+    from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
+                                     is_developer_error, is_developer_stuck)
+
+    declaration = f"{DEVELOPER_STUCK_PREFIX} every fix I can think of has already failed here)"
+    calls = []
+
+    def fake_loop(client, tools, messages, emit_spec, *, finalize, fallback, **opts):
+        calls.append(emit_spec["function"]["name"])
+        return finalize({"summary": declaration})
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", fake_loop)
+    dev = _dev()
+    idea = Idea(operator="draft", params={}, rationale="r", hypothesis="h")
+
+    out = dev.repair(idea, "", "Traceback ...\nRuntimeError: boom\n")
+    assert calls == ["done"], calls
+    assert is_developer_stuck(out), out
+    # …and it must NOT read as the other sentinel: "the model has no fix left" and "the model's
+    # session is dead" are opposite facts with opposite recoveries (one stops a node, the other
+    # pauses the RUN through the provider circuit breaker).
+    assert not is_developer_error(out) and DEVELOPER_ERROR_PREFIX not in out
+
+    # A FRESH IMPLEMENT IS UNCHANGED. It carries no stuck contract (nothing to be stuck about), so
+    # its summary stays discarded and the return value stays the empty "the files are the answer".
+    calls.clear()
+    assert dev.implement(idea) == ""

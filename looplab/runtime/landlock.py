@@ -141,7 +141,20 @@ POLICIES = ("off", "enforce")
 
 # The env var `engine/resources.py` stamps a launch's allow-list into and `runtime/sandbox.py`
 # consumes at the Popen choke point.
-LANDLOCK_ENV = "LOOPLAB_LANDLOCK"
+#
+# IT MUST NOT BE `LOOPLAB_LANDLOCK`, and that is the whole reason for the suffix. `Settings` is flat
+# with `env_prefix="LOOPLAB_"` (CLAUDE.md: "`LOOPLAB_<FIELD>` env vars map 1:1"), so `LOOPLAB_LANDLOCK`
+# is ALREADY taken — it is how an operator spells `Settings.landlock`, and it is the exact spelling
+# this repo's own validation instruction hands them (`cli/inspect_cmds.py`'s "run ONE real eval with
+# `LOOPLAB_LANDLOCK=enforce`", and the `landlock` row in `docs/guide/configuration.md`). `run_argv`
+# builds its child env from `os.environ` FIRST, so that policy word arrived here as an ALLOW-LIST and
+# `parse_env` refused it: `LandlockUnavailable: malformed landlock allow-list record: 'enforce'`,
+# raised out of the universal launch choke point — no return code, no stderr, no node terminal, and
+# it fires on `run_setup` before a single eval starts. Every documented attempt to turn this rung on
+# killed the run instead. The two names answer different questions (a POLICY the operator chooses vs
+# a DERIVED wire allow-list the engine computes), and only the derived one is free to move.
+# `LOOPLAB_LANDLOCK_ALLOWLIST` maps to no `Settings` field and must not become one.
+LANDLOCK_ENV = "LOOPLAB_LANDLOCK_ALLOWLIST"
 
 # The allow-list's wire format: `<mode>\x1f<path>` records joined by `\x1e`.
 #
@@ -302,7 +315,11 @@ def apply(allow, *, strict: bool = True) -> list:
 
 
 def parse_env(value: Optional[str]) -> list:
-    """`[(path, mode)]` from the `os.pathsep`-joined `mode:path` spelling `LANDLOCK_ENV` carries.
+    """`[(path, mode)]` from the `\\x1e`-joined `<mode>\\x1f<path>` spelling `LANDLOCK_ENV` carries.
+
+    The wire format is stated once above (`_UNIT`/`_RECORD`); this docstring named the `os.pathsep`
+    `mode:path` spelling the body abandoned in its first hour, which is a comment contradicting the
+    code it sits on in the one function whose separator bug the module docstring says bit it first.
 
     RAISES on a malformed record rather than dropping it. Dropping was the original behaviour and it
     is what turned the separator collision above into a total, silent denial: every record was junk,

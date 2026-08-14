@@ -299,12 +299,49 @@ def test_an_empty_allow_list_refuses_the_launch_instead_of_denying_everything(tm
 
 def test_the_landlock_marker_is_absent_from_a_child_env_by_default(tmp_path):
     """`Settings.landlock` ships `off`, so no launch on any run today carries the marker and
-    `run_argv` is byte-identical to what it was."""
+    `run_argv` is byte-identical to what it was.
+
+    Reads the marker under its OWN name (`landlock.LANDLOCK_ENV`) rather than a literal: the two
+    spellings drifted apart deliberately, and a literal here would go on asserting the absence of
+    the wrong variable.
+    """
     from looplab.runtime.sandbox import run_argv
     rc, out, _err, _to = run_argv(
         [sys.executable, "-c",
-         "import os; print(os.environ.get('LOOPLAB_LANDLOCK', 'ABSENT'))"], str(tmp_path), 60)
+         f"import os; print(os.environ.get({landlock.LANDLOCK_ENV!r}, 'ABSENT'))"],
+        str(tmp_path), 60)
     assert rc == 0 and out.strip() == "ABSENT"
+
+
+def test_the_policy_env_var_and_the_wire_allowlist_var_are_different_names(monkeypatch, tmp_path):
+    """`LOOPLAB_LANDLOCK` is the OPERATOR's policy knob; it must never reach `parse_env`.
+
+    `Settings` is flat with `env_prefix="LOOPLAB_"`, so `Settings.landlock` OWNS `LOOPLAB_LANDLOCK` —
+    and that is the spelling this repo's own validation instruction hands the operator
+    (`cli/inspect_cmds.py`: "run ONE real eval with `LOOPLAB_LANDLOCK=enforce`"; the `landlock` row in
+    `docs/guide/configuration.md`). `run_argv` builds its child env from `os.environ` first, so while
+    the derived wire allow-list shared that name the policy word `enforce` arrived at `parse_env` as
+    an allow-list record and raised `LandlockUnavailable` out of the UNIVERSAL launch choke point —
+    every stage, the metric adapter, `run_setup` and every Developer probe, with no return code, no
+    stderr and no node terminal. Driving `run_argv` is the point: a pin on the two constants alone
+    would not have caught it, because the collision is with `Settings`' derived env name and not with
+    any literal in this module.
+    """
+    from looplab.core.config import Settings
+    from looplab.runtime.sandbox import run_argv
+
+    monkeypatch.setenv("LOOPLAB_LANDLOCK", "enforce")
+    # The operator really did set the knob they were told to set...
+    assert Settings().landlock == "enforce"
+    # ...and the launch choke point still launches. THIS is the assertion that goes red on the
+    # defect — the crash is a raise out of `run_argv`, not a wrong value anywhere.
+    # (`landlock="off"` is still the effective rung: nothing derived an allow-list, which is exactly
+    # why a policy word must not be able to act as one.)
+    rc, out, _err, _to = run_argv(
+        [sys.executable, "-c", "print('RAN')"], str(tmp_path), 60)
+    assert rc == 0 and out.strip() == "RAN"
+    # The separation itself, so a later merge cannot quietly re-collide the two names.
+    assert landlock.LANDLOCK_ENV != "LOOPLAB_LANDLOCK"
 
 
 # --------------------------------------------------------------------------------------------
