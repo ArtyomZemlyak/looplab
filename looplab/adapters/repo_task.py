@@ -177,6 +177,15 @@ def eval_workspace_conflicts(task_or_spec, workspace_root) -> list[str]:
     return out
 
 
+# Wrappers that run the REST of their argv as a command, so the interpreter search may read through
+# them. Closed on purpose: each entry is a program whose contract is "exec what follows", which is
+# what makes `<wrapper> python score.py` still a readable `<interpreter> [flags] <target>` argv.
+# A launcher with its own flag grammar (`torchrun`, `deepspeed`, `accelerate`) is NOT here — see
+# `entrypoint_candidates`.
+_TRANSPARENT_LAUNCHERS = frozenset({"env", "nohup", "srun", "stdbuf", "setsid", "time", "ionice",
+                                    "nice", "chrt", "taskset"})
+
+
 def entrypoint_candidates(command) -> list[str]:
     """The cwd-relative file path(s) an eval `command` argv would actually EXECUTE, or [].
 
@@ -219,20 +228,33 @@ def entrypoint_candidates(command) -> list[str]:
     # cannot act on), and `eval_entrypoint_unprotected` fell silent for exactly the wrapper case that
     # warning exists to name. The docstring above already says `bash run.sh` returns []; this is what
     # makes that true. Say nothing rather than guess.
-    # Find the interpreter. Usually argv[0], but a transparent prefix that carries the interpreter
-    # VERBATIM — `srun python score.py`, `env FOO=1 python score.py`, `nohup python -m pkg.mod` —
-    # is still a `<interpreter> [flags] <target>` argv from that token on, so parse from there.
+    # Find the interpreter, ANCHORED AT argv[0] and walked forward only through a CLOSED set of
+    # transparent wrappers — `srun python score.py`, `env FOO=1 python score.py`,
+    # `nohup python -m pkg.mod`. Each of those runs the rest of the argv as a command, so from the
+    # interpreter token on it really is `<interpreter> [flags] <target>`.
+    #
+    # An unbounded scan for a python-looking token anywhere re-opens the wrapper hole the head-only
+    # check exists to close: `bash run_eval.sh --interpreter python3 --cfg configs/base.py` would
+    # find `python3` at index 3 and return `configs/base.py`, freezing a config the operator never
+    # named while the real scorer inside the shell script stays editable — and returning non-empty
+    # suppresses `eval_entrypoint_unprotected`, so nothing says so. All three costs at once.
+    #
     # Deliberately NOT extended to launchers that do not name an interpreter (`torchrun … score.py`,
-    # `accelerate launch …`, `deepspeed …`): their own flag grammar decides which of `--nproc_per_node
-    # 2 score.py` is the script, we do not know it, and a wrong guess freezes a file the operator
-    # never named. Those keep returning [] and `eval_entrypoint_unprotected` names them at submit
-    # time, which is the honest outcome rather than a confident wrong one.
+    # `accelerate launch …`, `deepspeed …`): their own flag grammar decides which of
+    # `--nproc_per_node 2 score.py` is the script, we do not know it, and a wrong guess freezes a
+    # file the operator never named. Those return [] and `eval_entrypoint_unprotected` names them at
+    # submit time, which is the honest outcome rather than a confident wrong one.
     start = -1
     for i, tok in enumerate(argv):
         head = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
         if re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
             start = i
             break
+        if head in _TRANSPARENT_LAUNCHERS:
+            continue                      # `srun`/`env`/`nohup`: the command follows
+        if i and head and "=" in tok and not tok.startswith("-"):
+            continue                      # `env`'s `VAR=value` assignments precede the command
+        return []                         # anything else owns the argv; we cannot read through it
     if start < 0:
         return []
     # Read the interpreter's OWN flags, and stop at the first token that is neither a flag nor a

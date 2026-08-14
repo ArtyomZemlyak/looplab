@@ -1750,6 +1750,7 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     wanted_nodes = {str(n) for n in node_ids}
 
     research: list[dict] = []
+    matched_research = 0
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for span in spans:
         by_trace[span.get("trace_id")].append(span)
@@ -1758,6 +1759,13 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
             attributes = root.get("attributes") or {}
             stamped = str(attributes.get("card_id") or "")
             if stamped != str(card_id) and str(tid) not in owned_traces:
+                continue
+            matched_research += 1
+            if len(research) >= TRACE_CARD_RESEARCH_CAP:
+                # COUNT IT, but do not build it. `_rollup` walks a whole trace and the row is a
+                # fresh dict; slicing after the fact left both costs on the request thread for rows
+                # nobody would see — 50k rollups for a 256-row answer on the crafted `spans.jsonl`
+                # this cap exists for. `total_research` stays truthful because it counts here.
                 continue
             roll = _rollup(trace_spans)
             research.append({
@@ -1777,10 +1785,13 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
                 "tokens": roll["tokens"],
             })
     research.sort(key=lambda row: (row["start"], str(row["trace_id"])))
-    total_research = len(research)
+    total_research = matched_research
     # OLDEST-FIRST truncation, like the node-trace tail: the card's own first proposal is the row
     # that explains it, and dropping the head to show the tail would answer a different question.
     research = research[:TRACE_CARD_RESEARCH_CAP]
+    # (The matching loop above stops building rows once the cap is reached — see `_rollup` there.
+    # Slicing alone bounded the RESPONSE and not the WORK, which is the half that matters for the
+    # crafted-log case this cap exists for.)
 
     nodes = []
     ordered_nodes = sorted(wanted_nodes, key=lambda value: (len(value), value))

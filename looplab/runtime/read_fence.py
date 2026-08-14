@@ -702,6 +702,15 @@ def _hook(event, args):
         bad = _fenced_dir(args[0])
     except Exception:
         return
+    # MONOTONIC — this flag is only ever SET here, never cleared, and that is the whole correctness
+    # argument. The audit event fires BEFORE the chdir, so a target outside every root does NOT
+    # prove the process is about to stand outside one: `try: os.chdir(cfg.output_dir) except
+    # OSError: pass` around a directory that does not exist yet is ordinary generated-training-code
+    # shape, and clearing the flag from the pre-event would turn OFF the fence for a process whose
+    # cwd is still the repo the launcher put it in — the v6-node-4 read, allowed under policy
+    # `deny` with nothing logged. Clearing it would need confirmation the chdir SUCCEEDED, which no
+    # pre-event hook can have. A stale True costs one `abspath` per relative open and decides
+    # nothing: `_fenced` re-checks the resolved path either way.
     if bad is not None:
         _report(bad, event, _MESSAGE)
         _CWD_REACHES_ROOT = True

@@ -359,6 +359,51 @@ def test_board_prompt_window_rotates_without_new_nodes():
     assert {card.id for card in first + second + third} == set(st.cards)
 
 
+class _RotatingBase:
+    """A base researcher shaped like the real ones: it publishes the window it showed the model
+    INSIDE `propose`, as its last act, and rotates that window on every call."""
+
+    def __init__(self, state):
+        self._state = state
+        self._board_prompt_attempt = 0
+        self._visible_board_cards = []
+        self.shown = []
+
+    def propose(self, state, parent):
+        attempt = self._board_prompt_attempt
+        self._board_prompt_attempt = attempt + 1
+        window = next_board_prompt_cards(state, attempt=attempt)
+        # The claim the model makes is for a card in the window it was ACTUALLY shown.
+        claimed = window[-1]
+        self._visible_board_cards = window
+        self.shown.append([card.id for card in window])
+        return Idea(operator="draft", card_id=claimed.id, hypothesis="fresh statement")
+
+    def __getattr__(self, name):                 # the panel forwards hints onto the base
+        raise AttributeError(name)
+
+
+def test_the_panel_binds_each_idea_to_the_window_that_produced_it():
+    """The base publishes its window INSIDE `propose`, so reading it BEFORE the call binds against
+    the PREVIOUS call's window — not a drift but a guaranteed one-call lag, and for k>1 it binds all
+    k ideas (each from a different base attempt) against one stale window.
+
+    With more than five open beliefs the rotation moves a card per attempt, so a stale window is
+    missing the card the model was shown and `bind_idea_to_board_card` NULLS the CARD_ID claim — the
+    proposal falls back to statement-hash linkage and a byte-identical twin card is minted, which is
+    the lost-claim shape the panel's binding exists to prevent."""
+    st = _state_with_open_hyps([f"belief-{index}" for index in range(7)])
+    base = _RotatingBase(st)
+    panel = ForesightPanelResearcher(base, client=None, k=1)
+
+    for _ in range(4):
+        idea = panel.propose(st, None)
+        assert idea.card_id is not None, (
+            "the claim was nulled — the panel bound against a window the base had already rotated "
+            "past, so the card the model was shown was not in it")
+        assert idea.card_id == base.shown[-1][-1], "and it is the card THIS call showed"
+
+
 def test_propose_prioritizes_board_and_ranks_ideas():
     st = _state_with_open_hyps(["h a", "h b"])
     a = Idea(operator="improve", params={"x": 1.0}, hypothesis="h a")

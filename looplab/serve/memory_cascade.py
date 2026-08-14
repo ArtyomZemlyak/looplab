@@ -307,18 +307,26 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
             # the comment above says was destroying other runs' corroboration, so a maintainer
             # hardening this predicate would have been editing a clause that never ran.
             #
-            # NAMESPACES ARE NOT MIXED. `other in {run.run_uid, run.run_id}` compared a value from
-            # ONE namespace against both, so a legacy ref naming an OLDER same-named incarnation by
-            # bare `run_id` read as a SELF-reference — its corroboration was discarded, and with
-            # `evidence_count == 1` and no untraceable count the row could then be deleted despite
-            # having cross-run support. A bare-name ref can only be proved to name THIS run when
-            # this run is itself name-keyed; otherwise it is somebody else's, which keeps the row.
+            # NAMESPACES ARE NOT MIXED: a value from one namespace is compared against that
+            # namespace only. `other in {run.run_uid, run.run_id}` compared a uid against a name and
+            # a name against a uid, which is how a `run_id`-shaped value could match `run_uid` by
+            # coincidence.
+            #
+            # A BARE-NAME REF STILL NAME-MATCHES, deliberately, and this is the same single ambiguity
+            # `RunIdentity.owns` resolves the same way one level up — a uid-less row carrying this
+            # run's directory name is treated as this run's and DISCLOSED (`name_matched`,
+            # `identity: "mixed"`). Resolving it the other way here (only a legacy-keyed caller may
+            # name-match) looked more careful and was strictly worse: this run's OWN pre-uid
+            # `evidence_refs` — the exact shape a mixed-generation store is full of — then read as
+            # another run's corroboration, so the row was KEPT and the receipt told the operator it
+            # survived because other runs support it, which no row said. One ambiguity, one rule,
+            # one disclosure.
             ref_uid = _text(ref.get("run_uid"))
             ref_id = _text(ref.get("run_id"))
             if ref_uid:
                 self_reference = bool(run.run_uid) and ref_uid == run.run_uid
             elif ref_id:
-                self_reference = run.legacy_only and ref_id == run.run_id
+                self_reference = bool(run.run_id) and ref_id == run.run_id
             else:
                 continue
             if not self_reference:
