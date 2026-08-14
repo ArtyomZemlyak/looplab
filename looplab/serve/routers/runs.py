@@ -2865,6 +2865,12 @@ def build_router(srv) -> APIRouter:
                 # The index already fenced before its row limit. The fallback receives the whole run,
                 # so it must apply the same trace-root generation fence before its own tail cap.
                 generation=read_attempt if idx is None else None,
+                # Resolved over the WHOLE index, never over `spans`: a `?before=` anchor inside the
+                # build ends the window before the `materialize_node` row that names it, and the
+                # projection would then re-derive an empty map and drop the build it just read.
+                # The fallback branch hands over the whole run and derives its own.
+                claimed_traces=(idx.node_build_traces(nid, generation=read_attempt)
+                                if idx is not None else None),
                 # Both branches above return normalized projections, never raw durable dictionaries.
                 _normalized=True)
         except Exception:  # noqa: BLE001

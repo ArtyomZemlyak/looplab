@@ -26,6 +26,9 @@ from looplab.core.trace_files import (
 
 _MAX_SPAN_ID_CHARS = 256
 _MAX_NODE_ID_CHARS = 128
+# "this trace is out of scope entirely", which `None` cannot say — None is the real answer for a
+# trace that names no node and whose rows may still carry their own ids (`_bounded_node_trace_tail`).
+_UNSCOPED = object()
 _MAX_TRACE_TOKENS = (1 << 63) - 1
 _MAX_TRACE_SECONDS = 1e15
 _MAX_TRACE_FLOAT = sys.float_info.max
@@ -296,6 +299,13 @@ _ATTRIBUTE_FIELDS = {
     # one node. Both must be on this allowlist or the projection silently drops them — which is
     # exactly what happened the first time, and made the stamp look like it had never run.
     "card_id", "proposed_for_node",
+    # The node's CLAIM on the run-scoped work that produced it (`claimed_build_traces`). Under the
+    # Card lane the Developer's whole build runs on a producer worker BEFORE any node id is
+    # reserved, so `card_build` and its `plan`/`stages`/tool/generation subtree can carry no
+    # `node_id` at all; `build_trace` is how the node — which learns the exact trace once it commits
+    # — names it afterwards. `card_build_generation` is the build request's search epoch, the
+    # `card_build_*` events' own key, kept so the run-scoped span is identifiable on its own terms.
+    "build_trace", "card_build_generation",
     # generation / tool observation
     "model", "op", "model_parameters", "tool", "tool_calls", "input", "output",
     "thinking", "usage", "cost", "level",
@@ -327,7 +337,7 @@ _ATTR_BOOL_FIELDS = {
 }
 _ATTR_INT_FIELDS = {
     "generation", "input_carry", "exit_code", "seed", "blocks", "attempt",
-    "repair_attempts", "violations", "proposed_for_node",
+    "repair_attempts", "violations", "proposed_for_node", "card_build_generation",
     "looplab.exporter.dropped_spans", "looplab.exporter.export_failures",
     "looplab.exporter.queue_capacity_spans", "looplab.exporter.queue_capacity_bytes",
     "looplab.exporter.pid", "looplab.exporter.dropped.queue_full",
@@ -605,7 +615,7 @@ def _normalize_span(value) -> Optional[dict]:
         attributes["node_id"] = budget.text(node_id, cap=_MAX_NODE_ID_CHARS, single_line=True)
     elif "node_id" in raw_attributes:
         budget.omit("omitted_attributes")
-    for key in ("phase_span", "input_from"):
+    for key in ("phase_span", "input_from", "build_trace"):
         if key in raw_attributes:
             normalized = _normalized_id(raw_attributes.get(key))
             if normalized is None:
@@ -707,6 +717,7 @@ def _bounded_tail(values, cap: int) -> tuple[list, int]:
 
 def _bounded_node_trace_tail(values, node_id, cap: int, *,
                              generation: Optional[int] = None,
+                             claimed=None,
                              _normalized: bool = False) -> tuple[list, int]:
     """Cap a node conversation only after selecting the traces attributed to that node.
 
@@ -715,6 +726,12 @@ def _bounded_node_trace_tail(values, node_id, cap: int, *,
     lets sufficiently busy unrelated/shared-trace rows evict the target and falsifies its total.
     ``build_conversation`` is public but its normal inputs are concrete snapshots (``load_spans`` or
     ``SpanIndex.full_spans_for_node``); retain a bounded one-pass degradation for exotic iterables.
+
+    ``claimed`` is the caller's node-build claim map (see `claimed_build_traces`); ``None`` derives
+    one from ``values``. It must be threaded rather than re-derived here for the same reason
+    `_conversation_bands` takes it: on a `?before=` window anchored INSIDE the build, the claiming
+    span is legitimately behind the anchor, and this filter would then drop every row the index just
+    selected — the whole build read but nothing rendered.
     """
     if not isinstance(values, (list, tuple)):
         return _bounded_tail(values, cap)
@@ -742,14 +759,35 @@ def _bounded_node_trace_tail(values, node_id, cap: int, *,
             (tid, trace_root_span(spans, _normalized=True))
             for tid, spans in by_trace.items())
     }
+    # A trace with no node of its OWN may still be one this node claims as its build. See the
+    # docstring for why the map is a parameter rather than always derived here.
+    if claimed is None:
+        claimed = claimed_build_traces(
+            [normalized for _raw, normalized in records], _normalized=True)
+    # ONE resolution per TRACE, not per span: this is the whole-run path, so anything evaluated in
+    # the comprehension below is paid on every span of the log. ABSENT here means the whole trace is
+    # out of scope (another lifecycle); PRESENT-but-None means the trace names no node of its own and
+    # only per-span ids can attribute its rows — the two are different answers and must stay so.
+    trace_scope: dict[str, Optional[int | str]] = {}
+    for trace_id, (root_nid, root_generation) in trace_meta.items():
+        if root_nid is None:
+            # A CLAIMED build trace is fenced by the CLAIM's lifecycle, not by its root's: it ran
+            # before the node existed, so its root carries whatever generation context the producer
+            # thread happened to inherit and never the node attempt it was built for.
+            claimed_nid = claimed_trace_node_id(claimed, trace_id, generation=generation)
+            if claimed_nid is not None:
+                trace_scope[trace_id] = claimed_nid
+                continue
+        if generation is not None and root_generation != generation:
+            continue
+        trace_scope[trace_id] = root_nid
     # Filtering precedes the global cap and exact total. Candidate-by-any-stamped-row is not enough:
     # one long-lived trace can carry spans for several nodes, and its newest foreign row must not
     # consume the target node's window. Keep this identical to SpanIndex._rows_for_node.
     matching = (
         raw for raw, normalized in records
-        if (meta := trace_meta.get(normalized.get("trace_id"))) is not None
-        and (generation is None or meta[1] == generation)
-        and (effective := effective_node_id(normalized, meta[0])) is not None
+        if (scope := trace_scope.get(normalized.get("trace_id"), _UNSCOPED)) is not _UNSCOPED
+        and (effective := effective_node_id(normalized, scope)) is not None
         and str(effective) == target
     )
     return _bounded_tail(matching, cap)
@@ -979,6 +1017,78 @@ def effective_node_id(span: dict, trace_root_nid: Optional[int | str]) -> Option
     """
     own = _node_id_of(span)
     return own if own is not None else trace_root_nid
+
+
+# The attribute a node's own span uses to name the run-scoped trace that BUILT it. One spelling,
+# read by every attribution site below and by `span_index`; see `claimed_build_traces`.
+NODE_BUILD_TRACE_ATTRIBUTE = "build_trace"
+
+
+def claimed_build_traces(spans, *, _normalized: bool = False) -> dict:
+    """`trace_id` -> `(node_id, generation)` for run-scoped traces a NODE claims as its own build.
+
+    THE PROBLEM THIS SOLVES. Under `card_driven_selection` the Developer's whole build — `card_build`
+    and, under it, `plan`, `stages` and every tool call and generation of the implement loop — runs
+    on a speculative producer worker, in a trace of its own, BEFORE any node id exists. Measured on
+    `runs/rubertlite-dr-unified-v7` (2026-08-14): 1,312 of the run's 2,637 spans are in those three
+    `card_build` traces and not one of them carries a `node_id`, so the node's trace showed
+    `create_node`, `triage`, inline repair and `train_monitor` and NOTHING of the construction —
+    91 % of the run's spans unattributed, against 0.1 % on the serial-path run `rubert-dr-0804`.
+
+    WHY NOT STAMP `node_id` ON THE BUILD. It is not knowable there, and it is not merely late: the id
+    a producer could compute (`_node_id_ceiling`) is a PREDICTION that `_claim_requested_card_build`
+    re-derives after the span has already closed, and the build may be refused as stale/budget/
+    superseded and produce no node at all. A run-scoped span must not be made to lie about a node —
+    `orchestrator.stamp_proposal_span` states the same rule for `proposed_for_node`.
+
+    SO THE POINTER RUNS THE OTHER WAY. The node knows its build the moment it commits, so the node
+    names the trace (`speculation.py::_create_precoded_node` stamps `build_trace` on
+    `materialize_node`, which already carries `node_id`+`generation`). That is an EXACT one-to-one
+    link recorded after the fact, never a guess — deliberately not a join on `card_id`, which is
+    one-to-MANY (a card can carry several nodes through an `attach` claim) and would file one node's
+    build under another's.
+
+    The claim carries the LIFECYCLE of the claiming span, not of the claimed trace: a `node_reset`
+    with `rerun_from="implement"` builds again, so generation N's node must reach generation N's
+    build and not the abandoned one. Two different nodes claiming one trace is only reachable from a
+    crafted/corrupt log; the trace is then dropped from the map rather than awarded to either, which
+    is the same refusal `trace_root_span` makes for a rootless trace.
+    """
+    claims: dict[str, tuple] = {}
+    conflicting: set[str] = set()
+    for span in (spans if _normalized else _normalize_spans(spans)):
+        attributes = span.get("attributes")
+        if not isinstance(attributes, dict):
+            continue
+        claimed = attributes.get(NODE_BUILD_TRACE_ATTRIBUTE)
+        node_id = attributes.get("node_id")
+        if not isinstance(claimed, str) or not claimed or node_id is None:
+            continue
+        # A span may not claim its OWN trace: that is what `node_id` already says, and honouring it
+        # would let one stamped span silently re-attribute every sibling in a shared trace.
+        if claimed == str(span.get("trace_id") or ""):
+            continue
+        generation = attributes.get("generation")
+        generation = generation if type(generation) is int and generation >= 0 else 0
+        prior = claims.setdefault(claimed, (node_id, generation))
+        if str(prior[0]) != str(node_id):
+            conflicting.add(claimed)
+    for trace_id in conflicting:
+        claims.pop(trace_id, None)
+    return claims
+
+
+def claimed_trace_node_id(claimed, trace_id, *, generation: Optional[int] = None):
+    """The node claiming `trace_id` at the requested lifecycle, else None. See `claimed_build_traces`.
+
+    The generation fence is applied HERE rather than at the map, because the same map serves a fenced
+    read (a node's window at one attempt) and an unfenced one (the whole-run trace view).
+    """
+    claim = claimed.get(str(trace_id)) if claimed else None
+    if claim is None:
+        return None
+    node_id, claim_generation = claim
+    return None if generation is not None and claim_generation != generation else node_id
 
 
 def _rollup(spans: list[dict]) -> dict:
@@ -1349,8 +1459,15 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
     return out
 
 
-def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[dict]]:
+def _conversation_bands(spans: list[dict], *, keep, claimed=None) -> tuple[list[dict], list[dict]]:
     """Bands + threaded turns over an ALREADY-SELECTED, already-normalized span set.
+
+    `claimed` is the node-claims map (`claimed_build_traces`) resolved over the FULL population, not
+    over this window. It has to come from the caller because the two halves of a claim live in
+    different traces: an anchored window (`?before=` on a band inside the build) legitimately ends
+    before `materialize_node`, and re-deriving the map here would then lose the link and drop every
+    span the window had just paid to read. `None` falls back to deriving it from `spans`, which is
+    right for the whole-run and direct callers that hand over everything they have.
 
     `keep(span, trace_node_id) -> bool` is the only thing that differs between the two conversations
     this serves: the per-NODE one keeps the spans attributed to its node, the per-TRACE one keeps
@@ -1365,6 +1482,7 @@ def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[di
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
+    claimed = claimed_build_traces(spans, _normalized=True) if claimed is None else claimed
     stages: list[dict] = []
     matching_span_count = 0
     matching_spans: list[dict] = []
@@ -1389,6 +1507,12 @@ def _conversation_bands(spans: list[dict], *, keep) -> tuple[list[dict], list[di
         # attributed to two different nodes in the two views, under a comment asserting the two were
         # "exactly" the same (doc 25 EV-10).
         trace_nid = trace_root_node_id(ss_sorted, _normalized=True)
+        if trace_nid is None:
+            # A run-scoped trace a node CLAIMED as its build: the claim supplies exactly the
+            # trace-level fallback the trace itself never had (`claimed_build_traces`). It can only
+            # ever fill a None — a trace whose root names a node is that node's, and a claim must
+            # never be able to take it.
+            trace_nid = claimed_trace_node_id(claimed, tid)
         # Attribute PER SPAN: a span's own stamped node_id, else its trace's root node. node_id is
         # stamped per-span, so one long-lived Developer tool-loop trace can serve several nodes in
         # sequence — keying the whole trace off its ROOT then dropped the target node's turns from
@@ -1543,6 +1667,7 @@ def _conversation_payload(state: RunState, stages: list[dict], matching_spans: l
 def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None,
                        span_cap: int = TRACE_CONVERSATION_SPAN_CAP,
                        generation: Optional[int] = None,
+                       claimed_traces=None,
                        _normalized: bool = False) -> dict:
     """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
     with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
@@ -1550,15 +1675,25 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
 
     `span_cap` is the UI's "load more" window (settled by `settle_node_span_cap` at the route). It
     widens the read AND, through `conversation_render_caps`, the stage/turn caps below in step — see
-    that function for why moving only one of the three surfaces nothing."""
+    that function for why moving only one of the three surfaces nothing.
+
+    `claimed_traces` is the node-build claim map (`claimed_build_traces`) over the node's WHOLE span
+    population. The indexed route passes `SpanIndex.node_build_traces(...)`, because `spans` there is
+    already a bounded — and possibly `?before=`-anchored — window, and the claiming span sits outside
+    it whenever the operator seeks into the build itself. The fallback path hands over the whole run
+    and can derive it here."""
+    if claimed_traces is None and isinstance(spans, (list, tuple)):
+        claimed_traces = claimed_build_traces(spans, _normalized=_normalized)
     selected, observed_total = _bounded_node_trace_tail(
-        spans, node_id, span_cap, generation=generation, _normalized=_normalized)
+        spans, node_id, span_cap, generation=generation, claimed=claimed_traces,
+        _normalized=_normalized)
     # Both production readers (`load_spans` and SpanIndex's full-offset reads) have already crossed
     # `_normalize_span`'s security boundary. Re-running its text redaction/entropy scan over as many
     # as 4096 prompt-heavy rows on every 4 s live poll was pure work (measured seconds at the ceiling).
     # The default remains fail-closed for public/direct callers; only explicit trusted call sites skip.
     spans = list(selected) if _normalized else _normalize_spans(selected)
-    stages, matching_spans = _conversation_bands(spans, keep=lambda s, trace_nid: (
+    stages, matching_spans = _conversation_bands(spans, claimed=claimed_traces,
+                                                 keep=lambda s, trace_nid: (
         (nid := effective_node_id(s, trace_nid)) is not None and str(nid) == str(node_id)))
     return _conversation_payload(state, stages, matching_spans, observed_total=observed_total,
                                  total_spans=total_spans, span_cap=span_cap,
@@ -1647,13 +1782,19 @@ def build_trace_conversation(state: RunState, spans: list[dict], trace_id, *, to
 
 
 def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
-                     total_spans=None, span_cap: int = TRACE_VIEW_SPAN_CAP) -> dict:
+                     total_spans=None, span_cap: int = TRACE_VIEW_SPAN_CAP,
+                     claimed_traces=None) -> dict:
     """Group spans into per-node trees + a run summary, correlated by node_id (carried on each
     trace's root span). Spans with no node_id land under `unscoped` (e.g. onboarding). Each span
     carries `kind` (operation/generation/tool) so the UI renders the Langfuse-style observation
     tree; `rollups` gives per-node token/cost/observation totals aggregated from generations.
     Heavy generation I/O is truncated (see `_cap_span_io`) so the payload stays browser-safe; with
-    `light=True` it's dropped entirely (run-level timeline doesn't need prompts/outputs)."""
+    `light=True` it's dropped entirely (run-level timeline doesn't need prompts/outputs).
+
+    `claimed_traces` is the node-build claim map (`claimed_build_traces`). The per-node route passes
+    the index's, because its `spans` is a bounded and possibly `?before=`-anchored window and the
+    claiming span can sit outside it; the run-level caller hands over everything and derives its
+    own."""
     selected, observed_total = _bounded_tail(spans, span_cap)
     spans = [(_strip_span_io if light else _cap_span_io)(s) for s in _normalize_spans(selected)]
     reported_total = max(observed_total, _projection_counter(total_spans), len(spans))
@@ -1667,8 +1808,16 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
     # id. The root fallback (NOT a full ancestor walk, which would bleed one node's id onto the whole
     # of a shared trace) keeps OLD root-only logs working: a create_node trace whose children carry no
     # id attributes to its root's node. Spans with neither → `unscoped`.
+    # A trace with no root node of its own may still be one a node CLAIMED as its build — the Card
+    # lane's whole Developer build runs before any node id exists, so `card_build` and its subtree
+    # would otherwise land in `unscoped` (measured: 1,312 of 2,637 spans on
+    # `runs/rubertlite-dr-unified-v7`). See `claimed_build_traces`; the claim only ever fills a None.
+    claimed = (claimed_build_traces(spans, _normalized=True)
+               if claimed_traces is None else claimed_traces)
     root_nid: dict[str, Optional[int]] = {
-        tid: trace_root_node_id(sps, _normalized=True) for tid, sps in by_trace.items()
+        tid: (own if (own := trace_root_node_id(sps, _normalized=True)) is not None
+              else claimed_trace_node_id(claimed, tid))
+        for tid, sps in by_trace.items()
     }
 
     node_spans: dict[str, list[dict]] = defaultdict(list)
@@ -1796,12 +1945,21 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     nodes = []
     ordered_nodes = sorted(wanted_nodes, key=lambda value: (len(value), value))
     total_nodes = len(ordered_nodes)
+    # The row's counts must describe the SAME trace its button opens, and that trace now reaches the
+    # run-scoped build a node claims (`claimed_build_traces`) — on the Card lane that is most of it.
+    # A row reading "2 spans" beside a button that opens 561 is the defect this section already
+    # records once, from the other side.
+    claimed = claimed_build_traces(spans, _normalized=True)
     for node_id in ordered_nodes[:TRACE_CARD_NODE_CAP]:
         # `str(_node_id_of(s) or "")` is the bug this codebase already has a whole test file about:
         # node 0's id is FALSY, so that spelling silently gives node 0 an empty section while every
         # other node renders. Compare the resolved value against None instead.
-        node_spans = [s for s in spans
-                      if (lambda own: own is not None and str(own) == node_id)(_node_id_of(s))]
+        node_spans = [
+            s for s in spans
+            if (lambda own: own is not None and str(own) == node_id)(
+                _node_id_of(s)
+                if _node_id_of(s) is not None
+                else claimed_trace_node_id(claimed, s.get("trace_id")))]
         roll = _rollup(node_spans)
         nodes.append({
             "node_id": node_id,

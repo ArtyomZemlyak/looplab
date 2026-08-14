@@ -1052,6 +1052,10 @@ const STAGE = {
   plan:         ['doc', 'Developer · plan', 'decompose into atomic steps', '#7fae8f'],
   'handoff-summary': ['doc', 'Handoff summary', 'distill this phase for the next (fewer re-reads downstream)', '#8fa8b8'],
   implement:    ['gear', 'Developer · implement', 'write / edit the solution code', '#6fae97'],
+  // The Card lane's name for the SAME work `implement` is on the serial path — one producer turn
+  // that plans, declares the stages and writes the code. Same tone on purpose: an operator reading
+  // two runs side by side must not have to learn that they are the same block.
+  card_build:   ['gear', 'Developer · build', 'write / edit the solution code (Card lane)', '#6fae97'],
   repair:       ['bug', 'Developer · repair', 'fix a failed parent', '#b0936f'],
   inline_repair: ['bug', 'Developer · inline repair', 'quick in-eval fix attempts', '#b08a6f'],
   seed_workspace: ['gear', 'Workspace', 'materialize node files into the eval workdir', '#8b96a5'],

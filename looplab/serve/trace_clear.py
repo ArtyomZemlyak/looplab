@@ -506,6 +506,13 @@ def _prepare_filtered_trace_snapshot(path: Path, node_ids: set[Any]) -> _Prepare
             if file_identity(after) != file_identity(before):
                 raise OSError("spans.jsonl changed while its filter was prepared")
 
+            # Attribution here is the ROOT rule ONLY, deliberately WITHOUT the `build_trace` claim
+            # the read surfaces follow (`traceview.claimed_build_traces`). A read learning to reach
+            # further is a fix; a DESTRUCTIVE operation learning the same thing silently widens its
+            # blast radius — clearing one node would start deleting a run-scoped producer trace that
+            # nothing in the operator's request named. The cost of not following it is bounded and
+            # visible: the claimed build's rows survive the clear and, with the claiming span gone,
+            # simply go back to being unattributed.
             root_nodes = {
                 trace_id: trace_root_node_id(spans, _normalized=True)
                 for trace_id, spans in by_trace.items()

@@ -296,6 +296,33 @@ a single in-memory trace can't survive resume and would be unbounded. The run-le
 reconstructed from **events** (parent_ids) — another reason events, not a trace, are the
 structural replay authority.
 
+### Run-scoped work a node claims (`build_trace`)
+Some top-level operations legitimately have **no node to be tagged with**, because they run before
+one exists. `propose` is the oldest case; under `card_driven_selection` the whole Developer build is
+another — `card_build` opens on a speculative producer worker before any node id is reserved, and the
+id it could compute is a *prediction* that `_claim_requested_card_build` re-derives after that span
+has closed (the build may be refused and mint no node at all).
+
+Measured on `runs/rubertlite-dr-unified-v7` (2026-08-14): 2,403 of 2,637 spans (91.1 %) were
+attributable to no node, 1,312 of them the three `card_build` traces — `plan`, `stages` and the whole
+implement loop. The serial-path run `rubert-dr-0804` has nine such spans out of 14,846 (0.1 %),
+because `_create_node` opens `create_node` with the node id and the build runs inside it.
+
+So the pointer runs the other way. `card_build` carries the request it serves (`card_id`,
+`card_build_generation`) and no node; the **node** stamps `build_trace` on its own
+`materialize_node` span once it commits, which is the first moment both facts exist together.
+`events/traceview.py::claimed_build_traces` is the one reading of that claim, shared by
+`span_index._rows_for_node`, `_bounded_node_trace_tail`, `_conversation_bands`, `build_trace_view`
+and `project_card_trace`. Three rules hold it honest: a claim only ever fills a trace that names no
+node of its own, a span may not claim its own trace, and a trace two nodes claim is awarded to
+neither. The claim carries the *claiming* span's lifecycle, so a `node_reset` that rebuilds reaches
+its own build and not the abandoned one.
+
+`propose` deliberately keeps NO such claim: a card's research belongs to every node the card carries,
+not to whichever one was prepared first (`orchestrator.stamp_proposal_span`), and it is reachable
+through the card trace (`/api/runs/{run}/cards/{card}/trace`). `looplab timings` also does not follow
+the claim — "who owns this wall clock" must keep charging a producer turn to the run.
+
 ### Determinism preserved
 `replay.fold` never reads spans. Tracing can be incomplete (crash) or non-deterministic
 (timings, random ids) without affecting engine state, resume, or `config_hash`.

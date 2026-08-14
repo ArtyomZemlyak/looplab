@@ -51,12 +51,16 @@ from looplab.core.trace_files import (
 from looplab.events.eventstore import (
     JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
-    _normalize_span, _strip_span_io, effective_node_id, root_span_generation, root_span_node_id,
+    NODE_BUILD_TRACE_ATTRIBUTE, _normalize_span, _strip_span_io, claimed_trace_node_id,
+    effective_node_id, root_span_generation, root_span_node_id,
     trace_root_generation, trace_root_node_id, trace_root_span)
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 11
+# 12: `_normalize_span` began keeping `build_trace`/`card_build_generation`, and `build_claims` is
+# derived from the light rows — a persisted index written by the previous normalizer has neither, so
+# it must be rebuilt from source rather than cold-loaded into a claim map that would come up empty.
+_SCHEMA = 12
 _INDEX_NAME = "spans.index.jsonl"
 _INDEX_LOCK_NAME = ".spans-index.lock"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
@@ -517,6 +521,13 @@ class SpanIndex:
         self.by_sid: dict[str, int] = {}          # span_id -> row
         self.by_tid: dict[str, list[int]] = defaultdict(list)   # trace_id -> rows
         self.node_tids: dict[str, set] = defaultdict(set)       # str(node_id) -> {trace_id}
+        # trace_id -> (node_id, generation): the run-scoped BUILD traces a node claims as its own
+        # (`traceview.claimed_build_traces`). Built here rather than per read because the claim and
+        # the claimed trace are DIFFERENT traces, so only a whole-index view can resolve it — a
+        # bounded or `?before=`-anchored window routinely holds one without the other.
+        self.build_claims: dict[str, tuple] = {}
+        self.build_claim_conflicts: set = set()                 # two nodes claimed it: award neither
+        self.node_build_tids: dict[str, set] = defaultdict(set)  # str(node_id) -> {claimed trace_id}
         self.covers: int = 0
         self.identity: Optional[tuple] = None
         self.source_epoch: Optional[str] = None
@@ -583,7 +594,34 @@ class SpanIndex:
             nid = attributes.get("node_id") if isinstance(attributes, dict) else None
             if nid is not None:
                 self.node_tids[str(nid)].add(tid)
+                self._claim_build_trace(light, attributes, nid, tid)
         return True
+
+    def _claim_build_trace(self, light: dict, attributes: dict, nid, tid) -> None:
+        """Record this span's claim on the run-scoped trace that BUILT its node.
+
+        The rule and its rationale are `traceview.claimed_build_traces`; this is the incremental
+        half, applied one row at a time so an append gets it without a rebuild. Kept byte-for-byte
+        equivalent to that function: a self-claim is ignored, the claim carries the CLAIMING span's
+        lifecycle, and a trace two different nodes claim is awarded to neither.
+        """
+        claimed = attributes.get(NODE_BUILD_TRACE_ATTRIBUTE)
+        if (not isinstance(claimed, str) or not claimed or claimed == str(tid)
+                # A contested trace stays dropped for the rest of this index's life. Without this
+                # the FIRST claimant's next row would simply re-instate it, which makes the refusal
+                # depend on file order — the one thing an attribution rule may not do.
+                or claimed in self.build_claim_conflicts):
+            return
+        generation = attributes.get("generation")
+        generation = generation if type(generation) is int and generation >= 0 else 0
+        prior = self.build_claims.get(claimed)
+        if prior is None:
+            self.build_claims[claimed] = (nid, generation)
+            self.node_build_tids[str(nid)].add(claimed)
+        elif str(prior[0]) != str(nid):
+            self.build_claim_conflicts.add(claimed)
+            self.build_claims.pop(claimed, None)
+            self.node_build_tids[str(prior[0])].discard(claimed)
 
     def _extend(self, records: list[tuple[dict, int, int, str]]) -> None:
         for light, off, length, digest in records:
@@ -609,6 +647,9 @@ class SpanIndex:
             self.by_sid.clear()
             self.by_tid.clear()
             self.node_tids.clear()
+            self.build_claims.clear()
+            self.build_claim_conflicts.clear()
+            self.node_build_tids.clear()
             self._extend(records)
             self.covers = consumed
             self.append_journal_identity = journal_identity
@@ -751,6 +792,12 @@ class SpanIndex:
         the dicts the index ALREADY holds and adds no disk read, no dependency on ``spans.jsonl``
         being complete, and no new failure mode. A truncated/quarantined source simply indexes fewer
         rows here, exactly as before.
+
+        A node also reaches the run-scoped trace that BUILT it — the Card lane's `card_build` and its
+        `plan`/`stages`/tool/generation subtree, which run before any node id exists and therefore
+        carry none. Those traces are not candidates by ``node_tids`` (no row in them names the node);
+        they are named by the node's OWN `materialize_node` span, and `build_claims` resolved that
+        link over the WHOLE index. See `traceview.claimed_build_traces`.
         """
         target = str(node_id)
         tids = self.node_tids.get(target, ())
@@ -784,7 +831,53 @@ class SpanIndex:
                 if (effective := effective_node_id(self.light[row], root_nid)) is not None
                 and str(effective) == target
             )
+        for tid in self.node_build_tids.get(target, ()):
+            # No root GENERATION fence here — the build ran before the node existed, so its
+            # lifecycle comes from the CLAIM (checked by `claimed_trace_node_id`) and never from the
+            # producer's trace root.
+            if claimed_trace_node_id(
+                    self.build_claims, tid, generation=generation) is None:
+                continue
+            trace_rows = list(self.by_tid.get(tid, ()))
+            if not trace_rows:
+                continue
+            # A claim only ever FILLS a None. A trace whose root names a node is already that node's
+            # — in both other readers (`_conversation_bands`, `build_trace_view`) the claim is
+            # consulted only when `trace_root_node_id` came back empty, and a selection that did not
+            # match them would hand the conversation rows it then refuses to render.
+            if root_span_node_id(
+                    trace_root_span([self.light[row] for row in trace_rows],
+                                    _normalized=True)) is not None:
+                continue
+            # The claim SUPPLIES the trace-level fallback this trace never had, so the very same
+            # per-span-first rule applies: a build-trace row with no id of its own is this node's,
+            # and one carrying another node's id still belongs to that node.
+            rows.extend(
+                row for row in trace_rows
+                if (effective := effective_node_id(self.light[row], target)) is not None
+                and str(effective) == target
+            )
         return sorted(rows)
+
+    def node_build_traces(self, node_id, *, generation: Optional[int] = None) -> dict:
+        """The build claims that apply to ONE node — the map `build_conversation` bands with.
+
+        The route reads this beside its bounded window because the two halves of a claim live in
+        different traces: an anchored (`?before=`) window that seeks INTO the build legitimately ends
+        before the `materialize_node` row that names it, and a projection re-deriving the map from
+        the window alone would then drop every span the read had just paid for. Shaped exactly like
+        `traceview.claimed_build_traces` so both sides speak one vocabulary.
+        """
+        target = str(node_id)
+        with self._rlock:
+            claims = {
+                tid: self.build_claims[tid]
+                for tid in self.node_build_tids.get(target, ())
+                if tid in self.build_claims
+                and claimed_trace_node_id(
+                    self.build_claims, tid, generation=generation) is not None
+            }
+        return claims
 
     def has_span(self, sid) -> bool:
         """Does this index know the span id a caller wants to anchor a window at?

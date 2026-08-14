@@ -28,6 +28,7 @@
 // band nobody has seen is how a map starts describing something the trace does not contain.
 const EPISODE_LABELS = Object.freeze({
   inline_repair: 'repair',
+  card_build: 'build',
   salvage_cause_repair: 'salvage repair',
   create_node: 'author node',
   handoff_summary: 'handoff',

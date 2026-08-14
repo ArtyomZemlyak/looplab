@@ -540,7 +540,12 @@ class AppState:
             idx.light_spans_for_node(nid, span_cap, generation=generation, before=before),
             light=True,
             total_spans=idx.node_span_count(nid, generation=generation),
-            span_cap=span_cap)
+            span_cap=span_cap,
+            # The node's build claims, resolved over the WHOLE index. A `?before=` anchor inside the
+            # build ends the window before the `materialize_node` row that names it, so a map
+            # re-derived from the window would drop the whole block into `unscoped` — the node's own
+            # tree tab showing nothing for a window it had just selected for that node.
+            claimed_traces=idx.node_build_traces(nid, generation=generation))
 
     def node_episode_map(self, rd: Path, nid, generation: Optional[int] = None) -> dict:
         """The node's EPISODE MAP — every band of its trace, with no band's contents.
