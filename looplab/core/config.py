@@ -1377,9 +1377,23 @@ class Settings(BaseSettings):
     # stage's start and folds the record onto `node_evaluated.metric_provenance`.
     #   "off"     — record nothing (byte-identical to the behaviour before 2026-08-13).
     #   "audit"   — RECORD, always: every evaluated node carries provenance, bound or not. No
-    #               violation, no selection effect.
-    #   "require" — the INVERSION: an UNBOUND metric also gets the existing `metric_salvaged`
-    #               violation, so it is counted, visible in the UI and lineage, and never selectable.
+    #               violation, no selection effect, and no stage contract.
+    #   "require" — the INVERSION, and the only rung that GATES: an UNBOUND metric also gets the
+    #               existing `metric_salvaged` violation, so it is counted, visible in the UI and
+    #               lineage, and never selectable — and the declared subject additionally becomes a
+    #               `needs` entry on the engine-appended `score` stage (`engine/eval_stages.py`), so
+    #               a subject the pipeline did not produce refuses before the scorer runs.
+    #
+    # THE RUNGS ARE ORDERED AND `audit` MUST NOT GATE. The derived `needs` fired for every mode but
+    # `off` until 2026-08-14, which made the middle rung HARSHER than the strict one: driven, a
+    # declared subject the pipeline did not produce returned `needs_failed` with `metric=None` under
+    # `audit` — the node lost its number entirely — while `require` is documented to keep the metric
+    # and record a violation against it. It also bought Developer repair attempts on the protected
+    # `score` stage (`needs_failed` is in the default `inline_repair_reasons`). Blast radius was nil
+    # rather than by luck: the entry is written ONLY for a task that DECLARES `eval.metric.subject`,
+    # and 0 of the 113 task snapshots under `runs/` + `examples/` do — including the live
+    # `rubertlite-dr-unified-v8`, which runs at this default. A latent contract bug, fixed before it
+    # had a corpus.
     #
     # THE NUMBER THAT DECIDES THIS. Across the six repo runs that have an event log, 82 of 83
     # recorded metrics carry NO `metric_provenance` at all (98.8 %) — the one exception is the
@@ -2297,12 +2311,19 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "metric_salvage": "off",
     "metric_salvage_repair": False,
     # THE METRIC SUBJECT BINDING, added 2026-08-13. It satisfies (a)+(b)+(c). (a) the field did not
-    # exist. (b) is the subtle one and it is real even at the `audit` rung: the score stage's `needs`
-    # is DERIVED from the declared subject (`engine/eval_stages.py`), so a resumed pre-versioning run
-    # whose task file has since gained a `subject` would start failing its scorer with `needs_failed`
-    # — a stage contract the first half of that same event log never had, and one that buys inline
-    # repair attempts. (c) is `off`, which is exactly what "before 2026-08-13" means. A resumed run
-    # keeps the account it was written with; a NEW run gets the record.
+    # exist. (b) the resumed run acquires a `metric_provenance` record on every node terminal that
+    # the first half of its own event log does not have, and — once the live value is `require` — a
+    # `metric_salvaged` violation that makes an unbound node UNSELECTABLE plus a derived `needs` on
+    # the score stage that can fail it outright and buy inline repair attempts. (c) is `off`, which
+    # is exactly what "before 2026-08-13" means. A resumed run keeps the account it was written with;
+    # a NEW run gets the record.
+    #
+    # This row's (b) used to be argued from the `needs` derivation firing at the `audit` rung. That
+    # was TRUE of the code and false of the contract, and the code is what moved: since 2026-08-14
+    # the derived `needs` belongs to `require` alone (see `Settings.metric_subject`). The entry stays
+    # and its value stays `off` — the provenance record is itself an additive change to every
+    # terminal, `require` remains reachable on a resume, and re-pinning a LEGACY default would change
+    # how an already-recorded run replays, which is the one thing this table exists to prevent.
     "metric_subject": "off",
     # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
     # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the

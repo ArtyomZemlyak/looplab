@@ -242,10 +242,19 @@ What binding does and does not buy, stated plainly:
 * it does **not** prove the score stage read the subject. Neither does `needs` — measured against the
   preserved node-4 workdir, `verify_stage_inputs` with a perfectly correct `needs` naming the node's own
   checkpoint returns "no problem", because the node really did write that file and the scorer read
-  somewhere else anyway. `needs` is a *presence* check and the engine now derives the protected `score`
-  stage's `needs` from `subject`, which buys **latency** (the refusal fires before the scorer runs) and
-  not coverage. What makes "read elsewhere" impossible is the read boundary — `read_fence` (on by
-  default) and, opt-in, the kernel allow-list `landlock`.
+  somewhere else anyway. `needs` is a *presence* check and, **under `metric_subject: "require"` only**,
+  the engine derives the protected `score` stage's `needs` from `subject`, which buys **latency** (the
+  refusal fires before the scorer runs) and not coverage. It is a `require` effect and not an `audit`
+  one because the rungs are ordered: `audit` is what you turn on to find out whether `require` is
+  affordable, so it records and never gates. What makes "read elsewhere" impossible is the read boundary
+  — `read_fence` (on by default) and, opt-in, the kernel allow-list `landlock`.
+
+When that derived contract does fail, the refusal says whose failure it is. The `needs` on the `score`
+stage is written by the engine, not by the Developer, and the Developer may edit neither that stage nor
+`eval.metric.subject` — so the message names the one repair it *does* own (make the pipeline produce the
+path) and names the operator for the other (the declaration itself is wrong). Repair eligibility is
+deliberately kept: the artifact is produced by the agent's own pipeline, unlike a missing **protected
+script**, which no edit can ever create and which the engine refuses without asking for a repair.
 
 A failed `expect` fails the stage the same way a non-zero exit does (same `failed_stage`, same repair
 path), so nothing new happens mid-loop — but see **metric salvage** below: a stage that failed its

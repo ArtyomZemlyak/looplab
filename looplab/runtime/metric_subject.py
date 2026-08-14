@@ -133,11 +133,23 @@ UNBOUND_REASONS = ("not_declared", "escapes", "missing", "empty", "stale", "unre
 #   off     — record nothing. Byte-identical to the behaviour before this shipped.
 #   audit   — RECORD, always: every node_evaluated carries `metric_provenance`, bound or not. This is
 #             the half that turns 82/83-with-no-referent into 0/83, and it costs one stat plus a
-#             bounded digest. No violation, no selection effect.
-#   require — the INVERSION. An unbound metric additionally gets the existing `metric_salvaged`
-#             violation row, so it is counted, visible in the UI and the lineage, and never
-#             selectable. The absence of provenance stops meaning "fine" and starts meaning
-#             "unproven".
+#             bounded digest. No violation, no selection effect, and — since 2026-08-14 — no STAGE
+#             CONTRACT either: the score stage's derived `needs` belongs to `require` alone.
+#   require — the INVERSION, and the ONLY rung that gates. An unbound metric gets the existing
+#             `metric_salvaged` violation row, so it is counted, visible in the UI and the lineage,
+#             and never selectable; and `engine/eval_stages.py` derives a `needs` entry from the
+#             declared subject onto the protected `score` stage, so a subject the pipeline did not
+#             produce refuses BEFORE the scorer runs instead of after. The absence of provenance
+#             stops meaning "fine" and starts meaning "unproven".
+#
+# THE RUNG ORDER IS A PROPERTY, not a presentation. Each rung must do everything the one below it
+# does and strictly more, and until 2026-08-14 the middle rung broke that: the derived `needs` fired
+# for every mode but `off`, so a declared-but-missing subject under `audit` returned `needs_failed`
+# with `metric=None` — the node lost its number outright, where `require` is documented to KEEP the
+# metric and record a violation against it. The mildest rung had the harder effect. `audit` is what
+# an operator turns on to measure whether `require` is affordable (see `Settings.metric_subject`'s
+# "THE EVIDENCE THAT WOULD JUSTIFY FLIPPING IT"), so a selection effect there does not merely
+# contradict the text — it destroys the reason the rung exists.
 MODES = ("off", "audit", "require")
 
 
