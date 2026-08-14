@@ -3383,8 +3383,15 @@ def test_g1_no_token_index_unchanged(tmp_path, monkeypatch):
 
 
 def test_g1_shared_hub_warns(tmp_path, monkeypatch, caplog):
-    """On a shared JupyterHub origin we warn that the token is per-deployment (not per-user), and
-    that with no token the control plane is unauthenticated. No warning off-hub."""
+    """On a shared JupyterHub origin we warn that the token is per-deployment (not per-user). No
+    warning off-hub.
+
+    The third case MOVED with the behaviour it describes (`serve/owner_token.py`): on-hub with no
+    token, the control plane is no longer unauthenticated — it fails closed by minting a credential,
+    and the log has to say which one and where. The word "unauthenticated" now belongs to the
+    explicit `LOOPLAB_UI_ANONYMOUS` opt-out, which is the only way that state is still reachable, so
+    it is asserted there rather than deleted. The request-level halves of both — 401 without the
+    token, 200 with it, 200 when opted out — are driven in `tests/test_owner_token.py`."""
     import logging
     _build_run(tmp_path)
 
@@ -3404,9 +3411,19 @@ def test_g1_shared_hub_warns(tmp_path, monkeypatch, caplog):
     msg = " ".join(caplog.messages).lower()
     assert "shared jupyterhub origin" in msg and "per-deployment" in msg
 
-    # on-hub WITHOUT a token -> control plane unauthenticated
+    # on-hub WITHOUT a token -> fail closed, and name the credential it just minted
     caplog.clear()
     monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    with caplog.at_level(logging.WARNING, logger="looplab.server"):
+        make_app(tmp_path)
+    assert "fails closed" in caplog.text.lower()
+    from looplab.serve.owner_token import owner_token_path, read_owner_token_file
+    assert read_owner_token_file() and str(owner_token_path()) in caplog.text
+
+    # on-hub, token unset AND the opt-out explicitly turned on -> the old open plane, said plainly
+    caplog.clear()
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    monkeypatch.setenv("LOOPLAB_UI_ANONYMOUS", "1")
     with caplog.at_level(logging.WARNING, logger="looplab.server"):
         make_app(tmp_path)
     assert "unauthenticated" in " ".join(caplog.messages).lower()

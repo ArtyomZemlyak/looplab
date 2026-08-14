@@ -66,20 +66,40 @@ site that proves it is open.
 
 ### §0.1 Ranked
 
-1. **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
-   `serve/launch.py:422-426` does `Path(os.path.expandvars(os.path.expanduser(v))).resolve()` and
-   loads it — the only guard is an 8 MiB size cap (`_require_task_file_size`, `launch.py:210`). There
-   is **no root confinement and no allow-list**. The other half of the old C3 row DID ship, but as an
-   *opt-in*: `server.py:447` reads `LOOPLAB_UI_TOKEN` and default-denies `/api/*` only when it is set
-   (`hmac.compare_digest`, `server.py:451`) — with it unset the server prints its own warning that the
-   control plane is "UNAUTHENTICATED and reachable by any same-origin page" on a shared JupyterHub
-   origin (`server.py:479-481`). **Cost:** an unauthenticated same-origin request names an arbitrary
-   host file and the server parses and runs it as a task. Highest cost on this list; smallest fix.
-   **[CLOSED later on 2026-08-14 (`dcb4c9a`) — this entry predates the fix that landed the same
-   day.** The `task_file` half shipped: `serve/launch.py:232::_confine_task_file` +
-   `:204::task_file_roots`, containment BEFORE any path-echoing probe (`launch.py:491-492`), driven
-   by `tests/test_launch_preflight.py`. The token half is unchanged by design (a deployment
-   decision, not missing code). The reconciled §1 C3 row is the authoritative record.]
+1. ✅ **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
+   `serve/launch.py:422-426` did `Path(os.path.expandvars(os.path.expanduser(v))).resolve()` and
+   loaded it — the only guard an 8 MiB size cap. The other half of the old C3 row shipped as an
+   *opt-in*: `server.py` read `LOOPLAB_UI_TOKEN` and default-denied `/api/*` only when it was set,
+   printing its own warning that the control plane is "UNAUTHENTICATED and reachable by any
+   same-origin page" on a shared JupyterHub origin. **Cost:** an unauthenticated same-origin request
+   names an arbitrary host file and the server parses and runs it as a task.
+   **[2026-08-14 — BOTH HALVES DONE.** The allow-list landed first (`launch.py::_confine_task_file`
+   over `task_file_roots`, the same derivation `GET /api/tasks` builds its pick-list from — see the
+   C3 row in §2). Two things were still open under it and are now closed.
+   *(a) the check was about a NAME, and three separate opens of that name followed it* — the size
+   `stat`, `load_document`'s `read_text` and the fingerprint's `read_bytes`. `read_confined_task_file`
+   makes it ONE fenced read: `O_NOFOLLOW` on the already-resolved path (a final component that became
+   a symlink after the check is refused, and a resolved path holds no symlinks, so nothing legitimate
+   is refused by it), `O_NONBLOCK` + `S_ISREG` (a FIFO in a declared root used to block the preflight
+   worker forever), and a `core/atomicio.file_identity` CAS between the descriptor's `fstat` and an
+   `lstat` after the read, so a replaced or rewritten file is `422 task_source_changed` instead of
+   parsed — and the parsed bytes are the fingerprinted bytes. `_read_bounded` is the seam the race
+   tests drive; the genesis card's own uncontained, uncapped `task_file` read
+   (`_defaults_backend_llm`) now takes the run root and goes through the same allow-list.
+   *(b) the token default* is `serve/owner_token.py`. It is not one answer: on a PRIVATE origin an
+   unset `LOOPLAB_UI_TOKEN` still means unauthenticated (byte-for-byte the historical local
+   single-user behaviour — the server binds loopback and nothing shares the origin), and on the
+   SHARED hub origin the server already detects, it FAILS CLOSED by minting a token into
+   `~/.looplab/ui-token` (`0600`, reused across restarts, logged with its path and value) and gating
+   `/api/*`. Not a loopback-only bind — it already binds loopback and jsp connects to it, so that
+   flag cannot see the difference; not a refusal to start — the hub deployment is a Launcher tile
+   with no terminal in which to export the variable. `LOOPLAB_UI_ANONYMOUS=1` is the explicit,
+   logged opt-out. `serve/tui_api.py` reads the same file so `looplab tui` still works.
+   Driven with real requests in `tests/test_owner_token.py` and `tests/test_launch_preflight.py`;
+   `tests/test_server.py::test_g1_shared_hub_warns` was re-pointed rather than left speaking the old
+   contract, and the "unauthenticated" assertion moved onto the opt-out, the only state that still
+   reaches it. **A LIVE server keeps whatever default it started with** — this changes the next
+   start, not a running process.]
 2. **Output redaction shipped but is OFF by default (P0, S).** `engine/audit.py:269::_redact` →
    `core/redact.py::redact_secrets` is wired at the one durable site
    (`engine/evaluate.py:2445`, `"stdout_tail": self._redact(res.stdout[-500:])`), but
@@ -391,6 +411,12 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   shared JupyterHub origin with no token it is an OPEN DOOR to any same-origin page, and the server
   already logs exactly that at startup (`server.py:470-481`). The remaining opt-in-ness of
   `LOOPLAB_UI_TOKEN` is a deployment decision, not missing code.
+  **[2026-08-14 — that last sentence was the wrong call and is reversed: `serve/owner_token.py`.**
+  "A deployment decision" is a defensible framing for a knob whose two settings are both reasonable
+  defaults on the SAME deployment; it is not one when the server can already tell the two deployments
+  apart. It detects the shared origin well enough to log the OPEN DOOR sentence by name — so on that
+  origin the unset token now mints one and fails closed, while the private origin keeps the open
+  default unchanged. See §0.1 row 1.]
   The `task_file` half of the claim WAS accurate and is now fixed: `serve/launch.py::_confine_task_file`
   refuses any `task_file` that does not resolve under a declared root (`task_file_roots` — repo
   `examples/`, the run root, `$LOOPLAB_TASKS_DIR`), which is the SAME derivation `GET /api/tasks`
@@ -399,7 +425,19 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   path-echoing `task_file_not_found` message can no longer be an oracle (`expandvars` on caller text
   meant `task_file: "$SOME_API_KEY"` echoed the secret's value back). Driven by six real requests in
   `tests/test_launch_preflight.py`. Note this bounds the AUTHENTICATED operator — a token never fixed
-  it.
+  it. **[2026-08-14 — the roots were re-derived against this box rather than assumed.** The four real
+  task files here are `/home/jovyan/data/*-task.json` and none of them is under a declared root — but
+  all four were launched with `looplab run <path>`, which reads its argument directly and never
+  enters `launch.py`, and every HTTP-launched run in the corpus with a `ui_meta.json` carried an
+  INLINE task (no `source_task_file` key exists anywhere in `runs/`). So the list refuses no launch
+  that has happened. It is deliberately NOT widened to the data mount — that would admit datasets,
+  model caches and every co-tenant's files, i.e. an allow-list that allows almost everything — and
+  `LOOPLAB_TASKS_DIR` now takes an `os.pathsep`-separated LIST instead, because "I have tasks in two
+  directories" is exactly the pressure that ends with an operator declaring their whole disk. Also
+  recorded in `task_file_roots`' own docstring: this is NOT `runtime/read_allowlist.py`'s question —
+  that one derives an eval's reads from an ALREADY-ADMITTED task's mount declarations, and using the
+  same shape here would be circular, since the document being decided about would supply the rule
+  that admits it.]
 
 - 🟡 **P2 · B1 host-side scoring + read-only eval mount (S–M).** Mount inputs `-v root:/work:ro` +
   separate writable `out/`; candidate writes `predictions.json`, host scores it. *Closes the rest of

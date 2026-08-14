@@ -77,12 +77,27 @@ class ApiError(Exception):
 class Api:
     """Minimal JSON client for the LoopLab UI server — the stdlib mirror of ui/src/util.js. Sends the
     `X-LoopLab-Token` header when LOOPLAB_UI_TOKEN is set (token-gated deployments), exactly like the
-    browser does, so the TUI works behind the same auth."""
+    browser does, so the TUI works behind the same auth.
+
+    It also falls back to the token FILE a shared-hub server mints when the variable is unset
+    (`serve/owner_token.py`): that server fails closed by generating a credential the operator never
+    exported, and a TUI that only read the variable would 401 against a server running on the same
+    box as the same user, with nothing on screen to explain why."""
 
     def __init__(self, base_url: str, token: Optional[str] = None, timeout: float = 30.0):
         self.base = base_url.rstrip("/")
-        self.token = token or os.environ.get("LOOPLAB_UI_TOKEN") or ""
+        self.token = token or os.environ.get("LOOPLAB_UI_TOKEN") or self._stored_token() or ""
         self.timeout = timeout
+
+    @staticmethod
+    def _stored_token() -> str:
+        # Deferred so `looplab tui` against an unauthenticated local server pays nothing, and so a
+        # refusal about an unsafe token file cannot break a client that does not need one.
+        try:
+            from looplab.serve.owner_token import read_owner_token_file
+            return read_owner_token_file() or ""
+        except Exception:       # noqa: BLE001 - an unreadable/unsafe token file is not a TUI error
+            return ""
 
     def _headers(self, body: bool = False) -> dict:
         h = {"Accept": "application/json"}

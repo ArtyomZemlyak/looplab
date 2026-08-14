@@ -431,3 +431,212 @@ def test_declared_tasks_dir_is_admitted_and_is_the_catalogue_list(tmp_path):
             assert any(r == Path(path) or r in Path(path).parents for r in roots), path
     finally:
         _os.environ.pop("LOOPLAB_TASKS_DIR", None)
+
+
+# --- C3, second half: the name that was CHECKED must be the bytes that get PARSED ----------------
+#
+# Containment answers about a NAME. Three separate opens of that name used to follow the one check
+# (`_require_task_file_size`'s stat, `load_document`'s read_text, `_source_fingerprint`'s
+# read_bytes), so a file could pass containment as a plain task JSON and be something else by the
+# time it was parsed — and the parser's error is embedded in the `400 invalid_task_file` message,
+# i.e. exactly the content oracle containment exists to close. `read_confined_task_file` now opens
+# ONCE, `O_NOFOLLOW` on the already-resolved path, and CASes the fstat against an lstat across the
+# read. These drive that window from both sides; `_read_bounded` is the seam the swap happens in.
+
+_SECRET_LINE = "root:$6$SUPERSECRETHASH:19000:0:99999:7:::"
+
+
+def _swap_after(monkeypatch, replacement):
+    """Run the real bounded read, then replace the file — the exact [fstat .. lstat] window."""
+    from looplab.serve import launch
+
+    real_read = launch._read_bounded
+    state = {}
+
+    def _hooked(fd):
+        data = real_read(fd)
+        replacement(state)
+        return data
+
+    monkeypatch.setattr(launch, "_read_bounded", _hooked)
+    return state
+
+
+def test_task_file_replaced_mid_read_is_refused_and_never_parsed(tmp_path, monkeypatch):
+    """A DIFFERENT regular file swapped onto the validated name. `O_NOFOLLOW` cannot see this one —
+    the identity CAS is what does, and the refusal must be the fail-closed set, never a 200."""
+    root = tmp_path / "runroot"
+    root.mkdir()
+    source = root / "innocent.json"
+    source.write_text(json.dumps(_toy()), encoding="utf-8")
+    imposter = tmp_path / "imposter.json"
+    imposter.write_text(json.dumps({**_toy(), "goal": _SECRET_LINE}), encoding="utf-8")
+
+    import os as _os
+    _swap_after(monkeypatch, lambda _s: _os.replace(imposter, source))
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "swapped", "task_file": str(source),
+    })
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"]["code"] == "task_source_changed"
+    assert _SECRET_LINE not in response.text
+
+
+def test_task_file_that_becomes_a_symlink_after_containment_is_refused(tmp_path, monkeypatch):
+    """The swap that reaches OUT of every declared root. Resolve-then-contain answered about the
+    file that was there at check time; `O_NOFOLLOW` on the resolved path answers about the one that
+    is there at OPEN time, and it can refuse no legitimate launch — a resolved path holds no
+    symlinks by construction."""
+    root = tmp_path / "runroot"
+    root.mkdir()
+    secret = tmp_path / "shadow"
+    secret.write_text(_SECRET_LINE, encoding="utf-8")
+    source = root / "innocent.json"
+    source.write_text(json.dumps(_toy()), encoding="utf-8")
+
+    from looplab.serve import launch
+
+    real = launch._confine_task_file
+
+    def _swapping(root_arg, expanded):
+        path = real(root_arg, expanded)
+        path.unlink()
+        path.symlink_to(secret)
+        return path
+
+    monkeypatch.setattr(launch, "_confine_task_file", _swapping)
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "relinked", "task_file": str(source),
+    })
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "task_file_not_found"
+    assert _SECRET_LINE not in response.text
+
+
+def test_task_file_fifo_in_a_declared_root_does_not_hang_the_worker(tmp_path):
+    """A FIFO passes `Path.is_file()`-shaped intent checks in spirit but blocks `read_text` forever.
+    The open is non-blocking and a non-regular file is refused, so this returns instead of wedging
+    the preflight worker — the timeout below IS the assertion."""
+    import os as _os
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    fifo = root / "pipe.json"
+    _os.mkfifo(fifo)
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "fifo", "task_file": str(fifo),
+    })
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "task_file_not_found"
+
+
+def test_confined_read_parses_exactly_what_it_fingerprints(tmp_path):
+    """The positive control, and the parity one: the single read must produce the SAME document the
+    shipped `appconfig.load_document` produces from that path, and the fingerprint must describe the
+    bytes that were parsed rather than a second, later read of the name."""
+    import hashlib
+
+    from looplab.core.appconfig import load_document
+    from looplab.serve.launch import read_confined_task_file
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    source = root / "unified.json"
+    source.write_text(json.dumps({"task": _toy(), "settings": {"max_nodes": 3}}), encoding="utf-8")
+
+    confined = read_confined_task_file(root, str(source))
+
+    assert confined.data == source.read_bytes()
+    assert confined.document() == load_document(source)
+    assert confined.fingerprint()["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+    assert confined.fingerprint()["size"] == len(confined.data)
+
+
+def test_confined_read_of_a_bom_yaml_task_file_matches_the_shipped_loader(tmp_path):
+    """Read parity is not only about JSON: `load_document` picks the parser by SUFFIX and tolerates a
+    BOM, and the launch path must not quietly become a stricter reader than the engine's."""
+    from looplab.core.appconfig import load_document
+    from looplab.serve.launch import read_confined_task_file
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    source = root / "with-bom.json"
+    source.write_bytes(b"\xef\xbb\xbf" + json.dumps(_toy()).encode("utf-8"))
+
+    assert read_confined_task_file(root, str(source)).document() == load_document(source)
+
+
+def test_task_file_larger_than_the_cap_is_refused_before_it_is_parsed(tmp_path):
+    from looplab.serve import launch
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    source = root / "huge.json"
+    source.write_bytes(b"{" + b" " * (launch._MAX_TASK_FILE_BYTES + 16) + b"}")
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "huge", "task_file": str(source),
+    })
+
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["code"] == "task_file_too_large"
+
+
+def test_genesis_card_cannot_read_a_task_file_outside_the_declared_roots(tmp_path):
+    """The sibling hole: the genesis card takes `task_file` straight from the request body and read
+    it with no containment and no size cap to decide a display-only backend hint. Same allow-list
+    now; the card still renders (the hint is best-effort), it just no longer opens the file."""
+    from looplab.serve.launch import _defaults_backend_llm
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    smuggled = outside / "repo-task.json"
+    smuggled.write_text(json.dumps({
+        "kind": "repo", "goal": "g", "direction": "max", "repo": str(tmp_path)}), encoding="utf-8")
+
+    # Uncontained (the historical CLI-shaped call) the file is read and the hint fires...
+    assert _defaults_backend_llm({}, str(smuggled), {}, {}) is True
+    # ...and with the server's run root supplied, the same path is refused and no hint is derived.
+    assert _defaults_backend_llm({}, str(smuggled), {}, {}, root) is False
+
+
+def test_declared_tasks_dir_takes_a_list(tmp_path, monkeypatch):
+    """`LOOPLAB_TASKS_DIR` is `os.pathsep`-separated. An operator with tasks in two places must not
+    have to choose — the way out of that choice is pointing it at the common ancestor, which is how
+    an allow-list ends up allowing a whole disk. Both declared dirs are admitted AND both are in the
+    catalogue, because the two are one derivation."""
+    import os as _os
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    first, second = tmp_path / "team", tmp_path / "mine"
+    for index, directory in enumerate((first, second)):
+        directory.mkdir()
+        (directory / f"task-{index}.json").write_text(json.dumps(_toy()), encoding="utf-8")
+    monkeypatch.setenv("LOOPLAB_TASKS_DIR", _os.pathsep.join([str(first), str(second)]))
+
+    client = TestClient(make_app(root))
+    offered = {t["path"] for t in client.get("/api/tasks").json()["tasks"]}
+    for index, directory in enumerate((first, second)):
+        source = directory / f"task-{index}.json"
+        response = client.post("/api/start/preflight", json={
+            "run_id": f"declared-{index}", "task_file": str(source),
+        })
+        assert response.status_code == 200, response.text
+        assert str(source.resolve()) in offered
+    # A sibling of the declared dirs is still refused — the list declares them, not their parent.
+    outside = tmp_path / "not-declared.json"
+    outside.write_text(json.dumps(_toy()), encoding="utf-8")
+    refusal = client.post("/api/start/preflight", json={
+        "run_id": "sibling", "task_file": str(outside),
+    })
+    assert refusal.status_code == 400
+    assert refusal.json()["detail"]["code"] == "task_file_not_allowed"

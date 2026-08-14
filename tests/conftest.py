@@ -61,6 +61,27 @@ def _isolate_looplab_home(monkeypatch, tmp_path):
     home = tmp_path / "_ll_home"
     monkeypatch.setenv("LOOPLAB_MEMORY_DIR", str(home / "memory"))
     monkeypatch.setenv("LOOPLAB_KNOWLEDGE_DIR", str(home / "knowledge"))
+    # `serve/owner_token.py` MINTS an owner credential into `~/.looplab/ui-token` when a shared-hub
+    # server starts without one. Same insulation, same reason: a test must never write the
+    # developer's real credential file, and two tests must not share one minted token.
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN_FILE", str(home / "ui-token"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_origin_detection(monkeypatch):
+    """`serve/engine_proc.py::_on_shared_hub` reads JupyterHub's own env, and the suite is routinely
+    run INSIDE a JupyterHub single-user server — where those variables are set for the developer's
+    shell, not for the deployment under test. That used to be invisible (the detection only chose a
+    log line); since it also chooses whether an unset `LOOPLAB_UI_TOKEN` fails closed, an inherited
+    `JUPYTERHUB_API_TOKEN` would silently token-gate every anonymous-mode server test on that box and
+    leave them passing everywhere else. Tests that mean "shared hub" set the variable themselves."""
+    for name in ("JUPYTERHUB_SERVICE_PREFIX", "JUPYTERHUB_API_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    # Same reason in both directions: a developer who exports LOOPLAB_UI_TOKEN would token-gate every
+    # anonymous-mode server test, and a test that lets the server MINT one would otherwise leak that
+    # credential into every later test in the process (`resolve_owner_token` exports what it mints).
+    # Deleting it through monkeypatch restores whatever was there when the test ends.
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
 
 
 @pytest.fixture(autouse=True)
