@@ -4,6 +4,29 @@
 this box on 2026-08-13; the command that produced each is in §8. Where I could not determine something
 I say so, in §7.
 
+> **Status update (2026-08-14).** The §6 recommendation shipped in its three pieces, with one
+> deliberate softening. (1) The SUBJECT: `EvalSpec.metric["subject"]`, bound at score-stage start by
+> `runtime/command_eval.py::bind_metric_subject` → `runtime/metric_subject.py::bind`
+> (`file_identity` + sha256, full under 256 MiB, SAMPLED above it with the mode recorded), landing
+> on `node_evaluated.metric_provenance` (`e767a12`, `dcb76df`, 2026-08-13). (2) The ENFORCEMENT:
+> `Settings.metric_subject` = `off`/`audit`/`require` — but the shipped default is `audit`, not the
+> mandatory rung recommended here: no existing task declares a subject yet, so inverting today would
+> leave every run championless; the field's own comment states the evidence that flips it (one full
+> run under `audit` with every node `subject_bound: true`). An UNBOUND metric under `require` gets
+> the existing `metric_salvaged` violation, exactly as specified. (3) The READ SET:
+> `runtime/read_allowlist.py` derives the allow-list from the operator's declarations (the 1/116
+> teacher-checkpoint false positive is covered — a declared mount is kept, an absent machine tier is
+> dropped at derivation), and `runtime/landlock.py` applies it in the child at
+> `runtime/sandbox.py::run_argv` — but `Settings.landlock` ships `"off"`, because §7.2 is still
+> true: nobody has run a ruleset through a real GPU eval or geesefs. F1 landed restated as §3a asks:
+> the appended `score` stage derives `needs` from the subject
+> (`engine/eval_stages.py::_resolve_stages`), documented as presence, not provenance.
+> `looplab landlock-check <run_dir>` (`cli/inspect_cmds.py`) is the shipped validation path; the
+> close for §7.2 is that command reporting `skipped: 0`, then ONE real train+score under
+> `LOOPLAB_LANDLOCK=enforce`, then the default flip. §4b cost 1's mitigation is NOT built: no engine
+> path yet rewrites a Landlock-era `EACCES`/`FileNotFoundError` into the fence's own sentence
+> (doc 38 §3's banner says where it should live).
+
 **Relationship to `docs/31-path-isolation-options-2026-08-13.md`.** Doc 31 covers the same incident
 from the read-fence side and reaches an adjacent conclusion ("the root is that a metric is an unbound
 number"). This document does not repeat it. It adds four things doc 31 does not have, and **corrects

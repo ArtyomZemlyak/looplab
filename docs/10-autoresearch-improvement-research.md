@@ -10,7 +10,12 @@ or shipped. Companion to [07-architecture-review.md](07-architecture-review.md).
 > claims below are pinned to the 2026-07-02 review. Many items subsequently landed or changed. Docs 17 and 18
 > own the current delivery/UI plan; doc 21 records later implementation chronology; current source/tests remain
 > runtime authority.
->
+
+> **2026-08-14 pointer.** [Doc 41](41-external-works-synergy-2026-08-14.md) re-tests this document's
+> M-/T-series against the August-2026 external cohort (AREX, Skill-SP, Frontis-MA1, EvoLib,
+> PACEvolve): M5 has since shipped (`events/digest.py::auto_char_cap`), T8's mean-of-params merge is
+> verified still current, and the memory items map onto EvoLib-style consolidation + utility scoring.
+
 **TL;DR.** The engineering backbone (event-sourced loop, replay-resume, pluggable
 roles/policies, Strategist, rich live UI) is genuinely strong and most of the 2026-06 roadmap
 *shipped*. The three biggest remaining gaps are not missing features — they are:

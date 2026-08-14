@@ -4,6 +4,22 @@
 `5b7010c7`, about `2b980d0b` (`feat(salvage): re-check a repaired artifact declaration instead of
 salvaging blind`) and [backlog F1e](29-operator-backlog-2026-08-11.md#f1e-re-check-a-repaired-artifact-contract-instead-of-leaving-the-metric-salvaged).
 
+> **Status update (2026-08-14).** Decided and landed, in this doc's own vocabulary. The §2 gate-2
+> fix shipped first (`7e9a9a2`; see the NOTE inside §2 — the four gates are now five). Option C then
+> shipped as exactly the REQUIREMENT §5-C asks for: `metric_salvage.py::recheckable_salvage` admits
+> only `producer == OPERATOR_PRODUCED` (`d9d12cc`, 2026-08-13), and the whole re-check is named by
+> `Settings.metric_salvage_repair` (default `true`). The module's RE-CHECK section states plainly
+> that under today's two pipeline shapes the promotion remains UNREACHABLE and v6 node 3 stays
+> salvaged — the intended answer, matching §4's table. Option A shipped in an adjacent form: the
+> appended `score` stage now derives `needs` (not `expect`) from `eval.metric.subject`
+> (`engine/eval_stages.py::_resolve_stages`, gated on `Settings.metric_subject`); an operator
+> `expect` on `score` still does not exist. Options D and G are NOT built. D remains the recommended
+> close and its parts already ship in the repair loop — `command_eval._run_stages(start_stage=…)`
+> and `evaluate._safe_reuse_start` — so the root implementation is to route the
+> corrected-declaration case into a bounded `next_start` at the stage AFTER the corrected one
+> (under §5-D's three "safe if" clauses) instead of promoting. G still needs the second derived
+> predicate §5-G prices; nothing has split champion-eligibility from breeding.
+
 The owner's two coupled questions:
 
 * may the operator's appended `score` stage carry an operator-declared `expect`?

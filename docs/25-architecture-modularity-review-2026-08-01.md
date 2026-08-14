@@ -97,9 +97,19 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 147 resolved, 37 partially resolved, 2 deferred, 2 open (188 total).** The heading
+**Status totals: 147 resolved, 39 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
+
+> **Status update (2026-08-14, HEAD `d307542`).** A code re-check flipped both remaining OPEN
+> findings. **SR-01** is now **PARTIALLY RESOLVED**: `serve/paid_ledger.py` (with
+> `tests/test_paid_ledger.py`, 17 tests) unified the two event-ledger variants and `routers/boss.py`
+> / `routers/runs.py` are ported; the file-ledger variants stay deliberately separate per that
+> module's docstring, and only `routers/control.py`'s start-record reconciliation remains
+> hand-rolled. **UI-14** is now **PARTIALLY RESOLVED**: `events/authoring_projection.py` +
+> `ui/src/cardBoardModel.js::cardAuthoring` feed the `speculating` lane; `built-awaiting-commit`
+> still has no producer. Running totals: **147 resolved, 39 partially resolved, 2 deferred, 0
+> open.** Evidence is under the two findings' own banners and §6.4.
 
 ### Severity model
 
@@ -4576,7 +4586,23 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 - Bounded caches done right: attention projection cache, concept core/replay LRUs, summary cache, and scope revision caches all have explicit size ceilings, stat-identity invalidation, and documented race handling instead of unbounded dicts.
 - The build_router(srv) convention with documented registration-order constraints (misc.py's catch-all ordering, __init__.py) keeps the app composition explicit and testable.
 
-#### SR-01 · HIGH · inconsistency · effort: large — **OPEN (2026-08-08)**
+#### SR-01 · HIGH · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-14)**
+
+> **Status update (2026-08-14).** The §6.4 target design shipped. `serve/paid_ledger.py`
+> (`tests/test_paid_ledger.py`, 17 tests) now owns the claim→terminal event-ledger protocol —
+> `fold_paid_ledger`/`append_claim`/`record_terminal` over a `PaidLedgerSpec` with an explicit
+> no-default `conflict_policy` (`FIRST_TERMINAL_WINS` for boss `report_refresh`, `FAIL_CLOSED` +
+> `request_digest` binding for the runs concept lens) and the `SERVE_PAID_LEDGER_EVENTS` allow-list
+> asserted at both append sites, exactly as §6.4 required; variants (1) and (2) are ported
+> (`routers/boss.py:35`, `routers/runs.py:61`). Variant (3) was extracted to
+> `serve/scope_report_store.py` + `serve/scope_actions.py`, variant (4) to `serve/trace_clear.py`,
+> and the reset/deletion pair shares `serve/durable_op.py` (SC-06) — all deliberately kept as
+> FILE-ledger protocols, per `paid_ledger.py`'s own docstring (they share the vocabulary, not the
+> storage). The remaining arm is exactly the follow-up §6.4 named: variant (5), `routers/control.py`'s
+> start-record reconciliation (`_reconcile_start`/`_inspect_keyed_start`, still `build_router`
+> closures at control.py:526/589). Closing it at the root means de-closuring those two helpers so
+> the protocol can be stated as a `PaidLedgerSpec` and tested like the other two — its terminals go
+> through the durable record store, so `FAIL_CLOSED` is the fitting policy.
 
 **Five parallel hand-rolled durable paid-work idempotency protocols across routers**
 
@@ -9032,7 +9058,19 @@ missing, because the early-retire path and the unmount teardown each call `clear
 
 UI-12's request-timeout wrappers are a separate finding and remain open.
 
-#### UI-14 · LOW · over-engineering · effort: small — **OPEN (2026-08-08)**
+#### UI-14 · LOW · over-engineering · effort: small — **PARTIALLY RESOLVED (2026-08-14)**
+
+> **Status update (2026-08-14).** Resolved by the projection arm the recommendation asked for, for
+> one of the two lanes. The lane table moved to the pure model `ui/src/cardBoardModel.js`
+> (`CARD_COLUMNS`, :25), and `speculating` is now FED: `events/authoring_projection.py::card_authoring`
+> projects the open `card_build_requested` head(s) into `state.card_authoring`, and
+> `cardBoardModel.js::cardAuthoring` (:151) overlays a `proposed` card with the live
+> `speculating`/`building` phase (measured on runs/rubertlite-dr-unified-v5: a 2,128 s build the fold
+> reported as `proposed` for all but 0.3 s). `built-awaiting-commit` is still dead configuration —
+> `AUTHORING_PHASES` (:149) carries only `speculating`/`building`, so that lane has no producer and
+> stays hidden by `CARD_OPTIONAL_STATUSES`. Closing the residue at the root: either add a
+> `built-awaiting-commit` phase to the authoring projection (a head whose producer attempt finished
+> but whose `node_created` has not landed) or drop that one lane, per the original recommendation.
 
 **Speculative Card kanban lanes acknowledged unreachable by their own comment**
 
@@ -9173,6 +9211,10 @@ The deferred findings are **ES-12** (the proposed shared fold memo is unsafe; a 
 was not justified) and **SE-12** (shrinking the runtime fidelity matrix requires an explicit receipt
 schema/version migration).
 
+> **Status update (2026-08-14, HEAD `d307542`).** SR-01 and UI-14 both moved to PARTIALLY RESOLVED —
+> see §0.3's banner and the two findings' own banners for the evidence. No finding remains OPEN;
+> running totals are **147 resolved, 39 partially resolved, 2 deferred, 0 open**.
+
 ## 6. Architectural resolution proposals
 
 §4's per-finding recommendations are local fixes. This section proposes the **target designs**
@@ -9308,6 +9350,16 @@ affected docs/guide pages, and `docs/infographic/agent-architecture.html` (which
 Card subsystem ~14 times), per the repo's same-change rule.
 
 ### 6.4 A durable paid-work service for `serve/` (SR-01, SR-02, SR-03, SC-06)
+
+> **Status update (2026-08-14).** This design is implemented on `master`, module for module:
+> `serve/paid_ledger.py` (both docstrings state the paid_work/paid_ledger split; boss
+> `report_refresh` and the runs concept lens ported, with the per-protocol conflict policies and the
+> append-site event allow-list this section required — `SERVE_PAID_LEDGER_EVENTS`, asserted at both
+> append sites), `serve/durable_op.py` (SC-06; `tests/test_durable_op_kit.py`),
+> `serve/trace_clear.py`, `serve/scope_actions.py` + `serve/scope_report_store.py`, and the
+> `run_commands.py` split (`serve/control_validation.py`, SC-01). The one named follow-up still
+> outstanding is `control.py`'s start-record reconciliation port (SR-01's fifth variant) — see the
+> SR-01 banner in §4.7.
 
 Five-plus hand-rolled implementations of "claim → do paid/destructive work → terminal receipt →
 generation fence → crash reconciliation" is the layer's biggest bug surface. Target:
@@ -9514,6 +9566,16 @@ Every god-module in §4 regrew *after* a documented split, so structural fixes n
    constructions across 78 test files — CLAUDE.md's own "~100 call sites" is a stale
    undercount) — this is what makes the frozen `Engine(...)` keyword API evolvable at all, and
    it de-risks every §6.2/§6.3 extraction.
+
+> **Status update (2026-08-14).** Item 4 landed: `tests/factories.py::make_engine` exists (the one
+> canonical construction — toy task + its roles + a subprocess sandbox + `GreedyTree`; ~20 test
+> files use it and CLAUDE.md documents it, with migration of old call sites opportunistic as
+> specified). Items 2–3 are practiced but not written down as rules: 8 `CODEX AGENT:` markers
+> remain across 7 files, and finding-flips do land with their fixes, but CLAUDE.md carries no
+> marker-hygiene rule. Item 1 — the size-regression ratchet — is still absent: no test under
+> `tests/` or `ui/test/` counts file or function lines. To close it at the root, land the test
+> exactly as specified here, as its own commit: seed every budget from the line counts at that
+> commit, ratchet down only, cover BOTH trees, and point the failure message at this document.
 
 ### 6.9 Suggested sequencing
 

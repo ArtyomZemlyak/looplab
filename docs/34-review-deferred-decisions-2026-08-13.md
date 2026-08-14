@@ -15,6 +15,13 @@ Nothing below is a bug you can fix without deciding something first. That is the
 
 ## D-01 · The agent-facing node purge has no durable receipt · `tools/machine_runs_tools.py`
 
+> **Status update (2026-08-14).** Unchanged. `_purge_node_snapshot` is still the bare `try/finally`
+> multi-file transaction with the ad-hoc `events.jsonl.bak-del<N>` backup, still reachable from the
+> agent-facing tool provider; the pointer comment is in place (`machine_runs_tools.py:1623`). The
+> recommendation stands: make node purge operator-initiated and route it through the existing
+> deletion transaction (`serve/durable_op.py` + `deletion_transaction.py`), rather than growing a
+> fourth receipt protocol for a caller that has no operator to hand an ambiguous outcome to.
+
 **What it is.** `_purge_node_snapshot` performs an irreversible multi-file transaction — rewrite the
 authoritative `events.jsonl` with renumbered `seq`, replace `spans.jsonl`, delete
 `spans.index.jsonl` and the append journal, `rmtree` node workdirs — inside a bare `try/finally`,
@@ -53,6 +60,17 @@ the agent is allowed to do to the run's own history.
 
 ## D-02 · The trace exporter's per-span filesystem cost · `core/tracing.py`
 
+> **Status update (2026-08-14).** Unchanged.
+> `core/tracing.py::JsonlSpanExporter._export_line_guarded` still runs the full ladder per row
+> (hardened open, torn-tail heal, before/after identity stats, one append receipt per span), and
+> `AsyncJsonlSpanExporter` still drains one row per delegate call — nothing is amortized per batch.
+> Note the pointer comment this document promises "at its site" is NOT present in `core/tracing.py`
+> (D-01/D-03/D-04 all carry theirs). How to close at the root: give the async worker a drain loop
+> that takes the export lock + writer guard once per queue drain, heals once, appends the N prepared
+> rows, and writes ONE receipt binding the whole appended byte range — the identity CAS then holds
+> at flush granularity, which is the amortization choice the paragraph below already names. Measure
+> before/after on the geesefs mount that motivated the numbers here.
+
 **What it is.** Each exported span performs roughly three hardened opens (~12 `stat` calls), two
 `flock`s, a torn-tail heal read and a 4 KiB read-and-parse of the append receipt journal, where the
 previous synchronous exporter did one `open(path, "ab")` and one `write`.
@@ -81,6 +99,11 @@ motivated it.
 
 ## D-03 · `card_trace_view` scans the whole run's spans · `serve/appstate.py`
 
+> **Status update (2026-08-14).** Unchanged. The scan is still whole-run — `serve/appstate.py:613`
+> carries the "KNOWN COST … docs/34 (CARD-TRACE-SCAN)" comment feeding `project_card_trace` — and
+> `events/span_index.py` has no `card_id` or span-name dimension (`_SCHEMA` is 12; `card_id` appears
+> nowhere in the module). The index-schema decision below is still the open one.
+
 **What it is.** The card trace copies the entire run's light span list (a 1 GB run's index is ~220 MB
 of Python dicts) and `project_card_trace` then rescans it once per owned node — ~1M predicate
 evaluations for a card owning 5 nodes on a 200k-span run, on the request thread.
@@ -97,6 +120,13 @@ path, and a decision about what else deserves a dimension before the row grows a
 ---
 
 ## D-04 · `SpanIndex` hashes every source row · `events/span_index.py`
+
+> **Status update (2026-08-14).** Unchanged. `_read_full` still SHA-256s each selected row's FULL
+> bytes and `_scan_light` still retains a 64-char digest per row; `_SCHEMA` is still 12. The pointer
+> comment is in place (`events/span_index.py:694`) and states the same bounded-prefix-plus-length
+> trade this entry does. The corruption-class decision has not been made; when it is, make it as a
+> `_SCHEMA` bump with the chosen preimage rule written at `_read_full`, so a weaker digest can never
+> be mistaken for the full-bytes one by an older index.
 
 **What it is.** `_scan_light` SHA-256s every admitted row and retains a 64-char digest per row in
 memory and in the persisted index; `_read_full` re-hashes each selected row's FULL bytes on the
@@ -116,6 +146,15 @@ explicitly rather than by deleting a hash.
 ---
 
 ## D-05 · The catalogue tripwire keeps drifting · `ui/test/settingsSchemaResource.test.js`
+
+> **Status update (2026-08-14).** Half-taken, and the half taken has not stopped the drift. CI runs
+> the UI suite beside the Python one on every push/PR (`.github/workflows/tests.yml`: the `pytest`
+> job plus a `ui` job running `npm test`), yet the JS literal is still hand-pinned and its own
+> ledger now records a FIFTH (168→175) and a SIXTH (175→176) drift, both dated 2026-08-14, both
+> caught by the Python half first — the contributor-side mechanism named below is intact, because
+> `python -m pytest` is what gets run locally. The remaining root fix is the second option: derive
+> the JS literal from the packaged `settings_ui_schema.json` at test time (or pin ONE shared count
+> both suites read), so there is only one number to move.
 
 **What it is.** The settings-catalogue field count is pinned in two files. It has drifted FOUR times
 (162→163, 165→167, 167→168, and once more mid-review), always in the same direction: the Python half

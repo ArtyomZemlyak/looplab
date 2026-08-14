@@ -184,6 +184,19 @@ concerns, (c) the only genuinely hard piece — atomic id reservation under repl
 > [02 §12](02-architecture.md) carries the same open annotation. Eval dispatch remains genuinely
 > continuous (`Semaphore(max_parallel)`), as §1 describes.
 
+> **Status update (2026-08-14).** Phase 4's missing golden is STILL not added:
+> `tests/test_golden_replay.py` has no parallel arm, and no test runs an engine at `llm_parallel=2`
+> and pins its replay (`tests/test_multi_build.py` covers the `st.buildings` fold handlers from
+> hand-built logs, not a 2-wide run's own log). Cheapest honest construction:
+> `tests/factories.py::make_engine(run_dir, llm_parallel=2, …)` with scripted researcher/developer
+> stubs over the toy task, run to completion, then (a) assert the folded state satisfies id
+> monotonicity and one-terminal-per-node, (b) `fold(store.read_all())` twice and through a second
+> `EventStore` open to pin replay determinism, and (c) run a SECOND engine over a fresh dir with the
+> same scripted roles and assert the two FOLDED states are equal while the logs' byte order is
+> allowed to differ — that last comparison is the property the fan-out actually promises (fold
+> order-tolerance across independent nodes; CLAUDE.md invariant 1's build-fan-out seam), and a
+> checked-in golden LOG would over-pin the deliberately nondeterministic byte order.
+
 Phased so each step ships behind a flag, keeps the default (serial) path byte-identical, and preserves
 every fold invariant. Default OFF → `parallel_build=1` (or `0`=auto by GPU) opts in.
 

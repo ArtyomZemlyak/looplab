@@ -20,6 +20,10 @@ the code at `f458f4af`, with the file/symbol that decided it. A row without one 
 > **§0 SURVIVORS**, immediately below. Rows that closed keep their text and gain a note; rows that the
 > design moved past say what superseded them rather than being deleted (a decision recorded only in a
 > commit message gets undone here).
+> **[Later on 2026-08-14:** survivors **#1 and #2 were CLOSED the same day** by `dcb4c9a`
+> (`_confine_task_file` + the `redact_output_tail` split) — see the dated notes on those two items
+> and the reconciled §1 C2/C3 rows, which are the authoritative record. That leaves **23** items
+> carrying unfinished work, and a new **#19** (claim ratification vs trust flags) was added below.]
 >
 > Thirteen symbol/line citations in this file were found **dead or moved** — they are corrected inline
 > and listed in §0.3. The caveats from 2026-08-04 still apply to everything NOT carrying a
@@ -71,6 +75,11 @@ site that proves it is open.
    control plane is "UNAUTHENTICATED and reachable by any same-origin page" on a shared JupyterHub
    origin (`server.py:479-481`). **Cost:** an unauthenticated same-origin request names an arbitrary
    host file and the server parses and runs it as a task. Highest cost on this list; smallest fix.
+   **[CLOSED later on 2026-08-14 (`dcb4c9a`) — this entry predates the fix that landed the same
+   day.** The `task_file` half shipped: `serve/launch.py:232::_confine_task_file` +
+   `:204::task_file_roots`, containment BEFORE any path-echoing probe (`launch.py:491-492`), driven
+   by `tests/test_launch_preflight.py`. The token half is unchanged by design (a deployment
+   decision, not missing code). The reconciled §1 C3 row is the authoritative record.]
 2. **Output redaction shipped but is OFF by default (P0, S).** `engine/audit.py:269::_redact` →
    `core/redact.py::redact_secrets` is wired at the one durable site
    (`engine/evaluate.py:2445`, `"stdout_tail": self._redact(res.stdout[-500:])`), but
@@ -79,6 +88,14 @@ site that proves it is open.
    UI. Two further `stdout_tail` producers do not go through `_redact` at all
    (`agents/cli_agent.py:349,370`). **Cost:** the event log is the artefact that gets exported and
    shared. Fix is a default flip plus two call sites.
+   **[CLOSED later on 2026-08-14 (`dcb4c9a`) — this entry predates the same-day fix.** The gate was
+   SPLIT rather than flipped: `core/redact.py:208::redact_output_tail` (+ `:197::redact_env_values`)
+   masks known credential shapes and the operator's own secret env values ALWAYS, funnelled through
+   `engine/audit.py:288-289::Engine._redact` (the cited `:269` drifted); `redact_output`
+   (`core/config.py:926`) now gates only the false-positive-prone entropy pass. Driven at the
+   default config by `tests/test_redact.py`. Residual, verified 2026-08-14: the two
+   `agents/cli_agent.py:349,370` `stdout_tail` producers still bypass `_redact` (they feed the
+   in-memory `AgentRun` telemetry). The reconciled §1 C2 row is the authoritative record.]
 3. ~~**The hardened exploit suite re-flags the grader import the detector just sanctioned (P1, S).**~~
    `engine/evaluate.py:807-815` correctly passes `grader_import_ok=True` to `detect_reward_hacks`
    when the task ships `grader.py` as an asset — and then `evaluate.py:819` runs
@@ -174,6 +191,18 @@ site that proves it is open.
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
     ship (`engine/widths.py::EVAL_WIDTH_MAX` enforced at `orchestrator.py:2966`;
     `engine/proposal_cues.py:425::per_experiment_gpu_budget`).
+19. **[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**
+    `trust/memo_verify.py:209::finalize_verified_evidence` re-checks a cited node's LIFECYCLE only
+    (exists, not tombstoned, not aborted, terminal status, stable attempt) — grep for
+    `feasible|metric_salvaged|flagged` across `memo_verify.py` returns nothing — so a D8 research
+    claim can ratify `supported` on a salvaged or reward-hacked node's number into the cross-run
+    `research_claims.jsonl` (`engine/claims.py`), where a later run retrieves it as evidence.
+    CLAUDE.md's engine map records this as "STILL OPEN". **Cost:** the same leak
+    `engine/memory.py::unreliable_metric_ids` closed for lessons/skills on 2026-08-13, one store
+    over. **Fix:** reuse that exact join — `engine/metric_salvage.py::metric_unmeasured` ∪
+    `events/replay.py::flagged_node_ids` — and refuse/downgrade a `supported` verdict whose cited
+    node is in the set, stating the withheld reason in the claim row. Ranked here (not top-5) only
+    because D8 claims are advisory retrieval input, not selection machinery.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
@@ -405,6 +434,9 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   `stdout_tail` producers never reach `_redact` (`agents/cli_agent.py:349,370`). The original
   citation `orchestrator.py:808` is dead; the site is `evaluate.py:2445`. Note redaction lives in
   `core/redact.py`, not in `trust/`.]
+  **[Superseded later on 2026-08-14 — CLOSED by `dcb4c9a` (the `redact_output_tail` split); see the
+  reconciled ✅ C2 row above and the note on §0.1 item 2. Only the `cli_agent.py:349,370` residual
+  survives.]
 - 🟡 **P0 · C3 auth token on mutating `/api/*` + `task_file` allow-list (S).** CORS+SPA are fixed, but
   endpoints are still **unauthenticated** and `task_file` from the request body is executed without an
   allow-list. Add a shared-secret token + path validation.
@@ -414,6 +446,9 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   is **opt-in** — unset means unauthenticated, which `server.py:479-481` warns about by name on a
   shared JupyterHub origin. The `task_file` allow-list is **STILL OPEN**: `serve/launch.py:422-426`
   resolves any path with only an 8 MiB cap (`_require_task_file_size`, `:210`) and no containment.]
+  **[Superseded later on 2026-08-14 — the `task_file` half CLOSED by `dcb4c9a`
+  (`serve/launch.py:232::_confine_task_file`); see the reconciled C3 row above and the note on §0.1
+  item 1.]
 - 🟡 **P1 · C4 finish (M).** Idempotent fold ✅; still TODO: **read/enforce `Event.v`** (a v2 log read
   by v1 silently mis-folds) + **fail-loud append lock** (still `except OSError: pass` →
   `events/eventstore.py:38`) + a real multi-process append-race test.
@@ -595,6 +630,17 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   there is no mismatch left to flag; the residual heuristic is `perfect_metric`
   (`reward_hack.py:317-320`). Sidestepped by design, not missing. **Its live defect is the §6
   hardened-suite residual row (SURVIVOR #3).**]
+- ⬜ **P1 · B7 claim ratification vs trust flags (S). [added 2026-08-14]** D8 memo-claim
+  verification checks a cited node's lifecycle but not its feasibility or trust flags:
+  `trust/memo_verify.py:209::finalize_verified_evidence` rejects tombstoned/aborted/non-terminal
+  nodes yet never consults `feasible`, `metric_salvaged` or `flagged_node_ids` (0 grep hits in the
+  module), so a `supported` verdict can be ratified on a salvaged or reward-hacked node's number
+  into the cross-run `research_claims.jsonl` — the exact leak `engine/memory.py::
+  unreliable_metric_ids` closed for lessons/skill cards on 2026-08-13, one evidence store over
+  (CLAUDE.md's engine map calls this "STILL OPEN"). Fix: apply the same join
+  (`engine/metric_salvage.py::metric_unmeasured` ∪ `events/replay.py::flagged_node_ids`) inside
+  `finalize_verified_evidence` and downgrade/refuse `supported` with a stated reason. See §0.1
+  item 19.
 - *(B1/B2/B3/B4 tracked in §1 Foundation.)*
 
 ### Theme C · Reliable coding Developer (SWE-bench stack)
@@ -858,8 +904,9 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 > **[2026-08-14 — SUPERSEDED by §0.1.** Every phase below is now mostly ✅, so following this order
 > sends the next person to work that is already done. Kept, not deleted, because it records the
 > 2026-06-24 sequencing DECISION and its rationale; **§0.1 is the live ordering.** For the record,
-> what survives of each phase: Phase 1 → `C2 output redaction` (default is off), `C3` (the
-> `task_file` half), `C4` (the race test), `C5 read-model`, `H2` (the "as default" half); Phase 2 →
+> what survives of each phase: Phase 1 → ~~`C2 output redaction` (default is off), `C3` (the
+> `task_file` half)~~ [both closed later on 2026-08-14 by `dcb4c9a` — see §1], `C4` (the race
+> test), `C5 read-model`, `H2` (the "as default" half); Phase 2 →
 > `C5 agentless Developer`; Phase 3 → `I1`'s CV gate, `I2`'s three named adapters, `F2`/`F6`,
 > `G3`'s distributed half. `B1`, `mlebench grader`, `A0a/b`, `A6`, `A1`, `C2 best-of-N`, `A0c/d/e`,
 > `B6`, `D1` and `E4` all closed.]

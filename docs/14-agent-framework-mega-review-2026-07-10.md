@@ -5,6 +5,28 @@
 > architecture ledger in doc 25 decide present implementation status. The current Deep Research
 > shipped/proposed split is maintained in [doc 28](28-deep-research-sota-roadmap-2026-08-10.md).
 
+> **Status update (2026-08-14) — what of this review is closed in today's tree.** Re-verified
+> against master `d307542`:
+>
+> - **All seven §1 signal routes remain shipped and registry-enforced.** The registry
+>   `engine/signal_delivery.py::SIGNALS` (driven by `tests/test_signal_delivery.py`) now carries
+>   EIGHT routes — the original seven plus a `watchdog_signals` route for the later
+>   train-monitor/ASHA diagnostics. In particular, "foresight never sees its own track record" is no
+>   longer true: `search/foresight.py:261::foresight_scoreboard` folds
+>   `RunState.foresight_selected` into the world model's `_memory_brief` (`closes_loop=True` on the
+>   route), crash-counted-as-miss per §8's review pass.
+> - **§4.1 per-role temperature — SHIPPED** (was "deliberately NOT in this change"):
+>   `core/config.py:1380-1382::researcher_temperature` / `developer_temperature` /
+>   `strategist_temperature`, applied per stage through the role→field map at
+>   `core/llm.py:1946-1952` alongside the per-role model/base_url fields, plus per-profile
+>   `temperature` in `llm_profiles` (`core/config.py:2020-2022`).
+> - **§2.2 trust/policy split-brain — CLOSED** (it was explicitly deferred in §9):
+>   `core/models.py:1588::breedable_nodes` bars hard-flagged nodes from breeding/confirm under
+>   `trust_gate=gate` (its docstring cites "T2, §2.2"); under `block` they are already infeasible.
+>   The surrogate-training exclusion from §9 batch 2 still holds.
+> - Still open from this review: none of the P0/P1 correctness items — §9/§10 closed them; the
+>   remaining §6 P2 hygiene items are tracked in `docs/BACKLOG.md`, not here.
+
 **Scope.** A deep, agent-focused review of the whole engine, organized around the three axes the
 review was commissioned for: **synergy** between the agents, **corner-case coverage**, and
 **agentic best practices**. Six parallel reviewers each read one subsystem end to end —

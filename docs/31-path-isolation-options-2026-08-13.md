@@ -4,6 +4,14 @@
 this box on 2026-08-13 unless marked otherwise; every mechanism claim was either read out of the code
 or driven in a bounded experiment in the scratchpad. Where I could not verify something I say so.
 
+> **Status update (2026-08-14).** The tree has moved: much of this landed, mostly in the shapes
+> doc 35 and doc 38 argued for rather than the ones priced here. Each option below now carries its
+> own dated banner; the short version is O7 shipped (derived from the metric SUBJECT), O2 shipped
+> as the subject binding (`runtime/metric_subject.py`), O3's mutation half and §7b shipped
+> (`runtime/read_fence.py::MUTATION_EVENTS`), the kernel boundary shipped as opt-in Landlock
+> (`runtime/landlock.py`, OFF by default) instead of O4/O5, and O1 shipped at the AUTHORING
+> boundary rather than at materialize (doc 29 §F1c).
+
 > Note on the file number: the two sibling notes written the same day landed as `32-` and `33-`, and
 > this file keeps `31-`. All three are indexed in `00-INDEX.md` and listed in `mkdocs.yml`'s nav —
 > `validation.nav.omitted_files: info` means an unlisted page would NOT fail `mkdocs build --strict`,
@@ -283,6 +291,18 @@ it is what makes §5.4 interesting.
 
 ### 5.1 · O1 — refuse the absolute source path where it is authored *and* where it lands
 
+> **Status update (2026-08-14).** Neither of this option's two placements shipped; what did land
+> (`7f5b9a3`, 2026-08-14) is a sharper AUTHORING-time rule with the same recall and better
+> precision: `adapters/repo_write_tools.py::manifest_path_collisions` REFUSES a
+> `write_file`/`edit_file`/`declare_stages` whose absolute source path collides component-wise with
+> the node's own declared `expect.files`, and `adapters/repo_task.py::eval_source_tree_command_paths`
+> warns at submit time. Measured over all 2,577 working sets in `runs/`: 3 nodes refused, all three
+> the known incidents, zero false positives — a blanket ban would have killed 5 legitimate nodes
+> (doc 29 §F1c has the table). The materialize-time backstop below stays OPEN for the
+> seeded-and-never-rewritten case; to close it at the root, run the same `manifest_path_collisions`
+> over the seeded set in `engine/workspace.py::seed_workspace` after `_write_node_files`, attaching
+> a violation to the node rather than failing it.
+
 **What it establishes.** That a node's working set contains no absolute path into an editable source
 root, checked before the eval starts. Two places, and both are worth having:
 
@@ -339,6 +359,19 @@ subsystem, no event type strictly required (though one is worth it for the UI).
 
 ### 5.2 · O2 — bind the reported metric to the artifact that was actually read
 
+> **Status update (2026-08-14).** Shipped, re-specified. Doc 35 §3c showed "the artifact the scorer
+> actually read" is unrecordable from an audit hook a native reader bypasses, so what landed
+> (`e767a12`, 2026-08-13) binds the metric to its declared SUBJECT instead:
+> `runtime/metric_subject.py::bind`, called at score-stage start through
+> `runtime/command_eval.py::bind_metric_subject` (`file_identity` + sha256, full under 256 MiB and
+> sampled above with the mode recorded), landing on `node_evaluated.metric_provenance`.
+> `Settings.metric_subject` is `off`/`audit` (default)/`require`; UNBOUND under `require` carries
+> the existing `metric_salvaged` violation — exactly step 3's enforcement shape. Steps 1 and 3's
+> read-assertion (the +2.2 % open recorder) were NOT built; the read-set half is instead the kernel
+> allow-list (`runtime/read_allowlist.py` + `runtime/landlock.py`, opt-in, OFF). "The scorer read
+> the subject" therefore remains unproven; the root close is `landlock="enforce"` +
+> `metric_subject="require"` once the GPU validation named in `Settings.landlock`'s comment exists.
+
 This is the option that answers the owner's point 4, and it is the only one that is *sound under a
 successful read*: it does not care whether the read was blocked, it cares whether the number is about
 the node's own model.
@@ -391,6 +424,14 @@ one that makes the *result* honest rather than the *filesystem access* honest.
 
 ### 5.3 · O3 — harden the fence in place
 
+> **Status update (2026-08-14).** The audit-event half shipped 2026-08-13 (`44c52fc` + `ee4d2cd`):
+> `runtime/read_fence.py::MUTATION_EVENTS` watches twelve mutation events, and `os.chdir` plus the
+> mutation path now resolve symlinks and descriptors (memoized `realpath` per directory,
+> `/proc/self/fd`) — closing chdir-through-symlink and mutation-under-a-symlinked-dir. Measured cost
+> is +34 ns/open, not this table's +3.9 %: the shipped order tests the `open` fast path first
+> (doc 38 §2). The read-through-symlinked-FILE and hardlink rows stay open at this layer by design;
+> the kernel rung (`runtime/landlock.py`, opt-in) is what closes them.
+
 Four variants, all measured, all one-file changes to the generated template:
 
 | variant | ns/open | Δ | closes | leaves open |
@@ -422,6 +463,10 @@ all for the intra-workdir majority of incidents.
 ---
 
 ### 5.4 · O4 — a libc-level fence (`LD_PRELOAD`)
+
+> **Status update (2026-08-14).** Declined, as doc 35 predicted: Landlock covers the same
+> native-reader/child/symlink set inside the kernel at ~0 steady-state cost with no build artifact
+> (doc 38 §3), and it shipped as `runtime/landlock.py`. This option is dead weight.
 
 I compiled a ~90-line shim (`gcc 13.3` is on the box) interposing `open`/`open64`/`openat`/`fopen`, and
 drove the same probes through it.
@@ -480,6 +525,14 @@ testing. Not a rewrite of the sandbox tier, but the first non-pure-Python thing 
 
 ### 5.5 · O5 — real filesystem isolation (namespaces / a container tier) — **design only**
 
+> **Status update (2026-08-14).** O5b is measured DEAD on this box — doc 35 §4a: the containerd
+> AppArmor profile denies `mount(2)` inside any namespace, and no docker/bwrap/overlay exists here.
+> The sound kernel boundary landed as Landlock instead: `runtime/landlock.py` (ABI-2 allow-list,
+> inherited across exec), derived from the operator's declarations by `runtime/read_allowlist.py`
+> via `engine/resources.py::_landlock_allow`, applied outermost in `runtime/sandbox.py::run_argv`,
+> with `Settings.landlock = "off"` (opt-in). `looplab landlock-check <run_dir>` is the validation
+> path; the flip-to-default evidence bar is written into the Settings field's own comment.
+
 **I executed nothing here.** No namespace was entered, no bind mount was performed. What follows is
 design, and its feasibility on this box is UNVERIFIED except where noted.
 
@@ -526,6 +579,8 @@ that isolation does not touch.
 
 ### 5.6 · O6 — deterministic relocation: rewrite absolute source paths at seed time
 
+> **Status update (2026-08-14).** Not built, per this section's own recommendation.
+
 **What it establishes.** That every absolute path into an editable source root in the node's seeded
 working set is rewritten to the corresponding path inside the node's workdir, so it resolves to the
 node's own copy. `engine/workspace.py::sandbox_cwd` already does exactly this for the eval `cwd` — the
@@ -550,6 +605,13 @@ O1's refusal message. Not as a mutation.
 ---
 
 ### 5.7 · O7 — give the score stage a `needs` (the narrowest real fix)
+
+> **Status update (2026-08-14).** Shipped 2026-08-13, derived rather than declared twice:
+> `engine/eval_stages.py::_resolve_stages` now gives the appended `score` stage
+> `needs = eval.metric.subject` whenever `metric_subject != "off"` — the subject IS what the scorer
+> reads, so a second declaration is how the two would come to disagree. Doc 35 §3a's correction
+> stands and is restated at the wire site: `needs` is a PRESENCE check, buys latency not coverage,
+> and measurably passes the v6 node-4 incident.
 
 Per §4a, `_resolve_stages` builds the appended protected `score` stage with `{name, command, timeout}`
 and nothing else, and `"score"` is reserved so the Developer cannot declare it.
@@ -578,6 +640,10 @@ machinery that shipped yesterday. It should probably ship regardless of what els
 ---
 
 ### 5.8 · O8 — record-and-adjudicate-after (the cheap tier under O2)
+
+> **Status update (2026-08-14).** Not built. O2 was re-specified into the subject binding (see its
+> banner), which needs no per-open recorder, and the symlink hole this closed off the hot path is
+> the kernel rung's job now.
 
 If O2 is too much for now, its first half is nearly free and is a strict improvement over `warn`:
 record every non-`sys.prefix` `open` **dirname** during each stage into a per-run ledger (+2.2 %
@@ -642,6 +708,11 @@ node process, because they raise audit events the hook does not watch. Adding th
 hook is the +3.9 % row in §5.3 and is close to free. Given that the source root is
 `/home/jovyan/data/vectorizer-unified` — an operator's working tree with a human's July checkpoint in
 it — this is arguably more urgent than any of the read-side options, and it is a five-line change.
+
+> **Status update (2026-08-14).** Closed 2026-08-13: the twelve-event `MUTATION_EVENTS` registry in
+> `runtime/read_fence.py` refuses mutation of the fenced tree, `shutil.rmtree(<the source root>)`
+> included. Doc 38 §1b/§2 is the full audit and the price (+34 ns/open on the read hot path,
+> +580 ns per legal create/remove pair in the node's own workdir).
 
 ---
 

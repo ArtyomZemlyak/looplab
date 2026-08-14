@@ -4,6 +4,13 @@
 in this same change (`looplab/runtime/read_fence.py`, `tests/test_read_fence.py`). The native-reader
 half is a recommendation with a price, and nothing of it is implemented.
 
+> **Status update (2026-08-14).** The native-reader half is no longer unimplemented: Landlock landed
+> 2026-08-13/14 (`de8a6ef` the module, `3306ef7` the wiring, `0838253` an env-name fix) as
+> `runtime/landlock.py` plus the mount-derived allow-list `runtime/read_allowlist.py`, applied at
+> `run_argv` exactly as §3 recommends — and it ships OPT-IN, `Settings.landlock = "off"`. §3's own
+> banner has the item-by-item ledger; §3 item 4 (geesefs / one real GPU eval) and item 2's
+> engine-side `EACCES` translation are the two pieces still open.
+
 Every verdict below was **measured on this box, on 2026-08-13, against the REAL generated fence** —
 `read_fence.render(...)` written to a directory placed first on a child's `PYTHONPATH`, exactly as
 `runtime/sandbox.py::run_argv` does it — over a synthetic editable source root in the session
@@ -280,6 +287,26 @@ costs `realpath` on every open, ~+190 % here and far worse on geesefs.
 
 ### Recommendation: Landlock ABI 2, applied at `run_argv`, ALONGSIDE the audit hook
 
+> **Status update (2026-08-14).** Implemented, opt-in, OFF (`Settings.landlock`, `off`/`enforce`;
+> `runtime/landlock.py`, wired through `engine/resources.py::_landlock_allow` →
+> `runtime/sandbox.py::run_argv`). The five priced items, one by one: **(1)** the allow-list
+> inversion was resolved the mount-derived way — `runtime/read_allowlist.py` grants the operator's
+> declared surfaces (workdir, run dir, mounts, interpreter, model cache, machine tiers) and never
+> walks the complement; an absent machine tier is dropped at derivation, an absent DECLARED mount is
+> kept so the launcher refuses it by name. **(2)** the refusal still degrades to `EACCES`, and the
+> engine-side translation into the fence's sentence is NOT built; the root close is at the repair
+> boundary — when the eval ran under `enforce` and a stage fails with `EACCES`/`FileNotFoundError`
+> naming a path outside the derived allow-list, rewrite the failure text handed to triage with the
+> fence's own message before the Developer sees it (`engine/evaluate.py`, where `res.stderr` feeds
+> `_triage_crash`). **(3)** unchanged — ABI 2, metadata unmediated, the audit hook keeps
+> `ftruncate`. **(4)** STILL THE LARGEST UNKNOWN and the reason for `off`: no ruleset has been run
+> through a real GPU eval or geesefs. `looplab landlock-check <run_dir>` (`cli/inspect_cmds.py`) is
+> the shipped procedure — zero skipped rules, then ONE real train+score under
+> `LOOPLAB_LANDLOCK=enforce`, then flip the default; the evidence bar is written into
+> `Settings.landlock`'s comment. **(5)** as recommended: applied outermost in `run_argv` as a
+> LAUNCHER (not a `preexec_fn`), Docker tiers skipped, with an ABI probe and a clean hook-only
+> fallback (`abi_version`/`unavailable_reason`).
+
 It is the only mechanism here that is a real kernel boundary **and** permitted **and** cheap. Applied
 to a scratch source directory it produced, verified by running it:
 
@@ -352,6 +379,11 @@ node 4 incident actually was.
 ---
 
 ## 4. What was deliberately NOT done
+
+> **Status update (2026-08-14).** The second bullet is superseded: the landlock implementation now
+> exists (see the banner in §3 — opt-in, OFF, with the geesefs/GPU validation and the `EACCES`
+> translation still open). The other bullets stand as written; the read-side symlink and hardlink
+> residuals are closed only for a run that opts into `landlock="enforce"`.
 
 * **No library allow-list.** Explicitly refused, per the constraint, and §1e says why it could never
   have worked: `torch.load` is covered and `safetensors.load_file` is not, for reasons internal to
