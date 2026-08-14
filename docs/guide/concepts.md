@@ -388,6 +388,21 @@ appending an event, or starting work. A valid delayed A request first arriving i
 `409 run_generation_changed` with zero effect, while a same-key A recovery still observes its old
 record and never reapplies it.
 
+A whole-run deletion moves the run into a quarantine directory named for its own operation before
+anything is purged, and on the FUSE/S3 mounts runs usually live on that "move" is a per-object walk
+rather than one rename. A file created after the walk's scan — CPython's `*.pyc.<n>` bytecode temp,
+`tempfile`'s `.tmp*`, a checkpoint a killed process never renamed into place — is simply left in the
+source, and the retry then finds both the run and its quarantine. **The retry finishes the move**: it
+carries each remaining entry into that same quarantine, never deleting anything and never writing
+over a name the quarantine already holds, and removes the emptied directories with `rmdir` alone —
+so an entry that arrives mid-walk becomes a refusal rather than a deletion nobody authorized. A name
+the quarantine already holds is proof the entry is *not* residue of that move, and it still refuses:
+a directory recreated at the run's name with content of its own is never absorbed. What that refusal
+now reports is `retryable: false` plus the exact blocking paths, because nothing in the server will
+ever touch them and a retry that cannot progress must not ask to be pressed again. The receipt phase
+stays `quarantining`; `quarantine_ambiguous` remains the one absorbing off-index state and is not
+reused for this.
+
 Assistant tool approval is a separate server-owned safety boundary. A central action registry
 classifies each concrete tool call as `READ`, `REVERSIBLE`, `CONSEQUENTIAL`, `HIGH`, or `UNKNOWN`;
 missing/unregistered identities fail closed as `UNKNOWN`. Plan denies all mutation and does not expose

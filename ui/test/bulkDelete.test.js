@@ -87,9 +87,15 @@ test('a clean batch is a plain confirmation, and blocked runs are still disclose
   // `retryIdentity` rides beside `retryRunId` on every branch that carries a handle, and is EMPTY
   // here for the same reason the handle is: nothing needs finishing. Both are always present so a
   // consumer reads one shape — the button is gated on the handle, never on the identity's presence.
+  //
+  // And it NAMES the runs. This sentence also travels outside the dialog, where "2 runs deleted"
+  // and "which two" are different answers and only one of them tells the operator what to do next.
   assert.deepEqual(bulkOutcomeNotice({ total: 2, done: ['a', 'b'], blocked: [], stoppedAt: null }),
     { kind: 'status', retryRunId: '', retryIdentity: { run_uid: '', memory_dir: '' },
-      text: '2 runs permanently deleted.' })
+      text: '2 runs permanently deleted: “a”, “b”.' })
+  assert.match(bulkOutcomeNotice({
+    total: 7, done: ['a', 'b', 'c', 'd', 'e', 'f', 'g'], blocked: [], stoppedAt: null,
+  }).text, /“a”, “b”, “c”, “d”, “e” and 2 more\./, 'naming is bounded, never a wall of ids')
   const withBlocked = bulkOutcomeNotice({
     total: 2, done: ['a', 'b'], blocked: [{ runId: 'x' }], stoppedAt: null })
   assert.match(withBlocked.text, /1 selected run could not be deleted/)
@@ -175,4 +181,95 @@ test('the batch reuses the single-run transaction rather than a second write pat
   assert.match(body, /createIdempotencyKey\(\)/)
   assert.ok(!/submitRunDeletion\(/.test(body),
     'the batch must not call the API directly — that path skips the recovery record')
+})
+
+// -----------------------------------------------------------------------------------------------
+// "Nothing was deleted" about a batch that deleted something.
+//
+// THE INCIDENT (2026-08-13). Two runs selected. `live-0806-features` was deleted — its receipt read
+// `phase: succeeded`, `status: succeeded`, and its directory was gone. The batch said:
+//
+//   "Nothing was deleted. “live-0806-features” stopped the batch: the deletion did not complete."
+//
+// `runDeletionRequest` computed a verdict and never returned it. The batch — its only reader — saw
+// `undefined` for every run, so `verdict?.outcome === 'deleted'` was never true, no run entered
+// `done`, every run took the stop branch, and `verdict?.reason || 'the deletion did not complete'`
+// wrote that sentence. A destructive operation that under-reports what it did is worse than one
+// that fails loudly: the operator's next move is decided by it.
+// -----------------------------------------------------------------------------------------------
+
+test('the batch RETURNS its verdict, which is the only thing that made `done` reachable', () => {
+  const source = readFileSync(new URL('../src/RunList.jsx', import.meta.url), 'utf8')
+  const at = source.indexOf('const runDeletionRequest')
+  assert.ok(at > 0, 'the single-run transaction is gone')
+  const body = source.slice(at, source.indexOf('const confirmRunDeletion'))
+  // Anchored to a whole line: a comment carrying the same words starts with `//` and cannot match.
+  assert.match(body, /^\s*return verdict$/m,
+    'without this the batch sees undefined for a run the server deleted')
+  // ...and the verdict really is what the batch keys on, so the two halves cannot drift apart.
+  const batch = source.slice(source.indexOf('const runBulkDeletion'),
+    source.indexOf('const closeBulkDelete'))
+  assert.match(batch, /verdict\?\.outcome === 'deleted'/)
+  assert.match(batch, /state\.done\.push\(target\.runId\)/)
+})
+
+test('a stop after a success reports BOTH facts, because they are different facts', () => {
+  // The branch the missing return made unreachable: `done` was empty for every batch, so every stop
+  // — including one that followed a completed deletion — printed "Nothing was deleted."
+  const notice = bulkOutcomeNotice({
+    total: 2, done: ['live-0806-features'], blocked: [{ runId: 'rubertlite-dr-unified-v5' }],
+    stoppedAt: { runId: 'run-b', outcome: 'blocked', reason: 'its storage must be resolved by hand' },
+  })
+  assert.match(notice.text, /^1 run deleted \(“live-0806-features”\)/)
+  assert.match(notice.text, /then the batch stopped at “run-b”/)
+  assert.ok(!/Nothing was deleted/.test(notice.text))
+  assert.match(notice.text, /1 selected run could not be deleted/)
+})
+
+test('"stopped" and "nothing was deleted" are separated by EVIDENCE, not by tone', () => {
+  // `unknown` is what the transaction returns when the receipt said `succeeded` and the tab could
+  // not finish reading the refreshed list, or could not clear the recovery record. Claiming nothing
+  // was deleted there is a statement about the filesystem that this branch cannot support.
+  const settled = bulkOutcomeNotice({
+    total: 2, done: [], blocked: [],
+    stoppedAt: { runId: 'r1', outcome: 'rejected', reason: 'this run is still active' },
+  })
+  assert.match(settled.text, /^Nothing was deleted\./)
+  assert.ok(!/outcome is not established/.test(settled.text))
+
+  const unsettled = bulkOutcomeNotice({
+    total: 2, done: [], blocked: [],
+    stoppedAt: { runId: 'r1', outcome: 'unknown', reason: 'the refreshed run list could not be read' },
+  })
+  assert.match(unsettled.text, /^No deletion is confirmed\./)
+  assert.match(unsettled.text, /check that run before assuming it still exists/)
+  assert.ok(!/Nothing was deleted/.test(unsettled.text))
+})
+
+test('an unestablished stop is disclosed even when other runs DID go', () => {
+  const notice = bulkOutcomeNotice({
+    total: 3, done: ['a'], blocked: [],
+    stoppedAt: { runId: 'b', outcome: 'unknown', reason: 'the outcome is not confirmed' },
+  })
+  assert.match(notice.text, /^1 run deleted \(“a”\), then the batch stopped at “b”/)
+  assert.match(notice.text, /Its own outcome is not established/)
+  assert.match(notice.text, /remaining 1 run were not touched|remaining 1 run was not touched/)
+})
+
+test('a stop the server says is NOT retryable does not get polled like a slow one', () => {
+  // The server answers a wedged deletion with `retryable: false` — nothing in its own process will
+  // ever touch what stands in the way. Treating that as "still working" is a progress bar over a
+  // state machine that has stopped, so the transaction gives it its own verdict and the batch's
+  // pending budget never sees it.
+  const source = readFileSync(new URL('../src/RunList.jsx', import.meta.url), 'utf8')
+  const finish = source.slice(source.indexOf('const finishRunDeletionReceipt'),
+    source.indexOf('const runDeletionRequest'))
+  assert.match(finish, /receipt\.retryable === false/)
+  assert.match(finish, /outcome: 'blocked'/)
+  const batch = source.slice(source.indexOf('const runBulkDeletion'),
+    source.indexOf('const closeBulkDelete'))
+  assert.match(batch, /verdict\?\.outcome === 'pending'\s*\n?\s*&& attempt < BULK_DELETION_PENDING_POLLS/,
+    'only a genuinely pending verdict may be polled')
+  // Only an explicit `false` means it: an older server that sends no flag keeps retrying.
+  assert.match(source, /value\.retryable === false \? false : true/)
 })

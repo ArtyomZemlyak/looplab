@@ -179,6 +179,150 @@ def _pending(receipt: dict[str, Any], code: str, message: str) -> dict[str, Any]
         remediation="Retry or check only this exact deletion operation.")
 
 
+def _wedged(receipt: dict[str, Any], code: str, message: str, *,
+            remediation: str, **extra: Any) -> dict[str, Any]:
+    """The same unfinished operation, reported as something a RETRY cannot move.
+
+    `_pending`'s `retryable: True` is a promise: press it again and this operation can make progress.
+    Every rung above it can honestly make that promise — a contended lock frees, a slow rename becomes
+    visible, a busy cost ledger settles. One rung could not, and said it anyway: a fenced source that
+    is neither empty nor absorbable answers `delete_quarantine_conflict` on every attempt for exactly
+    the same reason, because nothing in this process ever touches the paths that block it. That is a
+    permanently owned run whose only exit is a person editing the filesystem — and `retryable: true`
+    is what kept the operator pressing instead of being told so.
+
+    The receipt PHASE does not move. `quarantining` is where the operation genuinely is, and the two
+    states that leave the monotonic index (`quarantine_ambiguous`, `superseded`) are absorbing and
+    mean something else entirely; a third absorbing state whose real content is "a human must look"
+    would be a second spelling of the first. What changes is only what the ANSWER claims, plus the
+    evidence that makes the manual step checkable: `blocking_entries` names the exact paths, so the
+    operator resolves the ones they can account for rather than deleting a fenced directory blind.
+    """
+    return deletion_result(
+        receipt, code=code, message=message, retryable=False, remediation=remediation, **extra)
+
+
+_RESIDUE_REPORT_CAP = 12
+
+
+def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
+    """FINISH the quarantine move for whatever the directory rename left behind, moving nothing out
+    of this operation's own custody and deleting nothing at all.
+
+    A directory rename is atomic on a local filesystem, so a source that survives it should be empty.
+    On the geesefs/S3 mount every run here lives on it is not one rename but a per-object walk, and a
+    file created between the walk's scan and its end is simply missed. Observed on
+    `rubertlite-dr-unified-v5`: 2.7 GB moved, and SIX files stayed behind — five `*.pyc.<n>` (CPython's
+    own temp name for a bytecode write) and one 92 MB `.tmp*` (`tempfile`'s), every one of them a
+    partial atomic write left by a process killed mid-flight.
+
+    `_purge_recreated_writer_shell` cannot help: those are not an empty writer shell, and it is right
+    to refuse to remove them. Re-issuing the DIRECTORY move cannot help either, and that is not a
+    limitation to route around — `durable_no_replace_rename` must never replace an existing
+    destination, and the destination is this operation's own 2.7 GB. So the only shape that makes the
+    move idempotent is a per-entry one.
+
+    What makes this safe is what it is NOT allowed to do:
+
+    * it never `unlink`s and never `rmtree`s. Files are RENAMED into the quarantine — the same
+      container the rest of the run already sits in, under the same operation id — and directories are
+      removed with `rmdir` alone, so an entry that appears mid-walk turns into an ENOTEMPTY refusal
+      instead of a deletion nobody authorized;
+    * it never REPLACES. A destination name that already exists inside the quarantine is proof the
+      entry is not residue of this move (the move would have carried it), so the whole absorption
+      refuses and names it. This is what keeps the existing refusal's meaning intact: a directory
+      recreated at the run's name with real content of its own collides on the first file it shares
+      and never becomes bytes this operation purges;
+    * it never follows a link and never moves a non-regular file. Both are refusals, named.
+
+    A top-level `engine.lock` is deliberately left where it is: a recreated writer shell holds one,
+    the quarantine already has its own, and proving nobody owns it is `_purge_recreated_writer_shell`'s
+    job — so the caller runs that rung again afterwards rather than this one absorbing a lock file
+    into a quarantine whose purge must acquire exactly that name.
+
+    Returns `[]` when the fenced source is gone; otherwise the bounded list of reasons it is not.
+    """
+    # Both ends re-checked HERE, not inherited. `_strict_existing_run` runs only on a fresh preflight,
+    # and `_purge_recreated_writer_shell` answers a plain False for a source that is a link as well as
+    # for one holding real files — so without this a reparse point at the run's name would be
+    # `scandir`ed THROUGH and somebody else's directory emptied into a container about to be purged.
+    for path, name in ((rd, "the fenced run directory"), (quarantine, "the deletion quarantine")):
+        try:
+            info = path.lstat()
+            junction_fn = getattr(path, "is_junction", None)
+            if (is_reparse(info) or bool(callable(junction_fn) and junction_fn())
+                    or not stat.S_ISDIR(info.st_mode)
+                    or path.resolve(strict=True) != path.resolve(strict=False)):
+                return [f"{name} is not a canonical service directory"]
+        except OSError as exc:
+            return [f"{name} cannot be inspected ({exc})"]
+    blocked: list[str] = []
+    emptied: list[Path] = []
+    left_lock = False
+    pending: list[Path] = [Path(".")]
+    while pending and len(blocked) < _RESIDUE_REPORT_CAP:
+        relative = pending.pop()
+        source_dir = rd if relative == Path(".") else rd / relative
+        try:
+            with os.scandir(source_dir) as entries:
+                children = list(entries)
+        except OSError as exc:
+            blocked.append(f"{relative.as_posix()}: cannot be inspected ({exc})")
+            continue
+        for entry in children:
+            child = Path(entry.name) if relative == Path(".") else relative / entry.name
+            try:
+                info = os.lstat(entry.path)
+            except OSError as exc:
+                blocked.append(f"{child.as_posix()}: cannot be inspected ({exc})")
+                continue
+            if is_reparse(info) or stat.S_ISLNK(info.st_mode):
+                blocked.append(f"{child.as_posix()}: is a link, not a file this move left behind")
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                emptied.append(child)
+                pending.append(child)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                blocked.append(f"{child.as_posix()}: is not a regular file")
+                continue
+            if child == Path("engine.lock"):
+                left_lock = True
+                continue
+            destination = quarantine / child
+            if os.path.lexists(destination):
+                blocked.append(
+                    f"{child.as_posix()}: the quarantine already holds this name, so it is not "
+                    "residue of this operation's own move")
+                continue
+            try:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                durable_no_replace_rename(
+                    rd / child, destination, label="deletion quarantine residue",
+                    unique_destination=True, cross_directory=True)
+            except OSError as exc:
+                blocked.append(f"{child.as_posix()}: could not be moved into the quarantine ({exc})")
+    if blocked:
+        return blocked[:_RESIDUE_REPORT_CAP]
+    # Deepest first, `rmdir` only. A directory that is not empty by now holds something this walk did
+    # not see, and refusing is the whole point of not having an `rmtree` here.
+    for relative in sorted(emptied, key=lambda path: len(path.parts), reverse=True):
+        try:
+            (rd / relative).rmdir()
+        except OSError as exc:
+            blocked.append(f"{relative.as_posix()}: the emptied directory could not be removed ({exc})")
+    if blocked or left_lock:
+        # An `engine.lock` left standing is not a refusal — it is the ONE shape
+        # `_purge_recreated_writer_shell` was written for, and it proves ownership before removing it.
+        return blocked[:_RESIDUE_REPORT_CAP]
+    try:
+        rd.rmdir()
+        strict_fsync_parent(rd)
+    except OSError as exc:
+        blocked.append(f"the fenced run directory could not be removed ({exc})")
+    return blocked[:_RESIDUE_REPORT_CAP]
+
+
 def _flush_pending_costs(srv, rd: Path) -> None:
     flush = getattr(srv, "flush_pending_run_costs", None)
     if not callable(flush):
@@ -579,12 +723,41 @@ def begin_or_resume_run_deletion(
                             return _pending(
                                 receipt, "delete_quarantine_unavailable",
                                 f"The run is fenced but could not enter deletion quarantine: {exc}")
-                    elif source_exists and quarantine_exists:
+                        else:
+                            # A move that RETURNS is not proof the source is gone. Where the mount
+                            # implements a directory rename as a per-object walk, an entry created
+                            # after that walk's scan stays behind and the call still succeeds — so
+                            # this is re-READ rather than assumed, and falls into the same absorption
+                            # the resume path uses. Assuming it left an orphan run directory beside a
+                            # quarantine the next phases went on to purge.
+                            source_exists = os.path.lexists(rd)
+                            quarantine_exists = os.path.lexists(quarantine)
+                    if source_exists and quarantine_exists:
                         if not _purge_recreated_writer_shell(rd):
-                            return _pending(
-                                receipt, "delete_quarantine_conflict",
-                                "Both the run and its deletion quarantine exist; the source is not "
-                                "a removable fenced writer shell.")
+                            # Not a removable shell — so FINISH THE MOVE instead. Whatever the
+                            # per-object rename left behind is carried into this operation's own
+                            # quarantine, never deleted and never over a name already there. Only a
+                            # residue that cannot be absorbed on those terms is a real refusal, and
+                            # that one is not retryable: no later attempt touches those paths either.
+                            residue = _absorb_quarantine_residue(rd, quarantine)
+                            if residue:
+                                return _wedged(
+                                    receipt, "delete_quarantine_conflict",
+                                    "Both the run and its deletion quarantine exist; the source "
+                                    "holds entries this deletion cannot prove are its own.",
+                                    remediation=(
+                                        "Account for the named paths against the quarantine and "
+                                        "remove or move them yourself, then retry this exact "
+                                        "operation. Retrying before that cannot change the answer."),
+                                    blocking_entries=residue)
+                            # Everything absorbable is absorbed; anything still standing is the
+                            # writer-shell case, whose `engine.lock` a LIVE owner can still hold —
+                            # that one really does clear on its own, so it keeps `_pending`.
+                            if os.path.lexists(rd) and not _purge_recreated_writer_shell(rd):
+                                return _pending(
+                                    receipt, "delete_quarantine_conflict",
+                                    "Both the run and its deletion quarantine exist; a writer still "
+                                    "owns the recreated source shell.")
                         source_exists = False
                     elif not source_exists and not quarantine_exists:
                         return _pending(

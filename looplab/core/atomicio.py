@@ -241,7 +241,8 @@ _RENAME_FLAG_UNSUPPORTED = frozenset({errno.EINVAL, errno.ENOSYS, errno.EOPNOTSU
 
 
 def durable_no_replace_rename(source, destination, *, label: str,
-                              unique_destination: bool = False) -> None:
+                              unique_destination: bool = False,
+                              cross_directory: bool = False) -> None:
     """Rename one SIBLING path to a name that must not already exist, durably (doc 25 SC-05).
 
     Both callers — the reset route archiving a replaced event log, and the deletion service moving a
@@ -289,10 +290,23 @@ def durable_no_replace_rename(source, destination, *, label: str,
     unavailable — never as a first choice, and never on a `destination already exists` answer, which
     remains a hard refusal. This is the same inversion `exchange_paths_if_supported` documents in the
     other direction: what a missing primitive costs depends on what the caller needed it FOR.
+
+    `cross_directory` — an OPT-IN, because the sibling rule is not a tidiness convention. Two things
+    hang off it: the destination's parent must already exist (a sibling's always does), and ONE
+    `strict_fsync_parent` publishes both the new name and the old name's removal, which is the whole
+    durability claim above. A cross-directory move needs the caller to have created the destination
+    parent and needs BOTH parents fsynced, so it is a different contract and says so at the call site
+    rather than being inferred from the paths. Its one caller is
+    `deletion_service._absorb_quarantine_residue`, which finishes an interrupted directory move by
+    carrying a file the rename left behind into the SAME operation's quarantine — the source's parent
+    is the fenced run, the destination's is inside the quarantine, and they are never siblings.
+    Neither of the original two callers may pass it: their invariants ARE the sibling rule (a replay
+    archive stays in the run directory; the quarantine stays beside the run), and both keep their own
+    check in their own wrapper so the message an operator reads names their domain.
     """
     source = Path(source)
     destination = Path(destination)
-    if source.parent != destination.parent:
+    if source.parent != destination.parent and not cross_directory:
         raise ValueError(f"{label} must be a sibling of its source")
     if os.path.lexists(destination):
         raise FileExistsError(errno.EEXIST, f"{label} destination already exists", str(destination))
@@ -342,6 +356,11 @@ def durable_no_replace_rename(source, destination, *, label: str,
                                   str(destination))
         os.rename(source, destination)
     strict_fsync_parent(destination)
+    if cross_directory and source.parent != destination.parent:
+        # The sibling contract's single fsync publishes the new name AND the removal of the old one,
+        # because they are entries in the SAME directory. Across two directories that is one half of
+        # the durability claim: a crash here could leave the entry visible under both names.
+        strict_fsync_parent(source)
 
 
 def exchange_paths_if_supported(first: str | os.PathLike, second: str | os.PathLike) -> bool:

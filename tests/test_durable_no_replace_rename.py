@@ -81,7 +81,11 @@ def test_a_DANGLING_symlink_at_the_destination_still_counts_as_occupied(sibling)
 
 def test_a_non_sibling_destination_is_refused(tmp_path):
     """Both callers' invariant: the archive stays in the run dir, the quarantine stays beside the
-    run. A cross-directory move would also break the single parent fsync."""
+    run. A cross-directory move would also break the single parent fsync.
+
+    The DEFAULT is what is pinned here. `cross_directory=True` is a third caller's opt-in and is
+    driven below; the point of it being a keyword rather than an inference from the paths is that
+    passing it is a decision somebody wrote down."""
     source = tmp_path / "run" / "events.jsonl"
     source.parent.mkdir()
     source.write_text("x", encoding="utf-8")
@@ -279,3 +283,78 @@ def test_a_destination_that_appears_DURING_the_flag_probe_is_refused_not_replace
         _atomicio.durable_no_replace_rename(src, dst, label="deletion quarantine",
                                             unique_destination=True)
     assert src.is_dir(), "the source must survive a refused move"
+
+
+# ------------------------------------------------------------------------------------------------
+# The THIRD caller: finishing an interrupted directory move.
+#
+# `deletion_service._absorb_quarantine_residue` carries a file the geesefs per-object rename left
+# behind in the fenced run into the SAME operation's quarantine. Source parent and destination parent
+# are two different directories by construction, so it needs the sibling rule lifted — and it needs
+# the durability claim to still hold, which across two directories is two fsyncs and not one.
+# ------------------------------------------------------------------------------------------------
+
+
+def test_a_cross_directory_move_carries_the_bytes_when_it_is_asked_for(tmp_path):
+    source = tmp_path / "run" / "node_0" / "x.pyc.140558024057008"
+    source.parent.mkdir(parents=True)
+    source.write_text("residue", encoding="utf-8")
+    destination = tmp_path / "quarantine.uuid" / "node_0" / "x.pyc.140558024057008"
+    destination.parent.mkdir(parents=True)
+
+    durable_no_replace_rename(source, destination, label="deletion quarantine residue",
+                              unique_destination=True, cross_directory=True)
+
+    assert destination.read_text(encoding="utf-8") == "residue" and not source.exists()
+
+
+def test_a_cross_directory_move_still_refuses_an_occupied_destination(tmp_path):
+    """The no-replace contract does not soften with the sibling rule. For the residue absorber this
+    is not a detail: a destination that already exists is its proof that the entry is NOT residue of
+    its own move, and replacing it would destroy a file the quarantine already carried."""
+    source = tmp_path / "run" / "x"
+    source.parent.mkdir(parents=True)
+    source.write_text("mine", encoding="utf-8")
+    destination = tmp_path / "quarantine.uuid" / "x"
+    destination.parent.mkdir(parents=True)
+    destination.write_text("already carried", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        durable_no_replace_rename(source, destination, label="deletion quarantine residue",
+                                  unique_destination=True, cross_directory=True)
+    assert source.read_text(encoding="utf-8") == "mine"
+    assert destination.read_text(encoding="utf-8") == "already carried"
+
+
+def test_BOTH_parents_are_fsynced_when_the_directories_differ(tmp_path, monkeypatch):
+    """The sibling contract's single fsync publishes the new name AND the removal of the old one,
+    because they are entries in one directory. Across two, one fsync is half the guarantee: a crash
+    can leave the entry visible under both names, which for the residue absorber means a run
+    directory that is still non-empty after the quarantine already holds the file."""
+    import looplab.core.atomicio as atomicio
+
+    synced = []
+    monkeypatch.setattr(atomicio, "strict_fsync_parent", lambda path: synced.append(str(path)))
+    source = tmp_path / "run" / "x"
+    source.parent.mkdir(parents=True)
+    source.write_text("residue", encoding="utf-8")
+    destination = tmp_path / "quarantine.uuid" / "x"
+    destination.parent.mkdir(parents=True)
+
+    durable_no_replace_rename(source, destination, label="deletion quarantine residue",
+                              unique_destination=True, cross_directory=True)
+
+    assert synced == [str(destination), str(source)]
+
+
+def test_only_the_residue_absorber_may_cross_a_directory():
+    """The two original callers' invariants ARE the sibling rule, and the fsync asymmetry above is
+    what a forgotten `cross_directory=True` would silently cost. So the opt-in gets the same
+    treatment as the fallback: exactly one call site, named, or this goes red."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "looplab"
+    callers = sorted({str(path.relative_to(root))
+                      for path, source in iter_sources(root)
+                      if "cross_directory=True" in source})
+    assert callers == ["serve/deletion_service.py"], callers

@@ -515,12 +515,29 @@ Skills and the curation logs are never cascaded. See
 transaction rather than a bulk endpoint — each deletion keeps its own idempotency key, generation+seq
 fence and durable receipt. That shapes what you see: it runs strictly **sequentially** (each receipt
 is validated against a refreshed run list, which concurrent deletions would race), it **stops at the
-first refusal** and leaves the remainder untouched, and it reports what actually happened —
-*"8 runs deleted, then the batch stopped at run-9: `<reason>`. The remaining 3 were not touched."*
+first refusal** and leaves the remainder untouched, and it reports what actually happened.
 The confirm dialog lists every run by name rather than counting them, and names the ones it cannot
 delete and why. Selection is bounded by `SELECTION_MAX` (500) only because the set round-trips
 through the saved view and the URL. The memory cascade rides along per run; if a store was locked,
 the notice carries a retry that finishes just that run's purge.
+
+**Stopping and deleting nothing are different facts, and the batch notice keeps them apart.** There
+are four sentences and each one is a claim it can support:
+
+| What happened | What it says |
+|---|---|
+| every run went | *"2 runs permanently deleted: “a”, “b”."* — it names them (bounded at five, then a count) |
+| some went, then it stopped | *"8 runs deleted (…), then the batch stopped at “run-9”: `<reason>`. The remaining 3 were not touched."* |
+| it stopped on the first run, and that run's outcome is **settled** | *"Nothing was deleted. “r1” stopped the batch: `<reason>`."* |
+| it stopped, and that run's own outcome is **not established** | *"No deletion is confirmed. … Its own outcome is not established — check that run before assuming it still exists."* |
+
+The last row is not pedantry. A deletion whose receipt says `succeeded` while the tab could not
+re-read the run list, or could not clear its recovery record, is reported as `unknown`: the run may
+well be gone. Until 2026-08-14 the batch printed *"Nothing was deleted"* for **every** stop,
+including one that followed a completed deletion, because the single-run transaction computed its
+verdict and never returned it — so no run ever entered the deleted tally. A destructive operation
+that under-reports what it did is worse than one that fails loudly, and this is the surface the
+operator's next move is decided from.
 
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer
