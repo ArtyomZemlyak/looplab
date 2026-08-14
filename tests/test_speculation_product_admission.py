@@ -880,3 +880,158 @@ def test_every_build_lifecycle_discard_reason_is_registered():
     # the set look more complete than it is.
     stale = quality.SPECULATION_DISCARD_REASONS - written
     assert not stale, f"registered but written by no engine terminal: {sorted(stale)}"
+
+
+# ------------------------------------------------- what a refusal TELLS the operator (2026-08-14)
+
+def test_the_toy_lane_refusal_names_which_identity_moved(tmp_path, monkeypatch):
+    """A five-way disjunction is not a diagnosis.
+
+    The message states "stale, invalid, non-GPU, policy-mismatched, or does not pass the current
+    gates" — five different problems in one sentence, and until 2026-08-14 that was everything an
+    operator got. Measured against this box's own 2026-08-04 receipt, it had been revoked along FOUR
+    independent axes simultaneously (the `Settings` field set archived config snapshots are compared
+    against, the installed-distribution fingerprint, the source digest and the visible GPUs), and
+    two agents reading the module that week each reported the source digest as the cause because
+    nothing could be asked. The suffix is a DIAGNOSTIC: the refusal condition itself is untouched.
+    """
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(quality, "validated_speculation_gate_receipt", lambda _path: None)
+    task = ToyTask()
+    settings = Settings(**{
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3, "speculation_depth": 1, "speculation_gate_receipt": str(receipt_path),
+    })
+
+    def roles():
+        return (
+            ToyResearcher(task.bounds, seed=task.seed, step=task.step,
+                          calibration_concepts=True),
+            ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+        )
+
+    with pytest.raises(ValueError) as excinfo:
+        Engine(
+            tmp_path / "toy-diagnosed", task=task,
+            researcher=roles()[0], developer=roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=3, debug_depth=1),
+            options=EngineOptions.from_settings(settings), role_factory=roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
+        )
+
+    message = str(excinfo.value)
+    assert "stale, invalid" in message, "the historical refusal must survive verbatim"
+    # `{}` fails the very first invariant, and the operator is told THAT rather than the disjunction.
+    assert "field set differs from the current schema" in message
+
+
+def test_a_receipt_that_revalidates_but_fails_a_LANE_rule_is_diagnosed_locally(tmp_path, monkeypatch):
+    """The other half: nothing expensive is re-derived to say `require_gpu` was false."""
+    monkeypatch.setattr(
+        quality, "validated_speculation_gate_receipt",
+        lambda _path: _toy_receipt(require_gpu=False))
+    task = ToyTask()
+    settings = Settings(**{
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3, "speculation_depth": 1,
+        "speculation_gate_receipt": str(tmp_path / "receipt.json"),
+    })
+
+    def roles():
+        return (
+            ToyResearcher(task.bounds, seed=task.seed, step=task.step,
+                          calibration_concepts=True),
+            ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+        )
+
+    with pytest.raises(ValueError) as excinfo:
+        Engine(
+            tmp_path / "toy-nogpu", task=task,
+            researcher=roles()[0], developer=roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=3, debug_depth=1),
+            options=EngineOptions.from_settings(settings), role_factory=roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
+        )
+
+    assert "not measured with require_gpu" in str(excinfo.value)
+
+
+def test_the_replay_lane_refusal_carries_the_envelope_errors_it_already_computed(
+        tmp_path, monkeypatch):
+    """`narrow_runtime_envelope_errors` returns a per-rule truth table this refusal used to discard,
+    so an operator whose `max_nodes` was off by one read the same sentence as one whose receipt had
+    expired. The list is APPENDED; the refusal condition is unchanged."""
+    monkeypatch.setattr(
+        quality, "validated_speculation_gate_receipt",
+        lambda _path: _toy_receipt(admitted_depth=1))
+    task = ToyTask()
+    settings = Settings(**{
+        **SPECULATION_CALIBRATION_PROFILE_SETTINGS,
+        "max_nodes": 3, "speculation_depth": 2,          # receipt admitted depth 1
+        "speculation_gate_receipt": str(tmp_path / "receipt.json"),
+    })
+
+    def roles():
+        return (
+            ToyResearcher(task.bounds, seed=task.seed, step=task.step,
+                          calibration_concepts=True),
+            ToyObjectiveDeveloper(noise=0.0, calibration_gpu_probe=True),
+        )
+
+    with pytest.raises(ValueError) as excinfo:
+        Engine(
+            tmp_path / "toy-replay-detail", task=task,
+            researcher=roles()[0], developer=roles()[1],
+            sandbox=SubprocessSandbox(),
+            policy=GreedyTree(n_seeds=3, max_nodes=3, debug_depth=1),
+            options=EngineOptions.from_settings(settings), role_factory=roles,
+            _speculation_runtime_scope_sha256=speculation_runtime_scope_digest(
+                settings.masked_snapshot()),
+        )
+
+    message = str(excinfo.value)
+    assert "policy/depth-mismatched" in message
+    assert "receipt admitted depth 1, this run requests 2" in message, (
+        "the comparison this frame already made must reach the operator")
+
+
+def test_the_engine_reaches_the_receipt_validator_through_its_patch_SEAM(tmp_path):
+    """The lane decision must call `validated_speculation_gate_receipt` BY NAME.
+
+    Roughly a dozen tests in this file and `test_speculation_runtime_gate.py` stub that module
+    attribute. Routing the call through the sibling that also returns a reason resolves the real
+    function and every one of those stubs silently stops reaching the engine — the same narrowing
+    CLAUDE.md records for the `fold` seam. It went red once here, on 2026-08-14, which is why the
+    rule is now driven rather than remembered: this asserts the SEAM is observed, not merely named.
+    """
+    import looplab.engine.speculation_gate as gate
+
+    seen: list[object] = []
+    original = quality.validated_speculation_gate_receipt
+
+    def observed(path, **kwargs):
+        seen.append(path)
+        return original(path, **kwargs)
+
+    task = _repo_task(tmp_path)
+    receipt_path = tmp_path / "receipt.json"
+    receipt_path.write_text("{}", encoding="utf-8")
+    quality.validated_speculation_gate_receipt = observed
+    try:
+        _engine(
+            tmp_path / "seam-observed", task,
+            card_driven_selection=True, speculation_depth=1,
+            speculation_gate_receipt=str(receipt_path),
+        )
+    finally:
+        quality.validated_speculation_gate_receipt = original
+
+    assert seen, (
+        "admit_speculation_lane bypassed the validator's monkeypatch seam; "
+        f"{gate.admit_speculation_lane.__name__} must call it by name"
+    )

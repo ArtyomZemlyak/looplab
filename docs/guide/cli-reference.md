@@ -546,6 +546,36 @@ no longer revokes a receipt (it did until 2026-08-04; doc 25 XP-07). A docstring
 meant to: a tool's docstring is its agent-facing description. `pyproject.toml` is the one member still
 hashed as raw bytes, because it does not parse as Python and therefore has no tree to reduce to.
 
+### How long a receipt actually lives, and what to do about it
+
+**Expect a receipt to be dead within days on an active tree, and do not read that as a malfunction.**
+It is revoked by **four independent identities**, only one of which is the implementation digest:
+
+| identity | moved by | can a code change help? |
+|---|---|---|
+| `Settings` field set | **any** field added to or removed from `Settings` — the archived `config.snapshot.json` files in the evidence run directories are compared against the CURRENT set | **No.** Evidence already on disk can never gain a key. |
+| environment fingerprint | any `pip install`/upgrade, an interpreter change | No |
+| implementation digest | a semantic edit to any shipped `.py` (not comments/formatting) | Only by narrowing what it covers, which was examined and declined |
+| GPU inventory | a different box, a changed `CUDA_VISIBLE_DEVICES`, a driver upgrade | No |
+
+Measured on 2026-08-14 against this repo's own 2026-08-04 receipt: **all four had moved**, and the
+`Settings` field set had drifted by 17 additions and 1 removal in ten days. Pinning the source digest
+and the environment fingerprint by hand still left the receipt refused, so *narrowing the source
+digest would not have kept it alive*. If you are debugging a dead receipt, read the refusal message —
+since 2026-08-14 it names the first invariant that failed instead of a five-way disjunction.
+
+**The operating procedure is therefore:**
+
+- Do **not** treat a receipt as durable infrastructure. Re-earn it (the six calibration runs above)
+  immediately before the toy replay you want it for, not once per release.
+- Off the calibration lane, **do nothing at all** — positive `speculation_depth` needs no receipt,
+  a stale one is declined into the product lane, and the run proceeds. Nothing is blocked and no GPU
+  time is lost. The only thing a dead receipt costs is the ability to replay the *benchmark* under it.
+- A run that WAS started in the calibrated replay lane under a receipt (its `run_started` carries
+  `speculation_implementation_digest`) becomes unresumable when that receipt dies. That is by design —
+  the lane's whole claim is "this evidence describes this code" — and the workload is the offline toy,
+  so re-running it is minutes rather than a lost GPU run.
+
 ## `timings`
 
 Show where a run's wall-clock actually went — LLM generations vs eval vs repair vs tools, computed

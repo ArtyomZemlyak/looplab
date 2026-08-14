@@ -12,6 +12,31 @@ cost the receipt's `normalized_regret` bound was protecting (see the admission b
 the toy itself — bind a replay to the exact measured runtime envelope. It is revalidated whenever it is
 supplied, so a stale or forged receipt is refused rather than ignored. Counts supplied by a caller are
 never accepted as evidence.
+
+HOW LONG A RECEIPT LIVES, because the answer is "not long" and reading that as a defect has now cost
+two separate investigations. A receipt is revoked by FOUR independent identities, and
+`speculation_implementation_digest` — the one everybody reaches for — is only one of them, and the
+only one any code change can influence at all:
+
+  * the `Settings` FIELD SET, which `_validate_calibration_setup` compares each archived
+    `config.snapshot.json` against. Every field added to `Settings` anywhere in the repo revokes every
+    receipt ever issued, and this axis is UNREPAIRABLE by construction: the evidence is frozen JSON on
+    disk and can never grow the new key. (CLAUDE.md records the same trap from the writer's side — "a
+    new unconditional `run_started` key would revoke every issued speculation-calibration receipt".)
+  * `speculation_environment_fingerprint` — any `pip install`, any interpreter change.
+  * `speculation_implementation_digest` — a semantic edit to any shipped `.py` (v2 already excludes
+    comments and formatting; see `_semantic_source`).
+  * the effective GPU inventory — a different box, driver or `CUDA_VISIBLE_DEVICES`.
+
+Measured 2026-08-14 against this repo's own 2026-08-04 receipt: ALL FOUR had moved, and the `Settings`
+field set had drifted by 17 additions and 1 removal in ten days. Pinning the source digest and the
+environment fingerprint by hand still left it refused. So scoping the implementation digest to "the
+modules that can change speculation behaviour" was examined and DECLINED: it would not have kept a
+single receipt alive, while narrowing what a gate covers is precisely the change that could let a real
+behavioural edit past a lane that refuses runs. What was missing was never coverage — it was the
+ability to ASK, which is `speculation_gate_receipt_rejection`. The operating procedure (re-earn the
+receipt immediately before the replay that needs it, and ignore staleness entirely off the calibration
+lane, where a declined receipt costs nothing) is in `docs/guide/cli-reference.md`.
 """
 from __future__ import annotations
 
@@ -3081,33 +3106,54 @@ def _receipt_mapping(path_or_mapping: str | Path | Mapping[str, Any]) -> dict[st
     return decoded
 
 
-def validated_speculation_gate_receipt(
+def speculation_gate_receipt_rejection(
     path_or_mapping: str | Path | Mapping[str, Any],
     *,
     gpu_inventory: object = None,
     implementation_digest_fn: Callable[[], str] | None = None,
     environment_fingerprint: object = None,
-) -> dict[str, Any] | None:
-    """Return an independently revalidated passing receipt, or ``None``.
+) -> tuple[dict[str, Any] | None, str]:
+    """``(revalidated receipt, "")`` — or ``(None, the one invariant it failed)``.
 
-    Engine wiring can pin the returned ``self_digest`` without re-parsing an untrusted mapping.  The
-    public boolean validator below remains the convenient yes/no boundary.
+    THE ORDERED CHECKLIST BELOW IS THE VALIDATOR ITSELF, not a second copy of it:
+    `validated_speculation_gate_receipt` is this function's first element and nothing else, so the
+    reason and the verdict can never disagree about why a receipt was refused. Short-circuiting at
+    the FIRST failure is deliberate and preserves the historical cost exactly — a receipt whose
+    schema is wrong must not go on to re-parse six run directories to collect a second complaint.
+
+    WHY A REASON EXISTS AT ALL. A receipt is revoked by at least four independent identities, and a
+    bare `None` says which one moved about as well as a closed door explains a lock. Measured on
+    this box's own issued receipt (2026-08-04) against master on 2026-08-14, all four had moved:
+    the `Settings` field set the archived `config.snapshot.json` files are compared against (17
+    fields added, 1 removed — and archived evidence can never gain a key, so this one is
+    unrepairable except by re-running the calibration), the installed-distribution fingerprint, the
+    whole-source implementation digest, and the box's visible GPU inventory. Two separate agents
+    reading the same code that week each reported the SOURCE DIGEST as the cause; it is in fact the
+    only one of the four that a code change can even influence, and pinning both volatile identity
+    seams by hand still left the receipt refused. Diagnosing that took a scripted bisection of a
+    function whose whole answer was `None`, which is the defect this return value closes.
+
+    The reason is a DIAGNOSTIC, never an authorization: no caller may branch on its text, and the
+    verdict is the first element in every case.
     """
 
     try:
         receipt = _receipt_mapping(path_or_mapping)
         if set(receipt) != _RECEIPT_FIELDS:
-            return None
+            return None, "receipt field set differs from the current schema"
         if receipt.get("schema") != SPECULATION_QUALITY_GATE_SCHEMA:
-            return None
+            return None, (
+                f"receipt schema is {receipt.get('schema')!r}, "
+                f"expected {SPECULATION_QUALITY_GATE_SCHEMA!r}"
+            )
         if receipt.get("thresholds") != dict(SPECULATION_QUALITY_THRESHOLDS):
-            return None
+            return None, "receipt thresholds differ from the shipped fixed thresholds"
         if type(receipt.get("require_gpu")) is not bool:
-            return None
+            return None, "receipt require_gpu is not a boolean"
         if not _valid_digest(receipt.get("self_digest")):
-            return None
+            return None, "receipt self_digest is not a SHA-256 digest reference"
         if receipt["self_digest"] != _self_digest(receipt):
-            return None
+            return None, "receipt self_digest does not cover its own body"
         # Both identities are computed ONCE here and handed to the recomputation below, which would
         # otherwise derive each a second time inside `speculation_quality_gate`. Neither is cheap:
         # the implementation digest reads and PARSES every shipped `.py`, and the environment
@@ -3117,7 +3163,11 @@ def validated_speculation_gate_receipt(
         # comparison against an identity that no longer exists.
         current_implementation = _implementation_digest(implementation_digest_fn)
         if receipt.get("implementation_digest") != current_implementation:
-            return None
+            return None, (
+                "implementation digest moved: the receipt was earned on "
+                f"{receipt.get('implementation_digest')} and this tree is {current_implementation} "
+                "(re-run the calibration; see `speculation_implementation_digest`)"
+            )
         current_fingerprint = (
             speculation_environment_fingerprint()
             if environment_fingerprint is None else environment_fingerprint
@@ -3131,39 +3181,51 @@ def validated_speculation_gate_receipt(
             current_fingerprint = current_fingerprint()
         current_environment = _environment_digest(current_fingerprint)
         if receipt.get("environment_sha256") != current_environment:
-            return None
+            return None, (
+                "environment fingerprint moved: the receipt was earned under "
+                f"{receipt.get('environment_sha256')} and this box is {current_environment} "
+                "(an installed distribution or interpreter changed)"
+            )
         if receipt.get("policy_scope") != SPECULATION_POLICY_SCOPE:
-            return None
+            return None, (
+                f"receipt policy scope is {receipt.get('policy_scope')!r}, "
+                f"expected {SPECULATION_POLICY_SCOPE!r}"
+            )
         if receipt.get("workload_scope") != SPECULATION_WORKLOAD_SCOPE:
-            return None
+            return None, (
+                f"receipt workload scope is {receipt.get('workload_scope')!r}, "
+                f"expected {SPECULATION_WORKLOAD_SCOPE!r}"
+            )
         if receipt.get("calibration_seeds") != list(SPECULATION_CALIBRATION_SEEDS):
-            return None
+            return None, "receipt calibration seeds differ from the shipped fixed seeds"
         if not _valid_digest(receipt.get("task_profile_sha256")):
-            return None
+            return None, "receipt task_profile_sha256 is not a SHA-256 digest reference"
         admitted_depth = receipt.get("admitted_depth")
         if type(admitted_depth) is not int or not 1 <= admitted_depth <= 64:
-            return None
+            return None, "receipt admitted_depth is not an integer in 1..64"
         admitted_max_nodes = receipt.get("admitted_max_nodes")
         if type(admitted_max_nodes) is not int or not 1 <= admitted_max_nodes <= 64:
-            return None
+            return None, "receipt admitted_max_nodes is not an integer in 1..64"
         if not _valid_digest(receipt.get("runtime_scope_sha256")):
-            return None
+            return None, "receipt runtime_scope_sha256 is not a SHA-256 digest reference"
         if not _valid_digest(receipt.get("calibration_profile_digest")):
-            return None
+            return None, "receipt calibration_profile_digest is not a SHA-256 digest reference"
         rows = receipt.get("pairs")
         if (
             not isinstance(rows, list)
             or len(rows) != len(SPECULATION_CALIBRATION_SEEDS)
         ):
-            return None
+            return None, (
+                "receipt does not carry exactly one evidence pair per calibration seed"
+            )
         source_pairs: list[tuple[str, str]] = []
         for row in rows:
             if not isinstance(row, dict):
-                return None
+                return None, "receipt evidence pair is not an object"
             baseline = row.get("baseline")
             treatment = row.get("treatment")
             if not isinstance(baseline, dict) or not isinstance(treatment, dict):
-                return None
+                return None, "receipt evidence pair is missing a baseline/treatment side"
             baseline_dir = baseline.get("run_dir")
             treatment_dir = treatment.get("run_dir")
             if (
@@ -3172,7 +3234,7 @@ def validated_speculation_gate_receipt(
                 or len(baseline_dir) > _MAX_PATH_CHARS
                 or len(treatment_dir) > _MAX_PATH_CHARS
             ):
-                return None
+                return None, "receipt evidence pair names an invalid or oversized run directory"
             source_pairs.append((baseline_dir, treatment_dir))
 
         # The two identities validated above, forwarded rather than re-derived — see the note there.
@@ -3188,12 +3250,60 @@ def validated_speculation_gate_receipt(
         stored_body = {key: value for key, value in receipt.items() if key != "self_digest"}
         # Equality covers every source digest and raw metric. `passed` is not consulted until after the
         # recomputation has independently crossed all fixed constants.
-        return dict(receipt) if (
+        if (
             recomputed.get("passed") is True
             and canonical_json(stored_body) == canonical_json(recomputed)
-        ) else None
-    except Exception:
-        return None
+        ):
+            return dict(receipt), ""
+        # The recomputation's own errors were previously discarded, and BOTH levels have to be read
+        # or the diagnosis is worse than useless. The top-level list is only the phase-order summary
+        # ("calibration seed set must be exactly [0, 1, 2]") — a downstream consequence of whatever
+        # actually went wrong, phrased as though the seeds were edited. What names the real cause
+        # lives PER PAIR, and it is where the axis this module can least repair shows up: an archived
+        # `config.snapshot.json` compared against a `Settings` field set that has moved on since the
+        # evidence was written (`_validate_calibration_setup`). Evidence already on disk can never
+        # gain a key, so that one is unrepairable except by re-running the calibration — which is
+        # exactly the fact a bare summary hid. Bounded: this string reaches a `ConfigRefusal`.
+        detail = [str(item) for item in (recomputed.get("errors") or [])[:3]]
+        for index, row in enumerate(recomputed.get("pairs") or []):
+            pair_errors = row.get("errors") if isinstance(row, dict) else None
+            if pair_errors:
+                detail.append(f"pair {index}: {pair_errors[0]}")
+                break
+        return None, (
+            "recomputation from the receipt's own run directories disagrees: "
+            + ("; ".join(detail) if detail
+               else "the stored body differs from the recomputation")
+        )[:600]
+    except Exception as exc:
+        # The reason is diagnostic only, so an unexpected failure NAMES itself rather than being
+        # flattened into the same silence every other rejection used to share.
+        return None, f"receipt could not be revalidated: {type(exc).__name__}: {exc}"[:600]
+
+
+def validated_speculation_gate_receipt(
+    path_or_mapping: str | Path | Mapping[str, Any],
+    *,
+    gpu_inventory: object = None,
+    implementation_digest_fn: Callable[[], str] | None = None,
+    environment_fingerprint: object = None,
+) -> dict[str, Any] | None:
+    """Return an independently revalidated passing receipt, or ``None``.
+
+    Engine wiring can pin the returned ``self_digest`` without re-parsing an untrusted mapping.  The
+    public boolean validator below remains the convenient yes/no boundary.  The verdict is the
+    ordered checklist in `speculation_gate_receipt_rejection` and nothing else — a caller that also
+    wants to TELL the operator which invariant failed must call that one instead of calling this and
+    then re-deriving a reason, which would re-parse every shipped `.py` and all six run directories
+    a second time (doc 25 SE-01).
+    """
+
+    return speculation_gate_receipt_rejection(
+        path_or_mapping,
+        gpu_inventory=gpu_inventory,
+        implementation_digest_fn=implementation_digest_fn,
+        environment_fingerprint=environment_fingerprint,
+    )[0]
 
 
 def validate_speculation_gate_receipt(
@@ -3223,6 +3333,7 @@ __all__ = [
     "publish_speculation_gate_receipt",
     "speculation_budget_observation",
     "speculation_environment_fingerprint",
+    "speculation_gate_receipt_rejection",
     "speculation_implementation_digest",
     "speculation_product_authority_digest",
     "speculation_product_authority_digests",
