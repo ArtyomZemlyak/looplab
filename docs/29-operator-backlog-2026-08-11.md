@@ -464,7 +464,7 @@ This subsumes most of the value of [F1c](#f1c-catch-a-path-that-escapes-the-node
 static half without its false-positive problem, because it acts on a contract that has already failed
 and an artifact that already exists.
 
-## F1f · The eval batch is a BARRIER, so one slow node idles a GPU for hours
+## F1f · The eval batch is a BARRIER, so one slow node idles a GPU for hours — **BUILT, 2026-08-13**
 
 **Found while watching `rubertlite-dr-unified-v6`, 2026-08-13.** Not the same defect as the
 `freshness_stale` one fixed in `6f0a8be3` — that one stopped two cards from ever being *selectable*
@@ -563,7 +563,7 @@ proposed and is 256 as it runs — three repair rounds shrank it 32x chasing an 
 happened (the watchdog-vs-OOM misclassification fixed in `c862045c`). At 2.93 s/it that turned a
 ~1.5 h training into a ~6 h one, and it is the 6 h that the barrier then idles a GPU against.
 
-## F1g · `yield_outer` sterilizes the run mid-eval, so NO eval runs for 167.7 GPU-h
+## F1g · `yield_outer` sterilizes the run mid-eval, so NO eval runs for 167.7 GPU-h — **BUILT, 2026-08-13; the production-side remainder 2026-08-14**
 
 **The larger half of [F1f](#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours),
 and a separate defect.** F1f measures a second slot idling while a first one works. This one measures
@@ -825,7 +825,7 @@ separate change. Also unclosed: nothing yet tells either role the MEASURED per-s
 on this box before the first node pays for it — the repo cue's calibration line only exists once a node
 has finished.
 
-## F2 · Give the Developer simple shell commands
+## F2 · Give the Developer simple shell commands — **BUILT 2026-08-14, and deliberately NOT as a shell**
 
 **Asked:** "let the developer run simple bash commands (to check compilation, validate data, etc.)."
 
