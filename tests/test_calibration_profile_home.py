@@ -53,7 +53,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:d46e2af98e88c4e2b1f8fd754a91f1c5617f488873be8a5d874298e52708572a"
+_EXPECTED_DIGEST = "sha256:5bf5fd51cfbaffd4d775514cc3d0a88a794ae6d7e067a01863f7123cd24aadd8"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -180,7 +180,20 @@ _EXPECTED_DIGEST = "sha256:d46e2af98e88c4e2b1f8fd754a91f1c5617f488873be8a5d87429
 #               asserts about its replicates. `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it OFF, so a
 #               resumed pre-2026-08-14 run replays on the old evidence and its receipt still
 #               describes what happened. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 206
+#   2026-08-14  + auto_extra_metrics (may an UNDECLARED numeric key on the candidate's own stdout be
+#               RECORDED as one of the node's metrics). The 'field set changed too' branch, verified
+#               that way and not from the count: diffing the Settings field set against the
+#               pre-merge tree reports exactly `['auto_extra_metrics']` added and nothing removed.
+#               Re-pinning is right and not merely necessary, and this field is the sharpest case on
+#               this list so far: a calibration replicate's own CUDA-probe proof
+#               (`speculation_cuda_probe_v`/`device_count`/`alloc_bytes`/`device_ordinal`, which
+#               `speculation_quality._validate_cuda_probe_artifact` requires as an EXACT schema on
+#               `node.extra_metrics`) travels through precisely the channel this field gates — so at
+#               `false` a replicate records no probe metrics at all and the artifact check refuses
+#               it. The shipped default is `true`, i.e. the pre-field behaviour, so nothing about a
+#               default run moves; but a receipt asserts what its replicates recorded, and this is a
+#               field that can empty the very evidence the gate re-derives. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 207
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

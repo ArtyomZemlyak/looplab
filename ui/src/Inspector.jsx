@@ -12,6 +12,8 @@ import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation } from './trustSemantics.js'
+import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
+  extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
@@ -2517,23 +2519,47 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
 function Metrics({ n, detail, state, runId }) {
   const seeds = detail?.confirm_seeds_detail || {}
   const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
-  // Every metric reported anywhere in the run (the objective ★ + all auto-captured extras), shown for
+  // Every metric reported anywhere in the run (the objective ★ + all extras), shown for
   // THIS node and for the champion (the run's best node), so "the metrics you wanted to see overall"
   // are all visible + comparable. Only the objective drives selection; extras are audit-only.
+  //
+  // AND WHERE EACH EXTRA CAME FROM, which this table could not say until 2026-08-14. Two channels
+  // fill `extra_metrics`: an operator-declared `eval.metrics` reader (guarded — it refuses
+  // agent-authored reader code) and auto-capture, which takes every other numeric key off the
+  // experiment's own stdout with nothing declaring or checking it. Both rendered here in the same
+  // column as the protected objective, an operator reading `speculation_cuda_probe_v` or
+  // `train_auc` had no way to tell which was measured and which the candidate simply printed.
+  // `unknown` is a run recorded before the channel was written down — NOT a synonym for declared:
+  // every such value in the preserved corpus was in fact auto-captured.
   const nodes = Object.values(state?.nodes || {})
   const extraKeys = [...new Set(nodes.flatMap(x => Object.keys(x.extra_metrics || {})))]
   const champ = state?.best_node_id != null ? nodes.find(x => x.id === state.best_node_id) : null
   const showChamp = champ && champ.id !== n.id
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
-    ...extraKeys.map(k => ({ k, mine: n.extra_metrics?.[k], best: champ?.extra_metrics?.[k] })),
+    ...extraKeys.map(k => ({
+      k, mine: n.extra_metrics?.[k], best: champ?.extra_metrics?.[k],
+      channel: extraMetricChannel(n, k),
+    })),
   ]
+  const anyUnverified = rows.some(r => r.channel && r.channel !== 'declared')
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
-    <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
+    <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
-        <td>{r.star ? '★ ' : ''}{r.k}</td><td>{fmt(r.mine)}</td>
+        <td>{r.star ? '★ ' : ''}{r.k}</td>
+        <td className="muted">{r.star
+          ? <span title="The run's objective: read by the operator's own metric spec on the protected score stage.">measured</span>
+          : <span className={r.channel === 'declared' ? '' : 'warn'}
+            title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>}</td>
+        <td>{fmt(r.mine)}</td>
         {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+    {anyUnverified && <div className="muted">
+      Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing
+      declaring or checking them — the code that produced the number also chose to print it. They
+      are audit-only and never drive selection. <b>provenance unknown</b> means the run predates this
+      record; treat it as self-reported.
+    </div>}
     {n.confirmed_mean != null && <div className="kv confirmed-metric">
       {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
           substitute the sample length for a recorded count of zero — a different number presented as

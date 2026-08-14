@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events import digest
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, extra_metric_channel
 from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools._runcache import RunStateCache
 
@@ -270,7 +270,17 @@ class RunTools:
             out.append(f"confirmed={digest.fmt_num(n.confirmed_mean)} "
                        f"±{digest.fmt_num(n.confirmed_std)} ({n.confirmed_seeds} seeds)")
         if n.extra_metrics:
-            out.append(f"extra_metrics={n.extra_metrics}")
+            # Each extra metric is rendered WITH the channel it came through, because this surface
+            # is read by the Researcher/Strategist when deciding what to try next and an
+            # auto-captured `speculation_cuda_probe_v=1.0` reads exactly like a measured
+            # `test_auc=0.92` without it. `[auto]` = the candidate printed it, nothing declared or
+            # checked it; `[unknown]` = a log written before the channel was recorded (treat as
+            # auto). The objective `metric=` above is unchanged and is still the only number
+            # selection uses.
+            _chans = getattr(n, "extra_metrics_provenance", None)
+            out.append("extra_metrics=" + "{" + ", ".join(
+                f"{k!r}: {v} [{extra_metric_channel(_chans, k)}]"
+                for k, v in n.extra_metrics.items()) + "}")
         if n.violations:
             out.append(f"violations={n.violations}")
         if n.status is NodeStatus.failed:

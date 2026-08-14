@@ -333,6 +333,28 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   UNSPECIFIED footprint resolves against the TASK (`adapters/tasks.py::gpu_capable`, absent means
   capable) as well as the box, so the offline/synthetic adapters never take the lease. If a run
   genuinely stalls before its first eval, check that lock before suspecting the engine.
+- **`extra_metrics` has TWO producers and they are not equally trustworthy** — anything that writes
+  a secondary metric must write its CHANNEL beside it. `EvalSpec.metrics` is operator-owned and
+  refuses an agent-authored `adapter` reader; `runtime/sandbox.py::json_line_extras` takes EVERY
+  other numeric key off the candidate's own stdout with no declaration, no reader spec and no gate.
+  Measured over `runs/`, the declared channel produced 0 of 12 extra metrics and auto-capture
+  produced 12 of 12 — including `speculation_cuda_probe_v=1.0`, a schema VERSION number recorded as
+  a metric — and every one of them reached the operator's metrics table, the Pareto front, the
+  MLflow export, the reviewer projection and the agents' own `read_experiment` in the same visual
+  place as the protected primary metric, with nothing marking the difference. The vocabulary is
+  `core/models.py::EXTRA_METRIC_CHANNELS` (`declared` | `auto`, plus the READER-side
+  `EXTRA_METRIC_UNKNOWN` which is never storable), written to
+  `node_evaluated.extra_metrics_provenance` and read through `extra_metric_channel` /
+  `ui/src/extraMetrics.js`. Two traps: an UNTAGGED value means `unknown` and never `declared` (a
+  pre-2026-08-14 log — and all 12 preserved ones were in fact auto), and a value that reaches
+  `res.extra_metrics` through a later merge (`eval_dispatch`'s trial collapse, `evaluate`'s salvage
+  gates) must be tagged AT THE MERGE, where the source is known, or it silently degrades to
+  `unknown`. `Settings.auto_extra_metrics` (default `true` = the historical behaviour) can refuse
+  the undeclared channel entirely; it is expressed OVER the tag (`declared_extra_metrics_only`) so
+  the gate and the label cannot drift, it is applied at the ONE place the terminal payload is built,
+  and it is deliberately NOT pinned in `run_started` — the fold never reads it, so an
+  already-recorded run replays identically under either value, and a new unconditional `run_started`
+  key would revoke every issued speculation-calibration receipt.
 - Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
   snapshots and env compat depend on the names.
 - `looplab/sweep.py` is NOT a CLI subcommand — it is a runtime helper imported by *generated*

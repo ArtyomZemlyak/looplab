@@ -38,7 +38,8 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
                      hypothesis_id,
-                     normalize_extra_metrics, normalize_researcher_footprint,
+                     normalize_extra_metric_channels, normalize_extra_metrics,
+                     normalize_researcher_footprint,
                      normalize_steering_context,
                      run_setup_key)
 # The derived Card ledger (doc 25 EV-01). ONLY the names this module's own handlers call are
@@ -935,6 +936,14 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.resource_curve = _normalize_resource_curve(d.get("resource_curve"))
             n.eval_seconds = d.get("eval_seconds")
             n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
+            # WHICH CHANNEL each extra metric came through. Additive with a reader-side default
+            # (invariant #5): absent on every log written before 2026-08-14 -> `{}` -> every key
+            # answers `EXTRA_METRIC_UNKNOWN`. That default is deliberately NOT `declared`: all 12
+            # extra metrics preserved in `runs/` came from the UNDECLARED auto-capture channel, so
+            # reading an untagged historical value as operator-declared would state the one thing
+            # that is provably false about it.
+            n.extra_metrics_provenance = normalize_extra_metric_channels(
+                d.get("extra_metrics_provenance"))
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
             # Additive with a reader-side default: an old log has no such key and folds to None,
@@ -1100,6 +1109,8 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.never_evaluated = False          # the discard receipt described the prior attempt
         n.eval_started = False             # ...and so did the eval-start boundary
         n.extra_metrics = {}
+        # ...and so did the CHANNEL map describing where those extras came from.
+        n.extra_metrics_provenance = {}
         n.violations = []
         n.feasible = True
         # WHERE THE OLD METRIC CAME FROM described the old metric, which this epoch just cleared.
@@ -1289,6 +1300,8 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.stdout_tail = ""
         n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}
+        # ...and so did the CHANNEL map describing where those extras came from.
+        n.extra_metrics_provenance = {}
         n.violations = []
         n.feasible = True
         # See the same line in `_requeue_partition_bound_results`: the provenance describes the metric this

@@ -284,6 +284,12 @@ class RunResult:
     # hard constraints [{name,value,max,min}]. A node with violations stays measured but is
     # excluded from best-selection. None on the normal path.
     extra_metrics: Optional[dict] = None
+    # WHICH CHANNEL each `extra_metrics` key came through: `{name: "declared"|"auto"}`
+    # (`core/models.py::EXTRA_METRIC_CHANNELS`). `declared` means an operator-owned `EvalSpec.metrics`
+    # reader produced it; `auto` means it was scraped off the candidate's own stdout JSON line with
+    # no declaration and no gate. Every producer of `extra_metrics` MUST set this beside it —
+    # an untagged key reads back `unknown` at every consumer, which is deliberately not `declared`.
+    extra_metrics_provenance: Optional[dict] = None
     violations: Optional[list] = None
     # Intra-node sweep: when the solution ran a grid of configs in one process, it emits a final
     # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks
@@ -405,6 +411,17 @@ def json_line_extras(text: str, primary_key: str = "metric") -> dict:
 
 # Back-compat alias (pre-rename importers/tests use `_json_line_extras`).
 _json_line_extras = json_line_extras
+
+
+def auto_extra_metric_channels(extras) -> Optional[dict]:
+    """The channel map for a set of extras that ALL came from `json_line_extras`, i.e. off the
+    candidate's own stdout with nothing declaring or checking them.
+
+    Every solution-tier `RunResult` is in that state by construction — the `solution.py` sandboxes
+    have no operator reader spec to consult at all — so this is the one spelling both of them use.
+    `None` for an empty/absent set, matching the `extra_metrics or None` shape beside it."""
+    from looplab.core.models import EXTRA_METRIC_AUTO
+    return {str(k): EXTRA_METRIC_AUTO for k in (extras or {})} or None
 
 
 def json_line_trials(text: str) -> Optional[list]:
@@ -1314,9 +1331,11 @@ class SubprocessSandbox:
         # Discard metric/trials/extras from a TIMED-OUT run: a process killed at the deadline may have
         # printed a partial/misleading metric line before hanging. Matches DockerSandbox.run and
         # command_eval.run_command_eval, which both null these out on timeout.
+        _extras = None if to else (json_line_extras(out) or None)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if to else _parse_metric(out)), timed_out=to,
-                         extra_metrics=(None if to else (json_line_extras(out) or None)),
+                         extra_metrics=_extras,
+                         extra_metrics_provenance=auto_extra_metric_channels(_extras),
                          trials=(None if to else json_line_trials(out)))
 
 
@@ -1375,9 +1394,11 @@ class DockerSandbox:
         # See docker_timed_out: both 124 (SIGTERM at deadline) and 137 (SIGKILL escalation past the
         # `-k 5` grace) are this run's wall-clock timeout, not an OOM.
         timed_out = to or docker_timed_out(rc)
+        _extras = None if timed_out else (json_line_extras(out) or None)
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
-                         extra_metrics=(None if timed_out else (json_line_extras(out) or None)),
+                         extra_metrics=_extras,
+                         extra_metrics_provenance=auto_extra_metric_channels(_extras),
                          trials=(None if timed_out else json_line_trials(out)))
 
 

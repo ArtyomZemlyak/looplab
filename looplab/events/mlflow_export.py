@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from looplab.core.models import RunState
+from looplab.core.models import RunState, extra_metric_channel
 from looplab.core.redact import redact_secrets
 
 
@@ -51,11 +51,27 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
             metric = best.robust_metric
             if metric is not None:
                 mlflow.log_metric("best_metric", float(metric))
+            _channels = getattr(best, "extra_metrics_provenance", None)
             for k, v in (best.extra_metrics or {}).items():
                 if v is not None:
                     try:                              # extra_metrics is eval-reported: a non-numeric
                         mlflow.log_metric(str(k), float(v))   # value must not abort the whole export
                     except (TypeError, ValueError):
+                        pass
+                    # AND THE CHANNEL IT CAME THROUGH, as a tag beside it. MLflow's metric surface
+                    # is a bare `name -> value` series with nowhere to hang provenance, so an
+                    # auto-captured number the candidate printed landed in the same table as the
+                    # protected `best_metric` with nothing separating them — an operator comparing
+                    # runs in MLflow could not tell. A TAG rather than a renamed metric key: the key
+                    # is what makes a series comparable across runs and across the 3 preserved runs
+                    # that already exported these names, so renaming would break the comparison this
+                    # export exists for. `unknown` is exported too, and says so — silence there
+                    # would read as "declared" to exactly the reader this is for. Same containment
+                    # as the metric above: a key MLflow's tag charset refuses must not abort the run.
+                    try:
+                        mlflow.set_tag(f"looplab.extra_metric_channel.{k}",
+                                       extra_metric_channel(_channels, k))
+                    except Exception:  # noqa: BLE001
                         pass
         mlflow.log_metric("nodes", len(state.nodes))
         mlflow.log_metric("evaluated", len(state.evaluated_nodes()))
