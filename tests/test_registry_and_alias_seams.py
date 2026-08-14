@@ -38,7 +38,12 @@ def test_the_event_type_is_spelled_once_per_entry():
                      source.index("CONTROL_SPECS: dict[str, ControlSpec] = {")]
     assert "ControlSpec(" not in entries, "an entry constructs its own spec again"
     assert "_spec(" not in entries, "the pass-through constructor came back"
-    assert entries.count("EV_") == entries.count(":") - 1, (
+    # Count over CODE lines only. The colon count is a proxy for "one entry per line", and it was
+    # broken on 2026-08-13 by a perfectly legitimate comment — "measured on `…-v2`: the pause landed
+    # in under a second" — which made the guard report a duplicated event type that did not exist.
+    # A guard that a prose colon can redden is one that gets suppressed rather than read.
+    entry_lines = "\n".join(l for l in entries.split("\n") if not l.strip().startswith("#"))
+    assert entry_lines.count("EV_") == entry_lines.count(":") - 1, (
         "an entry names its event type more than once — the mismatch this rewrite removed")
 
 

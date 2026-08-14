@@ -242,8 +242,13 @@ def test_the_critic_stops_a_circling_chain_without_deciding_what_failed(tmp_path
     and violations, which is the thing that must not happen."""
     judge = _CriticJudge({"action": CRITIC_STOP, "rationale": "the same cause after three fixes"})
     # Enough scripted failures that only the critic can end this.
-    dev = _ScriptedDev([_emits("ValueError: boom\n")] * 40, first=_emits("ValueError: boom\n"),
-                       cycle=True)
+    # Each attempt must CHANGE something, or the chain is inert rather than circling — and inert has
+    # its own, earlier and cheaper rung (`repair_verify.inert_streak`, 2 in a row) that would stop
+    # this node at attempt 2 on a bound with nothing to do with the critic. A circling chain is one
+    # that keeps editing and keeps failing the same way, so the marker varies while the crash does
+    # not; that is exactly the condition the critic exists to name.
+    dev = _ScriptedDev([_emits("ValueError: boom\n") + f"# attempt {i}\n" for i in range(40)],
+                       first=_emits("ValueError: boom\n"), cycle=True)
     evs, _eng = _drive(tmp_path, dev, judge, repair_critic_after=2)
     assert judge.critic_calls, "the critic was never consulted"
     # Consulted only once there is a trajectory to judge: 2 durable repairs, then stop.
@@ -273,7 +278,11 @@ def test_a_critic_that_cannot_be_reached_changes_nothing(tmp_path):
     critic. Compare `_triage_crash`, where the same exception IS the dead-provider signal, because
     there it is the only stop."""
     judge = _CriticJudge(raises=True)
-    dev = _ScriptedDev([_emits("ValueError: boom\n"), _emits("ValueError: boom\n"), _GOOD],
+    # The two failing repairs must differ from each other and from `first`, or the second one is an
+    # EMPTY change set and `repair_verify`'s inert rung terminalizes the node before the critic is
+    # reached — a different bound testing a different thing. Same reason as the circling case above.
+    dev = _ScriptedDev([_emits("ValueError: boom\n") + "# a\n",
+                        _emits("ValueError: boom\n") + "# b\n", _GOOD],
                        first=_emits("ValueError: boom\n"))
     evs, _eng = _drive(tmp_path, dev, judge, repair_critic_after=1)
     assert judge.critic_calls, "the critic was never consulted"

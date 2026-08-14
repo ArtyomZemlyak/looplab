@@ -91,6 +91,7 @@ _LAYOUT = {
     "concept_tools": "tools",    # PART V Phase 2a: assistant-editable cross-run concept taxonomy (merge/purge/split, gated)
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",
+    "assistant_watch": "serve",  # the durable always-on watch record + scheduler (F4): a wake-up outlives its HTTP request, so the instruction is stored rather than held in a timer
     "assistant_commands": "serve",
     "atomicio": "core",
     "best_of_n": "search",
