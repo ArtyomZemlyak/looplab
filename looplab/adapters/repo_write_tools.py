@@ -12,7 +12,9 @@ The persona half (`LLMRepoDeveloper`, `LLMOnboarder` and the prompt constants) s
 nothing from `repo_developer` at import time (no cycle)."""
 from __future__ import annotations
 
+import json
 import os
+import posixpath
 import re
 from typing import Optional
 
@@ -95,6 +97,145 @@ def _missing_stage_input_paths(stages) -> list[str]:
                     missing.append(m)
         produced.extend(own_outputs)        # available to every stage that FOLLOWS
     return missing
+
+
+# --- The source-path / manifest COLLISION rule (docs/29 F1c) --------------------------------------
+# What may CONTINUE a path token once `<source root>/` has been matched. Deliberately a stop-set
+# rather than an allow-set of "path characters": generated content spells these paths inside YAML
+# scalars, JSON strings, f-strings and argv lists, and an experiment directory legitimately contains
+# `-`, `_`, `.`, `=` and digits. The stop-set is the punctuation that ENDS a path in each of those
+# hosts; `*`/`?` stop it too, because a glob is not a path this rule can reason about.
+_SRC_PATH_TAIL = re.compile(r"[^\s\"'`,;:()\[\]{}<>|*?\\]*")
+
+
+def _path_components(p) -> tuple:
+    """A path as its ordered, normalized components — the granularity the collision test compares at.
+
+    Component granularity is the whole reason this rule has no false positives. A STRING prefix test
+    would fire on `models/rubertlite-20e-v7/last.ckpt` against a declared `models/rubertlite_run/…`
+    the moment the two shared the characters `models/rubertlite`, and `runs/rubertlite-dense-retrieval`
+    node 36 — the measured 1-in-116 legitimate teacher checkpoint that lives INSIDE the editable root
+    — is exactly that shape. Compared as components, `rubertlite-20e-v7` != `rubertlite_run` and the
+    two paths merely share a top directory, which is not a collision and never fires.
+    """
+    p = posixpath.normpath(str(p or "").replace("\\", "/").strip())
+    if p in ("", ".", "/"):
+        return ()
+    return tuple(c for c in p.strip("/").split("/") if c not in ("", "."))
+
+
+def declared_output_paths(manifest_text: str) -> list[tuple]:
+    """`[(stage name, expect.files entry)]` for a staged `looplab_stages.json`, or [].
+
+    Reads the manifest the way `_materialized_stage_list` does — both the wrapped `{"stages": […]}`
+    shape `declare_stages` authors and a bare top-level list — but WITHOUT `validate_stages`, on
+    purpose: this rule runs while the model is still authoring, and a manifest that would be dropped
+    at consume time still states what the agent BELIEVES its pipeline writes, which is the half this
+    comparison needs. An unparseable manifest yields [] and the check degrades to silence.
+    """
+    try:
+        obj = json.loads(manifest_text or "")
+    except (ValueError, TypeError):
+        return []
+    stages = obj.get("stages") if isinstance(obj, dict) else obj
+    out: list[tuple] = []
+    for s in (stages or []):
+        if not isinstance(s, dict):
+            continue
+        for f in ((s.get("expect") or {}).get("files") or []):
+            if isinstance(f, str) and f.strip():
+                out.append((str(s.get("name") or "?"), f))
+    return out
+
+
+def source_root_targets(content: str, name, root) -> list[tuple]:
+    """Every `<root>/<rel>` spelled in `content`, as `(the path as spelled, workdir-relative components)`.
+
+    The translation into the WORKDIR frame is what makes the comparison against `expect.files`
+    meaningful at all: a node evaluates in its own materialized copy, where the root editable's tree
+    lands at the workspace root and a NAMED editable lands at `wd/<name>` (`engine/workspace.py`).
+    So `<root>/vectorsearch/x` is the same place as the manifest's `vectorsearch/x` for the root
+    editable, and as `<name>/vectorsearch/x` for a named one — and getting that wrong in a
+    multi-editable setup would silently never fire.
+    """
+    r = str(root or "").replace("\\", "/").rstrip("/")
+    # A root of "" or "/" would match every absolute path; a relative root cannot appear as an
+    # absolute path in generated code at all. Same guard as `_source_root_paths`.
+    if len(r) < 2 or not r.startswith("/"):
+        return []
+    pre = () if name in ("", ".", None) else _path_components(name)
+    out: list[tuple] = []
+    for m in re.finditer(re.escape(r + "/"), content):
+        rel = _SRC_PATH_TAIL.match(content, m.end()).group(0).rstrip("/.,;:")
+        if not rel:
+            continue
+        out.append((r + "/" + rel, pre + _path_components(rel)))
+    return out
+
+
+def manifest_path_collisions(content: str, manifest_text: str, roots) -> list[tuple]:
+    """`[(path as spelled, stage, declared expect.files entry)]` — the F1c collision, decided from
+    two artifacts LoopLab already owns and the agent itself authored.
+
+    A collision is: an ABSOLUTE path into an editable repo's SOURCE tree whose workdir-relative
+    equivalent is on the same directory chain as a path THIS NODE's manifest declares its own
+    pipeline WRITES. That is an unambiguous "this node writes it here and reads it there"
+    contradiction — a node runs in its own materialized copy, so a path rooted at the source can
+    never name anything this node produced.
+
+    WHY THIS SHAPE AND NOT A BAN ON ABSOLUTE SOURCE PATHS. Measured over every authored working set
+    in `runs/` (2,577 `node_created`/`node_repaired` file maps across the corpus, i.e. exactly what
+    this function would have been handed): a blanket ban refuses **8 distinct nodes**, of which
+    **5 are legitimate** — three `rubert-dr-0807` nodes reading a committed base model at
+    `models/converted/e5-small-v1.1.1`, `rubertlite-dense-retrieval` node 36's teacher checkpoint,
+    and `rubertlite-dr-unified-v2` node 0, whose config names the repo's own committed default for a
+    DIFFERENT experiment than the one it declares. The collision rule refuses **3**, and they are
+    exactly the three defective nodes: v2 node 4 and v6 node 4 (both recorded 0.224975 — a human's
+    July checkpoint) and v6 node 0 (which trained twice and threw away 2.5 GPU-hours). **8 → 3, and
+    0 false positives**, because a legitimate INPUT is never a path the node's own manifest declares
+    it WRITES. That property, not a tuned threshold, is what makes the rule safe.
+
+    Both directions of the prefix count, and both occur: v6 node 0's config names the `final/`
+    DIRECTORY while its manifest declares `final/model.safetensors` inside it, and v2 node 4's
+    config and manifest name the same directory exactly.
+    """
+    outputs = [(stage, decl, _path_components(decl))
+               for stage, decl in declared_output_paths(manifest_text)]
+    if not outputs:
+        return []                       # no declaration to collide with — degrade to silence
+    hits: list[tuple] = []
+    for name, root in (roots or []):
+        for spelled, cand in source_root_targets(content, name, root):
+            for stage, decl, dc in outputs:
+                n = min(len(cand), len(dc))
+                if n and cand[:n] == dc[:n] and (spelled, stage, decl) not in hits:
+                    hits.append((spelled, stage, decl))
+    return hits
+
+
+def collision_feedback(hits: list[tuple], *, where: str = "") -> str:
+    """The refusal text. It names BOTH declarations and BOTH ways out, because the model authored
+    both and either one may be the one that is wrong — a refusal that names only the path reads as
+    "try a different string" and gets answered with a different absolute path.
+
+    Cost of getting this wrong in the other direction is why it is a refusal at the TOOL call rather
+    than a note: the same channel already refuses a write that would not compile ("nothing was
+    staged"), and the model simply writes again. A note is what shipped for the general case and it
+    was measured to be spent — `_source_root_note` fired VERBATIM on `runs/rubertlite-dr-unified-v6`
+    node 4's own edit and the node still scored somebody else's model.
+    """
+    spelled, stage, decl = hits[0]
+    return (f"(refused: {('the content you wrote for ' + where) if where else 'this content'} "
+            f"hard-codes {spelled} — an ABSOLUTE path into the editable repo's SOURCE tree that "
+            f"names the SAME artifact your own stage {stage!r} declares it WRITES to "
+            f"{decl!r} (workdir-relative). Those two cannot both be true: this node evaluates in its "
+            "OWN materialized copy of the repo, so the source tree can never hold anything this "
+            "node's pipeline produced — a `.exists()` on it fails on every node, on every attempt, "
+            "forever, and if a file HAPPENS to be there it is somebody else's. Fix ONE of them: "
+            "either spell this path RELATIVE to the eval workdir (the same string your `expect` "
+            "declares), or, if you really meant a pre-existing input that is not this node's output, "
+            "declare it as a `data:`/`references:` mount and stop naming it as your artifact. "
+            "Nothing was staged.)")
 
 
 def _missing_paths_feedback(missing: list[str]) -> str:
@@ -281,6 +422,12 @@ class RepoWriteTools:
         miss = _missing_stage_input_paths(clean)      # catch a hallucinated non-existent data path
         if miss:
             return f"(refused: {_missing_paths_feedback(miss)})"
+        # F1c, the DECLARATION side: a file already in the working set (a repair's seeded config, or
+        # one written earlier this session) that names this manifest's own declared output
+        # absolutely, in the source tree. See `manifest_collision_refusal`.
+        collision = self.manifest_collision_refusal(clean)
+        if collision is not None:
+            return collision
         self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"
@@ -353,6 +500,63 @@ class RepoWriteTools:
                 out.append(r)
         return out
 
+    def _collision_refusal(self, content: str, where: str = "") -> Optional[str]:
+        """The F1c collision, asked from the WRITE side: does this content name, absolutely and in
+        the source tree, a path this node's own staged manifest declares its pipeline writes?
+
+        ORDERING — this is the question docs/29 §F1c said had to be answered before building, and
+        the code answers it. `_run` (`adapters/repo_developer.py`) constructs `RepoWriteTools`, then
+        for a fresh repo node runs the STAGES phase FIRST, which persists
+        `write.files["looplab_stages.json"]` in its `_finalize`; the write/edit tools are composed
+        only afterwards, for the PLAN and IMPLEMENT phases. So on every fresh node the manifest is
+        already in `self.files` at every `write_file`/`edit_file` call, and DURING the stages phase
+        there is nothing to check because that phase's tool set is read-only (`_declare_stages_phase`
+        composes `EnvInspectTools` + scouts; the manifest arrives through the phase EMIT, not a write
+        tool). For an improve/merge the parent's manifest is pre-loaded at construction, and for a
+        REPAIR — which skips the stages phase entirely — `repair_from` pre-loads the FAILING NODE's
+        own files, manifest included. The entry's worry that the check "must degrade gracefully
+        exactly where it matters most" turns out not to bite: the one case with no manifest at all is
+        a node whose stages phase produced nothing AND that has no parent, where there is no
+        declaration to contradict and silence is the right answer.
+
+        Verified against the incident: `runs/rubertlite-dr-unified-v6` node 0's `node_created.files`
+        is `{looplab_stages.json, vectorsearch/configs/config.yaml, vectorsearch/test.py}` — the
+        manifest and the colliding config were staged in the SAME session, manifest first.
+        """
+        hits = manifest_path_collisions(content, self.files.get("looplab_stages.json", ""),
+                                        self._roots)
+        return collision_feedback(hits, where=where) if hits else None
+
+    def manifest_collision_refusal(self, stages) -> Optional[str]:
+        """The same rule from the DECLARATION side: does a file ALREADY in the working set collide
+        with the `expect.files` these stages declare?
+
+        The write-side check alone is order-dependent — it can only see a manifest that is already
+        staged — and there are two real orders it misses. A REPAIR seeds the failing node's whole
+        working set and re-declares stages without necessarily re-writing the config (the config is
+        then never handed to `_write`/`_edit` at all), and within one implement session the model may
+        write the config before calling `declare_stages`. Asking the same question when the
+        DECLARATION moves closes both, with no second rule: `manifest_path_collisions` is called with
+        the arguments swapped round, not reimplemented.
+
+        `looplab_stages.json` itself is skipped as CONTENT — an absolute source path in a stage's own
+        argv is the `_missing_stage_input_paths` guard's subject, and reading the manifest as content
+        against itself would report a stage command that names its own declared output.
+        """
+        hits: list[tuple] = []
+        text = json.dumps({"stages": list(stages or [])})
+        for path, content in sorted(self.files.items()):
+            if path == "looplab_stages.json" or not isinstance(content, str):
+                continue
+            for hit in manifest_path_collisions(content, text, self._roots):
+                hits.append(hit)
+                # Name the FILE that has to change: from this side the model is holding a manifest,
+                # and "some staged file contradicts you" is not something it can act on.
+                return (collision_feedback(hits, where=path)
+                        .replace("Nothing was staged.", "The stages were NOT declared.")
+                        .replace("the content you wrote for", "your already-staged"))
+        return None
+
     def _source_root_note(self, content: str) -> str:
         """The advisory tail appended to a successful write/edit (see `_source_root_paths`)."""
         roots = self._source_root_paths(content)
@@ -398,6 +602,12 @@ class RepoWriteTools:
         if err is not None:
             return (f"(refused: the content you wrote for {p} is not valid Python — {err}. "
                     "Fix the syntax and write_file again; nothing was staged.)")
+        # Same channel and same cost as the syntax refusal above (one tool call, nothing staged),
+        # for the same reason: the model can act on it NOW, and the alternative is discovering it
+        # after the GPU has been spent. See `_collision_refusal`.
+        collision = self._collision_refusal(content, where=p)
+        if collision is not None:
+            return collision
         self.files[p] = content
         if p in self.deleted:
             self.deleted.remove(p)
@@ -431,6 +641,14 @@ class RepoWriteTools:
             return (f"(refused: this edit makes {p} invalid Python — {new_err}. Check the "
                     "indentation/brackets of your `replace` block against the surrounding code and "
                     "try again. Nothing was staged.)")
+        # Only the REPLACEMENT text, for the SAME reason the advisory note below reads only
+        # `replace`: a colliding line the repo already carried is not this edit's doing, and
+        # refusing an unrelated hunk over it is a refusal the model cannot satisfy by editing what
+        # it was editing. The declaration-side check (`manifest_collision_refusal`) is what reaches
+        # a line that arrived in the seeded working set and is never handed to a write tool.
+        collision = self._collision_refusal(replace, where=p)
+        if collision is not None:
+            return collision
         self.files[p] = new
         if p in self.deleted:
             self.deleted.remove(p)          # an edit resurrects a previously-deleted file

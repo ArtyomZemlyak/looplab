@@ -308,6 +308,65 @@ def entrypoint_candidates(command) -> list[str]:
     return []
 
 
+def eval_source_tree_command_paths(task) -> list[str]:
+    """The submit-time warning for an eval `command`/`cmd.stages[].command` argv token that names
+    the editable repo's own SOURCE tree absolutely, or [].
+
+    docs/29 §F1c names this as its third, orthogonal piece — "refuse an `eval.command` / `eval.cwd`
+    that itself names the editable source root absolutely, at submit time". Two thirds of that turn
+    out to be already answered, and the answers are worth stating rather than re-deriving:
+
+      * **`eval.cwd` is not a defect.** `engine/workspace.py::sandbox_cwd` REMAPS an absolute cwd
+        that lands inside an editable source onto the corresponding place in the node workdir, so
+        the eval already runs in the sandboxed copy. Refusing it would retire working, tested
+        behaviour that operators rely on.
+      * **The executed FILE is already named.** `entrypoint_candidates` returns [] for an absolute
+        path, so `eval_entrypoint_unprotected` (below) already fires on
+        `python /src/repo/score.py` — as "LoopLab cannot protect this", which is the more urgent
+        half of the same fact.
+
+    What is left is an argv ARGUMENT — `--config /src/repo/configs/base.yaml`, `--teacher
+    /src/repo/models/x.ckpt`. That reaches the operator's own tree rather than the node's copy, so
+    every node reads the same bytes and no node's edits to it ever take effect.
+
+    A WARNING and not a refusal, for the reason §F1c itself gives for not banning absolute source
+    paths on the agent side: an operator naming a large untracked in-tree INPUT is legitimate and
+    measured — `runs/rubertlite-dense-retrieval` node 36's `--teacher_checkpoint` lives inside that
+    run's editable root. Unlike the agent-side check there is no manifest here to collide it
+    against at submit time, so there is no false-positive-free refusal to be had; what there is, is
+    an operator who can still act.
+    """
+    if not isinstance(task, RepoTask) or task.eval is None:
+        return []
+    roots = [(ed.get("name") or ".", ed.get("path"))
+             for ed in (task.repo_spec() or {}).get("editables", []) if ed.get("path")]
+    if not roots:
+        return []
+    argvs = [("cmd.command", task.eval.command or [])]
+    for i, st in enumerate(task.eval.stages or []):
+        if isinstance(st, dict):
+            argvs.append((f"cmd.stages[{i}].command", st.get("command") or []))
+    out: list[str] = []
+    for label, argv in argvs:
+        for tok in argv:
+            if not isinstance(tok, str):
+                continue
+            for _name, root in roots:
+                r = str(root).replace("\\", "/").rstrip("/")
+                if len(r) < 2 or not r.startswith("/") or not tok.startswith(r + "/"):
+                    continue
+                out.append(
+                    f"{label} names `{tok}`, an absolute path inside the editable repo "
+                    f"`{r}`. Every node evaluates in its OWN materialized copy of that tree, so "
+                    "this token reaches the operator's original: the same bytes for every node, and "
+                    "no node's edits to that file ever take effect. If it is a path the pipeline "
+                    "PRODUCES, spell it relative to the eval workdir; if it is a fixed input, "
+                    "declare a `data:`/`references:` mount for it so the read is sanctioned and the "
+                    "read fence does not refuse it.")
+                break
+    return out
+
+
 def eval_entrypoint_unprotected(task) -> list[str]:
     """The submit-time warning for an eval `command` whose scorer could not be protected, or [].
 

@@ -168,6 +168,24 @@ as the contract the engine actually reads: *"each experiment gets exactly ONE GP
 
 ## F1c · Catch a path that escapes the node's own workspace
 
+**BUILT, 2026-08-14** — the COLLISION check ships in `adapters/repo_write_tools.py`
+(`manifest_path_collisions` + the three tool sites) and the operator-side warning in
+`adapters/repo_task.py::eval_source_tree_command_paths`. What was built is smaller than what this
+entry describes, and the reasons are below under *What survived*. Both open questions are answered
+from the code rather than guessed, and **two factual claims in the entry's own opening are wrong** —
+they are corrected in place, with the evidence, because an operator triaging this would otherwise
+re-derive them.
+
+**CORRECTION 1 — node 0 DID record a metric.** Its event log:
+`node_evaluated {"metric": 0.708762, "eval_seconds": 13995.5, "violations": []}`, and 0.708762 is
+its own `train.log`'s number. **CORRECTION 2 — the waste is a double training, not a lost run.**
+Attempt 2 ran `train` for 4,618 s (ok) and then `score` for **4,593 s** before failing: the scorer
+found nothing at the source path and ran `subprocess.run([sys.executable, "-m",
+"vectorsearch.train"])` itself, and `overwrite: true` destroyed the artifact the train stage had just
+produced. Attempt 3 then re-trained for another 4,588 s. So ~9,180 s of the node's 13,995 s — about
+**2.55 GPU-hours** — bought nothing. That is the same defect `repo_task.py::eval_entrypoint_unprotected`
+already records as "2x GPU per node"; this entry and that docstring were describing one incident.
+
 **Found by watching, 2026-08-12.** `rubertlite-dr-unified-v6` node 0 burned roughly 3.5 GPU-hours and
 produced no recorded metric. The train stage was correct throughout: it wrote its checkpoint to
 exactly the workdir-relative path its manifest declared. `vectorsearch/configs/config.yaml` carried
@@ -210,6 +228,98 @@ its own event type.
 **A third, orthogonal and trivial piece:** refuse an `eval.command` / `eval.cwd` that itself names the
 editable source root absolutely, at submit time. Cheap — but it catches an operator mistake, not this
 one.
+
+### What survived, and what the four mechanisms that landed after this entry already cover
+
+Checked against `read_fence` (deny), its mutation half, `metric_subject` (audit), the `needs` the
+protected `score` stage now derives from the declared subject, and `read_allowlist`/`landlock` (off).
+
+**Nothing that shipped can see node 0, and that is the point.** The operative call is
+`(checkpoint_path / "model.safetensors").exists()` on a path that is not there. `os.stat` raises **no
+CPython audit event at all** (doc 38 §1d), so the fence never engages — there is no read to refuse.
+Landlock ABI 2 does not mediate metadata either (doc 38 §3.3), so the kernel rung would not see it
+if it were on. `metric_subject` binds at the score stage's start and node 0's subject was present and
+correct, so it binds cleanly; the `needs` check is a PRESENCE check and node 0's train stage really
+did write the declared file, so it passes — doc 35 §3a measured exactly that against the preserved
+workdir. **Every one of the four is downstream of a read that never happens.** The one thing that
+sees it is a check on the two DECLARATIONS, which is what this entry proposed.
+
+Node 4 is different and is *conditionally* covered: the fence refuses the SentenceTransformer load,
+but only because `transformers` opens `config.json` through Python first (doc 35 §4b measured the
+weights read at **zero** audit events), and `metric_subject`'s binding does not prove the scorer read
+the subject. So the corruption class is covered-if-you-are-lucky and the waste class is not covered
+at all.
+
+**BUILT: the collision check, at the two moments the two declarations meet.** For each absolute path
+into an editable source root spelled in an authored file, translate it into the workdir frame and
+compare it **component-wise** against every `expect.files` entry in the node's staged manifest;
+either being a prefix of the other (equality included) is the contradiction. Refused on
+`write_file` / `edit_file` (the new content), and on `declare_stages` (an already-staged file against
+the incoming declaration — which is the only route that reaches a repair's *seeded* config, never
+handed to a write tool). The refusal names both declarations and both ways out, and rides the same
+channel as the existing compile-error refusal: one tool call, nothing staged.
+
+**Measured on the real corpus, through the shipped function.** Over all **2,577** `node_created` /
+`node_repaired` working sets in `runs/` — i.e. exactly what the check would have been handed:
+
+| rule | refuses | of which defective |
+|---|---|---|
+| blanket ban on an absolute source path | 8 nodes (18 sets) | 3 |
+| **this collision check** | **3 nodes (6 sets)** | **3** |
+
+The three are v2 node 4, v6 node 0 and v6 node 4 — every known incident, nothing else. The five a ban
+would have killed are all legitimate: `rubert-dr-0807` nodes 0/1/3 read a committed base model at
+`models/converted/e5-small-v1.1.1`; `rubertlite-dense-retrieval` node 36 is the measured 1-in-116
+teacher checkpoint inside the editable root; v2 node 0's config names the repo's own committed
+default for a *different* experiment than the one it declares. **The property that makes this
+false-positive-free is not a threshold — a legitimate INPUT is never a path the node's own manifest
+declares it WRITES.** Component granularity is load-bearing: `models/rubertlite-20e-v7` shares a
+string prefix with `models/rubertlite_run` and would be a false positive under `startswith`.
+
+**(a) ORDERING — answered from the code, and the entry's worry does not bite.** `repo_developer.py::_run`
+builds `RepoWriteTools`, then for a fresh repo node runs the STAGES phase FIRST; that phase's
+`_finalize` persists `write.files["looplab_stages.json"]`, and the write/edit tools are composed only
+afterwards for PLAN and IMPLEMENT. So the manifest is in `self.files` at every write. *During* the
+stages phase there is nothing to check — its tool set is read-only (`EnvInspectTools` + scouts) and
+the manifest arrives through the phase EMIT, not a tool — but the EMIT path is bounced by the same
+rule, so a merge node declaring fresh stages over a carried-over config is caught there. A REPAIR
+skips the stages phase and `repair_from` pre-loads the failing node's own files, manifest included;
+an improve pre-loads the parent's. Confirmed on the incident: v6 node 0's `node_created.files` is
+`{looplab_stages.json, vectorsearch/configs/config.yaml, vectorsearch/test.py}` — manifest first, in
+the same session. The one case with no manifest is a node whose stages phase produced nothing and
+that has no parent, where there is no declaration to contradict and silence is correct. **Refuse, not
+bounce or note:** a refused tool call costs one tool call (the compile-error refusal already sets that
+price), and the note rung is spent — `_source_root_note` fired verbatim on node 4's own edit and the
+node still scored somebody else's model.
+
+**(b) The runtime half is NOT the better first build, and the entry's premise for it is false.**
+The FACT is real: node 0's score.log records the scorer shelling out to the train stage's own argv.
+But (i) `engine/train_monitor.py` and `engine/asha_monitor.py` are **log** supervision, not process
+supervision — `resolve_stage_log`, `read_training_tail`, `snapshot_training_logs`; neither enumerates
+a descendant pid or reads an argv, so there is nothing to hang it on and the mechanism would be new;
+(ii) any such check is a poll, so it misses a short spawn, and it is evaded by the *more* natural
+spelling `import vectorsearch.train; train.main()` in-process; (iii) it does not touch the corruption
+class at all — v6 node 4 and v2 node 4 spawned nothing, they read a foreign file. It also cannot
+reach the RECORD under doc 36's rule without authenticated evidence, and the only authenticated
+version of "the score stage re-ran the pipeline" is not a process at all: it is the score stage
+CHANGING the identity of the subject `metric_subject` bound at its start. That is a real follow-up
+and it belongs to the subject binding, not to process supervision.
+
+**The third piece, split by what the code already does.** `eval.cwd` needs no rule —
+`engine/workspace.py::sandbox_cwd` already remaps an absolute cwd under an editable source onto the
+node workdir, and refusing it would retire tested behaviour. The executed FILE is already named:
+`entrypoint_candidates` returns `[]` for an absolute path, so `eval_entrypoint_unprotected` already
+warns. What was left is an argv ARGUMENT, now reported by `eval_source_tree_command_paths` at both
+submit surfaces — a **warning**, not a refusal, for this entry's own reason: there is no manifest to
+collide it against at submit time and a fixed in-tree input is legitimate (node 36's shape, authored
+by an operator).
+
+**Still open, stated rather than closed.** A colliding line that arrives in the seeded working set
+and is never re-written *and* never re-declared is unreachable from the authoring side; doc 31's O1
+(the same rule at `engine/workspace.py::materialize`, measured at 0.08–0.62 s/node) is the backstop,
+and it was deliberately not built here because its only available action is failing the whole node
+rather than costing one tool call. A path assembled at runtime
+(`os.environ["REPO"] + "/experiments/…"`) is out of reach of any static rule.
 
 ## F1d · A repo task cannot declare ENVIRONMENT for its stages
 

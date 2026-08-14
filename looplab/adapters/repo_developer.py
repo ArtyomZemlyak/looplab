@@ -1075,7 +1075,15 @@ class LLMRepoDeveloper:
             if err:
                 return err
             miss = _missing_stage_input_paths(stages)   # a hallucinated non-existent data path → re-declare
-            return _missing_paths_feedback(miss) if miss else None
+            if miss:
+                return _missing_paths_feedback(miss)
+            # F1c: an already-seeded file (the PARENT's config on an improve/merge) that names this
+            # declaration's own output absolutely, in the editable SOURCE tree. This phase reaches
+            # `declare_stages` through the emit spec and not through the write tool, so the tool's
+            # own copy of this check never runs here — and a merge node authoring a fresh manifest
+            # over a carried-over config is exactly the shape that cost v2 node 4 and v6 node 4 their
+            # metrics. Bounced, so the model re-declares while it still can.
+            return write.manifest_collision_refusal(stages)
 
         def _finalize(args):
             clean, _ = validate_stages((args or {}).get("stages"), reserved=reserved)
