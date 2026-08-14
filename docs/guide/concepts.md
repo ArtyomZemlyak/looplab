@@ -184,6 +184,8 @@ runs/<name>/
 ├── trace.json            # derived event/trace projection for the UI
 ├── chat.jsonl            # run-scoped operator/boss transcript sidecar
 ├── readmodel.sqlite      # derived SQLite read-model, rebuilt from events (+ -wal/-shm)
+│                         #   carries a watermark saying which event prefix it covers;
+│                         #   `looplab readmodel RUN_DIR [--check]` rebuilds/checks it
 ├── engine.stderr.log     # bounded stderr of a server-spawned engine (startup diagnostics)
 ├── spans.jsonl           # recorded diagnostic telemetry; never read by replay
 └── spans.index.jsonl     # derived bounded/redacted span projection + offsets

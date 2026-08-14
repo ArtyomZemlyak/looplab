@@ -12,9 +12,7 @@ paid report, reflection, or cost delta after an ambiguous crash.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import tempfile
 import time
 from typing import TYPE_CHECKING
 
@@ -46,7 +44,11 @@ from looplab.events.finalize_protocol import (
     budget_receipt,
 )
 from looplab.events.htmlview import render_html
-from looplab.events.readmodel import build_readmodel
+# NOT `build_readmodel`: the atomic publish moved DOWN to `events/readmodel.py` so the on-demand
+# `looplab readmodel` rebuild shares it. Importing the inner builder here too would leave a decoy
+# patch seam — `monkeypatch.setattr(finalize, "build_readmodel", …)` would resolve and reach
+# nothing, because `publish_readmodel` calls its own module global.
+from looplab.events.readmodel import publish_readmodel
 from looplab.events.replay import fold, run_wall_clock_seconds
 from looplab.events.traceview import (
     TRACE_VIEW_SPAN_CAP, build_trace_view, hydrate_inputs, load_span_tail,
@@ -477,21 +479,15 @@ def mark_finish_report_complete(engine: "Engine", scope: str) -> None:
 
 
 def _build_readmodel_atomic(events, path: Path) -> RunState:
-    """Build the rebuildable SQLite projection off to the side, then atomically publish it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        state = build_readmodel(events, tmp)
-        os.replace(tmp, path)
-        return state
-    finally:
-        for candidate in (tmp, Path(f"{tmp}-journal"), Path(f"{tmp}-wal"), Path(f"{tmp}-shm")):
-            try:
-                candidate.unlink()
-            except OSError:
-                pass
+    """Build the rebuildable SQLite projection off to the side, then atomically publish it.
+
+    The body lives in `events/readmodel.py::publish_readmodel`, which the on-demand
+    `looplab readmodel` rebuild calls too — one spelling of the temp-build-then-`os.replace`, so a
+    live/crashed run's operator-built projection and the engine's own cannot come to differ about
+    what a failed build leaves on disk. This wrapper stays because the finalization's own callers
+    and its `readmodel_skipped` containment name it.
+    """
+    return publish_readmodel(events, path)
 
 
 def _flush_trace_exporter(engine: "Engine") -> bool:

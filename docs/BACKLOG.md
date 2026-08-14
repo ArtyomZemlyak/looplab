@@ -133,6 +133,35 @@ site that proves it is open.
    caller is `engine/finalize.py:912` via `_build_readmodel_atomic` (`finalize.py:479`), which DID
    fix the atomicity half (tempfile + `os.replace`). **Cost:** a crashed or still-live run has no
    read model at all, and a post-run control event diverges from it undetectably.
+   **FIXED 2026-08-14 — two of the three, and the third was DELIBERATELY NOT BUILT.**
+   `build_readmodel` now stamps a WATERMARK (schema version, last `seq` folded, event count, digest
+   of the `(seq, type)` prefix) in the SAME transaction as the rows, and `readmodel_status` /
+   `readmodel_is_current` fail closed — absent file, unopenable db, missing/duplicated/malformed
+   row, unknown schema version and uncomputable digest all answer `unknown`, never `current`. The
+   reader opens `file:…?mode=ro`, because a plain `sqlite3.connect` CREATES a database and would
+   turn "this run has no read model" into "it has an empty one". All 29 preserved
+   `runs/*/readmodel.sqlite` load their `nodes` table unchanged and report `unknown`.
+   The exit-only half is closed by `looplab readmodel RUN_DIR [--check]` (`cli/inspect_cmds.py`) —
+   the same `publish_readmodel` the finalization calls, reachable during a live run and after a
+   crash, refusing a run whose deletion/reset fence is set or unreadable. It is safe under
+   invariant #1 (a derived sidecar is not an event; it appends nothing) and #4 (nothing in
+   `looplab/` opens the database, so it cannot become cached derived state the engine reads back).
+   **REFRESH-ON-APPEND was measured and rejected, not deferred.** The rebuild is not on any hot
+   path because it has NO programmatic reader: `sqlite3` is imported in exactly one module in
+   `looplab/`, `readmodel.py` itself. The other five mentions are non-readers — `serve/artifacts.py`
+   lists it as an opaque binary, `serve/reset_transaction.py` names it in `RESET_ARTIFACT_NAMES`,
+   `tools/perm_modes.py::DEFAULT_PROTECT` stops an agent clobbering it, `agents/preflight.py`
+   advertises it in prose, and the four test references only assert existence. And the expensive
+   part is already incremental one layer down: measured on the largest real log
+   (`runs/rubert-dr-0804`, 106 MB / 2,680 events) a full rebuild costs 6 ms to fold and 3 ms to
+   write once the events are in memory, against 1.06 s to prime `EventStore`'s own incremental
+   parse cache — so an incremental refresh here could save at most single-digit-to-220 ms
+   (`rubertlite-dr-unified-v6`'s fold is the worst at 223 ms) while duplicating machinery
+   `EventStore` already has. The watermark itself costs 0.8-1.2 ms to compute and 0.1 ms to read.
+   **STILL OPEN:** no periodic in-engine refresh (a live run's model is only as fresh as the last
+   `looplab readmodel`), and no consumer consults the watermark — there is no consumer at all, so
+   the guarantee is available rather than enforced. If a reader is ever added, it must call
+   `readmodel_is_current` before trusting a row.
 5. **`agentless` is not a developer backend, and a Strategist branch for it is dead code (P1, M).**
    `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose", "opencode")` —
    no `llm`, no `agentless`. `engine/strategy.py:75-77::_available_developers()` returns
@@ -505,6 +534,13 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   `os.replace`s it, called from `finalize.py:912` (`finalize_run`) — its only caller. `readmodel.py`
   is 55 lines and still exposes only `build_readmodel`: **no seq watermark, no refresh-on-append, and
   still exit-only.**]
+  **[2026-08-14, later the same day — CLOSED, on 2 of the 3 asks.** The watermark landed IN
+  `readmodel.py` (fail-closed `readmodel_status`/`readmodel_is_current`, read-only URI open), the
+  atomic publish moved down beside it as `publish_readmodel` so the engine and the new
+  `looplab readmodel RUN_DIR [--check]` share ONE spelling, and exit-only is gone. **Refresh-on-append
+  was rejected on measurement, not skipped** — the artefact has no programmatic reader anywhere in
+  `looplab/`, and the parse it would save is already incremental inside `EventStore`. Full rationale,
+  numbers and residue on SURVIVOR #4 above.]
 - ✅ **P1 · G4 finish (S–M).** LLM `_post` ✅; still TODO: reuse `_kill_tree`/process-group in
   `cli_agent` (timeout orphans grandchildren) + guard `choices[0]` envelope.
   **[2026-08-14 — DONE, both halves.** `agents/cli_agent.py:345-352,379` imports and calls
