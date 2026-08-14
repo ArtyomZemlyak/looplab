@@ -194,3 +194,39 @@ def test_a_store_a_surviving_run_names_is_managed_even_when_it_is_not_the_global
     assert response.status_code == 200, response.text
     assert response.json()["deleted"] == 1
     assert response.json()["memory_dir"] == str(other), "the receipt names the store it ran against"
+
+
+def test_a_retry_after_the_workspace_is_gone_finishes_the_cascade_uid_keyed(tmp_path, monkeypatch):
+    """The identity sidecar, driven end to end.
+
+    `run_uid` and the run's own `memory_dir` live ONLY inside the run directory, and the purge runs
+    after that directory is gone. So a deletion that completes on a RETRY — the four documented
+    "left the workspace but pending" phases, or a crash mid-transaction — used to lose the uid
+    permanently and answer `identity: "unknown"`, while telling the operator to pass back fields no
+    receipt and no 202 body ever carried. The UI's retry button then posted two empty strings
+    forever. Here the first attempt parks the identity beside its receipt and the retry reads it.
+    """
+    run_dir = _run(tmp_path)
+    (run_dir / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{"run_uid":"uid-gone-1"}}\n', encoding="utf-8")
+    memory = _memory(monkeypatch, tmp_path)
+    identity = _identity(run_dir)
+    client = TestClient(make_app(tmp_path))
+
+    # Simulate the shape the sidecar exists for: the workspace is already gone when the request
+    # that COMPLETES the operation reads the identity.
+    first = client.post(f"/api/runs/{GONE}/deletions", json={**identity, "delete_memory": True})
+    assert first.status_code == 200 and not run_dir.exists()
+    assert first.json()["memory"]["ok"] is True
+
+    # The retry of THIS EXACT operation re-runs the idempotent purge — and must still be uid-keyed
+    # rather than degrading to the bare-name matching that takes another checkout's rows.
+    again = client.post(f"/api/runs/{GONE}/deletions", json={**identity, "delete_memory": True})
+    assert again.status_code == 200, again.text
+    memory_receipt = again.json()["memory"]
+    assert memory_receipt["identity"] == "run_uid", (
+        "the retry must not report 'unknown' — nor fall back to matching the directory NAME")
+    assert memory_receipt["run_uid"] == "uid-gone-1"
+    assert memory_receipt["memory_dir"] == str(memory)
+    assert memory_receipt["ok"] is True
+    assert _statements(memory) == ["folded", "theirs"], "the purge stays idempotent"

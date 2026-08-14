@@ -230,7 +230,16 @@ def unbound_subject_violation_rows(prov, metric, mode: str) -> list:
 #            already handled and shipped — the STALL watchdog fires when the process went SILENT,
 #            i.e. when it had finished talking, and `evaluate.py`'s `ok` gate has salvaged that since
 #            before this module existed (`res.stalled`). A hard deadline carries no such evidence.
-NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout"})
+#
+# `diverged` is here for the same reason `command_eval._salvageable_stall` subtracts it from the
+# stall carve-out ("Divergence is the stronger, fail-closed verdict"). Without it the refusal of a
+# diverged training rested ENTIRELY on `exit_code != 0`, and the kill/exit race defeats that: the
+# non-finite losses drain, the process exits naturally before the tree-kill lands, and the
+# divergence verdict is recorded beside exit 0. The node reaches `eval_failed`, salvage re-admits a
+# number produced by a numerically broken run, and under `metric_salvage="select"` that number is
+# selectable. `res.diverged` is not consulted anywhere else in this module, so this set is the
+# whole rule.
+NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged"})
 
 # Stage statuses that VETO salvage even when a reader can find a number.
 #
@@ -337,6 +346,13 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     Reads only `res`'s own fields and the classifier's `reason`; no I/O, no model.
     """
     if reason in NEVER_SALVAGED_REASONS or getattr(res, "timed_out", False):
+        return None
+    # `res.diverged` as well as the reason, and deliberately not only through it: the divergence
+    # verdict is fail-closed and can land beside ANY classification (the kill/exit race records it
+    # next to a natural exit 0, where `_failure_reason` sees a clean completion). Reading the flag
+    # directly is what makes "a diverged training is never salvaged" a property of the RESULT rather
+    # than of whichever label the classifier happened to reach for.
+    if getattr(res, "diverged", False):
         return None
     if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False):
         return None
@@ -854,11 +870,15 @@ RECHECKABLE_SALVAGE_SOURCES = ("declared_reader",)
 
 
 def _decl_key(path) -> str:
-    """A repair's changed-file key as the manifest name would be spelled. `_repair_change_set` keys
-    are workdir-relative; the `./` prefix is the one spelling difference that shows up in practice
-    (`_safe_reuse_start` strips exactly the same one)."""
-    text = str(path or "")
-    return text[2:] if text.startswith("./") else text
+    """A repair's changed-file key as the manifest name would be spelled.
+
+    `command_eval.normalize_declared_path` and nothing else: this used to strip a `./` prefix ONCE
+    while the manifest validator stripped it repeatedly, so `././looplab_stages.json` canonicalized
+    on the validated side and did not here — and the F1e re-check then compared two spellings of one
+    path forever, refusing a promotion the validator had accepted. Fail-closed, but permanently
+    unreachable and indistinguishable from "the repair didn't correct anything"."""
+    from looplab.runtime import command_eval
+    return command_eval.normalize_declared_path(path)
 
 
 def declaration_only_repair(changed, deleted=(), code: str = "") -> bool:
@@ -926,10 +946,20 @@ def recheckable_salvage(salvaged) -> bool:
     The condition must be `artifact_contract` — the only failure class in which a declared contract
     is what failed, and therefore the only one a re-check of that contract can answer. See
     `RECHECKABLE_SALVAGE_SOURCES` for the rung rule.
-    """
+
+    The PRODUCER gate is the third rule, and without it this promotion was strictly more permissive
+    than `metric_salvage="select"` — the most permissive rung an operator can choose. A promotion
+    drops the `metric_salvaged` violation, its provenance and the `feasible_nodes()` exclusion
+    outright, whereas `violation_rows` keeps all three for AGENT_PRODUCED output under every rung
+    except `off` (see its own paragraph: the operator who set `select` accepted "a metric recovered
+    by MY declared reader may compete", not "a number the agent's own training script printed may
+    compete"). A fully Developer-declared pipeline is exactly the shape that reaches here, so
+    without this line a node could be recorded as MEASURED, with no violation, under the DEFAULT
+    `audit` rung — while the same node under an explicit `select` still carried the violation."""
     return (salvaged is not None
             and getattr(salvaged, "condition", "") == "artifact_contract"
-            and getattr(salvaged, "source", "") in RECHECKABLE_SALVAGE_SOURCES)
+            and getattr(salvaged, "source", "") in RECHECKABLE_SALVAGE_SOURCES
+            and getattr(salvaged, "producer", AGENT_PRODUCED) == OPERATOR_PRODUCED)
 
 
 def recheck_floor(res, stage: str) -> Optional[float]:
@@ -979,6 +1009,14 @@ def recheckable_expect(stages, stage: str, changed) -> dict:
     name = str(stage or "")
     if not name:
         return {}
+    # LATENT GAP in the guard below, unreachable today: `written` is only the CHANGED
+    # set, but the repair's commit path (`_repair_salvaged_cause` -> `_write_node_files`)
+    # re-materializes EVERY `node.files` entry with a fresh mtime after the stage start — so a
+    # corrected `expect.files` naming an UNCHANGED node source file (e.g. `train.py`) would pass
+    # the freshness floor on a file the stage never produced. Unreachable today only because the
+    # promotion path never sees an operator-declared expect on the appended score stage; if that
+    # documented design option ever lands, `written` must widen to everything the commit rewrote,
+    # not just the diff.
     written = {_decl_key(c) for c in (changed or ())}
     for row in (stages or ()):
         if not isinstance(row, dict) or str(row.get("name") or "") != name:

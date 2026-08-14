@@ -166,3 +166,116 @@ def test_each_caller_keeps_its_own_sibling_message_and_passes_its_label(module, 
     assert "ctypes" not in source
     assert "source.parent != destination.parent" in source, (
         f"{module}.{fn} dropped its own sibling rule along with the mechanics")
+
+
+# ------------------------------------------------------------------------------------------------
+# Where the FILESYSTEM cannot provide RENAME_NOREPLACE at all.
+#
+# MEASURED 2026-08-13: every LoopLab run on this deployment lives under a `fuse.geesefs` mount, where
+# `renameat2(..., RENAME_NOREPLACE)` returns EINVAL while the same rename with flags=0 succeeds. FUSE
+# does not implement the flag. Failing closed there protects nothing — it makes run deletion
+# IMPOSSIBLE, and it had been: every attempt stalled at `phase: quarantining` with `[Errno 22]`, the
+# operator saw "the deletion did not complete", and 9.6 GB they had asked to remove stayed on disk.
+# ------------------------------------------------------------------------------------------------
+import ctypes                                                                    # noqa: E402
+import errno as _errno                                                           # noqa: E402
+import os as _os                                                                 # noqa: E402
+
+import pytest                                                                    # noqa: E402
+
+from looplab.core import atomicio as _atomicio                                    # noqa: E402
+
+
+class _FlagRefusingLibc:
+    """A libc whose `renameat2` refuses the FLAG the way geesefs does, and performs a plain rename
+    when given flags=0 — so the fallback is exercised against a real filesystem move."""
+
+    def __init__(self, code):
+        self.code = code
+        self.calls = []
+
+    def __getattr__(self, name):
+        if name != "renameat2":
+            raise AttributeError(name)
+
+        def _call(_olddirfd, oldname, _newdirfd, newname, flags):
+            self.calls.append(flags)
+            if flags:
+                ctypes.set_errno(self.code)
+                return -1
+            _os.rename(_os.fsdecode(oldname), _os.fsdecode(newname))
+            return 0
+
+        _call.argtypes = None
+        _call.restype = None
+        return _call
+
+
+@pytest.mark.parametrize("code", [_errno.EINVAL, _errno.ENOSYS, _errno.EOPNOTSUPP])
+def test_a_unique_destination_still_moves_when_the_flag_is_unsupported(tmp_path, monkeypatch, code):
+    libc = _FlagRefusingLibc(code)
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: libc)
+    src = tmp_path / "run"
+    src.mkdir()
+    (src / "events.jsonl").write_text("{}\n")
+    dst = tmp_path / ".looplab-delete-quarantine-abc.7f0d1c8e-uuid"
+
+    _atomicio.durable_no_replace_rename(src, dst, label="deletion quarantine",
+                                        unique_destination=True)
+
+    assert dst.is_dir() and (dst / "events.jsonl").exists() and not src.exists()
+    assert libc.calls[0] != 0, "the flagged call must be tried FIRST, never skipped"
+
+
+@pytest.mark.parametrize("code", [_errno.EINVAL, _errno.ENOSYS, _errno.EOPNOTSUPP])
+def test_a_PREDICTABLE_destination_still_fails_closed(tmp_path, monkeypatch, code):
+    """The replay archive names itself `<name>.reset-<millisecond stamp>` from a probe-then-use loop
+    over `lexists` — exactly the TOCTOU the kernel flag closes. It does not get the fallback."""
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: _FlagRefusingLibc(code))
+    src = tmp_path / "events.jsonl"
+    src.write_text("{}\n")
+    with pytest.raises(OSError) as info:
+        _atomicio.durable_no_replace_rename(src, tmp_path / "events.jsonl.reset-1", 
+                                            label="replay archive")
+    assert info.value.errno == code
+    assert src.exists(), "the source must be untouched when the guarantee cannot be given"
+
+
+def test_a_REAL_rename_failure_is_never_treated_as_an_unsupported_flag(tmp_path, monkeypatch):
+    """EXDEV, ENOTEMPTY, EACCES, EBUSY are answers about THIS rename, not about the flag. Treating
+    one as "unsupported" would perform the very replace the no-replace contract forbids."""
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: _FlagRefusingLibc(_errno.EXDEV))
+    src = tmp_path / "run"
+    src.mkdir()
+    with pytest.raises(OSError) as info:
+        _atomicio.durable_no_replace_rename(src, tmp_path / "quarantine.uuid",
+                                            label="deletion quarantine",
+                                            unique_destination=True)
+    assert info.value.errno == _errno.EXDEV
+    assert src.is_dir()
+
+
+def test_a_destination_that_appears_DURING_the_flag_probe_is_refused_not_replaced(
+        tmp_path, monkeypatch):
+    """The residual race the fallback opens, closed: the kernel is asked about flags first, and a
+    destination created in that window must still be refused. Replacing it is the one outcome the
+    caller cannot recover from."""
+    dst = tmp_path / "quarantine.uuid"
+
+    class _Racer(_FlagRefusingLibc):
+        def __getattr__(self, name):
+            call = super().__getattr__(name)
+
+            def _raced(*args):
+                result = call(*args)
+                dst.mkdir()                      # a concurrent writer wins the name
+                return result
+            return _raced
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: _Racer(_errno.EINVAL))
+    src = tmp_path / "run"
+    src.mkdir()
+    with pytest.raises(FileExistsError):
+        _atomicio.durable_no_replace_rename(src, dst, label="deletion quarantine",
+                                            unique_destination=True)
+    assert src.is_dir(), "the source must survive a refused move"

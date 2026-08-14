@@ -526,22 +526,41 @@ class ForesightPanelResearcher(WrapsResearcher):
         except Exception:  # noqa: BLE001 — advisory: degrade to the self-reported confidence
             return None
 
+    def _base_board_window(self, state) -> list:
+        """The card window the BASE researcher actually showed the model, for re-binding.
+
+        `bind_idea_to_board_card` resolves a proposal's CARD_ID claim against a window and NULLS the
+        claim when the card is not in it. The base already bound the Idea it returned, against a
+        window derived from its own `_board_prompt_attempt`; re-binding here against a window from
+        this panel's independent `_board_attempt_cursor` therefore stripped valid claims whenever
+        the two cursors had drifted — and they drift as a matter of course, because the base
+        advances k per panel propose while the panel advances 1, and `_prioritize_board` skips its
+        increment on a <2-belief board. With more than 5 open beliefs the two 5-card rotations
+        differ in the rotated slot (reproduced: attempts 3 vs 1 over 7 cards), so a card the model
+        was legitimately SHOWN went missing and the proposal fell back to statement-hash linkage —
+        resurrecting exactly the lost-claim/twin-card shape the Card work closed.
+
+        Both base researchers publish `_visible_board_cards`. The recomputation is only a fallback
+        for a base that does not, where this panel's cursor is the sole rotation there is."""
+        published = getattr(self.base, "_visible_board_cards", None)
+        if isinstance(published, list):
+            return published
+        return next_board_prompt_cards(
+            state, getattr(self.base, "_hyp_order", None),
+            attempt=max(0, self._board_attempt_cursor - 1))
+
     def propose(self, state, parent):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
         self._forward_hints()
         if self.client is None:
-            visible_cards = next_board_prompt_cards(
-                state, getattr(self.base, "_hyp_order", None),
-                attempt=self._board_attempt_cursor)
             self._board_attempt_cursor += 1
-            return bind_idea_to_board_card(self.base.propose(state, parent), visible_cards)
+            idea = self.base.propose(state, parent)
+            return bind_idea_to_board_card(idea, self._base_board_window(state))
         if self.tools is not None and hasattr(self.tools, "bind_state"):
             self.tools.bind_state(state)                 # let the agentic ranker read the live run
         self._prioritize_board(state, parent)            # rank the open-hypothesis board, steer the base
-        visible_cards = next_board_prompt_cards(
-            state, getattr(self.base, "_hyp_order", None),
-            attempt=max(0, self._board_attempt_cursor - 1))
+        visible_cards = self._base_board_window(state)
         if self.k == 1:
             return bind_idea_to_board_card(
                 self.base.propose(state, parent), visible_cards)

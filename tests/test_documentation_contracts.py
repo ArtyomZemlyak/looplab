@@ -47,7 +47,7 @@ def test_index_mentions_every_numbered_document():
     # start "34-" and satisfy the count AND the membership check, which happened twice on 2026-08-13
     # (the fence audit vs the review residue, and the decision-sites survey vs the worktree
     # measurement). If you find this red, ADD THE MISSING ROW; do not just move the number.
-    assert len(numbered) == 39, "the derived numbered-document inventory changed"
+    assert len(numbered) == 40, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

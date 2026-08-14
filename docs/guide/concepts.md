@@ -477,8 +477,14 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
   **any** of the eight `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+- **debug / repair** — on a failure, hand the failing code + stderr back to fix it. Since 2026-08-12
+  **any** of the eleven `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
-  `check_failed` — not only the mechanical three. An in-place repair doesn't consume the node budget;
+  `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
+  <!-- FIXED 2026-08-13 (mega-review, doc 35): this list said "eight" and omitted the last three — it was
+       written on a branch where 8 was correct and merged beside the registry widening without
+       reconciliation; the settings table already listed all eleven. -->
+  An in-place repair doesn't consume the node budget;
   deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once
   per attempt (the call the loop already made) and is shown this node's whole repair history — what

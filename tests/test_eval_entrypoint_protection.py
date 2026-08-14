@@ -289,8 +289,26 @@ def test_the_note_follows_the_edit_path_and_only_reports_what_the_hunk_introduce
     (["python", "train.py", "--config", "cfg.py"], ["train.py"]),                       # first .py
     (["python", "./eval/score.py"], ["eval/score.py"]),
     (["python", "-W", "ignore", "score.py"], ["score.py"]),
+    (["python", "-X", "faulthandler", "score.py"], ["score.py"]),
+    # A `-m` AFTER the script is the SCRIPT'S argument. Scanning the whole argv returned
+    # `eval.py` here while CPython runs `train.py` — freezing a file the operator never named,
+    # leaving the real scorer editable, and suppressing the unprotected-scorer warning because the
+    # result was non-empty. Every cost the "say nothing rather than guess" rule exists to avoid.
+    (["python", "train.py", "-m", "eval"], ["train.py"]),
+    (["python", "score.py", "-m", "pkg.mod", "--out", "x.py"], ["score.py"]),
+    # A transparent prefix that names the interpreter verbatim is read through.
+    (["srun", "python", "score.py"], ["score.py"]),
+    (["env", "FOO=1", "python", "-m", "pkg.mod"], ["pkg/mod.py", "pkg/mod/__main__.py"]),
+    (["nohup", "python", "eval/score.py"], ["eval/score.py"]),
     # Everything below names no in-repo file, and says so rather than guessing.
     (["bash", "run.sh"], []),
+    # A launcher that does NOT name an interpreter: its own flag grammar decides which of
+    # `--nproc_per_node 2 score.py` is the script, and we do not know it.
+    (["torchrun", "--nproc_per_node", "2", "score.py"], []),
+    (["accelerate", "launch", "score.py"], []),
+    (["python", "-um", "pkg.mod"], []),               # a cluster carrying `m`: opaque, like `-mpkg`
+    (["python", "-"], []),                            # stdin
+    (["python", "run", "x.py"], []),                  # the executed token is not a .py at all
     (["./score"], []),
     (["pytest", "-q"], []),
     (["python", "-c", "import x"], []),

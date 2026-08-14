@@ -20,6 +20,7 @@ import logging
 import uuid
 from typing import Iterable, Optional
 
+from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
@@ -493,8 +494,11 @@ class ResearchCadenceMixin:
         directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
         if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
+            # The prefix comes from `agents/hints.py`, which FILTERS on it — a deep-research row
+            # whose `source` stamp is missing (a log older than the field) is recognised by this
+            # text alone, so the two must not be spelled separately.
             self.store.append(EV_HINT, {
-                "text": "deep-research directions: " + "; ".join(directions[:5]),
+                "text": DEEP_RESEARCH_HINT_PREFIX + "; ".join(directions[:5]),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
@@ -691,6 +695,18 @@ class ResearchCadenceMixin:
                        if footprint_subject is not None else subjects.get(card_id))
             card = state.cards.get(card_id)
             if subject is None or card is None:
+                continue
+            if getattr(card, "_card_enrichment_complete", True) is False:
+                # THE FOLD REFUSED THIS CARD'S ENRICHMENT, so writing another row cannot change the
+                # folded card and the delta below would be non-empty again on the very next pass.
+                # `replay._on_card_enriched` bounds the enrichment journal at 4,096 keys and a NEW
+                # key refused at the cap is refused on every subsequent fold too — the fold replays
+                # the same log prefix, so the same 4,096 keys win forever. Without this gate the
+                # reconciliation re-appended a byte-identical `card_enriched` on EVERY cadence pass
+                # for the rest of the run: reproduced at appends-per-pass 0,1,2,3,4… against a
+                # control that converges at one, i.e. unbounded growth of a log every fold re-reads.
+                # Organically ~1,000 cards away; a hand-edited or hostile log reaches it with 4,096
+                # cheap rows.
                 continue
             lesson_refs = sorted(desired_lessons.get(card_id, ()))[:64]
             claim_refs = sorted(desired_claims.get(card_id, ()))[:64]

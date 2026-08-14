@@ -5321,7 +5321,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             reason="proposal_rejected", drop_card=bool(current.idea.card_id))
                         self._discard_node_build_telemetry()
                         return
-                    self._drop_card_once(current.idea.card_id, reason="reproposed")
+                    # THE SAME OWNERSHIP CHECK the refusal path four lines up routes through (via
+                    # `_fail_reserved_build`). `_drop_card_once` has none of its own, so dropping
+                    # unconditionally destroyed a card that a DIFFERENT node had attached to — a
+                    # debug re-attempt landing on the same work item — and a dropped card is
+                    # unrecoverable, because `_retry_attach_card` refuses `dropped` forever. The
+                    # later repair then minted a byte-identical twin: exactly the duplicate work
+                    # item the attach disposition exists to prevent. Reproduced end-to-end (mint on
+                    # node 0, attach on node 1, `node_reset from_stage=propose` on node 0).
+                    # Fail-closed here means the superseded card survives as proposed inventory,
+                    # which is the cost `_reservation_minted_card`'s own docstring prices against
+                    # deleting somebody else's finished work item.
+                    if self._reservation_minted_card(events, node.id, current.idea.card_id):
+                        self._drop_card_once(current.idea.card_id, reason="reproposed")
                     if plan.disposition == "mint":
                         self.store.append(EV_CARD_ADDED, plan.payload)
                     self.store.append(EV_NODE_BUILDING, {

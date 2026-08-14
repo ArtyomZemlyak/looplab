@@ -80,9 +80,22 @@ def test_an_operator_can_still_narrow_it():
 
 def test_the_gate_reads_the_setting_rather_than_a_literal():
     """`_evaluate`'s gate is what actually decides. Pinned against the engine attribute it reads, so
-    a future 'fast path' literal in that branch is a red test."""
+    a future 'fast path' literal in that branch is a red test.
+
+    AST, not a substring over the module text. A positive `assert "<literal>" in source` pin is one
+    comment away from vacuous — delete the gate, leave it commented out carrying the pinned text,
+    and this stays green while every reason silently stops buying repairs. `attributes_read` resolves
+    real `ast.Attribute` nodes, and comments are not AST nodes.
+
+    The NEGATIVE pin stays a substring by house rule: what must not come back is the TEXT, and a
+    commented-out copy of the old hardcoded tuple is as much of a drift risk as a live one."""
     from looplab.engine import evaluate
 
-    source = inspect.getsource(evaluate)
-    assert "reason not in self._inline_repair_reasons" in source
-    assert '"crash", "timeout", "oom"' not in source
+    from tests._source_scan import attributes_read
+
+    reads = attributes_read(evaluate.EvaluateMixin._evaluate)
+    assert "self._inline_repair_reasons" in reads, (
+        "the gate must READ the setting — a hardcoded reason list here silently changes which "
+        "failures buy an inline repair, for every run")
+    assert "self._inline_repair" in reads
+    assert '"crash", "timeout", "oom"' not in inspect.getsource(evaluate)

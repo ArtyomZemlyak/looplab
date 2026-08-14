@@ -2608,6 +2608,15 @@ def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 def _on_hypothesis_added(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1: an explicitly-registered hypothesis (human `add_hypothesis`, or a deep-research
     # direction) — may have no evidence yet. Evidence + verdict are DERIVED post-loop.
+    #
+    # FOLD DELTA ON OLD LOGS, stated: the bounds below drop an over-cap or non-string LEGACY row
+    # ENTIRELY — not just its journal entry but also its card-identity registration and the
+    # abandoned-reopen side effect that the pre-bounds handler executed for any truthy statement.
+    # That is a fold-output change on old logs (a previously reopened hypothesis stays abandoned;
+    # ambiguity edges can differ), which invariant 5's additive-only rule says needs reader-side
+    # tolerance rather than silence. Real-log exposure is small (Card construction refused over-cap
+    # statements anyway), but the delta is undocumented here and should be — or the reopen/identity
+    # halves should keep accepting the legacy shape with the journal row alone bounded.
     statement = d.get("statement")
     clean_statement = statement.strip() if isinstance(statement, str) else ""
     try:
@@ -2859,7 +2868,18 @@ def _on_card_enriched(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             else:
                 # Handler-level LWW means repeated values for the same rejected window are still one
                 # missing projection candidate, not an ever-growing count of audit-log events.
+                #
+                # A NEW key refused here is refused FOREVER: the fold replays the same log prefix,
+                # so the same 4,096 keys win on every fold. That is fine for the fold — it is the
+                # bound doing its job — but it makes the omission a DURABLE fact the writer has to
+                # see, which is what `card_enrichment_omissions` carries out to `derive_cards` and
+                # what `Card._card_enrichment_complete` publishes. `research_cadence`'s
+                # reconciliation now refuses to re-append against a card marked incomplete;
+                # without that gate it re-emitted a byte-identical `card_enriched` on every cadence
+                # pass for the rest of the run (measured: appends-per-pass 0,1,2,3,4… versus a
+                # control converging at one).
                 ctx.card_enrichment_omissions.setdefault(candidate_key, 1)
+
 
 def _on_card_ranked(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Layer 1b: FOREAGENT board prioritization for cards — latest wins (mirrors `_on_hypothesis_ranked`).

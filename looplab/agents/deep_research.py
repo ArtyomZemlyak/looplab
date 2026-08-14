@@ -356,6 +356,16 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         trial = retained + [candidate]
         if len(render(trial)) <= _STATE_BRIEF_MAX_CHARS:
             retained = trial
+    if not retained and candidates:
+        # ONE EXPERIMENT IS RESERVED. The loop bounds only what it ADDS, and the prefix — goal,
+        # counts, and the board block whose own sub-caps admit ~28k chars of seeds — is never
+        # itself tested against the budget. So a near-cap board rejects every candidate and this
+        # returned an over-budget brief announcing "0 of N active experiments": a deep-research
+        # review of a run, with none of the run's experiments in it. `candidates` is already in
+        # priority order (leader first), so the reserved row is the one worth keeping. The brief is
+        # over budget either way in that case; it is better over budget WITH the leader than
+        # without, and `coverage_line` reports the omission honestly.
+        retained = [candidates[0]]
     return render(retained)
 
 

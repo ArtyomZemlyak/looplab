@@ -6,10 +6,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, fmtInt, CONTROL, commandFeedback, createIdempotencyKey, deadlineGet, getRunCommand,
   isTransientCommandReadError, retryRunCommand, runApiPath, runCommand,
-  submitCommand } from './util.js'
+  submitCommand, traceDeadlineGet, traceGenerationMatches } from './util.js'
 import { OpIcon } from './icons.jsx'
 import Panel, { PanelPresentationContext } from './PanelShell.jsx'
-import { cardControlSubmission, cardEditReflected } from './cardControlModel.js'
+import { cardControlRecovery, cardControlSubmission, cardEditReflected }
+  from './cardControlModel.js'
 // The lane vocabulary and the card-shape readers moved down into the pure model beside this file
 // (the `ui/` house pattern) so the board and `node --test` read ONE table. They are aliased back to
 // this file's existing private spellings rather than renamed at ~77 call sites: the point of the
@@ -30,6 +31,7 @@ import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { traceReadDeadlineMs } from './traceScrollModel.js'
+import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
 // Legacy direction board retained as a graceful fallback for pre-Card logs. Current runs use the
 // bounded public Card DTO and four generation-fenced, server-stamped operator controls below.
@@ -631,15 +633,29 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
     // `deadlineGet` returns a HANDLE — `{controller, promise, timedOut}` — not a promise. Calling
     // `.then` on it throws at runtime, which no test catches because none mounts this component and
     // the build compiles it happily.
-    const request = deadlineGet(
-      // The shared TRACE rule, not the generic panel timeout: this route pays the same fixed
-      // per-request fence cost every other trace read does. Measured 2026-08-12 on the live run —
-      // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
-      // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
-      // per request), not the spans.
-      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`), traceReadDeadlineMs(0))
+    // FENCED like every other trace read: `traceDeadlineGet` sends `expected_generation` and the
+    // response is checked with `traceGenerationMatches`. Without both, a read issued just before a
+    // reset resolves after it and commits the ARCHIVED generation's payload, while every sibling
+    // surface refuses the same bytes as superseded.
+    //
+    // The shared TRACE rule, not the generic panel timeout: this route pays the same fixed
+    // per-request fence cost every other trace read does. Measured 2026-08-12 on the live run —
+    // 2.2-10.1 s — against a 15 s panel budget that was marginal and a `deadlineGet` default of
+    // 8 s that was not. The cost is an absent-marker `lstat` on this FUSE mount (105-950 ms, five
+    // per request), not the spans.
+    const request = traceDeadlineGet(
+      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
+      expectedGeneration, null, 0, traceReadDeadlineMs(0))
     request.promise
-      .then(d => { if (alive) setPayload(d || {}) })
+      .then(d => {
+        if (!alive) return
+        if (!traceGenerationMatches(d, expectedGeneration)) {
+          // A superseded read is not an unreadable one, and must not be shown as this card's trace.
+          setPayload({ projection: { unavailable: true, superseded: true } })
+          return
+        }
+        setPayload(d || {})
+      })
       .catch(() => { if (alive) setPayload({ projection: { unavailable: true } }) })
     return () => { alive = false; request.controller.abort() }
   }, [cardId, runId, expectedGeneration])
@@ -740,7 +756,7 @@ function _CardDetailPane({
 }
 
 function _CardKanban({
-  state, cards, runId, onSelect, onClose, onToast,
+  state, cards, runId, runGeneration = null, onSelect, onClose, onToast,
   // The workspace-view extras. They stay on THIS component rather than moving the split layout into
   // a sibling because the optimistic-control state (`optim`, `cardControl`, `sentEditRef` and the
   // reconcile effect) belongs to the board, and the detail pane needs all four. Passing that bundle
@@ -764,6 +780,7 @@ function _CardKanban({
   // in-flight submission instead of a stale fold — see the editBaseline capture in cardControl.
   const sentEditRef = useRef({})
   const detailCloseRef = useRef(null)
+  const detailDrawerRef = useRef(null)
   const detailReturnFocusRef = useRef(null)
   const cardsById = new Map(cards.map(card => [card.id, card]))
   const cardsByIdRef = useRef(cardsById)
@@ -916,6 +933,11 @@ function _CardKanban({
       inFlight.current.delete(card.id)
     }
   }
+  // The CHOREOGRAPHY (which request, which optimistic entry, the commandId re-check that drops a
+  // late answer about a superseded command) stays here; the DECISION — which statuses are failed,
+  // which are retryable, and what phase and tone follow — is `cardControlModel.cardControlRecovery`,
+  // where `node --test` can drive its truth table. The two status lists are not the same list, and
+  // inline they were a one-token edit away from offering a retry on a terminal `rejected`.
   const recoverCardControl = async (cardId, action) => {
     const entry = optim[cardId]
     const pending = entry?.pending
@@ -940,15 +962,16 @@ function _CardKanban({
       setOptim(current => {
         const latest = current[cardId]
         if (!latest || latest.pending?.commandId !== pending.commandId) return current
-        const failed = ['failed', 'timed_out', 'rejected'].includes(record?.status)
-        const retryable = ['failed', 'timed_out'].includes(record?.status)
+        // The verdict lives in `cardControlModel.js`: the failed and retryable status lists are
+        // NOT the same list (`rejected` is terminal and must never offer a retry), and inline they
+        // were a one-token edit away from an infinite retry button, shipping green.
+        const verdict = cardControlRecovery(record)
         return { ...current, [cardId]: {
           ...latest,
           pending: {
-            ...latest.pending, phase: retryable ? 'retryable' : failed ? 'failed' : 'waiting-for-fold',
-            retryable,
+            ...latest.pending, phase: verdict.phase, retryable: verdict.retryable,
           },
-          notice: { tone: failed ? 'error' : 'pending', text: feedback.message },
+          notice: { tone: verdict.tone, text: feedback.message },
         } }
       })
     } catch (error) {
@@ -997,15 +1020,14 @@ function _CardKanban({
     onSelectCard?.(cardId)
   }
   const detailOpen = view && (!pane?.compact || !!selectedCard)
-  useEffect(() => {
-    if (!pane?.compact || !selectedCard) return undefined
-    detailCloseRef.current?.focus?.()
-    const onKeyDown = event => {
-      if (event.key === 'Escape') { event.preventDefault(); closeDetails() }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [pane?.compact, selectedCard?.id])
+  // ESCAPE GOES THROUGH THE PRIORITY SYSTEM, like every other dialog. A raw window keydown that
+  // unconditionally `preventDefault()`s and closes sat outside `DIALOG_PRIORITY` arbitration, so
+  // with a nested prioritized dialog open inside `renderInspector` — the destructive trace-clear
+  // confirm — Escape fired BOTH: the confirm cancelled AND the drawer unmounted it mid-interaction.
+  // `useDialogFocus` also declines Escape that `defaultPrevented` already claimed, which is what
+  // lets a text input inside the drawer cancel its own edit instead of dismissing the whole drawer.
+  useDialogFocus(detailDrawerRef, closeDetails, !!(pane?.compact && selectedCard),
+    { modal: true, priority: DIALOG_PRIORITY.OVERLAY })
   const addBar = canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
     <input className="text" style={{ flex: 1 }} aria-label="New hypothesis" disabled={readOnly}
       placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
@@ -1056,7 +1078,8 @@ function _CardKanban({
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
       {detailOpen && !pane?.compact && pane?.splitter}
-      {detailOpen && <aside className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
+      {detailOpen && <aside ref={detailDrawerRef}
+        className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
         style={pane?.width ? { width: pane.width } : undefined}
         tabIndex={pane?.compact ? -1 : undefined}
         data-route-focus-guard={pane?.compact ? 'true' : undefined}
@@ -1069,6 +1092,12 @@ function _CardKanban({
             aria-label={`Close details for ${selectedCard.id}`}
             onClick={closeDetails}>⟩</button>}
         </div>
+        {/* `runGeneration`, NOT `state?.generation`. The folded run state has no run-level
+            `generation` field at all — the generation is an envelope SIBLING of `state` in the
+            /api/state payload and lives in useRunState's separate generationState — so
+            `state?.generation` was always undefined and every trace surface reached from this
+            board ran with a dead fence: superseded reads accepted after a reset, and effects keyed
+            on expectedGeneration never re-firing on a generation change. */}
         <_CardDetailPane card={selectedCard}
           receipt={selectedCard && isRecord(receipts[selectedCard.id]) ? receipts[selectedCard.id] : null}
           attempts={selectedCard ? attemptsByCard.get(selectedCard.id) || [] : []}
@@ -1077,7 +1106,7 @@ function _CardKanban({
           controlState={selectedCard ? optim[selectedCard.id] : null}
           controlsLocked={readOnly || (globalPending && !(selectedCard && optim[selectedCard.id]?.pending))}
           onRecover={recoverCardControl}
-          runId={runId} expectedGeneration={state?.generation || null} />
+          runId={runId} expectedGeneration={runGeneration || null} />
       </aside>}
     </div>
   }
@@ -1861,6 +1890,7 @@ export function CardWorkspace({
   const scopeKey = `${runId || ''}:${runGeneration || ''}`
   if (hasAuthoritativeCards && !recoveryVisible) {
     return <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId}
+      runGeneration={runGeneration}
       layout="view" onSelect={onSelect} onClose={null} onToast={onToast}
       selectedCardId={selectedCardId} onSelectCard={onSelectCard}
       selectedNodeId={selectedNodeId} onSelectNode={onSelectNode}
@@ -1893,7 +1923,8 @@ export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose
   const recovery = inspectHypothesisDeleteRecovery(runId, runGeneration)
   const recoveryVisible = recovery.state === 'valid' || recovery.state === 'damaged'
   return hasAuthoritativeCards && !recoveryVisible
-    ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId} onSelect={onSelect}
+    ? <_CardKanban key={`cards:${scopeKey}`} state={state} cards={cards} runId={runId}
+      runGeneration={runGeneration} onSelect={onSelect}
       onClose={onClose} onToast={onToast} />
     : <_HypothesisFallback key={`hypotheses:${scopeKey}`} state={state} runId={runId}
       runGeneration={runGeneration}

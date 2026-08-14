@@ -235,7 +235,14 @@ test('Card controls use only generation-fenced command helpers and never client 
 test('Card optimistic controls retain uncertain commands and roll back only the failed operation', async () => {
   const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
   const board = source.slice(source.indexOf('function _CardKanban('), source.indexOf('function _HypothesisFallback'))
-  assert.match(board, /feedback\.kind === 'pending'[\s\S]*waiting-for-fold/)
+  // A non-error command KEEPS its optimistic entry, parked in `waiting-for-fold` — it is not
+  // rolled back just because the fold has not caught up. Pinned on the submission path's own
+  // expression rather than on "these two strings appear in this order anywhere in the component":
+  // the ordered form was satisfied by the RECOVERY path's copy of the phase name, so moving that
+  // decision into `cardControlModel` broke a pin about a branch it never described.
+  assert.match(board,
+    /feedback\.kind !== 'error'\s*\?\s*\{ kind, phase: 'waiting-for-fold', commandId \}/)
+  assert.match(board, /feedback\.kind === 'pending' \? 'pending' : 'success'/)
   assert.match(board, /submissionMayHaveSucceeded[\s\S]*confirmation-unknown/)
   assert.match(board, /if \(!uncertain\) delete updates\[kind\]/)
   assert.doesNotMatch(board, /feedback\.kind !== 'success'[\s\S]{0,120}(revert|delete next\[card\.id\])/)

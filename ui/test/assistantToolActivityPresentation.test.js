@@ -97,7 +97,13 @@ test('AssistantChat presents bounded, semantic tool activity without raw payload
         const list = fixture.document.querySelector('.asst-tool-list')
         const rows = [...list.children]
         assert.equal(rows.length, 40)
-        assert.equal(list.getAttribute('start'), '6')
+        // An explicit `value` per row, not a computed `start` on the list. `start` was derived as
+        // `total - shown + 1`, which is the right first ordinal only when EVERY windowed item
+        // produced a label — one unlabelled payload shifted all forty. See
+        // `assistantToolActivity.test.js` for that topology; here the two spellings agree.
+        assert.equal(list.getAttribute('start'), null)
+        assert.equal(rows[0].getAttribute('value'), '6')
+        assert.equal(rows.at(-1).getAttribute('value'), '45')
         assert.equal(rows[0].textContent, 'Tool step 6')
         assert.equal(rows.at(-1).textContent, 'Z'.repeat(240))
         assert.equal(fixture.document.querySelector('.asst-tool-limit').textContent,

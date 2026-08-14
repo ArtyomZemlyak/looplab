@@ -19,7 +19,7 @@ overlaps, and pinning the number is what makes a new one a red test instead of a
 Nine of them are the `spine` container the `sd_*` column sits inside, which is intentional. The rest
 are a structural defect that predates this file: the EVALUATE column at x=1000 grows downward while
 `kanban`, `h_prio` and the `w_*`/`g_*` rows sit at fixed `y`, so the column crosses them. Measured
-2026-08-13: closing it needs the rows below moved 564px, which is a re-layout to do with the rendered
+2026-08-14: closing it needs the rows below moved 564px, which is a re-layout to do with the rendered
 page in view, not a merge-time edit. Until then this pin stops it getting quietly worse.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ DIAGRAM = ROOT / "docs" / "infographic" / "agent-architecture.html"
 # Measured on 2026-08-13 after the eight-branch integration. Moving it is part of changing the
 # layout: RAISING it means a new overlap shipped, LOWERING it means one was fixed and the pin should
 # follow so the next regression is still caught.
-_EXPECTED_INTERSECTIONS = 19
+_EXPECTED_INTERSECTIONS = 16
 _SPINE_CONTAINER = "spine"
 
 

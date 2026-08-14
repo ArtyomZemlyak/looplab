@@ -1958,7 +1958,16 @@ export function TraceSurface({
   const spans = traceSubjectSpans(subject, trace)
   // For a node the owner owns this (it is bound to the DETAIL payload and feeds the destructive
   // clear's fence, which a failed pager may not move). For a trace subject the read IS the evidence.
-  const unavailable = detailUnavailable || (!detail && traceUnavailable(trace?.projection))
+  // A STALE SETTLE WITH NO PAYLOAD IS UNAVAILABLE. For a detail-less subject (any op-trace, or a
+  // node at a historical attempt) the paged read is the only read there is, so when it fails
+  // `usePagedTrace` settles `{payload: null, stale: true}` — and `traceUnavailable(undefined)` is
+  // false while `traceWindow(undefined)` reads as COMPLETE. The surface then rendered the positive
+  // empty claim ("No observations were recorded…") about a read that merely timed out, under a
+  // header notice saying "showing confirmed spans" with zero spans ever confirmed. A failed
+  // observation is never evidence that the subject recorded nothing.
+  const unavailable = detailUnavailable
+    || (!detail && (traceUnavailable(trace?.projection)
+                    || (pagedRead?.stale && !pagedRead?.payload)))
   const inline = chrome === 'inline'
   const head = <div className={'trace-head' + (inline ? ' trace-head-inline' : '')}>
     {status}
@@ -2001,6 +2010,8 @@ export function TraceSurface({
     onReach={loadMore} notice={traceWindowNotice(spanWindow)} />
   // Unavailable takes precedence over every empty/partial shape: a failed observation is never
   // evidence that the subject recorded nothing.
+  // (`unavailable` above already folds in the detail-less subject's failed sole read, which used
+  // to fall through to the positive empty claim.)
   if (unavailable)
     return shell(<TraceUnavailable onRetry={onRetry || retryRead} pending={retryPending} />)
   if (!spans.length) {
@@ -2310,13 +2321,25 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     // unavailable for this work item" — a receipt the client manufactured about a read the server
     // would have answered. The cost is not the spans (the light index serves a whole node in
     // 0.03 ms); it is five absent-marker `lstat`s per request at 105-950 ms each on this FUSE mount.
-    const request = deadlineGet(runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
-      traceReadDeadlineMs(0))
+    // Fenced like every other trace read: `expected_generation` on the request and
+    // `traceGenerationMatches` on the response. Without both, a read issued before a reset resolves
+    // after it and commits the ARCHIVED generation's research rows, while every sibling trace
+    // surface refuses the same payload as superseded.
+    const request = traceDeadlineGet(
+      runApiPath(runId, `/cards/${encodeURIComponent(cardId)}/trace`),
+      expectedGeneration, null, 0, traceReadDeadlineMs(0))
     request.promise
-      .then(d => { if (alive) setResearch(d || {}) })
+      .then(d => {
+        if (!alive) return
+        if (!traceGenerationMatches(d, expectedGeneration)) {
+          setResearch({ projection: { unavailable: true, superseded: true } })
+          return
+        }
+        setResearch(d || {})
+      })
       .catch(() => { if (alive) setResearch({ projection: { unavailable: true } }) })
     return () => { alive = false; request.controller.abort() }
-  }, [researchOpen, research, cardId, runId])
+  }, [researchOpen, research, cardId, runId, expectedGeneration])
   const researchRows = research
     ? (cardTraceSections(research).find(section => section.kind === 'research')?.rows || [])
     : []

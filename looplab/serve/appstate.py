@@ -30,6 +30,7 @@ from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.authoring_projection import card_authoring
 from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
+from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
@@ -584,7 +585,10 @@ class AppState:
                 continue
             node_ids.append(node.id)
         for event in events:
-            if event.type != "node_created":
+            # The registry constant, not a literal (invariant 7): a misspelling here does not
+            # fail, it matches nothing — `trace_ids` stays empty and the card trace surface loses
+            # every node section while still returning 200.
+            if event.type != EV_NODE_CREATED:
                 continue
             data = event.data or {}
             node_id = data.get("node_id")

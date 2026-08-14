@@ -45,6 +45,14 @@ TRACE_NODE_SPAN_CAP = 512
 # ceiling beside this one is how the two surfaces silently stop agreeing on what "everything" means.
 TRACE_NODE_SPAN_CAP_MAX = 4096
 TRACE_DETAIL_SPAN_CAP = 256
+# The card-trace projection's two section ceilings. Every sibling projection in this file bounds
+# what it returns; these loops did not, and the serve caller hands them the WHOLE run's light span
+# list — so a crafted `spans.jsonl` with thousands of root `propose` spans stamped with one card_id
+# (`card_id` survives normalization) produced an unbounded HTTP payload. Generous relative to any
+# real card (a card's research rows are its proposal attempts, its node rows its attempts) so the
+# cap is invisible in practice and the receipt discloses it when it is not.
+TRACE_CARD_RESEARCH_CAP = 256
+TRACE_CARD_NODE_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
 # The EPISODE MAP's ceiling (`node_episodes`). Not a span window: an episode row carries identity,
 # timing and counts, never contents, and the whole map is derived from light spans already in memory.
@@ -752,7 +760,16 @@ def _response_projection(*, total_spans: int, visible_spans: int, light: bool = 
     total = max(visible_spans, _projection_counter(total_spans))
     omitted = max(0, total - visible_spans)
     clean_extra = {key: _projection_counter(value) for key, value in extra.items()}
-    truncated = omitted > 0 or truncated_spans > 0 or any(
+    # `truncated` is the flag a reader checks BEFORE trusting a section, so it has to be true when
+    # ANY axis is short — not only the span axis and the explicit `omitted_*` counters. A caller
+    # that passes `total_x`/`visible_x` for its own axis (the card projection's research and node
+    # sections) was reporting `truncated: False` over a capped list, which is exactly the
+    # "a truncated projection indistinguishable from a complete one" this receipt exists to prevent.
+    short_axis = any(
+        clean_extra.get(f"visible_{axis}", 0) < value
+        for key, value in clean_extra.items()
+        if key.startswith("total_") and (axis := key[len("total_"):]))
+    truncated = omitted > 0 or truncated_spans > 0 or short_axis or any(
         value > 0 for key, value in clean_extra.items() if key.startswith("omitted_"))
     return {
         "schema": TRACE_PROJECTION_SCHEMA,
@@ -1245,11 +1262,18 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
         # at a base / already-memoized ancestor / missing ref / cycle, then apply the deltas back DOWN.
         if sid in memo:
             return memo[sid]
-        chain: list[tuple] = []           # (span_id, carry, delta_input), from `sid` upward
+        # (span_id, carry, delta_input, own_partial), from `sid` upward. `own_partial` is per-LEVEL
+        # rather than one flag for the whole walk, because partialness travels in exactly one
+        # direction: a span whose input was dropped makes every span chained ONTO it truncated, and
+        # says nothing about the ancestors above it, whose reconstructions are still exact. A single
+        # accumulator applied uniformly over `reversed(chain)` marked the whole chain — so walking
+        # the same three spans leaf-first flagged the complete BASE as partial, i.e. the answer
+        # depended on file order. Both directions were wrong, in opposite ways.
+        chain: list[tuple] = []
         seen: set = set()
         cur_sid = sid
         base: list = []
-        broke = False                     # True ⇒ a referenced ancestor was missing → prefix is truncated
+        broke = False                     # partialness of the BASE the walk bottoms out at
         while True:
             if cur_sid in memo:
                 base = memo[cur_sid]
@@ -1269,17 +1293,22 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             # A durable exporter fallback can retain this span's delta identity while omitting its
             # over-limit input. Once one ancestor declares that loss, every descendant is partial
             # even though the ancestor row and back-reference are both present and well-formed.
-            if a.get("input_partial") is True:
-                broke = True
+            own_partial = a.get("input_partial") is True
             cur = a.get("input")
             if "input_carry" not in a or not isinstance(cur, list):
                 base = cur if isinstance(cur, list) else []
+                # …unless the row says its own input was DROPPED. The durable exporter's
+                # oversized-generation fallback emits exactly this shape — no `input_carry`, and
+                # `input_partial: True` — so treating the branch as "input IS full" silently made
+                # every descendant of a dropped generation render as complete.
+                broke = own_partial
                 break   # old log / non-list → input IS full
             frm = a.get("input_from")
             if frm is None:                            # self-contained base: its `input` is the full ctx
                 memo[cur_sid] = list(cur)
-                partial[cur_sid] = broke               # an explicit exporter/projection loss survives
+                partial[cur_sid] = own_partial         # an explicit exporter/projection loss survives
                 base = memo[cur_sid]
+                broke = own_partial
                 break
             # Coerce carry to a NON-NEGATIVE int: a malformed span (bit-rot on a network mount, or a
             # hand-edited log) whose input_carry is a string/float would make `full[:carry]` raise
@@ -1289,16 +1318,21 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
             raw_carry = a.get("input_carry")
             carry = raw_carry if (isinstance(raw_carry, int) and not isinstance(raw_carry, bool)
                                   and raw_carry >= 0) else 0
-            chain.append((cur_sid, carry, cur))
+            chain.append((cur_sid, carry, cur, own_partial))
             cur_sid = frm
         full = base
-        for csid, carry, delta in reversed(chain):     # apply deltas base→leaf, memoizing every level
+        running = broke
+        for csid, carry, delta, own_partial in reversed(chain):
+            # base→leaf, memoizing every level. `running` accumulates DOWNWARD only: once a level
+            # declares its own loss, it and everything chained onto it are partial; levels already
+            # passed stay exact.
             full = list(full[:carry]) + list(delta)
+            running = running or own_partial
             memo[csid] = full
-            partial[csid] = broke
+            partial[csid] = running
         if sid not in memo:
             memo[sid] = full
-            partial[sid] = broke
+            partial[sid] = running
         return memo[sid]
 
     out: list[dict] = []
@@ -1743,9 +1777,15 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
                 "tokens": roll["tokens"],
             })
     research.sort(key=lambda row: (row["start"], str(row["trace_id"])))
+    total_research = len(research)
+    # OLDEST-FIRST truncation, like the node-trace tail: the card's own first proposal is the row
+    # that explains it, and dropping the head to show the tail would answer a different question.
+    research = research[:TRACE_CARD_RESEARCH_CAP]
 
     nodes = []
-    for node_id in sorted(wanted_nodes, key=lambda value: (len(value), value)):
+    ordered_nodes = sorted(wanted_nodes, key=lambda value: (len(value), value))
+    total_nodes = len(ordered_nodes)
+    for node_id in ordered_nodes[:TRACE_CARD_NODE_CAP]:
         # `str(_node_id_of(s) or "")` is the bug this codebase already has a whole test file about:
         # node 0's id is FALSY, so that spelling silently gives node 0 an empty section while every
         # other node renders. Compare the resolved value against None instead.
@@ -1763,6 +1803,9 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
             "errors": sum(1 for s in node_spans if s.get("status") == "ERROR"),
         })
 
+    # The receipt reports the REAL totals against what is visible, on every axis. Hardcoding
+    # `visible == total` would have made the caps above unreportable — a truncated projection
+    # indistinguishable from a complete one, which is the thing this receipt exists to prevent.
     return {
         "schema": TRACE_PROJECTION_SCHEMA,
         "card_id": str(card_id),
@@ -1770,6 +1813,6 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
         "nodes": nodes,
         "projection": _response_projection(
             total_spans=len(spans), visible_spans=len(spans), light=True,
-            total_research=len(research), visible_research=len(research),
-            total_nodes=len(nodes), visible_nodes=len(nodes)),
+            total_research=total_research, visible_research=len(research),
+            total_nodes=total_nodes, visible_nodes=len(nodes)),
     }

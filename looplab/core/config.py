@@ -755,6 +755,13 @@ class Settings(BaseSettings):
     #   "audit"  — salvage, record the provenance, and attach a `metric_salvaged` VIOLATION: the node
     #              is evaluated and counted (budget, UI, lineage) but excluded from `feasible_nodes`,
     #              so it can never become champion or be bred from on a value nobody measured.
+    #              ONE ESCAPE HATCH, and it is not this field's: `metric_salvage_repair` (below,
+    #              default True) can buy a Developer fix for the failing declaration and RE-CHECK the
+    #              artifact contract against the corrected one. A node that PASSES that re-check is
+    #              no longer salvaged — the value was measured after all — so the violation and the
+    #              exclusion go with it. That path is restricted to OPERATOR-produced output
+    #              (`metric_salvage.recheckable_salvage`), which is what keeps it from being more
+    #              permissive than `select`. Set `metric_salvage_repair: false` for the flat rule.
     #   "select" — a salvaged metric competes on equal terms.
     # `audit` is the default deliberately, and the trade-off is real: a salvaged baseline is not bred
     # from until the operator says so.
@@ -2172,14 +2179,35 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "systemic_failure_stop": 0,
     # WHICH FAILURES BUY AN IN-NODE REPAIR. A CHANGED default on a pre-existing field, so (a) cannot
     # apply and (b)+(c) carry it, exactly as for `inline_repair_attempts` above. It widened from the
-    # mechanical three to all eight `FAILURE_REASONS` on 2026-08-12, and (b) is paid work: with
+    # mechanical three to ALL of `FAILURE_REASONS` on 2026-08-12 — eleven members at the time of
+    # writing (REVIEW mega-review 2026-08-13: this line used to say "all eight"; `diverged`,
+    # `stalled` and `needs_failed` were added the same week, and an auditor counting this map's
+    # prose against the registry got a wrong count from the map itself) — and (b) is paid work: with
     # `inline_repair_attempts` restored to its historical 0 — which `_effective_repair_cap` reads as
     # the 50-attempt engine ceiling, not as "none" — a resumed node that fails `no_metric`/`setup`/
     # `drift`/`expect_failed`/`check_failed` can buy up to 50 Developer calls AND up to 50 full
     # re-evaluations that the first half of the same run bought ZERO of. On a GPU task where one eval
     # is the 76-minute training this range's own comments cite, that is hours nobody chose.
-    # (c) is `("crash", "timeout", "oom")`, pointable at every commit before that date.
-    "inline_repair_reasons": ("crash", "timeout", "oom"),
+    # (c) is `("crash", "timeout", "oom")` — PLUS the two verdicts that are RE-CLASSIFICATIONS of
+    # those, not new treatments. `triage._failure_reason` returns `diverged`/`stalled` from
+    # short-circuits placed ABOVE the `exit_code != 0` branch that used to answer `oom`/`crash` for
+    # the same watchdog SIGKILL, so pinning the bare historical tuple would REMOVE behaviour the
+    # original run had: a resumed node that the old classifier called `oom` (and repaired) is now
+    # called `diverged`, matches nothing, and terminalizes with ZERO repair attempts. This map
+    # exists to stop re-entry changing a run's treatment in EITHER direction.
+    # `needs_failed` is deliberately NOT here: the `needs` input contract did not exist before this
+    # window, so no pre-field node could produce it and there is no historical treatment to preserve.
+    "inline_repair_reasons": ("crash", "timeout", "oom", "diverged", "stalled"),
+    # THE SOURCE-TREE READ FENCE, added 2026-08-13 defaulting to `deny`. (a) holds. (b) is the
+    # strongest kind on this table after `systemic_failure_stop`: it is not extra work, it is an
+    # INTERVENTION that can fail a node outright — a repo run whose training script legitimately
+    # reads a large untracked in-tree input (the false positive `read_fence`'s own comment
+    # documents) ran fine for nodes 0..N and would hard-fail in the child for every node after the
+    # resume, with the operator having changed nothing, and each such failure then buys inline
+    # Developer repairs the first half of the run never bought. (c) is `off`, pointable at every
+    # commit before that date. Note the fence's `warn` rung is NOT the historical value: it writes
+    # to stderr, which is the captured `RunResult.stderr` the repair loop reads.
+    "read_fence": "off",
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

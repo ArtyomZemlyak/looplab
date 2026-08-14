@@ -299,12 +299,29 @@ def test_a_ref_naming_a_surviving_run_by_uid_keeps_the_lesson(memory):
 
 def test_a_legacy_row_with_no_uid_still_matches_by_name_and_says_so(memory):
     """Rows written before `run_uid` existed have only the directory name. That IS their best
-    identity — but the report must say which one was used, because the two are not equally safe."""
+    identity — but the report must say which one was used, because the two are not equally safe.
+
+    `identity` used to key on the CALLER alone, so a uid-keyed purge that had in fact fallen back to
+    bare-name matching reported `run_uid` — the label an operator reads as "this cannot have touched
+    another run", over the one case where it can: two checkouts sharing `~/.looplab/memory`, both
+    holding a directory named `demo`. That case is `mixed`, and the count is per store."""
     _write(memory / "meta_notes.jsonl", [{"run_id": GONE, "note": "old", "task_id": "t"}])
     report = attributable_memory(memory, GONE, GONE_UID)
-    assert report["deletable"] == 1 and report["identity"] == "run_uid"
+    assert report["deletable"] == 1 and report["identity"] == "mixed"
+    assert report["name_matched"] == 1
+    notes = next(s for s in report["stores"] if s["file"] == "meta_notes.jsonl")
+    assert notes["name_matched"] == 1
+
     assert attributable_memory(memory, GONE)["identity"] == "run_id", (
         "a run whose own uid we could not read must disclose that it matched by name alone")
+
+    # A store whose rows all carry a uid is NOT mixed — the disclosure has to be specific enough to
+    # be worth reading, or every receipt carries the warning and none of them mean it.
+    _write(memory / "meta_notes.jsonl", [{"run_id": GONE, "run_uid": GONE_UID, "note": "new",
+                                          "task_id": "t"}])
+    exact = attributable_memory(memory, GONE, GONE_UID)
+    assert exact["deletable"] == 1 and exact["identity"] == "run_uid"
+    assert exact["name_matched"] == 0
 
 
 def test_a_store_that_cannot_be_read_is_a_failure_not_a_clean_success(memory):

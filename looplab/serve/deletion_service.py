@@ -134,7 +134,8 @@ def _durable_no_replace_move(source: Path, destination: Path) -> None:
     """
     if source.parent != destination.parent:
         raise ValueError("deletion quarantine must be a sibling of the run")
-    durable_no_replace_rename(source, destination, label="deletion quarantine")
+    durable_no_replace_rename(source, destination, label="deletion quarantine",
+                              unique_destination=True)
 
 def _same_receipt_identity(
         receipt: dict[str, Any], *, run_id: str, operation_id: str,
