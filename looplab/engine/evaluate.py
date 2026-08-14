@@ -2273,7 +2273,12 @@ class EvaluateMixin:
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
-                        "rationale": str(triage.get("rationale", ""))[:300],
+                        # Same screen as `node_failed.triage_rationale` below, and for the same
+                        # reason — this is the judge's own words about a crash, on a DURABLE row, and
+                        # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
+                        # `reason`) have gone through `_redact` since B3. `error_in` beside it is
+                        # already covered: `err` derives from the redacted `_stderr_tail`.
+                        "rationale": self._redact(str(triage.get("rationale", "")))[:300],
                         # The judge's evidence columns, made durable (invariant #5: additive, and the
                         # fold ignores them — `_on_node_repaired` reads code/files/deleted/footprint
                         # only). `_durable_repair_ledger` reads exactly these back after a resume;
@@ -2597,7 +2602,18 @@ class EvaluateMixin:
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:
+                        # The SEVENTH persisted output channel, found by the C2 sweep and missed by
+                        # it: `triage_rationale` is LLM text about a crash, written to the durable
+                        # `node_failed` row, and the two SIBLING judgements of exactly this kind —
+                        # `train_monitor`'s and `asha_monitor`'s `reason` — have gone through
+                        # `_redact` since B3 with a comment saying why ("LLM text derived from the
+                        # raw log; redact it before it lands in the trace / event log"). This one
+                        # did not. The judge is handed the already-redacted `err`, so the leak is
+                        # narrow rather than open — but it also sees the repair log and the state
+                        # brief, and a model restating what it read is a laundering channel a screen
+                        # downstream of it costs nothing to close. Redact BEFORE the 300-char cut,
+                        # like both siblings, so masking can never be truncated away.
                         data["triage_action"], data["triage_rationale"] = (
-                            triage_outcome[0], str(triage_outcome[1])[:300])
+                            triage_outcome[0], self._redact(str(triage_outcome[1]))[:300])
                     self.store.append(EV_NODE_FAILED, data)
                 self._maybe_crash()

@@ -23,12 +23,46 @@ from typing import Optional
 
 @dataclass
 class AgentRun:
-    """Process-level signal captured from a CLI agent subprocess (`cli_agent`)."""
+    """Process-level signal captured from a CLI agent subprocess (`cli_agent`).
+
+    **The tails are redacted HERE, at the type, not at the three `cli_agent` construction sites.**
+    They are captured output from a subprocess LoopLab launched with the operator's environment
+    partially intact (`cli_agent` strips `is_secret_env` names, but a coding agent prints its own
+    endpoint config, its own tracebacks, and whatever the repo's tooling echoes), so they carry the
+    same bytes as any other output tail — and unlike the six the engine persists, these had no
+    screen at all.
+
+    The reason they had none is LAYERING, not oversight: the funnel is
+    `engine/audit.py::Engine._redact`, an ENGINE method, and `agents/` may not import upward to
+    reach it. Copying its regex down here would be the actual defect — a second spelling of a
+    redaction rule is how the two come to disagree, silently, in the direction that leaks. So the
+    rule stays in `core/redact.py`, which BOTH layers may import, and the screen is applied by the
+    dataclass every producer already constructs: a fourth construction site inherits it, and none of
+    them can forget.
+
+    `entropy=False` is not a weaker choice, it is the only ANSWERABLE one at this layer: the entropy
+    half is `Settings.redact_output`, and nothing here can see a `Settings` (a `core` dataclass has
+    no run, no engine and no config). The always-on half — known credential SHAPES plus the
+    operator's own secret env VALUES — is exactly the part that needs no configuration, and is what
+    `engine/audit.py::Engine._redact` also applies unconditionally.
+
+    NOTE what these tails are today: `validate_agent_code` reads only `launched`/`timed_out`/
+    `exit_code` off this record, so the tail TEXT reaches no durable artifact — it is not in
+    `agent_validated`, whose `AgentReport.summary()` carries only check names and details. That
+    makes this defence-in-depth rather than a live leak, and it is the reason to put it at the type:
+    the day someone adds the tail to the report (the obvious next diagnostic improvement), it is
+    already screened instead of becoming a seventh unredacted producer.
+    """
     launched: bool = True          # False if the launcher was missing (OSError)
     exit_code: Optional[int] = None
     timed_out: bool = False
     stdout_tail: str = ""
     stderr_tail: str = ""
+
+    def __post_init__(self) -> None:
+        from looplab.core.redact import redact_output_tail
+        self.stdout_tail = redact_output_tail(self.stdout_tail or "", entropy=False)
+        self.stderr_tail = redact_output_tail(self.stderr_tail or "", entropy=False)
 
 
 @dataclass
