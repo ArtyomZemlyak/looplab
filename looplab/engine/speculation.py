@@ -2164,13 +2164,28 @@ class SpeculationMixin:
             notify_producer(self._eval_notify, ("eval", (node_id, generation)))
 
     def _card_phase_serve_raw_stage(self, session: CardSession) -> None:
-        """Commit one prepared raw proposal, then elect and start its producer in the same turn."""
+        """Commit one prepared raw proposal, then — where the session may still produce — elect and
+        start its producer in the same turn."""
 
         raw_consumed, raw_staged = self._serve_raw_card_stage()
         if not raw_consumed:
             return
         session.progressed = True
-        if raw_staged and not session.boundary_owed and not session.yield_outer:
+        # THE COMMIT ABOVE IS DELIBERATELY UNGATED, and `gates.stopping` is the gate it is ungated
+        # against.  A prepared raw stage is already PAID FOR, and `_spec_raw_stage_result` counts in
+        # `_card_phase_decide_exit`'s `memory_pending`: a stopping session that declined to drain it
+        # would hold itself open over a result no other turn can adopt, and throw away a proposal on
+        # the way out.  Committing it is what lets a stopping run finish cleanly.
+        #
+        # WHAT FOLLOWS THE COMMIT IS NEW PRODUCER WORK, and it takes the ordinary gate.  Electing a
+        # durable Card and starting its head producer is exactly the pair `_card_phase_request_build`
+        # refuses two phases below under `open_for_production`, and this site used to hand-roll two
+        # of that predicate's three conjuncts — `boundary_owed` and `yield_outer` — while dropping
+        # `gates.stopping`.  A terminal intent, an exhausted budget or a pending outer rebuild would
+        # then still buy a paid build, which `producer_inflight` holds the session open for the whole
+        # of.  The gate reads a snapshot taken AFTER the commit, because the commit APPENDED.
+        if raw_staged and session.open_for_production(
+                self._session_gates(self._session_state(), session)):
             if self._request_card_build(consumed_inflight=session.eval_inflight):
                 # The election above APPENDED, so this snapshot re-folds: `_fold_current` serves the
                 # memo only while the observed tail is unmoved.
@@ -2184,6 +2199,8 @@ class SpeculationMixin:
             # outer loop is where a fresh authority snapshot comes from, and for the PERMANENT
             # attach refusal (`_stage_prepared_card`'s `attach` branch) because the outer loop is
             # the only place that can build a repair at all.
+            # A stopping session lands here too, having staged its Card durably: yielding is what it
+            # was already going to do, and the Card stays on the board for the outer turn to select.
             session.yield_outer = True
 
     async def _card_phase_drop_stale(self, session: CardSession) -> bool:
