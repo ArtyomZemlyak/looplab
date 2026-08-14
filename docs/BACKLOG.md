@@ -6,10 +6,28 @@
 
 **Status legend:** ✅ done · 🟡 partial (some sub-items done) · ⬜ todo
 **Priority:** P0 (do next) · P1 · P2 · **Effort:** S / M / L
+**Evidence notes:** a **`[2026-08-14 — …]`** block under a row is that row's status re-derived from
+the code at `f458f4af`, with the file/symbol that decided it. A row without one was not re-checked.
 
-> **⚠ STALE — read the caveats before trusting any status here (added 2026-08-04).** Last content edit
-> `59c33465`, 2026-07-22; the header date above (2026-06-24) is ~6 weeks behind HEAD. Four things a
-> reader must know:
+> **✅ RE-DERIVED FROM THE TREE, 2026-08-14.** Every `⬜`/`🟡` row below was re-checked against the
+> code at `f458f4af`, not against another doc, and each carries a **`[2026-08-14]`** evidence note
+> naming the file/symbol that decided it. **58 rows** were triaged (a naive grep for `⬜` counts 60 —
+> two of those glyphs are in the legend and in caveat 1 below, not rows): **35 DONE · 16 PARTIAL ·
+> 7 STILL OPEN**, four of them closed only because the design moved past them and now say what
+> superseded them (B1's read-only mount, A2's TPE/RF, A0e's Debug node, `_shutdown_pool_sockets`).
+> Two rows that were ALREADY `🟡` (§1 C4, §1 B4) were re-checked in the same pass and appear in the
+> ranked list, so 25 items carry unfinished work. The ranked list of what is genuinely left is
+> **§0 SURVIVORS**, immediately below. Rows that closed keep their text and gain a note; rows that the
+> design moved past say what superseded them rather than being deleted (a decision recorded only in a
+> commit message gets undone here).
+>
+> Thirteen symbol/line citations in this file were found **dead or moved** — they are corrected inline
+> and listed in §0.3. The caveats from 2026-08-04 still apply to everything NOT carrying a
+> `[2026-08-14]` note:
+>
+> **⚠ Original stale header (2026-08-04).** Last content edit before this pass was `59c33465`,
+> 2026-07-22; the header date above (2026-06-24) is ~6 weeks behind HEAD. Four things a reader must
+> know:
 >
 > 1. **The file contradicts itself by construction.** Every roadmap ID marked ✅ in the "★ Shipped
 >    2026-06-24" section below is *re-listed as ⬜ todo* in §2's Themes A–I (46 IDs). §2 is the older
@@ -33,6 +51,180 @@
 >    (`serve/attention.py`). Absence from this file is **not** evidence that something is unbuilt.
 >
 > Individually corrected items are marked **[corrected 2026-08-04]** inline below.
+
+---
+
+## §0 SURVIVORS — the ranked "what is actually still open" list (2026-08-14)
+
+Ordered by **cost of leaving it**, measured where a measurement exists and estimated otherwise. Start
+at the top. Everything not listed here is DONE or is low-cost residue (§0.2). Each entry names the
+site that proves it is open.
+
+### §0.1 Ranked
+
+1. **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
+   `serve/launch.py:422-426` does `Path(os.path.expandvars(os.path.expanduser(v))).resolve()` and
+   loads it — the only guard is an 8 MiB size cap (`_require_task_file_size`, `launch.py:210`). There
+   is **no root confinement and no allow-list**. The other half of the old C3 row DID ship, but as an
+   *opt-in*: `server.py:447` reads `LOOPLAB_UI_TOKEN` and default-denies `/api/*` only when it is set
+   (`hmac.compare_digest`, `server.py:451`) — with it unset the server prints its own warning that the
+   control plane is "UNAUTHENTICATED and reachable by any same-origin page" on a shared JupyterHub
+   origin (`server.py:479-481`). **Cost:** an unauthenticated same-origin request names an arbitrary
+   host file and the server parses and runs it as a task. Highest cost on this list; smallest fix.
+2. **Output redaction shipped but is OFF by default (P0, S).** `engine/audit.py:269::_redact` →
+   `core/redact.py::redact_secrets` is wired at the one durable site
+   (`engine/evaluate.py:2445`, `"stdout_tail": self._redact(res.stdout[-500:])`), but
+   `core/config.py:920` is `redact_output: bool = False`. **On the default path the original defect is
+   unchanged** — a `print(secret)` or a traceback is persisted verbatim into `events.jsonl` and the
+   UI. Two further `stdout_tail` producers do not go through `_redact` at all
+   (`agents/cli_agent.py:349,370`). **Cost:** the event log is the artefact that gets exported and
+   shared. Fix is a default flip plus two call sites.
+3. **The hardened exploit suite re-flags the grader import the detector just sanctioned (P1, S).**
+   `engine/evaluate.py:807-815` correctly passes `grader_import_ok=True` to `detect_reward_hacks`
+   when the task ships `grader.py` as an asset — and then `evaluate.py:819` runs
+   `self._exploit_suite.scan(scan_src)` **unconditionally**, and `ExploitSuite.scan`
+   (`trust/harden.py:79-90`) takes no sanction argument while `_SEED_EXPLOITS` still carries the
+   `\bimport\s+grader\b` regex (`trust/harden.py:34-36`). **Cost:** a false `reward_hack_suspected`
+   on a run that persisted a `looplab harden` suite bars the node from `feasible_nodes` — i.e. it
+   silently discards good nodes on MLE-bench, the proof point.
+4. **The read model is built once, at exit, with no watermark (P1, M).** `events/readmodel.py` is 55
+   lines and exposes only `build_readmodel` — **no seq watermark, no refresh-on-append**. Its sole
+   caller is `engine/finalize.py:912` via `_build_readmodel_atomic` (`finalize.py:479`), which DID
+   fix the atomicity half (tempfile + `os.replace`). **Cost:** a crashed or still-live run has no
+   read model at all, and a post-run control event diverges from it undetectably.
+5. **`agentless` is not a developer backend, and a Strategist branch for it is dead code (P1, M).**
+   `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose", "opencode")` —
+   no `llm`, no `agentless`. `engine/strategy.py:75-77::_available_developers()` returns
+   `["default", "llm", *PRESETS]`, so `agents/strategist.py:408-409`'s
+   `if "agentless" in ctx.available_developers` (comment: *"only when C5 has landed"*) can never
+   fire. **Cost:** the Strategist's `developer` decision has a permanently unreachable arm — a
+   silent capability gap, not a red test — plus the localize→generate-N→validate pipeline itself.
+   Its two building blocks already exist (`engine/localize.py`, `search/best_of_n.py`).
+6. **The schema-aligned parser is a fallback, not the default (P0, S).** `core/parse.py:195
+   ::_coerce_to_model` IS a real error-correcting SAP (case-insensitive key match, per-field
+   coercion, extras dropped) — but `core/config.py:1483` is `llm_parser: str = "tool_call"` and
+   `parse.py:213::_ORDER["tool_call"] = ["tool_call", "baml"]`, so it only runs after native FC has
+   already failed. **Cost:** this box serves local models, which is exactly where native FC collapses
+   (~20 % vs ~92–94 %). The original note called it the cheapest whole-system lift and that still
+   holds — it is now a one-line default change plus its blast-radius test.
+7. **Untrusted code still gets a writable container filesystem (P1, M).** `runtime/sandbox.py:230-238`
+   has `--pids-limit 1024`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`,
+   `--cpus`; `--read-only` + tmpfs appears **nowhere** in the tree, and `sandbox.py:241` mounts
+   `-v {root}:/work` with no `:ro`. Windows tree-kill is `taskkill /F /T` (`sandbox.py:1275`), not an
+   atomic Job Object. Partially covered by newer, independent rungs — but `Settings.landlock` is OFF
+   by default (`runtime/landlock.py`) and `runtime/read_fence.py` only sees `open` inside CPython.
+8. **Nothing tests the append lock across real OS processes (P1, S).** Both other C4 halves landed —
+   `Event.v` is enforced (`events/eventstore.py:166-168`, `UnsupportedEventVersionError`) and the
+   append lock fails loud (`_interprocess_lock`, `eventstore.py:254-321`, raising
+   `EventStoreLockError`). What is still missing is the test the row asked for: the suite has source/
+   AST parity checks (`tests/test_append_critical_section_parity.py`) and monkeypatched-failure
+   simulations, but **no concurrent multi-process append race**. **Cost:** the durability guarantee
+   the whole replay design rests on is held by inspection.
+9. **Two derivations of "which stages will run", and they disagree (P2, S–M).** `_resolved_stages`
+   moved out of `orchestrator.py` to `engine/eval_stages.py:261-278` and still re-implements
+   `_run_eval`'s chain (`engine/eval_dispatch.py:572-649`). The flagged divergence is intact:
+   `eval_dispatch.py:604` does `prof = profile or (node.idea.eval_profile ...)` while
+   `_resolved_stages` **has no `profile` parameter at all** (`eval_stages.py:269-271`). **Cost:** its
+   four callers — log-watch planning (`evaluate.py:1097,1655,2340`) and salvage re-check
+   (`metric_salvage.py:998`) — plan against the smoke chain during a `confirm`/full pass. Note the
+   proposed fix does NOT work: `RunResult.stages` (`runtime/sandbox.py:290-294`) is the post-run
+   *outcome* record and all four callers need the chain *before* the run.
+10. **Cross-run aggregation is a list, not an overlay (P1, M).** `ui/src/panels.jsx:2319
+    ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
+    asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
+    (`panels.jsx:2340-2343`). `serve/routers/cross_run.py` is the governance/claims surface, not this.
+11. **Fork-to-branch is still two primitives plus a read-only view (P1, M).** `fork` (`EV_FORK`,
+    `ui/src/api.js:202`) and `inject_node` (`serve/control_validation.py:712`) exist separately; fork
+    carries no edited idea, and the time-travel view refuses every node action —
+    `ui/src/RunView.jsx:1700`: *"Historical snapshot seq ${viewSeq} is read-only"*. Branching from a
+    seq means returning to live and re-typing the idea. Still the top verified steering UX.
+12. **Pareto selection is display-only (P2, M).** The real non-dominated algorithm exists —
+    `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
+    every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`
+    returns **nothing**. It never reaches champion selection.
+13. **The feature-engineering CV gate is a sentence, not an enforcement (P1, M).**
+    `engine/proposal_cues.py:231::_cue_feature_engineering` appends prose telling the model
+    *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
+    False`. There is no FE operator in `search/operators.py` and no `caafe` symbol anywhere. The row
+    called the CV gate **mandatory**; an instruction to a model is not a gate.
+14. **The time-series adapter is a synthetic toy; tabular-AutoML and multimodal do not exist (P1, M
+    each).** `adapters/timeseries.py`'s own docstring (line 9) says a real AutoGluon-TS/Darts backend
+    "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
+    backend. `adapters/` holds classification / dataset / mlebench{,_real} / regression / repo /
+    timeseries / toytask and nothing else.
+15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
+    `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
+    before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
+    `drift` hit in `looplab/` is code/schema-drift prose or confirm-phase seed variance
+    (`engine/confirm_phase.py:273`), never a distribution-shift detector.
+16. **MLflow is manual export, not autolog; there are no data connectors (P2, S–M).**
+    `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
+    `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
+    (Notebook export DID ship: `events/notebook.py::champion_notebook`, `export_cmds.py:108`.)
+17. **The MCTS tree has no LLM value estimate and no reflection (P2, M).**
+    `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
+    the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
+    `search/graded_novelty.py` / `novelty_recall.py` / `taxonomy_dedup.py`, which exist independently.
+18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
+    `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
+    `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
+    ship (`engine/widths.py::EVAL_WIDTH_MAX` enforced at `orchestrator.py:2966`;
+    `engine/proposal_cues.py:425::per_experiment_gpu_budget`).
+
+### §0.2 Low-cost residue (open, but cheap to keep open)
+
+- **Three spellings of the RunResult timeout-nulling** — `runtime/sandbox.py:1314-1320`
+  (`SubprocessSandbox`), `sandbox.py:1375-1381` (`DockerSandbox`), `runtime/command_eval.py:2286-2304`
+  (a third spelling, `if not to` guards instead of the sandboxes' ternaries). They now cross-reference
+  each other in comments, which is what makes this cheap rather than dangerous.
+- **Two copies of the socket-shutdown idiom** (was three) — `core/llm_streaming.py:58-61` and `:166-169`.
+- **The launch-readiness gate is still two copies** — `adapters/repo_task.py:725-729
+  ::EvalSpec._command_or_stages` and `serve/tui_format.py:140-171::spec_ready`, whose own docstring
+  (`:141-143`) points at this backlog row. There is no `/api/validate`; `adapters/tasks.py:336
+  ::validate_task` is a different operation (it constructs a real adapter for a run).
+- **Per-attempt stage accounting** — the reported failure mode is closed but the accounting is not; see
+  the D5 row.
+- **The literal read-only eval mount** — superseded in intent by three newer rungs; see the B1 row.
+- **Surrogate is k-NN/IDW, not TPE/RF** — see the A2 row; a design substitution, not a gap.
+- **`_shutdown_pool_sockets` is still pool-wide** — but now gated by
+  `core/llm.py:899-907::_pool_teardown_is_safe_locked()`, so the collateral-kill cascade the §5 row
+  describes can no longer fire. Only the cleanup (a per-request transport) remains.
+
+### §0.3 Dead or moved citations found in this file (all corrected inline)
+
+| This file said | The tree says |
+|---|---|
+| `server.py:245::delete_run` (`ignore_errors=True`) | **Symbol gone.** `DELETE /api/runs/{id}` is now `serve/routers/org.py:401::legacy_delete_run`, a 409 refusal; deletion is the quarantine transaction in `serve/deletion_service.py` |
+| `orchestrator.py:808` (stdout tail) | `engine/evaluate.py:2445` |
+| `eventstore.py:38` (`except OSError: pass`) | `events/eventstore.py:254-321::_interprocess_lock`, raising `EventStoreLockError` |
+| `orchestrator.py::_resolved_stages` | moved to `engine/eval_stages.py:261` |
+| `serve/tui.py::spec_ready` | moved to `serve/tui_format.py:140` |
+| `core/llm.py::_raw_socket` | **deleted** (doc 25 CO-03 — no caller since the openai-SDK migration) |
+| `core/llm.py:72,756` (`_shutdown_pool_sockets`) | moved to `core/llm_streaming.py:37-73`; `_nonstream_bounded` is `core/llm.py:891` |
+| `search/policy.py:722` (`"bohb": _make_asha`) | `search/policy.py:696` |
+| `adapters/mlebench.py:102` (`grader._Y`) | `adapters/mlebench.py:123`, and now only the synthetic fixture's `_GRADER_TEMPLATE` under `host_graded=False` |
+| `stage_completed` (D5) | **no such event.** The registry name is `events/types.py:224::EV_STAGE_FINISHED = "stage_finished"` |
+| `developer_backend = llm \| agentless \| <agent>` | `agentless` is not in `core/config.py:350::DEVELOPER_BACKENDS`; `agents/strategist.py:408` holds a branch that can never fire |
+| `trust/` owns redaction | it does not — `core/redact.py::redact_secrets`, reached via `engine/audit.py:269::_redact`. (`CLAUDE.md`'s package map still says `trust/ … redaction`.) |
+| **A4 is one ID** | **a FIFTH namespace collision the caveat block does not list:** ★Shipped's *"A4 failure-reflection"* and §2's *"A4 LATS-style MCTS"* are different items. Caveat 2 lists C2/C3/C5 and the §6 `D1–D5`; add A4. |
+
+### §0.4 Duplicates collapsed
+
+Caveat 1 says §2 re-lists ★Shipped IDs. Re-derived, the collapse is: **§2's A0a · A0b · A0d · A1 ·
+A2 · A5 · A6 · A7 · B5 · C1 · C2 · C3 · C4 · D2 · D3 · D4 · E1 · E2 · E3 · E4 · F1 · F2 · F3 · F4 ·
+F6 · G3 · G5 · H1 · H2 · H3 · H4 · I1 · I2 · I3 · I4 · I5 (36 rows) collapse into the ★ Shipped
+2026-06-24 roll-up** — same subject, same theme letter, and in every case the tree agrees with
+★Shipped rather than with §2. Each is marked below with its re-derived status; **eight of the 36 were
+overstated by ★Shipped and are re-opened as PARTIAL here** — A2, F2, H2, I1, I2, I3, I4, I5 (§0.1
+items 6, 10, 13, 14, 15, 16, plus A2 in §0.2 and I5 at item 12). Three §2 rows are **NOT** duplicates and stand on their own: **A0c,
+A0e, A0f** (never in ★Shipped), **C5 agentless** and **C6 ACI** (★Shipped explicitly parked C6 as
+"largely covered"), and **A4**, which collides with a *different* ★Shipped A4 (§0.3).
+
+Cross-theme overlaps the file already flagged, re-confirmed and now resolved the same way in both
+places: **D3 ≡ I2** (adapters), **D4 ≡ I3-provenance** (D4 shipped, I3-drift did not), **G5 ≡ I4**
+(both PARTIAL for the same reason: export yes, autolog no), **A0f ≡ E3** (both shipped as
+`tools/web.py` + `tools/literature.py`), **A0e ≡ C3** (both shipped, and both superseded by the
+2026-08-13 repair judgment).
 
 ---
 
@@ -175,22 +367,105 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   meant `task_file: "$SOME_API_KEY"` echoed the secret's value back). Driven by six real requests in
   `tests/test_launch_preflight.py`. Note this bounds the AUTHENTICATED operator — a token never fixed
   it.
+
+- 🟡 **P2 · B1 host-side scoring + read-only eval mount (S–M).** Mount inputs `-v root:/work:ro` +
+  separate writable `out/`; candidate writes `predictions.json`, host scores it. *Closes the rest of
+  C1 — self-reported metric is still trusted on the default path.* → `command_eval.py`, `sandbox.py`.
+  **[2026-08-14 — PARTIAL; the scoring half SHIPPED, the mount half was SUPERSEDED.** Host-side
+  scoring is real and wired: `runtime/command_eval.py:427::_read_host_score` / `:803` `host_score`,
+  registered in `READERS`/`READER_PATH_KEYS`, driven by `TaskAdapter.host_grader()`, and
+  `engine/eval_dispatch.py:729-732` makes the host score **replace** the self-report where a task
+  exposes one. The literal `:ro` mount never happened — `runtime/sandbox.py:241` still mounts
+  `-v {root}:/work` and `--read-only` appears nowhere. It is superseded rather than open, by three
+  2026-08-13 rungs that answer the same question better: `runtime/read_fence.py` (the CPython audit
+  hook refusing reads of the editable source tree, `Settings.read_fence` = deny by default),
+  `runtime/read_allowlist.py` (the ONE mount-derived allow-list of what an eval may read) and
+  `runtime/landlock.py` (the kernel ruleset, `Settings.landlock`, OFF). Priority dropped P0→P2: what
+  is left is the container-FS write side, tracked on the B4 row.]
+- ✅ **P0 · mlebench out-of-process grader (M).** Grader/`_Y` answer key still runs *in the candidate's
+  interpreter/workdir* (`adapters/mlebench.py:102`) — `import grader; grader._Y` leaks
+  labels. Grade in a separate process; labels never on the candidate FS. *(self-admitted caveat → close it).*
+  **[2026-08-14 — DONE.** `adapters/mlebench_grade.py::grade_in_subprocess` grades in a separate
+  process via `runtime/sandbox.py::run_argv`, and it is the **only** grading path in
+  `adapters/mlebench_real.py` (zero `_Y` hits there). The cited line moved: the embedded `_Y` is now
+  `adapters/mlebench.py:123` and survives only inside `_GRADER_TEMPLATE`, i.e. the **synthetic
+  fixture** under `host_graded=False`; `host_graded=True` goes through the B1 `host_score` path. The
+  adapter's own header (lines 15-27) records that as a fixture caveat, not a live label leak.]
+- 🟡 **P0 · C2 output redaction (S–M).** Env is filtered, but `stdout_tail = res.stdout[-500:]` is still
+  persisted **verbatim** (`engine/evaluate.py:2445`) — a `print(secret)` or
+  traceback still leaks into the event log/UI. Add a redaction pass (regex + entropy) before write.
+  **[2026-08-14 — PARTIAL, and this is SURVIVOR #2.** The pass shipped —
+  `engine/audit.py:269::_redact` → `core/redact.py::redact_secrets`, wired at
+  `engine/evaluate.py:2445` — but `core/config.py:920` is `redact_output: bool = False`, so on the
+  DEFAULT path the tail is still written verbatim exactly as this row describes. Two further
+  `stdout_tail` producers never reach `_redact` (`agents/cli_agent.py:349,370`). The original
+  citation `orchestrator.py:808` is dead; the site is `evaluate.py:2445`. Note redaction lives in
+  `core/redact.py`, not in `trust/`.]
+- 🟡 **P0 · C3 auth token on mutating `/api/*` + `task_file` allow-list (S).** CORS+SPA are fixed, but
+  endpoints are still **unauthenticated** and `task_file` from the request body is executed without an
+  allow-list. Add a shared-secret token + path validation.
+  **[2026-08-14 — PARTIAL, and the remaining half is SURVIVOR #1.** The token shipped and is broader
+  than asked (it gates ALL of `/api/*`, not only mutations): `serve/server.py:447` reads
+  `LOOPLAB_UI_TOKEN`, `:451` compares with `hmac.compare_digest`, `:483-514` default-denies. But it
+  is **opt-in** — unset means unauthenticated, which `server.py:479-481` warns about by name on a
+  shared JupyterHub origin. The `task_file` allow-list is **STILL OPEN**: `serve/launch.py:422-426`
+  resolves any path with only an 8 MiB cap (`_require_task_file_size`, `:210`) and no containment.]
 - 🟡 **P1 · C4 finish (M).** Idempotent fold ✅; still TODO: **read/enforce `Event.v`** (a v2 log read
   by v1 silently mis-folds) + **fail-loud append lock** (still `except OSError: pass` →
-  [eventstore.py:38](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/events/eventstore.py)) + a real multi-process append-race test.
-- ⬜ **P1 · C5 read-model integrity (M).** SQLite rebuilt only at exit, non-atomically, no seq
+  `events/eventstore.py:38`) + a real multi-process append-race test.
+  **[2026-08-14 — PARTIAL, 2 of 3 done.** `Event.v` IS enforced:
+  `events/eventstore.py:166-168` raises `UnsupportedEventVersionError` on an unsupported (or bool)
+  `v`. The append lock IS fail-loud: the cited `except OSError: pass` at `eventstore.py:38` is gone,
+  replaced by `_interprocess_lock` (`eventstore.py:254-321`) raising `EventStoreLockError`/`OSError`
+  for `required=True` callers and for any lock-path failure. **The multi-process append-race test is
+  STILL OPEN** — the suite has source/AST parity (`tests/test_append_critical_section_parity.py`) and
+  monkeypatched-failure simulations, but no real concurrent-process race. SURVIVOR #8.]
+- 🟡 **P1 · C5 read-model integrity (M).** SQLite rebuilt only at exit, non-atomically, no seq
   watermark, never refreshed for post-run control events → can diverge undetectably. Rebuild to temp +
   `os.replace`; stamp max `seq`; refresh on append. → `readmodel.py`.
-- ⬜ **P1 · G4 finish (S–M).** LLM `_post` ✅; still TODO: reuse `_kill_tree`/process-group in
+  **[2026-08-14 — PARTIAL, 1 of 3 done; SURVIVOR #4.** Atomicity landed, but at the CALL SITE, not in
+  `readmodel.py`: `engine/finalize.py:479::_build_readmodel_atomic` builds into a tempfile and
+  `os.replace`s it, called from `finalize.py:912` (`finalize_run`) — its only caller. `readmodel.py`
+  is 55 lines and still exposes only `build_readmodel`: **no seq watermark, no refresh-on-append, and
+  still exit-only.**]
+- ✅ **P1 · G4 finish (S–M).** LLM `_post` ✅; still TODO: reuse `_kill_tree`/process-group in
   `cli_agent` (timeout orphans grandchildren) + guard `choices[0]` envelope.
+  **[2026-08-14 — DONE, both halves.** `agents/cli_agent.py:345-352,379` imports and calls
+  `sandbox._kill_tree` on the timeout and exception paths. Every `choices[0]` access in `core/llm.py`
+  (`:1570,1600,1846,1876,1895`) sits behind a guard — the shared `_post` raises `LLMError` at
+  `:1382-1384` before returning an empty-choices body, and the SDK path re-checks at `:1844,1874`.]
 - 🟡 **P1 · B4 sandbox hardening (M).** `--pids-limit` ✅; add `--read-only`+tmpfs, `--memory`/`--cpus`,
   `--cap-drop ALL`, `--user`, `no-new-privileges`; Windows Job Object for atomic tree-kill; bounded
   in-flight output (kill-on-exceed).
-- ⬜ **P2 · B4+ true-isolation tier (L).** gVisor/Kata/Firecracker microVM (`hostile` tier) — verified
+  **[2026-08-14 — PARTIAL; SURVIVOR #7.** Shipped at `runtime/sandbox.py:230-238`: `--pids-limit
+  1024`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`, `--cpus`. Bounded
+  in-flight output shipped as memory-bounded truncation rather than kill-on-exceed (`_tee_drain`,
+  rolling collapse at `max(max_output_bytes*4, 256_000)`). **Still open:** `--read-only` + tmpfs
+  (zero hits in the tree) and an atomic Windows Job Object (`sandbox.py:1275` is `taskkill /F /T`).
+  `--user` is now a **deliberate non-goal**, documented in place at `sandbox.py:213-215` — the
+  host-owned bind mount needs write access — so treat that sub-item as resolved-as-kept, not open.]
+- ✅ **P2 · B4+ true-isolation tier (L).** gVisor/Kata/Firecracker microVM (`hostile` tier) — verified
   (3-0): shared-kernel hardening is *not* an isolation boundary for untrusted LLM code.
-- ⬜ **P2 · F5 remaining UX debt (S).** `delete_run` still `ignore_errors=True` (silent partial-delete →
-  [server.py:245](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/serve/server.py)); `layoutWithGroups` cycle guard; SSE/Dock O(n²) full-log
+  **[2026-08-14 — DONE and real, not a stub.** `Settings.trust_mode="hostile"` passes
+  `--runtime runsc` (gVisor) through `runtime/sandbox.py:1395-1398`, selected at
+  `engine/eval_dispatch.py:646`, straight into `docker run --runtime`.]
+- ✅ **P2 · F5 remaining UX debt (S).** `delete_run` still `ignore_errors=True` (silent partial-delete);
+  `layoutWithGroups` cycle guard; SSE/Dock O(n²) full-log
   refetch per tick; SSE `JSON.parse`/listener-leak guards; `RegistryPanel` min/max sort by direction.
+  **[2026-08-14 — DONE, all five.** (1) **`delete_run` no longer exists.** The bodyless
+  `DELETE /api/runs/{id}` is now `serve/routers/org.py:401::legacy_delete_run`, which *refuses* with
+  409 `deletion_identity_required`; real deletion is the quarantine transaction in
+  `serve/deletion_service.py`, which never `rmtree`s the source — it RENAMES entries into a
+  quarantine (`durable_no_replace_rename`, `deletion_service.py:138,300`) and, as of 2026-08-13
+  (`9156ce5a`), finishes an interrupted move via `_absorb_quarantine_residue` (`:209`) instead of
+  answering `409 delete_quarantine_conflict` retryably forever. `ignore_errors=True` appears nowhere
+  on the deletion path. (2) cycle guard: `ui/src/layout.js:33`. (3) the Dock timeline is paged —
+  `ui/src/Dock.jsx:784`, *"paged timeline O(visible events) and avoids folding or transferring the
+  whole run trace"*. (4) `ui/src/hooks.js:459` parses inside a `try` and a bad frame calls
+  `rejectLiveStream()`; there is no `EventSource` left to leak listeners on — the stream is
+  `fetchEventStream` under an `AbortController`. (5) `ui/src/panels.jsx:2192-2200` ranks through the
+  list view's direction-aware `sortRuns` comparator, with the `direction: 'min'` bug named in the
+  comment.]
 
 ---
 
@@ -200,29 +475,84 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 > **Principle (user decision): config-first, strategist-optional.** Every operator/policy/allocator
 > below is **individually configurable** (enable/disable + params); manual control is the default.
 > The optional **A7 Strategist** adapts those choices at runtime but never hides a knob.
-- ⬜ **P0 · A0a code-block ablation → targeted refinement (M).** Extend `_ablate` from *params* to
+- ✅ **P0 · A0a code-block ablation → targeted refinement (M).** Extend `_ablate` from *params* to
   *pipeline code blocks* (MLE-STAR, 64% MLE-bench-Lite). *LoopLab is one extension away.* + config knobs.
-- ⬜ **P0 · A0b real merge/ensembling (M).** Replace mean-param `merge_idea` with code-recombination +
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/ablation.py:267::_ablate_code` beside the
+  param-mode `_ablate` (`:71`), sharing `_build_refine_block_child` (`:176`); knob
+  `core/config.py:626::ablate_code_blocks = False` (+ `ablate_every`, `:622`).]
+- ✅ **P0 · A0b real merge/ensembling (M).** Replace mean-param `merge_idea` with code-recombination +
   agent-proposed iterative ensembler (verified: no-ensemble 37.9%→43.9%; removing merge −9pp).
-- ⬜ **P1 · A0c operator-scoped memory (S–M).** sibling-recall for draft/improve, ancestral debug-chain
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/node_build.py:87::_ensemble_idea` is the
+  code-recombination path, dispatched at `orchestrator.py:5221,5403,5844`.
+  `search/operators.py:21::merge_idea` still exists but is now the LEGACY mean-param arm behind
+  `core/config.py:634::merge_mode` (default `"auto"`, resolved to `"ensemble"` at
+  `orchestrator.py:751-754` whenever the Developer is code-generating).]
+- ✅ **P1 · A0c operator-scoped memory (S–M).** sibling-recall for draft/improve, ancestral debug-chain
   for debug (port aira-dojo `MEM_OPS` shape).
-- ⬜ **P1 · A0d complexity cue by node breadth (S, quick win).** Prompt hint keyed on child count.
-- ⬜ **P1 · A0e multi-turn ReAct debug (M).** Replace one-shot `repair` with bounded act/observe loop
+  **[2026-08-14 — DONE. NOT a ★Shipped duplicate** (this ID never appeared there).
+  `events/digest.py:519::sibling_digest` (docstring cites `MEM_OPS 'sibling'`) and
+  `:591::ancestral_repair_chain` (cites `MEM_OPS 'ancestral'`), the latter consumed by
+  `engine/crash_repair.py:332-333::_repair_error_context`.]
+- ✅ **P1 · A0d complexity cue by node breadth (S, quick win).** Prompt hint keyed on child count.
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/proposal_cues.py:78::_cue_complexity`,
+  keyed on the sibling/child count at `:81-82`, behind `Settings.complexity_cue`.]
+- ✅ **P1 · A0e multi-turn ReAct debug (M).** Replace one-shot `repair` with bounded act/observe loop
   (+5.5 percentile pts). *Ties C3/C5.*
-- ⬜ **P2 · A0f web-retrieval-grounded init (M, network-optional).** *Ties E3.*
-- ⬜ **P0 · A6 proxy/predictive scoring (M–L).** Early-signal scoring to kill doomed runs (KompeteAI
+  **[2026-08-14 — DONE, and then SUPERSEDED TWICE. NOT a ★Shipped duplicate.** `repair`/`repair_from`
+  (`adapters/repo_developer.py:1312,1315`) route through `_run` (`:1107`) → `agents/agent.py:78
+  ::run_phase` → `agents/tool_loop.py:393::drive_tool_loop`, bounded by `max_turns`/`time_budget_s`/
+  stuck-detection — i.e. an act/observe loop, not one-shot. Then on **2026-08-13** the loop's STOP
+  became a judgment (`engine/repair_judgment.py`, doc 36 F8) beside `engine/triage.py`'s per-failure
+  verdict, and the **Debug node was deleted**: `search/policy.py:35` marks `KIND_DEBUG` HISTORICAL,
+  *"the Debug node was deleted and NOTHING mints this kind any more"*, held by
+  `tests/test_debug_node_removed.py`. A newer rung landed the same day —
+  `engine/repair_verify.py::REPAIR_VERDICTS`, which compares what a repair CLAIMED against the bytes
+  it changed and bounds an inert chain (`INERT_REPAIR_LIMIT`).]
+- ✅ **P2 · A0f web-retrieval-grounded init (M, network-optional).** *Ties E3.*
+  **[2026-08-14 — DONE. NOT a ★Shipped duplicate.** `tools/web.py:199::WebTools` (search + fetch,
+  SSRF-guarded), behind `core/config.py:1705::web_search = False` — i.e. network-optional exactly as
+  specified. Wired into the Deep-Research role at `agents/deep_research.py:545-546`; fires at run
+  start via `deep_research_every` → `engine/cadence.py:106-122::deep_research_window`. **Duplicate of
+  E3**, which shipped as `tools/literature.py`; both are closed the same way.]
+- ✅ **P0 · A6 proxy/predictive scoring (M–L).** Early-signal scoring to kill doomed runs (KompeteAI
   6.9× faster eval = current Lite leader 51.5%). Pairs with A1 + C2.
-- ⬜ **P1 · A1 multi-fidelity racing ASHA/Hyperband (M).** Successive-halving scheduler over existing
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `search/proxy.py:22::ProxyScorer` (k-NN/IDW metric
+  predictor over folded `RunState`), gating the full eval at `engine/evaluate.py:1447-1451`, threaded
+  through `orchestrator.py:527,814,997` and `engine/speculation_gate.py:70,164,249`; knobs
+  `core/config.py:843-844::proxy_scoring` / `proxy_kill_fraction`.]
+- ✅ **P1 · A1 multi-fidelity racing ASHA/Hyperband (M).** Successive-halving scheduler over existing
   `eval_profile` smoke/full; emit `rung_promoted`. → `policy.py`.
-- ⬜ **P1 · A2 surrogate-guided proposal TPE/RF (M–L).** Fit `(params→metric)`; EI/UCB acquisition.
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `search/policy.py:677::_make_asha`, registered
+  `"asha"` at `:691`; `events/types.py:151::EV_RUNG_PROMOTED = "rung_promoted"`, emitted at
+  `policy.py:525,589`.]
+- 🟡 **P1 · A2 surrogate-guided proposal TPE/RF (M–L).** Fit `(params→metric)`; EI/UCB acquisition.
+  **[2026-08-14 — SHIPPED, but as a DIFFERENT ALGORITHM; ★Shipped's ✅ overstates the row as
+  written.** `search/surrogate.py:42::SurrogateResearcher` fits `(params→metric)` and acquires with a
+  UCB-style distance/exploration bonus (`core/config.py:830-832::surrogate_explore`, *"UCB-style
+  exploration weight"*), wired at `engine/strategy.py:446::_ensure_surrogate`. But the estimator is
+  **k-NN inverse-distance-weighted**, not TPE and not a random forest, and there is no EI. Recorded
+  as a deliberate substitution (zero-dep, pure Python) rather than a gap — see §0.2. Re-open only if
+  a measurement shows kNN/IDW is the binding constraint.]
 - 🟡 **P2 · A3 BOHB/DEHB fusion (M).** Capstone once A1+A2 land. **[corrected 2026-08-04 — the ★ Shipped
   roll-up above lists "A3 BOHB" as ✅; that OVERSTATES it.** `"bohb"` is a registry **alias for the ASHA
   factory** — `search/policy.py:722` reads `"bohb": _make_asha`, with the comment "Hence 'bohb' is an
   alias for the ASHA factory (kept exactly for compatibility)". The fusion is the ASHA racing schedule
   plus a surrogate wired in as the Researcher by the CLI; there is no BOHB/DEHB policy object.]
-- ⬜ **P2 · A4 LATS-style MCTS (M).** LLM value est + reflection + novelty/dedup.
-- ⬜ **P1 · A5 budget-aware proposal (S).** Surface remaining eval budget into the prompt/policy.
-- ⬜ **P0 · A7 Strategist role — adaptive meta-control (M rule + M llm) (NEW, user-requested).** Optional
+- 🟡 **P2 · A4 LATS-style MCTS (M).** LLM value est + reflection + novelty/dedup.
+  **[2026-08-14 — PARTIAL; SURVIVOR #17. And note the ID: this A4 is NOT ★Shipped's "A4
+  failure-reflection" — a fifth namespace collision the caveat block above does not list.** The tree
+  search shipped: `search/policy.py:393::MCTSPolicy` ("Opt-in UCB1 tree search (I22, ADR-2)"),
+  registered `"mcts"` at `:690`, classic UCB1 at `:475-478`. The three LATS ingredients did not: the
+  reward is folded straight from the metric (`_mcts_reward`, `:374`) with **no LLM value estimate and
+  no reflection step**, and it is not wired to `search/graded_novelty.py` / `novelty_recall.py` /
+  `taxonomy_dedup.py`, which exist independently. No `lats.py`; grep for `LATS` returns nothing.]
+- ✅ **P1 · A5 budget-aware proposal (S).** Surface remaining eval budget into the prompt/policy.
+  **[2026-08-14 — DONE; collapses into ★Shipped, and EXTENDED 2026-08-13.**
+  `engine/proposal_cues.py:90::_cue_eval_budget` and `:112::_cue_experiment_time_budget` inject the
+  remaining budget into the prompt, behind `core/config.py:647::budget_aware`. The second cue reads
+  `engine/shared.py:55::effective_eval_time_budget` — the docs/29 F1h landing that states the per-eval
+  TIME budget to *both* roles that spend it (`7aa4cbdc`).]
+- ✅ **P0 · A7 Strategist role — adaptive meta-control (M rule + M llm) (NEW, user-requested).** Optional
   LLM role that reads run state and **picks the search policy/allocator + Developer mode (agentless vs
   agentic) + operator mix** per situation; every choice is also a direct config knob (config-first).
   Emits `strategy_decision` (audit) + a "why this strategy" panel. **Ship the rule-based baseline
@@ -232,6 +562,14 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   `strategist_backend = "agent"` (`core/config.py:755`) — the tool-using AGENTIC backend, not off — and
   there are FOUR values, `off|rule|llm|agent` (validated set in `core/config.py`'s enum table). See
   [A7-strategist-design.md](A7-strategist-design.md), which is the current design record.]
+  **[2026-08-14 — DONE; re-verified, and the 2026-08-04 correction still holds exactly.**
+  `agents/strategist.py:333::RuleStrategist` (the rule baseline this row asked to ship first),
+  `:718::LLMStrategist`, agentic backend dispatched at `:849`. `engine/strategy.py:433` emits
+  `events/types.py:149::EV_STRATEGY_DECISION = "strategy_decision"`. Default is
+  `core/config.py:962::strategist_backend = "agent"`, validated set at `:1918`. **Caveat carried
+  forward:** its `developer` decision has a dead arm — `strategist.py:408-409` tests for
+  `"agentless"`, which `engine/strategy.py:75-77::_available_developers()` can never return. See the
+  C5-agentless row.]
 
 ### Theme B · Trust & eval integrity
 - ✅ **P2 · B6 held-out test + generalization-gap guard (M) — SHIPPED, ON BY DEFAULT.**
@@ -241,8 +579,18 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   on reserved unseen rows; defaults are `holdout_fraction=0.25`, `holdout_select=True`,
   `holdout_top_k=3` (`core/config.py:779-786`; `0.0` = off). Original scope, for the record: a final
   split the search never sees; fold `generalization_gap = val − test`; flag/penalize high-gap winners.
-- ⬜ **P1 · B5 reward-hacking detector (M).** Flag suspicious wins (grader import, runtime writes to
+- ✅ **P1 · B5 reward-hacking detector (M).** Flag suspicious wins (grader import, runtime writes to
   protected paths, val≠host-recompute) → `reward_hack_suspected` event in Trust panel.
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `trust/reward_hack.py:224::detect_reward_hacks`
+  flags `grader_access` (`:28-71,108-150`) and `protected_write`
+  (`engine/audit.py:214::_audit_workdir_writes`); `events/types.py:153
+  ::EV_REWARD_HACK_SUSPECTED`; Trust panel at `ui/src/panels.jsx:601` (+ `narration.js:158,489`,
+  `trustSemantics.js:68`); knob `core/config.py:925::reward_hack_detect`. **One of the three tells
+  differs from the row:** "val ≠ host-recompute" is not a comparison — where a task exposes
+  `host_grader()`, `engine/eval_dispatch.py:729-732` makes the host score REPLACE the self-report, so
+  there is no mismatch left to flag; the residual heuristic is `perfect_metric`
+  (`reward_hack.py:317-320`). Sidestepped by design, not missing. **Its live defect is the §6
+  hardened-suite residual row (SURVIVOR #3).**]
 - *(B1/B2/B3/B4 tracked in §1 Foundation.)*
 
 ### Theme C · Reliable coding Developer (SWE-bench stack)
@@ -251,11 +599,53 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   $0.70). Subsumes C1+C2+C4. **Keep the external coding-agent (agentic) backend as a first-class
   option** — `developer_backend = llm | agentless | <agent>`, selectable by config **or by the A7
   Strategist** per phase/node. Agentic is never removed.
-- ⬜ **P1 · C2 best-of-N + selection (M).** N attempts, keep best (SWE-RM best-of-k +10pts). *Depends A1/A6.*
-- ⬜ **P1 · C1 fault localization (M).** grep/embedding localization sub-phase (reuse `RepoTools`).
-- ⬜ **P2 · C3 deep test-driven repair (M).** Feed failing-test output + minimal repro; cap depth.
-- ⬜ **P2 · C4 independent critic (S–M).** Self-consistency/critic before accept. *Ties B5.*
-- ⬜ **P2 · C6 better ACI / write-over-edit (M).** Tuned edit/navigate/test interface (SWE-agent finding).
+  **[2026-08-14 — STILL OPEN, and the only §2 row that is both open and load-bearing; SURVIVOR #5.
+  The named vocabulary does NOT exist.** `developer_backend` is real (`core/config.py:1178`) but its
+  closed enum is `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose",
+  "opencode")` — **no `llm`, no `agentless`**. The default `"default"` is the full agentic
+  multi-phase in-house Developer (`adapters/repo_developer.py`, STAGES→PLAN→IMPLEMENT), which is the
+  opposite of what this row asks for. `agents/strategist.py:408-409` already contains the branch
+  (`if "agentless" in ctx.available_developers`, commented *"only when C5 has landed"*) and it is
+  **dead**: `engine/strategy.py:75-77::_available_developers()` returns `["default", "llm",
+  *PRESETS]` and never `"agentless"`. Both building blocks the pipeline needs already shipped —
+  localize (`engine/localize.py`) and generate-N (`search/best_of_n.py`) — so what is missing is the
+  backend that composes them.]
+- ✅ **P1 · C2 best-of-N + selection (M).** N attempts, keep best (SWE-RM best-of-k +10pts). *Depends A1/A6.*
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `search/best_of_n.py` ("C2 · Best-of-N candidate
+  selection"), execution-free reward `_score()` at `:16`; knobs `core/config.py:1182::best_of_n`
+  and `:1187::best_of_n_listwise`; wired at `agents/factory.py:483-487` (`BestOfNDeveloper` when
+  `best_of_n > 1`).]
+- ✅ **P1 · C1 fault localization (M).** grep/embedding localization sub-phase (reuse `RepoTools`).
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/localize.py:33::localize` ("C1 · Fault
+  localization (ADR-7, Agentless recipe phase 1)"), consumed at
+  `engine/proposal_cues.py:214-223` behind `self._localize_faults`. The named symbol `RepoTools`
+  still resolves — `tools/knowledge_tools.py:67`, wired at `agents/factory.py:434-435`; it was not
+  renamed.]
+- ✅ **P2 · C3 deep test-driven repair (M).** Feed failing-test output + minimal repro; cap depth.
+  **[2026-08-14 — DONE; collapses into ★Shipped. Duplicate of A0e**, closed by the same loop.
+  `engine/options.py:141::deep_repair` ("C3: structured failure-taxonomy repair context"); when on,
+  `engine/crash_repair.py:424-427` asks for "a tiny reproduction/assert near the failure" and always
+  feeds the failing `error` text back. Depth IS capped, and unconditionally: `_effective_repair_cap`
+  (`engine/evaluate.py:128-134`) substitutes `_UNLIMITED_REPAIR_CEILING = 50` (`:99-124`) when the
+  operator sets no `inline_repair_attempts`. Since 2026-08-13 a second bound sits above it —
+  `engine/repair_verify.py::INERT_REPAIR_LIMIT` abandons in-node repair after two change-set-EMPTY
+  repairs.]
+- ✅ **P2 · C4 independent critic (S–M).** Self-consistency/critic before accept. *Ties B5.*
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `trust/critic.py:16::critique` ("C4 · Independent
+  critic (ADR-7)"), reached from `engine/evaluate.py:760` (`critic_findings`); its findings reuse the
+  B5 `reward_hack_suspected` event per its own docstring.]
+- ✅ **P2 · C6 better ACI / write-over-edit (M).** Tuned edit/navigate/test interface (SWE-agent finding).
+  **[2026-08-14 — DONE, and EXTENDED 2026-08-13. NOT a plain ★Shipped duplicate** — ★Shipped parked
+  it as "largely covered by the patch-gate / whole-file-write", and that is now understated. The
+  edit/navigate half: `tools/patch.py::SurfacePolicy` (patch gate, wired
+  `adapters/repo_developer.py:30`) + `tools/edit_match.py` (tolerant SEARCH/REPLACE matcher). The
+  **test** half — the one SWE-agent finding that was genuinely missing — landed as
+  `tools/dev_probe.py::DevProbeTools`, the Developer's read-only PROBE: `run_probe(code)` runs a
+  short program against the REAL environment while it authors, joined at
+  `adapters/repo_developer.py:382` via `_scout_tools`. It is deliberately not a shell (four rules: no
+  source read, no write anywhere, no new program, no GPU) because the read fence only covers `open`
+  inside an interpreter. Behind `Settings.developer_probe`, which restores the old prompt
+  byte-for-byte when false.]
 
 ### Theme D · Benchmarks & real tasks
 - ✅ **P1 · D1 wire real MLE-bench (L).** Kaggle download + real grader. *Needs B1+B6.* Highest proof point.
@@ -263,55 +653,212 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   (`kind="mlebench_real"`, registered `adapters/tasks.py:22,93`), `adapters/mlebench_grade.py` (host-side
   real grader), `adapters/mlebench_prep.py`, `adapters/kaggle_dl.py`; runbook in
   [MLEBENCH.md](MLEBENCH.md). B6 (its stated prerequisite) also shipped — see Theme B.]
-- ⬜ **P2 · D2 self-benchmark harness (M).** N held-out tasks per release; capability regression test.
-- ⬜ **P2 · D3 more task adapters (M each).** *(overlaps I2.)*
-- ⬜ **P1 · D4 dataset/data-version provenance (S).** Pin data hashes into the run. *(overlaps I3.)*
+- ✅ **P2 · D2 self-benchmark harness (M).** N held-out tasks per release; capability regression test.
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `looplab/bench.py` ("D2 · Capability
+  self-benchmark harness"), exposed as `looplab bench` at `cli/export_cmds.py:66-84`.]
+- ✅ **P2 · D3 more task adapters (M each).** *(overlaps I2.)*
+  **[2026-08-14 — DONE; collapses into ★Shipped. Duplicate of I2** — and the two now DISAGREE, which
+  is why both rows stay: the *count* asked for here shipped (8 kinds registered at
+  `adapters/tasks.py:21-29`: toy, dataset, regression, code-regression, classification, repo,
+  mlebench, mlebench_real, timeseries), but the three adapters **I2 names specifically** did not —
+  see that row.]
+- ✅ **P1 · D4 dataset/data-version provenance (S).** Pin data hashes into the run. *(overlaps I3.)*
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `events/types.py:85::EV_DATA_PROVENANCE`, emitted
+  at `engine/orchestrator.py:3140-3147` (a sha256 of every task asset, comment: *"pin a content hash
+  of every task asset/dataset into the run so a result is tied to the exact data"*), folded by
+  `events/replay.py:1552::_on_data_provenance` into `core/models.py:1148::RunState.data_provenance`,
+  and read back as calibration evidence at `search/speculation_quality.py:1981`. Note the scope:
+  it hashes in-memory ASSETS; a repo task's mounted dataset is pinned through the workspace snapshot
+  instead (`adapters/repo_task.py::DataSpec` carries no hash field of its own). The 2026-08-13
+  OUTPUT-side twin is `runtime/metric_subject.py` — `eval.metric.subject` binds the recorded number
+  to the sha256 + `file_identity` of the artefact it is a claim ABOUT, because measured across six
+  repo runs 82/83 metrics carried no provenance at all and 2/83 were provably about bytes the node
+  did not produce.]
 
 ### Theme E · Idea generation & multi-agent ideation
-- ⬜ **P1 · E1 novelty/dedup gate (S–M).** Embedding-similarity reject near-duplicate ideas (reuse vector store).
-- ⬜ **P2 · E2 researcher panel + *empirical* ranking (M).** Small panel (≤3); rank by cheap eval/surrogate,
+- ✅ **P1 · E1 novelty/dedup gate (S–M).** Embedding-similarity reject near-duplicate ideas (reuse vector store).
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/novelty.py` ("Novelty / dedup gate
+  (E1/T5)"), cosine embedding similarity; knobs `core/config.py:869-870::novelty_semantic` /
+  `novelty_semantic_threshold = 0.92`, plus `:856-858::novelty_mode` / `novelty_gate`.]
+- ✅ **P2 · E2 researcher panel + *empirical* ranking (M).** Small panel (≤3); rank by cheap eval/surrogate,
   **not** LLM-judge (verified: LLM-judge ≈random at ranking). Elo-tournament only as a *prior*.
-- ⬜ **P2 · E3 literature-grounded ideation (M, network-optional).**
-- ⬜ **P1 · E4 reflection-memory → priors (M).** Meta-review note distilled into next run's prompt
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `search/panel.py` ("E2 · Researcher panel +
+  empirical ranking (ADR-2)") ranks by an inverse-distance-weighted k-NN surrogate over observed
+  history (`_predict`, `:17`) — empirical, explicitly not LLM-judge, as the row required. One
+  deviation: the "≤3" cap is not enforced; `core/config.py:835::researcher_panel` is a free operator
+  int. Not worth a row.]
+- ✅ **P2 · E3 literature-grounded ideation (M, network-optional).**
+  **[2026-08-14 — DONE; collapses into ★Shipped. Duplicate of A0f**, closed the same way.
+  `tools/literature.py::LiteratureTools` ("E3 · Literature-grounded ideation (ADR-16),
+  network-OPTIONAL") — arXiv search degrading to "(unavailable)" when disabled or unreachable; wired
+  at `agents/factory.py:177-178`.]
+- ✅ **P1 · E4 reflection-memory → priors (M).** Meta-review note distilled into next run's prompt
   (gradient-free cross-run meta-learning). *Pairs A0c.*
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `engine/lessons_distill.py:342::reflect_lessons`
+  (delegated from `orchestrator.py:4718-4719`) distils; `engine/lessons.py:71-72` sets
+  `prior_note_text`/`dev_prior_note_text` at run start ("E4: cross-run RESEARCHER prior"), refreshed
+  mid-run at `:240-267`. Proof it reaches the next prompt: `engine/proposal_cues.py:241`
+  (`prior_hint = self._prior_note_text`) and `engine/node_build.py:232`. **Narrowed 2026-08-13:** a
+  `metric_salvaged` node's NUMBER may no longer leave the run into `lessons.jsonl` —
+  `engine/memory.py::unreliable_metric_ids` joins the salvage rule with the trust gate's
+  `flagged_node_ids`, so `reflect_lessons` shows such a node with its salvage condition and no
+  number.]
 
 ### Theme F · Observability & researcher UX
-- ⬜ **P1 · F1 global hyperparameter-importance view (S–M).**
-- ⬜ **P1 · F2 cross-run sweep aggregation (M).** Overlay runs of the same task → lab dashboard.
-- ⬜ **P1 · F3 lineage/provenance export + model-card (S).**
-- ⬜ **P2 · F4 collaboration/sharing (M).** Read-only run links, annotation threads, export-to-report.
+- ✅ **P1 · F1 global hyperparameter-importance view (S–M).**
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `ui/src/report.js:147::hyperImportance` (real
+  Pearson-r over every evaluated/feasible node, `_pearson` at `:129`), rendered by
+  `ui/src/panels.jsx:2277::HyperImportancePanel` and mounted as the "Importance" panel at
+  `ui/src/RunView.jsx:171`. **NB the ID:** docs/29 uses `F1a–F1h` for entirely unrelated engine work
+  (cross-turn dispatch, occupancy pacing, eval time budget) — a sixth namespace over this letter.]
+- 🟡 **P1 · F2 cross-run sweep aggregation (M).** Overlay runs of the same task → lab dashboard.
+  **[2026-08-14 — PARTIAL; ★Shipped's ✅ overstates it. SURVIVOR #10.** The per-run surface exists —
+  `ui/src/panels.jsx:2319::CrossRunPanel` — but it is a TABLE of per-run observations that
+  explicitly disclaims the aggregation this row asks for: *"Cross-run ranking unavailable… Values
+  below remain per-run observations"* (`panels.jsx:2340-2343`). No overlay chart, no ranking, no lab
+  dashboard. `serve/routers/cross_run.py` is a different surface (governance claims/concepts), and
+  the run list's global concept view (`ui/src/conceptForest.js` / `PortfolioConcepts.jsx`) is a
+  concept rollup, not a metric overlay.]
+- ✅ **P1 · F3 lineage/provenance export + model-card (S).**
+  **[2026-08-14 — DONE; collapses into ★Shipped. Server-side symbol absent by design** — grep for
+  `model_card` in `looplab/` returns nothing; it is a client export.
+  `ui/src/report.js:355::buildModelCard` emits `schema_id: 'looplab.model-card'` with champion
+  params/metric, lineage (`parent_ids`) and a provenance block, downloaded from
+  `ui/src/Report.jsx:497`. `events/notebook.py::champion_notebook` carries the same provenance in
+  its markdown header.]
+- ✅ **P2 · F4 collaboration/sharing (M).** Read-only run links, annotation threads, export-to-report.
+  **[2026-08-14 — DONE, all three; collapses into ★Shipped.** Read-only links:
+  `serve/reviews.py` ("Persistent, revocable read-only capabilities for sharing one run",
+  `ReviewStore`). Annotation threads: `events/comment_projection.py` +
+  `serve/routers/collaboration.py`, rendered by `ui/src/CommentsThread.jsx` inside
+  `ui/src/CollabPanel.jsx:681`. Export-to-report: `serve/routers/reports.py` +
+  `serve/scope_report.py::generate_scope_report` (multi-run portfolio reports over project / task /
+  super-task scopes), with the paid-action protocol in `serve/scope_actions.py`.]
 - ⬜ **P1 · F6 fork-to-branch from any checkpoint (M).** Fuse time-travel + `inject_node` + reopen into
   one "branch from this seq with edited idea" gesture (top verified steering UX). *Partially in progress.*
+  **[2026-08-14 — STILL OPEN; ★Shipped's ✅ is wrong for the FUSED gesture, which is the whole row.
+  SURVIVOR #11.** Both primitives exist and stayed separate: `fork` (`EV_FORK`, `CONTROL.fork(rid,
+  id, generation)` at `ui/src/api.js:202`) carries no edited idea, and `inject_node`
+  (`serve/control_validation.py:712::_normalize_inject_node`) is a distinct manual add. There is no
+  fused symbol, and the time-travel view forbids the gesture outright:
+  `ui/src/RunView.jsx:1700` refuses every node action with *"Historical snapshot seq ${viewSeq} is
+  read-only"*. Branching from a seq today = return to live, then inject, then re-type the idea.
+  **Not to be confused with docs/29's F6**, which is the conversation-trace episode seek that landed
+  2026-08-13 (`events/traceview.py::node_episodes`, `/nodes/{n}/episodes`, `?before=` via
+  `events/span_index.py::_anchored`) — different namespace, different item.]
 - *(F5 UX debt tracked in §1.)*
 
 ### Theme G · Scale, ops, hardening
 - 🟡 **P1 · G2 replay/durability (M).** *(= C4/C5 in §1.)*
-- ⬜ **P2 · G3 distributed/parallel eval (L).** Worker pool + parallel-path budget guard; enables A1 at scale.
-- ⬜ **P2 · G5 MLflow/OTLP consumer bridges (M).** *(overlaps I4.)*
+  **[2026-08-14 — PARTIAL; a pure pointer row. See the §1 C4 and C5 rows: 2 of 3 and 1 of 3.]**
+- 🟡 **P2 · G3 distributed/parallel eval (L).** Worker pool + parallel-path budget guard; enables A1 at scale.
+  **[2026-08-14 — PARTIAL; SURVIVOR #18. The BUDGET GUARD shipped, the DISTRIBUTION did not.**
+  Parallel eval is in-process anyio: `engine/evaluate.py:1375::_evaluate(..., limiter:
+  anyio.CapacityLimiter)` under task groups at `orchestrator.py:1503,2383`, each eval driving a local
+  subprocess. There is no `ray`/`celery`/`dask` anywhere in `looplab/` and no cross-machine dispatch.
+  The guard half is real and has grown three ways: `engine/widths.py::EVAL_WIDTH_MAX` enforced at
+  `orchestrator.py:2966`, `engine/proposal_cues.py:425::per_experiment_gpu_budget`, and the
+  cross-process host GPU-pool lease (`engine/resources.py`, one file per OS user). Two 2026-08-13
+  landings changed the shape of the in-process half without closing this row: the eval task group
+  became run-scoped so evals outlive the turn that admitted them (F1f, `Engine._eval_inflight`,
+  `_refuse_finish_over_adopted_evals`), and production is now paced on OCCUPANCY rather than node
+  count (`engine/cadence.py::occupancy_due` → `orchestrator.py::_occupancy_paced_creates`, the F1g
+  fix for the state that cost this box 167.7 GPU-h with no evaluation running).]
+- ✅ **P2 · G5 MLflow/OTLP consumer bridges (M).** *(overlaps I4.)*
+  **[2026-08-14 — DONE; collapses into ★Shipped. Duplicate of I4's MLflow half**, and both are
+  closed at the same place with the same caveat (export, not autolog — see I4).
+  `events/mlflow_export.py::export_run` (optional dep, `available()` guard) behind
+  `cli/export_cmds.py:93::export-mlflow`; OTLP is genuine OTel SDK span export at
+  `core/tracing.py:118::_otel_env_requests_otlp` and `:276-298`, driven by the standard `OTEL_*`
+  env.]
 - *(G1 server auth, G4 client robustness tracked in §1.)*
 
 ### Theme H · Local-LLM serving & structured-output reliability (RTX 5090)
-- ⬜ **P0 · H2 schema-aligned (BAML-style) parser as default (S).** Native FC collapses on small models
+- 🟡 **P0 · H2 schema-aligned (BAML-style) parser as default (S).** Native FC collapses on small models
   (~20% vs SAP ~92–94%). Make the `baml` path a real error-correcting parser. → `parse.py`. *Cheapest
   whole-system lift; gates Themes C/E.*
-- ⬜ **P1 · H1 vLLM/SGLang recipe + `guided_json` constrained decoding (S–M).** Drive structured calls
+  **[2026-08-14 — PARTIAL; ★Shipped's ✅ covers only half the row. SURVIVOR #6.** The parser half IS
+  done and is not a stub: `core/parse.py:195::_coerce_to_model` does case-insensitive key matching,
+  per-field type coercion and extras-dropping — a genuine SAP. **The "as default" half did not
+  happen:** `core/config.py:1483::llm_parser = "tool_call"`, and
+  `core/parse.py:213::_ORDER["tool_call"] = ["tool_call", "baml"]`, so `baml` runs only after native
+  FC has already failed. That is the exact configuration whose ~20 % the row was written about, and
+  this box serves local models. Remaining work is a default flip plus its blast-radius test.]
+- ✅ **P1 · H1 vLLM/SGLang recipe + `guided_json` constrained decoding (S–M).** Drive structured calls
   from the Pydantic schema. → `llm.py`, `parse.py`, docs.
-- ⬜ **P1 · H3 per-role model presets (S–M).** Developer=Qwen3-Coder-30B-A3B, fast model for breadth /
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `core/llm.py:661,756,836-837,1593-1596` sends
+  `guided_json` / `response_format` `json_schema` derived from the Pydantic schema in
+  `complete_tool`, behind `Settings.llm_guided_json`. The recipe half is documented at
+  `docs/guide/llm-and-agents.md:183-209,468` (the SGLang/vLLM table with `--tool-call-parser` /
+  `--reasoning-parser`).]
+- ✅ **P1 · H3 per-role model presets (S–M).** Developer=Qwen3-Coder-30B-A3B, fast model for breadth /
   strong for depth; per-role `model`+`base_url`. → `config.py`, `tasks.make_roles`, Settings UI.
-- ⬜ **P2 · H4 context budgeting for long traces (S).** Truncate/scoped-memory; paged-KV. *Pairs A0c.*
+  **[2026-08-14 — DONE, all three surfaces; collapses into ★Shipped.**
+  `core/config.py:1366-1380::researcher_model` / `developer_model` / `strategist_model` plus their
+  `*_base_url` / `*_temperature` siblings; applied through the role→field map at
+  `core/llm.py:1946-1952`, consumed by `make_llm_client_for` inside
+  `agents/factory.py:294::make_roles`; present in `serve/settings_ui_schema.json`.]
+- ✅ **P2 · H4 context budgeting for long traces (S).** Truncate/scoped-memory; paged-KV. *Pairs A0c.*
+  **[2026-08-14 — DONE; collapses into ★Shipped.** `core/context_budget.py::truncate_history` does
+  middle-truncation of long intermediate tool-loop messages while keeping the system message and the
+  last N turns (`DEFAULT_SUMMARY_CHARS`, `RESULT_CAP`), consumed by `agents/tool_loop.py`,
+  `agents/agent.py` and `agents/strategist.py`. Paged-KV is a serving-side concern and is not, and
+  should not be, LoopLab's.]
 
 ### Theme I · Net-new capabilities (expand functional surface)
-- ⬜ **P1 · I1 LLM feature-engineering operator, CV-gated (M).** CAAFE-style (0.798→0.822); **CV gate
+- 🟡 **P1 · I1 LLM feature-engineering operator, CV-gated (M).** CAAFE-style (0.798→0.822); **CV gate
   mandatory** (FE is non-universal). Highest net-new value for tabular. *Composes A0a.*
-- ⬜ **P1 · I2 new TaskAdapters (M each).** Time-series (AutoGluon-TS/Darts backtesting), tabular AutoML,
+  **[2026-08-14 — PARTIAL; ★Shipped's ✅ overstates it. SURVIVOR #13.** There is **no FE operator** —
+  `search/operators.py` holds only `merge_idea`, and grep for `caafe`/`CAAFE` across the tree returns
+  nothing. What shipped is a PROMPT CUE: `engine/proposal_cues.py:231::_cue_feature_engineering`
+  appends free text telling the model *"the eval's cross-validation gates them — KEEP a feature only
+  if it improves CV"*, behind `core/config.py:643::feature_engineering = False`. The row called the
+  CV gate **mandatory**; an instruction to a model is not an enforcement, and FE being non-universal
+  is precisely why the row said so.]
+- 🟡 **P1 · I2 new TaskAdapters (M each).** Time-series (AutoGluon-TS/Darts backtesting), tabular AutoML,
   multimodal. *(overlaps D3.)*
-- ⬜ **P2 · I3 data-centric (M).** Static-dataflow leakage detection (beyond exact-match), drift, provenance.
-- ⬜ **P2 · I4 integrations (S–M).** Champion→Jupyter notebook export, MLflow autolog, data connectors.
-- ⬜ **P2 · I5 true Pareto / cost-aware (M).** Non-dominated-set selector over `extra_metrics` (panel exists).
+  **[2026-08-14 — PARTIAL; ★Shipped's ✅ overstates it. SURVIVOR #14. Duplicate of D3 — and the two
+  disagree**, which is why both rows survive: D3's "more adapters" shipped, but **none of the three
+  this row names** did. `adapters/timeseries.py` is a **synthetic toy** (exponential/seasonal
+  forecaster over a generated series, MASE backtest) whose own docstring at line 9 says a real
+  AutoGluon-TS/Darts backend "is a drop-in replacement for the templated forecaster" — i.e. it is the
+  template, not the backend. No tabular-AutoML adapter and no multimodal adapter exist; `adapters/`
+  holds classification / dataset / kaggle_dl / mlebench{,_real,_grade,_prep} / regression /
+  repo{,_developer} / timeseries / toytask.]
+- 🟡 **P2 · I3 data-centric (M).** Static-dataflow leakage detection (beyond exact-match), drift, provenance.
+  **[2026-08-14 — PARTIAL, 2 of 3; ★Shipped's ✅ overstates it. SURVIVOR #15.** Leakage DID go past
+  exact match: `trust/leakage.py` has `train_test_contamination` (exact rows), `target_leakage`
+  (correlation proxy), `temporal_leakage`, and `code_leakage_scan` (`:147`), self-described
+  "static-dataflow-lite" — it catches a preprocessor fit on the FULL data before the split and
+  `.fit()` called on test data. Provenance shipped as D4 (`EV_DATA_PROVENANCE`). **Drift is absent:**
+  every `drift` hit in `looplab/` is code/schema-drift prose or confirm-phase seed variance
+  (`engine/confirm_phase.py:273`), never a distribution-shift detector.]
+- 🟡 **P2 · I4 integrations (S–M).** Champion→Jupyter notebook export, MLflow autolog, data connectors.
+  **[2026-08-14 — PARTIAL, 1 of 3; ★Shipped's ✅ overstates it. SURVIVOR #16.** Notebook export DONE:
+  `events/notebook.py::champion_notebook` behind `cli/export_cmds.py:108::export-notebook`. MLflow is
+  **manual per-run export**, not autolog — `events/mlflow_export.py::export_run`; grep for `autolog`
+  across `looplab/` is empty (duplicate of G5, same caveat). Data connectors do **not exist**: no
+  `DataConnector`/`data_connector`/`connector` symbol anywhere.]
+- 🟡 **P2 · I5 true Pareto / cost-aware (M).** Non-dominated-set selector over `extra_metrics` (panel exists).
+  **[2026-08-14 — PARTIAL; ★Shipped's ✅ overstates it, and the row's own parenthetical was the whole
+  truth. SURVIVOR #12.** A real non-dominated-set algorithm exists — `ui/src/panels.jsx:721
+  ::paretoFront` with `dominates()` at `:725`, over the primary metric plus every `extra_metric` —
+  but it lives entirely in `ParetoPanel` (`panels.jsx:729`), a **display** surface. Grep for `pareto`
+  across `looplab/search/` and `looplab/engine/` returns **nothing**: it is not a SELECTOR, it never
+  moves the champion. Compare `engine/verifier_tiebreak.py`, which is selection machinery and can.]
 
 ---
 
 ## 3. Top-of-backlog — the ordered "do next" list
+
+> **[2026-08-14 — SUPERSEDED by §0.1.** Every phase below is now mostly ✅, so following this order
+> sends the next person to work that is already done. Kept, not deleted, because it records the
+> 2026-06-24 sequencing DECISION and its rationale; **§0.1 is the live ordering.** For the record,
+> what survives of each phase: Phase 1 → `C2 output redaction` (default is off), `C3` (the
+> `task_file` half), `C4` (the race test), `C5 read-model`, `H2` (the "as default" half); Phase 2 →
+> `C5 agentless Developer`; Phase 3 → `I1`'s CV gate, `I2`'s three named adapters, `F2`/`F6`,
+> `G3`'s distributed half. `B1`, `mlebench grader`, `A0a/b`, `A6`, `A1`, `C2 best-of-N`, `A0c/d/e`,
+> `B6`, `D1` and `E4` all closed.]
 
 **Phase 1 — finish "trust the numbers" (foundation):**
 `B1 host-side scoring` → `mlebench out-of-process grader` → `C2 output redaction` → `C3 auth token` →
@@ -438,7 +985,7 @@ command, bounded MCTS reward, node-count reflection gate + `run_id` de-dup,
 reused-stage fold record). What remains open or was dismissed:
 
 ### Deferred correctness (needs a design decision)
-- ⬜ **P2 · `_shutdown_pool_sockets` blast radius (M).** On a bounded non-stream
+- 🟡 **P2 · `_shutdown_pool_sockets` blast radius (M).** On a bounded non-stream
   timeout, `core/llm.py::_nonstream_bounded` `socket.shutdown()`s **every**
   connection in the SHARED httpx pool, so under `max_parallel>1` (or after a
   stream-stall degrade to non-stream) a healthy sibling request on another
@@ -454,6 +1001,19 @@ reused-stage fold record). What remains open or was dismissed:
   change. **Recommendation:** custom transport tracking `request→socket`, or shut
   only the wedged call's connection. → `core/llm.py:72,756`.
 
+  **[2026-08-14 — the described FAILURE is closed; the primitive is not. Both citations are dead.**
+  `_shutdown_pool_sockets` and `_stream_raw_socket` moved to `core/llm_streaming.py:37-73`
+  (re-exported through `llm.py:69`); `_nonstream_bounded` is `core/llm.py:891`; `_stream_stalls` /
+  `STREAM_STALL_DEGRADE_AFTER` are `llm.py:751` / `:84`. The walker at `llm_streaming.py:47-62` is
+  still literally pool-wide — but it is now GATED: `core/llm.py:785-792` maintains `_inflight` /
+  `_stream_inflight` counters, `:899-907::_pool_teardown_is_safe_locked()` requires `<= 1`, and the
+  teardown call at `:1001-1007` only fires when that holds under `_inflight_lock`. With a sibling in
+  flight the teardown is SKIPPED and the code accepts one lingering daemon thread instead (comment at
+  `:983-999`). So the collateral-kill → `_stream_stalls` → permanent non-stream degrade cascade this
+  entry describes can no longer occur. This is not the recommended per-request transport; it is a
+  different, real mitigation, and the recommendation stands only as a cleanup. Downgraded to residue
+  (§0.2).]
+
 ### Deferred cleanup (quality, not correctness — review flagged, left for a focused pass)
 - ⬜ **P2 · one owner for the resolved stage pipeline (S–M).** `_resolved_stages`
   (orchestrator.py) re-implements `_run_eval`'s profile→`build_command`→
@@ -461,6 +1021,18 @@ reused-stage fold record). What remains open or was dismissed:
   honors an explicit `profile` arg, `_resolved_stages` doesn't). Have
   `run_command_eval` return the resolved stage list on `RunResult` (it already
   returns `failed_stage`), so the repair loop inspects exactly what ran.
+
+  **[2026-08-14 — STILL OPEN, the divergence intact, and the PROPOSED FIX does not work. SURVIVOR
+  #9.** `_resolved_stages` MOVED out of `orchestrator.py` to `engine/eval_stages.py:261-278`;
+  `_run_eval` is `engine/eval_dispatch.py:572-649`. The exact flagged difference is still there:
+  `eval_dispatch.py:604` does `prof = profile or (node.idea.eval_profile …)` while `_resolved_stages`
+  **has no `profile` parameter at all** (`eval_stages.py:269-271`), so an explicit `profile` — a
+  confirm/full pass — is invisible to it. `RunResult.stages` DOES now exist
+  (`runtime/sandbox.py:290-294`) but is the post-run per-stage OUTCOME record, and all four callers
+  of `_resolved_stages` need the chain BEFORE or independently of a run: log-watch planning
+  (`engine/evaluate.py:1097,1655,2340`) and the salvage re-check
+  (`engine/metric_salvage.py:998`). So threading it through `RunResult` cannot retire the copy —
+  the one owner has to be a pure derivation both sides call.]
 - ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
   lives in 2 parallel copies — `EvalSpec._command_or_stages` (backend truth) and
   `serve/tui.py::spec_ready` (the third, `ui/src/GenesisChat.jsx`, was deleted as dead
@@ -468,6 +1040,15 @@ reused-stage fold record). What remains open or was dismissed:
   the drift repair (both frontends had to learn stages-only cmd + dataset mounts).
   Expose one server-side `validate_task` dry-run (e.g. `/api/validate`) both
   frontends call, instead of re-deriving the rules in Python + JS.
+
+  **[2026-08-14 — STILL OPEN, and now acknowledged IN CODE. One citation is stale.** Both copies
+  live: `adapters/repo_task.py:725-729::EvalSpec._command_or_stages` and — moved out of
+  `serve/tui.py` — `serve/tui_format.py:140-171::spec_ready`, whose own docstring (`:141-143`) says
+  it "mirrors the backend truth … see the BACKLOG 'unify the launch-readiness gate' item". No
+  `/api/validate` route exists anywhere in `serve/`. Careful: `adapters/tasks.py:336::validate_task`
+  DOES exist but is a different operation — it constructs a real TaskAdapter for a run, not a
+  launch-readiness dry-run. Residue (§0.2): one frontend has since been deleted, so the drift can
+  only bite the TUI.]
 - ⬜ **P3 · factor the shared socket-shutdown idiom (S).** `core/llm.py` has 3
   copies of the `try: sock.shutdown(SHUT_RDWR) except: pass` "only shutdown()
   interrupts a kernel recv" idiom (`_raw_socket`, `_stream_raw_socket`, the new
@@ -475,10 +1056,22 @@ reused-stage fold record). What remains open or was dismissed:
   httpx/httpcore upgrade must be chased through each. Factor one `_shutdown_sock`
   + keep the `get_extra_info('socket')` extraction in one place. *(Ties the P2
   above — a custom transport would subsume it.)*
+
+  **[2026-08-14 — PARTIAL: 3 copies → 2, and one named symbol is GONE.** `_raw_socket` was
+  **deleted** — `core/llm_streaming.py:9-11` records why (doc 25 CO-03: "no production code had
+  called [it] since the openai-SDK migration"). The two survivors are both in that one file now, the
+  pool walker at `:58-61` and the stream idle-guard at `:166-169`. No shared `_shutdown_sock` helper
+  exists. Consolidated into one module but not factored. Residue (§0.2).]
 - ⬜ **P3 · factor the RunResult timeout-nulling (S).** The "null metric/extras/
   trials on timeout" `RunResult(...)` construction is copy-pasted across
   `SubprocessSandbox.run`, `DockerSandbox.run`, and `command_eval.run_command_eval`
   (this range fixed a drift where Subprocess didn't null) — extract one factory.
+
+  **[2026-08-14 — STILL OPEN; three copies, now in three SPELLINGS.**
+  `runtime/sandbox.py:1314-1320` (`SubprocessSandbox.run`, whose comment names the other two),
+  `sandbox.py:1375-1381` (`DockerSandbox.run`), and `runtime/command_eval.py:2286-2304`, which uses
+  per-field `if not to` guards where the two sandboxes use `None if to else …` ternaries. They
+  cross-reference each other in comments, which is what keeps this cheap. Residue (§0.2).]
 
 ### Investigated and dismissed (on record so they aren't re-raised)
 - ✅ **REFUTED · "blanket `except` in `_resolved_stages` disables the retrain
@@ -547,20 +1140,42 @@ deliberately deferred, with rationale:
   in the manifest) is what makes those numbers exist, and it is a recommendation, not an enforcement.
   A cheaper model-free `assert` — a declared numeric relation the engine evaluates against a named
   key the stage prints — is the obvious next step and is not built.
-- ⬜ **D5 · per-attempt stage-event accounting (S).** After an in-loop checkpoint-reuse re-eval,
+- 🟡 **D5 · per-attempt stage-event accounting (S).** After an in-loop checkpoint-reuse re-eval,
   the node's only folded stage record is `train={reused, 0s}` — the attempt that actually spent
   the training wall-clock is never recorded for that node (the fold's guard only protects
   records that exist). Accounting/UI only, metrics and replay are unaffected; fix is an
   attempt-indexed stage record (or a per-attempt `stage_completed` event) plus a readmodel that
   sums attempts.
 
+  **[2026-08-14 — the reported DEFECT is closed; the accounting is not. The named event does not
+  exist:** there is no `stage_completed` — the registry name is
+  `events/types.py:224::EV_STAGE_FINISHED = "stage_finished"`. Its fold handler
+  `events/replay.py:1412-1431::_on_stage_finished` now guards exactly this case, in its own words at
+  `:1422-1427`: *"A 'reused' marker means a re-eval SKIPPED this stage — it must NOT clobber that
+  attempt's REAL completion record … Keep the informative record"*. So a later `reused/0s` no longer
+  overwrites an earlier real `{exit_code, seconds}` for the same stage name, and the training
+  wall-clock survives. What did NOT ship is the row's actual proposal: records are still keyed by
+  stage NAME (last-real-wins), not attempt-indexed, and no readmodel sums attempts. Residue (§0.2) —
+  accounting/UI only, as the row itself says.]
+
 ### Deferred cleanup
-- ⬜ **Tool-consolidation follow-through (S–M).** Dedup the paginated file-reader family —
+- ✅ **Tool-consolidation follow-through (S–M).** Dedup the paginated file-reader family —
   reposcout `read_file`, knowledge-tools `repo_read`, env_inspect `read_installed` — into one
   reader contract (same arg names, same resume-pointer shape) once loop-side pagination
   settles: the P3 fix pinned page sizes under the 4000-char loop cap per tool; unifying first
   would have churned three prompts mid-review. Blocked on: pick ONE page-size constant the
   `_base.py` provider contract exports, then collapse the three implementations.
+
+  **[2026-08-14 — DONE. The three tool NAMES survive (they are prompt contracts); the three
+  IMPLEMENTATIONS were collapsed onto the repo scout.**
+  `tools/knowledge_tools.py:171-173`: `repo_read` now delegates to `self._scout._read_file(...)`,
+  with the comment *"The scout owns the read: its size fence, its full-file-then-paginate contract…
+  its resume marker"*. `tools/env_inspect.py:264-271`: `_read_installed` imports
+  `RepoScoutTools._paginate` and `_MAX_READ` from `reposcout.py` verbatim — *"Paginate exactly like
+  the repo scout's read_file (SHARED window logic => one marker contract across all the source
+  readers)"*. The stated blocker resolved slightly differently than predicted: the one constant is
+  `tools/_base.py:26::RESULT_CAP` (re-exported from `core/context_budget`), from which
+  `reposcout.py:41::_MAX_READ = RESULT_CAP - 400` derives and which the other two import.]
 - ⬜ **Reward-hack vs hardened-suite residual (S).** The mlebench grader-import false positive
   was FIXED in the detector (`trust/reward_hack.py` waives only the IMPORT tells when the task
   ships `grader.py` as an asset — the asset set reaches it via `protected_names`; key access
@@ -569,3 +1184,14 @@ deliberately deferred, with rationale:
   sanctioned import on such tasks. Teach `ExploitSuite.scan` the same sanction (skip
   grader-import patterns when the task ships the grader), or tag seed exploits with the
   contexts they apply to.
+
+  **[2026-08-14 — STILL OPEN, and the double-flagging is visible in one call site. SURVIVOR #3.**
+  Every named symbol resolves unchanged: `trust/harden.py:33-49::_SEED_EXPLOITS` with the
+  `\bimport\s+grader\b` regex at `:34-36`, and `ExploitSuite.scan` at `:79-90` — whose signature is
+  still `scan(self, code)`, taking no context or sanction. The call site is
+  `engine/evaluate.py:797-819`: `detect_reward_hacks(...)` IS correctly passed
+  `grader_import_ok=True` when `grader.py` is a sanctioned asset (`:807-815`), and then `:819` runs
+  `sigs += self._exploit_suite.scan(scan_src)` **unconditionally, with nothing threaded through**.
+  So the sanctioned import is waived by the detector and independently re-flagged by the suite, on
+  exactly the mlebench tasks that are the proof point — and a `reward_hack_suspected` keeps the node
+  out of `feasible_nodes`. Cheapest fix of the top five survivors.]
