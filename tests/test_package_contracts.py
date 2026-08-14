@@ -91,6 +91,38 @@ def test_the_flat_alias_follows_the_move():
     assert looplab.numeric is importlib.import_module("looplab.core.numeric")
 
 
+def test_the_calibration_probe_moved_down_and_every_old_spelling_is_the_same_object():
+    """The probe the sandbox has to ask about extra-metric provenance (2026-08-14).
+
+    `runtime/sandbox.py::stdout_extra_metric_channels` needs `engine_declared_extra_metric_keys`,
+    and `runtime` may import nothing above `core` — but the answer to that was a MOVE and never a
+    copy: the probe source is an input to a calibration DIGEST, so a second copy of its key tuple is
+    how the two silently drift apart. Both halves are asserted here, because either one alone is the
+    bug: the module lives in `core`, AND every spelling of it names ONE object.
+    """
+    assert not (ROOT / "agents" / "calibration.py").exists()
+    canonical = importlib.import_module("looplab.core.calibration")
+    # The retired dotted path routes through `_RENAMED`, not through a re-exporting shim: the
+    # sandbox resolves the classifier through this module on every call, and a second module object
+    # would make the monkeypatch in `tests/test_auto_extra_metrics.py` a silent no-op.
+    assert importlib.import_module("looplab.agents.calibration") is canonical
+    assert importlib.import_module("looplab.calibration") is canonical
+
+    from looplab import _LAYOUT
+    from looplab.agents import roles
+    from looplab.search import speculation_quality
+
+    assert _LAYOUT["calibration"] == "core"
+    # `agents/roles.py` re-exported these before the move and must keep doing it — the same objects,
+    # not a re-derivation that can drift from the digested source.
+    for name in ("SPECULATION_CUDA_PROBE_CODE_PREFIX", "SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS",
+                 "SPECULATION_CUDA_PROBE_STATIC_EXTRA_METRICS"):
+        assert getattr(roles, name) is getattr(canonical, name)
+        assert getattr(speculation_quality, name) is getattr(canonical, name)
+    assert _module_imports(ROOT / "core" / "calibration.py") == set(), (
+        "the probe must keep importing nothing, or `core` inherits whatever it grows")
+
+
 def test_the_packaging_entry_point_follows_jupyter():
     """The launch spec is reached by NAME from installed metadata, not by import, so a move that
     leaves the entry point behind fails only at deploy time — in a JupyterHub, silently, as a

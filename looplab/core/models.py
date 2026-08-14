@@ -173,7 +173,7 @@ EXTRA_METRIC_AUTO = "auto"           # scraped off the candidate's own stdout; u
 #   1,636 values / 4 keys — `speculation_cuda_probe_v`, `device_count`, `alloc_bytes`,
 #       `device_ordinal`, across 7 runs. A schema VERSION, a hardware inventory count, and two
 #       constants of the request the probe made. None of them measures the experiment. Every one was
-#       printed by `agents/calibration.py`'s own source, which the ENGINE splices ahead of the Toy
+#       printed by `core/calibration.py`'s own source, which the ENGINE splices ahead of the Toy
 #       objective; `search/speculation_quality.py::_validate_cuda_probe_artifact` then authenticates
 #       them by engine-owned code prefix, exact key schema and static values.
 #   6 values / 6 keys — `train_auc`, `test_auc`, `cv_mean_auc`, `cv_std_auc`, `std`,
@@ -183,7 +183,7 @@ EXTRA_METRIC_AUTO = "auto"           # scraped off the candidate's own stdout; u
 # it" is exactly backwards for a number the engine wrote and the receipt gate checks. The separating
 # property is not the key's NAME (a list is the heuristic `json_line_extras` already carries, and
 # `alloc_bytes`/`device_count` are perfectly good measurements for a memory benchmark) and not its
-# SHAPE (see `agents/calibration.py::engine_declared_extra_metric_keys` for why constancy is both
+# SHAPE (see `core/calibration.py::engine_declared_extra_metric_keys` for why constancy is both
 # untestable on this corpus and undecidable at capture) — it is WHO AUTHORED THE PRINT STATEMENT,
 # which the engine can answer for exactly the artifacts it authored itself, byte-exactly.
 #

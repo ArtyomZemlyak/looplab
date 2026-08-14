@@ -841,6 +841,13 @@ def test_recovery_fences_live_worker_then_wins_late_cross_process_terminal(
     assert late["code"] == "concept_lens_abandoned"
     assert late["reason"] == "operator_recovered_abandon"
     assert late["seq"] == resolved.json()["seq"]
+    # ONE client for ONE claim: the recovery fence never buys a second provider call. `calls` counts
+    # a PROCESS-GLOBAL patch point (appstate resolves `make_llm_client` late so one patch reaches
+    # every router), so anything else in the session that constructs a client inside this window
+    # lands here too — a leaked watch scheduler did exactly that, and is stopped at teardown now by
+    # `tests/conftest.py::_stop_watch_schedulers_at_teardown`. If this ever reads `[True, True]`
+    # again, check the three run-scoped assertions below before suspecting the fence: they are what
+    # a genuine double-dispatch for this claim would break.
     assert calls == [True]
     events = EventStore(run_dir / "events.jsonl").read_all()
     terminals = [event for event in events

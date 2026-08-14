@@ -5985,6 +5985,19 @@ calibration receipt, exactly as an edit to the implementation digest does. Two t
 constants were compared byte-for-byte against the pre-move copy, and a guard now asserts the probe
 source's sha256. Adding one space to an `import` line inside the probe fails that guard.
 
+*Follow-up (2026-08-14) — the module moved once more, `agents/calibration.py` ->
+`core/calibration.py`.* Not a second opinion about where the probe belongs but a consequence of a
+new consumer: `runtime/sandbox.py::stdout_extra_metric_channels` asks the probe which extra-metric
+keys the ENGINE declared, and `runtime` may import nothing above `core`
+(`tests/test_package_contracts.py::test_runtime_imports_nothing_above_core`, which reads
+function-local imports too, so a deferred import did not make the edge legal). The copy the layering
+rule would otherwise force is exactly what must not exist here — the probe source is an input to a
+calibration digest — so the module went DOWN, verbatim again, the way `core/jsonlio.py` came out of
+`events/`. `roles.py` keeps its re-exports, `_LAYOUT["calibration"]` moves to `core`, and the retired
+dotted path `looplab.agents.calibration` is routed through `_RENAMED` to the one module object
+(rather than a shim file, which would break the monkeypatch seam a test uses to prove the sandbox
+resolves the classifier through this module on every call).
+
 NOT done: the `ToyResearcher`/`ToyObjectiveDeveloper` calibration hooks the recommendation calls
 "if feasible". They are entangled with the toy backends' own behaviour rather than being constants,
 so they want their own pass — and the finding's other four responsibilities in `roles.py` (prompt

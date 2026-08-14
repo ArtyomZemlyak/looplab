@@ -83,7 +83,7 @@ def test_the_probe_source_is_unchanged_by_the_move():
     the exact bytes rather than trusting that a move preserved them."""
     import hashlib
 
-    from looplab.agents.calibration import SPECULATION_CUDA_PROBE_CODE_PREFIX
+    from looplab.core.calibration import SPECULATION_CUDA_PROBE_CODE_PREFIX
 
     digest = hashlib.sha256(SPECULATION_CUDA_PROBE_CODE_PREFIX.encode("utf-8")).hexdigest()
     assert digest == "3c05c3c696e1788cee0ee7fb8f68b0433331d9bf0bfc31b940734ac5c3a5d174", (
@@ -93,10 +93,13 @@ def test_the_probe_source_is_unchanged_by_the_move():
 
 
 def test_calibration_does_not_import_back_into_roles():
+    """Read BY PATH, so it follows the module: the probe moved down to `core/calibration.py` on
+    2026-08-14 (`runtime` may not import `agents`, and the probe's keys may not be copied). Below
+    `core` the import it guards against would be a layering violation as well as a cycle."""
     import ast
     from pathlib import Path as _P
 
-    src = _P(__file__).resolve().parents[1] / "looplab" / "agents" / "calibration.py"
+    src = _P(__file__).resolve().parents[1] / "looplab" / "core" / "calibration.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     back = [f"line {n.lineno}" for n in ast.walk(tree)
             if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("looplab.agents.roles")]

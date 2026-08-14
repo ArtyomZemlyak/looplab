@@ -351,7 +351,7 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   since each genuine value occurs exactly once, and is undecidable at capture anyway because
   variance is a cross-node property, so a tag derived from it would change as later nodes arrived).
   It is **WHO AUTHORED THE PRINT STATEMENT**, and the engine can answer that only for the source it
-  splices itself: `agents/calibration.py::engine_declared_extra_metric_keys` returns the probe's key
+  splices itself: `core/calibration.py::engine_declared_extra_metric_keys` returns the probe's key
   tuple ONLY behind a byte-exact `SPECULATION_CUDA_PROBE_CODE_PREFIX` match — the same
   authentication `_validate_cuda_probe_artifact` uses downstream — so an agent script printing
   `speculation_cuda_probe_v` stays `auto`. An in-source marker (`# LOOPLAB_EXTRA_METRICS: …`) was

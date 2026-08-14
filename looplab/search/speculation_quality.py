@@ -150,7 +150,10 @@ from looplab.search.scorer_fidelity import (
     SCORER_FIDELITY_SCHEMA,
     scorer_fidelity_gate,
 )
-from looplab.agents.roles import (
+# The probe's canonical home since 2026-08-14 is `core/calibration.py` (it moved down out of
+# `agents/` so `runtime/sandbox.py` could name it). `agents/roles.py` still re-exports every name,
+# so this import is the SAME objects it always was — spelled at the home that owns them.
+from looplab.core.calibration import (
     SPECULATION_CUDA_PROBE_CODE_PREFIX,
     SPECULATION_CUDA_PROBE_DEVICE_COUNT_METRIC,
     SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,

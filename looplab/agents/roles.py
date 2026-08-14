@@ -22,8 +22,10 @@ from looplab.core.prompts import PromptStore, render
 from looplab.core.validate import AgentReport, validate_agent_code
 
 # The CUDA calibration probe moved to its own module (doc 25 AG-02) — it measures a GPU, and
-# this file is about role backends. Re-exported so both spellings name the SAME objects.
-from looplab.agents.calibration import (  # noqa: F401
+# this file is about role backends. That module then moved DOWN into `core/` (2026-08-14), so the
+# sandbox can name it without `runtime` importing `agents`. Re-exported here exactly as before, so
+# both spellings name the SAME objects.
+from looplab.core.calibration import (  # noqa: F401
     SPECULATION_CUDA_PROBE_ALLOC_BYTES,
     SPECULATION_CUDA_PROBE_CODE_PREFIX,
     SPECULATION_CUDA_PROBE_DEVICE_COUNT_METRIC,

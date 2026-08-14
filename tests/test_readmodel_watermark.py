@@ -139,13 +139,46 @@ def test_a_model_written_before_the_watermark_existed_still_loads_and_is_never_c
     assert not readmodel_is_current(db, events)  # never `current` by default
 
 
+def _untagged_corpus_readmodels() -> list[Path]:
+    """The preserved models an OLDER LoopLab wrote: no watermark row at all.
+
+    Partitioning the corpus by what is ON DISK, rather than assuming all of it predates the
+    watermark, is the whole fix here. `runs/` is a working directory on a box that runs experiments,
+    not a fixture: `looplab finalize` on a preserved run REWRITES its read model with today's
+    writer, and that artefact is then legitimately tagged and legitimately `current` for its log.
+    That happened to `rubertlite-dr-unified-v7` on 2026-08-14, and the blanket
+    `read_watermark(db) is None` over every corpus model failed — correctly. The property worth
+    guarding is about an UNTAGGED model, so the selection has to be too.
+    """
+    return [db for db in _corpus_readmodels() if read_watermark(db) is None]
+
+
 @pytest.mark.skipif(not _corpus_readmodels(), reason="no preserved runs/*/readmodel.sqlite on this box")
-def test_preserved_corpus_readmodels_load_and_report_unknown():
-    """Against artefacts an OLDER LoopLab really wrote, in `runs/`. Read-only."""
+def test_preserved_corpus_readmodels_load_and_never_certify_a_foreign_log():
+    """Every preserved model, tagged or not: it still LOADS, and it never claims to cover a log it
+    was not built from. Holds whatever the corpus contains, which is the point — read-only."""
     checked = 0
     for db in _corpus_readmodels():
         with sqlite3.connect("file:" + str(db) + "?mode=ro", uri=True) as con:
             con.execute("SELECT id, metric, status, is_best FROM nodes").fetchall()
+        assert readmodel_status(db, []) in (STATUS_UNKNOWN, STATUS_STALE)
+        assert not readmodel_is_current(db, [])     # never `current` for a prefix it never folded
+        checked += 1
+    assert checked
+
+
+@pytest.mark.skipif(not _untagged_corpus_readmodels(),
+                    reason="no untagged pre-watermark runs/*/readmodel.sqlite on this box")
+def test_preserved_untagged_corpus_readmodels_report_unknown():
+    """The back-compat claim, against files an OLDER LoopLab really wrote, which no synthetic
+    fixture can stand in for: an untagged model is UNKNOWABLE, never `declared` and never `current`.
+
+    The synthetic half of this property (`build_readmodel` then `DROP TABLE`) is asserted above and
+    keeps holding when the box has no pre-watermark artefact left; this is the one that says the
+    real ones behave the same, so it skips rather than fails when the corpus no longer has any.
+    """
+    checked = 0
+    for db in _untagged_corpus_readmodels():
         assert read_watermark(db) is None      # no watermark -> unknowable, not assumed current
         assert readmodel_status(db, []) == STATUS_UNKNOWN
         assert not readmodel_is_current(db, [])

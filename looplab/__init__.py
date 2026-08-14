@@ -69,7 +69,11 @@ _LAYOUT = {
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "cross_run_context": "engine",  # shared skeleton of the live cross-run builders (doc 25 EC-01)
     "crash_repair": "engine",
-    "calibration": "agents",   # the CUDA probe the speculation calibration runs (doc 25 AG-02)
+    # The CUDA probe the speculation calibration runs (doc 25 AG-02). It MOVED from `agents/` down
+    # into `core/` on 2026-08-14 so `runtime/sandbox.py` can name it without importing `agents` —
+    # a MOVE, so the stem is unchanged here and only its package moves; the retired DOTTED path
+    # `looplab.agents.calibration` is routed in `_RENAMED` below.
+    "calibration": "core",
     "loop_options": "agents",  # the typed drive_tool_loop options bundle (doc 25 AG-01)
     "memory_window": "core",   # one bounded JSONL snapshot/receipt for human and agent memory readers
     "cadence": "engine",     # the shared since-last node-count gate (doc 25 EC-07)
@@ -368,6 +372,14 @@ _RENAMED = {
     # dotted path and the flat pre-split alias are retained.
     "looplab.trust.verify": "looplab.trust.memo_verify",
     "looplab.verify": "looplab.trust.memo_verify",
+    # The speculation CUDA probe moved `agents/calibration.py` -> `core/calibration.py` (see the
+    # `_LAYOUT` entry). A MOVE keeps the stem, so the flat `looplab.calibration` alias is generated
+    # from `_LAYOUT` as before and only the DOTTED old path needs routing. It is routed here rather
+    # than left behind as a re-exporting shim module for the reason this map exists: a shim is a
+    # SECOND module object, and `tests/test_auto_extra_metrics.py` patches
+    # `looplab.agents.calibration.engine_declared_extra_metric_keys` to prove the sandbox resolves
+    # the classifier through the probe's own module on every call.
+    "looplab.agents.calibration": "looplab.core.calibration",
 }
 
 

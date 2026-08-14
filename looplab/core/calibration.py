@@ -10,6 +10,28 @@ prompt.
 Moved VERBATIM — the probe source is an input to a calibration DIGEST, so a whitespace change here
 would revoke issued receipts exactly like the implementation digest does. `agents/roles.py`
 re-exports every name, so both spellings resolve to the SAME objects.
+
+MOVED AGAIN, 2026-08-14, out of `agents/` and DOWN into `core/`, for the layering rule
+`tests/test_package_contracts.py::test_runtime_imports_nothing_above_core` states: `runtime/
+sandbox.py::stdout_extra_metric_channels` has to ask this module which keys the engine declared, and
+`runtime` may import nothing above `core`. The alternative — a second copy of the key tuple in
+`core`/`runtime` — is the one thing that must NOT happen: the probe source is an input to a
+calibration digest, and a second copy of its keys is how the two silently drift apart. So this is a
+MOVE, exactly like `core/jsonlio.py` out of `events/` and `core/envsafe.py`'s `SECRET_ENV` out of
+`runtime/sandbox.py`: one object, every old spelling still naming it. `agents/roles.py` re-exports
+every name as before, and `looplab/__init__.py::_RENAMED` routes the retired
+`looplab.agents.calibration` path to this module rather than leaving a shim file behind — a shim
+would be a SECOND module object, and `tests/test_auto_extra_metrics.py` monkeypatches
+`engine_declared_extra_metric_keys` through that exact path to prove the sandbox resolves the
+classifier through the probe's own module on every call. A second object would make that patch a
+silent no-op instead of an error.
+
+Nothing here is reached by PATH rather than by import, so the move costs no pinned identity:
+`search/speculation_quality.py::speculation_implementation_digest` hashes every shipped `.py` with
+its relative path in each manifest row, so it moves — but it already moves for any semantic edit and
+today's merges moved it regardless, and no test pins its value. The Settings-derived
+`SPECULATION_CALIBRATION_PROFILE_DIGEST` (`tests/test_calibration_profile_home.py`) does NOT move:
+its preimage is the declared `Settings` field set, which a file move cannot touch.
 """
 from __future__ import annotations
 

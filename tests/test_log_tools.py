@@ -340,13 +340,47 @@ def test_a_window_escalates_the_read_until_it_is_covered(tmp_path):
 
 
 # ------------------------------------------------------------------- driven against the real corpus
+def _named_numbers(text: str) -> dict:
+    """The `key=value` tokens of one answer line, for the keys whose value is a plain number."""
+    numbers = {}
+    for token in text.split():
+        key, sep, value = token.partition("=")
+        if not sep:
+            continue
+        try:
+            numbers[key] = float(value)
+        except ValueError:      # `step=2370/17650`, and anything else that is not a reading
+            continue
+    return numbers
+
+
+def _bucket_rows(answer: str) -> list[dict]:
+    return [_named_numbers(line) for line in answer.splitlines()
+            if line.startswith("+") and "med=" in line]
+
+
+def _window(answer: str) -> dict:
+    return _named_numbers(
+        next(line for line in answer.splitlines() if line.startswith("window:")))
+
+
 @pytest.mark.skipif(not _V7_NODE1.exists(), reason="the runs/ corpus is not in this checkout")
 def test_the_operators_two_questions_on_a_real_five_hour_run():
     """The two questions the operator named, asked of the log that produced the wrong verdict.
 
-    The hourly answer is the point: the medians descend and the within-bucket spread collapses, which
-    is exactly what the ~30-second slice could not show and what "pinned at ~23.0, no learning trend"
-    was a correct reading of.
+    The hourly answer is the point: aggregating whole hours resolves movement that a ~10-second
+    slice of the same file cannot show, which is exactly what "pinned at ~23.0, no learning trend"
+    was a correct reading of the slice and a wrong verdict about the run.
+
+    ASSERTED AS PROPERTIES, NOT AS THIS FILE'S NUMBERS, because `runs/` is a live corpus and not a
+    fixture: this box runs experiments, and on 2026-08-14 this very node was repaired and RESTARTED,
+    which appended a second training run beginning at step 10 with loss back around 45. The old
+    `medians[0] > medians[-1]` ("the curve descends from the first hour to the last") was a fact
+    about the file's contents on the day it was written, and it stopped being true while every
+    property the tool exists for stayed true. Re-pinning the numbers would only re-arm the same trap
+    for the next restart, so what is asserted below is what cannot be invalidated by one: the slice
+    cannot see the hours, and the aggregate resolves movement orders of magnitude beyond the spread
+    inside its quietest bucket — which is precisely what ten consecutive readings can ever show.
     """
     tools = LogQueryTools([LogSource(name="train.log", path=_V7_NODE1, role="training")],
                           default="train.log")
@@ -355,11 +389,27 @@ def test_the_operators_two_questions_on_a_real_five_hour_run():
 
     hourly = tools.execute("metric_series",
                            {"metric": "loss", "last_s": 86_400, "bucket_s": 3600, "whole_run": True})
-    medians = [float(row.split("med=")[1].split()[0])
-               for row in hourly.splitlines() if row.startswith("+") and "med=" in row]
-    assert len(medians) >= 3
-    assert medians[0] > medians[-1]                      # the curve the judge called pinned
     assert "buckets of 1:00:00" in hourly
+    rows = _bucket_rows(hourly)
+    if len(rows) < 3:
+        # The precondition, not a result: this is the "real five-hour run" test, and the corpus is
+        # mutable. A log that no longer spans three hours (a fresh restart, a rotated file) cannot
+        # answer the question, and saying so is honest where asserting over it would be noise.
+        pytest.skip("the preserved node no longer holds a multi-hour training log")
+
+    medians = [row["med"] for row in rows]
+    # THE TREND, stated so a restart cannot forge or hide it: the run gets better than its own first
+    # hour. (Not "the last hour is the best" — a repaired node's restart appends a fresh high-loss
+    # run at the end, which is exactly what happened here.)
+    assert min(medians) < medians[0]
+    # THE REASON THE BUCKETS EXIST. Movement ACROSS hours is more than an order of magnitude larger
+    # than the spread WITHIN the quietest hour — i.e. beyond anything a handful of consecutive
+    # readings, which all land inside one bucket, could ever reveal.
+    assert max(medians) - min(medians) > 10 * min(row["iqr"] for row in rows)
+    # ...and the slice the judge actually read shows less movement than the aggregate does, over a
+    # window that covers seconds of a run measured in hours.
+    slice_window = _window(last_10s)
+    assert slice_window["max"] - slice_window["min"] < max(medians) - min(medians)
 
 
 @pytest.mark.skipif(not _V7_NODE1.exists(), reason="the runs/ corpus is not in this checkout")
