@@ -438,12 +438,19 @@ def stdout_extra_metric_channels(extras, code=None) -> Optional[dict]:
 
     `code` is OPTIONAL and defaults to the safe answer, so a third-party `Sandbox` implementation
     that never passes it reports `auto` for everything — under-claiming, never over-claiming."""
-    from looplab.agents.calibration import engine_declared_extra_metric_keys
+    from looplab.core.calibration import engine_declared_extra_metric_keys
     from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE
-    # Deferred, and cheap: `agents/calibration.py` is constants plus this one predicate and imports
-    # nothing at all, so `runtime` naming it costs no cycle and no import weight. It is deliberately
-    # not copied down into `core`/`runtime` — the probe source is an input to a calibration DIGEST,
-    # and a second copy of its key tuple is how the two silently drift apart.
+    # The probe is deliberately NOT copied down here — the probe source is an input to a calibration
+    # DIGEST, and a second copy of its key tuple is how the two silently drift apart. It was reached
+    # in `agents/` through this deferred import until 2026-08-14, which was a layering violation
+    # whatever the import weight (`runtime` imports nothing above `core`, and the scan in
+    # `tests/test_package_contracts.py` reads function-local imports too). The module imports nothing
+    # at all, so it MOVED down into `core` instead: one object, no copy, no upward edge.
+    #
+    # Still resolved per call rather than at module scope, and that is load-bearing: a test patches
+    # `engine_declared_extra_metric_keys` on the calibration module to prove the classifier is
+    # resolved through the probe's own module every time, with no copy in `runtime` that could
+    # answer differently.
     engine_keys = engine_declared_extra_metric_keys(code)
     return {str(k): (EXTRA_METRIC_ENGINE if k in engine_keys else EXTRA_METRIC_AUTO)
             for k in (extras or {})} or None

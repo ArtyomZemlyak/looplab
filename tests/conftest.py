@@ -130,3 +130,52 @@ def _isolate_host_gpu_pool_lease(_isolation_patch, tmp_path):
     for module in (resources, orchestrator):
         _isolation_patch.setattr(module, "default_gpu_host_lease_path", lambda _p=lease: _p,
                                  raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _stop_watch_schedulers_at_teardown(_isolation_patch):
+    """A watch scheduler must not outlive the test that armed it.
+
+    `serve/assistant_watch.py::WatchService` starts a daemon thread the moment an app is built over
+    a store holding an armed watch, and NOTHING ever stops it: the thread keeps ticking every
+    `interval_s` (2s) for the rest of the session, and each tick can run a whole wake-up turn —
+    including `srv.make_llm_client`, which resolves `looplab.serve.server.make_llm_client` AT CALL
+    TIME, on purpose, so one patch reaches every router (see `serve/appstate.py`). That late binding
+    is what makes a leaked scheduler another test's problem: instrumenting `AppState.make_llm_client`
+    across a third of the suite caught FOUR client constructions from `looplab-assistant-watch`
+    threads landing inside three unrelated later tests, and two such threads were still alive at
+    session end.
+
+    A stray lands in whatever the test being run at that moment is counting. That is how
+    `test_concept_lens_durability.py::test_recovery_fences_live_worker_then_wins_late_cross_process_terminal`
+    read `[True, True] == [True]` in a full-suite run while passing alone, after its own file, and
+    after every one of its alphabetical predecessors: it patches that global factory and then spends
+    seconds restarting an app and resolving an orphan, which is a wide window for someone else's
+    scheduler to construct a client in. NOT a recovery-fence defect — the fence is fine, and the
+    at-most-once evidence beside that assertion (one claim, one terminal, one `llm_usage` in the
+    run's own log) is untouched. Same class as the `monkeypatch.undo()` defect fixed in `edb416ba`:
+    the harness losing its own insulation, not the feature under test misbehaving.
+
+    Stopped at TEARDOWN, so a test that drives the scheduler still gets a live thread; `stop()` sets
+    the event its loop waits on, so the loop exits before its next tick rather than running one more.
+    """
+    try:
+        from looplab.serve import assistant_watch
+    except Exception:      # the `[ui]` extra is optional; no server, no scheduler
+        yield
+        return
+
+    started: list = []
+    original = assistant_watch.WatchService.ensure_started
+
+    def _tracked(self):
+        started.append(self)
+        return original(self)
+
+    _isolation_patch.setattr(assistant_watch.WatchService, "ensure_started", _tracked)
+    yield
+    for service in started:
+        try:
+            service.stop()
+        except Exception:  # noqa: BLE001 - teardown must never mask the test's own outcome
+            pass

@@ -1407,7 +1407,7 @@ class Settings(BaseSettings):
     # `search/speculation_quality.py::_validate_cuda_probe_artifact` admits a calibration node by
     # the EXACT key schema on `extra_metrics`, and the gate — which could then only keep `declared`
     # — dropped all four keys, so the flag and the calibration receipt could not both be had. The
-    # probe's keys now arrive tagged `engine` (`agents/calibration.py::
+    # probe's keys now arrive tagged `engine` (`core/calibration.py::
     # engine_declared_extra_metric_keys` authenticates the artifact's source byte-exactly, the same
     # prefix the validator checks), and the gate keeps them because they were never the candidate's
     # numbers. It is still not a knob to reach for casually — it deletes the auto channel, and the
