@@ -110,7 +110,7 @@ declaration that is now being checked DIFFERENT from the one that failed"** — 
 failing stage's `expect.files` to have actually changed. That is a few lines, it is checkable, and
 it makes "the sentence was corrected" true by construction instead of by inference from a filename.
 
-> **NOTE (mega-review 2026-08-13, doc 35): this fix LANDED before this document did.** Commit `7e9a9a2`
+> **NOTE (mega-review 2026-08-13, doc 40): this fix LANDED before this document did.** Commit `7e9a9a2`
 > ("the F1e re-check must prove the repair reached the declaration that failed", an ancestor of the
 > commit that landed this doc) shipped exactly the recommendation above:
 > `evaluate.py::_recheck_repaired_contract` now calls

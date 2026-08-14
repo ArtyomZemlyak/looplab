@@ -220,7 +220,7 @@ process, a real `docker run` argv, and a real event log re-entered by a second E
 bound in `evaluate.py::_recheck_repaired_contract`) and `7e9a9a2` hardened it with
 `declaration_actually_corrected` the same morning; the reachability analysis and the two open
 operator questions are [doc 32](32-f1e-operator-declaration-options-2026-08-13.md).
-<!-- FIXED 2026-08-13 (mega-review, doc 35): this entry ended at "what to decide before building it"
+<!-- FIXED 2026-08-13 (mega-review, doc 40): this entry ended at "what to decide before building it"
      while its sibling F1b carried a BUILT note from the same window — an operator triaging the
      backlog would re-schedule finished work. -->
 
