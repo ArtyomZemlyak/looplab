@@ -267,6 +267,38 @@ def authenticated_extra_metrics_only(extras, channels) -> tuple[dict, dict]:
     return kept, {k: extra_metric_channel(channels, k) for k in kept}
 
 
+def apply_engine_extra_metric_channels(channels, code, *, engine_authored: bool):
+    """Upgrade the keys this artifact's ENGINE-authored source printed from `auto` to `engine`.
+
+    THE ONE APPLIER, so the third channel has exactly one spelling. Capture tags everything `auto`
+    (`runtime/sandbox.py::stdout_extra_metric_channels` explains why `runtime` cannot answer the
+    authorship question at all — it is handed an opaque string and runs it), and the engine, the only
+    party that knows which artifacts it wrote itself, raises the probe's own keys afterwards.
+    `engine/eval_dispatch.py` is its single call site, over `engine/speculation_gate.py::
+    engine_authored_artifacts`; `engine_authored` is NOT derivable from `code`, which is the whole
+    correction — see `core/calibration.py::engine_declared_extra_metric_keys` for what the byte
+    prefix admitted when it was the entire grant.
+
+    It only ever UPGRADES a key it is already given, and only from `auto`: a `declared` value is
+    operator-owned and outranks this, and a key absent from the map is one the capture never saw, so
+    this can neither invent a value nor overwrite a stronger claim. Total and fail-safe — an unusable
+    map, a non-engine artifact or `engine_authored=False` all return the input unchanged.
+
+    HERE AND NOT IN `core/calibration.py` for one concrete reason: that module imports NOTHING, which
+    `tests/test_package_contracts.py` asserts so `core` cannot inherit whatever the probe grows. This
+    function needs the channel vocabulary, which lives in this file beside its sibling gate. The
+    classifier is reached through the calibration MODULE at call time, so the documented monkeypatch
+    seam still observes every call."""
+    from looplab.core.calibration import engine_declared_extra_metric_keys
+    if not isinstance(channels, dict) or not channels:
+        return channels if isinstance(channels, dict) else None
+    keys = engine_declared_extra_metric_keys(code, engine_authored=engine_authored)
+    if not keys:
+        return channels
+    return {k: (EXTRA_METRIC_ENGINE if (k in keys and v == EXTRA_METRIC_AUTO) else v)
+            for k, v in channels.items()}
+
+
 MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 
 

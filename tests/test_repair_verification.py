@@ -304,7 +304,13 @@ def test_a_rationale_is_verified_against_its_whole_text_and_not_its_first_300_ch
     durable sink one layer down — so `verify_repair` was handed a prefix and could not know it. A
     crash rationale is diagnosis-first and fix-second, so the cut landed on that seam: 83 of the 123
     model-authored rationales in `runs/` are stored at exactly the cap, and replaying the 54 whose
-    full text survives in `spans.jsonl` moves 5 verdicts. This is the live one."""
+    full text survives in `spans.jsonl` moves 5 verdicts. This is the live one.
+
+    KNOW WHAT THIS ONE DOES NOT COVER: `_Judge` is wired straight in as `researcher=`, so the loop
+    below never enters `UnifiedAgent.triage_crash` — the shipped implementation of that seam, which
+    caps the same string on its way OUT. This test passed over a path production does not take for a
+    whole day. `test_the_shipped_triage_seam_hands_the_verifier_the_whole_rationale` below is the
+    production-path twin, and it is the one that would have gone red."""
     dev, judge = _ClaimingDev(), _Judge(rationale=_V7_RATIONALE)
     evs, _ = _drive(tmp_path / "whole", dev, judge, inline_repair_attempts=1)
 
@@ -315,6 +321,85 @@ def test_a_rationale_is_verified_against_its_whole_text_and_not_its_first_300_ch
     # The intake bound is an INTAKE bound: the durable column is still bounded by its own sink, so
     # widening what the engine reads did not widen what it writes into the event log.
     assert len(row["rationale"]) <= 300
+
+
+def _unified_triage_seam(monkeypatch, rationale):
+    """The SHIPPED triage seam, wired end to end with no model — returns `(agent, finalized)`.
+
+    `triage_crash` is duck-typed, and every test above answers it with a double wired directly as
+    `researcher=`. That is not the shipped path: `Settings.unified_agent` is true by default and
+    `agents/factory.py` returns a `UnifiedAgent` as BOTH roles, so in production the verdict is built
+    by `UnifiedAgent.triage_crash`'s emit finalizer and only THEN handed to `_ask_triage`. A cap in
+    that finalizer is upstream of every engine-side bound, and a test that cannot traverse it cannot
+    observe one — which is exactly how a fix that changed nothing shipped with a green suite.
+
+    What is faked here is one thing only: the tool loop, patched on the seam CLAUDE.md documents
+    (`looplab.agents.agent.drive_tool_loop`, which `_pilot_emit` resolves at CALL time). Everything
+    from the model's emit dict onward — `_finalize`, the verdict coercion, `_ask_triage`, the repair
+    commit and `verify_repair` — is production code.
+    """
+    from looplab.agents import agent as agent_mod
+    from looplab.agents.unified_agent import UnifiedAgent
+
+    finalized: list[dict] = []
+
+    def _loop(client, tools, messages, emit_spec, *, finalize, fallback, **_kw):
+        # The shape a live provider produces: one well-formed emit carrying the WHOLE rationale.
+        out = finalize({"action": "repair", "rationale": rationale})
+        finalized.append(out)
+        return out
+
+    monkeypatch.setattr(agent_mod, "drive_tool_loop", _loop)
+    # `pilot_client` merely has to be non-None: `triage_crash` returns None without one and the
+    # engine would fall back to its deterministic rule, i.e. the seam would not run at all.
+    agent = UnifiedAgent(researcher=_Judge(), developer=_ClaimingDev(), pilot_client=object())
+    return agent, finalized
+
+
+def test_the_shipped_triage_seam_hands_the_verifier_the_whole_rationale(tmp_path, monkeypatch):
+    """Tier 1 through the path production actually takes, and the negative control beside it.
+
+    The 2026-08-13 fix raised the intake bound in `crash_repair._ask_triage` — a bound on what the
+    seam RETURNED — while `UnifiedAgent.triage_crash`'s own finalizer went on cutting the same string
+    to 300 before returning it. So the truncation survived the fix untouched, and the end-to-end test
+    that "proved" otherwise never entered the finalizer. Both layers now read
+    `engine/triage.py::TRIAGE_RATIONALE_CAP`."""
+    agent, finalized = _unified_triage_seam(monkeypatch, _V7_RATIONALE)
+    evs, _ = _drive(tmp_path / "seam", _ClaimingDev(), agent, inline_repair_attempts=1)
+
+    assert finalized, "the shipped finalizer never ran — this test is not on the production path"
+    assert finalized[0]["rationale"] == _V7_RATIONALE, "the finalizer truncated before the engine saw it"
+
+    row = _repairs(evs)[0].data
+    assert row["verified"] == REPAIR_VERIFIED, (row["verified"], row.get("unmet"))
+    assert row["unmet"] == []
+    # The durable column is still bounded by its own sink: no durable bytes moved.
+    assert len(row["rationale"]) <= 300
+
+
+def test_the_old_finalizer_cap_reproduces_the_defect_on_the_same_production_path(tmp_path,
+                                                                                monkeypatch):
+    """THE NEGATIVE CONTROL, and it is what proves the test above traverses the finalizer at all.
+
+    Move the cap back to 300 on `engine/triage.py` — the module the FINALIZER re-reads on every call,
+    while `crash_repair` keeps the by-value 2000 it bound at import. That is exactly the pre-fix
+    configuration: a wide intake bound applied to a string that was already cut. The same developer
+    makes the same change the rationale's second half promises, and the durable verdict flips to
+    `unmet` naming `nll_cos` — the 0.728 BASELINE the rationale cited, the only concrete token that
+    survives the cut. If the production path did not run through the finalizer, this would still say
+    `verified`."""
+    from looplab.engine import triage as triage_mod
+
+    monkeypatch.setattr(triage_mod, "TRIAGE_RATIONALE_CAP", 300)
+    assert crash_repair._TRIAGE_RATIONALE_CAP == 2000, "only the finalizer's cap may move here"
+
+    agent, finalized = _unified_triage_seam(monkeypatch, _V7_RATIONALE)
+    evs, _ = _drive(tmp_path / "control", _ClaimingDev(), agent, inline_repair_attempts=1)
+
+    assert len(finalized[0]["rationale"]) == 300
+    row = _repairs(evs)[0].data
+    assert row["verified"] == REPAIR_UNMET, (row["verified"], row.get("unmet"))
+    assert row["unmet"] == ["nll_cos"], row["unmet"]
 
 
 def test_the_intake_bound_is_wider_than_every_sink_that_re_bounds_the_same_field():

@@ -288,6 +288,11 @@ class UnifiedAgent(WrapsDeveloper):
                 idx = default_idx
             if not (0 <= idx < n):           # out-of-range -> safe fallback, never escapes `legal`
                 idx = default_idx
+            # The third emit cap in this file, and like the critic's it stays at 300 deliberately:
+            # the pilot's rationale is prose whose only sink is the audit-only `agent_decision` row
+            # (`engine/node_build.py`), nothing extracts a claim from it, and the DECISION travels in
+            # `index` rather than in the text. See the triage finalizer for the shape that forced a
+            # widening — a downstream rung reading the string, not the string being long.
             return {"index": idx, "rationale": str((args or {}).get("rationale", ""))[:300]}
 
         def _fallback(_messages) -> dict:
@@ -383,7 +388,7 @@ class UnifiedAgent(WrapsDeveloper):
         # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
         # `agents` -> `search` rule and adds no import-time edge upward.
         from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
-                                           TRIAGE_TRANSPORT_FAILURE_KEY,
+                                           TRIAGE_RATIONALE_CAP, TRIAGE_TRANSPORT_FAILURE_KEY,
                                            UNANSWERABLE_TRIAGE_ACTION)
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         budget = ("" if attempts_left is None else
@@ -444,7 +449,22 @@ class UnifiedAgent(WrapsDeveloper):
             # allowlist + traceback corroboration + an absence check before any install
             # (runtime/deps.py::triage_install_candidates), so a hallucinated value here can at worst
             # be ignored.
-            return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300],
+            #
+            # THE RATIONALE WEARS THE ENGINE'S INTAKE BOUND, not a 300 of its own, and that is the
+            # 2026-08-14 correction to the 2026-08-13 fix. This finalizer is the FIRST cap the text
+            # meets: it runs one layer below `engine/crash_repair.py::_ask_triage`, which caps what
+            # this seam RETURNS. `UnifiedAgent` is the only implementation of the seam in the tree and
+            # is the shipped default, so raising the intake alone changed nothing at all — a bound
+            # over a string that is already 300 chars long is not a bound. The reader that needs the
+            # rest is `engine/repair_verify.py::verify_repair`, which asks whether a repair did what
+            # its rationale said and is fed by exactly this string; a crash rationale is written
+            # diagnosis-first and "Fix:"-last, so 300 kept the citations and dropped the claims.
+            # ONE constant, read from the registry module this method already imports, because two
+            # caps that must not disagree may not be two literals. Every durable SINK still clips
+            # independently at its own 300 (`node_repaired.rationale`, `node_failed.triage_rationale`)
+            # — no durable bytes move, only what the engine reads before it writes them.
+            return {"action": action,
+                    "rationale": str((args or {}).get("rationale", ""))[:TRIAGE_RATIONALE_CAP],
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 
         def _no_emit(_messages) -> dict:
@@ -590,6 +610,15 @@ class UnifiedAgent(WrapsDeveloper):
             action = str((args or {}).get("action", "")).strip().lower()
             if action not in AGENT_CRITIC_ACTIONS:
                 action = DEFAULT_CRITIC_ACTION
+            # THE SIBLING CAP, AND IT STAYS AT 300 — decided, not inherited by symmetry with the
+            # triage finalizer above. What made that one wrong was a downstream READER of the text:
+            # `repair_verify` extracts CLAIMS from a triage rationale and a cut on the "Fix:" seam
+            # silently changed a verdict on a durable column. Nothing extracts anything from a
+            # critic rationale. Its only consumers are prose — `crash_repair.py::_repair_critic`'s
+            # own 300-char normalization on the way back and the abandon reason an operator reads —
+            # so widening it would move no verdict and only put more model text into a durable row.
+            # If a rung is ever written that READS this string, it moves to the shared intake bound
+            # for the same reason its sibling did.
             return {"action": action, "rationale": str((args or {}).get("rationale", ""))[:300]}
 
         def _no_verdict(_messages) -> dict:

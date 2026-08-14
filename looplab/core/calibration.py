@@ -11,20 +11,23 @@ Moved VERBATIM — the probe source is an input to a calibration DIGEST, so a wh
 would revoke issued receipts exactly like the implementation digest does. `agents/roles.py`
 re-exports every name, so both spellings resolve to the SAME objects.
 
-MOVED AGAIN, 2026-08-14, out of `agents/` and DOWN into `core/`, for the layering rule
-`tests/test_package_contracts.py::test_runtime_imports_nothing_above_core` states: `runtime/
-sandbox.py::stdout_extra_metric_channels` has to ask this module which keys the engine declared, and
-`runtime` may import nothing above `core`. The alternative — a second copy of the key tuple in
-`core`/`runtime` — is the one thing that must NOT happen: the probe source is an input to a
-calibration digest, and a second copy of its keys is how the two silently drift apart. So this is a
-MOVE, exactly like `core/jsonlio.py` out of `events/` and `core/envsafe.py`'s `SECRET_ENV` out of
-`runtime/sandbox.py`: one object, every old spelling still naming it. `agents/roles.py` re-exports
-every name as before, and `looplab/__init__.py::_RENAMED` routes the retired
-`looplab.agents.calibration` path to this module rather than leaving a shim file behind — a shim
-would be a SECOND module object, and `tests/test_auto_extra_metrics.py` monkeypatches
-`engine_declared_extra_metric_keys` through that exact path to prove the sandbox resolves the
-classifier through the probe's own module on every call. A second object would make that patch a
-silent no-op instead of an error.
+MOVED AGAIN, 2026-08-14, out of `agents/` and DOWN into `core/`. The move was made for the layering
+rule `tests/test_package_contracts.py::test_runtime_imports_nothing_above_core` states, because
+`runtime/sandbox.py` was then asking this module which keys the engine declared and `runtime` may
+import nothing above `core`. LATER THE SAME DAY that caller went away — the extra-metric channel
+grant moved UP to `engine/eval_dispatch.py`, since the question it answers is "did the ENGINE author
+this artifact?" and `runtime` is handed an opaque string (see `engine_declared_extra_metric_keys`).
+`core` is still the right home: the readers are now `engine` and `search`, both of which may import
+`core` freely, and the alternative — a second copy of the key tuple — is the one thing that must NOT
+happen, because the probe source is an input to a calibration digest and a second copy of its keys is
+how the two silently drift apart. So this is a MOVE, exactly like `core/jsonlio.py` out of `events/`
+and `core/envsafe.py`'s `SECRET_ENV` out of `runtime/sandbox.py`: one object, every old spelling
+still naming it. `agents/roles.py` re-exports every name as before, and
+`looplab/__init__.py::_RENAMED` routes the retired `looplab.agents.calibration` path to this module
+rather than leaving a shim file behind — a shim would be a SECOND module object, and
+`tests/test_auto_extra_metrics.py` monkeypatches `engine_declared_extra_metric_keys` through that
+exact path to prove the grant site resolves the classifier through the probe's own module on every
+call. A second object would make that patch a silent no-op instead of an error.
 
 Nothing here is reached by PATH rather than by import, so the move costs no pinned identity:
 `search/speculation_quality.py::speculation_implementation_digest` hashes every shipped `.py` with
@@ -167,8 +170,12 @@ _looplab_cuda_device_count_value = int(_looplab_cuda_count.value)
 '''
 
 
-def engine_declared_extra_metric_keys(code: object) -> frozenset[str]:
+def engine_declared_extra_metric_keys(code: object, *, engine_authored: bool) -> frozenset[str]:
     """The extra-metric keys the ENGINE put on this artifact's stdout line, not the candidate.
+
+    `engine_authored` IS THE AUTHENTICATION; `code` only says WHICH engine artifact this is. It is a
+    required keyword with no default, and that is the whole 2026-08-14 correction — see the section
+    at the bottom of this docstring for what the one-argument version admitted.
 
     THE PROBLEM THIS ANSWERS. `runtime/sandbox.py::json_line_extras` harvests every numeric key off
     an artifact's final JSON line, and the record then calls each of them a metric. Measured over
@@ -197,18 +204,34 @@ def engine_declared_extra_metric_keys(code: object) -> frozenset[str]:
       * WHO WROTE THE PRINT STATEMENT. That is the one property that separates the two populations
         cleanly, and the engine can answer it for exactly the artifacts it authored itself.
 
-    So this is not a key registry with a name check bolted on: the key set is consulted ONLY after
-    the artifact's source is authenticated as engine-owned, byte-exactly, by the same
-    `SPECULATION_CUDA_PROBE_CODE_PREFIX` comparison `search/speculation_quality.py::
-    _validate_cuda_probe_artifact` uses to admit the proof downstream. An agent script that prints
-    `speculation_cuda_probe_v` stays `auto`, because its source does not carry the prefix.
-
     NOT AN IN-SOURCE MARKER, deliberately, though the probe already carries one
     (`# LOOPLAB_FOOTPRINT:`) and a `# LOOPLAB_EXTRA_METRICS: [...]` line would be the obvious
     generalization. The candidate WRITES its own source, so a self-declaring comment is a
-    self-promotion primitive: any agent could tag its numbers authenticated. The byte-exact prefix
-    check is what makes the declaration the engine's rather than the artifact's, and once it is
-    required the marker adds nothing.
+    self-promotion primitive: any agent could tag its numbers authenticated.
+
+    WHY THE BYTE PREFIX IS NOT THAT AUTHENTICATION EITHER, which is the correction this signature
+    carries (found 2026-08-14 auditing the merge day against docs/36). Until then the whole grant was
+    `code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX)`, and `runtime/sandbox.py` passed the
+    candidate's own `solution.py` as that `code` — the bytes an external coding agent
+    (`agents/cli_agent.py::CliAgentDeveloper`) authors with a real shell. The prefix is a public
+    constant in the shipped tree, not a secret: driven, `tools/env_inspect.py::read_installed` pages
+    this module out verbatim with no package allow-list. So prefix + one `print` earned
+    `{'device_count': 'engine', 'alloc_bytes': 'engine'}`, and the operator's "authenticated only"
+    switch (`Settings.auto_extra_metrics=false`) then ADMITTED the forged pair. The reasoning above
+    is unchanged and still right — WHO WROTE THE PRINT STATEMENT is the separating property — but a
+    predicate over source the candidate can rewrite cannot answer it, and narrowing the predicate
+    (exact key SET, the three static values) does not help: those values are public constants too,
+    so a forgery just prints them.
+    Nothing derivable from the artifact's CONTENT can authenticate its AUTHOR.
+
+    So the fact is CARRIED rather than re-derived: `engine_authored` is the caller's assertion that
+    the engine itself produced this artifact's source, and only `engine/speculation_gate.py::
+    engine_authored_artifacts` may make it — it reads the engine's OWN role wiring (the exact
+    `ToyObjectiveDeveloper` with `calibration_gpu_probe` true, the one splicer that exists), which is
+    state no candidate can reach. The prefix check then keeps its real job, which was never
+    authentication: it says WHICH engine artifact this is, and therefore which keys are its own. Both
+    conjuncts are required and the keyword has no default, so a caller that cannot make the assertion
+    cannot silently get the old behaviour — it gets a TypeError.
 
     THE HONEST LIMIT. This removes the ambiguity only where the engine authored the writer. For an
     agent-authored artifact nothing available at capture separates a diagnostic from a measurement —
@@ -218,6 +241,8 @@ def engine_declared_extra_metric_keys(code: object) -> frozenset[str]:
     any other artifact) so a caller can pass whatever code it has, and the fail-safe direction is
     always `auto`.
     """
+    if not engine_authored:
+        return frozenset()
     if not isinstance(code, str) or not code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX):
         return frozenset()
     return frozenset(SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS)

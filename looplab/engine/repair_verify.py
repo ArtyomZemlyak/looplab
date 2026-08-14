@@ -62,8 +62,12 @@ the only half this rung exists to check. Measured over `runs/` on 2026-08-14: 83
 model-authored rationales in the corpus are stored at exactly that cap — the MEDIAN rationale this
 rung read was truncated — and over the 54 repairs whose full text could be recovered from
 `spans.jsonl` and replayed, 3 of the 7 `unmet`s and 2 of the 3 `unstated`s are `verified` on the text
-the model actually wrote. `crash_repair._TRIAGE_RATIONALE_CAP` is now that intake bound and is
-deliberately far above every sink's; a sink capping its own column is fine and always was.
+the model actually wrote. `engine/triage.py::TRIAGE_RATIONALE_CAP` is now that intake bound and is
+deliberately far above every sink's; a sink capping its own column is fine and always was. IT LIVES
+IN `triage.py` BECAUSE THE INTAKE WAS NOT THE FIRST CAP: `triage_crash` is a duck-typed seam with
+exactly one implementation in the tree, `agents/unified_agent.py`, which is the shipped default and
+whose emit finalizer already cut the same string to 300 on its way out — so raising the bound on what
+the seam RETURNED changed nothing at all for a day. Both layers now read that single constant.
 
 A CITED NAME AND A CLAIMED NAME ARE THE SAME TOKEN, and no extractor over model-authored text will
 reliably tell them apart. "vs the working nll_cos runs" names a baseline being compared AGAINST; "I
@@ -184,7 +188,8 @@ def claimed_tokens(rationale) -> tuple[str, ...]:
     HAND IT THE WHOLE RATIONALE. A prefix is indistinguishable from a short answer here, and a crash
     rationale puts its citations before its claims, so a truncated input reads as "named a baseline
     and changed something else" — see the module docstring's measurement and
-    `crash_repair._TRIAGE_RATIONALE_CAP`, the intake bound that keeps this true.
+    `engine/triage.py::TRIAGE_RATIONALE_CAP`, the intake bound BOTH the seam's finalizer and
+    `crash_repair._ask_triage` read, which is what keeps this true.
     """
     text = rationale if isinstance(rationale, str) else ""
     if not text.strip():

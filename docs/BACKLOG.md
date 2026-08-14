@@ -362,8 +362,24 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
-- **The `engine` extra-metric channel authenticates against bytes the candidate authors** (found
-  2026-08-14 auditing the merge day against docs/36). `core/calibration.py:221
+- **[FIXED 2026-08-14, same day — kept as the record of what a content-derived tag cannot do]
+  The `engine` extra-metric channel authenticated against bytes the candidate authors** (found
+  2026-08-14 auditing the merge day against docs/36). **THE FIX, and the argument for it:** the
+  narrowing this row rejected (exact key SET + static values) would not have helped — those values
+  are public constants too, so a forgery just prints them. NOTHING derivable from an artifact the
+  candidate writes can authenticate its author, so the fact is now CARRIED instead of re-derived.
+  `runtime/sandbox.py::stdout_extra_metric_channels` lost its `code` parameter and answers `auto` for
+  everything (it is handed an opaque string and runs it); `core/models.py::
+  apply_engine_extra_metric_channels` grants the upgrade at `engine/eval_dispatch.py`, the one place
+  `node.code` and the engine's own wiring meet, behind a REQUIRED `engine_authored` keyword with no
+  default that only `engine/speculation_gate.py::engine_authored_artifacts` may assert — true in
+  exactly the calibration profile, whose Developer is the engine's probe splicer (exact type +
+  `calibration_gpu_probe`, written only by `cli/__init__.py::_make_calibration_roles`). The prefix
+  check survives for its real job: naming WHICH engine artifact this is, hence which keys are its
+  own. The probe keys still arrive and `_validate_cuda_probe_artifact` still accepts (driven), so no
+  issued receipt moves and no `Settings` field was added. Driven both ways in
+  `tests/test_auto_extra_metrics.py`: the same bytes evaluated by two engines differing only in their
+  Developer record two different channel maps. The original report follows. `core/calibration.py:221
   ::engine_declared_extra_metric_keys` grants `EXTRA_METRIC_ENGINE` — a member of
   `EXTRA_METRIC_AUTHENTICATED` — on `code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX)`, and
   `runtime/sandbox.py:1471`/`:1541` pass the candidate's own `solution.py` verbatim as that `code`.
@@ -439,8 +455,17 @@ site that proves it is open.
   cannot name different sets; and an absent/duplicated/unparseable/unknown-version watermark, or an
   empty digest on either side, all answer `unknown` and never `current`.
 
-- **The repair-rationale intake cap was raised at the wrong layer, so `_TRIAGE_RATIONALE_CAP` never
-  binds** (found 2026-08-14 auditing 4b2bd547). That commit moved the intake bound to
+- **[FIXED 2026-08-14, same day] The repair-rationale intake cap was raised at the wrong layer, so
+  `_TRIAGE_RATIONALE_CAP` never bound** (found 2026-08-14 auditing 4b2bd547). **THE FIX:** the cap
+  moved to `engine/triage.py::TRIAGE_RATIONALE_CAP` — the module `agents/unified_agent.py` already
+  reaches through its existing function-local import for the verdict registry, so no new layering
+  edge — and `UnifiedAgent.triage_crash`'s emit finalizer now reads that SAME constant instead of its
+  own `[:300]`. Both caps are one object, so they cannot disagree again. The sibling caps
+  (`repair_critic`, `choose_action`) deliberately STAY at 300, decided rather than inherited: what
+  made this one wrong was a downstream rung READING the string, and nothing reads those.
+  `tests/test_repair_verification.py` now drives the real seam (patching only the documented
+  `looplab.agents.agent.drive_tool_loop`) with the pre-fix configuration reproduced as a negative
+  control, which is what proves it traverses the finalizer at all. The original report follows. That commit moved the intake bound to
   `crash_repair.py:60::_TRIAGE_RATIONALE_CAP = 2000` and applies it at `_ask_triage` (`:250`, `:261`,
   `:277`) — i.e. to what the duck-typed `triage_crash` seam RETURNED. `UnifiedAgent.triage_crash` is
   the ONLY implementation of that seam in the tree, it is the shipped default

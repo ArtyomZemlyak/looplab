@@ -377,8 +377,10 @@ _RENAMED = {
     # from `_LAYOUT` as before and only the DOTTED old path needs routing. It is routed here rather
     # than left behind as a re-exporting shim module for the reason this map exists: a shim is a
     # SECOND module object, and `tests/test_auto_extra_metrics.py` patches
-    # `looplab.agents.calibration.engine_declared_extra_metric_keys` to prove the sandbox resolves
-    # the classifier through the probe's own module on every call.
+    # `looplab.agents.calibration.engine_declared_extra_metric_keys` to prove the extra-metric
+    # channel GRANT (`engine/eval_dispatch.py`, since 2026-08-14 — it was the sandbox until the
+    # byte-prefix authentication was found forgeable) resolves the classifier through the probe's
+    # own module on every call.
     "looplab.agents.calibration": "looplab.core.calibration",
 }
 

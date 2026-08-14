@@ -360,6 +360,44 @@ DEFAULT_TRIAGE_ACTION = UNREADABLE_TRIAGE_ACTION
 # rebuilds the returned dict from exactly those three, so no model output can ever set this key.
 TRIAGE_TRANSPORT_FAILURE_KEY = "transport_failure"
 
+# THE INTAKE BOUND on the triage model's own free text, and it is an INTAKE bound only — every SINK
+# keeps its own, tighter cap for its own reason (`node_repaired.rationale` 300 after redaction,
+# `repair_log["fix"]` 200 for the judge's history, `node_failed.triage_rationale` 300,
+# `proposal_cues` 90). Those sinks are what bound the durable row and the prompt; this one bounds
+# only what the ENGINE carries between them, so tightening it buys nothing downstream and costs the
+# one reader that needs the whole sentence.
+#
+# It was 300 — the same number as the durable sink — and that silently truncated the input to
+# `repair_verify.verify_repair`, which reads the rationale to ask "did this repair do what it said?".
+# A crash rationale is written in one shape: DIAGNOSIS first ("diverged right after the R-Drop KL
+# term, unlike the working nll_cos runs"), then "Fix: <the concrete things I am about to change>".
+# So a cut at 300 lands almost exactly on the seam and feeds the extractor the CITATIONS while
+# discarding the CLAIMS — the one half it exists to check. Measured over `runs/` on 2026-08-14:
+# 83 of the 123 model-authored `node_repaired` rationales in the corpus are stored at exactly the
+# cap, i.e. the MEDIAN rationale the rung read was truncated; and over the 54 repairs whose full
+# text could be recovered from `spans.jsonl` and replayed, 5 verdicts are wrong because of it —
+# 3 of the 7 `unmet`s and 2 of the 3 `unstated`s are `verified` on the text the model actually
+# wrote. `rubertlite-dr-unified-v7` node 0 attempt 2 is the live instance: its only surviving claim
+# was `nll_cos`, cited as the BASELINE it was comparing against, while `kl_div`/`log_target`/
+# `rdrop_alpha` — named after the cut, and present in the diff — were never read.
+#
+# 2000 is not a round number picked for comfort: the 93 full rationales in the corpus run
+# 121-690 chars (median 330, p90 460), so this is ~2.9x the longest one ever written here and still
+# bounds a model that decides to answer with an essay. Widening it can only ADD claims, and a claim
+# that was met stays met, so no `verified` can become `unmet` by this change — the failure it fixes
+# is one-directional.
+#
+# IT LIVES HERE, and that is the 2026-08-14 correction to the fix above. Raising it in
+# `engine/crash_repair.py` alone changed NOTHING, because the intake is not the first cap the text
+# meets: the ONLY implementation of the duck-typed `triage_crash` seam in this tree is
+# `agents/unified_agent.py::triage_crash`, it is the shipped default (`Settings.unified_agent`), and
+# its own emit finalizer already cut the rationale to 300 before returning. A bound applied to what a
+# seam RETURNED cannot widen what the seam's implementation already threw away, so both layers must
+# read ONE constant — which is why it sits in the module `unified_agent.py` already imports for the
+# verdict vocabulary (stdlib-only at module scope, so the `agents` -> `engine` deferred import that
+# reaches it cannot cycle) rather than in the mixin, which imports half the engine.
+TRIAGE_RATIONALE_CAP = 2000
+
 
 def is_transport_failure_verdict(out) -> bool:
     """Did the CALLEE report that the transport failed, as opposed to answering something odd?
