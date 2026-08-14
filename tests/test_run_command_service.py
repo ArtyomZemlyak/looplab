@@ -168,6 +168,20 @@ def _post(client, event_type, data=None, key="key-1", *, generation=None):
 # tests, so any ceiling below that can expire while the command is still legitimately 'executing'
 # and reports a hang the system does not consider one. 60s keeps a real hang bounded well inside
 # that window while leaving 4x headroom over the 15s that kept failing.
+#
+# IF IT FLAKES AGAIN, THE ANSWER IS NOT A BIGGER NUMBER — that reflex is what took this constant
+# 1.0 -> 15 -> 60 already. Measured 2026-08-14 on the 60s ceiling:
+# `test_reload_finalize_reattaches_existing_record_without_event_or_spawn_duplication` failed a full
+# frozen-tree run at 'executing', and passed the SAME tree, same command, when nothing else was
+# running — the contended run had three mutation-tree pytest sessions, a `node --test` suite and a
+# vite build alongside it. That is the whole mechanism: this loop polls from the MAIN thread for a
+# status a background worker THREAD sets, and `time.time()` keeps counting while that thread is
+# descheduled, so the ceiling measures wall clock and the work it is waiting on measures CPU it did
+# not get. A larger ceiling buys proportionally more starvation, which is why each bump has bought
+# roughly one more incident. What would actually close it is waiting on the worker's own progress
+# rather than the clock; nobody has built that, and a 60s hang is bounded well enough that the
+# guesswork is not worth spending until this fails on an IDLE host. Rule of thumb: reproduce it with
+# the box quiet before treating it as a defect.
 _TERMINAL_SETTLE_TIMEOUT_S = 60.0
 
 
