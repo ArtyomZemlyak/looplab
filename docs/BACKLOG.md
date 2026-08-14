@@ -79,7 +79,7 @@ site that proves it is open.
    UI. Two further `stdout_tail` producers do not go through `_redact` at all
    (`agents/cli_agent.py:349,370`). **Cost:** the event log is the artefact that gets exported and
    shared. Fix is a default flip plus two call sites.
-3. **The hardened exploit suite re-flags the grader import the detector just sanctioned (P1, S).**
+3. ~~**The hardened exploit suite re-flags the grader import the detector just sanctioned (P1, S).**~~
    `engine/evaluate.py:807-815` correctly passes `grader_import_ok=True` to `detect_reward_hacks`
    when the task ships `grader.py` as an asset — and then `evaluate.py:819` runs
    `self._exploit_suite.scan(scan_src)` **unconditionally**, and `ExploitSuite.scan`
@@ -87,6 +87,10 @@ site that proves it is open.
    `\bimport\s+grader\b` regex (`trust/harden.py:34-36`). **Cost:** a false `reward_hack_suspected`
    on a run that persisted a `looplab harden` suite bars the node from `feasible_nodes` — i.e. it
    silently discards good nodes on MLE-bench, the proof point.
+   **FIXED 2026-08-14** — `ExploitSuite.scan` takes the sanction, `evaluate.py` derives it once and
+   hands it to both detectors, waived per MATCH. One correction to the cost claim, in the survivor
+   entry below: no suite on disk carries that rule today, and the shipped `harden` path cannot mint
+   it — it is one `harden(hacker=…)`/hand-authored suite away, so the exposure was latent, not live.
 4. **The read model is built once, at exit, with no watermark (P1, M).** `events/readmodel.py` is 55
    lines and exposes only `build_readmodel` — **no seq watermark, no refresh-on-append**. Its sole
    caller is `engine/finalize.py:912` via `_build_readmodel_atomic` (`finalize.py:479`), which DID
@@ -1195,3 +1199,26 @@ deliberately deferred, with rationale:
   So the sanctioned import is waived by the detector and independently re-flagged by the suite, on
   exactly the mlebench tasks that are the proof point — and a `reward_hack_suspected` keeps the node
   out of `feasible_nodes`. Cheapest fix of the top five survivors.]
+
+  **[2026-08-14 — FIXED (`fix/hardened-suite-grader-waiver`), with one correction to the triage.**
+  `ExploitSuite.scan(code, *, grader_import_ok=False)` now takes the SAME sanction the detector
+  takes, `evaluate.py` derives it ONCE via the new `reward_hack.grader_import_sanctioned(assets)`
+  (the one owner of the asset-key normalization) and hands the identical value to both detectors,
+  and the waiver is applied per MATCH via `reward_hack.sanctioned_grader_import_only(span)` — a
+  finding is dropped only when its matched span carries an import tell AND is clean under the
+  waived detector. So it is total over rules the suite has not grown yet, while a rule matching a
+  key access / shell-out / protected write keeps firing. THE CORRECTION: no `exploits.jsonl` exists
+  anywhere in this tree or under `runs/`, and the shipped `looplab harden` path can never mint the
+  seed `import_grader` rule — its probe carries `grader._Y`, which the un-waivable key tell catches
+  in every configuration, so the rule counts as "already caught" and is never added (a default
+  harden run yields exactly constant_perfect / overwrite_frozen / os_system_exfil). The rule is
+  reachable by an LLM `hacker=` plug against a grader-aware detector (`_derive_pattern` escapes the
+  import head into a durable `import\ grader`) or by a hand-authored suite, both driven in
+  `tests/test_hardened_suite_grader_waiver.py` alongside two real runs — sanctioned (no violation,
+  node stays in `feasible_nodes`) and unsanctioned (still flagged, still excluded under `block`).
+  SIBLING CHECKED, no change: `_audit_workdir_writes` has no such asymmetry — `protected_write` is
+  never waived by the import sanction in EITHER detector, so the static tell and the runtime audit
+  agree about an asset write; a task that legitimately writes an engine-placed asset would be
+  flagged by both, which is a uniform frozen-asset policy rather than one detector re-raising what
+  another waived. Giving it a waiver would need an explicit host-side "this asset is writable"
+  declaration (assets carry none today), never an inference from what the candidate did.]

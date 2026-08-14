@@ -3,7 +3,7 @@
 Regression from the code-review findings pass — would FAIL against the pre-fix code."""
 from __future__ import annotations
 
-from looplab.trust.reward_hack import detect_reward_hacks
+from looplab.trust.reward_hack import detect_reward_hacks, grader_import_sanctioned
 
 
 # --- reward_hack: answer-key tells are case-sensitive and must still fire -------------------------
@@ -48,8 +48,11 @@ def test_engine_call_site_protected_grader_without_asset_stays_strict():
     protected_names = {"grader.py"}          # repo_spec protect list — "hands off", NOT a sanction
     assets: dict = {}                        # the task ships no grader → import is not the contract
 
-    def call_site(assets):                   # the exact engine/evaluate.py expression (normalized match)
-        return any(str(a).replace("\\", "/").lower() == "grader.py" for a in (assets or ()))
+    # The engine's own rule, not a copy of its expression: `evaluate.py` derives the flag ONCE via
+    # `grader_import_sanctioned(self._assets)` and hands the SAME value to `detect_reward_hacks` and
+    # to `ExploitSuite.scan` (a re-implementation here would keep passing while the two detectors
+    # drifted apart — which is exactly the defect the shared rule closes).
+    call_site = grader_import_sanctioned
 
     protected = set(protected_names) | set(assets)                    # the call-site union
     sigs = detect_reward_hacks(code, metric=0.9, direction="max", protected_names=protected,
