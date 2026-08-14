@@ -2995,3 +2995,51 @@ def test_a_diagnostic_row_cannot_discard_a_paid_proposal():
     for kind in ("node_evaluated", "node_failed", "pause", "policy_decision", "card_added"):
         assert SpeculationMixin._proposal_authority_seq(base + [ev(kind, 2)]) == 2, (
             f"{kind} no longer moves the fence — a real selection change would be committed over")
+
+
+def test_the_card_build_span_names_its_request_and_the_node_names_that_trace(tmp_path):
+    """THE BUILD IS PART OF THE NODE (F7) — the two writer facts a reader cannot infer.
+
+    Measured on `runs/rubertlite-dr-unified-v7` (2026-08-14): the three `card_build` traces are 1,312
+    of the run's 2,637 spans — the Developer's whole construction, `plan` and `stages` included — and
+    every one of their roots carried `attributes={}`. So the most expensive trace in the run was
+    addressable by NO key at all, and the node's own trace showed evaluation and repair with no
+    build. Node 2's trace was two spans.
+
+    `card_build` STAYS run-scoped. It runs on a producer worker before any node id is reserved; the
+    id it could compute is `_node_id_ceiling`, a prediction `_claim_requested_card_build` re-derives
+    after this span has closed, and the build may be refused and mint no node at all. What is true at
+    open is the request it serves, so it carries that — and the NODE, which learns the exact trace
+    when it commits, names it on `materialize_node`. The reading half is
+    `events/traceview.py::claimed_build_traces`; `tests/test_node_build_trace_claim.py` drives it.
+    """
+    import json
+
+    engine, _producer = _engine(tmp_path / "claim")
+    _start(engine)
+    _add_ready_draft(engine)
+    node_id = _commit_speculative_node(engine)
+
+    spans_path = Path(tmp_path / "claim") / "spans.jsonl"
+    rows = [json.loads(line) for line in
+            spans_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    builds = [row for row in rows if row["name"] == "card_build"]
+    materialized = [row for row in rows if row["name"] == "materialize_node"]
+    assert len(builds) == 1 and len(materialized) == 1
+
+    # RUN-SCOPED — and no longer anonymous: the request key it is serving.
+    assert builds[0]["attributes"].get("node_id") is None
+    assert builds[0]["attributes"]["card_id"] == "card-7"
+    assert builds[0]["attributes"]["card_build_generation"] == 0
+    # The node names it. A DIFFERENT trace, recorded after the fact, never a prediction.
+    assert materialized[0]["attributes"]["node_id"] == node_id
+    assert materialized[0]["attributes"]["build_trace"] == builds[0]["trace_id"]
+    assert materialized[0]["trace_id"] != builds[0]["trace_id"]
+
+    # …and the claim is what puts the build inside the node's own trace window.
+    from looplab.events.span_index import SpanIndex
+    index = SpanIndex(spans_path)
+    index._rebuild(spans_path.stat().st_size)
+    assert index.node_build_traces(node_id, generation=0) == {builds[0]["trace_id"]: (node_id, 0)}
+    reached = {span["span_id"] for span in index.light_spans_for_node(node_id, None, generation=0)}
+    assert builds[0]["span_id"] in reached

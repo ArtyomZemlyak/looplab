@@ -10,11 +10,12 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional
 
 import anyio
 
+from looplab.core import tracing
 from looplab.core.advisory_payloads import bounded_cross_run_advisory_receipt
 from looplab.core.models import (
     Idea,
@@ -73,6 +74,11 @@ class SpecBuildResult:
     cross_run_receipt: dict[str, Any] = field(default_factory=dict)
     roles: Optional[tuple[Any, Any]] = field(default=None, compare=False, repr=False)
     error: str = ""
+    # The trace id of the `card_build` span this result was produced under, carried back so the node
+    # that eventually commits can NAME its own build (`_create_precoded_node`). It is diagnostic
+    # provenance, never queue authority — `compare=False` because two results are the same result
+    # whether or not tracing was wired, and an empty string is simply "no tracer".
+    build_trace: str = field(default="", compare=False)
 
     @property
     def key(self) -> tuple[str, int]:
@@ -893,8 +899,26 @@ class SpeculationMixin:
         # spawning context, so a child span would splice a background producer into whatever
         # unrelated operation the main task happened to hold open. No `node_id` either — the node
         # does not exist yet, which is precisely why this cost is run-level and not per-node.
-        with self._op_span("card_build"):
-            return self._produce_requested_card(request, key, roles)
+        #
+        # It STAYS run-scoped, and a node reaches it through a claim pointing the other way. The id
+        # this producer could compute is `_node_id_ceiling`, i.e. a PREDICTION: the authoritative one
+        # is re-derived by `_claim_requested_card_build` after this span has already closed, and this
+        # build may be refused (stale / budget / superseded) and mint no node at all. What IS true at
+        # open is the request's own identity, so the span carries that instead of nothing — until
+        # 2026-08-14 it carried an EMPTY attribute map, which left the run's single most expensive
+        # trace unaddressable by any key at all (measured on `runs/rubertlite-dr-unified-v7`: three
+        # `card_build` traces, 1,312 of the run's 2,637 spans, `attributes={}` on every root).
+        # The node names this trace afterwards — see `_create_precoded_node` and
+        # `traceview.claimed_build_traces`.
+        card_id, build_generation = key
+        with self._op_span("card_build", card_id=card_id,
+                           card_build_generation=build_generation) as span:
+            # Read the id from the ACTIVE span rather than from the handle: `_op_span` degrades to a
+            # null context when no tracer is wired, and a build with no trace must carry no claim.
+            build_trace = tracing.current_ids()[0] if span is not None else None
+            result = self._produce_requested_card(request, key, roles)
+        return (result if not isinstance(build_trace, str) or not build_trace
+                else replace(result, build_trace=build_trace))
 
     def _produce_requested_card(
         self,
@@ -1042,7 +1066,16 @@ class SpeculationMixin:
         state = reserved.state
         node_id = reserved.node_id
         idea = result.idea.model_copy(deep=True)
-        with self.tracer.span("materialize_node", node_id=node_id, operator=reserved.kind):
+        # THE NODE NAMES ITS OWN BUILD. `_build_requested_card`'s `card_build` trace is run-scoped by
+        # necessity — it ran before this id was reserved — so the whole Developer construction (plan,
+        # stages, every tool call and generation) is unreachable from this node's trace unless
+        # something joins the two. This span is where both facts exist at once: the committed
+        # `node_id` and the exact trace that produced it. The claim is recorded AFTER the fact and is
+        # therefore never a guess; the reading half is `traceview.claimed_build_traces`, and the
+        # attribute is deliberately not `node_id` on the build itself (see `_build_requested_card`).
+        with self.tracer.span(
+                "materialize_node", node_id=node_id, operator=reserved.kind,
+                **({"build_trace": result.build_trace} if result.build_trace else {})):
             def _plan(events, tail) -> str:
                 latest = fold(events)
                 latest_card = latest.cards.get(result.card_id)

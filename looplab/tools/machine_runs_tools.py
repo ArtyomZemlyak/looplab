@@ -848,7 +848,11 @@ class MachineRunsTools(ForeignRunReader):
                     nid, TRACE_CONVERSATION_SPAN_CAP, generation=attempt)
                 convo = build_conversation(
                     st, spans, nid, total_spans=total,
-                    span_cap=TRACE_CONVERSATION_SPAN_CAP, _normalized=True)
+                    span_cap=TRACE_CONVERSATION_SPAN_CAP,
+                    # The node's build claims, resolved over the whole index — `spans` is a bounded
+                    # window and the claiming span can fall outside it. Same reason as the route's.
+                    claimed_traces=index.node_build_traces(nid, generation=attempt),
+                    _normalized=True)
             else:
                 # Missing indexes are rare (the source existence was checked above). Preserve the
                 # compatibility path, but apply the same attempt fence before the conversation cap.

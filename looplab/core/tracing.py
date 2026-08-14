@@ -67,7 +67,7 @@ _TRACE_STRUCTURAL_TEXT_RESERVE = 1_024
 _TRACE_STRUCTURAL_ITEM_RESERVE = 64
 _TRACE_STRUCTURAL_ATTRIBUTES = (
     "node_id", "generation", "attempt", "phase", "phase_span",
-    "input_from", "input_carry", "input_partial",
+    "input_from", "input_carry", "input_partial", "build_trace",
 )
 _TRACE_RESERVED_ATTRIBUTE_KEYS = frozenset((*_TRACE_STRUCTURAL_ATTRIBUTES, "looplab.run_id"))
 _TRACE_STRUCTURAL_CAPS = {
@@ -79,6 +79,13 @@ _TRACE_STRUCTURAL_CAPS = {
     "input_from": 128,
     "input_carry": 64,
     "input_partial": 32,
+    # `build_trace` is the ONE attribution key that points OUT of its own span: the trace id of the
+    # run-scoped work that produced this node (`events/traceview.py::claimed_build_traces`). It is
+    # structural for the same reason `node_id` is — an oversized diagnostic payload that spent the
+    # aggregate budget before reaching it would silently delete a node's whole build from its trace,
+    # which is precisely the defect the attribute exists to fix — and reserved for the same reason:
+    # arbitrary metadata must not be able to normalize ONTO an attribution key and claim a trace.
+    "build_trace": 128,
 }
 
 _OTEL_ENV_TRUE = frozenset({"1", "on", "t", "true", "y", "yes"})
@@ -1681,6 +1688,11 @@ class SpanHandle:
         elif raw_key == "node_id" and not (
                 (type(value) is int and -(1 << 63) <= value <= (1 << 63) - 1)
                 or (isinstance(value, str) and 0 < len(value) <= 128)):
+            key = f"field.{key}"
+        elif raw_key == "build_trace" and not (
+                isinstance(value, str) and 0 < len(value) <= 128):
+            # A claim on another trace is only readable if it is a trace ID SHAPE. Anything else is
+            # kept as diagnostic payload rather than silently offered to the reader's join.
             key = f"field.{key}"
         elif raw_key == "looplab.run_id":
             key = "field.looplab.run_id"

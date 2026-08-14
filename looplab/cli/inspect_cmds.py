@@ -183,7 +183,12 @@ def timings(run_dir: Path = typer.Argument(...),
     #
     # * It DROPPED every span with no `node_id`. That is not a rare edge — it is all the work that
     #   belongs to the RUN rather than to any one node (a Card producer's node does not exist yet,
-    #   which is exactly why per-node attribution is wrong for it). On a preserved 27.9-minute run
+    #   which is exactly why per-node attribution is wrong for it). This charges by the span's OWN
+    #   `node_id` and deliberately does NOT follow the `build_trace` claim the trace surfaces added
+    #   in 2026-08-14 (`events/traceview.py::claimed_build_traces`): the two answer different
+    #   questions. "What is in this node's story" reaches the build that produced it; "who owns this
+    #   wall clock" must keep charging a producer turn to the run, because it ran before the node
+    #   existed and could have ended without minting one. On a preserved 27.9-minute run
     #   this hid 143 of 174 spans: the report totalled 2.7 minutes and its LLM rows 0.2 minutes
     #   against a cost ledger of 139 calls / 780k tokens.
     # * It reconciled against nothing, so nobody could see what it was still missing. The denominator

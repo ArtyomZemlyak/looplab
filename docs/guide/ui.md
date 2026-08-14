@@ -379,6 +379,18 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   listing 2,345 rows. An anchor the run's index cannot place is refused with HTTP 409
   `trace_anchor_unknown` rather than answered with the tail — the newest steps under an older
   episode's label is the one failure worse than an empty panel.
+- **The node's BUILD is part of the node.** Under `card_driven_selection` the Developer's whole
+  construction — `card_build` and, under it, `stages`, `plan` and every tool call and generation of
+  the implement loop — runs on a speculative producer worker *before* any node id is reserved, so
+  none of those spans can carry one. Until 2026-08-14 that meant a node's trace showed evaluation,
+  triage and inline repair and no build at all: measured on `runs/rubertlite-dr-unified-v7`,
+  2,403 of 2,637 spans (91.1 %) belonged to no node and one experiment's whole trace was two spans.
+  The build stays run-scoped (its id is not knowable there, and the build may be refused and mint no
+  node), and the **node claims it instead**: `materialize_node` stamps `build_trace` with the exact
+  trace that produced it. Every read surface follows that claim — the trace tab, the conversation,
+  the episode map (so a build band is a place `?before=` can seek to, like any other), and the card
+  trace's per-node counts. A `propose` trace keeps no such claim: a card's research belongs to every
+  node the card carries, and it is read through the card's own trace instead.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
   redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
