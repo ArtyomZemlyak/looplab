@@ -65,8 +65,11 @@ from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.card_selection import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
     META_CARD_ID,
+    SpeculativeSelectionContext,
     card_budget_used,
+    card_lane_width,
     speculative_card_actions,
+    speculative_card_is_fresh,
 )
 from looplab.search.policy import GreedyTree
 from looplab.search.speculation_calibration import (
@@ -391,7 +394,19 @@ def test_depth_zero_delegates_to_legacy_dispatcher_and_never_requests(tmp_path, 
 
 
 def test_depth_three_counts_exact_pending_backlog_and_never_crosses_cap(tmp_path):
+    """The depth arithmetic: exact `(id, attempt)` admission, and no capacity from a wrong one.
+
+    The lane is declared THREE Cards wide here, and that declaration is load-bearing rather than
+    scaffolding. `_speculative_prefetch_ceiling` is `min(depth, card_lane_width)`, because a
+    prefetch beyond the width of the set `speculative_card_is_fresh` proves membership in is bought
+    and then discarded — measured on the default `greedy` width of 1, this exact fixture at depth 3
+    committed three Nodes of which the gate reported ONE fresh and two born stale, i.e. two paid
+    Developer calls for nothing. Widening the lane is what makes depth 3 a treatment the run can
+    actually spend, and it leaves this test's real subject — the counting — untouched.
+    """
+
     engine, producer = _engine(tmp_path / "depth-three", depth=3)
+    engine.policy.card_select_k = 3
     _start(engine)
     for index, x in enumerate((0.2, 0.4, 0.6, 0.8), start=1):
         _add_ready_draft(engine, f"card-{index}", x=x)
@@ -1057,6 +1072,11 @@ def test_delayed_producer_after_eval_terminal_closes_stale_without_late_claim(
         depth=2,
         producer=producer,
     )
+    # This scenario needs TWO prefetches live at once, so the lane has to be two Cards wide:
+    # `_speculative_prefetch_ceiling` is `min(depth, card_lane_width)`, and at greedy's width of 1
+    # the second election is refused rather than bought-and-discarded. Nothing about the delayed
+    # producer / stale-close contract below changes with the width.
+    engine.policy.card_select_k = 2
     _start(engine)
     _add_ready_draft(engine, "card-1", x=0.2)
     _add_ready_draft(engine, "card-2", x=0.8)
@@ -3043,3 +3063,100 @@ def test_the_card_build_span_names_its_request_and_the_node_names_that_trace(tmp
     assert index.node_build_traces(node_id, generation=0) == {builds[0]["trace_id"]: (node_id, 0)}
     reached = {span["span_id"] for span in index.light_spans_for_node(node_id, None, generation=0)}
     assert builds[0]["span_id"] in reached
+
+
+def _fresh(engine, node_id: int, *, inflight=frozenset()) -> bool:
+    """Ask the production freshness gate about one committed prefetch, the way the drain does."""
+
+    state = fold(engine.store.read_all())
+    excluded = engine._election_excluded_card_ids(state)
+    return speculative_card_is_fresh(
+        state,
+        engine.policy,
+        engine._speculative_selection_node_limit(state),
+        card_id=state.nodes[node_id].idea.card_id,
+        node_id=node_id,
+        context=SpeculativeSelectionContext(
+            scoring=getattr(engine, "_card_scoring", None),
+            excluded_card_ids=excluded,
+            ignored_pending_node_ids=engine._acknowledged_pending_ids(state),
+            resource_envelope=engine._resource_envelope(),
+            consumed_inflight=inflight,
+        ),
+    )
+
+
+def test_the_election_stops_at_the_width_the_freshness_gate_will_actually_keep(
+        tmp_path, monkeypatch):
+    """A prefetch the gate is obliged to discard must never be BOUGHT (backlog: v7 nodes 3 and 4).
+
+    Two ceilings, different numbers, and only one of them decided anything. AUTO `speculation_depth`
+    is the settled eval width — "one speculative prefetch per concurrent evaluation lane"
+    (`_resolve_speculation_depth`) — while what `_drop_stale_speculation` KEEPS is membership in
+    `speculative_card_selection_set`, which is `card_lane_width` wide, i.e. 1 under `greedy`, the
+    only policy `speculation_gate.py` admits speculation for at all. So on a two-lane box the
+    election bought two prefetches and the gate kept one, and the loser was terminalized
+    `superseded by Card freshness gate` 0.06 s after its own `card_build_done` — one full Developer
+    call (~1 h of wall clock on `rubertlite-dr-unified-v7`), never evaluated, its Card retired.
+
+    Driven end to end rather than pinned, because the property is exactly the one a source pin
+    cannot see: that the build the old ceiling licensed really does die unevaluated. The second half
+    restores the old ceiling and watches it happen.
+    """
+
+    engine, _producer = _engine(tmp_path / "prefetch-ceiling", depth=2)
+    engine._eval_parallel = 2                     # depth 2 = the eval width, lane width still 1
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    _add_ready_draft(engine, "card-3", x=0.5)
+    _without_research(monkeypatch, engine)
+
+    held = _commit_speculative_node(engine)       # the one prefetch a width-1 lane can retain
+    engine._ensure_speculation_state()
+
+    assert card_lane_width(engine.policy) == 1
+    assert engine.speculation_depth == 2, "the pinned treatment is untouched by the ceiling"
+    assert engine._speculative_prefetch_ceiling() == 1
+    assert _fresh(engine, held) is True, "the gate keeps this one, so it was worth buying"
+
+    # THE FIX: the second election is refused, and refused SILENTLY — no request row, no head, so
+    # nothing downstream can pay for it either.
+    before = engine.store.read_all()[-1].seq
+    assert engine._request_card_build() is False
+    assert engine.store.read_all()[-1].seq == before
+    assert engine._head_request(fold(engine.store.read_all())) is None
+
+    # …and the refusal is right. At the OLD ceiling the same board buys the build, and the gate it
+    # has to pass on arrival throws it away without ever dispatching it.
+    monkeypatch.setattr(
+        engine, "_speculative_prefetch_ceiling", lambda: engine.speculation_depth)
+    second = _commit_speculative_node(engine)
+    assert second != held
+    assert _fresh(engine, second) is False, "born stale: the width-1 lane already holds one"
+
+    assert anyio.run(engine._drop_stale_speculation) is True
+    state = fold(engine.store.read_all())
+    dead = state.nodes[second]
+    assert dead.status is NodeStatus.failed
+    assert dead.error == CARD_FRESHNESS_SUPERSEDED_ERROR
+    assert dead.error_reason == "superseded"
+    assert dead.never_evaluated is True and dead.eval_started is not True
+    assert state.nodes[held].status is NodeStatus.pending, "the lane kept exactly one"
+
+
+def test_the_raw_proposal_lane_shares_the_prefetch_ceiling(tmp_path):
+    """A refused durable election must not divert the same spend into the raw lane.
+
+    `_card_phase_request_build` falls through to a Researcher proposal + Card staging whenever
+    `_request_card_build` declines. Both of its gates therefore have to read the SAME ceiling, or
+    "do not buy a prefetch the gate must discard" becomes "buy a proposal instead" — the identical
+    paid call one lane over. A negative pin, because what must not come back is the bare depth.
+    """
+
+    source = inspect.getsource(speculation_module.SpeculationMixin._card_phase_request_build)
+    assert "self.speculation_depth" not in source
+    assert source.count("self._speculative_prefetch_ceiling()") == 2
+    election = inspect.getsource(speculation_module.SpeculationMixin._request_card_build)
+    assert "self.speculation_depth" not in election
+    assert "self._speculative_prefetch_ceiling()" in election

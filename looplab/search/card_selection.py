@@ -1021,23 +1021,36 @@ def _score_for_policy(
                       coverage_inputs=coverage_inputs)
 
 
-def _lane_limit(policy: object, remaining: int) -> int:
+def card_lane_width(policy: object) -> int:
+    """How many Cards ONE selection turn may retain, before the remaining budget narrows it.
+
+    Split out of ``_lane_limit`` (which is still the only caller that applies the budget) because a
+    SECOND question needs the same number and cannot ask it through a budget: the Layer-5 producer
+    election has to know how many committed-but-unconsumed prefetches the freshness gate is willing
+    to keep at once.  That ceiling is this width — ``speculative_card_is_fresh`` proves membership in
+    a set this wide, and `_counterfactual_owned_selection_state`'s docstring says so from the other
+    side ("that can retain more than ``card_select_k`` Cards", which is the thing it exists to stop).
+    Electing past it buys a Developer call whose result the gate is then obliged to discard.
+    """
+
     explicit = getattr(policy, "card_select_k", getattr(policy, "card_lane_width", None))
     if explicit is not None:
-        return min(remaining, max(1, _bounded_nonnegative_int(explicit, 1)))
+        return max(1, _bounded_nonnegative_int(explicit, 1))
     name = _builtin_policy_name(policy)
     if name == "GreedyTree":
-        width = 1
-    elif name == "EvolutionaryPolicy":
-        width = _bounded_nonnegative_int(getattr(policy, "elite", 1), 1) or 1
-    elif name == "MCTSPolicy":
-        width = _bounded_nonnegative_int(getattr(policy, "n_seeds", 1), 1) or 1
-    elif name == "ASHAPolicy":
+        return 1
+    if name == "EvolutionaryPolicy":
+        return _bounded_nonnegative_int(getattr(policy, "elite", 1), 1) or 1
+    if name == "MCTSPolicy":
+        return _bounded_nonnegative_int(getattr(policy, "n_seeds", 1), 1) or 1
+    if name == "ASHAPolicy":
         # ASHA's width is derived per current rung by `_asha_lane`; never reuse rung-0 width later.
-        width = 1
-    else:
-        width = 1
-    return min(remaining, width)
+        return 1
+    return 1
+
+
+def _lane_limit(policy: object, remaining: int) -> int:
+    return min(remaining, card_lane_width(policy))
 
 
 def _diversity_key(card: Card) -> tuple[str | None, tuple[int, ...], tuple[str, ...]]:

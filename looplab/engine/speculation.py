@@ -50,6 +50,7 @@ from looplab.search.card_selection import (
     CardResourceEnvelope,
     SpeculativeSelectionContext,
     card_budget_used,
+    card_lane_width,
     speculative_card_actions,
     speculative_card_is_fresh,
     speculative_raw_actions,
@@ -775,6 +776,36 @@ class SpeculationMixin:
         )
         return len(cls._outstanding_requests(state)) + pending
 
+    def _speculative_prefetch_ceiling(self) -> int:
+        """How many unconsumed prefetches this run may HOLD — the depth, narrowed by the lane width.
+
+        THE TWO CEILINGS WERE DIFFERENT NUMBERS AND ONLY ONE OF THEM DECIDED ANYTHING.  AUTO depth is
+        the settled eval width ("one speculative prefetch per concurrent evaluation lane",
+        `_resolve_speculation_depth`), because a prefetch exists to have a node ready when a GPU lane
+        frees.  But what the FRESHNESS gate keeps is set MEMBERSHIP in
+        `speculative_card_selection_set`, and that set is `card_lane_width` wide — 1 for `greedy`,
+        which `speculation_gate.py` makes the only policy speculation ever runs under.  So on a
+        two-lane box the election was licensed to buy two prefetches while the gate was contractually
+        obliged to keep one, and `_drop_stale_speculation` terminalized the loser 0.06 s after its
+        `card_build_done` — a full Developer call, never evaluated.
+
+        MEASURED over every run in `runs/` that emits the `node_eval_started` admission receipt
+        (`rubert-dr-0805`, `rubert-dr-0807`, v2, v6, v7): an election made while the width-1 lane
+        already held an unadmitted prefetch produced 3 builds and superseded 3 of them; elections made
+        with the lane empty produced 30 builds and superseded 2 (both genuine — the board moved during
+        the build, which is what the gate is FOR).  On `rubertlite-dr-unified-v7` the two losers cost
+        ~1 h of Developer wall-clock each and retired their Cards, whose ideas then never ran.
+
+        This narrows only the ELECTION, which decides what happens next.  The discard is a RECORD
+        event and its refund stays exactly as deterministic as it was: nothing here is read by
+        `_drop_stale_speculation`, by `speculative_card_is_fresh` or by the fold.  Nor does it cost
+        overlap — the surplus prefetch was destroyed on arrival, so refusing to buy it removes a
+        payment and no inventory.  A freed eval lane admits the held prefetch, which drops it out of
+        `_speculation_depth_used`'s unconsumed count, and the very next turn elects again.
+        """
+
+        return min(int(self.speculation_depth), card_lane_width(self.policy))
+
     @classmethod
     def _speculative_card_ids(cls, state: RunState) -> set[str]:
         ids = {
@@ -1373,7 +1404,8 @@ class SpeculationMixin:
             or state.stop_requested
             or self._head_request(state) is not None
             or self._speculation_depth_used(
-                state, consumed_inflight=consumed_inflight) >= self.speculation_depth
+                state, consumed_inflight=consumed_inflight)
+            >= self._speculative_prefetch_ceiling()
         ):
             return False
         self._refresh_speculation_budget(state)
@@ -2448,7 +2480,7 @@ class SpeculationMixin:
             and self._speculation_depth_used(
                 current,
                 consumed_inflight=session.eval_inflight,
-            ) < self.speculation_depth
+            ) < self._speculative_prefetch_ceiling()
         ):
             return False
         # `_request_card_build` consults the Card scorer. Drain any newly-stale
@@ -2477,10 +2509,14 @@ class SpeculationMixin:
             proposal_state = fold(proposal_events)
             if (
                 self._head_request(proposal_state) is None
+                # The SAME ceiling as the durable election above, and this half matters most: a
+                # refusal there falls through to here, so leaving the raw lane on the bare depth
+                # would turn "do not buy a prefetch the gate must discard" into "buy a Researcher
+                # proposal and a staged Card instead" — the identical spend one lane over.
                 and self._speculation_depth_used(
                     proposal_state,
                     consumed_inflight=session.eval_inflight,
-                ) < self.speculation_depth
+                ) < self._speculative_prefetch_ceiling()
             ):
                 raw_actions = speculative_raw_actions(
                     proposal_state,
