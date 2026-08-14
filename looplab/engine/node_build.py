@@ -257,7 +257,7 @@ class NodeBuildMixin:
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
-                           source=_OMIT, origin=_OMIT, generation=_OMIT,
+                           source=_OMIT, origin=_OMIT, forked_from=_OMIT, generation=_OMIT,
                            parent_generations=_OMIT, cross_run_receipt=_OMIT,
                            footprint_finalized=_OMIT, speculative=_OMIT,
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
@@ -274,7 +274,8 @@ class NodeBuildMixin:
         data = {"node_id": node_id, "parent_ids": parent_ids, "operator": operator,
                 "idea": idea, "code": code, "files": files}
         for k, v in (("deleted", deleted), ("research_origin", research_origin),
-                     ("source", source), ("origin", origin), ("generation", generation),
+                     ("source", source), ("origin", origin), ("forked_from", forked_from),
+                     ("generation", generation),
                      ("parent_generations", parent_generations),
                      ("cross_run_receipt", cross_run_receipt),
                      ("footprint_finalized", footprint_finalized),

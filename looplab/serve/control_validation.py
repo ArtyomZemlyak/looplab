@@ -49,7 +49,7 @@ from looplab.core.concepts import (
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     CARD_STATEMENT_MAX_CHARS,
-    Idea, IdeaEmission, durable_idea_payload, effective_card_footprint,
+    Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_proposal_digest,
 )
 from looplab.core.redact import redact_secrets
 from looplab.events.comment_projection import (
@@ -240,7 +240,7 @@ class _ControlIntake:
     place) must write the new dict back through `ctx.data` before calling another helper.
     """
 
-    __slots__ = ("srv", "rd", "event_type", "data", "_state")
+    __slots__ = ("srv", "rd", "event_type", "data", "_state", "_tail_seq")
 
     def __init__(self, srv, rd: Path, event_type: str, data: dict):
         self.srv = srv
@@ -248,11 +248,26 @@ class _ControlIntake:
         self.event_type = event_type
         self.data = data
         self._state = None
+        self._tail_seq = None
 
     def state(self):
         if self._state is None:
             self._state = self.srv.state(self.rd)
         return self._state
+
+    def tail_seq(self) -> int:
+        """The seq of the last event currently in the log, or -1 for an empty one.
+
+        LAZY and deliberately separate from `state()`: it costs a second read of `events.jsonl`, so
+        only the one rule that needs it pays (`_normalize_fork_receipt`, bounding the vantage point
+        an operator claims to have branched from). It reads through `srv.events` — the same seam
+        `routers/control.py` computes its pre-normalization approval baseline from — rather than
+        deriving a tail from the folded state, which does not carry one.
+        """
+        if self._tail_seq is None:
+            events = self.srv.events(self.rd)
+            self._tail_seq = events[-1].seq if events else -1
+        return self._tail_seq
 
     def strict_integer(self, value, name: str) -> int:
         if isinstance(value, bool):
@@ -709,6 +724,101 @@ def _relative_file_name(value, field: str) -> str:
     return portable
 
 
+# The fields a CLIENT may author on `forked_from`.  The receipt's other two keys are STAMPED by the
+# server from state it holds, and a payload that supplies either is REFUSED rather than overwritten:
+# "what the operator changed" is the whole point of the receipt, so it must be a fact the server
+# derived, not a claim the browser made about itself.  (Same rule, same reason, as the Card controls'
+# server-stamped provenance a few tables down.)
+_FORK_RECEIPT_CLIENT_FIELDS = frozenset({"node_id", "generation", "observed_seq"})
+_FORK_RECEIPT_SERVER_FIELDS = frozenset({"changed_fields", "base_idea_digest"})
+
+
+def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> dict:
+    """Validate + stamp the "this node was forked from #P, and here is what I changed" receipt.
+
+    WHY THIS IS NOT A TAIL CAS (the question `routers/control.py`'s approval baseline raises).  An
+    approval decision means "accept the gate that is open RIGHT NOW", so it has to be bound to the
+    exact tail the normalizer folded — a replacement request would otherwise be granted by a click
+    aimed at its predecessor.  A fork-from-a-snapshot is the opposite shape: the operator's whole
+    intent travels in the payload (their edited idea verbatim, the parent named by id, that parent's
+    lifecycle generation), so it means the same thing at seq N and at the live tail *provided its
+    named parent is still the one they saw*.  That is a CONTENT compare-and-swap and
+    `_normalize_inject_node`'s `parent_generations` block already performs it — refusing a
+    tombstoned/aborted parent (409) and a parent whose `attempt` has moved (409 `stale parent #P`).
+    A tail CAS here would be strictly worse than useless: an unrelated append (a metric row, an
+    LLM-accounting row — a live run appends several per second) would refuse a fork whose meaning
+    nothing had touched, so the operator would be told to retry until they happened to win a race.
+
+    What the seq IS for: `observed_seq` records the VANTAGE POINT the operator branched from, so the
+    log says which projection of the run they were reading.  It is bounded by the current tail so it
+    can never name a state that does not exist, and it fences nothing.
+
+    The two stamped fields make the lineage checkable rather than asserted.  `base_idea_digest` is
+    minted here from the live parent's own Idea, and `changed_fields` is this server's comparison of
+    the submitted Idea against it — a fact about two objects the server holds, which is why neither
+    may arrive from the client.  Note that a node's idea CAN drift inside one `attempt`
+    (`replay.py::_on_node_repaired` rewrites `idea.footprint` on a pending node without bumping the
+    generation), so the digest is not a redundant re-spelling of the generation CAS.
+    """
+    receipt = ctx.data.get("forked_from")
+    if not isinstance(receipt, dict):
+        raise HTTPException(400, "forked_from must be a JSON object")
+    forged = _FORK_RECEIPT_SERVER_FIELDS & set(receipt)
+    if forged:
+        raise HTTPException(400, {
+            "code": "fork_receipt_forged",
+            "message": (f"forked_from.{'/'.join(sorted(forged))} is derived by the server and "
+                        f"must not be supplied"),
+            "remediation": "submit only node_id, generation and observed_seq",
+        })
+    unknown = set(receipt) - _FORK_RECEIPT_CLIENT_FIELDS
+    if unknown:
+        raise HTTPException(
+            400, f"forked_from has unknown field(s): {', '.join(sorted(unknown))}")
+    missing = sorted(_FORK_RECEIPT_CLIENT_FIELDS - set(receipt))
+    if missing:
+        raise HTTPException(400, f"forked_from is missing: {', '.join(missing)}")
+    source_id = ctx.strict_integer(receipt["node_id"], "forked_from.node_id")
+    source = ctx.state().nodes.get(source_id)
+    if source is None:
+        raise HTTPException(404, f"no node #{source_id} in this run")
+    # The node a fork DERIVES from is the node it hangs under. Allowing a receipt naming some other
+    # node would let the record claim a lineage the DAG does not have, which is exactly the thing
+    # doc 36 asks this receipt to make exact.
+    if source_id not in parents:
+        raise HTTPException(400, {
+            "code": "fork_parent_mismatch",
+            "message": f"forked_from names #{source_id}, which is not a parent of this experiment",
+            "remediation": "branch from a node you also pass as the parent",
+        })
+    generation = ctx.strict_integer(receipt["generation"], "forked_from.generation")
+    if generation != source.attempt:
+        # Reachable independently of the parent_generations CAS above only through a hand-built
+        # payload; kept explicit so the refusal names the receipt the caller actually got wrong.
+        raise HTTPException(
+            409, f"stale parent #{source_id}: current generation is {source.attempt}")
+    observed_seq = ctx.strict_integer(receipt["observed_seq"], "forked_from.observed_seq")
+    tail = ctx.tail_seq()
+    if observed_seq < 0 or observed_seq > tail:
+        raise HTTPException(400, {
+            "code": "fork_observed_seq_out_of_range",
+            "message": f"forked_from.observed_seq {observed_seq} is not a seq this run has reached",
+            "remediation": f"branch from a snapshot between seq 0 and seq {tail}",
+        })
+    base = source.idea
+    changed = sorted(field for field in Idea.model_fields
+                     if getattr(idea, field, None) != getattr(base, field, None))
+    return {
+        "node_id": source_id,
+        "generation": generation,
+        "observed_seq": observed_seq,
+        # None when the parent's Idea exceeds the versioned identity's bounds — an honest "no digest
+        # could be minted" beats a fallback rendering two different ideas could both claim.
+        "base_idea_digest": idea_proposal_digest(base),
+        "changed_fields": changed,
+    }
+
+
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data = ctx.data
     if data.get("source_run") and data.get("source_node") is not None:
@@ -821,6 +931,21 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     origin = data.get("origin")
     if origin is not None and not isinstance(origin, dict):
         raise HTTPException(400, "origin must be a JSON object or null")
+    # `forked_from` is deliberately its OWN key and not a corner of `origin`: `origin` means
+    # CROSS-RUN seeding ({"run_id","node_id","metric"}) and `routers/reviews.py::_SUMMARY_OMIT_KEYS`
+    # drops it from every review capability for exactly that reason — "a review link is a capability
+    # over ONE run, so it must not disclose the PORTFOLIO". An in-run fork receipt is the opposite:
+    # it is within-run provenance a one-run bearer was already granted, the same distinction that
+    # keeps `research_origin` out of that omit set.
+    if "forked_from" in data:
+        if data["forked_from"] is None:
+            # An explicit null is ABSENT, not "a receipt whose value is null". Popping keeps the
+            # durable event byte-identical to an ordinary inject rather than writing a key the fold
+            # would read back as `Node.forked_from = None` anyway — a durable row that looks like a
+            # branch and carries no lineage is the one shape this receipt must never have.
+            data.pop("forked_from")
+        else:
+            data["forked_from"] = _normalize_fork_receipt(ctx, parents, normalized_idea)
     return data
 
 
@@ -1372,6 +1497,10 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_FORK: frozenset({"from_node_id", "generation"}),
     EV_INJECT_NODE: frozenset({
         "idea", "parent_id", "parent_ids", "parent_generations", "code", "files", "deleted", "origin",
+        # The operator's fork-from-a-snapshot receipt (`_normalize_fork_receipt`): which node this
+        # idea was branched FROM, at which lifecycle generation, from which observed seq — plus the
+        # two SERVER-STAMPED fields that make "what the operator changed" checkable.
+        "forked_from",
         "source_run", "source_node"}),
     EV_DEEP_RESEARCH: frozenset(),
     EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),

@@ -236,6 +236,15 @@ export const CONTROL = {
       parent_generations: parent_id != null && parent_generation != null
         ? { [parent_id]: parent_generation } : undefined,
     }),
+  // Fork-to-branch: the operator branches from an experiment they are reading — usually in a
+  // HISTORICAL snapshot — with its idea EDITED. Deliberately `inject_node` and not `fork`: `fork`
+  // asks the Researcher to improve a node and carries no idea at all, while an operator-authored
+  // idea with a parent and a parent-generation CAS is exactly what inject_node already transports.
+  // `payload` comes from `forkFromSeqModel.js::buildForkPayload` whole, so the generation fenced
+  // here is the one the operator SAW; the server validates `forked_from` and stamps its two derived
+  // fields (see `control_validation.py::_normalize_fork_receipt`). Never hand-build this body: the
+  // receipt and the CAS must carry ONE generation, which is the model's invariant, not this call's.
+  forkFrom: (rid, payload) => runCommand(rid, 'inject_node', payload),
   reopen: (rid) => runCommand(rid, 'run_reopened', {}),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).

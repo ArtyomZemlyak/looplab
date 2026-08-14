@@ -86,7 +86,12 @@ _REVIEW_NODE_KEYS = {
     # `origin` is deliberately ABSENT: it names a sibling run (see `_SUMMARY_OMIT_KEYS`), and this
     # route's closing `_scrub_json` carries no omit set, so allow-listing it here would disclose the
     # portfolio through the evidence scope even though the summary scope denies it.
-    "failed_stage", "attempt", "research_origin",
+    # `forked_from` joins `research_origin` on the WITHIN-run side of that same line: it names a node
+    # id, a generation, an observed seq, an idea digest and the Idea field names the operator edited
+    # — every one of them about THIS run, which a one-run bearer was already granted through
+    # `parent_ids` and `idea`. Withholding it would hide from a reviewer that a human authored this
+    # experiment's idea by editing another node's, which is provenance the review exists to carry.
+    "failed_stage", "attempt", "research_origin", "forked_from",
 }
 
 

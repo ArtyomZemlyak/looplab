@@ -799,6 +799,14 @@ class Node(BaseModel):
     # `import` inject). {"run_id","node_id","metric"} of the source. None for ordinary nodes. Audit/UI
     # only — eval/confirmation/best-selection treat it exactly like any other injected node.
     origin: Optional[dict] = None
+    # IN-run fork provenance (docs/36): set when an OPERATOR branched this node off an existing one
+    # and edited its idea — typically from a historical snapshot, where the node they were reading is
+    # not the node the live tail holds. {"node_id","generation","observed_seq","base_idea_digest",
+    # "changed_fields"} — see `serve/control_validation.py::_normalize_fork_receipt` for which of
+    # those the operator supplies and which the server derives. Deliberately NOT `origin`, which
+    # means a SIBLING RUN and is redacted from every review capability for that reason. Audit/UI
+    # only; eval/confirmation/best-selection treat the node like any other injected one.
+    forked_from: Optional[dict] = None
     # Deep-research provenance: set when this node was proposed right after a deep-research memo (its
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
