@@ -277,6 +277,61 @@ def guard_calibrated_role_factory(engine, task) -> None:
     engine.role_factory = _calibrated_role_factory
 
 
+def _receipt_refusal_detail(receipt_path, validated) -> str:
+    """Why the calibrated toy lane is about to refuse this run — a suffix, never a decision.
+
+    The refusal above states a DISJUNCTION ("stale, invalid, non-GPU, policy-mismatched, or does not
+    pass the current gates") and, for an operator, that is five different problems wearing one
+    sentence. Measured on this box's own 2026-08-04 receipt: it had been revoked along FOUR
+    independent axes at once (the `Settings` field set the archived config snapshots are compared
+    against, the installed-distribution fingerprint, the whole-source implementation digest, and the
+    visible GPU inventory), and two agents inspecting the code that week each named the source
+    digest as the cause because nothing could be asked which one had moved.
+
+    Two cases, and they are genuinely different questions. A receipt that did not REVALIDATE is
+    diagnosed by re-running the ordered checklist that rejected it — a second derivation, taken only
+    here, on a path that is already raising and ending the run, so the admitting path is unchanged.
+    A receipt that revalidated and then failed a LANE requirement is diagnosed locally: nothing
+    expensive is involved, the mismatch is a field compare.
+
+    Never raises: a diagnostic that can abort the refusal it is explaining would replace a stated
+    refusal with a traceback.
+    """
+    try:
+        if validated is None:
+            from looplab.search.speculation_quality import (
+                speculation_gate_receipt_rejection,
+            )
+            reason = speculation_gate_receipt_rejection(receipt_path)[1]
+        else:
+            reason = next(
+                (
+                    text for ok, text in (
+                        (validated.get("require_gpu") is True,
+                         "the receipt was not measured with require_gpu"),
+                        (bool(validated.get("gpu_inventory")),
+                         "the receipt carries no GPU inventory"),
+                        (validated.get("policy_scope") == SPECULATION_POLICY_SCOPE,
+                         f"receipt policy scope is {validated.get('policy_scope')!r}, "
+                         f"expected {SPECULATION_POLICY_SCOPE!r}"),
+                        (validated.get("calibration_profile_digest")
+                         == SPECULATION_CALIBRATION_PROFILE_DIGEST,
+                         "receipt calibration profile digest is not this build's"),
+                        (validated.get("workload_scope") == "quadratic_toy",
+                         f"receipt workload scope is {validated.get('workload_scope')!r}, "
+                         "expected 'quadratic_toy'"),
+                        (isinstance(validated.get("implementation_digest"), str)
+                         and bool(validated.get("implementation_digest")),
+                         "receipt carries no implementation digest"),
+                    ) if not ok
+                ),
+                "",
+            )
+    except Exception:
+        return ""
+    return f" — {reason}" if reason else ""
+
+
 def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None:
     """Decide, once, which speculation lane this construction is entitled to, and stamp its identity.
 
@@ -422,6 +477,13 @@ def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None
                 speculation_task_profile_digest,
                 validated_speculation_gate_receipt,
             )
+            # STAYS `validated_speculation_gate_receipt`, deliberately. It is a monkeypatch SEAM
+            # roughly a dozen tests reach through, and calling the reason-returning sibling here
+            # instead resolves the real function while every `monkeypatch.setattr(quality,
+            # "validated_speculation_gate_receipt", …)` silently stops reaching the engine — the
+            # narrowing CLAUDE.md names for the `fold` seam, one module over. The diagnosis is taken
+            # on the REFUSAL path only (`_receipt_refusal_detail`), which is already fatal, so the
+            # admitting path pays for exactly one derivation as before (doc 25 SE-01).
             _gate_receipt = validated_speculation_gate_receipt(
                 engine.speculation_gate_receipt,
             )
@@ -441,6 +503,8 @@ def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None
                         "speculation_gate_receipt is stale, invalid, non-GPU, "
                         "policy-mismatched, or does not pass the current "
                         "scorer/search-quality gates"
+                        + _receipt_refusal_detail(
+                            engine.speculation_gate_receipt, _gate_receipt)
                     )
                 _gate_receipt = None
         if _calibrated_replay and _gate_receipt is not None:
@@ -467,10 +531,45 @@ def admit_speculation_lane(engine, rt: CalibrationRuntime, gate_receipt) -> None
                 or _gate_receipt.get("task_profile_sha256")
                 != speculation_task_profile_digest(task)
             ):
+                # `runtime_errors` is the per-rule truth table `narrow_runtime_envelope_errors`
+                # already computed and this refusal used to throw away, and the four receipt-vs-run
+                # comparisons above are facts this frame is holding both sides of. Without them an
+                # operator whose `max_nodes` was off by one read the same sentence as one whose
+                # receipt had expired. Reported, never consulted: the condition above is unchanged,
+                # and every term below is already in hand — nothing is re-derived to say it.
+                # The condition above is an `or` chain, so a truthy `runtime_errors` SHORT-CIRCUITS
+                # before `speculation_task_profile_digest(task)` — which RAISES on a non-canonical
+                # ToyTask, and that raise is a different, more specific refusal the envelope is
+                # meant to surface. Re-deriving it eagerly here to describe the failure would
+                # replace that refusal with this one, so the term is resolved defensively and simply
+                # drops out of the description when it cannot be computed.
+                try:
+                    _task_profile = speculation_task_profile_digest(task)
+                except Exception:
+                    _task_profile = _gate_receipt.get("task_profile_sha256")
+                mismatches = [
+                    text for ok, text in (
+                        (type(_gate_receipt.get("admitted_depth")) is int
+                         and _gate_receipt.get("admitted_depth") == engine.speculation_depth,
+                         f"receipt admitted depth {_gate_receipt.get('admitted_depth')!r}, "
+                         f"this run requests {engine.speculation_depth!r}"),
+                        (type(_gate_receipt.get("admitted_max_nodes")) is int
+                         and _gate_receipt.get("admitted_max_nodes") == max_nodes,
+                         f"receipt admitted max_nodes "
+                         f"{_gate_receipt.get('admitted_max_nodes')!r}, "
+                         f"this run requests {max_nodes!r}"),
+                        (_gate_receipt.get("runtime_scope_sha256") == expected_runtime_scope,
+                         "receipt runtime scope digest is not this runtime's"),
+                        (_gate_receipt.get("task_profile_sha256") == _task_profile,
+                         "receipt task profile digest is not this task's"),
+                    ) if not ok
+                ]
+                detail = [*runtime_errors, *mismatches]
                 raise ConfigRefusal(
                     "speculation_gate_receipt is stale, invalid, non-GPU, "
                     "policy/depth-mismatched, runtime-scope/max-nodes-mismatched, or does "
                     "not pass the current scorer/search-quality gates"
+                    + (" — " + "; ".join(detail) if detail else "")
                 )
             guard_calibrated_role_factory(engine, task)
             engine._speculation_runtime_scope_sha256 = expected_runtime_scope

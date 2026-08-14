@@ -2036,3 +2036,132 @@ def test_the_receipt_lists_its_refusals_in_phase_order(_stable_scorer_gate):
     ]
     assert _stable_scorer_gate == [True], (
         "the scorer matrix is reached even when the pair input never parses")
+
+
+# ------------------------------------------------------------------ why a receipt was refused
+
+def _rejection(receipt, **kwargs):
+    kwargs.setdefault("gpu_inventory", _GPU)
+    kwargs.setdefault("implementation_digest_fn", _IMPL_A)
+    kwargs.setdefault("environment_fingerprint", _ENV)
+    return quality.speculation_gate_receipt_rejection(receipt, **kwargs)
+
+
+def test_a_valid_receipt_is_returned_with_no_rejection_reason(tmp_path):
+    receipt = _write_receipt(tmp_path / "receipt.json", _pairs(tmp_path / "runs"))
+    validated, reason = _rejection(receipt)
+
+    assert validated is not None
+    assert reason == ""
+    # The verdict IS the boolean validator's, not a second opinion beside it.
+    assert _validated(receipt) == validated
+    assert _validate(receipt) is True
+
+
+@pytest.mark.parametrize("mutate,expected", [
+    (lambda r: r.update(implementation_digest=_IMPL_B()), "implementation digest moved"),
+    (lambda r: r.update(environment_sha256="sha256:" + "9" * 64), "environment fingerprint moved"),
+    (lambda r: r.update(workload_scope="arbitrary"), "receipt workload scope is 'arbitrary'"),
+    (lambda r: r.update(policy_scope="beam"), "receipt policy scope is 'beam'"),
+    (lambda r: r.update(calibration_seeds=[0, 1, 3]), "calibration seeds differ"),
+    (lambda r: r.update(admitted_depth=0), "admitted_depth is not an integer in 1..64"),
+    (lambda r: r.update(admitted_max_nodes=999), "admitted_max_nodes is not an integer in 1..64"),
+    (lambda r: r.update(task_profile_sha256="nope"), "task_profile_sha256 is not a SHA-256"),
+    (lambda r: r.update(runtime_scope_sha256="nope"), "runtime_scope_sha256 is not a SHA-256"),
+    (lambda r: r.update(schema="looplab.speculation-quality-gate/v0"), "receipt schema is"),
+    (lambda r: r.update(thresholds={}), "thresholds differ from the shipped fixed thresholds"),
+    (lambda r: r.update(pairs=[]), "one evidence pair per calibration seed"),
+    (lambda r: r.pop("aggregates"), "field set differs from the current schema"),
+])
+def test_each_rejected_invariant_names_ITSELF_rather_than_answering_none(
+        tmp_path, mutate, expected):
+    """A refusal that cannot say what moved is a refusal nobody can act on.
+
+    Every branch below used to return a bare `None`. Two agents reading this module in the same
+    week each concluded the SOURCE DIGEST was why this box's receipt was dead; it was one of four
+    independent identities that had moved, and the only way to find that out was to bisect the
+    validator by hand. The reason is diagnostic only — the verdict is asserted unchanged beside it.
+    """
+    receipt = _write_receipt(tmp_path / "receipt.json", _pairs(tmp_path / "runs"))
+    mutate(receipt)
+    receipt["self_digest"] = quality._self_digest(receipt)
+
+    validated, reason = _rejection(receipt)
+
+    assert validated is None
+    assert _validate(receipt) is False, "the verdict must not move because a reason exists"
+    assert expected in reason, f"reason did not name the failed invariant: {reason!r}"
+
+
+def test_a_self_digest_that_does_not_cover_its_body_says_so(tmp_path):
+    receipt = _write_receipt(tmp_path / "receipt.json", _pairs(tmp_path / "runs"))
+    receipt["admitted_depth"] = 2                                  # digest NOT recomputed
+
+    validated, reason = _rejection(receipt)
+    assert validated is None
+    assert "self_digest does not cover its own body" in reason
+
+
+def test_the_recomputations_own_errors_reach_the_reason(tmp_path):
+    """The failure this module can least repair, and the one that was invisible.
+
+    The archived `config.snapshot.json` files are compared against the CURRENT `Settings` field set
+    (`_validate_calibration_setup`), so every field added to `Settings` permanently revokes evidence
+    already written to disk — an axis no change to the source digest can influence. Driven here by
+    removing one key from a stored snapshot, which is the same shape as the field set moving on.
+    """
+    pairs = _pairs(tmp_path / "runs")
+    receipt = _write_receipt(tmp_path / "receipt.json", pairs)
+    config_path = pairs[0][0] / "config.snapshot.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.pop(sorted(config)[0])
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    validated, reason = _rejection(receipt)
+    assert validated is None
+    assert "recomputation from the receipt's own run directories disagrees" in reason
+    assert "config fields differ from the exact calibration snapshot" in reason
+
+
+def test_an_unreadable_receipt_names_its_exception_instead_of_vanishing(tmp_path):
+    validated, reason = _rejection(tmp_path / "does-not-exist.json")
+    assert validated is None
+    assert "could not be revalidated" in reason
+
+
+def test_the_reason_is_bounded_because_it_reaches_an_operator_facing_refusal(tmp_path):
+    """`ConfigRefusal` prints this string. An unbounded recomputation report would put a whole
+    gate body into one terminal line."""
+    pairs = _pairs(tmp_path / "runs")
+    receipt = _write_receipt(tmp_path / "receipt.json", pairs)
+    (pairs[0][0] / "config.snapshot.json").write_text("{}", encoding="utf-8")
+
+    _validated_receipt, reason = _rejection(receipt)
+    assert 0 < len(reason) <= 600
+
+
+def test_a_reason_costs_no_second_derivation_of_either_expensive_identity(tmp_path):
+    """doc 25 SE-01, restated for the diagnostic: the reason travels WITH the verdict.
+
+    A caller that validated and then re-asked "but why?" would re-parse every shipped `.py` and
+    re-read all six run directories a second time. Counting seams prove one derivation each even on
+    the REFUSING path, which is the path that produces a reason.
+    """
+    receipt = _write_receipt(tmp_path / "receipt.json", _pairs(tmp_path / "runs"))
+    receipt["admitted_max_nodes"] = 3
+    receipt["self_digest"] = quality._self_digest(receipt)
+
+    impl_calls, env_calls = [], []
+
+    def counted_impl():
+        impl_calls.append(True)
+        return _IMPL_A()
+
+    def counted_env():
+        env_calls.append(True)
+        return dict(_ENV)
+
+    validated, reason = _rejection(
+        receipt, implementation_digest_fn=counted_impl, environment_fingerprint=counted_env)
+    assert validated is None and reason
+    assert impl_calls == [True] and env_calls == [True]
