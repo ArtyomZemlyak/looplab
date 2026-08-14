@@ -13,7 +13,7 @@ import { OpIcon } from './icons.jsx'
 import {
   ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED, comparisonScope, filterRuns,
   indexProjects, effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, selectionNotice,
-  sortRuns,
+  sortRuns, sourceIncomplete, sourceIntegrityNotice,
 } from './runIndex.js'
 import { defaultCollapsedClusters } from './runMapModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
@@ -2869,6 +2869,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 <div className="goal">{r.goal}</div>
               </a>
               <div className="run-card-metrics" style={{ textAlign: 'right' }}>
+                {/* The receipt goes ABOVE the numbers it qualifies, not below them: `best` and
+                    `nodes` are folded from the readable prefix, and on a truncated log they are a
+                    different, entirely plausible run (measured: `nodes: 2, best 0.8077` for a run
+                    whose own budget row says 81 nodes). `role="status"` so a screen reader reaches
+                    it in the same order a sighted reader does. */}
+                {sourceIncomplete(r) && <div className="pill warn" role="status"
+                  title={sourceIntegrityNotice(r)}>incomplete record</div>}
                 <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
                 <div className="muted">{r.nodes} nodes · {r.direction}</div>
                 {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is

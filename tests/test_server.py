@@ -506,9 +506,15 @@ def test_terminal_lifecycle_probe_matches_state_without_shipping_folded_payload(
         "schema": 1,
         "seq": state["seq"],
         "event_count": state["event_count"],
+        # The probe's job is to let an idle client decide whether to reopen the stream, and
+        # `event_count` is exactly the number a truncated log understates — so the integrity receipt
+        # travels with it (tests/test_seq_gap_visibility.py). Taken from `state` rather than pinned
+        # literally: this asserts the two envelopes cannot come to disagree about the same file.
+        "source_integrity": state["source_integrity"],
         "generation": state["generation"],
         "engine_running": state["state"]["engine_running"],
     }
+    assert probe.json()["source_integrity"]["complete"] is True   # this fixture's log is intact
     assert "state" not in probe.json()
 
 
@@ -2186,8 +2192,17 @@ def test_settings_and_run_config_openapi_contracts_preserve_legacy_runtime(tmp_p
     state_envelope = components["PublicRunStateResponse"]
     assert state_envelope["additionalProperties"] is False
     assert set(state_envelope["required"]) == {
-        "state", "seq", "max_seq", "event_count", "generation",
+        "state", "seq", "max_seq", "event_count", "generation", "source_integrity",
     }
+    # REQUIRED, not optional, and typed rather than an additive key inside the extensible `state`
+    # body: it qualifies every number in this envelope, and a receipt a client may find missing is
+    # one a client will learn to skip. `additionalProperties: false` on the receipt itself keeps its
+    # own shape closed (tests/test_seq_gap_visibility.py drives what it says).
+    integrity = components["RunSourceIntegrity"]
+    assert integrity["additionalProperties"] is False
+    assert set(integrity["required"]) == {"complete"}
+    assert {"complete", "good_records", "corrupt_line", "dropped_lines",
+            "unreadable"} == set(integrity["properties"])
     state_body = components["PublicRunStateBody"]
     assert state_body["additionalProperties"] is True
     assert {"cards", "cards_projection"} <= set(state_body["required"])

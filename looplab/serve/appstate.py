@@ -29,7 +29,7 @@ from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.authoring_projection import card_authoring
-from looplab.events.eventstore import iter_event_jsonl
+from looplab.events.eventstore import integrity_wire, iter_event_jsonl, log_integrity
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED
 from looplab.serve.deletion_transaction import (
@@ -138,6 +138,12 @@ class AppState:
         # state_payload concurrently on the threadpool, and `pop(next(iter(dict)))` on a dict another
         # thread is inserting into raises "dictionary changed size during iteration" (a 500).
         self._state_cache_lock = threading.Lock()
+        # Per-run event-log INTEGRITY receipt, keyed by the same `file_identity` (see `log_integrity`).
+        # Deliberately a separate map from `_state_cache`: that one is keyed by (run, identity, seq,
+        # audience) and holds four entries per run, while this answers ONE question about the file and
+        # is read by the run LIST too — which never builds a state payload at all. Shares
+        # `_state_cache_lock` because both are small dict ops under the same reader fan-out.
+        self._integrity_cache: dict[str, tuple] = {}
         # Run-level light trace-view cache keyed by (spans.jsonl, events.jsonl) file identity. The Dock
         # refetches /trace on every node add/settle and polls it while a node builds; without this each
         # fetch rebuilt the view. Combined with the span index (which makes the span read O(new spans)),
@@ -241,6 +247,51 @@ class AppState:
             evs = [e for e in evs if e.seq <= upto_seq]
         return evs
 
+    def log_integrity(self, rd: Path) -> dict:
+        """Is the prefix `events()` just returned the WHOLE log? — cached per file identity.
+
+        `events()` reads through `iter_event_jsonl`, which STOPS at the first corrupt or non-dense
+        record and reports nothing, and this class never builds an `EventStore` — so until 2026-08-14
+        the divergence receipt was structurally unreachable from every HTTP surface: `/api/runs`,
+        `/state`, the SSE stream, `/lifecycle`, `/nodes`, `/prov`, `/cost`, the review payload, the
+        assistant's run context and the whole TUI. `runs/rubertlite-dense-retrieval` is what that
+        costs: a 1,624-record log served as a confident 20-event run with `nodes: 2`.
+        (Three surfaces had already solved it in isolation and each with its own vocabulary — the
+        ConceptFrame's `source_integrity`, the attention feed's omit-and-flag, `RunStateCache`'s
+        `[PARTIAL SOURCE]` note. This publishes the ConceptFrame's spelling from the SHARED reader so
+        a fourth does not appear, and `eventstore.log_integrity` is the one derivation all of them
+        can reach.)
+
+        Keyed by `file_identity` exactly like `summary_cache`/`_state_cache`, so a finished run pays
+        the scan once and a live run pays it on the same ticks it already re-folds on. Cost, measured
+        on the corpus: 62 ms for the 12 MB rubertlite log and 33 ms for the 5.2 MB `rubert-dr-0807` —
+        at or below the `iter_event_jsonl` + `Event(**o)` pass this sits beside (3.5 ms / 44 ms), and
+        a divergent log stops the scan at its boundary rather than reading on.
+        """
+        log = rd / "events.jsonl"
+        try:
+            sig = file_identity(log.stat())
+        except OSError:
+            # No stat means no cache key, so answer uncached rather than not answering. `log_integrity`
+            # decides: a path that cannot be scanned is `unreadable` (the direction that fails toward
+            # "we cannot show you this run"), while an ABSENT log is `complete` — nothing was read, so
+            # nothing is claimed, which is `log_divergence`'s own rule and unreachable from here
+            # anyway (`run_dir` 404s and `run_summaries` skips a directory with no log).
+            return integrity_wire(log_integrity(log))
+        with self._state_cache_lock:
+            hit = self._integrity_cache.get(str(rd))
+            if hit is not None and hit[0] == sig:
+                return dict(hit[1])
+        # Widened to the fixed wire shape HERE, at the one point every HTTP surface reads through, so
+        # `/state`, `/lifecycle`, the run list, `/cost` and `/log-page` cannot publish two shapes for
+        # one file. The Python receipt stays minimal for the text surfaces that only read it.
+        receipt = integrity_wire(log_integrity(log))
+        with self._state_cache_lock:
+            self._integrity_cache[str(rd)] = (sig, receipt)
+            if len(self._integrity_cache) > 512:
+                self._integrity_cache.pop(next(iter(self._integrity_cache)))
+        return dict(receipt)
+
     def state(self, rd: Path):
         """`fold(self.events(rd))` — the routers' one-line state hydration (previously spelled out
         at ~16 call sites). DELIBERATELY uncached: engine invariant #4 (state is only observed via
@@ -280,8 +331,10 @@ class AppState:
                 # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
                 # hybrid object that is neither historical nor live.
                 out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
+                out["source_integrity"] = self.log_integrity(rd)
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
                         "event_count": event_count,
+                        "source_integrity": self.log_integrity(rd),
                         RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
         generation = run_generation_token(all_evs)
@@ -378,13 +431,28 @@ class AppState:
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
         d["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
+        # MIRRORED into the projection as well as onto the envelope, and stamped in both the miss and
+        # the hit path exactly like `engine_running`. The envelope is the canonical position (it is a
+        # fact about the RECORD), but `state` is the object every browser consumer actually receives —
+        # `useRunState` publishes the folded snapshot and not the frame around it — and a receipt that
+        # does not travel with the thing it qualifies is a receipt nobody reads. Not stored in the
+        # cache tuple: the receipt is keyed on the FILE, so a repair must be observed on the next tick
+        # rather than inherited from a cached body.
+        d["source_integrity"] = self.log_integrity(rd)
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
             with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
                 self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
                 if len(self._state_cache) > 256:  # bound the cache (many runs / seq points / session)
                     self._state_cache.pop(next(iter(self._state_cache)))
+        # The receipt rides on the ENVELOPE beside `event_count`, not inside the folded `state`: it is
+        # a fact about the RECORD, not about the run, and it must stay true for a historical
+        # `upto_seq` fold too — an operator scrubbed to seq 12 of a truncated log is looking at a
+        # prefix of a prefix. It is re-read on the cache hit above rather than stored in the cache
+        # tuple for the same reason `engine_running` is: it is keyed on the file, not on (file, seq,
+        # audience), so one map answers every entry and a repair between ticks is observed.
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
+                "source_integrity": self.log_integrity(rd),
                 RUN_GENERATION_FIELD: generation or None}
 
     def state_probe(self, rd: Path) -> dict:
@@ -401,6 +469,11 @@ class AppState:
             "schema": 1,
             "seq": payload.get("seq", -1),
             "event_count": payload.get("event_count"),
+            # Carried into the probe as well: this envelope's whole job is to let an idle client
+            # decide whether to reopen the stream, and its `event_count` is the number a truncated
+            # log understates. A probe that reports `event_count: 20` with no receipt is the same
+            # confident partial view one endpoint over.
+            "source_integrity": payload.get("source_integrity"),
             RUN_GENERATION_FIELD: payload.get(RUN_GENERATION_FIELD),
             "engine_running": state.get("engine_running"),
         }

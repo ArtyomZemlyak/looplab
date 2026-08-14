@@ -23,7 +23,8 @@ import typer
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
-from looplab.cli import _RUN_DIR_HINT, _print_result, _require_run_dir, app
+from looplab.cli import (
+    _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
 
 
 @app.command()
@@ -221,7 +222,13 @@ def timings(run_dir: Path = typer.Argument(...),
     wall = None
     budget_elapsed = None
     if ev_path.exists():
-        events = EventStore(ev_path).read_all()
+        store = EventStore(ev_path)
+        # The event log is this command's DENOMINATOR (first->last ts). A truncated prefix makes every
+        # percentage here a percentage of a run that is not the one on disk — on
+        # `rubertlite-dense-retrieval` the readable prefix ends 9 days before the log's last row — so
+        # the receipt is stated before any number derived from it.
+        _echo_log_integrity(store, run_dir)
+        events = store.read_all()
         wall = run_wall_clock_seconds(events)
         for e in events:                      # the durable receipt, for cross-check (last one wins)
             if e.type == EV_BUDGET:
@@ -350,7 +357,14 @@ def inspect(run_dir: Path = typer.Argument(...)):
     if snap.exists():
         typer.echo(snap.read_text(encoding="utf-8"))
     if events.exists():
-        _print_result(fold(EventStore(events).read_all()))
+        # This command cannot route through `_require_run_dir` (its input may be a config snapshot
+        # with no event log at all), so it states the SAME receipt from the store it opens anyway —
+        # `EventStore.__init__` has already scanned, so this costs nothing. Without it `inspect`
+        # printed a folded "current best result" derived from a 20-record prefix of a 1,624-record
+        # log and called it the run's result.
+        store = EventStore(events)
+        _echo_log_integrity(store, run_dir)
+        _print_result(fold(store.read_all()))
 
 
 @app.command()

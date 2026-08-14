@@ -214,6 +214,26 @@ class PublicRunStateBody(BaseModel):
     cards_projection: PublicCardsProjectionMetadata
 
 
+class RunSourceIntegrity(BaseModel):
+    """Whether the fold behind this payload saw the WHOLE event log (`eventstore.log_integrity`).
+
+    A TYPED field on the envelope and not an additive key inside `state`, because it qualifies every
+    number in the response — `event_count`, `seq`, and every node/metric/cost figure the fold derived
+    — and a receipt an `extra="allow"` body could silently stop carrying is a receipt that will one
+    day silently stop being sent. All four detail keys are always on the wire (null when the log is
+    complete) so a client never has to distinguish "absent because healthy" from "absent because this
+    server does not send it": the latter has NO `source_integrity` object at all.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    complete: bool
+    good_records: Optional[int] = Field(default=None, ge=0)
+    corrupt_line: Optional[int] = Field(default=None, ge=1)
+    dropped_lines: Optional[int] = Field(default=None, ge=0)
+    unreadable: Optional[bool] = None
+
+
 class PublicRunStateResponse(BaseModel):
     """Stable owner-state envelope; ``state`` keeps additive legacy fields discoverable at runtime."""
 
@@ -223,6 +243,7 @@ class PublicRunStateResponse(BaseModel):
     seq: int = Field(ge=-1)
     max_seq: int = Field(ge=-1)
     event_count: int = Field(ge=0)
+    source_integrity: RunSourceIntegrity
     generation: Annotated[Optional[str], Field(pattern=r"^[0-9a-f]{64}$")]
 
 
@@ -2961,7 +2982,8 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such run")
         return log_pages.page(
             log_path, direction=direction, limit=limit, byte_limit=byte_limit,
-            cursor=cursor, generation=generation, anchor_seq=anchor_seq)
+            cursor=cursor, generation=generation, anchor_seq=anchor_seq,
+            source_integrity=srv.log_integrity(rd))
 
     def _assert_artifact_generation(rd: Path, expected: str, *, phase: str) -> str:
         if _RUN_GENERATION_RE.fullmatch(expected) is None:
@@ -3678,7 +3700,13 @@ def build_router(srv) -> APIRouter:
             }) from exc
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):
-        st = srv.state(_run_dir(run_id))
+        rd = _run_dir(run_id)
+        st = srv.state(rd)
+        # A THIRD state, and it reads exactly like the second: `rubertlite-dense-retrieval` answers
+        # `{cost: 0.0, recorded: false}` for a run whose own `llm_cost` rows record 3,497 calls and
+        # 76.9 M tokens — the roll-up is behind the log's readable boundary. "Absent is not zero" is
+        # the rule this body already states; "unreadable is not absent" is the same rule one step up.
+        integrity = srv.log_integrity(rd)
         if st.llm_cost is None:
             # No roll-up exists yet (offline/toy run, or one that has not finalized). The historical
             # body was this zero-filled dict alone, which a client cannot tell from a finished run
@@ -3686,8 +3714,8 @@ def build_router(srv) -> APIRouter:
             # fixes one level down. `recorded` says which it is; the zeros stay, so any existing
             # arithmetic client is byte-for-byte unaffected.
             return {"cost": 0.0, "calls": 0, "priced_calls": 0, "total_tokens": 0,
-                    "recorded": False}
-        return {**st.llm_cost, "recorded": True}
+                    "recorded": False, "source_integrity": integrity}
+        return {**st.llm_cost, "recorded": True, "source_integrity": integrity}
 
     @router.get("/api/runs/{run_id}/agents_md", deprecated=True)
     def agents_md(run_id: str):

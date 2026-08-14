@@ -105,6 +105,13 @@ def run_summaries(srv, only=None) -> list:
                 "direction": st.direction, "finished": st.finished,
                 "phase": srv.phase(st, finalize_incomplete=finalize_incomplete),
                 "finalization_incomplete": finalize_incomplete, "nodes": len(st.nodes),
+                # Whether the fold above saw the WHOLE log. Every other field in this row is derived
+                # from `events` and none of them can express "this is 1.2 % of the run": the shipped
+                # corpus has a row reading `phase: search, finished: false, nodes: 2,
+                # best_metric: 0.8077` for `rubertlite-dense-retrieval`, whose own `budget` event says
+                # `nodes: 81` and whose log holds 1,624 records. Cached WITH the fold (same
+                # `file_identity` key), so it costs one scan per changed log, not one per poll.
+                "source_integrity": srv.log_integrity(rd),
                 "best_metric": (best.metric if best else None),
                 "best_confirmed": (best.confirmed_mean if best else None),
                 "stop_reason": st.stop_reason,

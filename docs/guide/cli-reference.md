@@ -414,6 +414,30 @@ looplab repair-log RUN_DIR
 # then: looplab resume RUN_DIR
 ```
 
+### How you find out you have one
+
+A **sequence discontinuity** produces the same boundary without a single corrupt byte: every line
+parses, but the logical `seq` jumps, so the dense-prefix fence ends the recoverable prefix there. A
+hand-edited log is the way this actually happens — `runs/rubertlite-dense-retrieval` holds 1,624
+valid rows and folds to 20, because five rows were deleted from the middle by hand.
+
+Every **read** surface now states that boundary instead of quietly folding the prefix. On the CLI,
+`replay`, `inspect`, `timings` and the exports print one line to **stderr** (stdout stays clean, so
+`looplab replay … | jq` is unaffected) and still answer:
+
+```
+[INCOMPLETE RECORD] runs/… 's event log stops being readable at line 21: only 20 of 1624 records
+are visible to replay and 1603 durable record(s) behind that boundary are NOT included. …
+```
+
+Over HTTP the same receipt rides on the run-state envelope, the `/lifecycle` probe and every
+run-list row as `source_integrity` (`{"complete": true}`, or `complete: false` with `good_records`,
+`corrupt_line` and `dropped_lines`); the UI renders it as an **Incomplete record** banner on the run
+and a pill on the list row. Mutating commands are unchanged and still refuse outright.
+
+The numbers are the honest denominator, not a warning to dismiss: everything else the surface prints
+is derived from the readable prefix, and a prefix is **not** evidence that the rest did not happen.
+
 ---
 
 ## `inspect`
