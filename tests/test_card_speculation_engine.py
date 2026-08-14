@@ -1452,6 +1452,69 @@ def test_raw_stage_authority_allows_llm_telemetry_but_rejects_other_tail_churn(t
     assert "raw_stale_audit_test" not in stale_types
 
 
+def test_a_stopping_session_commits_its_paid_raw_stage_and_buys_no_new_producer(tmp_path, monkeypatch):
+    """The raw-stage phase's two halves answer to different gates, and only one of them is new work.
+
+    COMMITTING the prepared proposal is ungated on purpose: it is already paid for, and
+    `_spec_raw_stage_result` counts in `_card_phase_decide_exit`'s `memory_pending`, so a stopping
+    session that declined to drain it could not leave. ELECTING a Card and starting its head producer
+    is new producer work, and `gates.stopping` — a terminal intent, an exhausted eval budget, a
+    pending outer rebuild — has to close it exactly as it closes `_card_phase_request_build` two
+    phases below. The budget is the stopping condition driven here because it moves no log tail.
+    """
+
+    def _staged(run_dir):
+        engine, _producer = _engine(run_dir, depth=1)
+        _start(engine)
+        engine._ensure_speculation_state()
+        events = engine.store.read_all()
+        state = fold(events)
+        ceiling = engine._node_id_ceiling(events, state)
+        engine._spec_raw_stage_result = speculation_module.SpecRawStageResult(
+            generation=state.search_epoch,
+            action={"kind": "draft"},
+            proposal_state=state,
+            proposal_authority_seq=engine._proposal_authority_seq(events),
+            proposal_node_ceiling=ceiling,
+            at_node=ceiling,
+            source="researcher",
+            cue_fence=engine._proposal_cue_fence(state),
+            success=True,
+            idea=Idea(operator="draft", params={"x": 0.4, "y": -1.0},
+                      rationale="a proposal this run has already paid for",
+                      hypothesis="a stopping session still commits it"),
+            audit_events=(),
+        )
+        elections: list[dict] = []
+        monkeypatch.setattr(engine, "_request_card_build",
+                            lambda **kw: (elections.append(kw), False)[1])
+        return engine, elections
+
+    stopping, stopping_elections = _staged(tmp_path / "raw-stage-stopping")
+    session = speculation_module.CardSession(max_eval_seconds=0.0, wall_deadline=None)
+    assert engine_gates_stopping(stopping, session) is True
+    stopping._card_phase_serve_raw_stage(session)
+    assert [event.type for event in stopping.store.read_all()].count("card_added") == 1, (
+        "the paid proposal was dropped instead of committed")
+    assert stopping_elections == [], "a stopping session bought a Card build"
+    assert session.progressed is True and session.yield_outer is True
+
+    # The CONTROL, same phase, same staged result: nothing about this is a refusal to serve a raw
+    # stage — only the budget differs.
+    running, running_elections = _staged(tmp_path / "raw-stage-running")
+    open_session = speculation_module.CardSession(max_eval_seconds=None, wall_deadline=None)
+    assert engine_gates_stopping(running, open_session) is False
+    running._card_phase_serve_raw_stage(open_session)
+    assert [event.type for event in running.store.read_all()].count("card_added") == 1
+    assert len(running_elections) == 1, "an open session stopped electing the Card it just staged"
+
+
+def engine_gates_stopping(engine, session) -> bool:
+    """The phase's own gate input, read the way the phase reads it."""
+
+    return engine._session_gates(engine._session_state(), session).stopping
+
+
 def test_node_created_before_done_recovery_appends_only_missing_done(tmp_path):
     run_dir = tmp_path / "created-prefix"
     first, _producer = _engine(run_dir)
@@ -2285,9 +2348,14 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
         return best
 
     # Reading a live session flag is how a second exit-gate predicate grows. Only the production
-    # predicate itself and the raw-stage phase (whose own, different, gate-free test this is not)
-    # may. `open_for_admission` is deliberately absent from this set: a live flag reaching the
-    # ADMISSION gate is the F1f defect, restated.
+    # predicate itself may. `open_for_admission` is deliberately absent from this set: a live flag
+    # reaching the ADMISSION gate is the F1f defect, restated.
+    #
+    # `_card_phase_serve_raw_stage` used to be here too, and that was the defect: it spelled out two
+    # of `open_for_production`'s three conjuncts by hand and dropped `gates.stopping`, so a session
+    # with a terminal intent, an exhausted budget or a pending outer rebuild still elected a Card and
+    # bought a paid build. Its COMMIT of the already-paid raw stage is still ungated, deliberately —
+    # that is how a stopping run finishes cleanly — and what it may no longer do is start new work.
     flag_readers = {
         _owner(node) for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
@@ -2299,7 +2367,7 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
     # loop and a fresh session cannot ping-pong for the length of an evaluation. That distinction
     # cannot be made from `open_for_production`, which folds both into one boolean.
     assert flag_readers == {
-        "open_for_production", "_card_phase_serve_raw_stage", "_card_phase_decide_exit",
+        "open_for_production", "_card_phase_decide_exit",
     }, flag_readers
 
     # WHICH GATE EACH PHASE ASKS. One entry per phase-owned call site; changing a row here is
@@ -2316,6 +2384,9 @@ def test_no_session_phase_re_derives_a_stop_condition_by_hand():
         # the stale drain, the build-result commit and the head producer
         ("_card_phase_drop_stale", "open_for_production"): 1,
         ("_card_phase_serve_head", "open_for_production"): 2,
+        # the election + head producer the raw-stage phase starts AFTER committing its own paid
+        # proposal; the commit itself is above the gate and stays there
+        ("_card_phase_serve_raw_stage", "open_for_production"): 1,
         # the freshness miss inside admission defers its DISCARD (not its refusal to start)
         ("_card_phase_admit_evals", "open_for_production"): 1,
         ("_card_phase_request_build", "open_for_production"): 1,

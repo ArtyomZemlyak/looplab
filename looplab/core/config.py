@@ -664,8 +664,9 @@ class Settings(BaseSettings):
     # Hybrid in-node crash repair: when an LLM-generated node CRASHES at runtime (mechanical errors
     # — bad import, removed kwarg, typo), the agent triages it and may repair the code IN PLACE within
     # the same eval (cheap; does NOT consume max_nodes and does NOT add a node to the search tree).
-    # Semantic failures still flow to a new idea/debug node via the policy. ON by default; set False
-    # to restore the prior behavior (every crash waits for a budgeted inter-node debug node).
+    # Semantic failures end the node and the policy proposes fresh work — there is no inter-node
+    # debug lane behind this either way since F5 deleted the Debug node (2026-08-13). ON by default;
+    # set False to restore the prior behavior (every crash ends its node with no in-place repair).
     inline_repair: bool = True
     # HARD upper limit on in-place repair attempts per node — the operator's backstop, not the
     # primary stopping rule. The primary rule is the crash-triage MODEL: it is consulted once per
