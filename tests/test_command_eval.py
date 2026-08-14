@@ -685,6 +685,61 @@ def test_start_stage_reuses_earlier_stages_instead_of_paying_for_them_again(tmp_
     assert [s["status"] for s in full.stages] == ["ok", "ok"]
 
 
+def test_a_python_dash_m_train_stage_is_reused_end_to_end_after_a_disjoint_repair(tmp_path):
+    """The `python -m` widening, DRIVEN rather than asserted: a real multi-hour-shaped pipeline whose
+    train stage is `python -m pkg.train`, a repair that edits a score-side module the train entry never
+    imports, and the train stage actually not re-executing.
+
+    This is the shape every `rubertlite-dr-unified-{v2,v6,v7,v8}` pipeline has, and until 2026-08-14
+    `_stage_reachable_files` called it OPAQUE and made the predicate refuse before any of its other
+    clauses were consulted — measured, 39 of the corpus's 75 change-set-bearing repairs sit on such a
+    pipeline. The two halves have to be joined here: the predicate deciding `score` is not worth
+    anything unless `run_command_eval(start_stage=...)` then really skips the training.
+    """
+    from looplab.engine.orchestrator import Engine
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "losses.py").write_text("SCALE = 1\n", encoding="utf-8")
+    # the train ENTRY POINT, named only as a dotted module — no `.py` token appears in its argv
+    (pkg / "train.py").write_text(
+        "from pkg import losses\n"
+        "open('ckpt.txt', 'a').write('trained\\n')\n"
+        "print('trained', losses.SCALE)\n", encoding="utf-8")
+    (pkg / "index.py").write_text("K = 10\n", encoding="utf-8")      # score-side, never imported by train
+    (tmp_path / "evaluate.py").write_text(
+        "import json\n"
+        "from pkg import index\n"
+        "runs = len(open('ckpt.txt').read().strip().splitlines())\n"
+        "print(json.dumps({'metric': runs * index.K}))\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "-m", "pkg.train"]},
+              {"name": "score", "command": [sys.executable, "evaluate.py"]}]
+
+    first = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M, stages=stages)
+    assert first.metric == 10.0 and [s["status"] for s in first.stages] == ["ok", "ok"]
+
+    e = Engine.__new__(Engine)
+    # THE DECISION: score failed, the repair touched only a module the train entry cannot reach.
+    assert e._safe_reuse_start(stages, "score", {"pkg/index.py"}, tmp_path) == "score"
+    (pkg / "index.py").write_text("K = 3\n", encoding="utf-8")       # the repair
+
+    # THE EXECUTION: the training is not paid for again — ckpt.txt still holds exactly one line, and
+    # the new metric is the REPAIRED scorer reading the REUSED artifact.
+    reused = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M,
+                              stages=stages, start_stage="score")
+    assert (tmp_path / "ckpt.txt").read_text().count("trained") == 1, "the -m train stage re-ran"
+    assert reused.metric == 3.0
+    assert [s["status"] for s in reused.stages] == ["reused", "ok"]
+
+    # THE NEGATIVE CONTROL on the same pipeline: a repair to what the train entry DOES reach is
+    # refused, the full pipeline re-runs, and the checkpoint gains its second line.
+    assert e._safe_reuse_start(stages, "score", {"pkg/losses.py"}, tmp_path) is None
+    full = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M, stages=stages)
+    assert (tmp_path / "ckpt.txt").read_text().count("trained") == 2
+    assert full.metric == 6.0
+
+
 def test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_under_start_stage(tmp_path):
     """F13: on a stage-scoped re-run the earlier stages are DELIBERATELY not re-executed, so the files
     they wrote keep their prior-eval mtime. The constraint / extra-metric readers that point at them
