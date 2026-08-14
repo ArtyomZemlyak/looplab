@@ -4,16 +4,37 @@ tail. Run a redaction pass — known credential patterns (always) plus conservat
 masking — over every output tail before it is written.
 
 Pure + deterministic. Known-pattern redaction is always safe; the entropy pass is conservative
-(long tokens only) to avoid masking legitimate data hashes. Config-gated (`redact_output`, off by
-default to preserve byte-identical behavior; recommended on for untrusted tiers).
+(long tokens only) to avoid masking legitimate data hashes.
+
+**WHAT `redact_output` GATES, AND WHAT IT NO LONGER GATES (2026-08-14, backlog C2).** Until this
+change the WHOLE pass was config-gated and the flag defaults to `False`, so on the DEFAULT path a
+`print(os.environ["X"])` or a traceback landed verbatim in the durable `node_evaluated.stdout_tail`
+— and a tail travels further than any other captured byte: into `events.jsonl`, the span trace, the
+UI node detail, an exported report and a bug report. Every OTHER durable diagnostic boundary in the
+tree already sanitized unconditionally (`redact_persisted_text`, ~30 call sites), so the tail was
+the ONE channel that skipped the screen the rest of the codebase applies. It no longer is:
+
+* **always, at every tail** — the known credential SHAPES in `_PATTERNS` (negligible false-positive
+  risk, which is why they were already documented "always redacted") and the operator's own secret
+  ENV VALUES (`redact_env_values`, below).
+* **`redact_output=True` only** — the ENTROPY pass, which is the half with a real false-positive
+  cost: a 24-char base64/hex run of a legitimate data hash, model checksum or embedding dump reads
+  exactly like a credential to it. That cost is the reason the flag was off by default, and it is a
+  reason to gate the entropy pass, never a reason to gate the pattern pass.
+
+`redact_output_tail` is the ONE spelling of that split; `engine/audit.py::Engine._redact` is its
+only production caller and funnels all six persisted output tails through it.
 """
 from __future__ import annotations
 
 import hashlib
 import math
+import os
 from itertools import islice as _islice
 import re
 import unicodedata
+
+from looplab.core.envsafe import is_secret_env
 
 # Field names that merely CONTAIN a credential substring but are benign diagnostic output
 # (tokenizer / max_tokens / *_tokens) — never mask these so operators keep model/token diagnostics.
@@ -124,6 +145,77 @@ def redact_secrets(text: str, *, entropy: bool = True,
             return "***REDACTED***" if _entropy(tok) >= entropy_cutoff else tok
         text = re.sub(rf"[A-Za-z0-9+/=_\-]{{{min_len},}}", _mask, text)
     return text
+
+
+# The shortest env VALUE worth treating as a credential. A screened name with a 1-4 character value
+# ("1", "true", "off", a port) is a switch, not a secret, and masking it would scrub those characters
+# out of every unrelated word in the tail. Real credentials are longer than this by construction —
+# the shortest thing any provider in `_PATTERNS` issues is well past it — so the floor costs nothing
+# and the failure mode it removes (a tail rewritten into `***` soup) is one an operator cannot debug.
+_MIN_SECRET_ENV_VALUE = 8
+
+
+def secret_env_values(env=None) -> list[str]:
+    """The operator's OWN secret env VALUES, longest first — the authenticated half of the screen.
+
+    `_PATTERNS` recognises credential SHAPES, which is everything a regex can do about a secret it
+    has never seen. It cannot recognise `hunter2hunter2` as this box's `POSTGRES_PASSWORD`, or a
+    provider's bare-uuid key, or an internal token with a bespoke prefix — and those are exactly the
+    secrets a `print(os.environ)`, a `subprocess` echo or a library traceback puts in a tail.
+
+    So the second screen is the one place that KNOWS: `envsafe.is_secret_env`, the SAME predicate
+    `runtime/sandbox.py` uses to withhold a variable from the child process. What the sandbox refuses
+    to hand the candidate, this refuses to persist about it — one rule, two directions. (The value
+    screen matters as much as the name one: `DATABASE_URL` names nothing suspicious and carries
+    `postgres://user:pw@host/db`.)
+
+    This is deterministic over AUTHENTICATED evidence in doc 36's sense: the authority is the
+    operator's own process environment, never text the candidate wrote. Nothing a node prints can add
+    a value to this list or take one off it.
+
+    Longest first so a variable whose value is a PREFIX of another's cannot mask the shorter one
+    first and leave the longer one's tail exposed as `***<rest>`.
+    """
+    items = (os.environ if env is None else env)
+    try:
+        pairs = list(items.items())
+    except Exception:  # noqa: BLE001 - a diagnostic redactor must never raise into its caller
+        return []
+    out: set[str] = set()
+    for name, value in pairs:
+        try:
+            text = str(value or "")
+            if len(text.strip()) < _MIN_SECRET_ENV_VALUE:
+                continue
+            if is_secret_env(str(name or ""), text):
+                out.add(text)
+        except Exception:  # noqa: BLE001 - one odd variable must not disable the whole screen
+            continue
+    return sorted(out, key=lambda s: (-len(s), s))
+
+
+def redact_env_values(text: str, env=None) -> str:
+    """Mask every literal occurrence of a secret env VALUE in `text`. Exact substring, never a regex:
+    the value is data, not a pattern, and `re.escape`-ing it back into one buys nothing."""
+    if not text:
+        return text
+    for value in secret_env_values(env):
+        if value in text:
+            text = text.replace(value, "***REDACTED_ENV***")
+    return text
+
+
+def redact_output_tail(text: str, *, entropy: bool, env=None) -> str:
+    """The persisted-tail redactor, and the ONE place the `redact_output` split is spelled.
+
+    Known credential shapes and the operator's own env values are masked ALWAYS; `entropy` is the
+    caller's `redact_output` and gates only the high-entropy pass (see this module's docstring for
+    why those two halves are gated differently). Env values go FIRST — a secret masked by identity
+    can no longer be half-eaten by a shape rule and re-emerge as a recognisable fragment.
+    """
+    if not text:
+        return text
+    return redact_secrets(redact_env_values(text, env), entropy=entropy)
 
 
 def _persisted_input(value) -> str:

@@ -201,6 +201,74 @@ def _path_stat(path: Path) -> dict:
     }
 
 
+def task_file_roots(root: Path) -> list[Path]:
+    """Where a launch `task_file` may live — the ONE derivation, shared with the task CATALOGUE.
+
+    `routers/misc.py::list_tasks` offers the operator a pick-list built from exactly these three
+    directories, and this is the same list because **the catalogue IS the declaration of what is
+    launchable**. Two hand-synced copies would drift in the only two directions that matter: the UI
+    offering a file the launcher then refuses, or — the direction that costs something — the launcher
+    accepting a path the operator never declared runnable.
+
+    Resolved here so the containment compare below is against real directories: an allowed root that
+    is itself a symlink must be compared by its target, or containment answers about a name.
+    """
+    repo = Path(__file__).resolve().parents[2]        # looplab/serve/launch.py -> repo root
+    dirs = [repo / "examples", root]
+    env_dir = os.environ.get("LOOPLAB_TASKS_DIR")
+    if env_dir:
+        dirs.insert(0, Path(env_dir))
+    out: list[Path] = []
+    for d in dirs:
+        try:
+            resolved = d.resolve()
+        except OSError:                               # an unreachable root is not an open one
+            continue
+        if resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def _confine_task_file(root: Path, expanded: str) -> Path:
+    """Resolve a requested `task_file` and REFUSE it unless it sits under a declared root.
+
+    Backlog C3's surviving half. `POST /api/start` took an arbitrary absolute path from the request
+    body: `os.path.expandvars(os.path.expanduser(...))` then `Path(...).resolve()`, then straight to
+    `load_document`. Nothing compared it to `srv.root` or to anything else. That is a privilege bug
+    the UI token does NOT fix — an authenticated operator's own browser session, or any same-origin
+    page on a shared JupyterHub, could name `/etc/…`, `~/.ssh/…` or `/proc/self/environ`, and the
+    `400 invalid_task_file` message embeds the parser's error, which is an oracle for a file's
+    existence, size and partial CONTENT.
+
+    Two orderings are load-bearing:
+
+    * **resolve, THEN contain.** `Path.resolve()` follows every symlink, so a symlink planted inside
+      an allowed root that points at `/etc/shadow` resolves outside it and is refused here. Checking
+      containment on the unresolved path and then resolving would admit exactly that. This is why
+      there is no separate `is_symlink()` rung the way `safe_run_dir` needs one — that function must
+      keep a name it is about to CREATE, this one only ever reads.
+    * **contain BEFORE `exists()`.** `expandvars` runs on caller text, so `task_file: "$OPENAI_API_KEY"`
+      expands to the secret's VALUE and the pre-existing `task_file_not_found` message echoes the
+      resolved path back to the caller verbatim. Refusing on containment first means every message
+      that echoes a path has already proved the path is under a declared root.
+
+    The refusal names the ALLOWED ROOTS and never the rejected path, for the same reason.
+    """
+    try:
+        source_path = Path(expanded).resolve()
+    except OSError as exc:
+        _reject(400, "invalid_task_file", f"task_file cannot be resolved: {exc}", "task_file")
+    roots = task_file_roots(root)
+    for allowed in roots:
+        if source_path == allowed or allowed in source_path.parents:
+            return source_path
+    _reject(400, "task_file_not_allowed",
+            "task_file must live under a declared task directory ("
+            + ", ".join(str(p) for p in roots)
+            + "); set LOOPLAB_TASKS_DIR to declare another",
+            "task_file")
+
+
 # Task specs are small (a toy dict, a YAML/JSON config). Cap the WHOLE-file reads below — both
 # load_document and _source_fingerprint slurp the file — so an unbounded pseudo-file or a multi-GB
 # regular file cannot hang the preflight worker or exhaust memory. Every other launch input is bounded.
@@ -420,7 +488,8 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     file_settings: dict = {}
     if has_file:
         expanded = os.path.expandvars(os.path.expanduser(task_file_value.strip()))
-        source_path = Path(expanded).resolve()
+        # C3: contain BEFORE any probe that echoes the path — see `_confine_task_file`.
+        source_path = _confine_task_file(srv.root, expanded)
         if not source_path.exists() or not source_path.is_file():
             _reject(400, "task_file_not_found", f"task_file not found: {source_path}", "task_file")
         _require_task_file_size(source_path)   # bound the read before load_document slurps the file
