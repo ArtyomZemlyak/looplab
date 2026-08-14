@@ -39,8 +39,12 @@ The EDITABLE SOURCE ROOT is deliberately absent, and that is the whole point: it
 the filesystem that provably cannot hold an artifact this node produced. `runtime/read_fence.py`
 derives the same boundary from the other side (`fence_inputs` returns the editable roots as DENY
 prefixes plus the mounts as exceptions); this module is the complement, expressed as the grant list a
-kernel ruleset needs. They are two spellings of one policy and `tests/test_read_allowlist.py` pins
-that the mounts appear in both.
+kernel ruleset needs. They are two spellings of one policy, and
+`tests/test_read_fence.py::test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts`
+derives BOTH from one spec and pins that the mounts appear in each. (This paragraph named a
+`tests/test_read_allowlist.py` from the day it was written; no such file has ever existed — this
+module's own tests live in the `The read allow-list` section of `tests/test_metric_subject.py`,
+beside the subject binding they shipped with.)
 
 WHY THIS IS NOT IN `read_fence.py`
 -----------------------------------

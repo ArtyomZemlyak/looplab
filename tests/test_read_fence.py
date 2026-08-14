@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 from looplab.core.config import Settings
-from looplab.runtime import read_fence
+from looplab.runtime import read_allowlist, read_fence
 from looplab.runtime.sandbox import run_argv
 
 # The fixture the whole file shares: an editable SOURCE tree holding the operator's checkpoint, a
@@ -297,6 +297,32 @@ def test_the_directory_predicate_catches_the_root_itself():
     assert ns["_fenced_dir"]("/src/repo/") == "/src/repo"
     assert ns["_fenced_dir"]("/src/repo/data") is None       # an allow-listed mount stays enterable
     assert ns["_fenced_dir"]("/src/repository") is None
+
+
+def test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts(tmp_path):
+    """One policy, two spellings, ONE spec — the property `read_allowlist.py`'s docstring claims.
+
+    `fence_inputs` answers "what is forbidden" (the editable roots, with the mounts carved out);
+    `read_allowlist.derive` answers "what is permitted" (the grant list a Landlock ruleset needs).
+    Each half already has its own tests, and neither could see a DISAGREEMENT: a mount that the fence
+    carves out and the allow-list forgets is a node refused by the kernel rung for reading exactly the
+    data its operator declared, which is the false positive both halves are built to avoid. So this
+    derives both from the same declaration and asserts the mount is in each and the root in neither.
+    """
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    spec = {"editables": [{"name": ".", "path": str(src)}],
+            "data": {"corpus": {"path": str(src / "corpus")}}}
+    roots, allowed, dropped, swallowed = read_fence.fence_inputs(spec)
+    grants = dict(read_allowlist.derive(workdir=str(wd), run_dir=str(run_dir), repo_spec=spec))
+    mount = os.path.realpath(str(src / "corpus"))
+
+    assert not dropped and not swallowed
+    assert str(src) + os.sep in roots, "the editable root is what both halves are drawn around"
+    assert [entry for entry in allowed if os.path.realpath(entry) == mount], (
+        "the DENY side stopped carving the declared mount out of the root")
+    assert grants.get(mount) == "read", "the GRANT side stopped naming the declared mount"
+    # …and the root itself is granted by neither, which is the whole point of the boundary.
+    assert os.path.realpath(str(src)) not in grants
 
 
 def test_a_root_too_broad_to_fence_is_dropped_not_accepted():
