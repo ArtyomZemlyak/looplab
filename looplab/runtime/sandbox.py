@@ -639,7 +639,18 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     `_tee_drain` and `_granted_grace` for the bound and for the 22.0 discarded GPU-hours behind it.
     `runtime` may not call an LLM, so the judge lives in the engine and arrives as this callback, the
     same seam shape `command_eval`'s `check_fn` already uses. Omitted (the default) => the historical
-    unconditional kill, byte-for-byte."""
+    unconditional kill, byte-for-byte.
+
+    THE STALL WATCHDOG OUTRANKS THE JUDGE ON THE WAY IN AND IS OUTRANKED BY IT ON THE WAY OUT, and
+    both halves are deliberate. A child that has been silent for a whole `stall_timeout` is
+    stall-killed BEFORE its deadline, so `on_deadline` is never called and no grace is asked for —
+    that is not a hole, it is the watchdog doing its job: the judge answers "is this stage finishing"
+    and a stage that has said nothing for thirty minutes has given it nothing to read. It does NOT
+    make the feature unreachable under the production default (`stall_cap` 1800 against a multi-hour
+    budget): a stage still talking within thirty minutes of its wall reaches the deadline and IS
+    judged, which is exactly the shipped-corpus case the feature was measured on
+    (`rubertlite-dense-retrieval` node 72's record ends on a full progress bar). Once a grace IS
+    granted, the order reverses — see `grace_until` in `_tee_drain`."""
     # Bound the deadline at the universal choke point: a NaN/inf/negative timeout from ANY caller
     # would otherwise disable the wall-clock kill (a NaN deadline is never reached). See finite_timeout.
     timeout = finite_timeout(timeout)
@@ -1029,6 +1040,30 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     # the caller can say so rather than silently reporting a longer stage.
     graced = [False]
     granted = [0.0]
+    # THE TWO CLOCKS MEET HERE. `deadline` bounds TOTAL wall time; `stall_timeout` bounds SILENCE.
+    # A granted grace moves the first and says nothing about the second, and until 2026-08-14 the
+    # stall branch below — evaluated FIRST in the same 250 ms tick — killed the child it had just
+    # been bought for: a stage that printed `100%|##########| 664/664` and went quiet to write its
+    # checkpoint was graced 600 s at its 4 s wall and died 0.26 s later, with the durable row
+    # claiming `deadline_grace_s: 600.0` for an extension the process never received.
+    # `grace_until` is the instant a granted grace expires (== the extended `deadline`), and while
+    # `now < grace_until` the SILENCE kill is DEFERRED, never cancelled:
+    #   * the judge has just READ THE LIVE LOG and said "this is finishing" — that is strictly more
+    #     evidence about this stage than "no bytes for N seconds", which is a proxy for the same
+    #     question asked by something that cannot read;
+    #   * the watchdog's own justification is not spent here. It exists so a deadlock dies in
+    #     minutes instead of burning a multi-hour budget — but at the wall there IS no multi-hour
+    #     budget left. The only time still at risk is the grace itself, which `deadline_grace_max_s`
+    #     bounds and which the OPERATOR chose to spend. So the silence kill's remaining value inside
+    #     the graced window is at most seconds the operator already agreed to; the cost of firing is
+    #     the whole stage, in exactly the case the grace exists to rescue.
+    # DEFERRED and not SUSPENDED, because a silent child must still die and the ROW must say what
+    # killed it: at `grace_until` the deadline and the deferral lift on the same tick, the stall
+    # branch is checked first, and a child that never spoke again is killed STALLED (keeping the
+    # metric-salvage path a stall has always kept) rather than reported as a plain timeout — while
+    # one that did speak falls through to the deadline branch. Either way the row is honest and the
+    # wall clock shows the seconds `deadline_grace_s` claims.
+    grace_until = [0.0]
 
     def _current_tail(max_chars: int = 4000) -> str:
         """The recent combined output the deadline judge reads. Bounded, and taken under the pump
@@ -1123,11 +1158,14 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                     pass
                 break
             if (stall_timeout and not stalled.is_set()
+                    and _time.monotonic() >= grace_until[0]
                     and (_time.monotonic() - last_output[0]) >= stall_timeout):
                 # STALL watchdog: the child is alive but has emitted NOTHING for `stall_timeout` — a hung
                 # distributed finalize / wedged CUDA op / deadlock that would otherwise sit until the full
                 # (multi-hour) deadline. Tree-kill NOW. NOT a timeout: mark it STALLED so the failure reason
                 # is honest and any metric it already printed before going quiet stays salvageable.
+                # The `grace_until` conjunct above is the ONE thing that holds this off: inside a granted
+                # grace the silence kill is deferred to the end of that window (see `grace_until`).
                 stalled.set()
                 _kill_tree(proc)
                 try:
@@ -1162,6 +1200,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 if _grace > 0:
                     deadline = _time.monotonic() + _grace
                     granted[0] += _grace
+                    # The grace has to mean something to the SILENCE clock too, or it buys nothing
+                    # for the very stage it was granted to: a child quiet at its wall is quiet one
+                    # tick later, and the stall branch above runs first. Defer that branch for
+                    # exactly the window bought — never past it (`grace_until` == the extended
+                    # `deadline`), so a genuinely deadlocked child still dies, and dies saying so.
+                    grace_until[0] = deadline
                     if logf is not None:
                         # UNDER `lock`, unlike the two watchdog markers at the bottom of this
                         # function: those are written after `t_out`/`t_err` have joined, so nothing
