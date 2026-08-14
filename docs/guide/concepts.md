@@ -44,6 +44,50 @@ or re-pin the Card, then `looplab resume`.
 Researcher → Novelty gate → Developer → Sandbox → Evaluator → trust/confirm → Card | agent | policy → repeat → champion
 ```
 
+### Two clocks: the node count, and occupancy
+
+`engine/cadence.py` holds **two** pacing rules, and they answer different questions.
+
+The old one, `cadence_due(n, last, every)`, is the **node-count** pace behind every periodic
+subsystem: lessons distillation (`lessons_every`), the lesson-store refresh
+(`lessons_refresh_every`), deep research (`deep_research_every`), the run report (`report_every`),
+the Strategist consult (`strategist_every`) and the concept re-tag (`concept_retag_every`). It is a
+*since-last* window (`n - last >= every`), not `n % every`, because the node count advances in
+strides of more than one — a build fan-out, a seed batch, a merged or failed node — and modulo steps
+clean over the only multiple in a window.
+
+The second one, `occupancy_due(inflight, queued, width)`, exists because **a node count cannot
+express "an evaluation has been running for four hours and the board behind it is empty."** That is
+the state that mattered: an evaluating node is still `pending` in the fold, so the Card queue kept
+answering with *its* evaluate action for the entire evaluation — an action the turn cannot start —
+and the only writer of Card inventory was reachable only at occupancy **zero**. Across the 52-run
+corpus that cost **167.7 GPU-h with no evaluation running at all**. When an evaluation takes hours,
+pacing production on how many nodes have finished is pacing on a clock that has stopped.
+
+So production is now also due when a GPU is busy and the supply behind it does not cover the width:
+
+```
+inflight > 0  and  (inflight + queued) < max(1, width)
+```
+
+`inflight` is the evaluations actually running in this process, `queued` is work already built and
+waiting for a slot, and `width` is the settled `eval_parallel`. It is **slots, not wall time** — the
+rule reads no clock — and it produces at most `width - inflight - queued` creates, only `draft` /
+`improve` / `merge`, only when the turn planned no creates of its own, and only under
+`card_driven_selection`. Measured on a toy backend at the shape of a real GPU run: max occupancy
+1 → 2, serial gap 18.1 % → 3.4 %, slot utilisation 40.9 % → 79.8 %. Where a prefetch was already
+filling the board the two arms are indistinguishable — the pace stands down rather than
+double-producing.
+
+It is deliberately **unconfigurable**: there is no `Settings` field for it, because it is not an
+interval. Its idempotence is its own condition — producing raises `queued`, which makes it stop being
+due — which is why, unlike every node-count pace, **it records no `at_node` mark**. That is the rule
+for any third pace as well: a pace that records an `at_node` mark is a node-count pace whatever it is
+called, and it would both close the node-count window for a full `every` nodes and make
+`already_covered_at` refuse the next firing at the same count. It also reads *live* in-process state
+rather than the durable `node_eval_started` boundary, so a freshly resumed process sees occupancy 0,
+takes the ordinary create turn, and is right to.
+
 ## Event log = canonical replay state
 
 `events.jsonl` is the append-only source of truth for the **replayable run state**: nodes, metrics,
@@ -491,14 +535,15 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any** of the eight `FAILURE_REASONS` is eligible for repair **in place** within the same eval
-- **debug / repair** — on a failure, hand the failing code + stderr back to fix it. Since 2026-08-12
   **any** of the eleven `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
   `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
   <!-- FIXED 2026-08-13 (mega-review, doc 40): this list said "eight" and omitted the last three — it was
        written on a branch where 8 was correct and merged beside the registry widening without
-       reconciliation; the settings table already listed all eleven. -->
+       reconciliation; the settings table already listed all eleven.
+       FIXED AGAIN 2026-08-14: a merge had left BOTH generations of this bullet in place — a
+       "**debug / repair**" one naming eleven reasons, directly under a "**repair**" one naming
+       eight, three lines after the prose that says the debug operator no longer exists. -->
   An in-place repair doesn't consume the node budget;
   deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once
@@ -1135,6 +1180,7 @@ Where each concept lives in the code:
 | Durable per-run observed-usage ledger | `engine/costs.py` |
 | Operators (merge/ensemble, sweep) | `search/operators.py`, `sweep.py` |
 | Control loop + crash-resume | `engine/orchestrator.py` |
+| The two pacing rules (node-count `cadence_due`, occupancy `occupancy_due`) | `engine/cadence.py` |
 | Authoritative server command lifecycle + leases | `serve/run_commands.py` |
 | HTTP control-payload validation (`normalize_control` + the five per-event tables) | `serve/control_validation.py` |
 | Durable whole-run Replay/deletion receipts + the destructive-quiescence ladder | `serve/durable_op.py`, `serve/reset_transaction.py`, `serve/deletion_transaction.py` |
