@@ -1,4 +1,4 @@
-﻿"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; the ONLY implementation shipped
+"""Pluggable vector store (I17, ADR-16). `VectorStore` is the seam; the ONLY implementation shipped
 today is the dependency-free `InMemoryVectorStore` (brute-force cosine, no persistence — it
 re-embeds on each rebuild). A persistent backend (LanceDB/Qdrant) is a documented FUTURE seam (see
 the deferred-infra notes in the design docs); there is no LanceDB store or store-selection Settings

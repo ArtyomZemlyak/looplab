@@ -1,4 +1,4 @@
-﻿"""Patch application with an out-of-surface gate (I4, ADR-14).
+"""Patch application with an out-of-surface gate (I4, ADR-14).
 
 When a Developer backend edits files via a unified diff (rather than whole-file
 rewrites), the diff is double-gated before it touches disk:

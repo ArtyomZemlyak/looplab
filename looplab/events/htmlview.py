@@ -1,4 +1,4 @@
-﻿"""Static-HTML lineage view (I6, ADR-1). A decoupled *reader* of files-as-truth:
+"""Static-HTML lineage view (I6, ADR-1). A decoupled *reader* of files-as-truth:
 takes a RunState and renders a standalone HTML page (no server, no JS framework).
 """
 from __future__ import annotations

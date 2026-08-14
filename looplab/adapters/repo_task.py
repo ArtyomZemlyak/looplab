@@ -1,4 +1,4 @@
-﻿"""RepoTask (kind="repo", ADR-7): the R&D agent works inside an EXISTING repo — it edits
+"""RepoTask (kind="repo", ADR-7): the R&D agent works inside an EXISTING repo — it edits
 experiment code within an allow-listed surface, and success is measured by running the
 OPERATOR'S OWN eval command and reading the metric it emits. The agent never authors the
 metric (trust boundary): the eval command, the FILE that command executes when the repo

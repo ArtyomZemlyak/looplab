@@ -1,4 +1,4 @@
-﻿"""Engine / control loop (I6, ADR-12/18). anyio structured concurrency:
+"""Engine / control loop (I6, ADR-12/18). anyio structured concurrency:
 node *creation* is sequential & deterministic; node *evaluation* fans out under a
 CapacityLimiter. State is always a fresh fold of the log (files-as-truth); resume
 is just re-entering this loop on an existing run dir — pending nodes get re-evaluated
