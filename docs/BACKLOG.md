@@ -23,7 +23,10 @@ the code at `f458f4af`, with the file/symbol that decided it. A row without one 
 > **[Later on 2026-08-14:** survivors **#1 and #2 were CLOSED the same day** by `dcb4c9a`
 > (`_confine_task_file` + the `redact_output_tail` split) — see the dated notes on those two items
 > and the reconciled §1 C2/C3 rows, which are the authoritative record. That leaves **23** items
-> carrying unfinished work, and a new **#19** (claim ratification vs trust flags) was added below.]
+> carrying unfinished work, and a new **#19** (claim ratification vs trust flags) was added below.
+> **Later still on 2026-08-14:** survivor **#11 was CLOSED** — fork-to-branch's RunView panel landed,
+> so its row is now a ✅ record of what shipped rather than a to-do. **22** items carry unfinished
+> work.]
 >
 > Thirteen symbol/line citations in this file were found **dead or moved** — they are corrected inline
 > and listed in §0.3. The caveats from 2026-08-04 still apply to everything NOT carrying a
@@ -275,7 +278,7 @@ site that proves it is open.
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
     (`panels.jsx:2340-2343`). `serve/routers/cross_run.py` is the governance/claims surface, not this.
-11. **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
+11. ✅ **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
     *(2026-08-14 — the three citations above were re-verified and all three were correct.)* The fused
     gesture landed as `inject_node` + a validated `forked_from` receipt, **not** as a new control event
     and not as a field on `fork`: `fork` (`EV_FORK`, `ui/src/api.js:202`) means "Researcher, improve
@@ -288,16 +291,30 @@ site that proves it is open.
     `tests/test_fork_from_seq.py` against a real paused run through the real HTTP surface, with the
     real engine building the node. The fence is a CONTENT CAS and deliberately not a tail one — see
     `docs/guide/concepts.md` §"Branching from a snapshot".
-    **WHAT REMAINS is exactly one thing: the panel in `ui/src/RunView.jsx`.** The pure model is
-    written and driven (`ui/src/forkFromSeqModel.js` + `ui/test/forkFromSeqModel.test.js`, 7 tests)
-    and the client call exists (`CONTROL.forkFrom`); what is not wired is (a) a `fork` entry in
-    `HISTORY_SAFE_PANELS`, (b) the narrow exception in `RunView.jsx:1697`'s `mutationReadOnlyMode`
-    guard so this ONE action is reachable at `historyActive` (every other action must stay refused —
-    the reason is in `forkFromSeqModel.js`'s header), (c) the idea form itself, and (d) a "Branch
-    from here" item on the Dag node menu. It was deliberately not attempted in the same change: a
-    `vite build` empties `ui/dist/assets` and breaks `test_server`'s static mount, nothing in the
-    suite MOUNTS `RunView`, and a GPU run was executing — so a ~3,000-line JSX file would have been
-    edited with no way to prove the tree still compiles.
+    **[2026-08-14 — CLOSED. The panel landed the same day.]** All four steps: (a) `'fork'` is in
+    `RunView.jsx::HISTORY_SAFE_PANELS`, and it belongs there by that list's own rule rather than as an
+    exception to it — everything the form sends derives from the exact fold on screen, so it cannot
+    make the `seq + panel` hybrid the list exists to prevent; (b) the narrow exception is
+    `forkFromSeqModel.js::readOnlyNodeActionRefused` + `forkGestureAccess`, i.e. the blanket refusal
+    RESTATED as a function with a truth table rather than loosened — `mutationReadOnlyMode` is
+    byte-identical, every other action still meets it, and review / a stale-generation link / an
+    unresolved start-over / an unloaded run each still refuse the branch too; (c) the form is
+    `ui/src/ForkFromSeqPanel.jsx`, seeded from `hist` and never `live2`; (d) `Dag.jsx::NODE_MENU_ITEMS`
+    made the node menu a TABLE, so a historical snapshot is offered exactly ONE item and the other
+    nine are absent rather than shown-and-then-refused (and "Branch from here" is `snapshotOnly`, so
+    it is not on the live menu — a branch records the vantage point it was formed at). A **second**
+    fence had to admit it and is named at both ends: the client's own run-access envelope
+    (`runMode.js::assertRunMutationAllowed`) would otherwise stop the request leaving the browser, so
+    `CONTROL.forkFrom` is the one durable run command that passes `allowRunMutationModes: ['history']`
+    — `resetRun` is the seam's only other caller and is deliberately wider because Start over is what
+    RESOLVES the states it runs in. The browser now reads the refusal asymmetry the python tests
+    pinned: a stale parent arrives as a 409 on `/control` and as a **rejected record** on `/commands`,
+    both proving nothing was appended, and `forkRetryable` turns that into three affordances — fix and
+    resubmit, fence and offer a re-read, or fence with no retry at all when the outcome is unknown.
+    Driven by `ui/test/forkFromSeqPanel.test.js` (9 tests) beside the model's own 7. The blocker that
+    deferred it was removed rather than waived: the tree is built into a STAGING dir
+    (`vite build --outDir .dist.stage`) so `ui/dist/assets` is never emptied under a live
+    `test_server`, and `vite.ssrLoadModule` gives RunView a compile check in the suite itself.
 12. **Pareto selection is display-only (P2, M).** The real non-dominated algorithm exists —
     `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
     every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`

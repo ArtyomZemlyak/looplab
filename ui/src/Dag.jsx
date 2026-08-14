@@ -22,6 +22,56 @@ import {
 import {
   createDagCanvasRefitScheduler, DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag,
 } from './dagViewport.js'
+import { FORK_FROM_SEQ_ACTION } from './forkFromSeqModel.js'
+
+// The node menu as DATA rather than eleven hand-written buttons, because since 2026-08-14 the answer
+// to "which of these does this view offer?" is no longer always "all of them": a HISTORICAL snapshot
+// offers exactly one, the branch (`forkFromSeqModel.js`'s header says why that one and no other).
+// Shown-and-then-refused was the alternative and it is worse than absence — an operator reading seq
+// N would be offered Kill branch and told, after clicking, that the view is read-only.
+//
+// `snapshotOnly` is the other direction and matters as much: "Branch from here" is NOT on the live
+// menu, because a branch records the vantage point it was formed at and a live view has none.
+// `forkSubmitDecision` would refuse it, so offering it live is a control that can only ever say no.
+const NODE_MENU_SECTIONS = Object.freeze({
+  act: null,
+  rerun: 're-run in place (same #, no new node)',
+})
+export const NODE_MENU_ITEMS = Object.freeze([
+  { id: FORK_FROM_SEQ_ACTION, section: 'act', icon: 'gitbranch', snapshotOnly: true,
+    label: 'Branch from here…' },
+  { id: 'explore', section: 'act', icon: 'gitbranch', label: 'Explore from here' },
+  { id: 'merge', section: 'act', icon: 'confluence', label: 'Merge with…' },
+  { id: 'ablate', section: 'act', icon: 'target', label: 'Ablate' },
+  { id: 'diff', section: 'act', icon: 'doc', label: 'Diff vs champion' },
+  { id: 'inspect', section: 'act', icon: 'search', label: 'Inspect' },
+  { id: 'reset:eval', section: 'rerun', icon: 'play', label: 'Re-run · re-score (keep code)' },
+  { id: 'reset:implement', section: 'rerun', icon: 'play', label: 'Re-run · re-code (keep idea)' },
+  { id: 'reset:propose', section: 'rerun', icon: 'play', label: 'Re-run · full redo' },
+  { id: 'kill', section: 'rerun', icon: 'cross', danger: true, label: 'Kill branch' },
+])
+
+/**
+ * The menu rows for a view, headings included — `null` means the ordinary live menu.
+ *
+ * A section heading is emitted only when something under it survived, so a one-item menu cannot
+ * print "re-run in place" over an empty region.
+ */
+export function nodeMenuEntries(allowed = null) {
+  const offered = item => allowed == null ? !item.snapshotOnly : allowed.includes(item.id)
+  const rows = []
+  let section
+  for (const item of NODE_MENU_ITEMS) {
+    if (!offered(item)) continue
+    if (item.section !== section) {
+      section = item.section
+      const heading = NODE_MENU_SECTIONS[section]
+      if (heading) rows.push({ kind: 'heading', id: `heading:${section}`, label: heading })
+    }
+    rows.push({ kind: 'item', ...item })
+  }
+  return rows
+}
 
 const NODE_W = 188, NODE_H = 84
 const DAG_FIT_OPTIONS = {
@@ -342,7 +392,7 @@ function visibleViewportBounds() {
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null,
-                             compact = false }) {
+                             nodeMenuActions = null, compact = false }) {
   const workId = workingId(state)
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
@@ -375,6 +425,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     const rect = event.currentTarget.getBoundingClientRect()
     openMenu(nodeId, rect.right + 6, rect.top, event.currentTarget)
   }, [openMenu])
+  const menuEntries = useMemo(() => nodeMenuEntries(nodeMenuActions), [nodeMenuActions])
   const act = (action) => {
     const id = menu?.nodeId
     const returnFocus = menu?.returnFocus || null
@@ -767,16 +818,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
            onClick={e => e.stopPropagation()} onKeyDown={onMenuKeyDown}
            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) closeMenu(false) }}>
         <div className="nm-h" role="presentation">experiment #{menu.nodeId}</div>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
-        <div className="nm-h" role="presentation" style={{ marginTop: 4 }}>re-run in place (same #, no new node)</div>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
-        <button type="button" role="menuitem" tabIndex={-1} className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
+        {menuEntries.map(entry => entry.kind === 'heading'
+          ? <div key={entry.id} className="nm-h" role="presentation" style={{ marginTop: 4 }}>{entry.label}</div>
+          : <button type="button" key={entry.id} role="menuitem" tabIndex={-1}
+              className={'nm-item' + (entry.danger ? ' danger' : '')}
+              onClick={() => act(entry.id)}><OpIcon name={entry.icon} size={13} /> {entry.label}</button>)}
       </div>
     </>}
     </div>

@@ -3,10 +3,17 @@
 // request targets, referrers, proxy logs, or server analytics.
 
 export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+// `fork` is the branch-from-a-snapshot form (`ForkFromSeqPanel.jsx`). It is here because this list is
+// the ROUTE's vocabulary and nothing else: a panel absent from it is silently dropped by
+// `sanitizeRunRouteState`, so an in-memory `route.update({ panel: 'fork' })` would do nothing at all
+// and the menu item would look broken with no error anywhere. Membership is not permission — whether
+// the panel may OPEN is `RunView.jsx::HISTORY_SAFE_PANELS`, and whether it may SUBMIT is
+// `forkFromSeqModel.js::forkGestureAccess`. It is deliberately NOT in `REVIEW_SAFE_PANEL_NAMES`
+// below: branching steers the run, which no review capability grants.
 export const RUN_ROUTE_PANELS = [
   'overview', 'queue', 'research', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
-  'collab', 'authoring', 'events', 'gpu', 'config',
+  'collab', 'authoring', 'events', 'gpu', 'config', 'fork',
 ]
 // The Card board is no longer a panel: it is the `cards` workspace view. `?panel=hypotheses` was a
 // live deep link (and the run menu's own spelling), so it is MIGRATED rather than rejected —

@@ -193,7 +193,13 @@ test('popup menus use one roving tab stop and restore the invoking control', asy
   assert.match(runList, /const restoreRunModalFocus = \(\) => requestAnimationFrame/)
   assert.match(runList, /onRename=\{openRunRename\}/)
   assert.match(runList, /onClose=\{closeRunRename\}/)
-  assert.equal((dag.match(/type="button" role="menuitem" tabIndex=\{-1\}/g) || []).length, 9)
+  // [2026-08-14] Nine hand-written menu buttons became one template over `Dag.jsx::NODE_MENU_ITEMS`
+  // when a historical snapshot needed a menu of exactly one item. The roving-tab-stop property this
+  // line guards is now structural — no row can be rendered without `role="menuitem" tabIndex={-1}`
+  // — so the count is of templates, and the ten actions themselves are counted in
+  // `dagActions.test.js` beside the rest of the menu's semantics.
+  assert.equal((dag.match(/type="button" key=\{entry\.id\} role="menuitem" tabIndex=\{-1\}/g) || []).length, 1)
+  assert.match(dag, /export const NODE_MENU_ITEMS = Object\.freeze\(\[/)
 })
 
 test('compact drawers and nested popups expose only the active modal layer', async () => {
