@@ -1201,3 +1201,73 @@ test('curation preview stays bounded to steward outcome counts', async () => {
   assert.doesNotMatch(atlas, /entry\.runId|entry\.at|entry\.revision/)
   assert.match(css, /\.ledger-curation-list/)
 })
+
+// ---------------------------------------------------------------------------------------------
+// `api.js::CROSS_RUN_STATE_FIELDS` is an ALLOWLIST: a wire field absent from it never reaches React
+// state. So the list and the fields `claimsCurationModel.normalizeClaim` reads are ONE contract, and
+// nothing held them together — a field dropped from the list turns its render branch into code no
+// server response can reach, which is exactly what had happened to five of them (`decision`,
+// `polarity`, `sources`, `verification`, `evidence_digest`). The Decision line, the polarity half of
+// the metric line and the whole "Sources and verification" disclosure in `ClaimsCuration.jsx` were
+// unreachable for every possible payload, while the model went on carefully normalizing all five.
+//
+// DRIVEN through the real projection rather than pinned against the literal: a pin would have passed
+// on the same list that dropped them.
+const fullyPopulatedClaim = () => ({
+  ...claim(1),
+  epistemic: 'mixed',
+  maturity: 'operator-ratified',
+  oppose: ['run-1:node-3'],
+  n_oppose: 1,
+  contradicts: ['run-2:node-9'],
+  n_contradicts: 1,
+  polarity: 1,
+  metric: 'recall@100',
+  sources: ['https://example.invalid/lessons'],
+  verification: ['verified by run-4'],
+  evidence_digest: 'd'.repeat(64),
+  decision_fresh: true,
+  decision: { decision: 'ratified', note: 'reproduced twice', by: 'operator', at: '2026-08-10' },
+})
+
+test('the claim projection keeps every field the claim card renders', () => {
+  const projected = projectLedgerSource('atlas', {
+    portfolio_id: PORTFOLIO_ID, n_contested: 1,
+    claim_source: completeClaimSource,
+    contradictions: [fullyPopulatedClaim()],
+  })
+  const view = buildClaimsCurationView(projected, {}, {})
+  const row = view.contradictions[0]
+  assert.ok(row, 'the mixed-evidence row must survive the projection')
+  // The steward's verdict, which is the entire point of a "Claims & Curation" screen.
+  assert.deepEqual(row.decision,
+    { action: 'ratified', note: 'reproduced twice', by: 'operator', at: '2026-08-10' })
+  assert.equal(row.polarity, 1)
+  assert.deepEqual(row.sources, ['https://example.invalid/lessons'])
+  assert.deepEqual(row.verification, ['verified by run-4'])
+  assert.equal(row.evidenceDigest, 'd'.repeat(64))
+})
+
+test('every wire field the claim model reads is on the api allowlist', async () => {
+  // The anti-drift half. `normalizeClaim`/`normalizeClaimSource` read the wire row as `row.<field>` /
+  // `receipt.<field>`; `projectCrossRunValue` keeps only names listed in `CROSS_RUN_STATE_FIELDS`. A
+  // name read on one side and absent from the other is a render branch no input can reach, and it is
+  // silent — the field simply arrives `undefined`.
+  const [model, api] = await Promise.all([source('claimsCurationModel.js'), source('api.js')])
+  const literal = api.match(/const CROSS_RUN_STATE_FIELDS = `([^`]*)`/)
+  assert.ok(literal, 'the allowlist literal must stay findable')
+  const allowed = new Set(literal[1].split(/\s+/).filter(Boolean))
+  const read = new Set()
+  for (const [, name] of model.matchAll(
+    /\b(?:row|receipt|segment|envelope|entry|decision)\.([a-z][a-z0-9_]*)\b/g)) read.add(name)
+  // `kind` is the ONE name here that is not a wire field: `mergeCurationLogs` stamps it onto each
+  // curation entry itself (`{ ...record(envelope.entries[0]), kind }`) after the projection has
+  // already run, so the allowlist has no business carrying it.
+  read.delete('kind')
+  // Only the wire names — a camelCase read is this model's own projected shape, never the envelope's.
+  const wire = [...read].filter(name => !/[A-Z]/.test(name))
+  const missing = wire.filter(name => !allowed.has(name))
+  assert.deepEqual(missing, [],
+    `these wire fields are read by claimsCurationModel.js but stripped by the api.js allowlist, so `
+    + `every branch that depends on them is unreachable: ${missing.join(', ')}`)
+})
