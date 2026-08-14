@@ -478,25 +478,126 @@ def test_the_operator_may_declare_a_subject_and_a_bad_shape_is_refused_at_submit
                      metric={"kind": "stdout_json", "key": "m", "subject": bad})
 
 
+def _stage_mixin(mode):
+    from looplab.engine.eval_stages import EvalStagesMixin
+    return type("_E", (EvalStagesMixin,), {"metric_subject": mode})()
+
+
 def test_the_engine_appended_score_stage_declares_what_it_reads(tmp_path):
     """Doc 35 §3a's ONE missing wire: `needs` shipped, and the only stage the operator owns was the
-    only stage that could not declare it."""
-    from looplab.engine.eval_stages import EvalStagesMixin
-
-    class _E(EvalStagesMixin):
-        metric_subject = "audit"
-
+    only stage that could not declare it — under the rung that GATES, which is `require` alone."""
     (tmp_path / "looplab_stages.json").write_text(
         json.dumps({"stages": [{"name": "train", "command": ["python", "t.py"]}]}), encoding="utf-8")
     es = {"command": ["python", "score.py"],
           "metric": {"kind": "stdout_json", "key": "m", "subject": ["out/model.bin"]}}
-    chain = _E()._resolve_stages(str(tmp_path), es)
+    chain = _stage_mixin("require")._resolve_stages(str(tmp_path), es)
     assert [s["name"] for s in chain] == ["train", "score"]
     assert chain[-1]["needs"] == ["out/model.bin"]
-    # …and the `off` rung must not acquire a stage contract the run never had.
-    class _Off(EvalStagesMixin):
-        metric_subject = "off"
-    assert "needs" not in _Off()._resolve_stages(str(tmp_path), es)[-1]
+    # …and NEITHER of the two rungs below it acquires a stage contract. `off` is the historical
+    # behaviour; `audit` is the one that regressed — it is documented as "no selection effect", and a
+    # `needs` here makes a declared-but-missing subject cost the node its whole metric, which is
+    # strictly harsher than the `require` rung it is supposed to be milder than.
+    for mode in ("off", "audit"):
+        assert "needs" not in _stage_mixin(mode)._resolve_stages(str(tmp_path), es)[-1], mode
+
+
+def test_the_stage_contract_is_only_ever_written_for_a_DECLARED_subject(tmp_path):
+    """Why the live blast radius was nil, as a property rather than a corpus count: no `subject`, no
+    `needs`, at every rung. Measured 2026-08-14, 0 of the 113 task snapshots under `runs/` and
+    `examples/` declare `eval.metric.subject` — `rubertlite-dr-unified-v8`, running at the `audit`
+    default, among them."""
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "train", "command": ["python", "t.py"]}]}), encoding="utf-8")
+    for metric in ({"kind": "stdout_json", "key": "m"},                  # no subject key at all
+                   {"kind": "stdout_json", "key": "m", "subject": []},   # declared empty
+                   {"kind": "stdout_json", "key": "m", "subject": ["  "]}):   # whitespace only
+        for mode in ("off", "audit", "require"):
+            es = {"command": ["python", "score.py"], "metric": metric}
+            assert "needs" not in _stage_mixin(mode)._resolve_stages(str(tmp_path), es)[-1]
+
+
+@pytest.mark.parametrize("mode", ["off", "audit", "require"])
+def test_a_present_subject_is_untouched_at_every_rung(tmp_path, mode):
+    """The control the other three cases are read against: when the pipeline produces what the
+    operator declared, every rung scores the node and records the same identity."""
+    wd = tmp_path / mode
+    wd.mkdir()
+    chain = [{"name": "train", "command": _writer(wd, "out/model.bin")},
+             {"name": "score", "command": [sys.executable, "s.py"]}]
+    if mode == "require":
+        chain[-1]["needs"] = ["out/model.bin"]
+    (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n", encoding="utf-8")
+    res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC, stages=chain,
+                           subject=(["out/model.bin"] if mode != "off" else None))
+    assert res.metric == 0.5 and res.failed_stage is None
+    assert [s["status"] for s in res.stages] == ["ok", "ok"]
+    if mode == "off":
+        assert res.metric_subject is None            # `off` is byte-identical to before this shipped
+    else:
+        assert res.metric_subject["subject_bound"] is True
+
+
+def test_a_MISSING_subject_under_audit_keeps_the_metric_and_names_the_real_reason(tmp_path):
+    """THE DEFECT, driven. `audit` is documented "RECORD, always … no violation, no selection
+    effect", and the derived `needs` made it the harshest rung of the three: the scorer never ran,
+    the node's metric was None, and the record said `not_declared` about a subject that WAS
+    declared — the one distinction `UNBOUND_REASONS` is a closed vocabulary to preserve."""
+    (tmp_path / "t.py").write_text("print('trained, wrote nothing')\n", encoding="utf-8")
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    chain = [{"name": "train", "command": [sys.executable, "t.py"]},
+             {"name": "score", "command": [sys.executable, "s.py"]}]   # no `needs`: the audit rung
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC, stages=chain,
+                           subject=["out/model.bin"])
+    assert res.metric == 0.5                                  # the number survives — no gate
+    assert res.failed_stage is None and [s["status"] for s in res.stages] == ["ok", "ok"]
+    assert res.metric_subject["subject_bound"] is False
+    assert res.metric_subject["unbound_reason"] == "missing"  # …and NOT "not_declared"
+    # The enforcement rung is where the consequence lives, and it is the DOCUMENTED one: the metric
+    # is kept and carries the `metric_salvaged` violation, rather than never being read.
+    assert unbound_subject_violation_rows(res.metric_subject, res.metric, "audit") == []
+    rows = unbound_subject_violation_rows(res.metric_subject, res.metric, "require")
+    assert rows[0]["value"] == 0.5 and rows[0]["salvage"]["unbound_reason"] == "missing"
+    assert "not produced" in rows[0]["salvage"]["detail"]     # the fix for THIS reason, not another
+
+
+def test_a_MISSING_subject_under_require_refuses_early_and_still_records_the_true_reason(tmp_path):
+    """`require` keeps the gate, and that is the whole of what it keeps: the refusal fires before the
+    scorer runs (latency), and because the subject is bound BEFORE the input contract the record
+    still names `missing` rather than degrading to the engine's absent-declaration fallback."""
+    from looplab.runtime.command_eval import NEEDS_IS_METRIC_SUBJECT
+
+    (tmp_path / "t.py").write_text("print('trained, wrote nothing')\n", encoding="utf-8")
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    chain = [{"name": "train", "command": [sys.executable, "t.py"]},
+             {"name": "score", "command": [sys.executable, "s.py"], "needs": ["out/model.bin"]}]
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC, stages=chain,
+                           subject=["out/model.bin"])
+    assert res.metric is None and res.failed_stage == "score"
+    assert [s["status"] for s in res.stages] == ["ok", "needs_failed"]
+    assert res.metric_subject["unbound_reason"] == "missing"
+    # WHOSE failure the message says it is. The Developer may edit neither the protected `score`
+    # stage nor the operator's declaration, so the refusal must name the one repair it does own.
+    concern = res.stages[-1]["concern"]
+    assert NEEDS_IS_METRIC_SUBJECT.strip()[:40] in concern
+    assert "PRODUCE this path" in concern and "OPERATOR" in concern
+
+
+def test_a_stage_needs_that_is_not_the_subject_keeps_the_plain_refusal(tmp_path):
+    """The sentence above is scoped to the DERIVED contract. An agent-authored `needs` between two
+    of its own stages is a stage the agent CAN edit, and telling it otherwise would be false."""
+    from looplab.runtime.command_eval import NEEDS_IS_METRIC_SUBJECT
+
+    (tmp_path / "t.py").write_text("print('trained')\n", encoding="utf-8")
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    chain = [{"name": "train", "command": [sys.executable, "t.py"]},
+             {"name": "score", "command": [sys.executable, "s.py"], "needs": ["out/other.bin"]}]
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC, stages=chain,
+                           subject=["out/model.bin"])
+    assert res.stages[-1]["status"] == "needs_failed"
+    assert NEEDS_IS_METRIC_SUBJECT.strip()[:40] not in res.stages[-1]["concern"]
 
 
 def test_needs_alone_does_not_catch_the_incident_and_this_is_why_it_is_not_the_gate(tmp_path):

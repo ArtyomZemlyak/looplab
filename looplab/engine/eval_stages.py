@@ -216,11 +216,36 @@ class EvalStagesMixin:
             # node really did write that file and the stage read somewhere else anyway). `needs` is a
             # PRESENCE check and must stop being described as a provenance gate.
             #
+            # `require` AND NOT `!= "off"`, and this is the rung rule, not a tightening. `audit`'s
+            # whole contract — `Settings.metric_subject`, `metric_subject.MODES`, the settings table
+            # — is "RECORD, always … no violation, no selection effect", and it is the rung an
+            # operator turns on to FIND OUT whether `require` is safe before paying for it. Gating
+            # the score stage here made that false in the worst available direction: driven
+            # 2026-08-14, a declared subject the pipeline did not produce returned
+            # `needs_failed` + `metric=None` under `audit`, i.e. the node lost its number entirely,
+            # while the rung `audit` is documented to be MILDER than keeps the metric and records a
+            # `metric_salvaged` violation. The mildest rung had the harder effect, and it bought
+            # Developer repair calls on the one stage no agent may edit.
+            #
+            # It also made the RECORD lie, which is the thing this module exists to stop. The bind
+            # happens inside `run_command_eval` at the score stage; a `needs_failed` early-returns
+            # BEFORE it, so `eval_dispatch`'s fallback stamped `absent_metric_subject()` —
+            # `unbound_reason: "not_declared"` — on a metric whose subject WAS declared and was
+            # missing. Those are exactly the two states `UNBOUND_REASONS`' own comment says a reader
+            # must be able to tell apart because they need opposite fixes. `command_eval` now binds
+            # the final stage's subject BEFORE its input contract runs, so under `require` the row
+            # says `missing`/`empty`/`escapes`; this gate is what keeps `audit` from needing that
+            # rescue at all.
+            #
+            # What `require` keeps: the latency. A subject that is not there cannot become bound, so
+            # the node is unselectable under this rung either way, and refusing before the scorer
+            # runs costs nothing an unbound metric was going to keep.
+            #
             # `str` filter: on the `_grandfathered` reload path a recorded snapshot's `subject` was
             # never re-validated, and a non-string entry reaches `_confined` -> `Path(wd) / 123` ->
             # an uncaught TypeError out of the eval worker (no node terminal, re-dying on every
             # resume — the failure class `READER_PATH_KEYS` exists to prevent).
-            if str(getattr(self, "metric_subject", "audit") or "audit") != "off":
+            if str(getattr(self, "metric_subject", "audit") or "audit") == "require":
                 _subject = (es.get("metric") or {}).get("subject") if isinstance(es.get("metric"), dict) else None
                 _needs = [s for s in (_subject or []) if isinstance(s, str) and s.strip()]
                 if _needs:

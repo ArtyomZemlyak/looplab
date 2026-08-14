@@ -1241,6 +1241,21 @@ NEEDS_MISSING_NEARBY = (" A file of that name DOES exist at {found!r}.")
 NEEDS_EMPTY = ("stage {stage!r} did not start: its declared input {path!r} exists but is EMPTY. "
                "Whatever was supposed to produce it did not finish — running this stage on a 0-byte "
                "input would either crash inside a loader or silently train on nothing.")
+# Appended when the failing input is the metric's DECLARED SUBJECT on the engine-appended, protected
+# `score` stage — the one `needs` no agent authored and no agent may edit. `NEEDS_MISSING` offers
+# "fix whichever is wrong" between the producer and the declaration, and on THIS stage the second
+# door is locked twice over: the write gate refuses the protected score stage, and
+# `eval.metric.subject` is the operator's field on the operator's spec (`metric_subject.py`, WHY IT
+# IS THE OPERATOR'S FIELD). Repair is still the right loop — the artifact is produced by the agent's
+# own pipeline — so this narrows the message to the ONE move the agent has rather than refusing, and
+# names the operator for the case where the declaration is what is wrong.
+NEEDS_IS_METRIC_SUBJECT = (
+    " This input is the METRIC'S DECLARED SUBJECT (`eval.metric.subject`) — the artifact the "
+    "recorded number is a claim about — and the engine derives it onto its own protected `score` "
+    "stage. You cannot edit that stage and you cannot change the declaration: the only repair "
+    "available to you is to make the pipeline actually PRODUCE this path (write it there, or declare "
+    "the producing stage's `expect.files` to match where it really lands). If the path itself is "
+    "wrong, only the OPERATOR can fix it, by correcting `eval.metric.subject` in the task.")
 
 
 def _confined_input(workdir, rel) -> Optional[Path]:
@@ -2066,6 +2081,35 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         _sto = finite_timeout(_stg.get("timeout", timeout), timeout)
         if not _scmd:
             continue
+        # THE METRIC SUBJECT, bound at the SCORE stage's start — i.e. the identity the artifact had
+        # at the instant the stage that produces the number began looking at it. Deliberately not
+        # after the pipeline: a score stage that rewrites its own input would then be recorded
+        # against bytes that postdate the measurement, and "the identity the scorer saw" is the only
+        # reading that makes the record a claim about the number rather than about the workdir.
+        #
+        # It is a READ, not a side effect (invariant #3): one `stat` plus a bounded digest, no event,
+        # nothing gated on it here. The enforcement lives at the terminal, in `engine/evaluate.py`.
+        #
+        # `_fresh_since`, NOT `eval_started`: on a stage-scoped re-run the subject is precisely the
+        # artifact the engine chose to REUSE, so binding it against this attempt's clock calls the
+        # engine's own reuse `stale` and — under `metric_subject="require"` — excludes the node from
+        # selection for it. The rule and the reason it is scoped rather than dropped are stated once,
+        # in `attempt_freshness_floor`, which the tail's secondary readers share.
+        #
+        # IT RUNS BEFORE THE INPUT CONTRACT BELOW, and that ORDER is the fix for a record that lied.
+        # Under `metric_subject="require"` the score stage's `needs` IS the declared subject
+        # (`engine/eval_stages.py` derives one from the other), so a missing subject fails the input
+        # contract and early-returns — and with the bind below that return, `run.metric_subject`
+        # stayed None and `eval_dispatch`'s fallback stamped `absent_metric_subject()`, i.e.
+        # `unbound_reason: "not_declared"`, on a metric whose subject WAS declared and was missing.
+        # Those two states need opposite fixes (declare one vs. produce the file) and telling them
+        # apart is the stated reason `UNBOUND_REASONS` is a closed vocabulary at all; under `require`
+        # the wrong slug also rides into the `metric_salvaged` violation row the operator reads.
+        # Nothing else moves with it: the bind is a stat plus a bounded digest of the SAME artifact
+        # `verify_stage_inputs` is about to stat, one iteration of one loop earlier.
+        if subject and _i == len(stages) - 1:
+            run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=_fresh_since,
+                                                     stages=stages, upto=_i, stage=_sname)
         # THE INPUT CONTRACT, before anything is spent. A stage whose declared input is not there
         # cannot succeed, and every second it runs before discovering that is a second bought at GPU
         # prices — v5 node 0 spent 76 minutes on a pipeline whose scorer read a directory the trainer
@@ -2079,11 +2123,27 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                                               producers=stage_output_producers(stages, _i))
                           if _needs else None)
         if _input_problem:
+            # WHOSE FAILURE THIS IS, when the failing input is the metric's declared SUBJECT. That
+            # `needs` is not in any manifest an agent wrote: the engine DERIVES it onto its own
+            # protected `score` stage from the operator's `eval.metric.subject`, so two of the three
+            # fixes `NEEDS_MISSING` names are unavailable here — the Developer may not edit the score
+            # stage and may not touch the operator's declaration. Repair eligibility is still RIGHT
+            # (the artifact is produced by the agent's own pipeline, which it fully owns), and this is
+            # deliberately NOT the `PROTECTED_SCRIPT_MISSING` shape, where no edit could ever help.
+            # What was wrong was the message: it invited an edit to a stage the write gate refuses,
+            # on the one failure where "make the producer write this path" is the only move the agent
+            # has. So the sentence names that move, and names the operator as the only party who can
+            # change the declaration itself.
+            _concern = str(_input_problem)
+            if subject and _i == len(stages) - 1 and any(
+                    normalize_declared_path(r) in {normalize_declared_path(s) for s in subject}
+                    for r in _needs):
+                _concern += NEEDS_IS_METRIC_SUBJECT
             stage_results.append({"name": _sname, "status": "needs_failed", "exit_code": 0,
-                                  "seconds": 0.0, "concern": str(_input_problem)[:700]})
+                                  "seconds": 0.0, "concern": _concern[:900]})
             run.early = RunResult(
                 exit_code=0, stdout=run.out, metric=None, timed_out=False,
-                stderr=f"stage '{_sname}' failed its declared input contract: {_input_problem}",
+                stderr=f"stage '{_sname}' failed its declared input contract: {_concern}",
                 stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
         # THE DECLARED ENVIRONMENT, resolved for THIS stage. `ex.env` already carries the run- and
@@ -2108,23 +2168,6 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stderr=_env_problem.format(stage=_sname),
                 stages=stage_results, failed_stage=_sname)
             return run
-        # THE METRIC SUBJECT, bound at the SCORE stage's start — i.e. the identity the artifact had
-        # at the instant the stage that produces the number began looking at it. Deliberately not
-        # after the pipeline: a score stage that rewrites its own input would then be recorded
-        # against bytes that postdate the measurement, and "the identity the scorer saw" is the only
-        # reading that makes the record a claim about the number rather than about the workdir.
-        #
-        # It is a READ, not a side effect (invariant #3): one `stat` plus a bounded digest, no event,
-        # nothing gated on it here. The enforcement lives at the terminal, in `engine/evaluate.py`.
-        #
-        # `_fresh_since`, NOT `eval_started`: on a stage-scoped re-run the subject is precisely the
-        # artifact the engine chose to REUSE, so binding it against this attempt's clock calls the
-        # engine's own reuse `stale` and — under `metric_subject="require"` — excludes the node from
-        # selection for it. The rule and the reason it is scoped rather than dropped are stated once,
-        # in `attempt_freshness_floor`, which the tail's secondary readers share.
-        if subject and _i == len(stages) - 1:
-            run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=_fresh_since,
-                                                     stages=stages, upto=_i, stage=_sname)
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
         # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
