@@ -601,22 +601,19 @@ class EvalDispatchMixin:
             from looplab.runtime import command_eval
             es = self._eval_spec
             self._ensure_run_setup()             # one-time run-level dep install (before the first eval)
-            prof = profile or (node.idea.eval_profile if node is not None else None)
-            # A7 Strategist fidelity override: when the active strategy pins smoke/full and the node
-            # didn't request a profile, use the strategy's. An explicit `profile` arg (confirm=full)
-            # always wins. "adaptive" leaves _strategy_fidelity None => the Idea's own profile.
-            if prof is None and self._strategy_fidelity in ("smoke", "full"):
-                prof = self._strategy_fidelity
-            params = node.idea.params if node is not None else {}
-            cmd, timeout = command_eval.build_command(es, params, prof)
             root = str(Path(workdir).resolve())               # repo/workdir root
             # The Developer's deliberate-change path: if THIS node's dependency declaration differs
             # from the one the run installed, install it before the eval. Digest-gated, so the
             # unchanged case (every node that did not touch the file) costs one read — see
             # `_sync_node_deps` for the four bounds and for why this is not a per-node environment.
             self._sync_node_deps(root)
-            stages = self._resolve_stages(root, es, params,   # cmd-authoritative pipeline (+ %params% per stage)
-                                          score_cmd=cmd, score_timeout=timeout)  # profile/timeout survive pipeline mode
+            # The profile -> `build_command` -> `_resolve_stages` derivation, asked of the ONE owner
+            # (`eval_stages.py::_eval_pipeline`) rather than spelled out here. The planners ask the
+            # same function through `_resolved_stages`, which is what stops them planning a chain
+            # this line would not run — they used to re-implement it and had already lost `profile`.
+            # It is the derivation only: `_ensure_run_setup`/`_sync_node_deps` above are the
+            # dispatcher's own side effects and stay here, where a planner can never reach them.
+            cmd, timeout, stages = self._eval_pipeline(node, workdir, profile)
             check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
                         if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))

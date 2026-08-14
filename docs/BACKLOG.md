@@ -170,6 +170,40 @@ site that proves it is open.
    (`metric_salvage.py:998`) — plan against the smoke chain during a `confirm`/full pass. Note the
    proposed fix does NOT work: `RunResult.stages` (`runtime/sandbox.py:290-294`) is the post-run
    *outcome* record and all four callers need the chain *before* the run.
+   **[CLOSED 2026-08-14. The divergence was real, the COST CLAIM was not — and the line numbers had
+   drifted ~29 lines (`_resolved_stages` was `eval_stages.py:290-307`, the flagged `prof =` line
+   `:298`; `eval_dispatch.py:572`/`:604` were exact).** Two corrections to this entry, both
+   measured rather than argued:
+   **(a) there are THREE callers, not four, and one of the four is a docstring.**
+   `metric_salvage.py:1006` only *documents* that its `stages` argument came from
+   `Engine._resolved_stages`; the salvage re-check that actually calls it is
+   `evaluate.py:1123::_recheck_repaired_contract`. The other two are `evaluate.py:1681` (the
+   watchdogs' log plan) and `evaluate.py:2372` (the inline-repair reuse/rollback predicate, which is
+   the use the method was written for).
+   **(b) the divergence was LATENT, not live.** The only production call site that passes an
+   explicit `profile` is `confirm_phase.py:224` (`"full"`), and it never plans; all three planning
+   sites sit inside `evaluate.py::_evaluate`, which dispatches `_run_eval(..., None, cancel, …)` —
+   so the two derivations agreed on every reachable call. Nothing in the 66-run `runs/` corpus could
+   have hit it: **zero `confirm_eval` rows exist in any preserved run** (no `confirm_*` event of any
+   kind), so the confirm phase has never run on this box. And had a planner been reachable at a
+   non-default profile, only ONE of the three could have seen a difference: a profile changes only
+   the appended protected `score` stage's overrides and `timeout` (`build_command`), so
+   `train_monitor.eval_log_plan` — which reads stage NAMES — is invariant under it. This is
+   therefore **not** `662a9be6` ("the watchdogs judged the wrong log") returning by another route;
+   that defect was mtime-based attribution, and the plan has been name-derived since.
+   **The shape.** One derivation, `eval_stages.py::_eval_pipeline(node, workdir, profile=None) ->
+   (command, timeout, stages)`, called by the dispatcher and — through a thin, total
+   `_resolved_stages(node, workdir, profile=None)` — by the planners, the same
+   straddling-readers pattern `command_eval.eval_spec_time_budget` documents. The dispatcher keeps
+   only its two SIDE EFFECTS (`_ensure_run_setup`, `_sync_node_deps`): what it knows that a planner
+   cannot is exactly the caller-supplied `profile`, which is an argument, not private state, and the
+   function says so. `tests/test_resolved_stages_profile.py` drives a real staged eval at `"full"`
+   and asserts the planner returns the chain the dispatcher ran (and, mutated to ignore the profile,
+   goes red).
+   **Still open, noticed here:** each planner call re-enters `_resolve_stages`, so a manifest that is
+   over the operator's budget emits its `stage_timeout_over_budget` span 2–4 times per attempt
+   instead of once. Diagnostic-only and unchanged by this fix, but it is the duplicate-consumer tax
+   the shared derivation makes visible.]
 10. **Cross-run aggregation is a list, not an overlay (P1, M).** `ui/src/panels.jsx:2319
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
@@ -1104,7 +1138,7 @@ reused-stage fold record). What remains open or was dismissed:
   (§0.2).]
 
 ### Deferred cleanup (quality, not correctness — review flagged, left for a focused pass)
-- ⬜ **P2 · one owner for the resolved stage pipeline (S–M).** `_resolved_stages`
+- ✅ **P2 · one owner for the resolved stage pipeline (S–M).** `_resolved_stages`
   (orchestrator.py) re-implements `_run_eval`'s profile→`build_command`→
   `_resolve_stages` derivation as a parallel copy (they already differ: `_run_eval`
   honors an explicit `profile` arg, `_resolved_stages` doesn't). Have
@@ -1122,6 +1156,15 @@ reused-stage fold record). What remains open or was dismissed:
   (`engine/evaluate.py:1097,1655,2340`) and the salvage re-check
   (`engine/metric_salvage.py:998`). So threading it through `RunResult` cannot retire the copy —
   the one owner has to be a pure derivation both sides call.]
+
+  **[2026-08-14, later the same day — SHIPPED, as that last sentence prescribed.** The one owner is
+  `engine/eval_stages.py::_eval_pipeline`, a pure derivation the dispatcher and the planners both
+  call; `RunResult.stages` is untouched and stays the outcome record. Two corrections to the survey
+  above, carried in full at §1 survivor #9: the citations had drifted ~29 lines in `eval_stages.py`,
+  there are THREE callers rather than four (`metric_salvage.py`'s is a docstring; the real salvage
+  caller is `evaluate.py::_recheck_repaired_contract`), and the divergence was LATENT — the only
+  profile-passing caller is the confirm phase, which never plans, and no run in `runs/` contains a
+  single `confirm_eval` row.]
 - ⬜ **P2 · unify the launch-readiness gate (S–M).** "Is this task launchable" now
   lives in 2 parallel copies — `EvalSpec._command_or_stages` (backend truth) and
   `serve/tui.py::spec_ready` (the third, `ui/src/GenesisChat.jsx`, was deleted as dead
