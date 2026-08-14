@@ -31,6 +31,34 @@ from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
 # `engine/repair_verify.py`'s docstring for why they must not be merged.
 from looplab.engine.repair_verify import REPAIR_INERT, REPAIR_UNMET
 
+# THE INTAKE BOUND on the triage model's own free text, and it is an INTAKE bound only — every SINK
+# keeps its own, tighter cap for its own reason (`node_repaired.rationale` 300 after redaction,
+# `repair_log["fix"]` 200 for the judge's history, `node_failed.triage_rationale` 300,
+# `proposal_cues` 90). Those sinks are what bound the durable row and the prompt; this one bounds
+# only what the ENGINE carries between them, so tightening it buys nothing downstream and costs the
+# one reader that needs the whole sentence.
+#
+# It was 300 — the same number as the durable sink — and that silently truncated the input to
+# `repair_verify.verify_repair`, which reads the rationale to ask "did this repair do what it said?".
+# A crash rationale is written in one shape: DIAGNOSIS first ("diverged right after the R-Drop KL
+# term, unlike the working nll_cos runs"), then "Fix: <the concrete things I am about to change>".
+# So a cut at 300 lands almost exactly on the seam and feeds the extractor the CITATIONS while
+# discarding the CLAIMS — the one half it exists to check. Measured over `runs/` on 2026-08-14:
+# 83 of the 123 model-authored `node_repaired` rationales in the corpus are stored at exactly the
+# cap, i.e. the MEDIAN rationale the rung read was truncated; and over the 54 repairs whose full
+# text could be recovered from `spans.jsonl` and replayed, 5 verdicts are wrong because of it —
+# 3 of the 7 `unmet`s and 2 of the 3 `unstated`s are `verified` on the text the model actually
+# wrote. `rubertlite-dr-unified-v7` node 0 attempt 2 is the live instance: its only surviving claim
+# was `nll_cos`, cited as the BASELINE it was comparing against, while `kl_div`/`log_target`/
+# `rdrop_alpha` — named after the cut, and present in the diff — were never read.
+#
+# 2000 is not a round number picked for comfort: the 93 full rationales in the corpus run
+# 121-690 chars (median 330, p90 460), so this is ~2.9x the longest one ever written here and still
+# bounds a model that decides to answer with an essay. Widening it can only ADD claims, and a claim
+# that was met stays met, so no `verified` can become `unmet` by this change — the failure it fixes
+# is one-directional.
+_TRIAGE_RATIONALE_CAP = 2000
+
 
 def _accepted_kwargs(fn, candidates: dict) -> dict:
     """The subset of `candidates` that `fn` can actually be called with.
@@ -218,7 +246,8 @@ class CrashRepairMixin:
                 # verdict, so it is carried here rather than re-derived downstream. It fails
                 # closed to "" = no install, and the engine never acts on it alone (see
                 # runtime/deps.py::triage_install_candidates).
-                return {"action": out["action"], "rationale": str(out.get("rationale", ""))[:300],
+                return {"action": out["action"],
+                        "rationale": str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP],
                         "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
             # A TRANSPORT FAILURE OBSERVED ONE LAYER DOWN. `UnifiedAgent.triage_crash`'s `_fallback`
             # runs when `resilient` contained an unreachable endpoint / a 401 / a loop that never
@@ -229,7 +258,7 @@ class CrashRepairMixin:
             # "returned no usable verdict (…)", because it is a real report, not a malformed one.
             if is_transport_failure_verdict(out):
                 return {"action": UNANSWERABLE_TRIAGE_ACTION,
-                        "rationale": (str(out.get("rationale", ""))[:300]
+                        "rationale": (str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP]
                                       or "the triage model did not return a verdict"),
                         "missing_dependency": ""}
             # A WIRED, LIVE JUDGE THAT ANSWERED SOMETHING OUTSIDE THE VOCABULARY. Coerced through the
@@ -240,7 +269,13 @@ class CrashRepairMixin:
             # malformed, it is the same verdict reached one layer down, so its rationale (the model's
             # own words about the node) passes through rather than being re-wrapped.
             _raw = (out or {}).get("action") if isinstance(out, dict) else None
-            _why = (str(out.get("rationale", ""))[:300] if _raw == DEFAULT_TRIAGE_ACTION
+            # Two different kinds of string, so two different bounds. The first is the MODEL's own
+            # diagnosis passing through and wears the intake cap like every other rationale; the
+            # second is an engine-authored message wrapping an arbitrary `repr`, which stays at a
+            # message-sized 300 — a wider bound there buys no reader anything and puts an unbounded
+            # object's repr into a durable row.
+            _why = (str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP]
+                    if _raw == DEFAULT_TRIAGE_ACTION
                     else f"the triage model returned no usable verdict ({out!r})"[:300])
             return {"action": coerce_triage_action(_raw),
                     "rationale": _why or "no verdict returned", "missing_dependency": ""}
