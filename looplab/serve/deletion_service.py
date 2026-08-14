@@ -27,7 +27,7 @@ from looplab.serve.appstate import (
     _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.deletion_transaction import (
-    DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX, DeletionReceiptError,
+    DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX, DeletionReceiptError,
     advance_deletion_receipt, deletion_quarantine_path, deletion_receipt_path,
     deletion_receipts_for_run, deletion_result, load_deletion_receipt,
     mark_deletion_quarantine_ambiguous, prepare_deletion_receipt, save_deletion_receipt,
@@ -44,7 +44,8 @@ from looplab.serve.run_files import run_config_write_lock
 _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SERVICE_PREFIXES = (
     _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
-    DELETE_RECEIPT_PREFIX, DELETE_QUARANTINE_PREFIX, ".looplab-delete-fence-",
+    DELETE_RECEIPT_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_IDENTITY_PREFIX,
+    ".looplab-delete-fence-",
 )
 
 

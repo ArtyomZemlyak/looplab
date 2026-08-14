@@ -90,9 +90,15 @@ export function bulkOutcomeNotice(state) {
   // left the list, and this notice is the only surface left that can carry a retry — so it takes
   // the first unfinished purge's run id, and `retryRunId` is what renders the button.
   const unfinished = (state.memoryFailures || [])[0]
+  // The identity gate is shared with `cascadeOutcome`, so the REASON has to be shared too: refusing
+  // the dead button in both places while only one of them says why leaves the batch notice telling
+  // the operator a store still holds a run's rows, with neither an affordance nor an explanation.
+  const retryableMemory = retryableCascadeIdentity(unfinished?.memory)
   const memoryTail = unfinished
     ? ` Cross-run memory was only partly removed for ${plural(state.memoryFailures.length, 'run')}`
       + ` (first: “${unfinished.runId}”).`
+      + (retryableMemory ? '' : ' That run\u2019s identity was not recorded, so the purge cannot be'
+        + ' finished from here.')
     : ''
   // The identity travels with the handle, for the same reason `cascadeOutcome` carries one: the run
   // is already deleted, so the server cannot read `run_uid`/`memory_dir` back and refuses to guess
@@ -102,7 +108,7 @@ export function bulkOutcomeNotice(state) {
   // `retryableCascadeIdentity`, so both notices refuse the dead button by the same rule.
   // Both keys are ALWAYS present so a consumer reads one shape; what the gate decides is the
   // HANDLE, which is what renders the button.
-  const retryable = retryableCascadeIdentity(unfinished?.memory)
+  const retryable = retryableMemory
   const retryIdentity = retryable || { run_uid: '', memory_dir: '' }
   const retryRunId = unfinished && retryable ? String(unfinished.runId || '') : ''
   if (!stopped) {

@@ -593,6 +593,39 @@ def test_the_warn_rung_bounds_stderr_the_same_way_it_bounds_the_log(tmp_path):
         ln.split("refused: ", 1)[1].split(" is under", 1)[0] for ln in lines}
 
 
+def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
+    """The `os.chdir` audit event fires BEFORE the chdir, so its target proves nothing about where
+    the process will actually stand. Re-deriving `_CWD_REACHES_ROOT` from that pre-event cleared the
+    flag for a chdir that then FAILED — and `try: os.chdir(cfg.output_dir) except OSError: pass`
+    around a directory that does not exist yet is ordinary generated-training-code shape. The
+    process was still standing in the repo the launcher put it in, and every relative read took the
+    fast bail: the v6-node-4 read, allowed under policy `deny`, with nothing logged."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, fence)                                    # cwd IS the source tree
+    assert rc != 0 and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+
+    # …and the flag only ever moves toward MORE checking, so a chdir that really does leave the
+    # tree cannot re-open it either.
+    rc2, out2, _err2, _to2 = _run("""
+        import os
+        os.chdir("/tmp")
+        try:
+            print(open('x-not-here.txt').read())
+        except FileNotFoundError:
+            print("relative reads outside the tree still work")
+        """, src, fence)
+    assert rc2 == 0 and "still work" in out2
+
+
 def test_settings_vocabulary_matches_the_module(tmp_path):
     """`core` cannot import `runtime`, so the policy vocabulary is spelled twice. Pin them equal —
     a third rung added on one side only would be accepted by config and ignored by the fence."""

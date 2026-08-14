@@ -24,6 +24,7 @@ from looplab.agents.hints import DEEP_RESEARCH_HINT_PREFIX
 from looplab.agents.roles import BOARD_PROMPT_CARDS
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
 from looplab.engine.cadence import deep_research_window
 from looplab.events.replay import fold
@@ -696,18 +697,6 @@ class ResearchCadenceMixin:
             card = state.cards.get(card_id)
             if subject is None or card is None:
                 continue
-            if getattr(card, "_card_enrichment_complete", True) is False:
-                # THE FOLD REFUSED THIS CARD'S ENRICHMENT, so writing another row cannot change the
-                # folded card and the delta below would be non-empty again on the very next pass.
-                # `replay._on_card_enriched` bounds the enrichment journal at 4,096 keys and a NEW
-                # key refused at the cap is refused on every subsequent fold too — the fold replays
-                # the same log prefix, so the same 4,096 keys win forever. Without this gate the
-                # reconciliation re-appended a byte-identical `card_enriched` on EVERY cadence pass
-                # for the rest of the run: reproduced at appends-per-pass 0,1,2,3,4… against a
-                # control that converges at one, i.e. unbounded growth of a log every fold re-reads.
-                # Organically ~1,000 cards away; a hand-edited or hostile log reaches it with 4,096
-                # cheap rows.
-                continue
             lesson_refs = sorted(desired_lessons.get(card_id, ()))[:64]
             claim_refs = sorted(desired_claims.get(card_id, ()))[:64]
             origin = desired_origins.get(card_id)
@@ -723,6 +712,31 @@ class ResearchCadenceMixin:
                 if not _footprint_receipt_exists(
                         card_id, fp_node, fp_proposal_ref, footprint):
                     delta["footprint"] = footprint
+            # DO NOT RE-APPEND A DELTA THAT ALREADY DID NOT TAKE. `replay._on_card_enriched`
+            # bounds the enrichment journal at 4,096 keys, and a NEW key refused at that cap is
+            # refused on every subsequent fold — the fold replays the same log prefix, so the same
+            # 4,096 keys win forever. The delta below is computed from the FOLDED card, so a refused
+            # key makes it non-empty again on the very next pass and the reconciliation re-appended
+            # a byte-identical `card_enriched` for the rest of the run (reproduced: appends-per-pass
+            # 0,1,2,3,4… against a control converging at one — unbounded growth of a log every fold
+            # re-reads).
+            #
+            # Keyed on the EXACT delta, not on the card. Gating on `_card_enrichment_complete`
+            # instead was too broad in a way that costs the operator real information: that flag is
+            # set for ANY omission and never clears, so a card that once had one key refused could
+            # never receive a lesson-ref or origin correction the fold would have accepted, and
+            # `public_cards` reported it enrichment-incomplete forever with no path back. A memo of
+            # what THIS process already tried and watched fail stops the loop without freezing the
+            # card. Runtime-only and bounded by the card/delta space; a restart retries once more,
+            # which is the correct amount of forgetting for a non-durable memo.
+            if delta:
+                attempted = getattr(self, "_card_enrichment_attempted", None)
+                if attempted is None:
+                    attempted = self._card_enrichment_attempted = set()
+                fingerprint = (card_id, canonical_json_digest(delta))
+                if fingerprint in attempted:
+                    continue
+                attempted.add(fingerprint)
             if not delta:
                 continue
             node, proposal_ref = subject

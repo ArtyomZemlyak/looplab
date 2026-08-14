@@ -365,3 +365,32 @@ test('a Card that declares no action renders no stray count where its Action row
     'a declared search space is an action and must still open the Action row')
   assert.deepEqual(bareTextNodes(space).filter(text => text === '0'), [])
 })
+
+test('the compact card drawer is NONMODAL, because its close scrim is its own sibling', async () => {
+  // `useDialogFocus({modal: true})` makes `isolateBackgroundFor` walk to <body> setting `inert` on
+  // every sibling along the way — and `.workspace-scrim`, the click-outside-to-close button, is
+  // rendered in the SAME parent as the drawer `<aside>`. Modal would therefore kill click-to-close
+  // and make the board behind it non-interactive, leaving Escape and the ⟩ button as the only ways
+  // out. `RunView.jsx`'s structurally identical drawer chose nonmodal for this reason.
+  //
+  // Pinned here because nothing in the suite MOUNTS `_CardKanban` in compact mode: this is a source
+  // pin standing in for a mount, and the negative half is what actually holds the line.
+  const source = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
+  const call = source.slice(source.indexOf('useDialogFocus(detailDrawerRef'))
+  assert.match(call.slice(0, 400), /modal:\s*false/,
+    'the compact drawer must not claim modal containment over its own scrim')
+  assert.match(call.slice(0, 400), /DIALOG_PRIORITY\.NONMODAL/)
+  // Line comments stripped first — the comment above the call legitimately DISCUSSES `modal: true`
+  // to say why it is wrong, and a negative pin that its own explanation trips is a pin that gets
+  // deleted rather than heeded.
+  const code = source.split('\n').map(line => line.replace(/(^|\s)\/\/.*$/, '')).join('\n')
+  assert.doesNotMatch(code, /modal:\s*true/,
+    'no surface in this file may claim modal containment while rendering a sibling scrim')
+
+  // …and the scrim really is a sibling, which is the fact the rule rests on. If this moves, the
+  // reasoning above has to be re-checked rather than the pin relaxed.
+  const scrimAt = source.indexOf('className="workspace-scrim"')
+  const asideAt = source.indexOf('<aside ref={detailDrawerRef}')
+  assert.ok(scrimAt > 0 && asideAt > scrimAt && asideAt - scrimAt < 600,
+    'the scrim button and the drawer aside are still rendered as adjacent siblings')
+})

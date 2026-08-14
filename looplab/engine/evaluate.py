@@ -30,6 +30,7 @@ attempt loop. Trust scans (reward-hack / code-leakage / critic) stay lazy, metho
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from collections.abc import Mapping
 from typing import Optional
@@ -543,6 +544,9 @@ def _repair_forces_full_retrain(res, next_start, *, rolled_back: bool = False) -
 
 class SpeculativeEvaluationInvariantError(AssertionError):
     """A speculative build reached an evaluation without a confirmed selection. See below."""
+
+
+_LOG = logging.getLogger(__name__)
 
 
 class EvaluateMixin:
@@ -1233,8 +1237,14 @@ class EvaluateMixin:
                                           f"proposed no change to the failing declaration"),
                             "changed": [], "stages_passed": None,
                             "salvaged_metric": salvaged.metric})
-            except Exception:  # noqa: BLE001 — see the tail's containment below; same contract
-                pass
+            except Exception as exc:  # noqa: BLE001 — see the tail's containment below
+                # SAY SO. The paid call already happened, so losing this row loses the run's only
+                # record that it did: `_durable_repair_ledger`'s judge history then shows the node
+                # never asked, and a resume can re-enter and buy the identical call again. There is
+                # no terminal at stake here (unlike the tail below, where invariant #2 justifies a
+                # silent swallow), so the containment stays and the loss becomes visible.
+                _LOG.warning("node %s: the salvage-cause repair was billed but its receipt could "
+                             "not be written (%s); a resume may re-spend it", node.id, exc)
             return node, attempt, False, {}   # billed, receipted, nothing to commit
         # THE TAIL IS CONTAINED FOR THE SAME REASON THE PAID CALL IS. Everything from here down —
         # the receipt append, the fold, `_write_node_files` — is I/O, and this method's callers

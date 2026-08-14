@@ -1026,8 +1026,15 @@ function _CardKanban({
   // confirm — Escape fired BOTH: the confirm cancelled AND the drawer unmounted it mid-interaction.
   // `useDialogFocus` also declines Escape that `defaultPrevented` already claimed, which is what
   // lets a text input inside the drawer cancel its own edit instead of dismissing the whole drawer.
+  //
+  // NONMODAL, matching the structurally identical drawer in `RunView.jsx` ("dialog navigation …
+  // without claiming or enforcing modal containment"). `modal: true` would make
+  // `isolateBackgroundFor` walk to <body> setting `inert` on every sibling — including the
+  // `.workspace-scrim` close button rendered in this same parent — so click-outside-to-close would
+  // be dead and the board behind it non-interactive, leaving Escape and the ⟩ button as the only
+  // ways out. Nothing in the suite mounts `_CardKanban` in compact mode, so no test would say so.
   useDialogFocus(detailDrawerRef, closeDetails, !!(pane?.compact && selectedCard),
-    { modal: true, priority: DIALOG_PRIORITY.OVERLAY })
+    { modal: false, priority: DIALOG_PRIORITY.NONMODAL })
   const addBar = canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
     <input className="text" style={{ flex: 1 }} aria-label="New hypothesis" disabled={readOnly}
       placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"

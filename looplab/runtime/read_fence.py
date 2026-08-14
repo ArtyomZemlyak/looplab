@@ -430,23 +430,29 @@ def _hook(event, args):
         return
     if event != "os.chdir":
         return
-    # Refused so a process cannot walk into the source tree and read it with bare relative names.
-    # The audit event fires BEFORE the chdir, so this also re-derives `_CWD_REACHES_ROOT` from the
-    # target — the flag that keeps `_resolve`'s relative fast bail correct rather than merely
-    # asserted. Under `warn` the chdir proceeds, so the flag must be set even though we do not stop
-    # it; under `deny` `_report` raises, the chdir never happens, and the assignment is skipped.
+    # Refused so a process cannot walk into the source tree and read it with bare relative names,
+    # and it also maintains `_CWD_REACHES_ROOT` — the flag that keeps `_resolve`'s relative fast
+    # bail correct rather than merely asserted.
     global _CWD_REACHES_ROOT
     try:
         bad = _fenced_dir(args[0])
     except Exception:
         return
+    # MONOTONIC — this flag is only ever SET here, never cleared, and that is the whole correctness
+    # argument. The audit event fires BEFORE the chdir, so a target outside every root does NOT
+    # prove the process is about to stand outside one: `try: os.chdir(cfg.output_dir) except
+    # OSError: pass` around a directory that does not exist yet is ordinary generated-training-code
+    # shape, and clearing the flag from the pre-event would turn OFF the fence for a process whose
+    # cwd is still the repo the launcher put it in — the v6-node-4 read, allowed under policy
+    # `deny` with nothing logged. Clearing it would need confirmation the chdir SUCCEEDED, which no
+    # pre-event hook can have. A stale True costs one `abspath` per relative open and decides
+    # nothing: `_fenced` re-checks the resolved path either way.
     if bad is not None:
-        _report(bad)
-        _CWD_REACHES_ROOT = True
-    else:
-        # `os.fchdir` hands an already-open fd, whose target this hook cannot resolve. Nothing
-        # proves it is outside a root, so pay the `abspath` on relative opens rather than guess.
-        _CWD_REACHES_ROOT = args[0].__class__ is int
+        _report(bad)            # under `deny` this raises, so the chdir never happens at all
+    # `os.fchdir` hands an already-open fd, whose target this hook cannot resolve. Nothing proves it
+    # is outside a root, so pay the `abspath` rather than guess.
+    _CWD_REACHES_ROOT = (
+        _CWD_REACHES_ROOT or bad is not None or args[0].__class__ is int)
 
 
 def _chain():
