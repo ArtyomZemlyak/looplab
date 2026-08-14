@@ -575,9 +575,13 @@ class EvalSpec(BaseModel):
         being RESUMED, which `_grandfathered` reloads without re-validating precisely because a
         recorded run must keep reaching the treatment it had.
         """
-        from looplab.runtime.command_eval import _validate_rel_paths
+        # The cap became a REQUIRED argument upstream on 2026-08-14. A subject is an
+        # output-side declaration, so it takes `expect.files`' cap rather than `needs`'.
+        from looplab.runtime.command_eval import (MAX_STAGE_EXPECT_FILES,
+                                                  _validate_rel_paths)
         if isinstance(v, dict) and v.get("subject") is not None:
-            clean, err = _validate_rel_paths("score", "subject", v["subject"])
+            clean, err = _validate_rel_paths("score", "subject", v["subject"],
+                                                MAX_STAGE_EXPECT_FILES)
             if err is not None:
                 raise ValueError(
                     err.replace("stage 'score'", "eval.metric")
