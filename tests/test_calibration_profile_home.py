@@ -48,11 +48,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               but the complete settings envelope and therefore old receipts genuinely changed)
 #   2026-08-13  + developer_probe, developer_probe_timeout_s  (F2, the Developer's probe)
 #   2026-08-13  + eval_env                   (run-level declared environment; see below)
+#   2026-08-13  + proposal_width             (the proposal-derived run width, F1; see below)
 # A LITERAL, measured on the tree. Both halves must stay literals: an earlier attempt at this guard
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:5a3fcc8c24b6038cc0cd2eb77be6b037e0df4b9ac938ec785fc565c742b27801"
+_EXPECTED_DIGEST = "sha256:52423342aaf1c4c6776884dcf1294e049feb1ca9e4063802826f47393c5087dd"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -157,7 +158,18 @@ _EXPECTED_DIGEST = "sha256:5a3fcc8c24b6038cc0cd2eb77be6b037e0df4b9ac938ec785fc56
 #               protected `score` stage's `needs` is derived from the declared subject, so a
 #               replicate can now fail `needs_failed` where it used to run. Old receipts SHOULD stop
 #               verifying. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 204
+#   2026-08-13  + proposal_width  (the run's WIDTH derived from the proposals, backlog F1). The
+#               'field set changed too' branch. It is INERT for a calibration replicate twice over —
+#               the profile spells all four widths as `1`, so no axis is AUTO, and
+#               `_settle_proposal_width` refuses the calibration lane outright — but the digest binds
+#               the COMPLETE non-variant envelope and is deliberately not clever enough to exempt an
+#               inert knob. What makes re-pinning right rather than merely necessary is that the
+#               field decides whether a run may CHANGE its execution width mid-log at all, which is
+#               precisely the property a receipt asserts about its replicates; `run_width_settled` is
+#               a named forbidden calibration lifecycle event for the same reason. Both pins re-set.
+#               Note this change moves `speculation_implementation_digest` regardless (it hashes
+#               every shipped `.py`), so every previously issued receipt is revoked either way.
+_EXPECTED_FIELD_COUNT = 205
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
