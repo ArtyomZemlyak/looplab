@@ -51,7 +51,11 @@ from looplab.core.llm_broker import in_llm_lane
 # The confidence normalizer is the training monitor's, deliberately not a second spelling: both watchdogs
 # must treat a NaN/absent/non-numeric model confidence the same way (observable at 0.0, never authority
 # for a kill). train_monitor imports nothing from this module, so the module-level import is cycle-free.
-from looplab.engine.train_monitor import _normalize_monitor_confidence
+from looplab.engine.train_monitor import (
+    _MONITOR_LOOK_TURNS,
+    _normalize_monitor_confidence,
+    monitor_log_tools,
+)
 
 # A kill never fires until the node has been flagged underperforming for MORE than this many
 # CONSECUTIVE acting ticks (a metric and enough same-resource sibling observations exist): the gate is
@@ -100,6 +104,18 @@ _ASHA_JUDGE_SYSTEM = (
     "stop throws away an experiment that was only slow to start — when in doubt choose 'watch', which "
     "keeps the run alive and re-examines it later. Judge only from the evidence given; the final metric "
     "is not known yet, so do not guess it. Be concise and specific about what you saw.")
+
+# Spliced into the USER turn only when log tools are wired, immediately before the question — the same
+# additive pattern `train_monitor._LOOK_INVITATION` uses, so `train_monitor_tools=false` leaves this
+# judge's message byte-identical to what it has always been. It names THIS judge's own blind spot
+# rather than reusing the training monitor's wording: the rank evidence is 12 mined numbers with no
+# time axis and no log text at all, so "is it still improving" is precisely what it cannot see.
+_ASHA_LOOK_INVITATION = (
+    "\nYOU CAN LOOK. The curve above is at most 12 points mined from a short tail, and it does not "
+    "show you WHEN they happened or what the log said around them. Use `metric_series` to see what "
+    "this run's numbers have done over its whole life at a granularity you choose — a run that is "
+    "behind but still descending is the exact case you are told to keep alive — and `read_log` to "
+    "search for the errors, warnings or fallbacks that would explain the gap.")
 
 
 def latest_intermediate(log_tail: str, workdir, metric_spec: dict) -> Optional[float]:
@@ -542,7 +558,7 @@ class AshaMonitorMixin:
                 pass
         return 600.0
 
-    def _asha_verdict(self, context: str) -> Optional[AshaVerdict]:
+    def _asha_verdict(self, context: str, tools=None) -> Optional[AshaVerdict]:
         """One-shot LLM stop decision over the rank evidence (SYNC — the caller runs it in a worker
         thread), mirroring `train_monitor._training_verdict`. Uses the Developer's client (it wrote the
         training loop, so it knows what this curve should look like) through the SHARED judge-call
@@ -552,18 +568,30 @@ class AshaMonitorMixin:
 
         Returns None when there is no client (offline / toy path) or the model output cannot be parsed.
         Unlike the training monitor's advisory verdict, None here is LOAD-BEARING: `should_asha_kill`
-        treats it as "do not stop", so a broken/absent judge can only ever spare a node."""
+        treats it as "do not stop", so a broken/absent judge can only ever spare a node.
+
+        `tools` (`tools/log_tools.py`, built by the SHARED `train_monitor.monitor_log_tools` so both
+        watchdogs honour one switch) is the fix for this judge's own pre-chewed slice, and it is a
+        DIFFERENT slice from the training monitor's: this judge never sees a byte of log text at all.
+        `asha_judge_context` hands it 12 curve points mined from a 128 KiB tail, ≤8 extra metrics and a
+        300-char echo of the training monitor's reason — so the question "is this curve actually still
+        improving, or did it plateau an hour ago" is asked of twelve numbers whose spacing it cannot
+        see. `structured_judge` already took `tools`; it was simply never given any, so this is the
+        argument that was missing rather than a new mechanism, and `tools=None` is the historical call.
+        """
         client = getattr(getattr(self, "developer", None), "client", None)
         if client is None:
             return None
         messages = [
             {"role": "system", "content": _ASHA_JUDGE_SYSTEM},
             {"role": "user", "content": context
+             + (("\n\n" + _ASHA_LOOK_INVITATION) if tools is not None else "")
              + "\n\nShould this still-running experiment continue, be watched, or be stopped?"},
         ]
         try:
             from looplab.trust.judge import structured_judge
-            return structured_judge(client, messages, AshaVerdict, parser="tool_call")
+            return structured_judge(client, messages, AshaVerdict, parser="tool_call",
+                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS)
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict", not a crash
             return None
 
@@ -761,7 +789,11 @@ class AshaMonitorMixin:
                             # state. Join an in-flight call on eval cancellation (abandon_on_cancel=False)
                             # so no detached worker can emit cost after the node/run has finalized.
                             verdict = await anyio.to_thread.run_sync(
-                                self._asha_verdict, context, abandon_on_cancel=False)
+                                self._asha_verdict, context,
+                                # Per tick, for the reason the training monitor's is: the log the
+                                # judge would read is being written while it thinks.
+                                monitor_log_tools(self, workdir, log_plan, log_snapshot),
+                                abandon_on_cancel=False)
                             judge_calls += 1
                         conf, confidence_valid = _normalize_monitor_confidence(
                             getattr(verdict, "confidence", None))

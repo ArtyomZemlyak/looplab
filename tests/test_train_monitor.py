@@ -157,9 +157,11 @@ def test_monitor_cancellation_joins_the_paid_verdict_worker(tmp_path):
         # contract: the loop calls it POSITIONALLY through `to_thread.run_sync`, and a stub one
         # parameter short raises `TypeError` inside the loop's own per-tick `except Exception:
         # continue` — the monitor then spins forever, `started` is never set, and this test hangs
-        # rather than failing. That is what adding `trajectory_text` did. Keep it in step with the
-        # signature; `test_train_monitor_trajectory.py` drives the two into agreement.
-        def _blocking_verdict(digest, context, stage_context="", trajectory_text=""):
+        # rather than failing. That is what adding `trajectory_text` did, and then `tools` did it
+        # AGAIN — the guard in `test_train_monitor_trajectory.py` bound the loop to the real
+        # signature and never looked at the stubs, so it stayed green through both. It now derives
+        # this stub too. Keep it in step with the signature.
+        def _blocking_verdict(digest, context, stage_context="", trajectory_text="", tools=None):
             started.set()
             release.wait()
             worker_finished.set()

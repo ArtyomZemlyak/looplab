@@ -95,6 +95,32 @@ _MONITOR_SYSTEM = (
     "evidence. Be concise and specific about the evidence you saw.")
 
 
+# The sentence that tells the judge the tail is not all it may have. Spliced ONLY when tools are
+# actually wired (`monitor_log_tools`), at the same position pattern as `stage_context` and
+# `trajectory_text`, so `train_monitor_tools=false` restores the historical message byte for byte.
+#
+# It NAMES the failure it exists to end, because a model handed both a tail and a tool still reasons
+# from the tail: on v7 the spliced tail was ten loss values ~30 seconds apart on a five-hour run, and
+# the verdict "pinned at ~23.0 … no learning trend from its initialization value" was a correct
+# reading of exactly that. Telling it the window is small is not the same as telling it the window is
+# *too small to answer the question it is being asked* — so this says the second thing.
+_LOOK_INVITATION = (
+    "YOU CAN LOOK FURTHER. The tail below is a SHORT window — often under a minute of a run that has "
+    "been going for hours — and 'converged', 'stuck at initialization' and 'still descending slowly' "
+    "are indistinguishable inside it, because the difference is smaller than the step-to-step noise. "
+    "Before you call anything broken, USE YOUR TOOLS: `metric_series` for what the loss has actually "
+    "done over the whole run at a granularity you choose, and `read_log` to tail further back, read "
+    "the run's start, or search for a traceback. If the tools disagree with the tail, the tools have "
+    "more evidence.")
+
+# The tool-loop turn budget for ONE monitor tick. Deliberately well below `trust.judge.JUDGE_MAX_TURNS`
+# (15): this judge fires up to `_MAX_MONITOR_LLM_CALLS` times per node on a timer, so a turn budget is
+# multiplied by ~200 in a way the two one-shot verifiers' never is. Six is enough for the shape the
+# invitation asks for — a whole-run series, a narrower one, a search, and the emit — and a loop that
+# spends it degrades to `parse_structured` on the same messages rather than to nothing.
+_MONITOR_LOOK_TURNS = 6
+
+
 def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000) -> str:
     """Reduce a raw training-log tail to a compact digest that preserves the recent TRAJECTORY (the LLM
     context in Phase 1).
@@ -1056,51 +1082,120 @@ def read_training_tail_raw(workdir, *, max_read_bytes: int = 131_072,
     limit = max(0, int(max_read_bytes))
     if limit == 0:
         return ""
-    key = _log_path_key(path)
-    cursor = snapshot.cursors.get(key) if snapshot is not None else None
-    if snapshot is not None and not snapshot.complete:
-        return ""
     try:
         with open(path, "rb") as fh:
-            stat_result = os.fstat(fh.fileno())
-            size = max(0, int(stat_result.st_size))
-            current_identity = _file_identity(stat_result)
-            if cursor is None and snapshot is not None and current_identity is not None:
-                # A rotation can rename the old file to another ``*.log`` path. Follow identity across
-                # that rename so the renamed prior-attempt bytes are not mistaken for a brand-new log.
-                cursor = next((old for old in snapshot.cursors.values()
-                               if old.identity == current_identity), None)
-            if cursor is None and snapshot is not None:
-                # Some filesystems expose no stable inode. A matching old EOF probe is sufficient to
-                # classify an unknown path as a renamed old log; a false match only suppresses advisory
-                # evidence (safe), whereas treating it as new could resurrect a stale kill metric.
-                for old in snapshot.cursors.values():
-                    if old.offset is None or old.probe is None or size < old.offset:
-                        continue
-                    fh.seek(old.probe_start)
-                    if fh.read(len(old.probe)) == old.probe:
-                        cursor = old
-                        break
-            floor = 0
-            if cursor is not None:
-                if cursor.offset is None or cursor.probe is None:
-                    return ""
-                replaced = (cursor.identity is not None and current_identity is not None
-                            and cursor.identity != current_identity)
-                truncated = size < cursor.offset
-                boundary_changed = False
-                if not replaced and not truncated:
-                    fh.seek(cursor.probe_start)
-                    boundary_changed = fh.read(len(cursor.probe)) != cursor.probe
-                # only a proven append may inherit the old EOF. Rotation/replacement or a
-                # truncate-and-regrow (including past the old size before the first watchdog tick) starts
-                # at zero; if identity is unavailable, the boundary probe supplies the same protection.
-                floor = 0 if (replaced or truncated or boundary_changed) else cursor.offset
+            size = max(0, int(os.fstat(fh.fileno()).st_size))
+            floor = attempt_byte_floor(fh, path, snapshot)
+            if floor is None:
+                return ""
             fh.seek(max(floor, size - limit))
             raw = fh.read(limit)
     except (OSError, TypeError, ValueError, OverflowError):
         return ""
     return raw.decode("utf-8", "replace")
+
+
+def attempt_byte_floor(fh, path, snapshot: Optional[TrainingLogSnapshot]) -> Optional[int]:
+    """The byte offset at or above which THIS eval attempt's bytes begin in the already-open `fh`.
+
+    `None` means the boundary cannot be established and the caller must return nothing: a transient
+    permission/stat failure at snapshot time must not let a monitor consume prior-attempt bytes.
+    `0` (no snapshot, or a fresh file) means the whole file is this attempt's.
+
+    Extracted from `read_training_tail_raw` so the SECOND reader of these bytes — the log tools the
+    judge queries (`tools/log_tools.py`, wired in `monitor_log_sources`) — cannot come to a different
+    conclusion about where the previous attempt ended. One boundary, two readers; the alternative is a
+    role that seeks past a floor the digest respects and reads a dead attempt's curve as the live one's.
+    Leaves `fh`'s position undefined — every caller seeks before reading.
+    """
+    if snapshot is not None and not snapshot.complete:
+        return None
+    stat_result = os.fstat(fh.fileno())
+    size = max(0, int(stat_result.st_size))
+    current_identity = _file_identity(stat_result)
+    cursor = snapshot.cursors.get(_log_path_key(Path(path))) if snapshot is not None else None
+    if cursor is None and snapshot is not None and current_identity is not None:
+        # A rotation can rename the old file to another ``*.log`` path. Follow identity across
+        # that rename so the renamed prior-attempt bytes are not mistaken for a brand-new log.
+        cursor = next((old for old in snapshot.cursors.values()
+                       if old.identity == current_identity), None)
+    if cursor is None and snapshot is not None:
+        # Some filesystems expose no stable inode. A matching old EOF probe is sufficient to
+        # classify an unknown path as a renamed old log; a false match only suppresses advisory
+        # evidence (safe), whereas treating it as new could resurrect a stale kill metric.
+        for old in snapshot.cursors.values():
+            if old.offset is None or old.probe is None or size < old.offset:
+                continue
+            fh.seek(old.probe_start)
+            if fh.read(len(old.probe)) == old.probe:
+                cursor = old
+                break
+    if cursor is None:
+        return 0
+    if cursor.offset is None or cursor.probe is None:
+        return None
+    replaced = (cursor.identity is not None and current_identity is not None
+                and cursor.identity != current_identity)
+    truncated = size < cursor.offset
+    boundary_changed = False
+    if not replaced and not truncated:
+        fh.seek(cursor.probe_start)
+        boundary_changed = fh.read(len(cursor.probe)) != cursor.probe
+    # only a proven append may inherit the old EOF. Rotation/replacement or a
+    # truncate-and-regrow (including past the old size before the first watchdog tick) starts
+    # at zero; if identity is unavailable, the boundary probe supplies the same protection.
+    return 0 if (replaced or truncated or boundary_changed) else cursor.offset
+
+
+def monitor_log_sources(workdir, plan: Optional[EvalLogPlan] = None,
+                        snapshot: Optional[TrainingLogSnapshot] = None) -> list:
+    """The `tools/log_tools.LogSource` map for ONE eval: every stage log the plan can NAME, each with
+    the eval phase that writes it and this attempt's byte floor.
+
+    This is the whole of rule 2 in `tools/log_tools.py`'s boundary. What a role may read is exactly
+    what `eval_log_plan` derived from the resolved pipeline — the node's own workdir output — so the
+    tool never constructs a path from model input and there is nothing outside the workdir to name.
+    A log the plan cannot attribute (`LOG_ROLE_AMBIGUOUS`) is left OUT for the same reason
+    `resolve_stage_log` refuses to judge it: bytes nobody can attribute to a phase are not evidence.
+
+    Deliberately WIDER than `read_training_tail_raw`'s single active log and deliberately NOT wider
+    than the plan: `setup.log` and the scorer carry no TRAINING-health authority (`_NON_TRAINING_ROLES`,
+    enforced in `should_monitor_kill`), but a judge that can read them can answer "did the dep install
+    actually get the CUDA build" and "has the scorer started yet", which is the question the tail's
+    absence of an answer used to be mistaken for evidence about. The ROLE rides on every source, so
+    the model is always told which phase it is reading — the same fix `monitor_stage_context` makes
+    for the spliced tail.
+
+    Returns [] when there is no log yet. Import is function-local: `tools/` sits BELOW `engine/`, so a
+    module-level import here would be the wrong direction for a module `tools` must never import back.
+    """
+    from looplab.tools.log_tools import LogSource
+    try:
+        candidates = sorted(Path(workdir).glob("*.log"))
+    except OSError:
+        return []
+    sources: list = []
+    for path in candidates:
+        key = _log_name_key(path.name)
+        if plan is not None:
+            if key not in plan.roles:
+                continue
+            stage, role = plan.roles[key]
+            if role == LOG_ROLE_AMBIGUOUS:
+                continue
+        else:
+            role = LOG_ROLE_UNKNOWN
+        floor = 0
+        try:
+            with open(path, "rb") as fh:
+                boundary = attempt_byte_floor(fh, path, snapshot)
+            if boundary is None:
+                continue          # fail closed — the same direction `read_training_tail_raw` fails
+            floor = boundary
+        except (OSError, TypeError, ValueError, OverflowError):
+            continue
+        sources.append(LogSource(name=path.name, path=path, role=role, floor=floor))
+    return sources
 
 
 def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
@@ -1118,6 +1213,35 @@ def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
     if not raw:
         return ""
     return training_log_digest(raw, max_lines=max_lines, max_chars=max_chars)
+
+
+def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
+    """The log tools this tick's judge may LOOK with, or None to keep the historical one-shot call.
+
+    A FREE FUNCTION taking the engine, not a mixin method, and that is the point — the same reason
+    `engine/speculation_gate.py`'s envelope is one. BOTH watchdogs need it, so as a method it has to
+    live on a mixin one of them does not have: on `TrainingMonitorMixin` an ASHA-only object raises
+    AttributeError, and `_monitor_asha`'s own per-tick containment `except` swallows that into a
+    watchdog that silently stops producing verdicts for the rest of a multi-hour eval.
+    `tests/test_asha_monitor.py`'s `_AshaStub` is exactly that object and is what caught it. Moving it
+    to `SharedEngineMixin` only moves which stub breaks; a free function depends on no MRO at all, and
+    `getattr` below is total over a partially-built engine.
+
+    None when `Settings.train_monitor_tools` is off or the eval has written no nameable log yet — and
+    `None` is exactly what `structured_judge` treats as "no tools", so the off path is the plain
+    `parse_structured` both judges have always made, byte for byte.
+
+    The provider is built PER TICK and its source map is a CALLABLE, because both halves move: a new
+    stage log appears when the pipeline advances, and the log the judge is being asked about changes
+    with it. A provider frozen at eval start would answer a question about `train.log` while the model
+    read `setup.log`.
+    """
+    if not getattr(engine, "_train_monitor_tools", False):
+        return None
+    from looplab.tools.log_tools import LogQueryTools
+    if not monitor_log_sources(workdir, log_plan, log_snapshot):
+        return None
+    return LogQueryTools(lambda: monitor_log_sources(workdir, log_plan, log_snapshot))
 
 
 class TrainingMonitorMixin:
@@ -1145,7 +1269,7 @@ class TrainingMonitorMixin:
         return cfg
 
     def _training_verdict(self, digest: str, context: str, stage_context: str = "",
-                          trajectory_text: str = "") -> Optional[TrainingVerdict]:
+                          trajectory_text: str = "", tools=None) -> Optional[TrainingVerdict]:
         """One-shot LLM judgment of the live log (SYNC — the caller runs it in a worker thread). Uses the
         Developer's client (the Developer wrote the loop, so it knows what its own logs should look like)
         with a fresh, STATELESS structured call — it never mutates the shared role object, so it is safe to
@@ -1166,6 +1290,15 @@ class TrainingMonitorMixin:
         multi-hour run — see the trajectory section above for the two live cases where that produced a
         confident "not learning" about a run that had descended 4.73 and 1.41 respectively.
 
+        `tools` (from `monitor_log_tools`) is the FOURTH such layer and the one that stops the engine
+        choosing for the judge what it is allowed to see. The three above are all still fixed slices;
+        this one lets the judge ASK — tail the log further back, read its start, search it for a
+        traceback, or query the loss series over the whole run at a granularity it picks. The digest
+        still arrives spliced, so a model that ignores the tools answers exactly as it did before;
+        `_LOOK_INVITATION` is what tells it they are there, and it is spliced at the SAME position
+        pattern as the three above (empty when there are no tools, reproducing the historical message
+        byte for byte).
+
         Additive by construction: `_MONITOR_SYSTEM` and the log header are unchanged (prompt strings are
         contracts), and an empty `stage_context`/`trajectory_text` reproduces the historical message byte
         for byte."""
@@ -1177,12 +1310,17 @@ class TrainingMonitorMixin:
             {"role": "user", "content": ((context + "\n\n") if context else "")
              + ((stage_context + "\n\n") if stage_context else "")
              + ((trajectory_text + "\n\n") if trajectory_text else "")
+             + ((_LOOK_INVITATION + "\n\n") if tools is not None else "")
              + "LIVE TRAINING LOG (recent tail):\n" + digest
              + "\n\nClassify this run's health from the log evidence above."},
         ]
         try:
-            from looplab.core.parse import parse_structured
-            return parse_structured(client, messages, TrainingVerdict)
+            from looplab.trust.judge import structured_judge
+            # `parser="tool_call"` is what the two other judges in this repo use, and `structured_judge`
+            # falls back to the plain `parse_structured` whenever the tool loop yields nothing valid —
+            # so an agentic hiccup degrades to the historical verdict rather than to no verdict.
+            return structured_judge(client, messages, TrainingVerdict, parser="tool_call",
+                                    tools=tools, max_turns=_MONITOR_LOOK_TURNS)
         except Exception:  # noqa: BLE001 — a parser/endpoint failure means "no verdict this tick", not a crash
             return None
 
@@ -1380,7 +1518,12 @@ class TrainingMonitorMixin:
                         verdict = await anyio.to_thread.run_sync(
                             self._training_verdict, tail, context,
                             monitor_stage_context(resolved, log_plan),
-                            trajectory_context(trajectory), abandon_on_cancel=False)
+                            trajectory_context(trajectory),
+                            # Built HERE, per tick, in the same thread hand-off as the call it serves:
+                            # the tool reads the live log while the judge is thinking, so it must see
+                            # the file as it is now, not as it was when the eval started.
+                            monitor_log_tools(self, workdir, log_plan, log_snapshot),
+                            abandon_on_cancel=False)
                         llm_calls += 1
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed

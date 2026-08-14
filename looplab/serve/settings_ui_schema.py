@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 176
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 177
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -77,7 +77,12 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # own declared footprints or by the box alone. A curated row rather than an uncurated one because it
 # changes how much hardware the run uses concurrently, which is the same class of question every
 # other concurrency row on this form answers.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9b4725e36f29fc0acc045c528a070aa548aec358a107532ec753509efc39fbbc"
+# (177 since `train_monitor_tools`: whether the two live-eval watchdog JUDGES may query the stage
+# logs themselves instead of being handed a fixed slice of them. Curated, beside the kill switch
+# and its confidence bar, because it changes what the evidence for an LLM-judged kill IS — the
+# measured slice was ~30 seconds of a five-hour run — and because it buys extra paid round trips
+# per check, which is the same class of question every other watchdog row here answers.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "93f77619521fe9c535b7ee4adff377679e3767051590e9fcef68a7ba9992fb70"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

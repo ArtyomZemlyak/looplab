@@ -499,6 +499,16 @@ class Settings(BaseSettings):
     # a plateau is 'watch' and is never killed.
     train_monitor_kill: bool = True
     train_monitor_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    # Let the monitor's judge (and the ASHA judge beside it) QUERY the live logs instead of only being
+    # handed a slice of them: `tools/log_tools.py`'s `read_log` + `metric_series`, scoped to the stage
+    # logs `eval_log_plan` names. ON by default because the slice was MEASURED insufficient — the
+    # digest a judge received on `runs/rubertlite-dr-unified-v7` was ~10 loss values ≈ 30 s of a
+    # five-hour run, and it answered "pinned, no learning trend" about a curve that had fallen 4.73.
+    # OFF restores the historical single completion byte for byte (`structured_judge` treats
+    # `tools=None` as the plain `parse_structured` this always was). The cost it buys is real and
+    # bounded: up to `train_monitor._MONITOR_LOOK_TURNS` extra round trips per tick, and a default
+    # tool read is a 256 KiB seek (~12 ms) — see that module's measured cost table.
+    train_monitor_tools: bool = True
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
     # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
@@ -2081,6 +2091,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "train_monitor_interval_s": 600.0,
     "train_monitor_kill": False,
     "train_monitor_kill_confidence": 0.8,
+    # An old run resumes WITHOUT the log tools: this table exists so a resume cannot silently add
+    # paid calls, and an agentic tick costs up to `_MONITOR_LOOK_TURNS` extra round trips.
+    "train_monitor_tools": False,
     "asha_live": False,
     "asha_live_kill": False,
     "asha_live_quantile": 0.5,

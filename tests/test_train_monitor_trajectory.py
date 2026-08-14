@@ -306,6 +306,7 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
     parameter cannot strand a stub silently."""
     import ast
     import inspect
+    from pathlib import Path
 
     from tests._source_scan import function_tree
 
@@ -325,6 +326,40 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
     assert len(required) <= passed <= len(positional), (
         f"the loop passes {passed} positional arguments; _training_verdict takes "
         f"{len(required)}..{len(positional)}")
+
+    # ...and the same bound over every STUB the suite substitutes for it. Binding the loop against
+    # the real signature is only half the rule and it is the half that was already true both times
+    # this broke: `trajectory_text` and then `tools` each left `test_train_monitor.py`'s
+    # `_blocking_verdict` one parameter short, and each turned a test into a HANG while this
+    # assertion stayed green. A stub is found the way the loop finds it — an assignment to
+    # `<something>._training_verdict` — so a stub added later inherits the check instead of escaping
+    # a hand-written list of file names.
+    stubs = 0
+    for path in sorted(Path(__file__).resolve().parent.glob("test_*.py")):
+        module = ast.parse(path.read_text(encoding="utf-8"))
+        functions = {node.name: node for node in ast.walk(module)
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        for node in ast.walk(module):
+            if not isinstance(node, ast.Assign):
+                continue
+            targets = [t for t in node.targets
+                       if isinstance(t, ast.Attribute) and t.attr == "_training_verdict"]
+            if not targets or not isinstance(node.value, ast.Name):
+                continue
+            stub = functions.get(node.value.id)
+            if stub is None:                    # not a def in this file (a lambda, an import) — skip
+                continue
+            args = stub.args
+            names = [a.arg for a in args.posonlyargs + args.args if a.arg != "self"]
+            defaulted = len(args.defaults)
+            stub_required = len(names) - defaulted
+            stubs += 1
+            assert stub_required <= passed <= len(names), (
+                f"{path.name}::{stub.name} accepts {stub_required}..{len(names)} positional "
+                f"arguments; the loop passes {passed}. A short stub raises TypeError inside the "
+                "monitor's own per-tick `except Exception: continue`, so the test HANGS instead of "
+                "failing.")
+    assert stubs, "no _training_verdict stub found — this half of the guard went vacuous"
 
 
 # ------------------------------------------------------------------------------ the tracker's scope
