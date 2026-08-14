@@ -21,10 +21,11 @@ export LOOPLAB_DOCKER_IMAGE=python:3.12-slim     # bake the framework's deps int
 ```
 
 Because the container runs `--network none`, a candidate can't fetch anything at eval time — the
-image must already contain the dependencies. `redact_output=true` masks bounded stdout/stderr tails in
-events, traces and the UI; it does **not** scrub raw node-workdir `setup.log`, stage logs, `eval.log`,
-source or artifacts. Do not expose secrets to candidate code, and protect/retain the run root as
-sensitive data.
+image must already contain the dependencies. Bounded stdout/stderr tails in events, traces and the UI
+are always screened for known credential shapes and for the values of your own secret-named env vars;
+`redact_output=true` adds the high-entropy pass on top. Neither scrubs raw node-workdir `setup.log`,
+stage logs, `eval.log`, source or artifacts. Do not expose secrets to candidate code, and
+protect/retain the run root as sensitive data.
 
 > **Docker is only required for this tier (and the Compose stack below).** The local CLI never needs
 > it.
@@ -97,6 +98,22 @@ research notes and evidence.
 first shows **Unlock LoopLab controls**; enter the same value there. The SPA sends it as
 `X-LoopLab-Token` for the rest of that tab. Neither the owner page nor `/review` contains the token in
 HTML, and it is not written to a persistent browser store.
+
+### Where a launch may read its task from
+
+`POST /api/start` accepts either an inline `task` object or a `task_file` path. A `task_file` is
+**allow-listed**: it must resolve under one of the declared task directories — the repo's
+`examples/`, the run root the server was started on, and `$LOOPLAB_TASKS_DIR` if set. Anything else
+is refused with `400 task_file_not_allowed`, naming the allowed roots and never echoing the rejected
+path. The path is resolved *before* it is checked, so a symlink planted inside an allowed root that
+points outside it is refused too, and the check runs before any probe that would report whether a
+file exists. This is the same list `GET /api/tasks` builds the launch pick-list from, so what the UI
+offers and what the launcher accepts cannot drift apart. Set `LOOPLAB_TASKS_DIR` to declare a task
+directory outside the run root.
+
+Note that this bounds an *authenticated* caller: it is not part of the token boundary but a limit on
+what the owner credential itself can reach. Point `LOOPLAB_TASKS_DIR` at a directory you are willing
+to have parsed, and no wider.
 
 The live owner run stream is protected by the same deny-by-default owner API boundary. The SPA uses an
 authenticated `fetch`-based SSE client because native `EventSource` cannot attach `X-LoopLab-Token`.

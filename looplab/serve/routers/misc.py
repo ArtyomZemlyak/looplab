@@ -41,6 +41,7 @@ from looplab.core.pathsafe import is_reparse
 from looplab.engine.concept_shelf import bounded_row_concepts, build_shelf, run_concept_index
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.serve.http import if_none_match, json_object, request_body_contract
+from looplab.serve.launch import task_file_roots
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import (
     _ALLOWED_FIELDS, _SECRET_API_FIELDS, _SECRET_FIELDS,
@@ -1509,12 +1510,13 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/tasks")
     def list_tasks():
         """Discover runnable task JSON files (the `examples/` catalogue by default, plus any in the
-        run-root) so the launch dialog can offer a pick-list instead of a raw path."""
-        repo = Path(__file__).resolve().parents[3]   # routers/ is one level deeper than server.py was
-        dirs = [repo / "examples", srv.root]
-        env_dir = os.environ.get("LOOPLAB_TASKS_DIR")
-        if env_dir:
-            dirs.insert(0, Path(env_dir))
+        run-root) so the launch dialog can offer a pick-list instead of a raw path.
+
+        The directory list comes from `launch.task_file_roots`, which is also the `POST /api/start`
+        ALLOW-LIST (backlog C3). One derivation on purpose: this catalogue is what declares a file
+        launchable, so a second copy here would let the pick-list offer paths the launcher refuses —
+        or, worse, let the launcher accept paths this list never offered."""
+        dirs = task_file_roots(srv.root)
         seen, out = set(), []
         for d in dirs:
             if not d.exists():

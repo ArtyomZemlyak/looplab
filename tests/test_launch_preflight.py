@@ -308,3 +308,126 @@ def test_task_file_settings_reject_secret_and_unknown_fields(tmp_path):
         })
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == "invalid_launch_settings"
+
+
+# --- C3: `task_file` allow-list ------------------------------------------------------------------
+#
+# `POST /api/start` took an arbitrary absolute path out of the request body and loaded it with no
+# containment of any kind. The UI token does not fix this: it is a privilege bug reachable BY the
+# authenticated operator's own session (and by any same-origin page on a shared JupyterHub, which
+# `server.py` warns about at startup). These drive the boundary with real requests.
+
+def test_task_file_outside_the_declared_roots_is_refused(tmp_path):
+    """A readable, perfectly valid task JSON that simply lives somewhere the operator never declared."""
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    smuggled = outside / "task.json"
+    smuggled.write_text(json.dumps(_toy()), encoding="utf-8")
+    root = tmp_path / "runroot"
+    root.mkdir()
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "smuggled", "task_file": str(smuggled),
+    })
+
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["code"] == "task_file_not_allowed"
+    # The refusal names what IS allowed and never echoes the rejected path — that message is the
+    # oracle the containment check exists to close.
+    assert str(smuggled) not in json.dumps(detail)
+    assert str(root) in detail["field_errors"]["task_file"]
+
+
+def test_task_file_cannot_read_an_arbitrary_host_file(tmp_path):
+    """The real shape: a file the server can read and the operator never declared runnable. The
+    refusal must be the containment one, NOT a parser error — a parse failure that quotes its input
+    is a content oracle."""
+    root = tmp_path / "runroot"
+    root.mkdir()
+    for target in ("/etc/hostname", "/proc/self/environ"):
+        response = TestClient(make_app(root)).post("/api/start/preflight", json={
+            "run_id": "probe", "task_file": target,
+        })
+        assert response.status_code == 400, target
+        assert response.json()["detail"]["code"] == "task_file_not_allowed", target
+
+
+def test_task_file_symlink_out_of_a_declared_root_is_refused(tmp_path):
+    """Resolve-then-contain: a symlink PLANTED inside an allowed root still resolves outside it."""
+    root = tmp_path / "runroot"
+    root.mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    real = outside / "task.json"
+    real.write_text(json.dumps(_toy()), encoding="utf-8")
+    link = root / "innocent.json"
+    link.symlink_to(real)
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "via-link", "task_file": str(link),
+    })
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "task_file_not_allowed"
+
+
+def test_task_file_envvar_expansion_cannot_echo_a_secret_back(tmp_path, monkeypatch):
+    """`expandvars` runs on caller text, so `$SOME_KEY` becomes the secret's VALUE and the
+    pre-existing `task_file_not_found` message echoed the resolved path verbatim. Containment runs
+    FIRST, so no message that echoes a path is reachable for a path outside the roots."""
+    monkeypatch.setenv("C3FIXTURE_API_KEY", "sk-abcdefABCDEF0123456789LEAK")
+    root = tmp_path / "runroot"
+    root.mkdir()
+
+    response = TestClient(make_app(root)).post("/api/start/preflight", json={
+        "run_id": "expand", "task_file": "$C3FIXTURE_API_KEY",
+    })
+
+    assert response.status_code == 400
+    body = response.text
+    assert "sk-abcdefABCDEF0123456789LEAK" not in body
+    assert response.json()["detail"]["code"] == "task_file_not_allowed"
+
+
+def test_task_file_inside_the_run_root_still_launches(tmp_path):
+    """The allow-list must not break the shipped path: the run root is a declared root."""
+    source = tmp_path / "ok-task.json"
+    source.write_text(json.dumps(_toy()), encoding="utf-8")
+
+    response = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={
+        "run_id": "allowed", "task_file": str(source),
+    })
+
+    assert response.status_code == 200, response.text
+    assert response.json()["preview"]["source"] == "task_file"
+
+
+def test_declared_tasks_dir_is_admitted_and_is_the_catalogue_list(tmp_path):
+    """LOOPLAB_TASKS_DIR is how an operator declares another directory — and the SAME derivation
+    feeds `GET /api/tasks`, so what the pick-list offers is exactly what the launcher accepts."""
+    import os as _os
+    from looplab.serve.launch import task_file_roots
+
+    tasks_dir = tmp_path / "declared"
+    tasks_dir.mkdir()
+    source = tasks_dir / "declared-task.json"
+    source.write_text(json.dumps(_toy()), encoding="utf-8")
+    root = tmp_path / "runroot"
+    root.mkdir()
+
+    _os.environ["LOOPLAB_TASKS_DIR"] = str(tasks_dir)
+    try:
+        client = TestClient(make_app(root))
+        response = client.post("/api/start/preflight", json={
+            "run_id": "declared", "task_file": str(source),
+        })
+        assert response.status_code == 200, response.text
+        offered = {t["path"] for t in client.get("/api/tasks").json()["tasks"]}
+        assert str(source.resolve()) in offered
+        # every path the catalogue offers is under a root the launcher admits — one derivation
+        roots = task_file_roots(root)
+        for path in offered:
+            assert any(r == Path(path) or r in Path(path).parents for r in roots), path
+    finally:
+        _os.environ.pop("LOOPLAB_TASKS_DIR", None)

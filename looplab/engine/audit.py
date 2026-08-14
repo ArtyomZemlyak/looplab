@@ -267,11 +267,26 @@ class AuditMixin:
         return sigs
 
     def _redact(self, text: str) -> str:
-        """B3: mask secrets in an output tail before it is persisted, when redaction is enabled."""
-        if not self._redact_output or not text:
+        """B3/C2: mask secrets in an output tail before it is persisted.
+
+        The ONE funnel for all six persisted tails (`evaluate.py`'s `stdout_tail` and stderr,
+        `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its RuntimeError message,
+        `train_monitor`/`asha_monitor`'s reason), so the split lands once.
+
+        **`self._redact_output` no longer gates the whole pass** — see `core/redact.py`'s docstring.
+        It defaults to False, so gating everything on it meant the DEFAULT path persisted a
+        `print(api_key)` verbatim into `events.jsonl`, the trace, the UI and every export, while
+        ~30 other durable-diagnostic call sites sanitized unconditionally through
+        `redact_persisted_text`. Known credential shapes and the operator's own secret env VALUES
+        are now always masked; the flag gates only the high-entropy pass, whose false positives
+        (a legitimate 24-char data hash or model checksum) are what made it opt-in in the first
+        place. Redaction is applied to the BOUNDED tail its callers already sliced, not to the full
+        stream, so its cost stays proportional to what is persisted.
+        """
+        if not text:
             return text
-        from looplab.core.redact import redact_secrets
-        return redact_secrets(text)
+        from looplab.core.redact import redact_output_tail
+        return redact_output_tail(text, entropy=bool(self._redact_output))
 
     def _maybe_crash(self) -> None:
         if self.crash_after is None:

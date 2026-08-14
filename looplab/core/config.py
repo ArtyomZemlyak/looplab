@@ -914,9 +914,15 @@ class Settings(BaseSettings):
     # run-start read only, the pre-M6 behavior.
     lessons_every: int = Field(default=4, ge=0)
     lessons_refresh_every: int = Field(default=4, ge=0)
-    # B3 output redaction: mask credentials (known key shapes + high-entropy tokens) in the
-    # stdout/stderr tail before it is persisted to the event log / spans / UI — a leaked secret in a
-    # print()/traceback must not land in the durable log. Off by default; recommend on for untrusted.
+    # B3 output redaction: the HIGH-ENTROPY half of the persisted-tail redactor.
+    # **This flag no longer decides whether tails are redacted at all** (backlog C2, 2026-08-14).
+    # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted
+    # stdout/stderr tail unconditionally — a `print(api_key)` or a traceback must not land in the
+    # durable log on the DEFAULT path, which is what gating the whole pass on an off-by-default flag
+    # meant for six weeks. What stays gated here is the entropy pass, which masks any 24+ character
+    # base64/hex run above the entropy cutoff: on ML output that also hits legitimate data hashes,
+    # model checksums and embedding dumps, and THAT false-positive cost is why it is opt-in.
+    # Recommended on for untrusted tiers. See `core/redact.py::redact_output_tail`.
     redact_output: bool = False
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`

@@ -190,6 +190,13 @@ every other file route does — `GET /..%2f..%2f..%2fWindows%2fwin.ini` returns 
 → Token on all mutating `/api/*`; CORS allow-list to `http://localhost:5173`; resolve-guard the SPA
 route; bind loopback-only; validate `task_file`.
 
+**[status 2026-08-14 — CLOSED. Do not re-derive this finding from the text above, which describes
+the July tree.]** All five landed: `LOOPLAB_UI_TOKEN` deny-by-default over `/api/*`
+(`serve/server.py:484::_require_token`, three non-mutating exemptions), CORS + SPA traversal guard,
+loopback bind by default (`server.py:764`), and — last, 2026-08-14 — the `task_file` allow-list
+(`serve/launch.py::_confine_task_file`, roots shared with `GET /api/tasks`). See the C3 entry in
+`BACKLOG.md` for the exposure analysis and what stays a deployment decision.
+
 ### C4 · Replay/durability invariant holds only within one schema version
 - `Event` has no `model_config` → Pydantic v2 `extra="ignore"`; the `v` version field is **written
   but never read**, and `fold` silently ignores unknown event *types*

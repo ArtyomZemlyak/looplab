@@ -102,18 +102,79 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
 
 *These gate credible benchmarks + any non-local deployment. Ordered by priority.*
 
-- ⬜ **P0 · B1 host-side scoring + read-only eval mount (S–M).** Mount inputs `-v root:/work:ro` +
-  separate writable `out/`; candidate writes `predictions.json`, host scores it. *Closes the rest of
-  C1 — self-reported metric is still trusted on the default path.* → `command_eval.py`, `sandbox.py`.
-- ⬜ **P0 · mlebench out-of-process grader (M).** Grader/`_Y` answer key still runs *in the candidate's
-  interpreter/workdir* ([mlebench.py:102](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/adapters/mlebench.py)) — `import grader; grader._Y` leaks
-  labels. Grade in a separate process; labels never on the candidate FS. *(self-admitted caveat → close it).*
-- ⬜ **P0 · C2 output redaction (S–M).** Env is filtered, but `stdout_tail = res.stdout[-500:]` is still
-  persisted **verbatim** ([orchestrator.py:808](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/engine/orchestrator.py)) — a `print(secret)` or
-  traceback still leaks into the event log/UI. Add a redaction pass (regex + entropy) before write.
-- ⬜ **P0 · C3 auth token on mutating `/api/*` + `task_file` allow-list (S).** CORS+SPA are fixed, but
-  endpoints are still **unauthenticated** and `task_file` from the request body is executed without an
-  allow-list ([server.py](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/serve/server.py)). Add a shared-secret token + path validation.
+> **[reconciled 2026-08-14 — this four-item cluster was six weeks stale and three of the four entries
+> below understated what had shipped.** Every entry was re-derived against the tree, not against this
+> file. Two are now closed, two are narrowed to the part that is genuinely still open. The general
+> lesson repeats the one this file has already recorded four times: an entry that names a line number
+> (`mlebench.py:102`, `orchestrator.py:808`) is the entry most likely to be dead — both of those
+> citations now point at unrelated code.]
+
+- 🟡 **P0 · B1 read-only eval mount (S–M). [corrected 2026-08-14 — the HOST-SIDE SCORING half is
+  SHIPPED, twice, and this entry claimed it was unbuilt.]** `runtime/command_eval.py:427::_read_host_score`
+  is a registered metric reader (`METRIC_READERS`, `command_eval.py:528`) where the candidate writes
+  `predictions.json` and the HOST scores it against labels held outside the workspace — containment
+  enforced at both submit time (`host_score_labels_error`, `command_eval.py:698`) and score time
+  (`command_eval.py:455-480`, against the MOUNT root). Beside it, the general `host_grader()` task
+  hook (`adapters/tasks.py:93`, bound at `engine/orchestrator.py:1164`) OVERRIDES the self-report on
+  both eval tiers (`engine/eval_dispatch.py:732`), with a symlink confused-deputy guard on every
+  candidate-written file the host reads (`engine/holdout.py:30-56`). `tests/test_host_grading.py`
+  drives it with a solution that deliberately lies in stdout.
+  **STILL OPEN, and it is the mount, not the scoring:** `runtime/sandbox.py:241` binds
+  `-v {root}:/work` read-WRITE for both untrusted tiers — no `:ro`, no `--read-only`, no `tmpfs`, no
+  separate writable `out/` (0 hits for each in that file), and `sandbox.py:214` states the intent
+  explicitly. The per-source `:ro` machinery already exists at `command_eval.py:1509` for `data:`/
+  `references:` binds and should be reused rather than reinvented. Also still true: the DEFAULT
+  metric kind is `stdout_json` (`adapters/repo_task.py:427`), so a task declaring neither
+  `metric.kind="host_score"` nor a `host_grader()` is scored entirely from candidate stdout.
+- ✅ **P0 · mlebench out-of-process grader — SHIPPED. [corrected 2026-08-14 — the cited
+  `mlebench.py:102` is dead; that line is now the close of an unrelated template.]**
+  `adapters/mlebench_grade.py:42::grade_in_subprocess` spawns a real separate process
+  (`[sys.executable, "-m", "looplab.adapters.mlebench_grade", …]`), dispatched from
+  `engine/holdout.py:95`. The REAL competition adapter never copies answers into the workdir at all
+  (`adapters/mlebench_real.py:155`). What remains is a DEFAULT, not missing machinery: the synthetic
+  tutorial task still ships `host_graded=False` (`adapters/mlebench.py:216`), so `grader.py` carrying
+  `_Y` is written into the candidate workdir on that path. `mlebench.py:199-215` argues flipping it
+  buys pipeline exercise and not confidentiality — the synthetic labels are `i % 2` before a seeded
+  shuffle and `tests/test_mlebench.py:151` reconstructs them from the mounted split with no answer
+  key at all. **Decide that default explicitly; do not re-open this as unbuilt work.**
+- ✅ **P0 · C2 output redaction — DONE 2026-08-14.** The redactor and its six wiring sites already
+  existed; what was still true is that ALL of it was gated on `redact_output`, which defaults to
+  `False` — so the shipped default persisted a `print(secret)` verbatim into `events.jsonl`, the
+  trace, the UI node detail and every export, while ~30 sibling durable-diagnostic sites sanitized
+  unconditionally through `redact_persisted_text`. The gate is now SPLIT
+  (`core/redact.py::redact_output_tail`, funnelled through `engine/audit.py::Engine._redact`): known
+  credential shapes and the operator's own secret ENV VALUES (`redact_env_values`, screened by the
+  same `envsafe.is_secret_env` the sandbox uses to withhold a variable from the child) are masked
+  always; `redact_output` now gates only the entropy pass, whose false positives on legitimate data
+  hashes were the actual reason it was opt-in. Driven at the DEFAULT config by
+  `tests/test_redact.py::test_default_run_does_not_persist_{a_shaped_secret_in_the_stdout_tail,an_operator_env_secret}`
+  — a real subprocess eval, a planted secret, the event log read back off disk.
+  *Deliberately unchanged:* `node_created.code` still carries the generated SOURCE verbatim (measured
+  — a secret planted as a string literal is in it). That is the record of what ran; redacting it
+  would corrupt the reproduction, and `docs/guide/configuration.md` states code/artifacts are outside
+  this boundary.
+- 🟡 **P0 · C3 `task_file` allow-list — DONE 2026-08-14; the AUTH half was already shipped.
+  [corrected 2026-08-14 — "endpoints are still unauthenticated" was false.]** A deny-by-default owner
+  middleware has existed for some time: `serve/server.py:484::_require_token` 401s every `/api/*`
+  request without a valid `X-LoopLab-Token` (constant-time compare at `server.py:449`), with exactly
+  three exemptions (`/api/health`, `/api/auth/status`, and the GET-only shared-assistant family,
+  `server.py:269-289`) — none of them mutating. All 64 mutating routes are covered by prefix, plus
+  CSRF (`_reject_cross_origin_mutation`) and DNS-rebinding (`_reject_untrusted_host`) guards that
+  apply regardless. **Exposure, stated plainly:** the server binds `127.0.0.1` by default
+  (`server.py:764`, `cli/ui_cmds.py:24`) and Compose publishes to loopback (`docker-compose.yml:100`),
+  so on the supported single-operator path the unauthenticated default is DEFENCE IN DEPTH. On a
+  shared JupyterHub origin with no token it is an OPEN DOOR to any same-origin page, and the server
+  already logs exactly that at startup (`server.py:470-481`). The remaining opt-in-ness of
+  `LOOPLAB_UI_TOKEN` is a deployment decision, not missing code.
+  The `task_file` half of the claim WAS accurate and is now fixed: `serve/launch.py::_confine_task_file`
+  refuses any `task_file` that does not resolve under a declared root (`task_file_roots` — repo
+  `examples/`, the run root, `$LOOPLAB_TASKS_DIR`), which is the SAME derivation `GET /api/tasks`
+  builds its pick-list from, so the catalogue and the launcher cannot drift. Resolve-then-contain
+  makes a symlink out of an allowed root fail; containment runs BEFORE `exists()` so the pre-existing
+  path-echoing `task_file_not_found` message can no longer be an oracle (`expandvars` on caller text
+  meant `task_file: "$SOME_API_KEY"` echoed the secret's value back). Driven by six real requests in
+  `tests/test_launch_preflight.py`. Note this bounds the AUTHENTICATED operator — a token never fixed
+  it.
 - 🟡 **P1 · C4 finish (M).** Idempotent fold ✅; still TODO: **read/enforce `Event.v`** (a v2 log read
   by v1 silently mis-folds) + **fail-loud append lock** (still `except OSError: pass` →
   [eventstore.py:38](https://github.com/ArtyomZemlyak/looplab/blob/master/looplab/events/eventstore.py)) + a real multi-process append-race test.

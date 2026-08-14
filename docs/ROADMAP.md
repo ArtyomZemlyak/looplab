@@ -485,9 +485,12 @@ pending-hint feedback chip were added in the 2026-06-24 UI pass — F-theme part
 
 ## 9. Theme G — Scale, ops, and hardening
 
-**G1 · Server auth + hardening.** Token on mutating `/api/*`, CORS allow-list, SPA traversal guard,
-loopback bind, `task_file` allow-list. *(Review C3.)* Prerequisite for any non-local deployment.
-*Effort:* S.
+**G1 · Server auth + hardening — SHIPPED.** Token on mutating `/api/*`, CORS allow-list, SPA
+traversal guard, loopback bind, `task_file` allow-list. *(Review C3.)* All five landed; the
+`task_file` allow-list was the last, 2026-08-14 (`serve/launch.py::_confine_task_file`). What is
+still a DEPLOYMENT decision rather than missing code: `LOOPLAB_UI_TOKEN` is opt-in, and on a shared
+JupyterHub origin an unset token leaves the control plane reachable by any same-origin page — the
+server logs exactly that at startup. *Effort:* S.
 
 **G2 · Replay/durability hardening.** Read/enforce `Event.v`, idempotent `fold` for terminal events,
 fail-loud append lock, atomic read-model with a seq watermark + refresh-on-append. *(Review C4/C5.)*
