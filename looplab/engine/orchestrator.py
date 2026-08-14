@@ -2991,7 +2991,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # width (`_resolve_llm_parallel`), so leaving it behind would fan builds out wider than the run
         # can now evaluate, which is the exact coupling that resolver exists to maintain. Recorded in
         # the SAME row rather than re-derived at re-entry so replay needs no resolver at all.
+        # …and only where AUTO actually RESOLVED to the eval width. `_llm_parallel_startup_auto`
+        # records what the operator ASKED for (it mirrors `_resolve_llm_parallel`'s post-`int()`
+        # test, by construction), not what that resolver ANSWERED: an AUTO build width on a run whose
+        # build calls no LLM settles to serial 1 on purpose, because fan-out exists to overlap
+        # provider latency and a templated build has none — that is CLAUDE.md invariant #1's
+        # byte-identical event order, and `_resolve_llm_parallel` owns the rule. Following the eval
+        # width here without re-asking would widen exactly that run back out, silently, through an
+        # operator's `card_resource_pinned` footprint on a toy board. Asking the resolver's own
+        # predicate keeps the two spellings of "what AUTO means for builds" from drifting apart.
         if (self._llm_parallel_startup_auto
+                and self._build_calls_an_llm()
                 and not any(key in overrides for key in ("parallel_build", "llm_parallel"))):
             follow = min(LLM_WIDTH_MAX, settled["eval_parallel"])
             if follow != self._llm_parallel:

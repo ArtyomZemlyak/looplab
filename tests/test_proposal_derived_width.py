@@ -44,10 +44,11 @@ def _gpu_capable(monkeypatch) -> None:
     monkeypatch.setattr(ToyTask, "gpu_capable", lambda self: True)
 
 
-def _engine(run_dir, *, gpus=(0, 1), **kw) -> Engine:
+def _engine(run_dir, *, gpus=(0, 1), llm_build=True, **kw) -> Engine:
     task = ToyTask()
     researcher = ToyResearcher(task.bounds, seed=task.seed, step=task.step)
-    researcher.client = object()          # what `_build_calls_an_llm` reads (agents/roles.py)
+    if llm_build:
+        researcher.client = object()      # what `_build_calls_an_llm` reads (agents/roles.py)
     kw.setdefault("card_driven_selection", True)
     kw.setdefault("proposal_width", True)
     kw.setdefault("eval_parallel", 0)
@@ -246,6 +247,36 @@ def test_two_two_gpu_proposals_on_a_two_gpu_box_repin_the_run_to_serial(tmp_path
     # IDEMPOTENT: the same board must not append a second row every turn.
     assert engine._settle_proposal_width(fold(engine.store.read_all())) is False
     assert len(_width_rows(engine)) == 1
+
+
+def test_a_build_that_calls_no_llm_is_not_widened_by_a_repin_of_the_eval_width(tmp_path, monkeypatch):
+    """The build width follows only where AUTO actually RESOLVED to the eval width.
+
+    `_llm_parallel_startup_auto` says the operator ASKED for AUTO. It does not say what AUTO
+    ANSWERED: `_resolve_llm_parallel` settles an AUTO build width to serial 1 when the build calls no
+    LLM at all, because fan-out exists to overlap provider latency and a templated build has none —
+    CLAUDE.md invariant #1's byte-identical event order. A follow clause that re-derived the width
+    from the eval width alone would widen exactly that run back out, and here the re-pin NARROWS the
+    evals (4 -> 2) while still leaving a number above the serial 1 the build settled at, so the two
+    readings of "AUTO" give different answers and the log records which one shipped.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1, 2, 3])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "run", llm_build=False)
+    assert engine._eval_parallel == 4
+    assert engine._llm_parallel == 1, "a build with no provider call did not settle to serial"
+    assert engine._llm_parallel_startup_auto is True, "the axis was still LAUNCHED as AUTO"
+
+    _propose(engine, 2, 2)
+    assert engine._settle_proposal_width(fold(engine.store.read_all())) is True
+    assert engine._eval_parallel == 2
+    assert engine._llm_parallel == 1, "a proposal re-pin re-enabled build fan-out on a toy build"
+
+    rows = _width_rows(engine)
+    assert len(rows) == 1 and rows[0]["eval_parallel"] == 2
+    # Not merely unchanged in memory: the durable row must not carry an axis it did not move, or a
+    # replay/resume would re-derive the fan-out this decision declined.
+    assert "llm_parallel" not in rows[0]
 
 
 def test_one_gpu_proposals_leave_a_box_shaped_width_exactly_where_it_was(tmp_path, monkeypatch):
