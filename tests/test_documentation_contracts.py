@@ -47,7 +47,15 @@ def test_index_mentions_every_numbered_document():
     # start "34-" and satisfy the count AND the membership check, which happened twice on 2026-08-13
     # (the fence audit vs the review residue, and the decision-sites survey vs the worktree
     # measurement). If you find this red, ADD THE MISSING ROW; do not just move the number.
-    assert len(numbered) == 41, "the derived numbered-document inventory changed"
+    #   41 -> 42 (2026-08-14): a THIRD number collision, and the first one this count actually
+    #   caught — which is what the paragraph above predicted it could not do on its own. Two
+    #   concurrent sessions each wrote a `41-`: the external-works synergy doc (from origin/master)
+    #   and the pre-chewed evidence survey (the log/metric tools branch). Both are real and neither
+    #   supersedes the other, so the survey was RENUMBERED to `42-` — glob, index row, index first
+    #   column and `mkdocs.yml` nav together — rather than one being dropped. Note the collision
+    #   itself still slipped past the membership check exactly as the comment says; what went red
+    #   was the count, because after renumbering there genuinely is one more document.
+    assert len(numbered) == 42, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
