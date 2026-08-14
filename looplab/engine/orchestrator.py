@@ -573,6 +573,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         train_monitor_interval_s = _opt("train_monitor_interval_s")
         train_monitor_kill = _opt("train_monitor_kill")
         train_monitor_kill_confidence = _opt("train_monitor_kill_confidence")
+        train_monitor_tools = _opt("train_monitor_tools")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
@@ -1052,6 +1053,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._train_monitor_interval_s = train_monitor_interval_s
         self._train_monitor_kill = bool(train_monitor_kill)
         self._train_monitor_kill_confidence = train_monitor_kill_confidence
+        # Whether the monitor/ASHA judges may LOOK (tools/log_tools.py) instead of only being handed
+        # a slice. Read by `train_monitor.monitor_log_tools`, the ONE place the two watchdogs build
+        # their provider, so both honour one switch.
+        self._train_monitor_tools = bool(train_monitor_tools)
         # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
         self._asha_live = bool(asha_live)
         self._asha_live_kill = bool(asha_live_kill)

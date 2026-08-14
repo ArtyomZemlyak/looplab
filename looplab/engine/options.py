@@ -67,6 +67,12 @@ class EngineOptions:
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early
     train_monitor_kill_confidence: float = 0.8   # min verdict confidence to act on a 'broken' kill
+    # Let the monitor/ASHA judges QUERY the live logs (tools/log_tools.py) rather than only being
+    # handed a slice. NOT a divergence: it is a modifier on `train_monitor`, which is False here, so
+    # a bare EngineOptions caller still gets no monitor and no call. A caller that turns the monitor
+    # ON is already opting into the paid verdict, and the slice it would otherwise get was measured
+    # insufficient — see the Settings field's comment.
+    train_monitor_tools: bool = True
     asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)

@@ -57,7 +57,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   renamed away underneath them, which a bare re-pin could not have told you.
   //   175 -> 176 (2026-08-14, same day): F1's `proposal_width`. SIXTH occurrence — and it was
   //   caught by the Python guard again, not by this one, exactly as the paragraph above says.
-  assert.equal(Object.keys(schema.fieldByKey).length, 176)
+  //   176 -> 177 (2026-08-14, same day): `train_monitor_tools` — whether the two live-eval
+  //   watchdog judges may QUERY the stage logs instead of being handed a fixed slice. SEVENTH
+  //   occurrence, and the Python guard caught it first for the third consecutive time, which is
+  //   now the pattern rather than an anecdote: this literal has never once been the one that
+  //   noticed. Verified as the paragraph prescribes — the catalogue was 177 keys and removing
+  //   exactly `train_monitor_tools` gave back 176, so this is one real addition.
+  assert.equal(Object.keys(schema.fieldByKey).length, 177)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)
