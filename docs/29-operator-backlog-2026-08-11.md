@@ -1092,7 +1092,7 @@ new Operations panel.
 
 **Asked, 2026-08-13:** *"я бы хотел чтобы репейринг у нас был по сути бесконечный, но стопался бы
 каким-нибудь LLM критиком и самим девелопером, что типа я фиг знает как чинить."* Paired with the
-[F5](#f5--debug-nodes-keep-scope-or-remove) decision to delete the Debug node: everything is fixed
+[F5](#f5-debug-nodes-keep-scope-or-remove) decision to delete the Debug node: everything is fixed
 inside the ONE node, for as long as it takes, and nothing may open a fresh node to have another go.
 
 **Today.** The transition from "keep repairing" to "stop" is a COUNTER. A counter cannot distinguish

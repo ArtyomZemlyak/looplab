@@ -97,9 +97,19 @@ current source, tests and the resolution evidence already recorded under that fi
   example because it changes a receipt format or would introduce shared mutable folded state).
 - **OPEN** means no adequate resolution is present on current `master`.
 
-**Status totals: 147 resolved, 37 partially resolved, 2 deferred, 2 open (188 total).** The heading
+**Status totals: 147 resolved, 39 partially resolved, 2 deferred, 0 open (188 total).** The heading
 status plus its adjacent resolution narrative is the current authority; §5.1–§5.4 remain historical
 roll-ups for their named commits.
+
+> **Status update (2026-08-14, HEAD `d307542`).** A code re-check flipped both remaining OPEN
+> findings. **SR-01** is now **PARTIALLY RESOLVED**: `serve/paid_ledger.py` (with
+> `tests/test_paid_ledger.py`, 17 tests) unified the two event-ledger variants and `routers/boss.py`
+> / `routers/runs.py` are ported; the file-ledger variants stay deliberately separate per that
+> module's docstring, and only `routers/control.py`'s start-record reconciliation remains
+> hand-rolled. **UI-14** is now **PARTIALLY RESOLVED**: `events/authoring_projection.py` +
+> `ui/src/cardBoardModel.js::cardAuthoring` feed the `speculating` lane; `built-awaiting-commit`
+> still has no producer. Running totals: **147 resolved, 39 partially resolved, 2 deferred, 0
+> open.** Evidence is under the two findings' own banners and §6.4.
 
 ### Severity model
 
@@ -4576,7 +4586,23 @@ Scope: `looplab/serve/routers/`: reports, runs, control, boss, cross_run, assist
 - Bounded caches done right: attention projection cache, concept core/replay LRUs, summary cache, and scope revision caches all have explicit size ceilings, stat-identity invalidation, and documented race handling instead of unbounded dicts.
 - The build_router(srv) convention with documented registration-order constraints (misc.py's catch-all ordering, __init__.py) keeps the app composition explicit and testable.
 
-#### SR-01 · HIGH · inconsistency · effort: large — **OPEN (2026-08-08)**
+#### SR-01 · HIGH · inconsistency · effort: large — **PARTIALLY RESOLVED (2026-08-14)**
+
+> **Status update (2026-08-14).** The §6.4 target design shipped. `serve/paid_ledger.py`
+> (`tests/test_paid_ledger.py`, 17 tests) now owns the claim→terminal event-ledger protocol —
+> `fold_paid_ledger`/`append_claim`/`record_terminal` over a `PaidLedgerSpec` with an explicit
+> no-default `conflict_policy` (`FIRST_TERMINAL_WINS` for boss `report_refresh`, `FAIL_CLOSED` +
+> `request_digest` binding for the runs concept lens) and the `SERVE_PAID_LEDGER_EVENTS` allow-list
+> asserted at both append sites, exactly as §6.4 required; variants (1) and (2) are ported
+> (`routers/boss.py:35`, `routers/runs.py:61`). Variant (3) was extracted to
+> `serve/scope_report_store.py` + `serve/scope_actions.py`, variant (4) to `serve/trace_clear.py`,
+> and the reset/deletion pair shares `serve/durable_op.py` (SC-06) — all deliberately kept as
+> FILE-ledger protocols, per `paid_ledger.py`'s own docstring (they share the vocabulary, not the
+> storage). The remaining arm is exactly the follow-up §6.4 named: variant (5), `routers/control.py`'s
+> start-record reconciliation (`_reconcile_start`/`_inspect_keyed_start`, still `build_router`
+> closures at control.py:526/589). Closing it at the root means de-closuring those two helpers so
+> the protocol can be stated as a `PaidLedgerSpec` and tested like the other two — its terminals go
+> through the durable record store, so `FAIL_CLOSED` is the fitting policy.
 
 **Five parallel hand-rolled durable paid-work idempotency protocols across routers**
 

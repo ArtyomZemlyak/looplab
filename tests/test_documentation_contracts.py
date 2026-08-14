@@ -109,14 +109,13 @@ def test_architecture_ledger_has_one_current_status_per_finding_and_exact_rollup
     counts = Counter(status for _, status in statuses)
     assert counts == {
         "RESOLVED": 147,
-        "PARTIALLY RESOLVED": 37,
+        "PARTIALLY RESOLVED": 39,
         "DEFERRED": 2,
-        "OPEN": 2,
     }
     summary = re.search(
         r"Status totals: (\d+) resolved, (\d+) partially resolved, (\d+) deferred, "
         r"(\d+) open \((\d+) total\)", text)
-    assert summary and tuple(map(int, summary.groups())) == (147, 37, 2, 2, 188)
+    assert summary and tuple(map(int, summary.groups())) == (147, 39, 2, 0, 188)
 
 
 def test_current_user_docs_have_no_hidden_review_handoffs():
