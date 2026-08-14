@@ -39,6 +39,7 @@ is what makes that falsifiable, and it is driven (a real run, watched intercepti
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Collection
 from typing import NamedTuple, Optional
 
 import orjson
@@ -58,9 +59,11 @@ from looplab.events.types import (EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_D
                                   EV_CARD_MERGED, EV_HYPOTHESIS_MERGED, EV_NODE_BUILDING,
                                   PROGRESS_STAGE_BUILD,
                                   EV_NODE_CREATED, EV_NOVELTY_REJECTED)
-from looplab.search.card_selection import (META_CARD_ID, card_action as projected_card_action,
+from looplab.search.card_selection import (META_CARD_ID, SpeculativeSelectionContext,
+                                           card_action as projected_card_action,
                                            card_budget_used, card_selection_set, eligible_cards,
-                                           forced_card_actions)
+                                           forced_card_actions,
+                                           speculative_card_selection_set)
 
 
 # The additive `node_building` field an ATTACH claim carries, and the whole reason it exists: a
@@ -1563,7 +1566,7 @@ class CardReservationMixin:
         return None
 
     def _claim_existing_card_builds(
-        self, actions: list[dict],
+        self, actions: list[dict], *, ignored_pending_node_ids: Collection[int] = (),
     ) -> Optional[list[_BuildReservation]]:
         """Atomically claim the complete Card lane selected from one fresh snapshot.
 
@@ -1573,6 +1576,18 @@ class CardReservationMixin:
         owners are appended as one tail-CAS group before any slow Developer work begins.
 
         Every refusal path names itself through `_refuse_card_claim`; see there for why.
+
+        `ignored_pending_node_ids` is the OCCUPANCY-PACED caller's mask (backlog F1g), and it must be
+        the same one the selection it is claiming was made under. The revalidation below re-derives
+        the lane, and re-deriving it unmasked while an evaluation runs answers a different question:
+        the running Node is still `pending`, so `forced_card_actions` returns its evaluate lane, the
+        comparison reads `['card-1'] -> []`, and after `_CARD_CLAIM_RETIRE_AFTER` turns the Card is
+        durably `card_auto_dropped` as "unclaimable". Measured on a toy-backend run of that shape:
+        every Card minted during an evaluation was retired within three turns and the node was still
+        built serially after the terminal — the two copies of the rule disagreeing is precisely the
+        failure `CardSessionGates`' docstring was written about, one lane over. The mask is exactly
+        the in-flight set, so the evaluate-all discipline still holds for every pending Node that has
+        NOT been started.
         """
         if not actions:
             return []
@@ -1603,8 +1618,22 @@ class CardReservationMixin:
 
             try:
                 live = {card.id: card for card in eligible_cards(state, self.policy)}
-                forced = forced_card_actions(state, self.policy, max_nodes)
-                if forced is not None:
+                if ignored_pending_node_ids:
+                    # ONE query, the same one the occupancy-paced turn asked, through the same
+                    # production entry point the speculative producer uses. Not a second rule: the
+                    # masked selection already carries every receipt, generation, anchor, trust,
+                    # cadence, scorer, lane-width, pin and budget gate the unmasked pair below does,
+                    # forced phases included — `_speculative_selection` runs `_forced_card_actions`
+                    # itself, with the mask applied.
+                    current_ids = speculative_card_selection_set(
+                        state, self.policy, max_nodes,
+                        context=SpeculativeSelectionContext(
+                            scoring=getattr(self, "_card_scoring", None),
+                            ignored_pending_node_ids=ignored_pending_node_ids,
+                            resource_envelope=self._resource_envelope(),
+                        ),
+                    )
+                elif (forced := forced_card_actions(state, self.policy, max_nodes)) is not None:
                     current_ids = [
                         candidate.get(META_CARD_ID) for candidate in forced
                         if isinstance(candidate, dict) and META_CARD_ID in candidate

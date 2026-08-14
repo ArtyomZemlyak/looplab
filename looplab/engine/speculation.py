@@ -571,6 +571,9 @@ class SpeculationMixin:
     #                          `_run_card_session(...)` call fall back to session-scoped evals.
     #   `_eval_notify`         the CURRENT session's wake-up stream, or `None` between sessions.
     #   `_eval_boundary_owed`  set by an eval child's `finally`; consumed by the next session turn.
+    #                          A BOOL, so it means "at least one terminal landed", not "one turn per
+    #                          terminal" — see `_card_eval_one`'s `finally` for the three reasons
+    #                          that is left as it is, and for what would change if it were not.
     #   `_eval_drain_requested`  set by a terminal gate that refused to finish over live evals; the
     #                          run loop drains on its next turn and the gate then succeeds.  A
     #                          FLAG rather than an inline wait because the gates are sync helpers
@@ -2097,13 +2100,29 @@ class SpeculationMixin:
             # without turning one terminal child into head-of-line blocking for every remaining
             # slot; add an unequal-duration refill regression."
             #
-            # ONE terminal owes the outer control/Strategist/cadence boundary ONE turn.  That is all
-            # it ever meant, and it is now all it does: the debt closes the PRODUCER lane and asks
+            # A terminal owes the outer control/Strategist/cadence boundary a turn.  That is all it
+            # ever meant, and it is now all it does: the debt closes the PRODUCER lane and asks
             # `_card_phase_decide_exit` to return, and the session CAN return, because the eval task
             # group is run-scoped and the next session adopts whatever is still burning.  It no
             # longer closes admission, so the slot this child just freed is refilled by the very
             # turn that observes the terminal.  The regression the TODO asked for is
             # `tests/test_card_refill_unequal_durations.py`.
+            #
+            # IT IS A BOOL, NOT A COUNT, and the debt is therefore "at least one terminal has landed
+            # since the session last handed back" — not "one turn per terminal".  At width > 1 two
+            # children finishing inside one poll window collapse into a SINGLE owed turn, so the
+            # one-turn-per-terminal reading of the line above is stronger than the code (backlog
+            # F1g, 2026-08-14).  Left a bool deliberately, on three grounds.  (a) It costs no work:
+            # the outer loop is not rationed by this flag — it keeps turning until nothing is
+            # starved — and the occupancy pace it feeds is WIDTH-complete
+            # (`_occupancy_paced_creates` asks for every free slot, not for one), so one hand-back
+            # refills as many slots as the collapse freed.  (b) It costs no cadence: two terminals
+            # inside one poll window are at the same node count, and every cadence is node-count
+            # paced and at_node-idempotent, so the second turn would have decided exactly what the
+            # first one did.  (c) A counter would have to be decremented by a consumer that can
+            # crash between the read and the decrement, which is a durability question this flag
+            # does not currently have.  Driven by
+            # `test_two_terminals_in_one_window_owe_one_turn_and_still_refill_every_freed_slot`.
             self._eval_boundary_owed = True
             if reservation is not None:
                 self._clear_eval_resource_reservation(node_id, generation)

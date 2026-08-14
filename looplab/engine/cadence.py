@@ -10,6 +10,12 @@ The since-last form has no such hole. It also composes with resume, because `las
 consumer's own DURABLE record of when it last fired rather than from process memory — and each
 consumer keeps its own, because the Strategist consult, the coverage snapshot and the
 concept-coverage snapshot advance independently and must not be able to satisfy each other's window.
+
+There is a SECOND clock here since 2026-08-14, `occupancy_due` (backlog F1g), and it is deliberately
+not a variant of the first: a node count cannot express "an evaluation has been running for four
+hours and the board behind it is empty", which is the state that cost this box 167.7 GPU-h. Read its
+docstring before adding a third — the rule that keeps two paces from collapsing into one is that a
+pace which records an `at_node` mark is a node-count pace whatever it is called.
 """
 from __future__ import annotations
 
@@ -22,6 +28,52 @@ def cadence_due(n: int, last: int, every: int) -> bool:
     with no consumer wired at all.
     """
     return every > 0 and n > 0 and n - last >= every
+
+
+# ------------------------------------------------------------------- the SECOND pacing rule (F1g)
+#
+# `cadence_due` above paces on the NODE COUNT, and on a run whose evaluations are hours long that is
+# the wrong clock entirely. Measured across the 52-run corpus on this box: 167.7 GPU-h with NO
+# evaluation running at all, against 164.4 GPU-h of work actually done — the largest single number in
+# `docs/29-operator-backlog-2026-08-11.md`, and bigger than the F1f barrier it sits beside. The board
+# empties while a long evaluation runs; `n` does not move, so nothing on a node-count window is ever
+# due; and the producer only gets another chance once the node it is waiting for terminates. The run
+# then pays a full build latency SERIALLY after every terminal instead of hiding it behind the
+# evaluation that was already running (v6: a 15-37 minute hole between every consecutive pair).
+#
+# So there are two clocks, and this is the other one. Note what it is NOT paced on: it does not read
+# `n`, `last`, or any at_node mark, and no consumer of it writes one.
+def occupancy_due(inflight: int, queued: int, width: int) -> bool:
+    """Whether the run should PRODUCE now because a GPU is busy and the board behind it is empty.
+
+    `inflight` — evaluations actually running. `queued` — work already built and waiting to be
+    admitted (a pending Node the consumer will start on its next poll). `width` — the settled eval
+    concurrency. Due when an evaluation is running AND the supply behind it does not cover the slots:
+    "an evaluation is running and the board has nothing selectable", which
+    `docs/29-operator-backlog-2026-08-11.md` F1g names as the genuine trigger.
+
+    `inflight > 0` is the load-bearing half and not a formality. With nothing running, an empty board
+    is the ORDINARY create turn the outer loop has always taken, and this rule must not become a
+    second, differently-worded copy of it. What is new is only that the same production is reachable
+    while a slot is held.
+
+    WHY IT CANNOT SATISFY — OR BE SATISFIED BY — `cadence_due` AND `already_covered_at`. Those two
+    are a pair: `cadence_due` is a since-last WINDOW over a consumer's own durable marks, and
+    `search/coverage.py::already_covered_at` is its at_node IDEMPOTENCE twin, and each is
+    parametrized over its own consumer's records precisely so two consumers cannot advance each
+    other. A second pacing rule that recorded an `at_node` would break both halves at once: it would
+    close the node-count window for a full `every` nodes (starving the consumer it fired for), and
+    its own record would then make `already_covered_at` refuse the NEXT starvation at the same node
+    count — a rule that fires once per node count is a node-count rule wearing another name.
+
+    This one records nothing, so neither can happen. Its idempotence is the CONDITION, which is
+    self-clearing: production makes the board non-empty, `queued` rises, and the rule is no longer
+    due until the board empties again. The one direction that does compose is the honest one — work
+    produced here becomes a Node, `n` advances, and the node-count cadences become due because a node
+    really was created.
+    """
+
+    return inflight > 0 and (inflight + queued) < max(1, width)
 
 
 # --------------------------------------------------------------- the ONE knob whose 0 is not "off"
