@@ -384,7 +384,9 @@ def test_staged_card_bootstrap_forwards_the_invocation_wall_deadline(
 
     monkeypatch.setattr(engine, "_setup_phase", lambda _state: None)
     monkeypatch.setattr(engine, "_producer_role_pair", lambda: (object(), object()))
-    monkeypatch.setattr(engine, "_request_card_build", lambda: True)
+    # STRANDED BY `0f5c565a`, which gave the outer election a `consumed_inflight` keyword: this
+    # stub raised `TypeError` inside the loop and the wall-deadline assertion below never ran.
+    monkeypatch.setattr(engine, "_request_card_build", lambda **_kwargs: True)
 
     async def _session(evals, state, max_es, wall_deadline=None):
         captured.update(
