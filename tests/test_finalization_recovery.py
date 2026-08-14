@@ -393,6 +393,11 @@ def test_stale_cost_refresh_failure_blocks_completion_until_durable(tmp_path, mo
 
 def test_derived_projection_failures_are_atomic_and_non_terminal(tmp_path, monkeypatch):
     import looplab.engine.finalize as mod
+    # The atomic publish moved DOWN to `events/readmodel.py::publish_readmodel` (shared with the
+    # on-demand `looplab readmodel` rebuild), and it calls its own module global — so the builder
+    # seam is patched THERE. Patching `mod.build_readmodel` would resolve today and reach nothing,
+    # leaving this test green over a projection that never failed.
+    import looplab.events.readmodel as rm_mod
 
     run_dir = tmp_path / "run"
     store, _finish_seq = _terminal_store(run_dir)
@@ -406,7 +411,7 @@ def test_derived_projection_failures_are_atomic_and_non_terminal(tmp_path, monke
 
     trace_attempts = []
     tree_attempts = []
-    monkeypatch.setattr(mod, "build_readmodel", _broken_readmodel)
+    monkeypatch.setattr(rm_mod, "build_readmodel", _broken_readmodel)
     monkeypatch.setattr(
         mod, "atomic_write_bytes",
         lambda *_a, **_k: trace_attempts.append(True) or (_ for _ in ()).throw(OSError("trace")),

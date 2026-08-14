@@ -1,4 +1,5 @@
-"""Read-only run diagnostics: `replay` / `speculation-gate` / `timings` / `inspect` / `tensorboard`.
+"""Read-only run diagnostics: `replay` / `speculation-gate` / `timings` / `inspect` / `readmodel` /
+`tensorboard`.
 
 Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2), then split again (doc 25 CT-01):
 the module had grown to 1700 lines across three unrelated domains while its docstring still claimed
@@ -8,8 +9,10 @@ to `concept_cmds.py`; the cross-run governance commands (durable writes and paid
 to `governance_cmds.py`, where the fact that they MUTATE is stated in the header rather than buried
 200 lines below a "read-only" claim.
 
-Read-only EXCEPT `speculation-gate`, which atomically writes a local quality receipt without
-changing any source run.
+Read-only EXCEPT two, and each says which run it touches: `speculation-gate` atomically writes a
+local quality receipt without changing any source run, and `readmodel` atomically republishes the
+named run's OWN `readmodel.sqlite` — a derived sidecar the engine never reads back, rebuilt in place
+because a live or crashed run otherwise has none at all.
 """
 from __future__ import annotations
 
@@ -20,7 +23,13 @@ from typing import Optional
 import orjson
 import typer
 
+from looplab.core.run_deletion import (
+    RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
+from looplab.core.run_reset import (
+    RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
 from looplab.events.eventstore import EventStore
+from looplab.events.readmodel import (
+    STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
 from looplab.cli import _RUN_DIR_HINT, _print_result, _require_run_dir, app
@@ -351,6 +360,76 @@ def inspect(run_dir: Path = typer.Argument(...)):
         typer.echo(snap.read_text(encoding="utf-8"))
     if events.exists():
         _print_result(fold(EventStore(events).read_all()))
+
+
+@app.command()
+def readmodel(
+    run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
+    check: bool = typer.Option(
+        False, "--check",
+        help=("Report what the existing readmodel.sqlite covers and exit 1 unless it is current. "
+              "Writes nothing."),
+    ),
+):
+    """Rebuild (or check) a run's `readmodel.sqlite` from its event log.
+
+    Until 2026-08-14 the read model was built at ONE moment — the end of `finalize_run` — so a run
+    that was still going, or that crashed, had none at all, and a control event appended after a run
+    finished left the published file behind with nothing on it saying so. This is the other half:
+    the same projection, reachable on demand.
+
+    It is safe against the engine invariants because a read model is a derived SIDECAR, not an
+    event. Nothing here appends to `events.jsonl`, so invariant #1's "the engine is the sole writer
+    of domain events" is untouched; and nothing in `looplab/` ever opens the database, so the
+    artefact cannot become the cached derived state invariant #4 forbids — the engine keeps
+    observing state only through `fold(store.read_all())`, including in the same process that just
+    wrote this file. Building it for a LIVE run is therefore a read of the log and a write of a file
+    the run does not consult; the watermark is what makes the resulting snapshot honest about being
+    a prefix, since the run appends more the moment it is written.
+
+    The two durable fences the engine's own writers respect are re-checked here, because this is a
+    second process writing into someone else's run directory: a run whose deletion or reset is
+    unresolved is refused rather than having a sidecar resurrected underneath the transaction.
+    """
+    # `healthy=True` on the writing path only: a mid-file divergence means the log this projection
+    # would claim to cover is not one prefix, and publishing over it would be the silent-stale case
+    # the watermark exists to remove. `--check` reads whatever is there and says so.
+    store = _require_run_dir(run_dir, healthy=not check)
+    events = store.read_all()
+    path = run_dir / "readmodel.sqlite"
+    want = coverage_watermark(events)
+
+    if check:
+        status = readmodel_status(path, events)
+        stored = read_watermark(path)
+        typer.echo(f"readmodel={path}")
+        typer.echo(f"status={status}")
+        typer.echo("covers=" + (f"seq<={stored.covered_seq} events={stored.event_count}"
+                                if stored is not None else "unknown (no usable watermark)"))
+        typer.echo("log=" + (f"seq<={want.covered_seq} events={want.event_count}"
+                             if want is not None else "unknown"))
+        if status != STATUS_CURRENT:
+            raise typer.Exit(1)
+        return
+
+    try:
+        assert_run_deletion_write_allowed(run_dir)
+        assert_run_reset_write_allowed(run_dir)
+    # The STORAGE errors are in the tuple deliberately: a fence that cannot be read is not an
+    # absent fence, and treating it as one is how a sidecar gets written into a run whose deletion
+    # is in flight. Fail closed on "cannot prove this is allowed", not only on "proven disallowed".
+    except (RunDeletionFenceError, RunDeletionStorageError,
+            RunResetFenceError, RunResetStorageError) as exc:
+        typer.echo(f"refusing to write a read model into a fenced run: {exc}", err=True)
+        raise typer.Exit(2)
+
+    publish_readmodel(events, path)
+    # Re-read the published watermark rather than echoing what was intended: the operator is told
+    # what the file on disk actually says, which is the same question `--check` answers.
+    stored = read_watermark(path)
+    typer.echo(f"readmodel={path}")
+    typer.echo("covers=" + (f"seq<={stored.covered_seq} events={stored.event_count}"
+                            if stored is not None else "unknown (no usable watermark)"))
 
 
 @app.command()

@@ -244,7 +244,7 @@ the UI derive from `fold`, not stale SQLite).
 | Sev | Loc | Finding |
 |---|---|---|
 | 🔴 | eventstore.py:38 | Lock swallows `OSError` → unsynchronized write → torn line → silent truncation (C4). |
-| 🔴 | readmodel.py:27 | Read-model diverges undetectably (C5). |
+| 🔴 | readmodel.py:27 | Read-model diverges undetectably (C5). **Fixed 2026-08-14**: the projection carries a fail-closed watermark (schema version, covered `seq`, event count, `(seq, type)` digest) written in the rows' own transaction, so divergence is now DETECTED; `looplab readmodel` rebuilds it during a live run or after a crash. Refresh-on-append deliberately not built — no reader (see BACKLOG survivor #4). |
 | 🟠 | eventstore.py:104 | `_disk_last_seq` and `iter_jsonl` use **different** "last record" rules → seq gap after a crash. |
 | 🟠 | memory.py:30 | `JsonlCaseLibrary._flush` does a full `write_text` (non-atomic) — a crash mid-write loses **all** cross-run memory; `atomic_write_text` exists but is unused. |
 | 🟠 | retrieval.py:55 | `read_file` reads any absolute path — no root containment (path traversal / arbitrary read). |

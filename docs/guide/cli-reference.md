@@ -12,6 +12,7 @@ looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the raw launch snapshot + current folded best result
 looplab replay          Pure fold of the event log → state (read-only)
+looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
@@ -434,6 +435,35 @@ reproducibility check — it has no side effects.
 ```bash
 looplab replay RUN_DIR
 ```
+
+## `readmodel`
+
+Rebuild — or just check — a run's `readmodel.sqlite`, the derived SQLite projection of the event log.
+
+```bash
+looplab readmodel RUN_DIR            # rebuild in place, atomically
+looplab readmodel RUN_DIR --check    # report coverage, write nothing
+```
+
+The engine builds this file once, at the end of `finalize_run`. So a run that is **still going** — or
+that crashed — has none at all, and until 2026-08-14 a published one could not say whether it covered
+the whole log: a control event appended after the run finished left it silently behind. Two things
+changed. The projection now carries a **watermark** (schema version, last `seq` folded, event count,
+and a digest of the `(seq, type)` prefix, written in the same transaction as the rows), and this
+command makes the build reachable at any moment.
+
+`--check` prints `status=current|stale|unknown` and exits **1** unless the answer is `current`. It
+fails closed by design: a missing file, a database it cannot open, a missing/duplicated/malformed
+watermark row, and a schema version this build does not implement all report `unknown`, never
+`current`. Read models written before the watermark existed load exactly as before — their `nodes`
+table is untouched — and report `unknown`.
+
+Writing is safe against the engine invariants because a read model is a derived **sidecar**, not an
+event: nothing here appends to `events.jsonl`, and nothing in LoopLab ever reads the database back,
+so it cannot become cached derived state the engine observes instead of `fold(store.read_all())`. For
+a live run the result is honestly a *prefix* — the run appends more the moment it is written, and the
+watermark is what says so. A run whose deletion or reset is unresolved (or whose fence cannot be
+read) is refused with exit `2` rather than having a sidecar written under the transaction.
 
 ## `speculation-gate`
 

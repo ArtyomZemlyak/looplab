@@ -32,7 +32,12 @@ GROUPS = {
     # touches nothing — the same "fold/inspect a single run's sidecars" contract as `inspect`, and
     # the reason it is not in `governance_cmds` (it writes nothing and spends no money) or a new
     # group of its own (one command).
-    "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "tensorboard",
+    # `readmodel` DOES write — the named run's own `readmodel.sqlite`. It belongs here and not in
+    # `governance_cmds` because what it writes is a DERIVED sidecar of the single run it is pointed
+    # at, rebuilt by the same `fold` `replay` prints: it appends no event, spends no money, touches
+    # no cross-run store, and nothing in `looplab/` ever reads the file back. The group docstring
+    # carries that exception explicitly rather than letting "read-only" quietly become false.
+    "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "readmodel", "tensorboard",
                      "landlock-check"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},

@@ -47,7 +47,7 @@ runs/demo/
 ├── nodes/                # one workdir per candidate (its code, logs, artifacts)
 ├── tree.html             # static lineage view
 ├── trace.json            # end-of-run trace projection
-├── readmodel.sqlite      # derived read model for the UI (rebuildable from the log)
+├── readmodel.sqlite      # derived read model (rebuildable; `looplab readmodel RUN_DIR`)
 └── spans.jsonl           # diagnostic trace spans (never read by replay)
 ```
 
