@@ -205,6 +205,43 @@ def _wedged(receipt: dict[str, Any], code: str, message: str, *,
 _RESIDUE_REPORT_CAP = 12
 
 
+class _Residue(str):
+    """One reason the fenced source is not gone — and whether pressing RETRY could change it.
+
+    A `str` subclass rather than a record, so every reader of this list (the wedge report, the JSON
+    body, the tests that assert a substring) keeps working unchanged while the ONE bit the caller
+    needs travels with the reason that decided it.
+
+    THAT BIT IS THE WHOLE POINT, and its absence was the over-correction. `retryable: true` on a
+    permanently blocked deletion was the 2026-08-13 wedge; reporting `retryable: false` on a blocker
+    that is a RACE is the same lie mirrored, and it costs more, because the remediation it carries
+    ("Retrying before that cannot change the answer") sends the operator to remove files from a
+    fenced run directory by hand. Two of this walk's reasons are proofs about the filesystem — a
+    link, a non-regular file, a name the quarantine already holds — and no retry touches them. The
+    rest are `OSError`s on a `fuse.geesefs` mount whose races are the reason this function exists at
+    all: an `ENOTEMPTY` from a directory that gained an entry mid-walk is precisely the case the next
+    attempt absorbs, and this module's own docstring says so.
+    """
+
+    __slots__ = ("permanent",)
+
+    def __new__(cls, reason: str, *, permanent: bool):
+        entry = super().__new__(cls, reason)
+        entry.permanent = permanent
+        return entry
+
+
+def _residue_is_wedged(residue: list[str]) -> bool:
+    """May the operator be told that retrying cannot change this answer?
+
+    Only when EVERY blocker is a proof. One racy blocker is enough to keep the retry promise: the
+    next attempt re-scans and can absorb it, which is a move the operation makes on its own. A reason
+    with no marker (a future rung that forgets one) is read as racy — the fail-safe direction is the
+    one that keeps offering a retry, not the one that declares a run permanently owned.
+    """
+    return bool(residue) and all(getattr(entry, "permanent", False) for entry in residue)
+
+
 def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
     """FINISH the quarantine move for whatever the directory rename left behind, moving nothing out
     of this operation's own custody and deleting nothing at all.
@@ -240,7 +277,8 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
     job — so the caller runs that rung again afterwards rather than this one absorbing a lock file
     into a quarantine whose purge must acquire exactly that name.
 
-    Returns `[]` when the fenced source is gone; otherwise the bounded list of reasons it is not.
+    Returns `[]` when the fenced source is gone; otherwise the bounded list of `_Residue` reasons
+    it is not — each carrying whether a RETRY could change it (see `_residue_is_wedged`).
     """
     # Both ends re-checked HERE, not inherited. `_strict_existing_run` runs only on a fresh preflight,
     # and `_purge_recreated_writer_shell` answers a plain False for a source that is a link as well as
@@ -253,9 +291,9 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
             if (is_reparse(info) or bool(callable(junction_fn) and junction_fn())
                     or not stat.S_ISDIR(info.st_mode)
                     or path.resolve(strict=True) != path.resolve(strict=False)):
-                return [f"{name} is not a canonical service directory"]
+                return [_Residue(f"{name} is not a canonical service directory", permanent=True)]
         except OSError as exc:
-            return [f"{name} cannot be inspected ({exc})"]
+            return [_Residue(f"{name} cannot be inspected ({exc})", permanent=False)]
     blocked: list[str] = []
     emptied: list[Path] = []
     left_lock = False
@@ -267,33 +305,38 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
             with os.scandir(source_dir) as entries:
                 children = list(entries)
         except OSError as exc:
-            blocked.append(f"{relative.as_posix()}: cannot be inspected ({exc})")
+            blocked.append(_Residue(
+                f"{relative.as_posix()}: cannot be inspected ({exc})", permanent=False))
             continue
         for entry in children:
             child = Path(entry.name) if relative == Path(".") else relative / entry.name
             try:
                 info = os.lstat(entry.path)
             except OSError as exc:
-                blocked.append(f"{child.as_posix()}: cannot be inspected ({exc})")
+                blocked.append(_Residue(
+                    f"{child.as_posix()}: cannot be inspected ({exc})", permanent=False))
                 continue
             if is_reparse(info) or stat.S_ISLNK(info.st_mode):
-                blocked.append(f"{child.as_posix()}: is a link, not a file this move left behind")
+                blocked.append(_Residue(
+                    f"{child.as_posix()}: is a link, not a file this move left behind",
+                    permanent=True))
                 continue
             if stat.S_ISDIR(info.st_mode):
                 emptied.append(child)
                 pending.append(child)
                 continue
             if not stat.S_ISREG(info.st_mode):
-                blocked.append(f"{child.as_posix()}: is not a regular file")
+                blocked.append(_Residue(
+                    f"{child.as_posix()}: is not a regular file", permanent=True))
                 continue
             if child == Path("engine.lock"):
                 left_lock = True
                 continue
             destination = quarantine / child
             if os.path.lexists(destination):
-                blocked.append(
+                blocked.append(_Residue(
                     f"{child.as_posix()}: the quarantine already holds this name, so it is not "
-                    "residue of this operation's own move")
+                    "residue of this operation's own move", permanent=True))
                 continue
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +344,9 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
                     rd / child, destination, label="deletion quarantine residue",
                     unique_destination=True, cross_directory=True)
             except OSError as exc:
-                blocked.append(f"{child.as_posix()}: could not be moved into the quarantine ({exc})")
+                blocked.append(_Residue(
+                    f"{child.as_posix()}: could not be moved into the quarantine ({exc})",
+                    permanent=False))
     if blocked:
         return blocked[:_RESIDUE_REPORT_CAP]
     # Deepest first, `rmdir` only. A directory that is not empty by now holds something this walk did
@@ -310,7 +355,11 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
         try:
             (rd / relative).rmdir()
         except OSError as exc:
-            blocked.append(f"{relative.as_posix()}: the emptied directory could not be removed ({exc})")
+            # ENOTEMPTY here is the mid-walk ARRIVAL this function's own contract names, i.e. the
+            # racy case a second attempt absorbs — never a proof that a human must intervene.
+            blocked.append(_Residue(
+                f"{relative.as_posix()}: the emptied directory could not be removed ({exc})",
+                permanent=False))
     if blocked or left_lock:
         # An `engine.lock` left standing is not a refusal — it is the ONE shape
         # `_purge_recreated_writer_shell` was written for, and it proves ownership before removing it.
@@ -319,7 +368,8 @@ def _absorb_quarantine_residue(rd: Path, quarantine: Path) -> list[str]:
         rd.rmdir()
         strict_fsync_parent(rd)
     except OSError as exc:
-        blocked.append(f"the fenced run directory could not be removed ({exc})")
+        blocked.append(_Residue(
+            f"the fenced run directory could not be removed ({exc})", permanent=False))
     return blocked[:_RESIDUE_REPORT_CAP]
 
 
@@ -740,7 +790,7 @@ def begin_or_resume_run_deletion(
                             # residue that cannot be absorbed on those terms is a real refusal, and
                             # that one is not retryable: no later attempt touches those paths either.
                             residue = _absorb_quarantine_residue(rd, quarantine)
-                            if residue:
+                            if residue and _residue_is_wedged(residue):
                                 return _wedged(
                                     receipt, "delete_quarantine_conflict",
                                     "Both the run and its deletion quarantine exist; the source "
@@ -749,6 +799,26 @@ def begin_or_resume_run_deletion(
                                         "Account for the named paths against the quarantine and "
                                         "remove or move them yourself, then retry this exact "
                                         "operation. Retrying before that cannot change the answer."),
+                                    blocking_entries=residue)
+                            if residue:
+                                # A blocker this walk could not classify as a PROOF is a race on the
+                                # mount this function exists for — an `ENOTEMPTY` from a directory
+                                # that gained an entry mid-walk, an `lstat`/rename that failed on a
+                                # `fuse.geesefs` hiccup. The next attempt re-scans and absorbs it, so
+                                # the retry promise is real here and saying otherwise would send the
+                                # operator to delete files out of a fenced run directory by hand —
+                                # the same lie as the wedge it replaced, pointing the other way.
+                                # The paths ride along regardless: they are what makes either answer
+                                # checkable.
+                                return deletion_result(
+                                    receipt, code="delete_quarantine_conflict",
+                                    message=(
+                                        "Both the run and its deletion quarantine exist; finishing "
+                                        "the move was interrupted and can be resumed."),
+                                    retryable=True,
+                                    remediation=(
+                                        "Retry this exact operation. If the same paths keep "
+                                        "blocking it, account for them against the quarantine."),
                                     blocking_entries=residue)
                             # Everything absorbable is absorbed; anything still standing is the
                             # writer-shell case, whose `engine.lock` a LIVE owner can still hold —
