@@ -153,7 +153,13 @@ def test_monitor_cancellation_joins_the_paid_verdict_worker(tmp_path):
         host = _MonitorStub(tracer, interval=0.02)
         host._monitor_cadence = lambda: 0.0
 
-        def _blocking_verdict(digest, context, stage_context=""):
+        # This stub stands in for the real `_training_verdict`, so its parameters ARE that
+        # contract: the loop calls it POSITIONALLY through `to_thread.run_sync`, and a stub one
+        # parameter short raises `TypeError` inside the loop's own per-tick `except Exception:
+        # continue` — the monitor then spins forever, `started` is never set, and this test hangs
+        # rather than failing. That is what adding `trajectory_text` did. Keep it in step with the
+        # signature; `test_train_monitor_trajectory.py` drives the two into agreement.
+        def _blocking_verdict(digest, context, stage_context="", trajectory_text=""):
             started.set()
             release.wait()
             worker_finished.set()

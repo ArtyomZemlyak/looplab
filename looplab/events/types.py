@@ -515,6 +515,15 @@ LOG_ROLES: frozenset[str] = frozenset({
 # When the monitor DECIDES to stop the run it also stamps the kill-attribution pair described on
 # EV_ASHA_VERDICT below (`stop_decided` + `kill`, plus `kill_superseded_by` when a sibling watchdog won
 # the claim); those fields are absent on an ordinary advisory row.
+# `trajectory` (2026-08-14, additive) is the ENGINE'S OWN deterministic measurement of this stage's
+# loss over the whole eval so far — direction/first/last/minimum/noise/net/points, from
+# `engine/train_monitor.py::trajectory_row` — recorded BESIDE the model's verdict because the verdict
+# is formed from a tail worth ~30 seconds of a multi-hour run and the two can disagree. It states
+# what the loss DID, never what anyone concluded; `trajectory_veto: true` marks a row where the
+# measurement is what refused a kill the other four conjuncts would have granted. Readers must
+# default an absent `trajectory` to "the engine measured nothing" (an old row, or a log printing no
+# parseable loss — `runs/rubert-dr-0807` writes 45 MB containing the string "loss" zero times),
+# NEVER to "the loss was flat".
 EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 # ASHA live-curve watchdog (engine/asha_monitor.py): a node whose latest INTERMEDIATE metric ranks below
 # completed endpoints and/or comparable same-resource observations. New rows distinguish those verdicts;

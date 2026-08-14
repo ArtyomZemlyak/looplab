@@ -939,11 +939,20 @@ def test_h3b_an_endpoint_failure_between_two_broken_verdicts_never_confirms(tmp_
     class _FlakyClient(_FailingClient):
         """Fails the SECOND call. Each call also grows the log, so the changed-digest gate keeps
         letting ticks through — otherwise a frozen log legitimately goes quiet after the disarm and
-        the question this test asks (does a failure break the streak?) never comes up."""
+        the question this test asks (does a failure break the streak?) never comes up.
+
+        The appended line moves its STEP and prints the nan this client's own verdict names. It
+        used to descend 2.0 -> 1.9 -> 1.8, which the measured-trajectory conjunct (2026-08-14) reads
+        — correctly — as a run that is plainly still learning, and refuses to kill: `_TRAIN_TAIL`
+        opens 2.9 -> 2.1, so ANY flat continuation is still a net descent from the first reading.
+        That refusal is about a different question than the one this test asks, and a fixture whose
+        log contradicts its own verdict is what let the two questions collide. A nan is what "loss
+        is nan" looks like in a log, and it withdraws the veto by the anomaly rung, so the
+        confirmation-streak property is tested with nothing else in the way."""
 
         def complete_tool(self, messages, schema):
             self.calls += 1
-            log.write_text(log.read_text() + f'{{"loss": {2.0 - 0.1 * self.calls:.2f}}}\n',
+            log.write_text(log.read_text() + f'{{"step": {self.calls + 2}, "loss": nan}}\n',
                            encoding="utf-8")
             if self.calls == 2:
                 raise RuntimeError("endpoint 502")
