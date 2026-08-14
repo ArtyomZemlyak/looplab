@@ -10,7 +10,7 @@ stale — every status below was read off the tree on 2026-08-11.
 
 ---
 
-## F1 · Derive the run width from the proposals, not from the box
+## F1 · Derive the run width from the proposals, not from the box — **BUILT, 2026-08-13**
 
 **Asked:** "if I want to run one experiment per card — who decides that and how? Ideally
 automatically, from the propose."
@@ -28,6 +28,75 @@ it. A proposal-derived width therefore cannot just be recomputed per turn — it
 event that RE-pins the width mid-run (`budget_extend` is the existing shape for exactly this), plus a
 rule for what happens when the proposals ask for more cards than exist. Start there, not at the
 resolver.
+
+**BUILT, 2026-08-13 — `Settings.proposal_width` (ON), `EV_RUN_WIDTH_SETTLED`.**
+
+**The durable event is a NEW one, not `budget_extend`**, and the four reasons are why this entry's
+suggestion did not survive contact:
+
+1. `budget_extend` is a CONTROL event (`serve/protocol.py::CONTROL_EVENTS`) — a HUMAN intent the
+   UI/CLI author. `_repin_settled_widths` stands aside on any axis a control event has taken over, so
+   the engine's own first re-pin would permanently disable the re-entry refusal invariant #6 rests
+   on, for the operator too.
+2. It folds into `state.budget_overrides`, which `_apply_control_overrides` re-applies every turn.
+   Engine and operator writing the same cell leaves no way to say the human's number outranks the
+   research's.
+3. `_apply_control_overrides` **raises** on any non-empty `budget_overrides` during a speculation
+   calibration run — an engine-authored one would hard-crash that lane.
+4. `search/speculation_quality.py::_FORBIDDEN_CALIBRATION_LIFECYCLE_EVENTS` already contains
+   `budget_extend`, so writing one would silently disqualify every run as calibration evidence.
+
+`run_width_settled` is engine-appended and folds LAST-WRITE-WINS into fields of its own
+(`RunState.eval_parallel_settled`/`llm_parallel_settled`), never onto `run_started`'s pins — the same
+separation, for the same order-tolerance reason, as `speculation_depth_pinned`/`_settled`. Unlike the
+depth ratchet it is TWO-WAY (proposals narrow the run and widen it back), so a minimum would be wrong.
+`_repin_settled_widths` resolves the three layers: **pin < proposal re-pin < operator `budget_extend`**.
+
+**The rule** is `engine/widths.py::proposal_derived_width`, stated beside `per_experiment_gpu_budget`
+because the two are halves of one fact:
+
+```
+width = min( gpu_pool // widest declared footprint.gpus, the width run_started pinned )
+```
+
+The **count** of open cards is deliberately not a term, even though "one experiment per card" sounds
+like it should be. The board holds one ready card most of the time, so counting it narrows the run to
+serial on board churn and widens it back a turn later, appending a durable row each way — caught by a
+real toy run doing exactly that. It also buys nothing: the dispatcher fills up to the width from
+whatever work exists.
+
+**When the proposals exceed the box, the surplus QUEUES — the width never oversubscribes the pool.**
+Five one-GPU cards on a two-GPU box stay at 2. Three reasons: it is what keeps F1b's per-experiment
+announcement true (`pool // width >= need` by construction, so the next Card is never quoted less than
+the open Cards already declared); an eval slot above the device count buys a node blocked in
+`_acquire_gpus`, which is F1f's barrier; and `_dispatch_evals`'s aged-head escape hatch cannot fire at
+all when the width exceeds the batch's own semaphore total.
+
+**`speculation_depth` is NOT re-derived from the new width**, and this is the loud part. It is a
+`run_started` pin, it is `CalibrationRuntime` field #6, the calibrated replay lane re-checks
+`admitted_depth == engine.speculation_depth`, and `_require_pinned_speculation_receipt` raises
+`SpeculationAuthorizationError` on a resolved-vs-recorded mismatch — so moving it here would make a
+re-pinned run unresumable through the guarded path at the NEXT re-entry rather than at the decision.
+The residual is a depth that may exceed the width after a narrowing, which is the same benign desync a
+Strategist width change has always produced.
+
+**Calibration receipts.** A calibration run never re-pins (refused outright, beside the AUTO gate the
+profile's spelled `1`s already close), and `run_width_settled` is now a named member of
+`_FORBIDDEN_CALIBRATION_LIFECYCLE_EVENTS` so a re-pinned run is refused as evidence BY NAME rather
+than as an anonymous unlisted type. Separately and unavoidably: `speculation_implementation_digest`
+hashes every shipped `.py`, so **this change revokes every previously issued speculation-quality
+receipt** — as does any code change, but it is worth stating rather than discovering.
+
+Also fixed here, because the feature makes mid-run width changes routine: `_dispatch_evals` compared
+free semaphore tokens against the LIVE `self._eval_parallel` while the semaphore's total was captured
+at construction. Lowered mid-batch it declared a wide head unsatisfiable while its GPUs were merely
+busy (and `head_unsatisfiable` is sticky); raised, the escape hatch became unreachable and a genuinely
+unsatisfiable head wedged the batch. It now compares against the batch's own captured width.
+
+`tests/test_proposal_derived_width.py` drives it: the rule's truth table, the F1b announcement
+property over every pool/footprint pair, fold order-tolerance against `run_started`, a real Card board
+through the real planner, every stand-aside, and a real resume onto a four-GPU box that must reach the
+re-pinned width from the log alone.
 
 ### F1b · Tell the Researcher what the per-experiment GPU budget IS
 
