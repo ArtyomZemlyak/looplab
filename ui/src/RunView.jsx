@@ -22,7 +22,8 @@ import {
   requestHistory, resolveHistory, setRunAccess,
 } from './runMode.js'
 import {
-  approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady,
+  approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, sourceIncomplete,
+  sourceIntegrityNotice, terminalReady,
 } from './runIndex.js'
 import { initialDagOverviewDecision } from './dagViewport.js'
 import {
@@ -2594,6 +2595,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <label htmlFor="copy-view-fallback">Clipboard blocked — select and copy this link</label>
         <input id="copy-view-fallback" readOnly value={copyFallback} onFocus={event => event.currentTarget.select()} />
         <button type="button" className="btn xs ghost" onClick={() => setCopyFallback('')} aria-label="Close copy fallback">×</button>
+      </div>}
+
+      {/* FIRST banner in the stack, and `role="alert"` rather than `status`: every other notice here
+          qualifies what the operator is allowed to DO with this run, while this one says the run on
+          screen is not the run on disk. It sits above the workspace because there is no panel it
+          belongs to — the DAG, the node table, the metrics, the cost and the timeline are all folded
+          from the same truncated prefix. It is deliberately not dismissible: nothing the operator can
+          do here makes it stop being true (`looplab repair-log` names the boundary, off-screen). */}
+      {sourceIncomplete(live) && <div className="review-banner" role="alert"
+        data-run-source-incomplete>
+        <span className="history-lock" aria-hidden="true">◬</span>
+        <b>Incomplete record</b>
+        <span>{sourceIntegrityNotice(live)}</span>
       </div>}
 
       {reviewMode && <div className="review-banner" role="status">

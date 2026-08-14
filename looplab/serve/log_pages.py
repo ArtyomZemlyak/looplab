@@ -452,7 +452,17 @@ class EventLogPager:
 
     def page(self, path: str | os.PathLike, *, direction: str = "tail", limit: int = DEFAULT_ROWS,
              byte_limit: int = DEFAULT_BYTES, cursor: Optional[str] = None,
-             generation: Optional[str] = None, anchor_seq: Optional[int] = None) -> dict:
+             generation: Optional[str] = None, anchor_seq: Optional[int] = None,
+             source_integrity: Optional[dict] = None) -> dict:
+        # `source_integrity` is passed IN rather than derived here, and that is deliberate twice over.
+        # (1) Cost: the caller (`AppState.log_integrity`) caches the scan per file identity, while this
+        # method runs on every timeline poll and re-scanning a 12 MB log each time would undo the
+        # index this class exists to be. (2) Meaning: this pager reads PHYSICAL rows leniently and is
+        # right to — showing the operator the whole file is the one thing it can do that the fold
+        # cannot. What it must not do is assert health it did not check. On
+        # `runs/rubertlite-dense-retrieval` it answered `total_events: 1624, torn_tail: false` in the
+        # same second `/state` answered `event_count: 20`, and NEITHER surface said the other existed.
+        # `torn_tail` is a fact about the last line; this is the fact about the middle.
         if direction not in _DIRECTIONS:
             raise HTTPException(400, {
                 "code": "invalid_log_direction",
@@ -549,6 +559,7 @@ class EventLogPager:
                 "cursors": cursors,
                 "has_more": {"older": start > 0, "newer": end < len(rows)},
                 "torn_tail": index.torn_tail,
+                "source_integrity": source_integrity,
                 "source_tail_limited": index.source_tail_limited,
                 "bytes": wire_bytes,
                 "limit": limit,

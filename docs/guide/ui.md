@@ -813,6 +813,17 @@ A preview launcher (`tools/ui_preview.py`) serves the built UI with the dev `.en
 
 ## Troubleshooting
 
+**An "Incomplete record" banner on a run, or an `incomplete record` pill on a run-list row.** The
+run's `events.jsonl` stops being readable part-way, so the fold behind *everything else on screen* —
+the DAG, the node table, the metrics, the cost, the timeline — covers only the readable prefix. The
+banner names where the log stops and how many durable records sit behind that boundary. Take the
+numbers literally: a run reading `nodes: 2, best 0.8077` from a 20-record prefix of a 1,624-record
+log is not a two-node run, and the missing records are **on disk**, not absent from history. The
+server derives this from the bytes (`source_integrity` on the run-state envelope, the `/lifecycle`
+probe and each run-list row); `looplab repair-log RUN_DIR` names the exact boundary, and
+`docs/guide/cli-reference.md#repair-log` explains what causes one. The banner is not dismissible
+because nothing you can do in the browser makes it stop being true.
+
 **`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's
 `esbuild` runs a **native binary** during install/build. `EACCES` when *executing* it means the
 volume holding `node_modules` won't run binaries. Two common causes:

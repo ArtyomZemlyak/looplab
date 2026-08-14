@@ -36,7 +36,7 @@ from looplab.core.run_deletion import (
     RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
 from looplab.core.run_reset import (
     RunResetFenceError, RunResetStorageError, assert_run_reset_write_allowed)
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import INTEGRITY_COMPLETE, EventStore, integrity_sentence
 from looplab.engine.options import EngineOptions
 from looplab.engine.orchestrator import (
     Engine,
@@ -298,6 +298,15 @@ def _require_run_dir(run_dir: Path, *, hint: str = _RUN_DIR_HINT,
     existence check inline, two of them with a shorter message, and each re-opened its own EventStore
     on the very path this function had just validated. Read commands leave it False (they only ever
     fold the recoverable prefix), and `repair-log` MUST leave it False — a corrupt log is its input.
+
+    `healthy=False` is NOT silent, and that is the 2026-08-14 change. "They only ever fold the
+    recoverable prefix" was true and was exactly the defect: `replay`, both exports and all six
+    concept commands printed a fold of 20 records for `runs/rubertlite-dense-retrieval` — a run whose
+    log holds 1,624 — with no indication that 1,603 durable records were behind the boundary. The
+    divergence was already computed by the `EventStore` constructor on the line above; it just had no
+    reader. A read command now STATES it on stderr and continues (the prefix is still the honest
+    answer to "what can be replayed", and `repair-log`/inspection must stay reachable on a log that
+    is itself the evidence), while a MUTATING command keeps failing closed exactly as before.
     """
     if not (run_dir / "events.jsonl").exists():
         typer.echo(f"no run found at {run_dir} (no events.jsonl). {hint}")
@@ -305,7 +314,29 @@ def _require_run_dir(run_dir: Path, *, hint: str = _RUN_DIR_HINT,
     store = EventStore(run_dir / "events.jsonl")
     if healthy:
         _require_healthy_log(store, run_dir)
+    else:
+        _echo_log_integrity(store, run_dir)
     return store
+
+
+def _echo_log_integrity(store: EventStore, run_dir: Path) -> None:
+    """Print the incomplete-record statement for a READ command, or nothing. Derived from the store's
+    own byte scan — never re-derived here, so the CLI and the HTTP surfaces cannot disagree about the
+    same file. Goes to stderr so a caller piping `looplab replay` into `jq` still gets clean JSON on
+    stdout AND a human running it still cannot miss that the JSON describes a fraction of the run."""
+    note = integrity_sentence(log_integrity_from(store), run_label=f"{run_dir}")
+    if note:
+        typer.echo(note, err=True)
+
+
+def log_integrity_from(store: EventStore) -> dict:
+    """The shared receipt shape, from a store that has ALREADY scanned (no second read of the file).
+    `EventStore.__init__` calls `log_divergence`, so this is free at every CLI call site."""
+    div = store.divergence
+    if div is None:
+        return dict(INTEGRITY_COMPLETE)
+    return {"complete": False, "good_records": div.get("good_records"),
+            "corrupt_line": div.get("corrupt_line"), "dropped_lines": div.get("dropped_lines")}
 
 
 def load_run_settings(run_dir, *, strict: bool) -> Settings:

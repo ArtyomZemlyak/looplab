@@ -15,6 +15,47 @@ export function finalizationIncomplete(run = {}) {
   return !run.finished || stopFinishedWithError(run) || run.engine_running !== false
 }
 
+// --- Event-log INTEGRITY -----------------------------------------------------------------------
+// The server's `source_integrity` receipt (`looplab/events/eventstore.py::log_integrity`) says
+// whether the fold behind every other field on this object saw the WHOLE log. It exists because a
+// run whose log stops being readable part-way renders as a smaller, entirely plausible run: on the
+// shipped corpus `rubertlite-dense-retrieval` drew a row reading `nodes: 2, best_metric: 0.8077`
+// from a 20-record prefix of a 1,624-record log, with nothing anywhere on screen saying so.
+//
+// Both helpers take the run SUMMARY row (`/api/runs`) or the folded run state (`useRunState`'s
+// `live`) — the server mirrors the same receipt onto both, so one rule serves the list and the
+// workspace. An ABSENT receipt is `false`, deliberately: a legacy server that does not send the
+// field must not paint every run with a corruption warning. An UNREADABLE log is incomplete, which
+// is the direction that never renders "we could not look" as "we looked and it is fine".
+export function sourceIncomplete(run = {}) {
+  const receipt = run?.source_integrity
+  if (!receipt || typeof receipt !== 'object') return false
+  return receipt.complete !== true
+}
+
+// The one wording the browser prints, mirroring `eventstore.py::integrity_sentence`. Phrased so the
+// operator cannot read a truncated view as a small run — it names what IS visible, what is not, and
+// that the missing records are on disk rather than absent from history.
+export function sourceIntegrityNotice(run = {}) {
+  if (!sourceIncomplete(run)) return ''
+  const receipt = run.source_integrity
+  if (receipt.unreadable) {
+    return 'This run’s event log could not be read at all. Nothing on this screen describes the run.'
+  }
+  const good = Number.isSafeInteger(receipt.good_records) ? receipt.good_records : null
+  const dropped = Number.isSafeInteger(receipt.dropped_lines) ? receipt.dropped_lines : null
+  const line = Number.isSafeInteger(receipt.corrupt_line) ? receipt.corrupt_line : null
+  // good + the BOUNDARY row + dropped, mirroring `eventstore.py::integrity_sentence`: the boundary
+  // line is a complete record on disk, so this total is the one the timeline pager also counts.
+  const total = good != null && dropped != null ? good + dropped + 1 : null
+  const where = line != null ? ` at line ${line}` : ''
+  const scope = total != null ? `You are seeing ${good} of ${total} records; ${dropped} durable `
+    + 'record(s) behind that boundary are NOT shown.' : 'Part of the log is not shown.'
+  return `Incomplete record: this run’s event log stops being readable${where}. ${scope} `
+    + 'Every number here describes the readable prefix only — it is not evidence that the rest did '
+    + 'not happen.'
+}
+
 export function terminalReady(run = {}) {
   return !!run.finished && !finalizationIncomplete(run) && run.engine_running === false
 }

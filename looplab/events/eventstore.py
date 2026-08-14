@@ -403,6 +403,90 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
     return None
 
 
+# The ONE operator-facing statement about whether a log's readable prefix IS the log. `log_divergence`
+# above answers the WRITER's question ("may I append?"); this answers the READER's ("is what I am
+# about to show you the run?"), and until 2026-08-14 nothing asked it on a display path.
+#
+# The cost of not asking, measured on the shipped corpus: `runs/rubertlite-dense-retrieval` has 1,624
+# physical rows, ALL of them valid JSON, and `read_all()` returns 20 — seqs 20-24 are absent, so the
+# dense-prefix fence ends the recoverable prefix at line 21 and 1,603 records are dropped from every
+# fold. `EventStore` computed exactly that divergence and it went nowhere an operator looks: on the
+# same server in the same second the timeline pager reported `total_events: 1624, torn_tail: false`
+# while `/state` reported `event_count: 20`, and the run-list row read `nodes: 2, best_metric: 0.8077`
+# for a run whose own `budget` row says `nodes: 81`. Every one of those numbers is arithmetically
+# correct on 1.2 % of the run and none of them said so.
+#
+# Two rules this receipt keeps (docs/36, and invariant #5 one file over):
+#   * it is DERIVED FROM THE BYTES and never inferred. There is no heuristic here and no softening —
+#     the whole body is `log_divergence`, which reads the file. An unreadable file is INCOMPLETE with
+#     `unreadable: True`, because "we could not look" must never render as "we looked and it is fine".
+#   * it is a STATEMENT, not a fence. It reads nothing the fence does not already stop at and it
+#     changes no reader's stop condition, so every log that loads today still loads identically —
+#     including the ten runs whose `read_all()` legitimately returns MORE records than physical lines
+#     (an `append_many` envelope carries several events on one line).
+INTEGRITY_COMPLETE = {"complete": True}
+# The keys a WIRE receipt always carries, so a client never has to tell "absent because healthy" from
+# "absent because this server is older" — the latter has no `source_integrity` object at all. Stated
+# once because four HTTP surfaces publish this (`/state`, `/lifecycle`, the run list, `/cost` and
+# `/log-page`) and two envelopes describing the SAME file in two shapes is the original defect's own
+# signature. `serve/routers/runs.py::RunSourceIntegrity` declares exactly this set.
+INTEGRITY_WIRE_FIELDS = ("complete", "good_records", "corrupt_line", "dropped_lines", "unreadable")
+
+
+def log_integrity(path: str | os.PathLike) -> dict:
+    """Whether the recoverable prefix of an event log is the WHOLE log, for a display surface.
+
+    Returns `{"complete": True}`, or `{"complete": False, ...}` carrying `good_records` (how many
+    records a reader gets), `corrupt_line` (where it stops) and `dropped_lines` (how many complete
+    records are on disk BEHIND that boundary and invisible to every fold). `unreadable: True` marks
+    the file we could not scan at all — the conservative direction, never `complete`.
+
+    Callers must treat an incomplete receipt as "we cannot show you this run", not as a footnote on
+    numbers they print anyway: `good_records` is the denominator every derived figure is really over.
+    """
+    try:
+        div = log_divergence(path)
+    except (OSError, ValueError, TypeError):
+        return {"complete": False, "unreadable": True}
+    if div is None:
+        return dict(INTEGRITY_COMPLETE)
+    return {"complete": False, "good_records": div.get("good_records"),
+            "corrupt_line": div.get("corrupt_line"), "dropped_lines": div.get("dropped_lines")}
+
+
+def integrity_wire(receipt: dict) -> dict:
+    """Widen a receipt to the fixed wire shape (`INTEGRITY_WIRE_FIELDS`), absent keys as null."""
+    return {field: receipt.get(field) for field in INTEGRITY_WIRE_FIELDS}
+
+
+def integrity_sentence(receipt: Optional[dict], *, run_label: str = "this run") -> str:
+    """The ONE wording every TEXT surface prints for an incomplete log, or "" when it is complete.
+
+    Spelled once so the CLI, the tool surfaces and any future reader cannot come to describe the same
+    bytes differently. Phrased so a reader cannot convert a truncated read into an ABSENCE claim —
+    the specific failure `tools/_runcache.py::source_note` already guards for an in-loop agent, and
+    the identical one an operator makes when a 20-event view of an 81-node run reads as a small run.
+    """
+    if not receipt or receipt.get("complete"):
+        return ""
+    if receipt.get("unreadable"):
+        return (f"[INCOMPLETE RECORD] {run_label}'s event log could not be read at all; nothing "
+                f"below describes the run.")
+    good = receipt.get("good_records")
+    dropped = receipt.get("dropped_lines")
+    line = receipt.get("corrupt_line")
+    # good + the BOUNDARY row + dropped. The boundary line is itself a complete record on disk, so
+    # leaving it out would state a denominator one short of the file — and the timeline pager, which
+    # counts physical rows, would print a different total for the same bytes. Two surfaces disagreeing
+    # about the size of the log is the original defect in miniature.
+    total = (good + dropped + 1) if isinstance(good, int) and isinstance(dropped, int) else None
+    scope = f"{good} of {total} records" if total else f"{good} record(s)"
+    return (f"[INCOMPLETE RECORD] {run_label}'s event log stops being readable at line {line}: only "
+            f"{scope} are visible to replay and {dropped} durable record(s) behind that boundary are "
+            f"NOT included. Everything reported here describes the readable prefix ONLY — it is not "
+            f"evidence that the rest did not happen. `looplab repair-log` names the boundary.")
+
+
 def repair_log(path: str | os.PathLike) -> dict:
     """Operator recovery for a MID-FILE divergence (see `EventLogCorruptionError`). Idempotent:
     returns `{}` (no-op) when the log has no divergence. Otherwise it (1) backs up the ORIGINAL bytes
