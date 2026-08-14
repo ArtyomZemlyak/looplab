@@ -178,11 +178,18 @@ SETTLED_WIDTH_SOURCES = {
 }
 
 
-def settled_width_refusal(axis: str, *, resolved, recorded: int, source: str | None = None) -> str:
+def settled_width_refusal(axis: str, *, resolved, recorded: int, source: str | None = None,
+                          repinned: bool = False) -> str:
     """The ONE wording of a refused width re-entry, so every surface says something true.
 
     ``source`` selects the remedy from ``SETTLED_WIDTH_SOURCES``; ``None`` is the generic phrasing a
     library ``Engine(...)`` caller gets, where the engine genuinely cannot know which knob was turned.
+
+    ``repinned`` names the RIGHT ROW.  Since docs/29 F1 the recorded width may come from a durable
+    `run_width_settled` re-pin rather than from `run_started`, and telling an operator that
+    "run_started pinned 1" when their log's `run_started` plainly says 4 sends them to argue with the
+    wrong event.  It is a one-clause difference because it has to be: the remedy is identical (the
+    log's current treatment wins either way), only the authority differs.
 
     The `null` note is not padding.  ``eval_parallel: null`` is the natural JSON spelling of "no
     opinion" and is the one an operator reaches for after reading "0 = AUTO adopts the pin", but it
@@ -194,11 +201,12 @@ def settled_width_refusal(axis: str, *, resolved, recorded: int, source: str | N
     """
     remedy = SETTLED_WIDTH_SOURCES.get(source, SETTLED_WIDTH_SOURCES[None])
     remedy = remedy.format(axis=axis, ENV=axis.upper())
+    authority = ("this run re-pinned itself to" if repinned else "run_started pinned")
     return (
         # "re-enter", not "resume": `looplab run <existing dir>` reaches this too (it REOPENS the
         # log), and telling that operator their `resume` was refused sends them looking for a command
         # they did not type.
-        f"cannot re-enter this run at {axis}={resolved}: run_started pinned {recorded}. "
+        f"cannot re-enter this run at {axis}={resolved}: {authority} {recorded}. "
         "The run-start record owns the width its log was written under (engine invariant #6) — a "
         "change here would splice two execution treatments into one log with nothing recording the "
         f"change. Put {axis} back to {recorded} (or to 0 = AUTO, which adopts the pin; `null` is NOT "

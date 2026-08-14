@@ -467,6 +467,19 @@ class Settings(BaseSettings):
     # way, with the broker live so the Strategist can reallocate lanes at cadence.
     eval_parallel: int | None = Field(default=0, ge=0, le=1024)
     llm_parallel: int | None = Field(default=0, ge=0, le=64)
+    # docs/29 F1 — let the PROPOSALS decide the width, not just the box. With this on, an AUTO
+    # `eval_parallel` is re-pinned mid-run to how many of the currently open Cards the box can serve
+    # at the `footprint.gpus` they declared (`engine/widths.py::proposal_derived_width`), through a
+    # durable `run_width_settled` event so replay and resume reproduce the width instead of
+    # re-deriving one off their own hardware (invariant #6). ON, because the box-derived width is
+    # measurably wrong in the ordinary case rather than merely coarse: on `rubertlite-dr-unified-v5`
+    # AUTO settled `eval_parallel: 2` off two H200s while both Cards declared `{"gpus": 2}`, so the
+    # run held both devices for one experiment and went serial at double the per-node cost with
+    # `run_started` still claiming a width of 2 (docs/29 F1b). This is the axis that makes that width
+    # true. It only ever moves an AUTO axis, never an explicitly spelled one and never one an
+    # operator's `budget_extend` owns, and it never widens past the launch pin — so `false` here, an
+    # explicit `eval_parallel=N`, or a `budget_extend` each keep today's behaviour byte for byte.
+    proposal_width: bool = True
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings). Its alert event is fold-ignored and cannot directly change lifecycle/champion;
@@ -2063,6 +2076,10 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     "max_eval_timeout": 24 * 3600.0,
     "watchdog_reflection": False,
     "card_driven_selection": False,
+    # docs/29 F1. A run launched before the proposals could move its width never consented to the
+    # engine re-pinning one mid-log, and re-entry must not add that treatment to it — the same reason
+    # every other concurrency row here is pinned to its historical value.
+    "proposal_width": False,
     "speculation_depth": 0,
     "speculation_gate_receipt": None,
     "concurrent_research_repeat": False,

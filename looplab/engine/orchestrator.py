@@ -43,7 +43,7 @@ from looplab.events.types import (
     EV_POLICY_DECISION,
     EV_REPORT_GENERATED,
     EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED,
-    EV_RUN_STARTED, EV_RUNG_PROMOTED,
+    EV_RUN_STARTED, EV_RUN_WIDTH_SETTLED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
     EV_ENV_CHANGED, EV_WORKSPACE_CHANGED,
@@ -51,8 +51,8 @@ from looplab.events.types import (
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.runtime.metric_subject import settle_mode as settle_metric_subject_mode
-from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width,
-                                   settled_width_refusal)
+from looplab.engine.widths import (EVAL_WIDTH_MAX, LLM_WIDTH_MAX, proposal_derived_width,
+                                   settle_width, settled_width_refusal)
 from looplab.engine.audit import AuditMixin
 from looplab.engine.card_reservation import CardReservationMixin, _BuildReservation
 from looplab.engine.speculation_gate import CalibrationRuntime, admit_speculation_lane
@@ -98,7 +98,8 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (
-    Idea, Node, NodeStatus, RunState, durable_idea_payload, is_developer_error)
+    Idea, Node, NodeStatus, RunState, durable_idea_payload, effective_card_footprint,
+    is_developer_error)
 from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
 from looplab.core.errors import ConfigRefusal, EnvironmentRefusal, OperatorRefusal
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
@@ -594,6 +595,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         task_facets_finalize = _opt("task_facets_finalize")
         cross_run_curation_auto = _opt("cross_run_curation_auto")
         concept_tidy = _opt("concept_tidy")
+        proposal_width = _opt("proposal_width")
         cross_run_read_tools = _opt("cross_run_read_tools")
         phase_handoff_summary = _opt("phase_handoff_summary")
         trust_mode = _opt("trust_mode")
@@ -860,6 +862,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._task_facets_finalize = bool(task_facets_finalize)
         self._cross_run_curation_auto = bool(cross_run_curation_auto)
         self._concept_tidy = bool(concept_tidy)
+        # docs/29 F1: whether the PROPOSALS may re-pin this run's width (`_settle_proposal_width`).
+        self._proposal_width = bool(proposal_width)
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
@@ -930,6 +934,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # Now that eval_parallel is settled, resolve llm_parallel (0 = AUTO = eval_parallel), so a build
         # fan-out never exceeds what we can concurrently evaluate.
         self._llm_parallel = self._resolve_llm_parallel(self._llm_parallel_startup_opt)
+        # docs/29 F1 — the LAUNCH treatment, kept because `_eval_parallel` stops being it. A
+        # proposal-derived re-pin, a `budget_extend` and `_repin_settled_widths` all write the live
+        # attribute, so by the time `_settle_proposal_width` needs a CEILING ("never widen past what
+        # this run was authorized to run at") the live value is the last thing that moved it, and
+        # using it would ratchet the run monotonically downward — one wide proposal could never be
+        # undone. On a resumed run the ceiling comes from `run_started` instead (invariant #6: the log
+        # outranks this box); this is the fallback for the first process and for a legacy log that
+        # pinned nothing.
+        self._eval_parallel_launched = self._eval_parallel
+        self._llm_parallel_launched = self._llm_parallel
         # AUTO (-1) follows the same settled width; every other value is used as spelled. Resolving
         # BEFORE the local is read again keeps one settled integer flowing into the envelope checks,
         # the runtime-scope digest and the run_started pin — a hardware-derived depth must never reach
@@ -1724,6 +1738,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if self._settle_terminal_gate(state, "eval_budget", decision_seq=decision_seq,
                                        max_es=max_es, drain_forced_request=True) == "break":
                     break
+                continue
+
+            # docs/29 F1 — the run's WIDTH re-pins HERE, from what the research proposed, for the same
+            # reason the AUTO depth re-resolves below: a stable decision prefix, nothing in flight,
+            # and a durable event the caller must re-fold after. AFTER `_apply_control_overrides` so
+            # an operator's live `budget_extend` is already in force and the axis it owns is visibly
+            # theirs; BEFORE the speculation block so the depth settle and every gate under it read
+            # one width rather than two.
+            if self._settle_proposal_width(state):
                 continue
 
             if await self._serve_forced_requests(state):
@@ -2650,11 +2673,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         Deliberately NOT called per loop iteration: `_apply_control_overrides` re-applies an
         operator's `budget_extend` widths on every turn, so a per-iteration re-pin would either undo
         the operator's own live retune or refuse the run over it.
+
+        THREE LAYERS, resolved here and nowhere else (docs/29 F1). `run_started` pins what the run
+        LAUNCHED at; a `run_width_settled` row re-pins what the run's own PROPOSALS moved it to; a
+        `budget_extend` is what a HUMAN said last. The order is pin < proposals < operator, and the
+        top layer is applied by `_apply_control_overrides` on every turn rather than here — which is
+        also why the two lower layers must be resolved BEFORE it runs, and why a `budget_extend` on an
+        axis still makes this method stand aside entirely for that axis.
+
+        This is what makes the width reconstructible BY REPLAY ALONE (invariant #6). A resumed process
+        adopts the last recorded re-pin; it does NOT re-derive one, because the derivation reads the
+        LIVE GPU pool and the resuming box may have a different one. Re-deriving here would reproduce,
+        one layer up, exactly the defect pinning the widths was introduced to close.
         """
         for axis, upper, recorded, resolved, auto in (
-            ("eval_parallel", EVAL_WIDTH_MAX, getattr(entry, "eval_parallel", 0),
+            ("eval_parallel", EVAL_WIDTH_MAX,
+             self._recorded_settled_width(entry, "eval_parallel", EVAL_WIDTH_MAX),
              self._eval_parallel, self._eval_parallel_startup_auto),
-            ("llm_parallel", LLM_WIDTH_MAX, getattr(entry, "llm_parallel", 0),
+            ("llm_parallel", LLM_WIDTH_MAX,
+             self._recorded_settled_width(entry, "llm_parallel", LLM_WIDTH_MAX),
              self._llm_parallel, self._llm_parallel_startup_auto),
         ):
             # 0 = the key is absent or malformed = a log written before widths were pinned. Keep this
@@ -2680,7 +2717,194 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                else ("parallel_build", "llm_parallel"))):
                 continue
             raise SettledWidthPinError(
-                settled_width_refusal(axis, resolved=resolved, recorded=recorded, source=source))
+                settled_width_refusal(
+                    axis, resolved=resolved, recorded=recorded, source=source,
+                    repinned=(getattr(entry, f"{axis}_settled", None) == recorded)))
+
+    @staticmethod
+    def _recorded_settled_width(entry: RunState, axis: str, upper: int) -> int:
+        """The width THIS LOG is running at: the `run_started` pin, re-pinned by the proposals.
+
+        docs/29 F1. Returns `0` for "not recorded", which every caller reads as "keep this process's
+        own startup resolution" — the byte-identical pre-pin behaviour a legacy log must retain.
+
+        The re-pin wins over the pin whenever it is present and valid, and that direction is the whole
+        contract: the pin says what the run was launched at, the re-pin says what the run's own
+        proposals moved it to, and it is the SECOND that later events in this log were produced under.
+        Guarded rather than trusted (`Optional[int]` reaching here as a bool or a string means a
+        hand-edited log) so a malformed re-pin degrades to the pin instead of to `0` — losing the pin
+        as well would hand a hand-edited row the power to re-derive the width off the resuming box,
+        which is more than it should be able to do.
+        """
+        repin = getattr(entry, f"{axis}_settled", None)
+        if type(repin) is int and 1 <= repin <= upper:
+            return repin
+        recorded = getattr(entry, axis, 0)
+        return recorded if type(recorded) is int and 1 <= recorded <= upper else 0
+
+    def _proposal_footprints(self, state: RunState) -> list[Optional[int]]:
+        """The declared `gpus` of every OPEN proposal — one entry per Card the run could run next.
+
+        `selection_ready` is the population, and it is the right one because it is the SAME predicate
+        the Card queue selects from (`card_reservation.py::_reserve_card_build`): the width is being
+        derived from work this run can actually dispatch, not from every Card the board has ever held.
+        A card already owned by a node, terminal, stale or in flight is not a proposal to run one more
+        experiment concurrently — it is an experiment already running or already done, and counting it
+        would let the board's history inflate the run's width.
+
+        The operator's `card_resource_pinned` override is merged in through `effective_card_footprint`
+        exactly as admission merges it, so the width is derived from the footprint the SCHEDULER will
+        see rather than from the Researcher's original declaration — the two differ precisely when an
+        operator has intervened, and the operator's number is the one that will be reserved.
+        `gpu_count` is deliberately NOT passed: that clamps a declaration to the live pool, and this
+        caller wants the raw demand so `proposal_derived_width` can see that the proposals asked for
+        more than the box has instead of being handed a pre-clamped number that hides it.
+        """
+        out: list[Optional[int]] = []
+        for card in (getattr(state, "cards", None) or {}).values():
+            if not getattr(card, "selection_ready", False):
+                continue
+            merged = effective_card_footprint(getattr(card, "footprint", None),
+                                              getattr(card, "resource_pin", None))
+            out.append((merged or {}).get("gpus"))
+        return out
+
+    def _settle_proposal_width(self, state: RunState) -> bool:
+        """Re-pin the run's width from what the research proposed (docs/29 F1). True = a row landed.
+
+        THE ASK: *"if I want to run one experiment per card — who decides that and how? Ideally
+        automatically, from the propose."* Today AUTO means one experiment per detected GPU, so the
+        width is a fact about the BOX; a per-Card footprint moves that node's reservation and nothing
+        lets the proposals move the RUN. This is the missing half, and the reason it is a durable
+        append rather than a resolver change is invariant #6 — see `_repin_settled_widths`.
+
+        Modelled on `speculation.py::_settle_speculation_depth`, which is the existing shape for
+        "a settled scalar the run is allowed to move mid-log": decide on a stable decision prefix,
+        append the durable row, mutate the live attribute, say so at WARNING, and return True so the
+        caller re-folds before any gate reads the new treatment.
+
+        EVERY GATE BELOW IS A REFUSAL TO ACT, and each one is load-bearing:
+
+        * **off by setting.** `proposal_width` is the operator's switch; a run that wants its width
+          decided by the box alone keeps today's behaviour byte for byte.
+        * **calibration never re-pins.** A calibration lane is launch-only and its complete execution
+          envelope is receipt-bound — the same refusal `_apply_control_overrides` makes for
+          `budget_extend`, one lane over. The AUTO gate below already excludes it (the profile SPELLS
+          all four widths as `1`, so no axis is AUTO), but a refusal that depends on another rule
+          holding is not a refusal; `search/speculation_quality.py` also refuses a log carrying this
+          row, so the two ends agree.
+        * **no Card queue, no proposals.** `_card_inventory_enabled` is the flag that decides whether
+          this run maintains a Card board at all. Without it `state.cards` is a compatibility shadow
+          over nodes, not a set of open proposals, and deriving a width from it would read the run's
+          own history back as demand.
+        * **AUTO axes only.** An explicitly spelled width is the operator's number, and the codebase's
+          standing rule is that an explicit number is always honoured (`configuration.md`). AUTO is a
+          request to let something else decide; this changes WHAT decides, from the box to the work.
+        * **an axis a `budget_extend` owns is the operator's.** They said it last and it is re-applied
+          every turn, so a row here would be durable noise that changes nothing — the same reasoning,
+          and the same key list, as `_repin_settled_widths`'s own stand-aside clause.
+        * **QUIESCENT ONLY.** Nothing in flight, no build, no head request — the same precondition
+          `_settle_speculation_depth` takes, and for a sharper reason: `_dispatch_evals` sizes a
+          per-batch `anyio.Semaphore` from the width and a Semaphore cannot be resized, so a width
+          that moves under a live batch leaves the batch's own concurrency at the old value while the
+          aged-head escape hatch compares against the new one. That comparison is now made against the
+          batch's captured total, so this is defence in depth rather than the only thing holding it —
+          but the honest statement is that a width change belongs BETWEEN batches, and between batches
+          is free: the loop reaches this point once per turn.
+
+        `speculation_depth` is deliberately NOT re-derived from the new width, even though AUTO depth
+        resolves off the eval width at startup. It is a `run_started` pin, it is `CalibrationRuntime`
+        field #6, the calibrated replay lane re-checks `admitted_depth == engine.speculation_depth`,
+        and `_require_pinned_speculation_receipt` raises `SpeculationAuthorizationError` when a
+        resolved depth disagrees with the recorded one — so moving it here would make a re-pinned run
+        unresumable through the guarded path, at the NEXT re-entry rather than at this decision. The
+        residual is a depth that may exceed the width after a narrowing (a prefetch backlog deeper
+        than the lanes it feeds). That is the same benign desync a Strategist width change has always
+        produced, it costs a prefetch that waits rather than a wrong result, and the depth's OWN
+        one-way ratchet is the thing licensed to move it.
+        """
+        if not getattr(self, "_proposal_width", False):
+            return False
+        if self._speculation_gate_calibration:
+            return False
+        if not self._card_inventory_enabled():
+            return False
+        if (self._head_request(state) is not None
+                or state.buildings
+                or self._evals_inflight()
+                or getattr(self, "_spec_build_inflight", None)
+                or getattr(self, "_spec_builds", None)):
+            return False
+        overrides = getattr(state, "budget_overrides", None) or {}
+        # The CEILING is the run's own launch treatment, read from the log first: a resume onto a
+        # bigger box must not be able to widen past what this run was authorized to run at, and
+        # `_eval_parallel_launched` on a resumed process describes the NEW box (invariant #6).
+        pinned = self._recorded_settled_width(state, "eval_parallel", EVAL_WIDTH_MAX)
+        ceiling = pinned if pinned else self._eval_parallel_launched
+        # …but the log's `eval_parallel` may itself already be a re-pin, and a re-pin must never
+        # become its own ceiling — that would ratchet the width monotonically down and make one wide
+        # proposal permanent. The PIN is the ceiling, always.
+        launch_pin = getattr(state, "eval_parallel", 0)
+        if type(launch_pin) is int and 1 <= launch_pin <= EVAL_WIDTH_MAX:
+            ceiling = launch_pin
+        settled = {}
+        if (self._eval_parallel_startup_auto
+                and not any(key in overrides for key in ("max_parallel", "eval_parallel"))):
+            width = proposal_derived_width(len(getattr(self, "_gpu_ids", None) or []),
+                                           self._proposal_footprints(state), ceiling=ceiling)
+            if width is not None and width != self._eval_parallel:
+                settled["eval_parallel"] = width
+        if not settled:
+            return False
+        # llm_parallel FOLLOWS, but only where it was itself AUTO — AUTO llm width IS the settled eval
+        # width (`_resolve_llm_parallel`), so leaving it behind would fan builds out wider than the run
+        # can now evaluate, which is the exact coupling that resolver exists to maintain. Recorded in
+        # the SAME row rather than re-derived at re-entry so replay needs no resolver at all.
+        if (self._llm_parallel_startup_auto
+                and not any(key in overrides for key in ("parallel_build", "llm_parallel"))):
+            follow = min(LLM_WIDTH_MAX, settled["eval_parallel"])
+            if follow != self._llm_parallel:
+                settled["llm_parallel"] = follow
+        pool = len(getattr(self, "_gpu_ids", None) or [])
+        footprints = self._proposal_footprints(state)
+        payload = {
+            **settled,
+            "previous": {"eval_parallel": self._eval_parallel, "llm_parallel": self._llm_parallel},
+            "reason": ("the open proposals declare a per-experiment footprint the run's box-derived "
+                       "width cannot serve concurrently"),
+            # The decision's whole input, so `looplab inspect` and the report can show WHY and the fold
+            # never has to re-derive anything from the box it is replaying on.
+            "evidence": {
+                "gpu_pool": pool,
+                "open_proposals": len(footprints),
+                "widest_declared_gpus": max((f for f in footprints
+                                             if type(f) is int and f >= 0), default=None),
+                "undeclared_proposals": sum(1 for f in footprints if type(f) is not int),
+                "launch_ceiling": ceiling,
+            },
+        }
+        self.store.append(EV_RUN_WIDTH_SETTLED, payload)
+        for axis, value in settled.items():
+            setattr(self, f"_{axis}", value)
+        if "llm_parallel" in settled:
+            # The shared provider-call ceiling follows the canonical width exactly as a canonical
+            # `budget_extend` makes it follow, or the broker would keep admitting at the old total
+            # while the build spine fanned out at the new one.
+            self._reconfigure_llm_broker(settled["llm_parallel"])
+        # SAY SO, at WARNING, for the same reason the depth ratchet and the GPU-pool lease wait are:
+        # the run has changed its EXECUTION treatment, and a silent change gets debugged as something
+        # else — here, as "why is my 4-GPU box running one experiment".
+        _LOG.warning(
+            "eval_parallel %d -> %d (llm_parallel -> %s): %d open proposal(s) on a pool of %d GPU(s), "
+            "widest declared footprint %s. Recorded as run_width_settled in the event log, so replay "
+            "and resume reproduce this width instead of re-deriving one from their own box. The "
+            "surplus proposals QUEUE — the width never oversubscribes the pool, because the "
+            "per-experiment GPU budget the Researcher is quoted is derived from it. To decide the "
+            "width by the box alone, LAUNCH with `-s proposal_width=false` or spell the width.",
+            payload["previous"]["eval_parallel"], settled["eval_parallel"],
+            settled.get("llm_parallel", "unchanged"), len(footprints), pool,
+            payload["evidence"]["widest_declared_gpus"])
+        return True
 
     def _setup_phase(self, state: RunState) -> None:
         # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
@@ -4056,7 +4280,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     #
                     # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
                     # `bg_tg`'s lifecycle and every `pending_nodes()`-keyed guarantee are unchanged.
-                    slots = anyio.Semaphore(self._eval_parallel, fast_acquire=True)
+                    # CAPTURE the width beside the semaphore. `anyio.Semaphore` cannot be resized, so
+                    # its token TOTAL is this batch's real concurrency for the batch's whole life —
+                    # while `self._eval_parallel` is live and has three writers that move it mid-batch
+                    # (the Strategist, an operator `budget_extend`, and since docs/29 F1 the
+                    # proposal-derived re-pin). The drained-pool test below asks "are all my tokens but
+                    # one free?", which is a question about THIS semaphore and must be asked of its own
+                    # total. Against the live attribute it broke in both directions: LOWERED mid-batch
+                    # (4 -> 2) the test fires with 3 siblings still holding GPUs, so a wide head is
+                    # declared unsatisfiable while the devices it wants are merely busy — and
+                    # `head_unsatisfiable` is sticky until the head changes, so it starves for the rest
+                    # of its queue lifetime, which is the exact defect `_HEAD_BYPASS_LIMIT` exists to
+                    # prevent. RAISED mid-batch (2 -> 4) the test needs `slots.value >= 3` from a
+                    # semaphore whose maximum is 2, so it can never fire and a genuinely unsatisfiable
+                    # head wedges the batch on `_wait_for_gpu_change` with nothing running to move the
+                    # epoch. `_settle_proposal_width` only re-pins between batches, so this is defence
+                    # in depth for that writer — but it is the ONLY thing holding the line for the
+                    # other two, which have always been able to fire mid-batch.
+                    batch_width = max(1, int(self._eval_parallel))
+                    slots = anyio.Semaphore(batch_width, fast_acquire=True)
 
                     async def _eval_in_slot(nid: int, generation: Optional[int],
                                             reservation: Optional[dict]) -> None:
@@ -4145,7 +4387,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # A bypass is what ages the head; picking the head itself clears the debt.
                             if chosen_index is not None:
                                 head_bypasses = head_bypasses + 1 if chosen_index > 0 else 0
-                            elif scan is not pending and slots.value >= self._eval_parallel - 1:
+                            elif scan is not pending and slots.value >= batch_width - 1:
                                 # The pool was reserved for the head and drained to empty (this task
                                 # holds the only taken slot) and it STILL does not fit: it wants more
                                 # than the box has. Release the claim so the queue behind it can move.

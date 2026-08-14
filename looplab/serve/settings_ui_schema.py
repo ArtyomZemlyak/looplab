@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 175
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 176
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -73,7 +73,11 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # the Nth on) — and one, `assistant_time_budget_s`, gave the chat the wall clock it used to borrow
 # from every engine role. Each branch pinned this digest against a tree without the others, so it is
 # re-derived over the merged keyset rather than taken from any side.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "cf33fc434b6d30c40c941e0d4ce8056794101bb25332ef01637b4f788353bf1c"
+# (176 since docs/29 F1 added `proposal_width`: whether the run's WIDTH is decided by the research's
+# own declared footprints or by the box alone. A curated row rather than an uncurated one because it
+# changes how much hardware the run uses concurrently, which is the same class of question every
+# other concurrency row on this form answers.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9b4725e36f29fc0acc045c528a070aa548aec358a107532ec753509efc39fbbc"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

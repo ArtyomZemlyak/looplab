@@ -70,6 +70,12 @@ EXPECTED = {
     # library keeps the legacy policy/unified-pilot action path, so a toy `Engine(...)` still runs the
     # historical spine. The value is pinned in `run_started`, so a resume cannot mix two treatments.
     "card_driven_selection": (True, False),
+    # Proposal-derived width (docs/29 F1, 2026-08-13): the product surface lets the open proposals'
+    # declared footprints re-pin an AUTO eval width mid-run; the bare library keeps the box-derived
+    # width. Same reasoning as `card_driven_selection` above and for a stronger reason — this knob is
+    # inert without a Card board, a GPU pool AND a durable log, so a toy `Engine(...)` would carry the
+    # branch without ever being able to exercise it.
+    "proposal_width": (True, False),
     # Speculative Card prefetch (2026-08-05): the product surface ships `-1` = AUTO, resolved once at
     # startup to the settled `eval_parallel` and pinned as the RESOLVED integer; the bare library keeps
     # `0` = off. Same reasoning as the two watchdog kills and `card_driven_selection` above — a direct

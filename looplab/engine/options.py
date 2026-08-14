@@ -58,6 +58,11 @@ class EngineOptions:
     # (None) on BOTH sides -> no options-divergence and an unbounded broker total at startup.
     eval_parallel: Optional[int] = None
     llm_parallel: Optional[int] = None
+    # docs/29 F1: re-pin an AUTO eval width mid-run from the open proposals' declared footprints.
+    # False here and True in `Settings` is a DELIBERATE divergence (see test_options_divergence): the
+    # library default is "off == today", and this knob needs a Card board, a GPU pool and a durable
+    # log to do anything at all — none of which a bare `EngineOptions` caller necessarily has.
+    proposal_width: bool = False
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early
