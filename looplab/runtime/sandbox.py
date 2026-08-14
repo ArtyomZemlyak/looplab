@@ -190,11 +190,88 @@ def require_docker_cli(what: str) -> None:
             "found on PATH. Install Docker or use trust_mode='trusted_local'.")
 
 
+# The writable scratch a `--read-only` container still needs, and the ONE place it is enumerated.
+# It is deliberately the same set `runtime/read_allowlist.py` grants `readwrite` OUTSIDE the node's
+# own workdir minus the kernel/device tiers a container gets from the runtime anyway: `/tmp` and
+# `/var/tmp` for tempfiles (a `tempfile.mkstemp` on a read-only root raises `OSError 30` from inside
+# numpy/torch/pip, i.e. arbitrarily deep in a candidate's imports), and NOT `/dev/shm`, which docker
+# mounts as its own tmpfs on every container regardless of `--read-only` (the DataLoader-worker
+# channel is therefore already writable and must not be re-mounted, since a second mount would
+# silently replace the daemon's `--shm-size`).
+READONLY_SCRATCH_DIRS = ("/tmp", "/var/tmp")
+
+# `exec` is spelled EXPLICITLY, and that is not decoration: docker's own default for `--tmpfs` is
+# `rw,noexec,nosuid,nodev,size=65536k`, so accepting the default would give a 64 MiB `/tmp` that
+# cannot execute — which breaks `pip install` from an sdist (build isolation runs an interpreter out
+# of TMPDIR), torch's inductor/`cpp_extension` JIT builds, and any `eval.setup` that unpacks and runs
+# something. `noexec` would also buy nothing HERE: the candidate's own code lives on the writable
+# `/work` bind and is executed from there by definition, so the exec bit on a scratch dir is not the
+# boundary. `nosuid,nodev` are free and stay.
+_READONLY_SCRATCH_OPTS = "rw,exec,nosuid,nodev,size={size}"
+
+
+def readonly_rootfs_argv(size: str) -> list[str]:
+    """`--read-only` + the tmpfs scratch that makes it survivable — or `[]` when `size` is empty.
+
+    THE ROOT FILESYSTEM IS THE ONE THING THIS TIER NEVER BOUNDED. `--cap-drop ALL`,
+    `--security-opt no-new-privileges`, `--pids-limit`, `--network none`, `--memory`/`--cpus` were
+    all here; the image's own filesystem was writable, so candidate code ran as root over
+    site-packages, `/usr/bin`, `/etc` and the interpreter itself. `--rm` bounds how long that lasts
+    (one container per `docker run`, and a staged pipeline gets a fresh one per stage — which is
+    exactly why `PYTHONUSERBASE` has to point INTO the /work bind for a `setup` to stick), so the
+    blast radius is one eval rather than the next node; that is a mitigation, not the boundary, and
+    it is worth nothing against an escape chain whose first step is writing the rootfs.
+
+    WHAT MUST STAY WRITABLE, and why `-v {root}:/work` can never become `:ro`:
+      * `/work` IS the node's workdir on the host. The eval writes its checkpoints, its stage logs
+        and the metric FILE the engine then reads back on host paths through this bind; a `:ro` here
+        does not harden anything, it deletes the tier's output channel. The per-source `edit:false`
+        enforcement that DOES exist is `make_docker_wrap(binds=…)`'s `--mount …,readonly`, one
+        mount per declared data/reference source, which is the right granularity: those are the
+        operator's originals, `/work` is the node's own scratch.
+      * `/work/.looplab-deps` — `PYTHONUSERBASE` + `PIP_USER`, i.e. every dependency an `eval.setup`
+        installs. Inside the bind, so it is writable for free and `--read-only` costs it nothing.
+      * `/tmp`, `/var/tmp` — see `READONLY_SCRATCH_DIRS`.
+
+    WHAT THIS BREAKS, which is why it is `Settings.sandbox_readonly_rootfs` and is OFF by default:
+      * `apt-get install` in an `eval.setup` stops working. Today it "works" and then evaporates
+        with the container (the known limit `make_docker_wrap` already records); under `--read-only`
+        it fails loudly instead, which is better but is still a behaviour change.
+      * Anything writing under `$HOME` — the HF hub's `.lock` files beside a cache HIT, `datasets`'
+        arrow cache, `~/.matplotlib`, a pip cache. `--network none` (this tier's default) already
+        forbids the DOWNLOAD half, and matplotlib degrades to a temp dir once `/tmp` is writable,
+        but a task with egress enabled and an unbaked model cache will fail here.
+      * The NVIDIA container runtime writes into the container rootfs during `--gpus` setup
+        (library symlinks + `ldconfig` rewriting `/etc/ld.so.cache`). Whether that lands before or
+        after the read-only remount is runtime-dependent, and NOTHING on this box could drive it —
+        there is no docker daemon here. Treat GPU + `--read-only` as unproven.
+
+    An UNPARSEABLE size REFUSES rather than silently disabling the flag. `parse_mem_bytes` returns
+    None for garbage because a bad `--memory` should not crash an eval; the opposite is right for a
+    boundary, and "the operator asked for a read-only rootfs and got a writable one because they
+    typed `1gb`" is precisely the silent downgrade `require_docker_cli` exists to prevent.
+    """
+    spec = str(size or "").strip()
+    if not spec:
+        return []
+    if parse_mem_bytes(spec) is None:
+        raise ConfigRefusal(
+            f"sandbox_readonly_rootfs={size!r} is not a size docker can mount. Use a byte count or a "
+            "k/m/g/t suffix (e.g. '1g'), or '' to leave the container filesystem writable — this "
+            "value is a security boundary, so an unreadable one is refused rather than ignored.")
+    opts = _READONLY_SCRATCH_OPTS.format(size=spec)
+    argv = ["--read-only"]
+    for d in READONLY_SCRATCH_DIRS:
+        argv += ["--tmpfs", f"{d}:{opts}"]
+    return argv
+
+
 def docker_run_argv(image: str, *, network: str, mount_root: str, workdir: str,
                     runtime: Optional[str] = None, gpu_args: Optional[list] = None,
                     mem: Optional[str] = None, cpus: Optional[str] = None,
                     env_args: Optional[list] = None,
-                    extra_mounts: Optional[list] = None) -> list[str]:
+                    extra_mounts: Optional[list] = None,
+                    readonly_rootfs: str = "") -> list[str]:
     """The hardened `docker run` prefix BOTH untrusted tiers share, up to and including the image.
 
     Everything here is a security boundary, and it used to exist twice — once in
@@ -217,6 +294,9 @@ def docker_run_argv(image: str, *, network: str, mount_root: str, workdir: str,
       stop kernel escape but NOT resource exhaustion, so these matter even on the hostile runtime.
       An empty/None value disables that cap, which is how both callers spell "unbounded".
     * `--runtime` — B4+ gVisor ("runsc") / Kata true-isolation tier; absent = the default runtime.
+    * `--read-only` + the `--tmpfs` scratch — the container's own FILESYSTEM, from
+      `readonly_rootfs_argv`; empty (the default) leaves the image writable exactly as before. Read
+      that function for what has to stay writable and what turning this on costs.
 
     The caller supplies `gpu_args` (from `docker_gpu_argv`) and `env_args` (`-e` pairs built from
     `docker_gpu_env`, which is the single choke point that strips secret-named host vars) because
@@ -237,6 +317,7 @@ def docker_run_argv(image: str, *, network: str, mount_root: str, workdir: str,
             *(gpu_args or []),
             "--pids-limit", "1024",
             *caps,
+            *readonly_rootfs_argv(readonly_rootfs),
             *(env_args or []),
             "-v", f"{root.as_posix()}:/work", *(extra_mounts or []),
             "-w", workdir,
@@ -1318,6 +1399,20 @@ def _kill_tree(proc: "subprocess.Popen") -> None:
     # `same_group` gates that killpg for the same reason it gated the one above: this branch is
     # reached when psutil is absent, which is exactly when an unguarded group kill would take the
     # engine down with the child. There the single `proc.kill()` below is all that is safe.
+    #
+    # NEITHER Windows path is ATOMIC, and that is a known, unfixed gap rather than an oversight. Both
+    # psutil's `children(recursive=True)` above and `taskkill /T` here ENUMERATE a tree and then kill
+    # its members, so a process the doomed tree spawns between the enumeration and the kill survives
+    # — the exact race a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` does not have, because
+    # membership is inherited at CreateProcess time and closing the handle kills everything at once.
+    # It is not adopted here because the fix does not live in this function: the job must be created
+    # and the child ASSIGNED to it at SPAWN (`run_argv`), with the breakaway cases handled, which is
+    # a Windows-only code path no box in this repo can execute (this one is Linux; the suite has
+    # never run under `os.name == "nt"`). Note the scope of what it would buy: this is the
+    # trusted_local tier, which this module's own header states is NOT a security boundary — under
+    # the Docker tiers a runaway is bounded by `--pids-limit`, the in-container coreutils `timeout`
+    # and `--rm`, none of which routes through here. So the missing Job Object is a leaked-process
+    # robustness fix on the operator's own box, not a hole in the untrusted tier.
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -1378,7 +1473,7 @@ class DockerSandbox:
 
     def __init__(self, image: str = "python:3.12-slim", network: str = "none",
                  max_output_bytes: int = 64_000, runtime: Optional[str] = None,
-                 mem: str = "4g", cpus: str = "", **_: object):
+                 mem: str = "4g", cpus: str = "", readonly_rootfs: str = "", **_: object):
         self.image = image
         self.network = network
         self.max_output_bytes = max_output_bytes
@@ -1393,6 +1488,12 @@ class DockerSandbox:
         # gVisor ("runsc", user-space kernel) or Kata ("kata-runtime", microVM). None = the default
         # shared-kernel runtime (untrusted tier). Passed to `docker run --runtime`.
         self.runtime = runtime
+        # Container ROOT-FILESYSTEM hardening ("" = off = the historical writable image). Validated
+        # HERE rather than at the first `run`: `make_sandbox` is called from `cli/__init__.py::_engine`
+        # during startup, so a misspelled size refuses the launch instead of failing the first node's
+        # eval — the same "fail loud at START, not mid-sweep" rule the engine's docker-CLI probe uses.
+        readonly_rootfs_argv(readonly_rootfs)
+        self.readonly_rootfs = readonly_rootfs
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
             env: Optional[dict] = None, cancel=None) -> RunResult:
@@ -1420,7 +1521,8 @@ class DockerSandbox:
         argv = docker_run_argv(
             self.image, network=self.network, mount_root=str(wd), workdir="/work",
             runtime=self.runtime, gpu_args=gpu_args, mem=self.mem, cpus=self.cpus,
-            env_args=envs) + ["timeout", "-k", "5", str(secs), "python", "solution.py"]
+            env_args=envs, readonly_rootfs=self.readonly_rootfs,
+        ) + ["timeout", "-k", "5", str(secs), "python", "solution.py"]
         rc, out, err, to = _run_argv(argv, str(wd), timeout + 15.0, None, self.max_output_bytes, cancel)
         # See docker_timed_out: both 124 (SIGTERM at deadline) and 137 (SIGKILL escalation past the
         # `-k 5` grace) are this run's wall-clock timeout, not an OOM.

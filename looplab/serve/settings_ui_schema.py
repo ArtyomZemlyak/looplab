@@ -139,7 +139,8 @@ _UNCURATED_SECOND_ORDER = frozenset({
     "memora_anchors", "memora_cache",
     "memora_consolidate_threshold", "memora_llm", "phase_handoff_summary",
     "researcher_temperature", "sandbox_cpus", "sandbox_fsize_local", "sandbox_memory",
-    "sandbox_memory_local", "strategist_temperature", "train_monitor_interval_s",
+    "sandbox_memory_local", "sandbox_readonly_rootfs",
+    "strategist_temperature", "train_monitor_interval_s",
     "workdir_audit",
 })
 SETTINGS_UI_SCHEMA_UNCURATED_FIELDS: dict[str, str] = {

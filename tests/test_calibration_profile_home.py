@@ -53,7 +53,10 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:5bf5fd51cfbaffd4d775514cc3d0a88a794ae6d7e067a01863f7123cd24aadd8"
+#   2026-08-14  + sandbox_readonly_rootfs (the untrusted/hostile Docker tier's container ROOT
+#               FILESYSTEM: "" = the historical writable image, a size = `--read-only` plus a tmpfs
+#               scratch of that size). See the second history block below for why.
+_EXPECTED_DIGEST = "sha256:2ce17ec9afac3317d4452c2a4ec59d8b4e625f0c4e8bb61220fbb22a5b9f23d2"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -193,7 +196,23 @@ _EXPECTED_DIGEST = "sha256:5bf5fd51cfbaffd4d775514cc3d0a88a794ae6d7e067a01863f71
 #               it. The shipped default is `true`, i.e. the pre-field behaviour, so nothing about a
 #               default run moves; but a receipt asserts what its replicates recorded, and this is a
 #               field that can empty the very evidence the gate re-derives. Both pins re-set.
-_EXPECTED_FIELD_COUNT = 207
+#   2026-08-14  + sandbox_readonly_rootfs (container ROOT-FILESYSTEM hardening for the untrusted and
+#               hostile Docker tiers). The 'field set changed too' branch, verified that way and NOT
+#               from the count: diffing the `Settings` field set against the pre-merge tree by AST
+#               reports exactly `['sandbox_readonly_rootfs']` added and nothing removed, so a +2/-1
+#               cannot be hiding behind the +1. It is INERT for a calibration replicate twice over —
+#               the profile pins `trust_mode` to the subprocess tier, which has no container
+#               filesystem at all, and the shipped default is `""`, i.e. the historical writable
+#               image byte for byte — and both pins are re-set anyway, on the same rule every inert
+#               knob above was re-pinned under: the digest binds the COMPLETE non-variant envelope
+#               and the guard is deliberately not clever enough to exempt a knob it can prove
+#               unreachable. What makes re-pinning right rather than merely necessary is what the
+#               field IS: it decides what an eval process may WRITE outside its own workdir, which
+#               is the write-side twin of `read_fence`/`landlock` — an operator who sets it changes
+#               whether a replicate that installs a system package, or writes a cache under $HOME,
+#               succeeds or fails. An envelope that cannot state that is not the envelope a later
+#               receipt would be compared against.
+_EXPECTED_FIELD_COUNT = 208
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

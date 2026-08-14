@@ -41,8 +41,8 @@ from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
                                      finite_timeout, json_line_extras,
-                                     json_line_metric, json_line_trials, require_docker_cli,
-                                     run_argv)
+                                     json_line_metric, json_line_trials, readonly_rootfs_argv,
+                                     require_docker_cli, run_argv)
 
 # A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
 # be a short filesystem-safe SLUG — no path separators, drive letters, control chars, NUL, or dot
@@ -1559,7 +1559,7 @@ _DOCKER_DEPS_DIR = "/work/.looplab-deps"
 def make_docker_wrap(mount_root: str, image: str, network: str = "none",
                      mem: Optional[str] = None, cpus: Optional[str] = None,
                      runtime: Optional[str] = None, binds: Optional[list] = None,
-                     env: Optional[dict] = None):
+                     env: Optional[dict] = None, readonly_rootfs: str = ""):
     """untrusted tier (ADR-13, Phase 4): return a `wrap(argv, host_cwd) -> argv` that runs the
     command inside `docker run` with the run workspace bind-mounted at /work and the network
     off by default — a real isolation boundary for executing an arbitrary framework. The bind
@@ -1573,8 +1573,18 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     `:ro` is the MOUNT-LAYER enforcement of the per-source `edit:false` permission: code running
     in the sandbox physically cannot write the operator's original, matching the write-tool gate
     (mega-review fix; the write gate alone couldn't stop a declared train stage from mutating the
-    original through ./<name>)."""
+    original through ./<name>).
+
+    `readonly_rootfs`: "" (default) leaves the container's own filesystem writable, exactly as
+    before; a size like "1g" adds `--read-only` plus a tmpfs scratch of that size at each of
+    `sandbox.READONLY_SCRATCH_DIRS`. The `/work` bind and the extra `binds` are UNAFFECTED — a
+    read-only ROOT filesystem does not change a bind mount's own mode — which is the whole reason
+    this is expressible at all: the eval's checkpoints, logs and metric file keep landing on the
+    host. Read `sandbox.readonly_rootfs_argv` for what it costs."""
     require_docker_cli("eval")
+    # Eagerly, beside the docker probe: `wrap` builds its argv per COMMAND, so an unparseable size
+    # would otherwise refuse inside the first stage of the first node instead of at wrap construction.
+    readonly_rootfs_argv(readonly_rootfs)
     root = Path(mount_root).resolve()
     gpu_args = docker_gpu_argv(env, runtime=runtime)
     extra: list[str] = []
@@ -1646,7 +1656,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
             return docker_run_argv(
                 image, network=network, mount_root=str(root), workdir=cdir, runtime=runtime,
                 gpu_args=gpu_args, mem=mem, cpus=cpus, env_args=envs,
-                extra_mounts=extra) + list(argv)
+                extra_mounts=extra, readonly_rootfs=readonly_rootfs) + list(argv)
 
         wrap._docker = True   # marks a real container wrap -> run_command_eval adds in-container timeout
         wrap._mount_root = str(root)   # host_score guards the held-out labels against the MOUNTED root

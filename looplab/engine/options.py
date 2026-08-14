@@ -103,6 +103,10 @@ class EngineOptions:
     docker_image: str = "python:3.12-slim"
     sandbox_memory: str = "4g"           # --memory for the untrusted command-eval Docker tier ("" = unbounded)
     sandbox_cpus: str = ""               # --cpus for the untrusted command-eval Docker tier ("" = unbounded)
+    # Container root-filesystem hardening for the untrusted command-eval Docker tier: the SIZE of the
+    # tmpfs scratch a `--read-only` container gets ("" = off = the historical writable image). Same
+    # value on BOTH sides — see `Settings.sandbox_readonly_rootfs` for what it costs and why it is off.
+    sandbox_readonly_rootfs: str = ""
     seed_mode: str = "auto"              # RepoTask node seeding fallback: auto|tracked|all
     # Source-tree read fence: off|warn|deny (see Settings.read_fence for why deny is the default).
     # Same value on BOTH sides on purpose — unlike merge_mode/report_every, this is not a knob where

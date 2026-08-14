@@ -120,3 +120,78 @@ def test_engine_untrusted_builds_docker_wrap(monkeypatch, tmp_path):
     assert made["image"] == "img:2"
     assert Path(made["root"]).name.startswith("node_")
     assert Path(made["root"]).parent == (tmp_path / "run" / "nodes").resolve()
+
+
+def test_settings_readonly_rootfs_reaches_the_container_argv(monkeypatch, tmp_path):
+    """The WIRING, driven end to end: `Settings.sandbox_readonly_rootfs` -> EngineOptions -> the
+    Engine -> `make_docker_wrap` -> the real `docker run` argv.
+
+    Docker cannot be driven on the box this was written on (no daemon, no CLI, no podman), so this
+    is deliberately the longest chain that CAN be: a real Engine really evaluates a real RepoTask
+    under `trust_mode='untrusted'`, and the keyword it hands the wrap factory is captured and then
+    fed to the REAL `make_docker_wrap`, whose argv is asserted. What it proves is that the operator's
+    value is not silently dropped at any of the four hops — the failure mode a hardening flag
+    actually has. What it does NOT prove is that a container so launched refuses a write; that needs
+    a daemon and is stated as unverified in `Settings.sandbox_readonly_rootfs` and the docs row."""
+    monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
+    seen = {}
+
+    def fake_wrap_factory(root, image, **kw):
+        seen.update(kw)
+        return lambda argv, hc: ["echo"] + list(argv)
+
+    monkeypatch.setattr(command_eval, "make_docker_wrap", fake_wrap_factory)
+
+    import anyio
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    from looplab.core.config import Settings
+    from looplab.engine.options import EngineOptions
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "run.py").write_text("print('{\"metric\": 1.0}')", encoding="utf-8")
+    t = RepoTask(id="ro", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
+                 eval=EvalSpec(command=[sys.executable, "run.py"], metric=_M))
+    r, d = t.build_roles()
+    options = EngineOptions.from_settings(Settings(sandbox_readonly_rootfs="1g"))
+    assert options.sandbox_readonly_rootfs == "1g"       # hop 1: Settings -> the bundle
+    eng = Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=2),
+                 options=options, trust_mode="untrusted", docker_image="img:2")
+    assert eng.sandbox_readonly_rootfs == "1g"           # hop 2: the bundle -> the Engine
+    anyio.run(eng.run)
+    assert seen.get("readonly_rootfs") == "1g"           # hop 3: the Engine -> the wrap factory
+
+    # hop 4: the wrap factory -> the argv docker would actually have been exec'd with. Only the
+    # captured `readonly_rootfs` is replayed; the engine's own GPU pin travels in `env` and this box
+    # has no NVIDIA-advertising daemon to satisfy it (`GpuPinUnenforceable`), which is a different
+    # boundary and not the one under test.
+    argv = make_docker_wrap(str(tmp_path), "img:2",
+                            readonly_rootfs=seen["readonly_rootfs"])(["python", "train.py"],
+                                                                     str(tmp_path))
+    assert "--read-only" in argv
+    assert "/tmp:rw,exec,nosuid,nodev,size=1g" in argv
+    # ...and the eval's own output channel is still writable through all of it.
+    assert any(a.endswith(":/work") for a in argv), "the /work bind must not become read-only"
+
+
+def test_a_bad_readonly_rootfs_size_refuses_the_run_at_construction(monkeypatch, tmp_path):
+    """Fail loud at START, not mid-sweep — the same rule as the missing-docker-CLI probe beside it.
+    Building the argv lazily would put this refusal inside the first node's first stage, i.e. it
+    would read as a task bug and be repaired by the agent instead of by the operator."""
+    monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.orchestrator import Engine
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    t = ToyTask()
+    r, d = t.build_roles()
+    with pytest.raises(ConfigRefusal, match="sandbox_readonly_rootfs"):
+        Engine(tmp_path / "run", task=t, researcher=r, developer=d,
+               sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+               trust_mode="untrusted", sandbox_readonly_rootfs="1gb")

@@ -630,6 +630,27 @@ class Settings(BaseSettings):
     # Ignored by the trusted_local (subprocess) tier.
     sandbox_memory: str = "4g"
     sandbox_cpus: str = ""
+    # Container ROOT-FILESYSTEM hardening for the untrusted/hostile Docker tier. The value is the
+    # SIZE of the writable tmpfs scratch the container gets in exchange (`/tmp`, `/var/tmp`); "" =
+    # OFF = today's behaviour, an image whose whole filesystem — site-packages, /usr/bin, /etc, the
+    # interpreter — is writable by root-inside-the-container. Set e.g. "1g" for `docker run
+    # --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g …`.
+    #
+    # It is OFF by default because it CAN break a legitimate eval and the repo's rule is that
+    # hardening only defaults on where it cannot: an `eval.setup` running `apt-get`, anything writing
+    # under `$HOME` (the HF hub's lock files, `datasets`' arrow cache, a pip cache), and — unproven,
+    # because no box here has a docker daemon to drive it — the NVIDIA container runtime, which
+    # writes library symlinks and re-runs `ldconfig` inside the container during `--gpus` setup.
+    # `--network none` (this tier's default) already forbids the download half of the cache story,
+    # which is why the flag is usable at all with a baked image.
+    #
+    # What it does NOT touch, deliberately: the `/work` bind is the node's own workdir on the host
+    # and stays READ-WRITE — the eval's checkpoints, stage logs and the metric file the engine reads
+    # back all travel through it, so a `:ro` there would delete the tier's output channel rather
+    # than harden it. Per-source write protection is the separate, finer `edit:false` mount rule
+    # (`make_docker_wrap(binds=…)` -> `--mount …,readonly`). Ignored by `trusted_local`, whose
+    # process tier has no container filesystem; see `runtime/sandbox.py::readonly_rootfs_argv`.
+    sandbox_readonly_rootfs: str = ""
     # Best-effort host-OOM guard for the TRUSTED-LOCAL (subprocess) tier. When set (e.g. "8g"), each
     # eval child gets an RLIMIT_AS address-space cap so a runaway trainer hits MemoryError instead of
     # OOM-killing the whole host (and the engine). POSIX only; a no-op on Windows. Default "" = OFF:
