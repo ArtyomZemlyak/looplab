@@ -14,13 +14,27 @@ because the file is one 300-line script that no test evaluated:
 None of that is visible in a diff, and `test_architecture_infographic.py` only checks that certain
 labels are present. This module evaluates the script the browser runs and measures the result.
 
-The intersection baseline is a LITERAL and is deliberately not zero: the diagram ships with real
-overlaps, and pinning the number is what makes a new one a red test instead of a rendering surprise.
-Nine of them are the `spine` container the `sd_*` column sits inside, which is intentional. The rest
-are a structural defect that predates this file: the EVALUATE column at x=1000 grows downward while
-`kanban`, `h_prio` and the `w_*`/`g_*` rows sit at fixed `y`, so the column crosses them. Measured
-2026-08-14: closing it needs the rows below moved 564px, which is a re-layout to do with the rendered
-page in view, not a merge-time edit. Until then this pin stops it getting quietly worse.
+The baseline is now ZERO, and the structural defect it used to pin is gone. It was real: the
+EVALUATE column at x=1000 grows downward every time an engine feature is documented, while `HY`,
+`WY`, `GY`, `TY`, the spine's `y` and `SY` were hand-picked literals, so the column grew through the
+rows below it — 13 pairs before the 2026-08-13 content landed and 16 after. Fixed 2026-08-14 by
+making those constants MEASURE their datum (`below(gap)` in the diagram = the deepest bottom placed
+so far) instead of naming it, so every row follows the column automatically. The rows moved down
+460-588px, all of it derived.
+
+Two things the old baseline asserted were simply wrong, and are worth not re-learning:
+
+* the nine "intentional" `spine` container overlaps were six, and they were NOT the `sd_*` column.
+  `sd_*` sits ~100px BELOW the spine and has never intersected it; the six were the memory-TIER row
+  (`mA`..`sim`, whose `mC` is 108 tall against its siblings' 72) growing into a spine `y` that was
+  still the literal 2214. A container overlap was assumed and never measured.
+* the "564px" figure recorded here was not reproducible. Re-derived against the same content: the
+  first row below the column (`kanban`/`h_spec` at `HY-8`) needed 460px to clear `e_dr`'s bottom of
+  2072 with a 24px gutter, and the rows below it needed 492 and 588 because two of the gutters they
+  inherited were themselves negative.
+
+So: zero is the number, and any non-zero result is a real collision. Do not re-pin it upward to make
+a change green — a box that intersects another is drawn ON TOP of it and hides its text.
 """
 from __future__ import annotations
 
@@ -36,10 +50,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 DIAGRAM = ROOT / "docs" / "infographic" / "agent-architecture.html"
 
-# Measured on 2026-08-13 after the eight-branch integration. Moving it is part of changing the
-# layout: RAISING it means a new overlap shipped, LOWERING it means one was fixed and the pin should
-# follow so the next regression is still caught.
-_EXPECTED_INTERSECTIONS = 16
+# Measured 2026-08-14, after the row constants were made to derive their own datum. ZERO remaining
+# pairs: no box in the diagram intersects any other, container or otherwise, and no pair was left
+# unseparated. Moving this is part of changing the layout: RAISING it means a new overlap shipped and
+# the fix is to pay for the growth (rows below a growing column now move themselves — see the CARD
+# row's comment in the diagram), never to re-pin. There is no longer any intentional overlap to
+# exempt, which is why `_SPINE_CONTAINER` below survives only as the detail formatter's filter.
+_EXPECTED_INTERSECTIONS = 0
 _SPINE_CONTAINER = "spine"
 
 
@@ -106,19 +123,32 @@ def test_diagram_box_overlaps_do_not_grow():
     names = sorted(boxes)
     hits = [(a, b) for i, a in enumerate(names) for b in names[i + 1:]
             if all(d > 0 for d in _overlap(boxes[a], boxes[b]))]
+    # EVERY pair, `spine` included. The old formatter filtered the spine out as "the container",
+    # which would now report a count with an empty list — and the spine growing into the tier row
+    # above it is exactly one of the collisions this file was mis-crediting to that exemption.
     detail = "\n  ".join(
         f"{a} x {b}: {_overlap(boxes[a], boxes[b])[0]}x{_overlap(boxes[a], boxes[b])[1]}px"
-        for a, b in hits if _SPINE_CONTAINER not in (a, b))
+        for a, b in hits)
     assert len(hits) == _EXPECTED_INTERSECTIONS, (
         f"the diagram now has {len(hits)} overlapping box pairs, pinned at "
-        f"{_EXPECTED_INTERSECTIONS}. Non-container overlaps:\n  {detail}\n"
-        f"If you grew a block, it pushed its column into a neighbouring row — pay for the height "
-        f"out of that block's own slack or move the rows below, and re-measure. If you FIXED one, "
-        f"lower the pin in the same change.")
+        f"{_EXPECTED_INTERSECTIONS}:\n  {detail}\n"
+        f"A box that intersects another is drawn over it and hides its text. The rows below the "
+        f"loop-stage columns derive their own y from `below(gap)`, so GROWING a column is free and "
+        f"an overlap here means something the derivation cannot see: two boxes in the SAME row "
+        f"(pay for the width/height out of that row), or a new row declared out of top-to-bottom "
+        f"order (so `below()` measured a datum that did not exist yet).")
 
 
 def test_the_spine_is_the_only_intentional_container():
-    """Pins WHY nine of the overlaps are legitimate, so the count above stays reviewable."""
+    """The `sd_*` column is drawn to read as sitting INSIDE the event spine — horizontally.
+
+    This used to be offered as the reason nine intersections were legitimate. It never was: the
+    spine ends ~100px above `SY` and the two rows do not touch, so the containment is a horizontal
+    alignment (every `sd_*` box within the spine's x-span, so the band reads as one object) and not
+    a nesting. It is still worth pinning, because the alignment is what the two rows MEAN together
+    and a re-layout that widened `sd_*` past the spine would break that silently — but it explains
+    no overlap, and the baseline above is zero.
+    """
     boxes = _boxes()
     assert _SPINE_CONTAINER in boxes, "the spine container is gone; the baseline above is stale"
     spine = boxes[_SPINE_CONTAINER]

@@ -64,6 +64,17 @@ function box(id,x,y,w,h,t,tag,c,sub){B[id]={x,y,w,h,t,tag,c:c||C.mut,sub:sub||[]
 // vertical stack helper: items=[{id,h,t,tag,c,sub}] placed down from y0 at column x/w; returns next y
 function stack(x,w,y0,items,gap){gap=gap==null?12:gap;let y=y0;for(const it of items){box(it.id,x,y,w,it.h,it.t,it.tag,it.c,it.sub);y+=it.h+gap;}return y;}
 function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
+// ROW PLACEMENT — the deepest bottom of everything placed SO FAR, plus a gutter. Every full-width
+// row below the loop-stage detail stacks is derived through this rather than pinned to a literal y,
+// because the columns above them GROW: documenting one more engine feature adds a `sub` line or a
+// box to the EVALUATE stack, its bottom moves down, and a fixed row constant does not. That is not
+// hypothetical — it is the whole history of this file (see the CARD row's comment below), and it
+// had put 16 box pairs into each other by 2026-08-14. The rows are still named constants and are
+// still the editing surface; what changed is that their DATUM is measured instead of guessed.
+// Correct by construction only because rows are declared top-to-bottom: `below()` reads B, so a row
+// declared out of order would measure a datum that does not exist yet.
+function below(gap){let m=0;for(const id in B){const b=B[id];if(b.y+b.h>m)m=b.y+b.h;}return m+gap;}
+const ROWGAP=24;   // the minimum clear gutter between one row's deepest box and the next row's top
 
 /* ============ SETUP row ============ */
 box("genesis",40,44,300,92,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo·dataset·cmd·kaggle·benchmark (kind inferred)","generative kind → backend=llm (CLI + web /api/start)","role backend default: llm — toy (offline optimizer) is opt-in"]);
@@ -149,28 +160,30 @@ stack(2100,360,DY,[
  {id:"concept_ops",h:156,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator intent → fence → concept_tag_edited/run_concepts: retag is NODE-generation-fenced, set-base only by the run token","fold stamps operator provenance; an explicit [] retag stays untagged (an empty run BASE is refused)","Assistant ConceptGovernanceTools: merge · purge/unpurge · split — one undo tool, concept_edit_clear; clearing a purge dispatches as the distinct HIGH-risk concept_unpurge","approval binds normalized payload + BOTH revisions (ledger + governance); ledger CAS serializes mutation","RATIFY (concept_tidy, OFF): the steward's logged MERGE proposals applied at finalize through the SAME alias writer — action_id = the semantic payload + per-decision governance CAS, so a repeat is a replay and an operator’s alias-clear is permanent; splits/purges never auto-applied","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
 ]);
 
-/* ============ CARD / legacy HYPOTHESIS pipeline (row y≈1540) ============
-   Sits BELOW every loop-stage detail stack: the EVALUATE column is the deepest and runs to
-   y=1632 — `e_dr` at y=1550, h=82 (it grew with the repair-ledger and watchdog boxes, then again
-   with metric salvage, the systemic-failure stop and the read fence), so a higher row renders the
-   board on top of it. 1020 did exactly that, overlapping `e_dr` with `h_prio`/`kanban`; 1076 was
-   166px short even before the salvage boxes; and 1540 was still 104px short after the read-fence
-   box landed — `e_dr`×`kanban` overlapped by 250×82, i.e. the Deep-repair detail was drawn ENTIRELY
-   inside the Card board. Keep this constant ahead of the deepest stack, and keep WY/GY/TY/spine/SY
-   below ahead of THIS row (they all move by the same delta).
+/* ============ CARD / legacy HYPOTHESIS pipeline ============
+   Sits BELOW every loop-stage detail stack: the EVALUATE column is the deepest, and it is the one
+   that GROWS — every engine feature documented in `e_ir`/`e_sal`/`e_dep`/`e_dr` pushes its bottom
+   down. A hand-picked y here is therefore a value with a shelf life, and the history is the proof:
+   1020 overlapped `e_dr` with `h_prio`/`kanban`; 1076 was 166px short even before the salvage boxes;
+   1540 was still 104px short after the read-fence box landed (`e_dr`×`kanban` overlapped 250×82,
+   i.e. the Deep-repair detail was drawn ENTIRELY inside the Card board); and 1644 — chosen with the
+   column flush against it, `e_dep`'s bottom 6px inside `kanban` — had by 2026-08-14 gone 460px
+   short, putting TEN non-container box pairs into each other. That is four hand-fixes of the same
+   defect, so the datum is now MEASURED: `below(ROWGAP)` is the deepest bottom placed so far.
 
-   THE EVALUATE COLUMN IS FLUSH: `e_dep`'s bottom (1538) already sits 6px inside `kanban` (1532),
-   so ANY growth in that stack pushes a box through the Card row. The 2026-08-13 verification
-   bullet on `e_ir` therefore cost `e_sal` the same 14px (132 -> 118, which still clears its own
-   4 sub lines: a box needs h >= 28 + 14*len(sub), since the last line's baseline is y+42+14(n-1)).
-   Pay for a new line out of a box with slack, or move this row AND everything below it.
+   Every row below this one is derived the same way, so they all follow the column automatically and
+   nobody has to re-pick five constants by hand again. `+8` is not slack — `kanban` and `h_spec` are
+   drawn at HY-8, so the row's real top is HY-8 and the gutter is owed from THERE.
 
-   MEASURE IT, do not eyeball it. The stack helper places boxes from a running y, so adding one `sub`
-   line to a box hundreds of lines above silently pushes this row's clearance around. The check is
-   mechanical: evaluate this file's own `B` map and count box-pair intersections — the only pairs
-   that may intersect are the deliberate 8px seams (`h_spec`×`w_meta`/`w_skill`, `spine`×`sd_*`).
-   `tests/test_architecture_infographic.py` does NOT check geometry, so nothing else will catch it. */
-const HY=1644;
+   Growing a box in the EVALUATE stack is now free: the rows move. What is still NOT free is growing
+   one INSIDE this row (a box needs h >= 28 + 14*len(sub), since the last sub line's baseline is
+   y+42+14(n-1)) — a taller `kanban`/`h_spec` pushes the memory rows down, which is correct, but it
+   also eats the horizontal room its neighbours in the SAME row need.
+
+   MEASURE IT, do not eyeball it: `tests/test_architecture_diagram_geometry.py` evaluates this file's
+   own `B` map and counts box-pair intersections. `tests/test_architecture_infographic.py` only
+   checks that labels are present and will not catch a collision. */
+const HY=below(ROWGAP)+8;
 box("h_state",40,HY,270,72,"State Card","R",C.r,["Card id = durable work-item identity","immutable seed · editable display · source receipt"]);
 box("h_dedup",350,HY,340,72,"Dedup + merge","R",C.r,["exact id (fold) + agentic paraphrase merge","hybrid grep+BM25+vector RRF → agent decides (open pure-belief ≥4 AND +2 since the last pass)","MINT-SIDE 2026-08-12, now UNREACHABLE (kept fail-closed): a `debug` repair of a failed node ATTACHED to that node's OWN card (engine/card_reservation.py::_retry_attach_card → the `attach` disposition = the node_building claim alone, no second card_added) whenever the two seed statements share a belief_id — one card, several nodes, which is what the card/node split was always for. Before it a retry copied the parent Idea verbatim, flipped `operator`, hashed to a different action digest and minted a BYTE-IDENTICAL twin: card-0/card-3 in rubertlite-dr-unified-v5, card-0/card-1 in rubert-dr-0807. Narrow on purpose — only `debug`, only one parent, only a live singly-registered native owner, only a FAILED LEAF (the parent node is terminally failed and nothing else under that card is still pending or building), and only the SAME belief, so a re-scoped repair still mints and shared formulaic wording never merges two different actions","OPT-IN PER CALL SITE, and the flag is forwarded rather than hardcoded (fixed 2026-08-12): _reserve_node_build has FIVE callers and only the ordinary build spine may attach. An operator `inject_node` never does — an attach mints no card_added, so it would discard both source=\"operator\" and the implementation_ref that binds the human's ready-made code","AND AN ATTACH NEVER CLOSES WHAT IT JOINED: its node_building claim carries `card_attached: true`, because every bare-reservation close path drops the card its marker names and for an attach that card is the PARENT's. One SIGKILL between node_building and node_created used to administratively drop card-0 with reason=build_interrupted, evidence and all — strictly worse than the twin. _fail_reserved_build now settles ownership against the raw journal (_reservation_minted_card: the claim marker, plus 'no other node_created names this card')","the agentic merge above could never have caught that: it consolidates PURE beliefs only (selection_provenance.action_source == 'none') and both twins own a card_added action"]);
 box("h_prio",730,HY,300,72,"Score + pin priority","R / A",C.r,["policy scorer ranks selectable Cards","operator priority override is applied last"]);
@@ -178,8 +191,11 @@ box("h_prio",730,HY,300,72,"Score + pin priority","R / A",C.r,["policy scorer ra
 box("h_spec",1730,HY-8,730,300,"Speculative pre-build (Layer 5)","depth",C.d,["any TaskAdapter (2026-08-04; was the shipped quadratic Toy only) · needs card_driven_selection (on) + policy=greedy","THE SESSION BOUNDARY IS A DECISION BOUNDARY, NOT A QUIESCENCE ONE (2026-08-13, backlog F1f/F1g): the eval task group is owned by Engine.run, so _run_card_session RETURNS while its evaluations burn and the next session ADOPTS them from Engine._eval_inflight. Its two live flags (boundary_owed — one eval terminal — and yield_outer) close the PRODUCER lane only; eval ADMISSION is gated by the fold-derived stop conditions alone (open_for_admission vs open_for_production). Before that a single flag closed both: the run stopped starting work at the FIRST terminal and could not reach the outer loop until the LAST eval drained — measured 115.6 GPU-h of idle second slot vs 164.4 GPU-h of work done across the six width-2 runs (82.6% of available second-slot time) plus 167.7 GPU-h with no eval running at all. Quiescence now includes running evals: every finish CAS refuses over one and asks the loop to drain first",
 "PREFETCH ONLY — it does not own the queue: card_driven_selection alone MINTS Card inventory and selects from it since 2026-08-07, so depth 0 = 'select from the queue, build serially'. Before that, the only writer of selectable inventory (_stage_card_creates) sat behind this gate, so a run with the flag on and an AUTO depth settled to 0 silently reverted to policy.next_actions while run_started still pinned card_driven_selection: true — measured: 0 selection-ready Cards across 27 nodes in 7 such runs, vs 24 in the 4 speculation runs","speculation_depth: −1 = AUTO is the DEFAULT since 2026-08-05 — resolved at startup to the settled eval width (clamped 1–64) and pinned as the RESOLVED integer; 0 = the explicit off switch","AUTO also RE-RESOLVES DOWN mid-run (2026-08-05): once ≥2 evals and ≥2 builds are measured, median eval < 10% of median build ⇒ nothing to overlap ⇒ depth ratchets to 0 · each move appends speculation_depth_settled carrying the RESOLVED integer + its evidence, so the fold READS it and never re-measures the box (invariant #3, not a startup pin) · at most ONE such row per run (its resolved depth is 0, which has no smaller answer) · measured: 109 calls/1.27M tokens vs 75/0.82M for a 4% wall saving on the 0.1 s evals of the pre-2026-08-05 blobs classification example (now rings, 0.05–0.6 s — still nothing to overlap)","debug anchor (fixed 2026-08-05): a Card’s OWN work item no longer disqualifies its own failed parent — every other child that SPENT BUDGET still does · a child the policy view cannot see is not a child at all, because the fold calls the SAME node_counts_toward_card_budget the L3 budget and _effective_policy_state call (in core/models.py; events may not import search)", "that predicate hides FOUR classes — tombstoned · feasible=False · breed_excluded · discarded prefetch: sharing only the discard clause reopened the identical runaway on the other three the same day (84 dead debug Cards on one parent, 7 nodes frozen), so the fold shares the PREDICATE, not a leaf of its proof","AUTO settles ITSELF to off where a prefetch cannot help: build calls no LLM (nothing to overlap) · policy ≠ greedy · run dir with no run id — a SPELLED depth is honoured/refused as spelled","TWO DEPTH FACTS, folded APART (fixed 2026-08-06 — one field made a settled run unresumable through two doors): speculation_depth_pinned = what run_started committed (RUN_START_PINNED_FIELDS and the HTTP config editor read THIS; the -1 AUTO sentinel in config.snapshot.json is never rewritten) · speculation_depth_settled = the floor the run's own ratchet reached · effective = pin ∧ floor, so the settle row splices ANYWHERE relative to run_started (one field could not: run_started ASSIGNS, giving 4 at splice position 0 and 0 everywhere else) · ONE re-entry rule over the two: AUTO adopts the EFFECTIVE depth (a run narrowing itself is never an operator disagreement), a SPELLED depth must equal the LAUNCH PIN or fail closed, and either way the run executes at the settled depth — the ratchet is one-way and no resume flag lifts it, which is what the warning now says (it used to advise `-s speculation_depth=<pre-settle>`, which the guard REFUSED)","one head request at a time: depth caps the BACKLOG (requests + committed pending), never the number of concurrent producers — the overlap is +1 build-lane call","an isolated Researcher/Developer role pair pre-builds the PREDICTED next Card, off the main build spine","gate receipt is the benchmark's RESULT, not a licence: declined on a real workload, binding on the calibration lane","miss → discarded before dispatch (reason=superseded · 0 eval s · no workdir); its cost is one Developer call","REFUND is PROVEN, not inferred: node_created promised eval_start_boundary AND no node_eval_started row exists","+ weak half (never_evaluated · 0 charged eval s · no stage_finished) → slot REFUNDED, cap one whole budget","FAIL CLOSED — no promise, no refund: a pre-boundary log or a build killed mid-sandbox stays CHARGED","budget receipt's speculation block: charged_discards = unrefunded discards + abandoned (pending at finalize)","a DISCARD is a build the LIFECYCLE threw away (SPECULATION_DISCARD_REASONS, registry-scanned) or one the log shows never ran — NOT any failed speculative node: with speculation on by default that made every crashing experiment trip the signal (fixed 2026-08-05)","producer_failed bars a Card from speculative re-election, so ONLY the serial Developer can build it — and if that claim also refuses, the lane RETIRES after 3 consecutive turns (card_auto_dropped naming the refusal) instead of free-spinning to the no-mint cap (measured: 74 loop turns in one second, 2/8 nodes vs 8/8)"]);
 
-/* ============ MEMORY WRITE (row y≈1320) ============ */
-const WY=1928;
+/* ============ MEMORY WRITE ============ */
+// ROWGAP off the Card row, whose deepest box is the 300px-tall `h_spec`. This gutter used to be
+// MINUS 8 and was described as a deliberate seam; it was simply an overlap (`h_spec`×`w_meta` and
+// ×`w_skill`, 8px each), and there is nothing to gain from a row touching the one above it.
+const WY=below(ROWGAP);
 box("w_order",40,WY,260,116,"Finalize memory tail","fin",C.mem,["budget + diversity receipts first","→ case · research claims · concept capsule (the capsule carries the rank-normalized profit signs)","→ reflection: meta-note · lessons · skills","→ card enrich → concept steward → claim steward","→ task facets (opt-in; OFF) → concept RATIFY (concept_tidy, OFF) → llm_cost → completion"]);
 box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
 box("w_reflect",630,WY,300,96,"Lessons: reflect (LLM)","R",C.mem,["consolidate run: nodes + resolved hyps + fail themes","→ 1 lesson/theme · conf 0.6 · evidence_sig","no winner needed: 0 evaluated → reflect the FAILURES; skipped only with no node and no card at all","role: researcher · no measured result → UNTAGGED = shared (both roles)"]);
@@ -188,16 +204,18 @@ box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["candidate change a
 box("w_meta",1590,WY,260,72,"Meta-note","R / stats",C.mem,["model hypothesis or stats fallback","not causal proof → meta_notes.jsonl"]);
 box("w_skill",1870,WY,290,72,"Auto-skill","R",C.mem,["supported hyp & Δ>0 → SKILL.md","candidate→promoted when fp sim < 0.6"]);
 
-/* ============ HYGIENE (row y≈1470) ============ */
-const GY=2078;
+/* ============ HYGIENE ============ */
+// 34, not ROWGAP: the historic gutter under the memory-write row, kept so the two memory bands stay
+// visually grouped against the tighter ROWGAP breaks above them.
+const GY=below(34);
 box("g_ex",40,GY,320,66,"Dedup pass1 · exact","",C.mem,["group (statement, task_id, role)","newest wins · evidence summed (agreeing)"]);
 box("g_ag",380,GY,320,66,"Dedup pass2 · agentic","R",C.mem,["per (task_id, role) HybridRetriever RRF","Researcher merges paraphrases + synthesizes"]);
 box("g_ct",720,GY,300,66,"Contradiction quarantine","read",C.mem,["drop the OLDER verdict either way (statement, task_id)","never drop the newest verdict"]);
 box("g_cp",1040,GY,320,66,"Compact + fingerprint","",C.mem,["lessons 4000→keep 2000","fp = kind·dir·metric·goal-kw·params"]);
 box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips outcome → retire + re-derive stale","{node→sig} gate · evidence_sig · lessons_reconciled"]);
 
-/* ============ MEMORY TIERS (row y≈1570) ============ */
-const TY=2178;
+/* ============ MEMORY TIERS ============ */
+const TY=below(34);
 box("mA",40,TY,300,72,"A · Card board","in-run",C.mem,["state.cards — lifecycle + controls derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
 box("mC",672,TY,320,108,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules · v3 claims + producer/read-health receipts","alias/split/tombstone taxonomy ledger with global revision","stewards @finalize: proposals only","operator CLI / approved Assistant applies governed mutations"]);
@@ -205,13 +223,21 @@ box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.l
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → cards · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
-/* ============ EVENT SPINE (row y≈1710) ============ */
-box("spine",40,2214,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars","paid/external work receipts its ATTEMPT first: research_attempted · card_build_attempted · run_setup_started — plus node_eval_started, the durable eval-START boundary the main task writes at the dispatch decision (speculative nodes), which is what lets a refund prove ‘never ran’ across a crash","RESUME IS STILL BLANK, AND THAT IS MEASURED: every line of _enter_run runs before the loop's first turn, so nothing the UI polls has moved \u2014 but a phase_progress beacon here is REVERTED, not pending. Thirteen tests across four files broke on it: the speculation receipt gate pins the log BYTES as unchanged when it REJECTS a run (an authorization property), finalize RECOVERY changed branch and minted a fresh PAID scope instead of resuming the existing one, and two files pin exact event counts across a resume. The prologue is where the authorization fences, the finalize-scope reconciliation and the width pins all read the raw log. A resume needs a channel that is NOT events.jsonl \u2014 a run-dir progress sidecar the server tails"]);
+/* ============ EVENT SPINE ============ */
+// A ROW LIKE ANY OTHER, and now named like one. Its y was the last hand-placed literal below the
+// stacks (2214) and it had drifted INSIDE the tier row above it — `mC` is 108 tall against its
+// siblings' 72, so the tiers reached 2286 and every one of mA/mB/mC/mD/mE/sim intersected the
+// spine. Six of the 16 pinned overlaps were that one stale literal, and they were miscredited to
+// the `sd_*` column, which sits well BELOW the spine and has never intersected it.
+const EY=below(ROWGAP);
+box("spine",40,EY,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars","paid/external work receipts its ATTEMPT first: research_attempted · card_build_attempted · run_setup_started — plus node_eval_started, the durable eval-START boundary the main task writes at the dispatch decision (speculative nodes), which is what lets a refund prove ‘never ran’ across a crash","RESUME IS STILL BLANK, AND THAT IS MEASURED: every line of _enter_run runs before the loop's first turn, so nothing the UI polls has moved \u2014 but a phase_progress beacon here is REVERTED, not pending. Thirteen tests across four files broke on it: the speculation receipt gate pins the log BYTES as unchanged when it REJECTS a run (an authorization property), finalize RECOVERY changed branch and minted a fresh PAID scope instead of resuming the existing one, and two files pin exact event counts across a resume. The prologue is where the authorization fences, the finalize-scope reconciliation and the width pins all read the raw log. A resume needs a channel that is NOT events.jsonl \u2014 a run-dir progress sidecar the server tails"]);
 
-/* ============ SIGNAL DELIVERY (row y≈1840) — §1: every folded signal reaches the agent that acts on it ============
+/* ============ SIGNAL DELIVERY — §1: every folded signal reaches the agent that acts on it ============
    Registry engine/signal_delivery.py + tests/test_signal_delivery.py enforce ONE injection site per signal
    (a signal folded-but-uninjected is a red test). push = engine injects · ctx = folded-state brief · pull = a tool. */
-const SY=2408, SW=250, SG=12; const sx=i=>40+i*(SW+SG);
+// 96, not ROWGAP: the spine is the page's spine, and the signal-delivery band reads as a separate
+// section beneath it rather than as the next row of the memory stack.
+const SY=below(96), SW=250, SG=12; const sx=i=>40+i*(SW+SG);
 box("sd_hdr", sx(0),SY,SW,92,"SIGNAL DELIVERY","§1",C.sig,["every folded signal → 1 injection site","registry + test enforce it"]);
 box("sd_trust", sx(1),SY,SW,92,"Trust flags → Researcher","push",C.trust,["reward-hack/leakage → proposal hint","‘flagged for X; avoid if unintended’"]);
 box("sd_triage",sx(2),SY,SW,92,"Triage why → Researcher","ctx",C.r,["crash-triage verdict on the Node","in digest + failure-reflection hint"]);
