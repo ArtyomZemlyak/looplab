@@ -41,6 +41,7 @@ from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable r
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
+from looplab.serve.owner_token import log_owner_token_decision, resolve_owner_token
 from looplab.serve.projects import ProjectStore
 from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
@@ -437,14 +438,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 if supplied is None or (supplied != target and supplied not in allowed_origins):
                     return JSONResponse({"detail": "cross-origin mutation rejected"}, status_code=403)
         return await call_next(request)
-    # Owner auth: when LOOPLAB_UI_TOKEN is set, default-deny every owner API request unless it carries
+    # Owner auth: when a token is resolved, default-deny every owner API request unless it carries
     # a matching X-LoopLab-Token; only the explicit zero-model/status and review-share
     # exceptions above remain open. The token is never embedded in HTML: the owner enters it through
     # the SPA unlock gate and it remains in that tab's sessionStorage. NOTE: a shared origin (notably
     # jupyter-server-proxy paths under one host) is still one browser principal, so this static token is
-    # a per-DEPLOYMENT credential rather than user identity or RBAC. See the deployment guide. Unset
-    # (the default local single-user mode) leaves the API unauthenticated, preserving existing behavior.
-    ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
+    # a per-DEPLOYMENT credential rather than user identity or RBAC. See the deployment guide.
+    # WHAT AN UNSET LOOPLAB_UI_TOKEN MEANS is `serve/owner_token.py`'s decision, and it is not one
+    # answer: on a private origin it still means "unauthenticated", byte-for-byte the historical
+    # local single-user behaviour; on the SHARED JupyterHub origin this server already detects and
+    # warns about, it now fails closed by MINTING a token rather than serving the control plane to
+    # any same-origin page. That module states why, and what it costs.
+    ui_token, ui_token_source = resolve_owner_token()
 
     def _owner_authenticated(request: "Request") -> bool:
         supplied = request.headers.get("X-LoopLab-Token", "")
@@ -468,18 +473,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         )
 
     if _on_shared_hub():
-        if ui_token:
-            _log.warning(
-                "LoopLab UI is on a SHARED JupyterHub origin (jupyter-server-proxy). LOOPLAB_UI_TOKEN "
-                "is a PER-DEPLOYMENT owner secret, NOT per-user identity. It is no longer embedded in "
-                "HTML, but a shared origin is still not RBAC: use a private origin or authenticated "
-                "reverse proxy for per-user isolation. See docs/guide/deployment.md (Shared JupyterHub).")
-        else:
-            _log.warning(
-                "LoopLab UI is on a SHARED JupyterHub origin with NO LOOPLAB_UI_TOKEN: the control "
-                "plane (start/delete runs, edit configs, shell-executing experiments) is "
-                "UNAUTHENTICATED and reachable by any same-origin page. Set LOOPLAB_UI_TOKEN, and for "
-                "real isolation serve each user from a PRIVATE origin. See docs/guide/deployment.md.")
+        log_owner_token_decision(ui_token, ui_token_source)
     if ui_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):

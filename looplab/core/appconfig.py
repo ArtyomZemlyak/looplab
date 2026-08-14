@@ -38,13 +38,19 @@ from looplab.core.config import (Settings, canonicalize_parallelism_source,
 _RUNTIME_CREDENTIAL_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
 
 
-def _read_doc(path: Path) -> dict:
-    """Parse a YAML or JSON document into a dict. YAML is a superset of JSON, so a single
+def parse_document_text(text: str, *, suffix: str, label: str) -> dict:
+    """Parse ALREADY-READ config text into a dict. YAML is a superset of JSON, so a single
     ``yaml.safe_load`` would read both — but we keep the stdlib ``json`` path for ``.json`` so the
     core never needs PyYAML for the legacy format, and only import PyYAML (with a clear install hint)
-    when a YAML file is actually used."""
-    text = path.read_text(encoding="utf-8-sig")   # utf-8-sig tolerates a BOM from Windows editors
-    suffix = path.suffix.lower()
+    when a YAML file is actually used.
+
+    Split out of ``_read_doc`` so a caller that must control the READ can still share the one parser.
+    ``serve/launch.py`` is that caller: it reads a launch ``task_file`` through a descriptor it has
+    already fstat-fenced, and re-opening the same NAME here to parse it would reintroduce the
+    check-to-open race that boundary exists to close. ``suffix`` selects the format (the caller's
+    already-lowercased ``Path.suffix``) and ``label`` is what error messages name — the path, for a
+    file-backed caller, so every message reads exactly as it did when this took a ``Path``.
+    """
     if suffix in (".yaml", ".yml"):
         try:
             import yaml
@@ -57,14 +63,20 @@ def _read_doc(path: Path) -> dict:
         except yaml.YAMLError as e:
             # YAMLError is not a ValueError, so callers' `except ValueError` would otherwise miss it
             # and dump a raw traceback instead of the intended one-line error.
-            raise ValueError(f"{path}: invalid YAML: {e}") from e
+            raise ValueError(f"{label}: invalid YAML: {e}") from e
     else:
         data = json.loads(text)
     if data is None:
         return {}
     if not isinstance(data, dict):
-        raise ValueError(f"{path}: expected a mapping at the top level, got {type(data).__name__}")
+        raise ValueError(f"{label}: expected a mapping at the top level, got {type(data).__name__}")
     return data
+
+
+def _read_doc(path: Path) -> dict:
+    """Read a config file and parse it with the shared parser above."""
+    text = path.read_text(encoding="utf-8-sig")   # utf-8-sig tolerates a BOM from Windows editors
+    return parse_document_text(text, suffix=path.suffix.lower(), label=str(path))
 
 
 def split_document(doc: dict) -> tuple[dict, dict, Optional[str]]:

@@ -151,7 +151,8 @@ def build_router(srv) -> APIRouter:
         # plan); a missing hint just means the default appears at launch, where /api/start keeps the
         # narrow-except semantics as the authoritative gate.
         try:
-            if _defaults_backend_llm(task, task_file, settings, srv.settings.load_ui_settings()):
+            if _defaults_backend_llm(task, task_file, settings, srv.settings.load_ui_settings(),
+                                     root):
                 settings["backend"] = "llm"
         except Exception:  # noqa: BLE001 - display-only sugar; /api/start re-applies the real rule
             pass

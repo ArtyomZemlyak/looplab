@@ -746,11 +746,15 @@ impact preview, ACL/RBAC or a complete history workbench, so those writes are no
 
 ## Exposure & auth
 
-Bind to `127.0.0.1` (the default) for local use. The control plane is **unauthenticated** unless you
-set a token, so it is not placed on the LAN implicitly. To serve beyond localhost, set
-`LOOPLAB_UI_TOKEN`, bind to `0.0.0.0`, and add the public hostname to the comma-separated
+Bind to `127.0.0.1` (the default) for local use. On a **private origin** the control plane is
+**unauthenticated** unless you set a token, so it is not placed on the LAN implicitly. To serve beyond
+localhost, set `LOOPLAB_UI_TOKEN`, bind to `0.0.0.0`, and add the public hostname to the comma-separated
 `LOOPLAB_UI_HOSTS` allow-list. Requests with any other Host are rejected, closing DNS-rebinding
 attacks against the local API.
+
+On a **shared JupyterHub origin** an unset token is not anonymous mode: the server mints a credential
+into `~/.looplab/ui-token` and default-denies `/api/*`, because every proxied app on that hub shares one
+browser origin. See [What an UNSET `LOOPLAB_UI_TOKEN` means](deployment.md#what-an-unset-looplab_ui_token-means).
 
 The token is never embedded in HTML. The owner enters it at **Unlock LoopLab controls** and it remains
 in that tab's `sessionStorage`. True review links cannot be created in anonymous mode; the reviewer

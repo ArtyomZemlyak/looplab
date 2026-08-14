@@ -7,9 +7,11 @@ construct an LLM client, or start a process.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -18,8 +20,9 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from looplab.adapters import tasks as task_adapters
+from looplab.core.atomicio import file_identity
 from looplab.core.pathsafe import WINDOWS_RESERVED
-from looplab.core.appconfig import load_document
+from looplab.core.appconfig import load_document, parse_document_text, split_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
@@ -269,32 +272,120 @@ def _confine_task_file(root: Path, expanded: str) -> Path:
             "task_file")
 
 
-# Task specs are small (a toy dict, a YAML/JSON config). Cap the WHOLE-file reads below — both
-# load_document and _source_fingerprint slurp the file — so an unbounded pseudo-file or a multi-GB
-# regular file cannot hang the preflight worker or exhaust memory. Every other launch input is bounded.
+# Task specs are small (a toy dict, a YAML/JSON config). Cap the ONE whole-file read below so an
+# unbounded pseudo-file or a multi-GB regular file cannot hang the preflight worker or exhaust
+# memory. Every other launch input is bounded.
 _MAX_TASK_FILE_BYTES = 8 * 1024 * 1024  # 8 MiB
+_TASK_FILE_READ_CHUNK = 1 << 20
 
 
-def _require_task_file_size(path: Path) -> None:
+@dataclass(frozen=True)
+class ConfinedTaskFile:
+    """One task-file read: the bytes, and the identity of the file they actually came from."""
+    path: Path
+    data: bytes
+    stat_row: dict
+
+    def fingerprint(self) -> dict:
+        return {**self.stat_row, "sha256": hashlib.sha256(self.data).hexdigest()}
+
+    def document(self) -> tuple[dict, dict, str | None]:
+        """Parse THESE bytes with the shared loader — never by re-opening the name."""
+        return split_document(parse_document_text(
+            self.data.decode("utf-8-sig"),      # utf-8-sig tolerates a BOM, as `load_document` does
+            suffix=self.path.suffix.lower(), label=str(self.path)))
+
+
+def _read_bounded(fd: int) -> bytes:
+    """Read one descriptor to EOF, stopping one byte past the cap so growth is DETECTED, not silently
+    truncated into a parse of a prefix. Its own function because it is the window the identity CAS in
+    `read_confined_task_file` covers — a test that has to replace the file mid-read patches HERE, and
+    a race nobody can drive is a guard nobody has checked."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= _MAX_TASK_FILE_BYTES:
+        chunk = os.read(fd, _TASK_FILE_READ_CHUNK)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def read_confined_task_file(root: Path, expanded: str) -> ConfinedTaskFile:
+    """Contain a requested `task_file`, then read it ONCE through a fenced descriptor.
+
+    `_confine_task_file` answers about a NAME, and a name is not what gets parsed. Before this, three
+    separate opens of that name followed the one check — `_require_task_file_size`'s `stat`,
+    `load_document`'s `read_text`, and `_source_fingerprint`'s `read_bytes` — so on a box where
+    anything else can write inside a declared root (the run root IS one, and a node's own eval writes
+    under it) a file could pass containment as a plain task JSON and then be replaced by a symlink to
+    `/etc/shadow` before `load_document` opened it. The parser's error is embedded in the
+    `400 invalid_task_file` message, so that race is the same content oracle containment closes.
+    The three reads could also disagree with each other: the launch token's fingerprint described a
+    different set of bytes than the ones that were parsed into the run's task.
+
+    Three rungs, in this order:
+
+    * **`O_NOFOLLOW` on the RESOLVED path.** `Path.resolve()` has already canonicalized every
+      symlink, so the resolved path contains none by construction and this flag can refuse no
+      legitimate launch — an operator's `runs/current-task.json -> examples/foo.json` resolves to the
+      target and is admitted exactly as before. The ONLY thing it can catch is a final component that
+      became a symlink *after* the resolve, which is precisely the swap.
+    * **`fstat` + `S_ISREG`, and `O_NONBLOCK` on the open.** A FIFO planted in a declared root made
+      `read_text` block the preflight worker forever; opening non-blocking and refusing a
+      non-regular file closes both the hang and the device/`/proc`-style pseudo-file read. It keeps
+      the existing `task_file_not_found` code, which `Path.is_file()` already gave these.
+    * **an identity CAS across the read.** The `fstat` taken before the read is compared against an
+      `lstat` of the same path after it, through `core/atomicio.file_identity` — the canonical
+      "same file AND unchanged" tuple, used WHOLE and not as a subset because that is exactly the
+      question here: the bytes handed to the parser must be the bytes of the file that passed
+      containment. A replacement (new inode), a same-size rewrite, or a growth mid-read all refuse.
+
+    What stays open, said plainly: a DIRECTORY component of the resolved path could still be swapped
+    between the resolve and the open, which no `O_NOFOLLOW` can see — closing that needs an
+    `openat` walk holding a descriptor per component. It requires write access inside a declared
+    root, which on the supported deployment is the operator themselves.
+    """
+    path = _confine_task_file(root, expanded)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        size = path.stat().st_size
+        fd = os.open(path, flags)
     except OSError as exc:
+        # ELOOP is the swap (or a symlink that appeared under the resolved name); ENXIO is a FIFO
+        # with no writer. Both are "this is not the readable regular file you contained".
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.EISDIR, errno.ELOOP, errno.ENXIO):
+            _reject(400, "task_file_not_found", f"task_file not found: {path}", "task_file")
         _reject(400, "invalid_task_file", f"task_file cannot be read: {exc}", "task_file")
-    if size > _MAX_TASK_FILE_BYTES:
-        _reject(400, "task_file_too_large",
-                f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
-
-
-def _source_fingerprint(path: Path | None) -> dict | None:
-    if path is None:
-        return None
     try:
-        _require_task_file_size(path)
-        stat = _path_stat(path)
-        stat["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
-        return stat
-    except OSError as exc:
-        _reject(422, "task_source_changed", f"task_file cannot be read: {exc}", "task_file")
+        try:
+            before = os.fstat(fd)
+        except OSError as exc:
+            _reject(400, "invalid_task_file", f"task_file cannot be read: {exc}", "task_file")
+        if not stat.S_ISREG(before.st_mode):
+            _reject(400, "task_file_not_found", f"task_file not found: {path}", "task_file")
+        if before.st_size > _MAX_TASK_FILE_BYTES:
+            _reject(400, "task_file_too_large",
+                    f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
+        try:
+            data = _read_bounded(fd)
+            after = os.lstat(path)
+        except OSError as exc:
+            _reject(422, "task_source_changed", f"task_file cannot be read: {exc}", "task_file")
+        if len(data) > _MAX_TASK_FILE_BYTES:
+            _reject(400, "task_file_too_large",
+                    f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
+        if file_identity(after) != file_identity(before):
+            _reject(422, "task_source_changed",
+                    "task_file changed while it was being read", "task_file")
+    finally:
+        os.close(fd)
+    return ConfinedTaskFile(path=path, data=data, stat_row={
+        "path": str(path),
+        "mode": before.st_mode,
+        "size": before.st_size,
+        "mtime_ns": before.st_mtime_ns,
+    })
 
 
 def _task_paths(task: dict) -> list[tuple[str, Path, bool]]:
@@ -423,9 +514,16 @@ class LaunchPreflight:
         }
 
     def current_token(self, srv) -> str:
-        """Cheap pre-Popen drift check; it performs only local reads/stats/settings construction."""
+        """Cheap pre-Popen drift check; it performs only local reads/stats/settings construction.
+
+        Deliberately a re-read BY NAME: the whole point is to notice that the source changed between
+        the preflight the operator confirmed and the spawn. It goes through the same fenced reader,
+        so the re-read is contained and identity-checked too — a source that has become a symlink
+        out of a declared root since the preflight is refused rather than hashed.
+        """
         safe_run_dir(srv.root, self.run_id, check_conflict=True)
-        source = _source_fingerprint(Path(self.source_task_file) if self.source_task_file else None)
+        source = (read_confined_task_file(srv.root, self.source_task_file).fingerprint()
+                  if self.source_task_file else None)
         # Re-stat the exact validated fields. Missing/replaced paths fail closed with field detail.
         paths = _validated_path_fingerprints(self.canonical_task)
         saved = srv.settings.load_ui_settings()
@@ -488,18 +586,18 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
     file_settings: dict = {}
     if has_file:
         expanded = os.path.expandvars(os.path.expanduser(task_file_value.strip()))
-        # C3: contain BEFORE any probe that echoes the path — see `_confine_task_file`.
-        source_path = _confine_task_file(srv.root, expanded)
-        if not source_path.exists() or not source_path.is_file():
-            _reject(400, "task_file_not_found", f"task_file not found: {source_path}", "task_file")
-        _require_task_file_size(source_path)   # bound the read before load_document slurps the file
+        # C3: contain BEFORE any probe that echoes the path — see `_confine_task_file` — and read
+        # the contained file exactly ONCE, so the bytes parsed below and the bytes fingerprinted
+        # into the launch token are the same bytes (`read_confined_task_file`).
+        source = read_confined_task_file(srv.root, expanded)
+        source_path = source.path
         try:
-            raw_task, raw_file_settings, _out = load_document(source_path)
+            raw_task, raw_file_settings, _out = source.document()
         except (OSError, ValueError, TypeError) as exc:
             _reject(400, "invalid_task_file", f"could not load task_file: {exc}", "task_file")
         task_input = raw_task
         file_settings = _validate_settings_keys(raw_file_settings, "task-file")
-        source_fp = _source_fingerprint(source_path)
+        source_fp = source.fingerprint()
     else:
         task_input = task_value
 
@@ -580,7 +678,7 @@ def preflight_response(plan: LaunchPreflight) -> dict:
 
 
 def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
-                          settings: dict, ui_settings: dict) -> bool:
+                          settings: dict, ui_settings: dict, root: Optional[Path] = None) -> bool:
     """True when a launch should default `backend="llm"`: the task normalizes to a GENERATIVE kind
     (the agent writes/edits code) and nobody chose a backend. CLI parity (mega-review P10):
     `looplab run --goal` already defaults backend=llm for these kinds (cli.py's `backend_chosen`
@@ -610,7 +708,16 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
     "Chosen" = a `backend` key already in the merged launch/card `settings`, or one the deployment
     set — a UI-saved value, LOOPLAB_BACKEND env, or a `.env` line all land in
     `Settings(**ui).model_fields_set` (and `_spawn_engine` overlays our env ON TOP of os.environ, so
-    injecting would clobber it)."""
+    injecting would clobber it).
+
+    `root` is the server's run root and is what makes the card's file read go through the SAME
+    containment `/api/start` applies. A card whose `task_file` the launcher would refuse must not
+    quietly read that file anyway to decorate itself: the genesis body takes `task_file` straight
+    from the request, and this was the one remaining place a path outside the declared roots was
+    still opened (unbounded, and on a FIFO it blocked the request). Its answer is a single bool, so
+    the residual oracle was narrow — but the read was not. Omitting `root` keeps the historical
+    uncontained read for the CLI-shaped callers that have no server root; the HTTP caller passes it.
+    """
     if "backend" in settings:
         return False
     file_settings: dict = {}
@@ -623,10 +730,14 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
         # raw json.loads mis-reads — so this default can never disagree with the task the engine
         # actually parses out of the very same file (read parity).
         try:
-            from looplab.core.appconfig import load_document
-            task_spec, file_settings, _out = load_document(Path(task_file))
-        except (OSError, ValueError):
-            return False                # unreadable/foreign task file → no default; fails downstream
+            if root is not None:
+                expanded = os.path.expandvars(os.path.expanduser(str(task_file).strip()))
+                task_spec, file_settings, _out = read_confined_task_file(root, expanded).document()
+            else:
+                from looplab.core.appconfig import load_document
+                task_spec, file_settings, _out = load_document(Path(task_file))
+        except (OSError, ValueError, HTTPException):
+            return False                # unreadable/refused/foreign task file → no default
         if not (isinstance(task_spec, dict) and task_spec):
             return False
     from looplab.adapters.tasks import normalize_task

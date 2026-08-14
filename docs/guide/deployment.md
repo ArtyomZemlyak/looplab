@@ -99,6 +99,29 @@ first shows **Unlock LoopLab controls**; enter the same value there. The SPA sen
 `X-LoopLab-Token` for the rest of that tab. Neither the owner page nor `/review` contains the token in
 HTML, and it is not written to a persistent browser store.
 
+### What an UNSET `LOOPLAB_UI_TOKEN` means
+
+It does not mean one thing, because the exposure is not the same on both deployments:
+
+| Origin | Unset token | Why |
+|---|---|---|
+| **Private** (`looplab ui` on loopback, Compose published to loopback, a per-user host) | Unauthenticated, exactly as before | Nothing else shares the origin; the token is defence in depth, and a mandatory unlock gate on a laptop buys nothing. |
+| **Shared JupyterHub origin** (`jupyter-server-proxy`, detected from `JUPYTERHUB_SERVICE_PREFIX`/`JUPYTERHUB_API_TOKEN`) | **Fails closed**: the server generates a token, stores it `0600` at `~/.looplab/ui-token`, logs the path and the value at startup, and default-denies `/api/*` | Every user's app and every other proxied page live on ONE browser origin, and the same-origin policy is per-origin, not per-path. An unauthenticated control plane there can be driven by any same-origin page: start a run, delete a run, edit settings, name a `task_file`. |
+
+Read a minted token back with `cat ~/.looplab/ui-token` (or `$LOOPLAB_UI_TOKEN_FILE`), then unlock the
+UI with it. `looplab tui` reads the same file, so it keeps working without an exported variable. The
+file is reused across restarts — an already-unlocked tab does not have to be re-unlocked — and a
+token file that is a symlink or readable by anyone else is **refused at startup** rather than used.
+
+Two deliberate non-choices: the server already binds loopback, and `jupyter-server-proxy` connects to
+loopback itself, so "bind loopback-only when unset" cannot be the boundary here; and refusing to start
+would break the Launcher-tile deployment whose whole point is that there is no terminal in which to
+export a variable. A minted credential is fail-closed *and* recoverable.
+
+`LOOPLAB_UI_ANONYMOUS=1` restores the previous open behaviour on a shared origin — for a deployment
+whose origin is private in a way the detection cannot see. It is deliberately something you turn on,
+and the startup log says so on every start.
+
 ### Where a launch may read its task from
 
 `POST /api/start` accepts either an inline `task` object or a `task_file` path. A `task_file` is
@@ -110,6 +133,15 @@ points outside it is refused too, and the check runs before any probe that would
 file exists. This is the same list `GET /api/tasks` builds the launch pick-list from, so what the UI
 offers and what the launcher accepts cannot drift apart. Set `LOOPLAB_TASKS_DIR` to declare a task
 directory outside the run root.
+
+The allow-listed file is then read **once, through one descriptor**, and the bytes read are the bytes
+parsed and the bytes fingerprinted into the launch token. A name that passed the check and a file
+that gets parsed are not the same thing: the file is opened `O_NOFOLLOW` on the already-resolved path
+(so a final component that became a symlink *after* the check is refused), non-regular files such as
+a FIFO are refused instead of blocking the request, and the descriptor's `fstat` is compared against
+an `lstat` across the read, so a file replaced or rewritten mid-read is refused with
+`422 task_source_changed` rather than parsed. The genesis card applies the same allow-list before it
+reads a `task_file` to decide its display-only backend hint.
 
 Note that this bounds an *authenticated* caller: it is not part of the token boundary but a limit on
 what the owner credential itself can reach. Point `LOOPLAB_TASKS_DIR` at a directory you are willing
@@ -185,6 +217,7 @@ target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter o
 | `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds `engine.lock` as the one live reducer, while the engine and authenticated control server may append serialized records to the same log. On a FUSE/S3 mount where OS locking is unavailable the reducer lock cannot be enforced, so engine startup **fails closed**. Set this to `1` only if you externally guarantee one engine per run dir and accept best-effort append locking/durability; prefer a lock-capable local disk. |
 | `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
 | `LOOPLAB_UI_HOSTS` | Public hostname(s), comma-separated, that may reach the UI (for example `hub.example.org`). `localhost`, `127.0.0.1`, and `::1` are always allowed; every other Host is rejected to prevent DNS rebinding. |
+| `LOOPLAB_UI_TOKEN` | The owner control credential. On a hub, **leaving it unset no longer means anonymous**: the server mints one into `~/.looplab/ui-token` (`0600`) and default-denies `/api/*`. Set it to choose your own; see [What an UNSET `LOOPLAB_UI_TOKEN` means](#what-an-unset-looplab_ui_token-means). `LOOPLAB_UI_TOKEN_FILE` moves the minted file; `LOOPLAB_UI_ANONYMOUS=1` opts back out, loudly. |
 | `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint is caught by the [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts): the run is **refused before it starts**, so there is no event log and no `run_finished` event — nothing to resume, only the empty `engine.lock` the run dir was created to hold — and the operator sees one refusal message naming every unreachable role/target and [exit code 2](cli-reference.md#exit-codes-a-refusal-is-not-a-crash). On a hub that means a failed launch you can read, not a silent stuck run and not a "successful" run of empty fallback proposals. |
 
 **Behind a non-stripping proxy** `looplab ui` auto-derives `root_path` from `JUPYTERHUB_SERVICE_PREFIX`
