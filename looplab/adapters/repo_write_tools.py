@@ -260,7 +260,7 @@ class RepoWriteTools:
     immediate feedback (a refused write) instead of having the edit silently dropped downstream."""
 
     def __init__(self, surface, protected, prefixes=None, editables=None,
-                 operator_stages: bool = False, data_mounts=None):
+                 operator_stages: bool = False, data_mounts=None, time_budget=None):
         self.files: dict[str, str] = {}
         self.deleted: list[str] = []
         self._surface = list(surface or [])
@@ -272,6 +272,12 @@ class RepoWriteTools:
         # "fixed" a stage timeout via the manifest otherwise loops the identical failure to abandon
         # (mega-review P12).
         self._operator_stages = bool(operator_stages)
+        # The OPERATOR's per-eval wall-clock ceiling (`command_eval.eval_spec_time_budget`), or None
+        # when the task declares no eval spec. A stage `timeout` above it is refused at DECLARATION
+        # time — see `stage_budget_refusal`. Passed in rather than derived here because this class
+        # holds no task: the repo Developer resolves it ONCE (`_eval_time_budget`) for both the note
+        # it states in the prompt and the bound it enforces, so the two cannot name different numbers.
+        self._time_budget = time_budget
         # Names of read-only DATA MOUNTS (they sit in the protect list defensively — see
         # RepoTask._protected_names) so a refused write can name the REAL reason: "read-only data
         # mount, write derived data elsewhere" rather than the misleading "the operator owns the eval".
@@ -419,6 +425,15 @@ class RepoWriteTools:
         clean, err = validate_stages(stages, reserved=("score",))
         if err is not None:
             return f"(refused: {err})"
+        # The OPERATOR's wall-clock ceiling, held at the one moment correcting it is free. Deliberately
+        # NOT inside `validate_stages`: that validator is shared with the OPERATOR's own `cmd.stages`
+        # (who owns the budget and may declare what they like) and with `_resolve_stages` at CONSUME
+        # time, where a refusal drops the whole manifest — which degrades the node to the score command
+        # alone and, on a repo carrying a committed baseline checkpoint, records a number about a model
+        # this node never trained. A budget rule must never be able to cause that.
+        over_budget = self.stage_budget_refusal(clean)
+        if over_budget is not None:
+            return over_budget
         miss = _missing_stage_input_paths(clean)      # catch a hallucinated non-existent data path
         if miss:
             return f"(refused: {_missing_paths_feedback(miss)})"
@@ -526,6 +541,20 @@ class RepoWriteTools:
         hits = manifest_path_collisions(content, self.files.get("looplab_stages.json", ""),
                                         self._roots)
         return collision_feedback(hits, where=where) if hits else None
+
+    def stage_budget_refusal(self, stages) -> Optional[str]:
+        """The operator's WALL-CLOCK ceiling, from the DECLARATION side: does any stage claim a longer
+        leash than the whole eval gets? Returns the `(refused: …)`-enveloped message, or None.
+
+        A method on the tools rather than a bare call at each site, for the same reason
+        `manifest_collision_refusal` is: the two declaring paths — this tool (implement/repair) and the
+        stages phase's `_validate` bounce (authoring) — must apply the identical rule to the identical
+        budget, and the phase reaches it through the same `write` object it already holds. The rule
+        itself is `command_eval.stage_time_budget_refusal`; nothing is re-derived here, because the
+        number a role is TOLD and the number it is HELD TO diverging is the whole defect."""
+        from looplab.runtime.command_eval import stage_time_budget_refusal
+        msg = stage_time_budget_refusal(stages, self._time_budget)
+        return f"(refused: {msg})" if msg is not None else None
 
     def manifest_collision_refusal(self, stages) -> Optional[str]:
         """The same rule from the DECLARATION side: does a file ALREADY in the working set collide

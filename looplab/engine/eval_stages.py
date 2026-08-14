@@ -161,6 +161,35 @@ class EvalStagesMixin:
             except Exception:  # noqa: BLE001 — a malformed manifest just falls back to the single command
                 preceding = None
         if preceding:
+            # THE DIVERGENCE THAT GOT PAST THE AUTHORING GATE, recorded and NOT enforced.
+            #
+            # `declare_stages` refuses a stage timeout above the operator's per-eval budget, but that
+            # gate covers the tool. A manifest can still arrive over budget three ways: hand-written
+            # with `write_file` on a surface that admits `.json`, CARRIED OVER from a parent on an
+            # improve/merge (the shape `rubertlite-dr-unified-v7` node 1 has, at 90000 s against
+            # 21600 s), or resumed from a run that predates the gate. Those are the manifests the
+            # operator most needs to know about and the ones an authoring refusal can no longer reach.
+            #
+            # Recorded rather than CLAMPED, deliberately, and the arithmetic is the argument: on v7
+            # node 0 a clamp discards 21600 s of GPU time and returns no metric to avoid 6360 s of
+            # unbudgeted spend. Killing a training at the wall is the most expensive possible moment
+            # to enforce a ceiling and the only one at which nothing can act on it — so what belongs
+            # here is the deterministic half (the FACT, into the record) and not the kill. The
+            # protected `score` stage is unaffected either way: it is built below with the operator's
+            # own `score_timeout` and never with a declared one.
+            #
+            # `eval_spec_time_budget(es)` and NOT `score_timeout`: the budget is the LARGEST profile,
+            # which is the number both roles were told to size against, while `score_timeout` is
+            # whichever profile THIS eval selected — comparing against the 60 s smoke profile would
+            # report every full-fidelity `train` stage as a divergence.
+            _budget = command_eval.eval_spec_time_budget(es)
+            _over = command_eval.stages_over_time_budget(preceding, _budget)
+            if _over:
+                from looplab.core import tracing
+                for _nm, _t in _over:
+                    with tracing.operation("stage_timeout_over_budget", stage=_nm, declared_s=_t,
+                                           budget_s=_budget, at="resolve", enforced=False):
+                        pass
             # the operator's cmd is the FINAL + protected scoring stage; reuse the already
             # profile-resolved command/timeout (build_command) so smoke/full still applies.
             final = {"name": "score",

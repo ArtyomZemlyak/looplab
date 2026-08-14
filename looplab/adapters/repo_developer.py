@@ -859,6 +859,18 @@ class LLMRepoDeveloper:
         has_cmd = bool(ev.get("command") or ev.get("stages"))
         return ev, has_cmd
 
+    def _eval_time_budget(self):
+        """The operator's per-eval wall-clock ceiling in seconds, or None. ONE resolution for the two
+        things this role does with it — the note it is TOLD (`_time_budget_note`) and the bound its
+        `declare_stages` is HELD TO (`RepoWriteTools(time_budget=…)`). Separately spelled, the prompt
+        could announce one ceiling while the refusal enforced another, which is the F1h defect with
+        the roles swapped. Soft-fails to None for a bare/`__new__`-constructed dev carrying no task."""
+        from looplab.runtime.command_eval import eval_spec_time_budget
+        try:
+            return eval_spec_time_budget(self._cmd_context()[0])
+        except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
+            return None
+
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
 
@@ -867,22 +879,21 @@ class LLMRepoDeveloper:
         Researcher was ever told the number (`engine/proposal_cues.py::_cue_experiment_time_budget`).
         Measured on `rubertlite-dr-unified-v7` node 0: told "give `train` a GENEROUS timeout" against a
         budget it could not see, the Developer declared `timeout: 172800` — 48 h against the operator's
-        21600 s — and paced a schedule at 7 h 50 m. Neither number is refused anywhere: `_run_stages`
-        takes a declared stage timeout as a FALLBACK-replacement, never a clamp, so the generous leash
-        is real and is exactly why the budget has to be stated rather than enforced here.
+        21600 s — and paced a schedule at 7 h 50 m. `_run_stages` still takes a declared stage timeout
+        as a FALLBACK-replacement and never a clamp, so nothing at the WALL refuses the generous leash;
+        what refuses it since 2026-08-14 is `declare_stages`, at authoring time, while the Developer can
+        still act (`command_eval.stage_time_budget_refusal`). The note is the rung above that refusal and
+        is the reason most manifests never reach it.
 
         Derived from `command_eval.eval_spec_time_budget`, the SAME rule the engine quotes to the
         Researcher, because two roles sizing one schedule between them must be given one number. Empty
         when the task declares no eval spec at all (an onboarding/toy dev has no budget to state).
         """
-        from looplab.runtime.command_eval import eval_spec_time_budget
-        try:
-            budget = eval_spec_time_budget(self._cmd_context()[0])
-        except Exception:  # noqa: BLE001 — a bare/unit-test dev with no task states no budget
-            return ""
+        from looplab.runtime.command_eval import format_time_budget
+        budget = self._eval_time_budget()
         if budget is None:
             return ""
-        span = f"{budget:.0f}s" + (f" (~{budget / 3600.0:.1f}h)" if budget >= 600.0 else "")
+        span = format_time_budget(budget)
         return (
             f"\n\nWALL-CLOCK BUDGET — one evaluation of this node gets {span}, end to end: every stage "
             "you declare plus the protected scoring step. The schedule and the batch size YOU choose are "
@@ -892,7 +903,13 @@ class LLMRepoDeveloper:
             "GPU-hour it spent is discarded: a shorter run that REPORTS A NUMBER beats a longer one that "
             "reports nothing. A stage `timeout` longer than the budget is not more budget — it only "
             "removes the guard, and a stage that outlives the budget spends GPU-hours the run was never "
-            "planned around. Do not shrink the experiment past the point where it answers the "
+            "planned around. "
+            # Spliced 2026-08-14 beside the sentence it makes true: the clause above states why a long
+            # leash is not more budget, and this states that declaring one is now REFUSED rather than
+            # merely unwise. The rest of the note is untouched — it is a contract, not prose.
+            "`declare_stages` REFUSES a stage `timeout` above the budget, so declare the time you "
+            "actually estimate a stage needs and cut the schedule to fit. "
+            "Do not shrink the experiment past the point where it answers the "
             "researcher's question; shrink the schedule, and say in your notes what you cut.")
 
     def _operator_stage_list(self) -> list:
@@ -1074,6 +1091,26 @@ class LLMRepoDeveloper:
             _, err = validate_stages(stages, reserved=reserved)
             if err:
                 return err
+            # The OPERATOR's wall-clock ceiling. Bounced here as well as at the write tool because
+            # this phase reaches `declare_stages` through the EMIT SPEC and never through the tool,
+            # exactly like the F1c collision below — and this is the site that matters most: it is the
+            # one moment the Developer can still cut the schedule without having spent a GPU-second.
+            over = write.stage_budget_refusal(stages)
+            if over is not None:
+                # RECORDED, not only spoken. The refusal lives in the model's context for one session
+                # and then is gone, while the number the Developer ASKED for is the only evidence an
+                # operator whose budget is genuinely too small will ever get: on v7 node 0 the node
+                # really did need ~27960 s against a 21600 s budget, and a refusal nobody can read
+                # afterwards leaves that operator with a run that keeps under-delivering for no
+                # stated reason. Zero-work marker span, the same shape as `plan_steps_failed` below.
+                from looplab.core import tracing as _tr
+                from looplab.runtime.command_eval import stages_over_time_budget
+                _bud = self._eval_time_budget()
+                for _nm, _t in stages_over_time_budget(stages, _bud):
+                    with _tr.operation("stage_timeout_over_budget", stage=_nm, declared_s=_t,
+                                       budget_s=_bud, at="declare", enforced=True):
+                        pass
+                return over
             miss = _missing_stage_input_paths(stages)   # a hallucinated non-existent data path → re-declare
             if miss:
                 return _missing_paths_feedback(miss)
@@ -1128,7 +1165,8 @@ class LLMRepoDeveloper:
         op_stages = self._operator_stage_list()
         write = RepoWriteTools(self._surface, self._protected, self._prefixes, editables=self._editables,
                                operator_stages=bool(op_stages),
-                               data_mounts=getattr(self, "_data_mounts", None))
+                               data_mounts=getattr(self, "_data_mounts", None),
+                               time_budget=self._eval_time_budget())
         if base is not None or base_deleted is not None:
             # An EXPLICIT base is the node's OWN solution — the parent's (improve/refine via
             # implement_from) or the failing node's (repair via repair_from). Pre-load it so untouched

@@ -1388,6 +1388,10 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
     operator's budget, and on `rubertlite-dr-unified-v7` node 0 it declared 172800 s against a
     21600 s budget. This is the number the run is PLANNED around and the one the protected `score`
     stage always runs under; a stage that outlives it is spending GPU-hours the run did not budget.
+
+    Since 2026-08-14 that divergence is REFUSED WHERE IT IS AUTHORED and RECORDED where it is not —
+    see `stages_over_time_budget` below. `_run_stages` is deliberately unchanged: a clamp at the
+    wall costs more than the overspend it prevents (the arithmetic is in that helper's docstring).
     """
     es = eval_spec or {}
     if not es:
@@ -1403,6 +1407,88 @@ def eval_spec_time_budget(eval_spec: Optional[dict]) -> Optional[float]:
         vals.append(600.0)
     cand = max((finite_timeout(v, 0.0) for v in vals), default=0.0)
     return cand if math.isfinite(cand) and cand > 0 else None
+
+
+def format_time_budget(budget: float) -> str:
+    """`21600s (~6.0h)` — the ONE spelling of the budget in operator-facing text. Split out because
+    `repo_developer._time_budget_note` already said it this way and the refusal below must say the
+    SAME number the same way: a prompt that announces `21600s (~6.0h)` and a refusal that says
+    `21600.0` read as two different bounds to the role being held to them."""
+    return f"{budget:.0f}s" + (f" (~{budget / 3600.0:.1f}h)" if budget >= 600.0 else "")
+
+
+def stages_over_time_budget(stages, budget: Optional[float]) -> list:
+    """`[(stage name, declared timeout)]` for every stage declaring a LONGER wall-clock leash than
+    the operator's whole per-eval budget (`eval_spec_time_budget`), in declaration order.
+
+    THE RULE IS PER STAGE, NOT THE SUM, and that is a measurement rather than a preference. A stage
+    `timeout` is a CEILING, not an estimate — a `data_prep` reserving 3600 s may finish in 60 — so
+    summing ceilings refuses manifests that would have fitted comfortably, and the protected `score`
+    stage runs at the operator's number ON TOP of whatever precedes it, which means a sum rule that
+    counted it would refuse every manifest ever written. Measured over every `looplab_stages.json`
+    in `runs/` against its own run's `task.snapshot.json` budget (31 manifests declaring at least
+    one stage timeout): the per-stage rule refuses 17, the sum rule 18 — one extra
+    (`rubertlite-dr-unified-v6` node 3, 14400 + 900 against 14400). Three percent more coverage is
+    not worth a rule that fires on ceilings nobody intended to spend. A stage over the budget ALONE,
+    by contrast, is a statement that cannot be true under any reading of the operator's number.
+
+    What the 17 are: `rubertlite-dr-unified-v7` node 0 at 172800 s against 21600 s (8.0x),
+    `rubert-dr-0807` nodes 0-4/7 at 86400 s against 14400 s (6.0x), v7 node 1 at 4.2x, 0807 nodes
+    8/9 at 3.8x, and six more between 1.5x and 2.0x — 5 runs, 44 % of the declarations that have
+    both numbers to compare.
+
+    `budget is None` (no eval spec — an onboarding/toy Developer) means there is no ceiling to hold
+    anything to, so nothing is over it. A non-numeric/absent stage timeout is likewise not over: the
+    stage then INHERITS the budget through `_run_stages`' fallback, which is the correct behaviour
+    this whole rule exists to restore."""
+    if budget is None or not isinstance(stages, list):
+        return []
+    over = []
+    for s in stages:
+        if not isinstance(s, dict) or "timeout" not in s:
+            continue
+        try:
+            t = float(s["timeout"])
+        except (TypeError, ValueError):
+            continue                      # `validate_stages` refuses this separately, and first
+        if math.isfinite(t) and t > float(budget):
+            over.append((str(s.get("name") or "?"), t))
+    return over
+
+
+def stage_time_budget_refusal(stages, budget: Optional[float]) -> Optional[str]:
+    """The AUTHORING-time refusal for the first over-budget stage, or None when the manifest fits.
+
+    WHY THE ENFORCEMENT IS HERE AND NOT AT THE WALL (docs/36). The per-eval budget is an
+    operator-declared resource CEILING, so whether it holds is not an ambiguity for an agent to
+    reinterpret — but the DEADLINE is the one place enforcing it is ruinous. On the measured case,
+    `rubertlite-dr-unified-v7` node 0 needed ~27960 s against a 21600 s budget: clamping at the wall
+    discards 21600 s of GPU time AND returns no metric, to avoid 6360 s of unbudgeted spend — 3.4x
+    worse than the overrun it prevents, and the operator learns nothing until it dies. At AUTHORING
+    time the same correction costs nothing at all: the Developer has spent no GPU seconds yet and
+    can still cut the schedule. So the bound is deterministic (it is the operator's) and the
+    RESPONSE is the agent's — which of fewer epochs, a subsample or a larger batch to spend, stated
+    with reasons. A wider action space, not a widened trusted set.
+
+    The message names BOTH numbers on purpose. A refusal that says only "too long" leaves the agent
+    guessing at the ceiling, which is the F1h defect one rung down; and the ASKED-FOR number is the
+    only evidence an operator whose budget is genuinely too small ever gets, so the message tells the
+    Developer to declare a real estimate rather than a leash and to say what it cut. `_declare_stages_phase`
+    records the pair (see `stage_timeout_over_budget` spans) so that evidence outlives the session."""
+    over = stages_over_time_budget(stages, budget)
+    if not over:
+        return None
+    name, declared = over[0]
+    span = format_time_budget(float(budget))
+    return (
+        f"stage {name!r} declares `timeout: {declared:.0f}` — LONGER than the operator's whole "
+        f"per-eval wall-clock budget of {span}, which this node does not get to raise. A stage "
+        "timeout is not extra budget: it only removes the guard, and the protected `score` stage "
+        "still runs under the operator's number regardless. Size the EXPERIMENT to the budget — "
+        "fewer epochs or steps, a subsample, a larger batch if the memory allows — and declare the "
+        "time you actually ESTIMATE this stage needs, not a generous leash. If the experiment "
+        "genuinely cannot fit, declare your honest estimate up to the budget and say in your notes "
+        "how long it really needs: that is what tells the operator to raise it.")
 
 
 def build_command(eval_spec: dict, params: Optional[dict] = None,

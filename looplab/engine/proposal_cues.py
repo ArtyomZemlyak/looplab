@@ -495,7 +495,11 @@ class ProposalCuesMixin:
         budget = self._experiment_time_budget()
         if budget is None:
             return ""
-        span = f"{budget:.0f}s" + (f" (~{budget / 3600.0:.1f}h)" if budget >= 600.0 else "")
+        # The SPELLING of the number is shared with the Developer's note and with the stage-budget
+        # refusal (`command_eval.format_time_budget`) — byte-identical to the expression that used to
+        # be inline here. Two roles told one budget in two formats is the same defect one layer down.
+        from looplab.runtime.command_eval import format_time_budget
+        span = format_time_budget(budget)
         # The SCOPE clause differs because the two paths kill at different places: a repo pipeline spends
         # the budget across every stage it declares plus the protected `score` stage, while a sandbox
         # solution is one process.

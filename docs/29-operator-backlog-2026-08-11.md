@@ -748,6 +748,43 @@ footprints, and it is declined here for the same reason: it would fence a legiti
 it changes execution rather than what a role plans, and it needs its own evidence. So both prompts say
 the true thing — *a longer stage `timeout` is not more budget; it only removes the guard.*
 
+**THE EVIDENCE ARRIVED THE SAME DAY, AND THE LIMIT IS NOW CLOSED AT THE OTHER END (F1h-b,
+2026-08-14).** v7 node 0 was not one Developer being careless. Measured over every
+`looplab_stages.json` in `runs/` against its own run's `task.snapshot.json`: of the **39** declared
+stages that have both numbers, **17 exceed the operator's budget** — v7 node 0 at 8.0x, `rubert-dr-0807`
+nodes 0-4/7 at 6.0x (86400 s vs 14400 s), v7 node 1 at 4.2x, 0807 nodes 8/9 at 3.8x, v6 node 6 at 2.0x,
+`rubert-dr-0805` node 0 at 1.8x and five more at 1.5x. Five runs, **44 %** of the comparable
+declarations. Note what the measurement does *not* say, because the tempting reading is wrong: every
+one of those 17 predates `_time_budget_note` (`7aa4cbdc`, 08:19 today), so the advisory rung was never
+*tried* on them, let alone spent. That is an argument for keeping the note, not for stopping there —
+an advisory alone can never make the two numbers agree, because nothing checks the number it asked for.
+
+The clamp this section declined is still declined, and now for a measured reason rather than a
+cautious one: on v7 node 0 the node needed ~27960 s against 21600 s, so clamping at the wall discards
+**21600 s of GPU time and returns no metric** to avoid **6360 s** of unbudgeted spend — 3.4x worse
+than the overrun, at the one moment nothing can act on it. What changed is *where* the bound is held:
+
+* **AUTHORING time.** `declare_stages` — both the stages phase's emit-spec bounce and the
+  implement/repair tool — refuses a stage `timeout` above `eval_spec_time_budget`, naming both numbers
+  and asking for the schedule to be cut. The same correction costs zero GPU seconds there. The bound is
+  deterministic because it is the operator's (docs/36); the *response* — fewer epochs, a subsample, a
+  larger batch — stays the agent's, which is a wider action space and not a wider trusted set.
+* **CONSUME time, recorded and never killed.** A manifest that reaches the workdir another way
+  (hand-written, carried over from a parent on an improve/merge — v7 node 1's 90000 s is exactly this —
+  or resumed from before the gate) makes `_resolve_stages` emit a `stage_timeout_over_budget` span
+  carrying the stage, the declared seconds and the budget.
+* **PER STAGE, not the sum.** A stage `timeout` is a ceiling, not an estimate, and the protected
+  `score` stage runs at the operator's number on top of whatever precedes it. Measured: over the 31
+  manifests declaring at least one stage timeout, the per-stage rule refuses 17 and the sum rule 18.
+  Three percent more coverage is not worth a rule that fires on generous prep ceilings nobody spends.
+* **The operator may be the one who is wrong**, and this has to stay diagnosable. Both the refusal and
+  the span carry the number the Developer *asked for*; that is the only signal an operator whose budget
+  is genuinely too small ever gets, and the refusal tells the Developer to declare an honest estimate
+  and say in its notes how long the experiment really needs. What is still open: nothing aggregates
+  those spans into a run-level "your budget is short by X" statement, and nothing bounds the SUM of a
+  pipeline's stage timeouts, so `prep(budget) + train(budget) + score(budget)` still fits every rung
+  here.
+
 **BUILT, 2026-08-14.** A new registry hint `_time_budget_hint`
 (`agents/roles.py::RESEARCHER_HINT_ATTRS` + `RESEARCHER_PROMPT_CUES`, so it reaches BOTH readers
 through the shared `collect_hint_cues` and all four wrappers through the shared `forward_hints`),
