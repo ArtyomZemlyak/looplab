@@ -733,10 +733,37 @@ class ResearchCadenceMixin:
                 attempted = getattr(self, "_card_enrichment_attempted", None)
                 if attempted is None:
                     attempted = self._card_enrichment_attempted = set()
-                fingerprint = (card_id, canonical_json_digest(delta))
+                # THE KEY CARRIES THE SUBJECT EXACTLY WHEN THE DELTA DOES, and the two halves of
+                # this delta are scoped differently.
+                #
+                # `footprint` is fenced by card/node/generation/proposal_ref —
+                # `_footprint_receipt_exists` checks all four — so two DIFFERENT nodes under one
+                # card legitimately produce byte-identical footprint deltas as the newest
+                # materialized node advances across passes, and a (card_id, delta) key suppressed
+                # the second one permanently, losing that node's Developer-finalization receipt.
+                #
+                # `lesson_refs`/`claim_refs`/`research_origin` are fenced by the CARD alone: the
+                # delta is computed by comparing against `card.<field>`, never against a node. So
+                # keying those on the subject fixes nothing and reintroduces the defect the memo
+                # exists to stop. The subject for a card-scoped delta is `subjects.setdefault`'s —
+                # the card's LOWEST-numbered node, which adding nodes does not move — but its
+                # `proposal_ref` does move: an inline repair that finalizes a different held
+                # envelope rewrites the idea and the digest with it, and a card carrying a footprint
+                # takes the newest finalized node as subject instead. Each such move bought a
+                # refused card-scoped delta another byte-identical row: bounded rather than
+                # unbounded, which is the same re-append with a constant in front. So the subject
+                # (and its `proposal_ref`) enters the key only for the node-scoped half.
+                # `proposal_ref` is a dict, so it goes THROUGH the digest rather than into the
+                # tuple — the fence is its value, not its identity.
+                node_scoped = "footprint" in delta
+                fingerprint = (
+                    card_id,
+                    subject[0].id if node_scoped else None,
+                    subject[0].attempt if node_scoped else None,
+                    canonical_json_digest({"ref": subject[1], "delta": delta} if node_scoped
+                                          else {"delta": delta}))
                 if fingerprint in attempted:
                     continue
-                attempted.add(fingerprint)
             if not delta:
                 continue
             node, proposal_ref = subject
@@ -747,6 +774,10 @@ class ResearchCadenceMixin:
                 "proposal_ref": proposal_ref,
                 **delta,
             })
+            # AFTER the append, never before: the memo's premise is "a delta that was written and
+            # the fold then refused". Recording it first meant an append that RAISED (ENOSPC, EIO)
+            # permanently suppressed a delta no row ever carried.
+            attempted.add(fingerprint)
             appended = True
         return fold(self.store.read_all()) if appended else state
 

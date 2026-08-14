@@ -47,7 +47,15 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   suite a contributor runs (`python -m pytest`) and this one is not, so it is ALWAYS the half
   //   that gets missed. If you are adding a row and reading this, the fix is to grep the repo for
   //   the OLD number rather than trusting either file to remind you.
-  assert.equal(Object.keys(schema.fieldByKey).length, 168)
+  //   168 -> 175 (2026-08-14): FIFTH occurrence, and the largest — seven rows across five branches
+  //   merged over four days while this literal stayed at 168, so the paragraph above predicted its
+  //   own next failure exactly. Verified the way that paragraph prescribes rather than by bumping
+  //   the number: the packaged catalogue is 175 keys, and removing precisely the seven the Python
+  //   side's own history names — `assistant_time_budget_s`, `developer_probe`,
+  //   `developer_probe_timeout_s`, `repair_critic_after`, `metric_subject`, `landlock`,
+  //   `eval_deadline_grace_s` — gives back 168. So this is seven real additions with nothing
+  //   renamed away underneath them, which a bare re-pin could not have told you.
+  assert.equal(Object.keys(schema.fieldByKey).length, 175)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

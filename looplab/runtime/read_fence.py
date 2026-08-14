@@ -693,10 +693,10 @@ def _hook(event, args):
                 _report(bad, event, _MUTATION_MESSAGE)   # outside the try: deny RAISES from here
                 return
         return
-    # The audit event fires BEFORE the chdir, so this re-derives `_CWD_REACHES_ROOT` from the
-    # TARGET — the flag that keeps `_resolve`'s relative fast bail correct rather than merely
-    # asserted. Under `warn` the chdir proceeds, so the flag must be set even though we do not stop
-    # it; under `deny` `_report` raises, the chdir never happens, and the assignment is skipped.
+    # `_CWD_REACHES_ROOT` is what keeps `_resolve`'s relative fast bail correct rather than merely
+    # asserted, so a chdir has to be able to TURN IT ON: under `warn` the chdir proceeds, and a
+    # process that has just moved into a fenced root must start paying the `abspath` on relative
+    # opens. It must never turn it OFF — see the MONOTONIC note below, which is the whole argument.
     global _CWD_REACHES_ROOT
     try:
         bad = _fenced_dir(args[0])
@@ -712,13 +712,15 @@ def _hook(event, args):
     # pre-event hook can have. A stale True costs one `abspath` per relative open and decides
     # nothing: `_fenced` re-checks the resolved path either way.
     if bad is not None:
-        _report(bad, event, _MESSAGE)
-        _CWD_REACHES_ROOT = True
-    else:
-        # `os.fchdir` hands an already-open fd. `_fenced_dir` resolves it through /proc/self/fd, but
-        # a platform or a race where that fails leaves nothing proving the target is outside a root,
-        # so pay the `abspath` on relative opens rather than guess.
-        _CWD_REACHES_ROOT = args[0].__class__ is int
+        _report(bad, event, _MESSAGE)    # under `deny` this RAISES: the chdir never happens at all
+    # `os.fchdir` hands an already-open fd. `_fenced_dir` resolves it through /proc/self/fd, but a
+    # platform or a race where that fails leaves nothing proving the target is outside a root, so
+    # pay the `abspath` on relative opens rather than guess. The leading `_CWD_REACHES_ROOT or` is
+    # what makes this the monotonic assignment the comment above describes: written as a plain
+    # `= args[0].__class__ is int` it CLEARS the flag whenever the target is outside every root,
+    # which is the pre-event guess this whole block exists to refuse to make.
+    _CWD_REACHES_ROOT = (
+        _CWD_REACHES_ROOT or bad is not None or args[0].__class__ is int)
 
 
 def _chain():

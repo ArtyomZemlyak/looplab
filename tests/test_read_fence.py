@@ -892,6 +892,61 @@ def test_the_bound_separates_a_read_from_a_mutation_of_the_same_path(tmp_path):
     assert "may not create, delete, rename, truncate, link or change" in err
 
 
+def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
+    """The `os.chdir` audit event fires BEFORE the chdir, so its target proves nothing about where
+    the process will actually stand. Re-deriving `_CWD_REACHES_ROOT` from that pre-event cleared the
+    flag for a chdir that then FAILED — and `try: os.chdir(cfg.output_dir) except OSError: pass`
+    around a directory that does not exist yet is ordinary generated-training-code shape. The
+    process was still standing in the repo the launcher put it in, and every relative read took the
+    fast bail: the v6-node-4 read, allowed under policy `deny`, with nothing logged."""
+    src, _sib, run_dir, _wd, _models = _world(tmp_path)
+    fence = _install(run_dir, src)
+    rc, out, err, _to = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, fence)                                    # cwd IS the source tree
+    assert rc != 0 and CHECKPOINT not in out
+    assert "LoopLabSourceReadRefused" in err
+
+    # The same shape under `warn`, which is the half that proves the fence still SAW the read rather
+    # than that `deny` raised. It has to DISCRIMINATE, and two nearby spellings do not: a chdir back
+    # INTO the tree is refused by the chdir hook itself under `deny` whether the flag is monotonic or
+    # not, and a read of a harmless relative name after `chdir("/tmp")` is allowed either way. Under
+    # `warn` the read PROCEEDS in both implementations — so the observable that separates them is the
+    # violation LOG. With the flag cleared by the failed chdir, the relative name takes `_resolve`'s
+    # fast bail and nothing is ever recorded: the read is not merely allowed, it is invisible.
+    warn_run = tmp_path / "run-warn"
+    (warn_run / "nodes").mkdir(parents=True)
+    warn_fence = _install(warn_run, src, policy="warn")
+    rc2, out2, _err2, _to2 = _run("""
+        import os
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, warn_fence)
+    assert rc2 == 0 and CHECKPOINT in out2, "warn observes, it does not block"
+    logged = (warn_run / read_fence.FENCE_DIRNAME / read_fence.VIOLATION_LOG).read_text()
+    assert str(src / "experiments" / "baseline" / "final" / "model.safetensors") in logged, (
+        "a read the fence stopped resolving is a read nobody can review afterwards")
+
+    # The plain outside-the-tree case still works, so the monotonic flag costs correctness nothing.
+    rc3, out3, _err3, _to3 = _run("""
+        import os
+        os.chdir("/tmp")
+        try:
+            print(open('x-not-here.txt').read())
+        except FileNotFoundError:
+            print("relative reads outside the tree still work")
+        """, src, fence)
+    assert rc3 == 0 and "still work" in out3
+
+
 def test_settings_vocabulary_matches_the_module(tmp_path):
     """`core` cannot import `runtime`, so the policy vocabulary is spelled twice. Pin them equal —
     a third rung added on one side only would be accepted by config and ignored by the fence."""

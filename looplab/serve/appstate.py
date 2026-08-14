@@ -25,12 +25,15 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
+from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.authoring_projection import card_authoring
 from looplab.events.eventstore import iter_event_jsonl
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED
+from looplab.serve.deletion_transaction import (
+    DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import global_settings, llm_settings
@@ -67,10 +70,15 @@ _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
 _TRACE_CLEAR_RECEIPT_PREFIX = ".trace-clear."
 # Whole-run Replay receipts are also root-side service files keyed by a run-path digest.
 _RESET_RECEIPT_PREFIX = ".looplab-reset-receipt-"
-# Whole-run deletion uses one root fence plus operation-bound receipt/quarantine entries.
-_DELETE_FENCE_PREFIX = ".looplab-delete-fence-"
-_DELETE_RECEIPT_PREFIX = ".looplab-delete-receipt-"
-_DELETE_QUARANTINE_PREFIX = ".looplab-delete-quarantine-"
+# Whole-run deletion uses one root fence plus operation-bound receipt/quarantine/identity entries.
+# IMPORTED, not respelled: these names are what the deletion writers build their filenames from, and
+# a hand-copied prefix here does not fail when a writer's changes — it silently stops recognizing
+# that writer's files as service files, which at this call site means `run_dir` treats one as a run
+# id. The identity sidecar was missing from the hand-written set for exactly that reason.
+_DELETE_SERVICE_PREFIXES = (
+    RUN_DELETION_FENCE_PREFIX, DELETE_RECEIPT_PREFIX,
+    DELETE_QUARANTINE_PREFIX, DELETE_IDENTITY_PREFIX,
+)
 
 # Fields that can contain verbatim source, captured process output, private host paths, or an internal
 # model-facing prompt. `state_payload` feeds both the public /state GET and headerless EventSource SSE,
@@ -177,7 +185,7 @@ class AppState:
         lowered = requested.name.lower()
         if (lowered in _RESERVED_RUN_IDS or lowered.startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
-                _DELETE_FENCE_PREFIX, _DELETE_RECEIPT_PREFIX, _DELETE_QUARANTINE_PREFIX))):
+                *_DELETE_SERVICE_PREFIXES))):
             raise HTTPException(404, "no such run")
         try:
             fence = load_run_deletion_fence(requested)

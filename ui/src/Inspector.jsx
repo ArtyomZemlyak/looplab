@@ -2154,13 +2154,13 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
     if (next) { setDraft(clampEpisodeIndex(map, activeKind, target) + 1); onSeek(next) }
   }
   return <span className="trace-episodes">
-    <button type="button" className="seg" aria-expanded={open}
+    <button type="button" className="btn xs ghost" aria-expanded={open}
       title="Jump the trace window to an earlier step of this experiment — an early repair, the first training run, the proposal."
       onClick={() => setOpen(value => !value)}>
       <span aria-hidden="true">{open ? '▾' : '▸'}</span> steps
       {here ? <span className="muted"> · {here.name} {here.ordinal}/{here.count}</span> : null}
     </button>
-    {anchor && <button type="button" className="seg" onClick={() => onSeek(null)}
+    {anchor && <button type="button" className="btn xs ghost" onClick={() => onSeek(null)}
       title="Return the window to this experiment's most recent steps">latest ›</button>}
     {open && <span className="trace-episodes-body">
       {map === null && <span className="muted" role="status">loading steps…</span>}
@@ -2169,7 +2169,7 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
       {map?.status === 'empty' && <span className="muted" role="status">{EPISODE_MAP_EMPTY}</span>}
       {map?.status === 'ready' && <>
         <label className="muted" htmlFor={`${pickerId}-kind`}>step </label>
-        <select id={`${pickerId}-kind`} className="seg" value={activeKind || ''}
+        <select id={`${pickerId}-kind`} className="text" value={activeKind || ''}
           onChange={e => { setKind(e.target.value); setDraft(1) }}>
           {kinds.map(row => <option key={row.label} value={row.label}>
             {row.name} ({row.count})</option>)}
@@ -2177,20 +2177,20 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
         {/* Prev/next/first/last plus a typed ordinal, because a picker cannot list 2,345 repairs and
             a list that long is a phone book, not a map. Every position is clamped in the model, so a
             typo can never issue a request the server would refuse. */}
-        <button type="button" className="seg" title="first" disabled={index <= 0}
+        <button type="button" className="btn xs ghost" title="first" disabled={index <= 0}
           onClick={() => seek(0)}>«</button>
-        <button type="button" className="seg" title="previous" disabled={index <= 0}
+        <button type="button" className="btn xs ghost" title="previous" disabled={index <= 0}
           onClick={() => seek(index - 1)}>‹</button>
-        <input className="seg trace-episode-n" type="number" min="1" max={active?.count || 1}
+        <input className="text trace-episode-n" type="number" min="1" max={active?.count || 1}
           aria-label={`which ${active?.name || 'step'} to show`}
           value={draft}
           onChange={e => setDraft(Number(e.target.value) || 1)}
           onKeyDown={e => { if (e.key === 'Enter') seek(index) }} />
         <span className="muted">of {active?.count || 0}</span>
-        <button type="button" className="seg" title="next"
+        <button type="button" className="btn xs ghost" title="next"
           disabled={!active || index >= active.count - 1}
           onClick={() => seek(index + 1)}>›</button>
-        <button type="button" className="seg" title="last"
+        <button type="button" className="btn xs ghost" title="last"
           disabled={!active || index >= active.count - 1}
           onClick={() => seek((active?.count || 1) - 1)}>»</button>
         <button type="button" className="btn xs" onClick={() => seek(index)}>show</button>

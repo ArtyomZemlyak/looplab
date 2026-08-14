@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from looplab.core.atomicio import durable_no_replace_rename, strict_fsync_parent
 from looplab.core.pathsafe import is_reparse, WINDOWS_RESERVED
 from looplab.core.run_deletion import (
-    RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
+    RUN_DELETION_FENCE_PREFIX, RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
     assert_run_deletion_write_allowed, clear_run_deletion_fence,
     load_run_deletion_fence, publish_run_deletion_fence, run_deletion_key,
     run_deletion_snapshot_token)
@@ -45,7 +45,7 @@ _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SERVICE_PREFIXES = (
     _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
     DELETE_RECEIPT_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_IDENTITY_PREFIX,
-    ".looplab-delete-fence-",
+    RUN_DELETION_FENCE_PREFIX,
 )
 
 

@@ -3308,6 +3308,14 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
    reach — never focus-conditional; see traceScrollModel.js for what that cost the last time. The
    body wraps onto its own line rather than squeezing the switcher, because on a repaired node it
    carries a kind select, four nav buttons, an ordinal field and a summary. */
+/* The episode picker carries LAYOUT only, and that is deliberate: its controls are `.btn.xs.ghost`
+   and `.text`, both fully specified and themed. It shipped with eight bare `class="seg"` controls —
+   the exact white-slab defect the RESEARCH LANE comment below documents, reintroduced by a branch
+   that never saw it, because `.seg` is a CONTAINER rule (`.seg button` carries the background) and
+   as a class on the control itself it contributes a border and nothing else. Adding a scoped
+   `.trace-episodes .seg` paint would have been the third such exception and would have taught the
+   next picker the same wrong lesson; the guard in `test/traceSurfaceReuse.test.js` says so and it
+   is the reason this was caught at all. */
 .trace-episodes { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .trace-episodes-body { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .trace-episodes-body select { max-width: 14em; }

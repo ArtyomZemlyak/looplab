@@ -418,8 +418,16 @@ def test_run_argv_cleanup_swallows_a_cidfile_oserror(tmp_path, monkeypatch):
     assert rc == 0
 
 
-def test_kill_tree_never_signals_an_already_reaped_process():
+def test_kill_tree_skips_a_reaped_pid_but_still_group_kills_a_live_one():
     """A reaped PID is FREE — signalling its group can hit a stranger, including the engine itself.
+
+    RENAMED, not rewritten: a merge gave this test and the one below the same name, so Python bound
+    the later definition and this body — the stronger of the two — silently stopped running. The
+    difference is not academic. Removing `_kill_tree`'s `returncode` fence leaves the surviving
+    same-named test GREEN (it calls `_kill_tree` on a reaped process and asserts nothing about what
+    was signalled) while this one fails with `[(4321, 9)] == []`. Both are kept: that one exercises
+    a real reaped `Popen` with no mocks, this one is the only place the two-sided rule — skip the
+    reaped group, still kill the live one — is actually checked.
 
     `_kill_tree` issues `os.killpg(os.getpgid(proc.pid), 9)` unconditionally. Once `wait()` /
     `communicate()` has collected the child the OS may reuse that PID, and callers do reach here

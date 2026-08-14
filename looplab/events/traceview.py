@@ -1749,49 +1749,71 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
     owned_traces = {str(tid) for tid in (node_trace_ids or {}).values() if tid}
     wanted_nodes = {str(n) for n in node_ids}
 
-    research: list[dict] = []
-    matched_research = 0
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for span in spans:
         by_trace[span.get("trace_id")].append(span)
+    # TWO PASSES, and the split is what makes the cap both CHEAP and HONEST. Pass one matches roots
+    # and keeps only their sort key — no `_rollup`, no row dict. Pass two sorts, takes the oldest
+    # `TRACE_CARD_RESEARCH_CAP`, and rolls up only those.
+    #
+    # Neither single-pass spelling works. Building every row and slicing afterwards paid a whole
+    # `_rollup` per matching trace for rows nobody sees — 50k rollups for a 256-row answer on the
+    # crafted `spans.jsonl` this cap exists for. Stopping the loop at the cap fixed that and broke
+    # the ORDER: `by_trace` is iterated in span-file insertion order, and `spans.jsonl` is appended
+    # as spans CLOSE, so file order tracks END time — a first-N-encountered cutoff dropped the
+    # card's own FIRST proposal, which is precisely the row the oldest-first rule exists to keep.
+    matches: list[tuple] = []
     for tid, trace_spans in by_trace.items():
         for root in (s for s in trace_spans if not s.get("parent_id") and s.get("name") == "propose"):
             attributes = root.get("attributes") or {}
             stamped = str(attributes.get("card_id") or "")
             if stamped != str(card_id) and str(tid) not in owned_traces:
                 continue
-            matched_research += 1
-            if len(research) >= TRACE_CARD_RESEARCH_CAP:
-                # COUNT IT, but do not build it. `_rollup` walks a whole trace and the row is a
-                # fresh dict; slicing after the fact left both costs on the request thread for rows
-                # nobody would see — 50k rollups for a 256-row answer on the crafted `spans.jsonl`
-                # this cap exists for. `total_research` stays truthful because it counts here.
-                continue
-            roll = _rollup(trace_spans)
-            research.append({
-                "name": "propose",
-                "trace_id": tid,
-                "span_id": root.get("span_id"),
-                "start": _finite_number(root.get("start"), nonnegative=True),
-                "duration_s": _finite_number(root.get("duration_s"), nonnegative=True),
-                "status": root.get("status"),
-                # How this row was matched, so the reader is never left guessing which rule applied.
-                "link": "card_id" if stamped == str(card_id) else "shared_trace",
-                "proposed_for_node": attributes.get("proposed_for_node"),
-                "operator": attributes.get("operator"),
-                "spans": len(trace_spans),
-                "generations": roll["generations"],
-                "tools": roll["tools"],
-                "tokens": roll["tokens"],
-            })
-    research.sort(key=lambda row: (row["start"], str(row["trace_id"])))
+            # `_finite_number` is TOTAL: a missing, non-numeric, non-finite, out-of-range or
+            # negative `start` all come back as its `default` of 0.0, and it has no branch that
+            # returns None. So the sort key needs no coercion of its own. There WAS one here —
+            # `start if isinstance(start, (int, float)) else 0.0` — under a comment saying it kept a
+            # malformed span from raising on None against float. That branch was unreachable and the
+            # comment described a guarantee its own callee already makes, which is the worse half:
+            # it reads as the thing protecting the sort, so hardening `_finite_number` looked
+            # optional. This IS the sort's protection, and it lives one call down.
+            #
+            # A malformed start therefore sorts as 0.0, i.e. OLDEST, and the cap keeps it ahead of
+            # real rows. That is deliberate: the cap's rule is oldest-first because the row it must
+            # never drop is the card's own first proposal, and a span whose start we cannot read is
+            # not evidence that it came later. `str(tid)` is the tie-break, so a batch of them still
+            # orders deterministically rather than by dict insertion.
+            matches.append((_finite_number(root.get("start"), nonnegative=True),
+                            str(tid), tid, root))
+    matched_research = len(matches)
+    matches.sort(key=lambda m: (m[0], m[1]))
+
+    research: list[dict] = []
+    for _sort_start, _tid_text, tid, root in matches[:TRACE_CARD_RESEARCH_CAP]:
+        trace_spans = by_trace[tid]
+        attributes = root.get("attributes") or {}
+        stamped = str(attributes.get("card_id") or "")
+        roll = _rollup(trace_spans)
+        research.append({
+            "name": "propose",
+            "trace_id": tid,
+            "span_id": root.get("span_id"),
+            "start": _finite_number(root.get("start"), nonnegative=True),
+            "duration_s": _finite_number(root.get("duration_s"), nonnegative=True),
+            "status": root.get("status"),
+            # How this row was matched, so the reader is never left guessing which rule applied.
+            "link": "card_id" if stamped == str(card_id) else "shared_trace",
+            "proposed_for_node": attributes.get("proposed_for_node"),
+            "operator": attributes.get("operator"),
+            "spans": len(trace_spans),
+            "generations": roll["generations"],
+            "tools": roll["tools"],
+            "tokens": roll["tokens"],
+        })
+    # No re-sort: `matches` was already ordered by the same key, and the slice preserves it.
+    # OLDEST-FIRST, like the node-trace tail: the card's own first proposal is the row that
+    # explains it, and dropping the head to show the tail would answer a different question.
     total_research = matched_research
-    # OLDEST-FIRST truncation, like the node-trace tail: the card's own first proposal is the row
-    # that explains it, and dropping the head to show the tail would answer a different question.
-    research = research[:TRACE_CARD_RESEARCH_CAP]
-    # (The matching loop above stops building rows once the cap is reached — see `_rollup` there.
-    # Slicing alone bounded the RESPONSE and not the WORK, which is the half that matters for the
-    # crafted-log case this cap exists for.)
 
     nodes = []
     ordered_nodes = sorted(wanted_nodes, key=lambda value: (len(value), value))

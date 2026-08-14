@@ -300,6 +300,19 @@ def test_the_note_follows_the_edit_path_and_only_reports_what_the_hunk_introduce
     (["srun", "python", "score.py"], ["score.py"]),
     (["env", "FOO=1", "python", "-m", "pkg.mod"], ["pkg/mod.py", "pkg/mod/__main__.py"]),
     (["nohup", "python", "eval/score.py"], ["eval/score.py"]),
+    # …and the assignment's VALUE may itself end in an interpreter-looking component, which is
+    # ordinary in an ML environment. `head` is the BASENAME, so testing the interpreter regex before
+    # the assignment shape anchored `start` on the assignment and lost the real entrypoint: both
+    # rows below returned [] — a silently unprotected scorer, which is the failure this function
+    # exists to prevent. These are the rows that discriminate; `FOO=1` above does not, because `1`
+    # never matched the pattern in the first place.
+    (["env", "VIRTUAL_ENV=/opt/venvs/python3", "python", "train.py"], ["train.py"]),
+    (["env", "PYTHONHOME=/usr/lib/python3.11", "python3", "-m", "pkg.mod"],
+     ["pkg/mod.py", "pkg/mod/__main__.py"]),
+    # The skip is deliberately not applied at index 0: argv[0] is the command being executed, and
+    # without a shell a bare `VAR=value` there is no launcher at all. Saying nothing is the honest
+    # answer — reading through it would name a file on the strength of a command that cannot run.
+    (["VIRTUAL_ENV=/opt/venvs/python3", "python", "train.py"], []),
     # Everything below names no in-repo file, and says so rather than guessing.
     (["bash", "run.sh"], []),
     # A launcher that does NOT name an interpreter: its own flag grammar decides which of

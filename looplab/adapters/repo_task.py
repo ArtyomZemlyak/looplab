@@ -246,14 +246,21 @@ def entrypoint_candidates(command) -> list[str]:
     # submit time, which is the honest outcome rather than a confident wrong one.
     start = -1
     for i, tok in enumerate(argv):
+        # THE ASSIGNMENT SHAPE IS TESTED FIRST, before the interpreter regex. `head` is the
+        # BASENAME, so `VIRTUAL_ENV=/opt/venvs/python3` has head `python3` and matched the
+        # interpreter pattern — anchoring `start` on an env assignment and losing the real
+        # entrypoint entirely (measured: `env VIRTUAL_ENV=/opt/venvs/python3 python train.py`
+        # returned []). `VIRTUAL_ENV`/`PYTHONHOME`/`CONDA_PREFIX` values ending in a `pythonN`
+        # component are ordinary in an ML environment, and the result is a silently unprotected
+        # scorer — the failure this whole function exists to prevent.
+        if i and "=" in tok and not tok.startswith("-"):
+            continue                      # `env`'s `VAR=value` assignments precede the command
         head = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
         if re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
             start = i
             break
         if head in _TRANSPARENT_LAUNCHERS:
             continue                      # `srun`/`env`/`nohup`: the command follows
-        if i and head and "=" in tok and not tok.startswith("-"):
-            continue                      # `env`'s `VAR=value` assignments precede the command
         return []                         # anything else owns the argv; we cannot read through it
     if start < 0:
         return []

@@ -119,13 +119,35 @@ class RunIdentity:
         return bool(self.run_id) and _text(row.get("run_id")) == self.run_id
 
     def name_matched(self, row: dict) -> bool:
-        """Was this row attributed by directory NAME while a uid was available to key on?
+        """Did attributing this row rest on a directory NAME while a uid was available to key on?
 
-        The disclosure predicate. False for a legacy caller (`identity` already says `run_id`, so
-        every match is by name and counting them adds nothing) and false for any row carrying a
-        uid. True exactly for the mixed case the receipt used to misreport."""
-        return (bool(self.run_uid) and not _text(row.get("run_uid"))
-                and bool(self.run_id) and _text(row.get("run_id")) == self.run_id)
+        The disclosure predicate behind `name_matched` / `identity: "mixed"`. False for a legacy
+        caller — `identity` already says `run_id`, so every match is by name and counting them adds
+        nothing.
+
+        TWO PLACES a name can decide it, and reading only the first understated the disclosure: the
+        ROW itself may be uid-less, and a row that DOES carry this run's uid may still be attributed
+        through a uid-less `evidence_refs` entry (`lesson_keep_reason` treats a bare-name ref as a
+        self-reference, which is what makes the row deletable). A purge that deleted such a row
+        reported `identity: "run_uid"` — "this could not have touched another run" — over a decision
+        a directory name made. `_name_matched_refs` is the second half."""
+        if not (self.run_uid and self.run_id):
+            return False
+        if not _text(row.get("run_uid")):
+            return _text(row.get("run_id")) == self.run_id
+        return self._name_matched_refs(row)
+
+    def _name_matched_refs(self, row: dict) -> bool:
+        """True when a uid-less `evidence_refs` entry naming this run's DIRECTORY decided the row.
+
+        Only reached for a row that carries this run's uid, so the row's own attribution is exact;
+        what is inexact is the corroboration test that let it be deleted."""
+        for ref in _evidence_refs(row):
+            if not isinstance(ref, dict):
+                continue
+            if not _text(ref.get("run_uid")) and _text(ref.get("run_id")) == self.run_id:
+                return True
+        return False
 
     @property
     def legacy_only(self) -> bool:
@@ -135,6 +157,30 @@ class RunIdentity:
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
+
+
+def _evidence_refs(row: dict) -> list:
+    """The `evidence_refs` entries a predicate may read — the ONE spelling both readers share.
+
+    `lesson_keep_reason` DECIDES whether the row is deleted; `RunIdentity._name_matched_refs`
+    discloses whether that deletion rested on a directory name. A disclosure predicate that scans a
+    different set from the decision it discloses is worse than no disclosure, and the two hand-rolled
+    scans disagreed in BOTH directions:
+
+    * the decision scan was unbounded, the disclosure stopped at `refs[:256]`. A uid-less
+      self-reference at index 300 deleted the row and the receipt then said `identity: "run_uid"` —
+      "this purge could not have touched another run" — over exactly the decision that could.
+    * the disclosure accepted a tuple, the decision required a list. That direction is only
+      reachable in-process (JSONL rows parse as lists), but it is a disclosure ABOUT a ref that
+      decided nothing, which is the same defect mirrored.
+
+    Neither bound is worth reinstating here. The decision scan has always been unbounded, so a cap
+    would not protect anything the cascade does not already do; capping the PAIR would silently keep
+    a row whose corroboration lives past the cap, and a cascade that quietly keeps rows is the
+    failure mode this module's docstring opens with.
+    """
+    refs = row.get("evidence_refs")
+    return refs if isinstance(refs, list) else []
 
 
 def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -> dict:
@@ -288,49 +334,50 @@ def lesson_keep_reason(row: dict, run: "RunIdentity") -> str:
         evidence = 2                                   # unreadable support is not absent support
     if evidence > 1:
         return "consolidated: it carries evidence from other runs"
-    refs = row.get("evidence_refs")
-    if isinstance(refs, list):
-        for ref in refs:
-            if not isinstance(ref, dict):
-                continue
-            # `run_uid` FIRST. `lesson_hygiene._evidence_lineage` writes BOTH on every ref precisely
-            # so a reader can use the durable one, and reading `run_id` first meant a ref naming a
-            # SURVIVING run by uid — but sharing this run's directory name — compared equal and the
-            # row was deleted. That is "destroy corroboration earned by runs that still exist,
-            # silently", i.e. the exact outcome the predicate exists to prevent.
-            # ONE rule: a ref naming any run that is not this one is corroboration, and a row with
-            # corroboration survives. There used to be a `continue` above this line, guarded on
-            # `other in {run.run_uid, run.run_id} and other == row's own uid` — unreachable BY
-            # EFFECT, because the two branches were exhaustive on `other in {…}`: whenever that
-            # guard held, the test below was already False and the loop iterated anyway. It read as
-            # a load-bearing rule about a ref naming this run's own uid, which is precisely the case
-            # the comment above says was destroying other runs' corroboration, so a maintainer
-            # hardening this predicate would have been editing a clause that never ran.
-            #
-            # NAMESPACES ARE NOT MIXED: a value from one namespace is compared against that
-            # namespace only. `other in {run.run_uid, run.run_id}` compared a uid against a name and
-            # a name against a uid, which is how a `run_id`-shaped value could match `run_uid` by
-            # coincidence.
-            #
-            # A BARE-NAME REF STILL NAME-MATCHES, deliberately, and this is the same single ambiguity
-            # `RunIdentity.owns` resolves the same way one level up — a uid-less row carrying this
-            # run's directory name is treated as this run's and DISCLOSED (`name_matched`,
-            # `identity: "mixed"`). Resolving it the other way here (only a legacy-keyed caller may
-            # name-match) looked more careful and was strictly worse: this run's OWN pre-uid
-            # `evidence_refs` — the exact shape a mixed-generation store is full of — then read as
-            # another run's corroboration, so the row was KEPT and the receipt told the operator it
-            # survived because other runs support it, which no row said. One ambiguity, one rule,
-            # one disclosure.
-            ref_uid = _text(ref.get("run_uid"))
-            ref_id = _text(ref.get("run_id"))
-            if ref_uid:
-                self_reference = bool(run.run_uid) and ref_uid == run.run_uid
-            elif ref_id:
-                self_reference = bool(run.run_id) and ref_id == run.run_id
-            else:
-                continue
-            if not self_reference:
-                return "consolidated: it carries evidence from other runs"
+    for ref in _evidence_refs(row):
+        if not isinstance(ref, dict):
+            continue
+        # `run_uid` FIRST. `lesson_hygiene._evidence_lineage` writes BOTH on every ref precisely
+        # so a reader can use the durable one, and reading `run_id` first meant a ref naming a
+        # SURVIVING run by uid — but sharing this run's directory name — compared equal and the
+        # row was deleted. That is "destroy corroboration earned by runs that still exist,
+        # silently", i.e. the exact outcome the predicate exists to prevent.
+        # ONE rule: a ref naming any run that is not this one is corroboration, and a row with
+        # corroboration survives. There used to be a `continue` above this line, guarded on
+        # `other in {run.run_uid, run.run_id} and other == row's own uid` — unreachable BY
+        # EFFECT, because the two branches were exhaustive on `other in {…}`: whenever that
+        # guard held, the test below was already False and the loop iterated anyway. It read as
+        # a load-bearing rule about a ref naming this run's own uid, which is precisely the case
+        # the comment above says was destroying other runs' corroboration, so a maintainer
+        # hardening this predicate would have been editing a clause that never ran.
+        #
+        # NAMESPACES ARE NOT MIXED: a value from one namespace is compared against that
+        # namespace only. `other in {run.run_uid, run.run_id}` compared a uid against a name and
+        # a name against a uid, which is how a `run_id`-shaped value could match `run_uid` by
+        # coincidence.
+        #
+        # A BARE-NAME REF STILL NAME-MATCHES, deliberately, and this is the same single ambiguity
+        # `RunIdentity.owns` resolves the same way one level up. Resolving it the other way here
+        # (only a legacy-keyed caller may name-match) looked more careful and was strictly
+        # worse: this run's OWN pre-uid `evidence_refs` — the exact shape a mixed-generation
+        # store is full of — then read as another run's corroboration, so the row was KEPT and
+        # the receipt told the operator it survived because other runs support it, which no row
+        # said.
+        #
+        # And it IS disclosed: `RunIdentity.name_matched` counts a row whose deletion rested on
+        # a uid-less ref, not only a uid-less row, so `identity` answers `mixed` rather than
+        # claiming the purge was exactly uid-keyed. One ambiguity, one rule, one disclosure —
+        # which was a claim before that predicate had its second half.
+        ref_uid = _text(ref.get("run_uid"))
+        ref_id = _text(ref.get("run_id"))
+        if ref_uid:
+            self_reference = bool(run.run_uid) and ref_uid == run.run_uid
+        elif ref_id:
+            self_reference = bool(run.run_id) and ref_id == run.run_id
+        else:
+            continue
+        if not self_reference:
+            return "consolidated: it carries evidence from other runs"
     try:
         if int(row.get("evidence_untraceable_count", 0) or 0) > 0:
             return "carries support whose run of origin is not recorded"

@@ -398,3 +398,56 @@ def test_the_champion_guard_is_load_bearing(memory):
     active = [r for r in rows if r.get("active")]
     assert len(active) == 1 and active[0]["metric"] == 0.4, (
         "the incumbent champion was re-elected away by an unrelated deletion")
+
+
+def test_a_uid_bearing_row_deleted_on_a_bare_name_ref_is_disclosed_as_mixed(memory):
+    """The SECOND place a directory name can decide a deletion, and the half that was missing.
+
+    This row carries the doomed run's uid, so its own attribution is exact. What is not exact is the
+    corroboration test that lets it go: `lesson_keep_reason` reads a uid-less `evidence_refs` entry
+    naming `doomed-run` as a self-reference — deliberately, because a mixed-generation store is full
+    of this run's own pre-uid refs — and a name is what made that call. Reading only the ROW's own
+    identity reported `identity: "run_uid"`, the label an operator reads as "this purge cannot have
+    touched another run", over precisely the decision that can.
+    """
+    row = {"run_id": GONE, "run_uid": GONE_UID, "task_id": "t", "statement": "x", "outcome": "won",
+           "evidence_count": 1, "evidence_refs": [{"node_id": 2, "run_id": GONE}]}
+    assert lesson_keep_reason(row, DOOMED) == "", "control: the bare-name ref makes it deletable"
+    assert DOOMED.name_matched(row) is True
+
+    _write(memory / "lessons.jsonl", [row])
+    report = attributable_memory(memory, GONE, GONE_UID)
+    assert report["deletable"] == 1 and report["identity"] == "mixed"
+    assert report["name_matched"] == 1
+
+    # A ref that names the run by UID decided nothing by name, so it is not disclosed. The
+    # disclosure has to be specific enough to be worth reading.
+    exact = dict(row, evidence_refs=[{"node_id": 2, "run_id": GONE, "run_uid": GONE_UID}])
+    assert lesson_keep_reason(exact, DOOMED) == ""
+    assert DOOMED.name_matched(exact) is False
+    _write(memory / "lessons.jsonl", [exact])
+    assert attributable_memory(memory, GONE, GONE_UID)["identity"] == "run_uid"
+
+
+def test_the_disclosure_scans_exactly_what_the_deletion_decided_on(memory):
+    """`lesson_keep_reason` has always scanned `evidence_refs` unbounded; the disclosure predicate
+    stopped at 256. So a uid-less self-reference past that index deleted the row while the receipt
+    said `identity: "run_uid"` — the two predicates reading different sets, which makes the
+    disclosure worse than none. Both now go through one spelling."""
+    refs = [{"node_id": i, "run_id": KEPT, "run_uid": KEPT_UID} for i in range(300)]
+    refs.append({"node_id": 300, "run_id": GONE})          # the bare-name self-reference, at 300
+    row = {"run_id": GONE, "run_uid": GONE_UID, "task_id": "t", "statement": "x", "outcome": "won",
+           "evidence_count": 1, "evidence_refs": refs}
+    # Every ref before index 300 names a SURVIVING run by uid, so it is not a self-reference and
+    # would keep the row — except that they are refs to another run, which is corroboration.
+    assert "other runs" in lesson_keep_reason(row, DOOMED)
+
+    # Make them all this run's own, so the only thing deciding the row is the far-out bare-name ref.
+    row["evidence_refs"] = [{"node_id": i, "run_id": GONE, "run_uid": GONE_UID}
+                            for i in range(300)] + [{"node_id": 300, "run_id": GONE}]
+    assert lesson_keep_reason(row, DOOMED) == "", "control: still deletable"
+    assert DOOMED.name_matched(row) is True, (
+        "a decision made past index 256 must still be disclosed — the deletion scan saw it")
+
+    _write(memory / "lessons.jsonl", [row])
+    assert attributable_memory(memory, GONE, GONE_UID)["identity"] == "mixed"
