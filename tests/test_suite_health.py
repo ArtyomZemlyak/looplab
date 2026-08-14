@@ -57,3 +57,49 @@ def test_no_test_module_shares_a_basename_with_another():
         names[path.name].append(str(path.relative_to(TESTS)))
     collisions = {name: paths for name, paths in names.items() if len(paths) > 1}
     assert collisions == {}, f"colliding test module basenames: {collisions}"
+
+
+REPO = TESTS.parent
+
+
+def test_the_docs_index_lists_each_document_once_under_its_own_number():
+    """A merge can RESURRECT a row somebody deleted, and nothing downstream notices.
+
+    Both halves of this have already happened. Two branches gave `docs/` two different documents
+    numbered 35, so `doc 35 §4b` in `core/config.py` and `(mega-review, doc 35)` in
+    `docs/guide/concepts.md` pointed at different files. And when the duplicate rows for 31/32/33
+    were merged into one apiece, a later `merge master into F1` brought the deleted copies straight
+    back — within fourteen commits. mkdocs is happy either way: the links resolve, so `--strict`
+    says nothing.
+
+    Three properties, all cheap: one row per document, one document per number, and a document's own
+    H1 number agreeing with its filename (the mega-review's H1 still said 35 after it moved to 40).
+    """
+    import re
+
+    docs = REPO / "docs"
+    index = (docs / "00-INDEX.md").read_text(encoding="utf-8")
+
+    by_file, by_number = collections.defaultdict(list), collections.defaultdict(set)
+    for line in index.splitlines():
+        row = re.match(r"\|\s*(\d+)\s*\|\s*\*\*\[([^\]]+)\]", line)
+        if row:
+            by_file[row.group(2)].append(row.group(1))
+            by_number[row.group(1)].add(row.group(2))
+
+    assert {name: rows for name, rows in by_file.items() if len(rows) > 1} == {}, \
+        "a document is listed more than once — a merge most likely resurrected a deleted row"
+    assert {num: sorted(names) for num, names in by_number.items() if len(names) > 1} == {}, \
+        "two documents share a number — every `doc N` reference in the tree is now ambiguous"
+
+    numbered = {p.name: re.match(r"^(\d+)-", p.name).group(1)
+                for p in docs.glob("*.md")
+                if re.match(r"^\d+-", p.name) and p.name != "00-INDEX.md"}
+    assert sorted(n for n in numbered if n not in index) == [], "a numbered document is not indexed"
+
+    mismatched = []
+    for name, number in sorted(numbered.items()):
+        heading = re.match(r"^#\s*(\d+)\b", (docs / name).read_text(encoding="utf-8").splitlines()[0])
+        if heading and heading.group(1) != number.lstrip("0"):
+            mismatched.append(f"{name} opens with '# {heading.group(1)}'")
+    assert mismatched == [], mismatched
