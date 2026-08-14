@@ -17,6 +17,7 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 import { metricComparable, sortRuns } from './runIndex.js'
+import { crossRunGroups, groupClaim, rankCoverage } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
@@ -2311,54 +2312,102 @@ export function HyperImportancePanel({ state, onClose }) {
   )
 }
 
-// Same-task IDs are an operational lookup key, not a ComparisonContract. Keep this
-// legacy panel useful for navigation without ranking raw objectives whose metric unit, dataset/eval
-// identity, and protocol are absent from /api/runs. The claim ledger owns contract-bound comparison.
-const CROSS_RUN_OBSERVATION_LIMIT = 100
-
+// Same-task IDs are an operational lookup key, not a ComparisonContract, and this panel used to stop
+// there: a flat list under "Cross-run ranking unavailable … values below remain per-run observations".
+// That refusal was RIGHT about what a task id proves and WRONG about what follows from it — an
+// operator with 45 runs on this box was left comparing numbers by eye, which is not a safer answer,
+// only an unstated one. The overlay it now draws is a ranking inside each COMPARABLE GROUP (one task
+// id + one direction, i.e. exactly `runIndex.js::metricComparable` applied per partition instead of
+// over the whole payload), with competition ranks so ties are ties, with an integrity-incomplete run
+// holding no rank at all, and with the two things a run row can never prove printed beside every
+// group. The decisions and the wording are in `crossRunRank.js`, which `node --test` drives against
+// the real corpus; this half is choreography. The claim ledger still owns contract-bound comparison.
+//
+// The fold runs over the payload this panel ALREADY fetches — no second request, and the whole corpus
+// is grouped once so the panel can also say how many comparable groups exist outside this task.
 export function CrossRunPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
   const task = typeof state.task_id === 'string' && state.task_id.trim() ? state.task_id : ''
-  // an absent task identity is not a shared identity. Never combine legacy rows merely
-  // because they all encode the missing value as an empty string.
-  const observations = (task ? runs.filter(r => r.task_id === task) : [])
-    .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
-    .filter(r => r.m != null)
-  const rows = observations.slice(0, CROSS_RUN_OBSERVATION_LIMIT)
-  const hidden = observations.length - rows.length
+  const index = useMemo(() => crossRunGroups(runs), [runs])
+  const coverage = rankCoverage(index)
+  // The run's OWN direction first: this panel opened from a workspace, and the group that run belongs
+  // to is the one being asked about. A second group only appears when sibling runs of the same task
+  // recorded the opposite objective — which the corpus really does contain (`dataset_task` is 4
+  // minimize runs plus `mnist-experiments` maximizing), and which is precisely what may not be
+  // ordered into one column.
+  const own = group => (group.direction === state.direction ? 0 : 1)
+  const groups = index.groups.filter(group => group.taskId === task)
+    .sort((a, b) => own(a) - own(b) || b.size - a.size)
+  const elsewhere = index.comparable.filter(group => group.taskId !== task).length
+  const observations = groups.reduce((sum, group) => sum + group.size, 0)
+  const omitted = groups.reduce((sum, group) => sum + group.omitted, 0)
+  const rankCell = row => (row.rank == null
+    ? <span className="muted" title="no rank: this run's event log stops being readable, so the value beside it is the best of a PREFIX">—</span>
+    : <span title={row.tied ? `tied with ${row.tied} other run(s) at this value` : 'rank within this comparable group'}>
+        #{row.rank}{row.tied ? ' (tie)' : ''}</span>)
+  const metricCell = row => <>{fmt(row.value)}
+    {row.confirmed ? ' (confirmed mean)' : ''}
+    {row.provisional && <span className="muted" title="this run has not finished; its best can still improve"> · best so far</span>}
+  </>
   return (
-    <Panel title="Same-task run observations"
-      sub={resource.data ? `${observations.length} metric observation${observations.length === 1 ? '' : 's'}` : ''}
+    <Panel title="Same-task run comparison"
+      sub={resource.data ? `${observations} metric observation${observations === 1 ? '' : 's'}` : ''}
       onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
         <span className="muted">task ID:</span><code>{task || 'not recorded'}</code>
-        <span className="muted">{rows.length} shown · comparison unavailable</span>
+        <span className="muted">{groups.length} comparable group{groups.length === 1 ? '' : 's'} · ranked within a group only</span>
       </div>}
-      {resource.data && (task
-        ? <div className="notice resource-warning" role="status">
-            <b>Cross-run ranking unavailable.</b>
-            <span> A shared task ID does not bind metric name/unit, dataset and evaluation identity, or a
-              comparison protocol. Values below remain per-run observations.</span>
-          </div>
-        : <div className="notice resource-warning" role="status">
-            <b>Same-task observations unavailable.</b>
-            <span> This run has no recorded task ID, so no portfolio row can be bound to it. Rows with
-              missing identities are never grouped.</span>
-          </div>)}
-      {rows.length
-        ? <DataTable caption="Same-task per-run metric observations" card={false}><table className="tbl"><thead><tr><th>run</th><th>recorded objective</th><th>direction</th><th>nodes</th><th>status</th></tr></thead><tbody>
-            {rows.map(r => <tr key={r.run_id}>
-              <td><a href={`#/run/${encodeURIComponent(r.run_id)}`}>{r.label || r.run_id}</a></td>
-              <td>{fmt(r.m)}{r.best_confirmed != null ? ' (confirmed mean)' : ''}</td>
-              <td className="muted">{r.direction}</td><td className="muted">{r.nodes}</td>
-              <td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td></tr>)}
-          </tbody></table></DataTable>
+      {resource.data && !task && <div className="notice resource-warning" role="status">
+        <b>Same-task observations unavailable.</b>
+        <span> This run has no recorded task ID, so no portfolio row can be bound to it. Rows with
+          missing identities are never grouped.</span>
+      </div>}
+      {groups.map(group => {
+        const claim = groupClaim(group)
+        return <div key={group.key} className="notice resource-warning" role="status">
+          <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}.</b>
+          <span> {claim.claim}</span>
+          <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
+            {claim.refusals.map((line, i) => <li key={i} className="muted">{line}</li>)}
+          </ul>
+        </div>
+      })}
+      {groups.length
+        ? <DataTable caption="Same-task per-run metric observations by comparable group" card={false}><table className="tbl">
+            <thead><tr><th>rank</th><th>run</th><th>recorded objective</th><th>nodes</th><th>status</th></tr></thead>
+            {groups.map(group => <tbody key={group.key}>
+              {/* One region, one caption: `dataTableMigration.test.js` reads captions statically, so a
+                  per-group caption cannot exist. The group boundary is a header ROW instead, which is
+                  also what keeps two objectives from reading as one ordered list. */}
+              <tr className="xr-group"><th colSpan={5} scope="colgroup">
+                {group.taskId} · {group.direction === 'min' ? 'lower is better' : 'higher is better'}
+                {' · '}{group.ranked} of {group.size} ranked
+              </th></tr>
+              {[...group.rows, ...group.unranked].map(row => <tr key={row.runId}>
+                <td>{rankCell(row)}</td>
+                <td><a href={`#/run/${encodeURIComponent(row.runId)}`}>{row.label}</a></td>
+                <td>{metricCell(row)}</td>
+                <td className="muted">{row.nodes}</td>
+                <td className="muted">{row.phase || (row.provisional ? '—' : 'finished')}</td>
+              </tr>)}
+            </tbody>)}
+          </table></DataTable>
         : resource.status === 'ready' && task
           && <div className="muted">No per-run metric observations for this task ID yet.</div>}
-      {hidden > 0 && <div className="muted" style={{ marginTop: 8 }}>
-        {hidden} additional observation{hidden === 1 ? '' : 's'} omitted by the client render limit.
+      {omitted > 0 && <div className="muted" style={{ marginTop: 8 }}>
+        {omitted} additional observation{omitted === 1 ? '' : 's'} omitted by the client render limit.
+      </div>}
+      {/* Coverage, in the spirit of `conceptForest.js::forestCoverage`: what this screen ranked, and
+          the far larger population it says nothing about. */}
+      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
+        This server holds {coverage.runs} run{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns} of
+        them sit in {coverage.comparableGroups} comparable group{coverage.comparableGroups === 1 ? '' : 's'}.
+        {' '}{coverage.noMetric} recorded no metric and {coverage.singletonTasks} task/direction
+        {' '}combination{coverage.singletonTasks === 1 ? ' is' : 's are'} the only run of their kind, so
+        nothing on this box ranks them.
+        {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
       </div>}
     </Panel>
   )

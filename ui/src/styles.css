@@ -933,6 +933,12 @@ table.tbl th, table.tbl td { text-align: left; padding: 4px 8px; border-bottom: 
 table.tbl th { color: var(--fg-mut); font-weight: 500; position: sticky; top: 0; background: var(--bg-1); }
 table.tbl tr:hover td { background: var(--bg-2); }
 table.tbl tr.best-row td { color: var(--best); }
+/* The cross-run overlay's COMPARABLE-GROUP boundary (`panels.jsx::CrossRunPanel`). It is a real
+   `<th scope="colgroup">` so a screen reader hears where one objective's ranking ends and the next
+   begins, and it must NOT inherit the sticky column-header rule above — two stuck headers overlap,
+   and the second one silently covers the first group's rows. */
+table.tbl tr.xr-group th { position: static; color: var(--fg); font-weight: 650;
+  background: var(--bg-2); border-top: 1px solid var(--line); }
 .flag { color: var(--fail); font-weight: 600; }
 
 /* Shared accessible table contract: a named keyboard-scrollable region, sticky headers, optional
