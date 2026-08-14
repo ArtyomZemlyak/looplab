@@ -47,6 +47,41 @@ grading its own text, and it would be graded on a run where BOTH inputs came fro
     row, exactly the way `metric_salvage` makes a salvaged metric visible-but-not-selectable rather
     than silently trusted.
 
+--------------------------------------------------------------------------------------------------
+WHAT `unmet` IS PRECISE ABOUT, AND WHAT IT IS NOT. Two limits, different in kind — one is a caller's
+obligation this module cannot enforce, the other is a ceiling of the approach.
+
+THE INPUT MUST BE THE WHOLE RATIONALE, and that is the CALLER's to get right. `claimed_tokens` reads
+the text it is handed and has no way to know it was handed a PREFIX, so a caller that truncates first
+gets a confident verdict about a sentence the model did not finish. Not hypothetical:
+`crash_repair._triage_crash` capped the rationale at 300 chars — the same number as the DURABLE sink
+one layer down — and a crash rationale is written diagnosis-first ("diverged right after the R-Drop
+KL term, unlike the working nll_cos runs (0.728)") and fix-second ("Fix: <the concrete things>"). The
+cut therefore landed on that seam and delivered the CITATIONS while dropping the CLAIMS, which is
+the only half this rung exists to check. Measured over `runs/` on 2026-08-14: 83 of the 123
+model-authored rationales in the corpus are stored at exactly that cap — the MEDIAN rationale this
+rung read was truncated — and over the 54 repairs whose full text could be recovered from
+`spans.jsonl` and replayed, 3 of the 7 `unmet`s and 2 of the 3 `unstated`s are `verified` on the text
+the model actually wrote. `crash_repair._TRIAGE_RATIONALE_CAP` is now that intake bound and is
+deliberately far above every sink's; a sink capping its own column is fine and always was.
+
+A CITED NAME AND A CLAIMED NAME ARE THE SAME TOKEN, and no extractor over model-authored text will
+reliably tell them apart. "vs the working nll_cos runs" names a baseline being compared AGAINST; "I
+removed the nll_cos path" names a change being promised — identical to this module, which sees one
+token and one diff. That is a real residual: a rationale whose ONLY concrete token is a citation
+scores `unmet` where the honest answer is `unstated`. It is deliberately NOT patched, on three
+grounds. It is INHERENT — the discriminator would be a second regex over the same
+adversarially-authorable text, and "vs" / "unlike" / "compared with" / "the documented X recipe" is a
+phrasing list rather than a rule, so a model that writes around it is back where it started while an
+honest one writing "unlike the old nll_cos path, which I deleted" has its real claim dropped. It is
+CHEAP — `unmet` stops nothing (see the tiering above), so the cost is precision in a signal a model
+reads, never a wrong stop. And on the evidence it is RARE: replayed over the corpus's full-text
+rationales, ZERO of the four surviving `unmet` verdicts is a citation artifact, and the one case that
+looked like one was the truncation above. Widening the extractor to chase a class the corpus does not
+contain is the same trade `_NOT_A_CLAIM` refuses in the other direction. If it ever does need fixing,
+fix it TO `unstated` — the "I could not check this" verdict already exists — and never by dropping
+the token, which would make a real broken promise unverifiable.
+
 WHY THESE ARE NOT TRIAGE VERDICTS. `engine/triage.py::TRIAGE_ACTIONS` answers "keep repairing this
 node?" and is a JUDGEMENT, three-fifths of which a model may emit. These four answer "what did the
 repair just do?" and are FACTS the engine derives from bytes it holds — no model may emit one, no
@@ -145,6 +180,11 @@ def claimed_tokens(rationale) -> tuple[str, ...]:
 
     Pure and total — every input is an answer, never a raise, because it runs inside the attempt
     loop on model-authored text of arbitrary shape.
+
+    HAND IT THE WHOLE RATIONALE. A prefix is indistinguishable from a short answer here, and a crash
+    rationale puts its citations before its claims, so a truncated input reads as "named a baseline
+    and changed something else" — see the module docstring's measurement and
+    `crash_repair._TRIAGE_RATIONALE_CAP`, the intake bound that keeps this true.
     """
     text = rationale if isinstance(rationale, str) else ""
     if not text.strip():

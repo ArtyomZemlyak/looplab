@@ -85,6 +85,38 @@ class _MovingDev:
         return f"{_BAD}# attempt {self.repair_calls}\n"
 
 
+# The VERBATIM rationale from `runs/rubertlite-dr-unified-v7` node 0 attempt 2 (seq 476), recovered
+# from that run's `spans.jsonl` — the durable row holds only its first 300 characters. It is kept
+# whole here because its SHAPE is the defect: every concrete thing it promises to change is written
+# after the word "Fix:", at character 300, and the only token before that cut is `nll_cos` — the
+# 0.728 baseline it is comparing AGAINST. Truncated, the rung read a rationale that named one
+# historical metric and changed something else, and stamped `unmet` on the durable row.
+_V7_RATIONALE = (
+    "Diverged at step 50/35300, immediately after the only structural change vs the working "
+    "10-epoch nll_cos runs (0.728): the newly-added R-Drop auxiliary KL term. The idea (DCL+R-Drop, "
+    "the documented 0.8835 recipe) is sound; this is a numerical-stability bug in the new term, not "
+    "a flawed approach. Fix: compute the R-Drop KL in stable log-space (F.kl_div with "
+    "log_target=True and clamp the target probs to >=1e-7), upcast the KL term to fp32 before "
+    "scaling, and lower rdrop_alpha from 0.5 to 0.1 so the auxiliary term cannot destabilize the "
+    "DCL base in the first batches. Keep the rest of the proven recipe (nll_cos, lr 1e-3, wd 0.1, "
+    "accumulate 2, grad clip 1.0, bs 8k, positive_threshold 1).")
+
+
+class _ClaimingDev:
+    """A developer that makes exactly the change the rationale's SECOND half promises (and still
+    fails, so the loop runs to the operator's cap rather than to a metric)."""
+
+    def __init__(self):
+        self.repair_calls = 0
+
+    def implement(self, idea):
+        return _BAD
+
+    def repair(self, idea, code, error):
+        self.repair_calls += 1
+        return f"{_BAD}rdrop_alpha = 0.1\n"
+
+
 def _drive(run_dir, dev, judge, **kw):
     """Seed one node and run the REAL repair loop over it (no genesis, no policy search)."""
     kw.setdefault("auto_install_deps", False)
@@ -261,6 +293,85 @@ def test_the_engines_verdict_actually_reaches_the_live_judge(tmp_path):
     dev, judge = _InertDev(), _Judge()
     _drive(tmp_path / "reaches", dev, judge, inline_repair_attempts=8)
     assert any("THE ENGINE COMPARED THE BYTES" in h for h in judge.histories), judge.histories
+
+
+# --------------------------------------------------- the rung must be shown the WHOLE rationale
+def test_a_rationale_is_verified_against_its_whole_text_and_not_its_first_300_chars(tmp_path):
+    """Tier 1, driven through the real loop: the verdict on the DURABLE row, for a developer that
+    really did make the change the rationale's second half named.
+
+    `crash_repair._triage_crash` capped the model's rationale at 300 chars — the same number as the
+    durable sink one layer down — so `verify_repair` was handed a prefix and could not know it. A
+    crash rationale is diagnosis-first and fix-second, so the cut landed on that seam: 83 of the 123
+    model-authored rationales in `runs/` are stored at exactly the cap, and replaying the 54 whose
+    full text survives in `spans.jsonl` moves 5 verdicts. This is the live one."""
+    dev, judge = _ClaimingDev(), _Judge(rationale=_V7_RATIONALE)
+    evs, _ = _drive(tmp_path / "whole", dev, judge, inline_repair_attempts=1)
+
+    row = _repairs(evs)[0].data
+    assert row["verified"] == REPAIR_VERIFIED, (row["verified"], row.get("unmet"))
+    # …and specifically NOT the historical answer, which named the baseline the rationale cited.
+    assert row["unmet"] == []
+    # The intake bound is an INTAKE bound: the durable column is still bounded by its own sink, so
+    # widening what the engine reads did not widen what it writes into the event log.
+    assert len(row["rationale"]) <= 300
+
+
+def test_the_intake_bound_is_wider_than_every_sink_that_re_bounds_the_same_field():
+    """The rule, stated: a cap at the INTAKE silently truncates every reader, while a cap at a SINK
+    truncates only that sink's column. The rationale has four sinks and each keeps its own; the
+    intake must therefore be strictly the loosest, or it is the one doing the truncating again."""
+    assert crash_repair._TRIAGE_RATIONALE_CAP > 300          # the durable/terminal sinks
+    assert crash_repair._TRIAGE_RATIONALE_CAP > 200          # `repair_log["fix"]`, the judge history
+    # Wide enough, with headroom, for the rationales this repo has actually seen: the 93 recovered
+    # from `runs/` run 121-690 characters (median 330, p90 460).
+    assert crash_repair._TRIAGE_RATIONALE_CAP >= 2 * 690
+    assert claimed_tokens(_V7_RATIONALE[:crash_repair._TRIAGE_RATIONALE_CAP]) == \
+        claimed_tokens(_V7_RATIONALE), "the cap must not cut the live instance it was sized against"
+
+
+def test_truncation_can_only_ever_lose_a_claim_never_invent_one():
+    """Why widening the intake is safe in one direction and the bug was in the other. More text can
+    only ADD claims, and a claim that was met stays met — so no `verified` can become `unmet` by
+    being shown more, while an `unmet`/`unstated` can and does become `verified`."""
+    region = "<whole-file solution>\n@@\n+rdrop_alpha = 0.1\n+kl_div(x, y, log_target=True)\n"
+    kw = dict(changed=[], code_changed=True, region=region)
+    assert verify_repair(_V7_RATIONALE[:300], **kw).verdict == REPAIR_UNMET
+    assert verify_repair(_V7_RATIONALE[:300], **kw).unmet == ("nll_cos",)
+    assert verify_repair(_V7_RATIONALE, **kw).verdict == REPAIR_VERIFIED
+    # The prefix's claims are a SUBSET of the whole text's — that is the whole argument.
+    assert set(claimed_tokens(_V7_RATIONALE[:300])) < set(claimed_tokens(_V7_RATIONALE))
+
+
+def test_a_cited_name_and_a_claimed_name_are_the_same_token_to_this_rung():
+    """The residual, stated as a truth table rather than papered over — see the module docstring for
+    why it is not patched. What matters is that the row this rung EXISTS for stays red: a repair that
+    promises to remove something and then does not is still caught."""
+    diff = "<whole-file solution>\n@@\n-old = 1\n+new = 2\n"
+    kw = dict(changed=["train.py"], code_changed=True)
+
+    def verdict(rationale, region=diff):
+        return verify_repair(rationale, region=region, **kw).verdict
+
+    # 1. A PROMISE this diff does not keep. The case the rung is for — must stay `unmet`.
+    assert verdict("I removed the nll_cos path entirely") == REPAIR_UNMET
+    # 2. The same promise, kept. `verified`, and the token is why.
+    assert verdict("I removed the nll_cos path entirely",
+                   "<whole-file solution>\n@@\n-loss = nll_cos(a, b)\n") == REPAIR_VERIFIED
+    # 3. A pure CITATION and nothing else concrete. `unmet` here is the residual false positive:
+    #    the honest answer is `unstated`, because the rationale promised nothing checkable. It costs
+    #    precision in a signal a model reads and stops nothing — `unmet` is never actionable.
+    assert verdict("this diverged, unlike the working nll_cos runs (0.728); "
+                   "I will make the new term numerically stable") == REPAIR_UNMET
+    assert not verify_repair("this diverged, unlike the working nll_cos runs (0.728)",
+                             region=diff, **kw).actionable
+    # 4. A citation ALONGSIDE a kept promise — the shape the corpus actually contains, and the one
+    #    the intake fix restores. One met claim is enough, so the citation costs nothing.
+    assert verdict("unlike the working nll_cos runs, I set rdrop_alpha",
+                   "<whole-file solution>\n@@\n+rdrop_alpha = 0.1\n") == REPAIR_VERIFIED
+    # 5. Prose with no concrete token either way is `unstated`, never `unmet` — "I could not check
+    #    this" and "this checked out" stay different facts.
+    assert verdict("the approach is sound; this is a mechanical bug") == REPAIR_UNSTATED
 
 
 # ------------------------------------------------------------------ the claim extractor
