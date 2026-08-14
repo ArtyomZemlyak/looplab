@@ -471,6 +471,48 @@ Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are n
 the server sequencer and must not be run concurrently with an active server-owned command. Migrating
 those direct CLI paths is an explicit compatibility boundary.
 
+### Branching from a snapshot (fork-to-branch)
+
+An operator reading a **historical snapshot** can see the moment they want to branch from. Every
+other node action is refused there, and for a real reason: those actions name a node and let the LIVE
+state supply the rest (the client reads the node's current `attempt`), so a click made while reading
+seq N would execute against whatever the tail happens to hold. Branching is different in kind — the
+whole intent travels in the payload — so it is the one gesture a historical view may perform.
+
+It is **not** a new control event, and it is not `fork`. `fork` (`EV_FORK`) means "Researcher,
+propose an improvement on this node" and carries no idea at all. Branching with an *edited* idea is
+`inject_node`, which already transports an operator-authored `Idea`, a parent, and the
+`parent_generations` compare-and-swap that fences it — plus one optional key:
+
+```jsonc
+{"type": "inject_node", "data": {
+  "idea": {"operator": "improve", "params": {"x": 0.125}, "rationale": "halve the step"},
+  "parent_id": 3,
+  "parent_generations": {"3": 0},
+  "forked_from": {"node_id": 3, "generation": 0, "observed_seq": 412}
+}}
+```
+
+`forked_from` is the lineage receipt. Its three authored fields say what the branch came FROM and
+where the operator was standing; `observed_seq` is bounded by the run's current tail, so it can never
+name a state that does not exist. The server then **stamps two more** and refuses a payload that
+supplies either — `changed_fields` (the `Idea` fields on which this idea differs from its parent's)
+and `base_idea_digest` (the parent's own versioned idea identity), so "what the operator changed" is
+a fact anyone can re-derive from the same log rather than a claim the browser made about itself. The
+whole receipt lands on `node_created` and is folded to `Node.forked_from`.
+
+**The fence is a CONTENT compare-and-swap, deliberately not a tail one.** The legacy `/control`
+route binds an *approval* append to the pre-normalization tail, because an approval means "accept the
+gate that is open right now" and a replacement request must not be granted by a click aimed at its
+predecessor. A branch has no such dependency: it means the same thing at seq N and at the live tail
+as long as its named parent is still the one the operator saw, which `parent_generations` already
+checks. A tail CAS would be strictly worse than useless here — a live run appends unrelated rows
+several times a second, so it would refuse branches whose meaning nothing had touched.
+
+When the run *has* moved, the operator is told so rather than having their branch quietly re-aimed:
+a parent that was re-run answers `409 stale parent #3: current generation is 1`, and a tombstoned or
+aborted parent answers 409 as well. Nothing is queued in either case.
+
 **Reopening a *finished* run starts a new search epoch.** The nodes you add with the extra budget are
 a fresh candidate set, so reopening bumps `search_epoch` and re-opens the promotion gates: the
 multi-seed **confirmation** pass runs again (already-confirmed nodes are reused for free, only the new

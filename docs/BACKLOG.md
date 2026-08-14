@@ -275,11 +275,29 @@ site that proves it is open.
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
     (`panels.jsx:2340-2343`). `serve/routers/cross_run.py` is the governance/claims surface, not this.
-11. **Fork-to-branch is still two primitives plus a read-only view (P1, M).** `fork` (`EV_FORK`,
-    `ui/src/api.js:202`) and `inject_node` (`serve/control_validation.py:712`) exist separately; fork
-    carries no edited idea, and the time-travel view refuses every node action —
-    `ui/src/RunView.jsx:1700`: *"Historical snapshot seq ${viewSeq} is read-only"*. Branching from a
-    seq means returning to live and re-typing the idea. Still the top verified steering UX.
+11. **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
+    *(2026-08-14 — the three citations above were re-verified and all three were correct.)* The fused
+    gesture landed as `inject_node` + a validated `forked_from` receipt, **not** as a new control event
+    and not as a field on `fork`: `fork` (`EV_FORK`, `ui/src/api.js:202`) means "Researcher, improve
+    this node" and carries no idea, while `inject_node` already transports an operator-authored Idea,
+    a parent and the `parent_generations` CAS that fences it. So no row was added to
+    `control_validation.py`'s five tables — the change is one key on `CONTROL_DATA_FIELDS[inject_node]`
+    plus `_normalize_fork_receipt`, which validates `{node_id, generation, observed_seq}` and STAMPS
+    `{changed_fields, base_idea_digest}` (refusing a payload that supplies either). It flows to
+    `node_created` → `Node.forked_from` and survives the review projection. Driven both ways by
+    `tests/test_fork_from_seq.py` against a real paused run through the real HTTP surface, with the
+    real engine building the node. The fence is a CONTENT CAS and deliberately not a tail one — see
+    `docs/guide/concepts.md` §"Branching from a snapshot".
+    **WHAT REMAINS is exactly one thing: the panel in `ui/src/RunView.jsx`.** The pure model is
+    written and driven (`ui/src/forkFromSeqModel.js` + `ui/test/forkFromSeqModel.test.js`, 7 tests)
+    and the client call exists (`CONTROL.forkFrom`); what is not wired is (a) a `fork` entry in
+    `HISTORY_SAFE_PANELS`, (b) the narrow exception in `RunView.jsx:1697`'s `mutationReadOnlyMode`
+    guard so this ONE action is reachable at `historyActive` (every other action must stay refused —
+    the reason is in `forkFromSeqModel.js`'s header), (c) the idea form itself, and (d) a "Branch
+    from here" item on the Dag node menu. It was deliberately not attempted in the same change: a
+    `vite build` empties `ui/dist/assets` and breaks `test_server`'s static mount, nothing in the
+    suite MOUNTS `RunView`, and a GPU run was executing — so a ~3,000-line JSX file would have been
+    edited with no way to prove the tree still compiles.
 12. **Pareto selection is display-only (P2, M).** The real non-dominated algorithm exists —
     `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
     every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`
@@ -950,6 +968,9 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   **Not to be confused with docs/29's F6**, which is the conversation-trace episode seek that landed
   2026-08-13 (`events/traceview.py::node_episodes`, `/nodes/{n}/episodes`, `?before=` via
   `events/span_index.py::_anchored`) — different namespace, different item.]
+  **[2026-08-14 — the GESTURE landed; only the RunView panel remains. See §1 survivor #11 for the
+  shape chosen (`inject_node` + a server-stamped `forked_from` receipt, no new control event), what
+  is driven, and the four wiring steps that are left.]**
 - *(F5 UX debt tracked in §1.)*
 
 ### Theme G · Scale, ops, hardening

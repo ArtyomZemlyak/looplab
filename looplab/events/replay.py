@@ -612,6 +612,10 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             deleted=d.get("deleted", []) or [],
             attempt=generation,
             origin=d.get("origin"),   # cross-run provenance (None for ordinary nodes)
+            # IN-run fork provenance: the operator branched from a node (usually while reading a
+            # historical snapshot) and edited its idea. Additive with a reader-side default, so old
+            # logs fold byte-identically (invariant 5).
+            forked_from=d.get("forked_from"),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             footprint_finalized=d.get("footprint_finalized") is True,
             speculative=speculative,

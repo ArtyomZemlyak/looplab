@@ -5990,6 +5990,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # folded Node fail validation and silently vanish, so the inject gate would keep
                     # re-creating the SAME node id forever.
                     origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
+                    # The operator's fork-from-a-snapshot receipt, validated and stamped by
+                    # `serve/control_validation.py::_normalize_fork_receipt` before it ever reached
+                    # the log. OMITTED (not None-filled) when absent, so every historical inject
+                    # emits its exact previous payload shape — see `_emit_node_created`'s docstring.
+                    # Coerced defensively for the same reason `origin` is: a hand-authored durable
+                    # row carrying a non-dict here must not make the folded Node fail validation and
+                    # leave the inject gate re-creating the SAME id forever.
+                    **({"forked_from": req["forked_from"]}
+                       if isinstance(req.get("forked_from"), dict) else {}),
                 )
             except Exception:
                 try:
