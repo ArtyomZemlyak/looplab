@@ -244,6 +244,16 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
     authority: it appends no event and names no control intent, its only import above `core` is the
     run-phase vocabulary its trigger waits on, and the *server* — not the agent — evaluates the
     trigger, so an agent can never be woken because it declared its own wake condition met.
+
+- **The closing answer is about the TURN, not the session** — what you read when a long agentic turn
+  ends is written by the model, so its INPUT is fixed by the server rather than chosen by the model:
+  the chat keeps the request dict it started the turn with and marks *that* message
+  (`[current turn — answer this]`) as the boundary. Everything after it is the work being reported;
+  everything before it is context the answer may rely on but must not re-narrate. The whole
+  conversation is still sent — a turn routinely depends on a file read three turns ago — only the
+  scope is narrowed. **For a wake-up the boundary is the wake-up's own instruction**, not the last
+  thing a human typed: nobody types a wake-up, so scoping to the last human message would make every
+  firing re-report the whole session; previous wake-up reports are context, never work to redo.
 - **A cut-short turn says so** — a long turn can end for five reasons that are not "the model
   finished": the wall clock, the turn budget, stuck-detection, a model that will not emit, and the
   convergence ceiling. All five now append a notice naming which one and how far it got, and set
