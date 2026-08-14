@@ -153,3 +153,117 @@ def test_the_stage_row_reports_the_seconds_that_were_bought(tmp_path):
     assert res.stages[0]["status"] == "ok"
     assert res.stages[0]["deadline_grace_s"] == pytest.approx(8.0)
     assert res.metric == pytest.approx(0.5)
+
+
+# --------------------------------------------------------------------------------------------
+# THE SILENT CHILD. The docstring above names it — a progress bar at 664/664 and then nothing —
+# and until 2026-08-14 nothing in this file drove it: every case above keeps a CHATTY child
+# printing throughout, which keeps the stall watchdog's clock permanently reset and hides the
+# whole interaction between the two clocks. The reviewer's reproduction, verbatim: one bar line,
+# then silence, a short budget, a granted grace. Measured on the pre-fix tree it returned
+# `wall-clock actually got 4.26 s` for a 600 s extension and a durable row that claimed it.
+# --------------------------------------------------------------------------------------------
+
+# Prints ONE progress-bar line — node 72's last line — and then goes quiet, alive, forever.
+_SILENT_AFTER_ONE_BAR = ("import time\n"
+                         "print('100%|##########| 664/664 [00:17<00:00, 38.13it/s]', flush=True)\n"
+                         "time.sleep(3600)\n")
+
+
+def test_a_grace_granted_to_a_SILENT_child_is_actually_served(tmp_path):
+    """THE PROPERTY THE ROW CLAIMS. The stall watchdog and the deadline are two clocks measuring
+    different things — total wall time and silence — and a grace moves only the first. The silence
+    kill is DEFERRED for exactly the window bought, so the seconds `deadline_grace_s` reports are
+    seconds the process really received; then it dies, because a grace is not a reprieve."""
+    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
+    sig: dict = {}
+    t0 = time.monotonic()
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "quiet.py"], str(tmp_path), 1.0,
+        stall_timeout=1.0,                      # == the budget: what `_stall_window` derives here
+        signals=sig, on_deadline=lambda tail: 30.0, deadline_grace_max_s=2.0)
+    elapsed = time.monotonic() - t0
+    assert sig["deadline_grace_s"] == 2.0
+    # The whole finding in one assertion: the wall clock must SHOW the extension the row claims.
+    assert elapsed >= 2.5, f"the 2.0s grace bought {elapsed - 1.0:.2f}s of child ({elapsed:.2f}s wall)"
+    assert elapsed < 12, "a grace is bounded — the child must not outlive budget + grace"
+    assert "664/664" in out, "the graced child's output is still captured"
+    assert sig["stalled"] is True, "it never spoke again, and the row must say THAT killed it"
+
+
+def test_the_durable_row_describes_what_actually_happened_to_a_silent_stage(tmp_path):
+    """The RECORD side (doc 36). A row reading `{"deadline_grace_s": 600.0, "seconds": 4.26}` for a
+    4 s budget asserts an extension the run did not get — worse than losing the GPU-hours, because a
+    later reader reconstructing where the compute went believes it. `seconds` and `deadline_grace_s`
+    must be consistent with each other on the SAME row."""
+    from looplab.runtime.command_eval import run_command_eval
+    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "quiet.py"]}]
+    res = run_command_eval([sys.executable, "quiet.py"], str(tmp_path), 1.0,
+                           {"kind": "stdout_json", "key": "metric"}, stages=stages,
+                           stall_cap=1800.0,
+                           on_deadline=lambda tail: 600.0, deadline_grace_max_s=2.0)
+    row = res.stages[0]
+    assert row["deadline_grace_s"] == pytest.approx(2.0)
+    assert row["seconds"] >= 1.0 + row["deadline_grace_s"] * 0.75, (
+        f"the row claims {row['deadline_grace_s']}s of grace but only ran {row['seconds']}s: {row}")
+    assert res.stalled is True and res.timed_out is False
+
+
+def test_a_deadlocked_child_still_dies_and_the_grace_is_the_only_extra_time_it_gets(tmp_path):
+    """The watchdog's own comment — a real deadlock must die in minutes — survives the grace. The
+    deferral is bounded by the granted window and never renewed, so the ceiling on a hung stage is
+    budget + ONE clamped grace, and it is reported as a stall rather than a clean anything."""
+    body = ("import threading\n"                       # a real deadlock, not a sleep
+            "print('start', flush=True)\n"
+            "lock = threading.Lock(); lock.acquire(); lock.acquire()\n")
+    (tmp_path / "dead.py").write_text(body, encoding="utf-8")
+    sig: dict = {}
+    t0 = time.monotonic()
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "dead.py"], str(tmp_path), 1.0, stall_timeout=1.0,
+        signals=sig, on_deadline=lambda tail: 900.0, deadline_grace_max_s=1.5)
+    elapsed = time.monotonic() - t0
+    assert rc != 0 and sig["stalled"] is True
+    assert elapsed < 12, f"a deadlocked child outlived budget + one grace ({elapsed:.1f}s)"
+    assert "STALLED" in err
+
+
+def test_the_stall_watchdog_still_precedes_the_judge_when_the_window_is_the_shorter_clock(tmp_path):
+    """THE SECOND REGIME, and it is the watchdog working rather than the feature being unreachable.
+    A window SHORTER than the budget fires first, so `on_deadline` is never called on a stage that
+    has said nothing for a whole window — correctly: the judge's whole input is a live log tail."""
+    (tmp_path / "quiet.py").write_text(_SILENT_AFTER_ONE_BAR, encoding="utf-8")
+    asked = []
+    sig: dict = {}
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "quiet.py"], str(tmp_path), 30.0, stall_timeout=1.0, signals=sig,
+        on_deadline=lambda tail: asked.append(tail) or 600.0, deadline_grace_max_s=600.0)
+    assert asked == [], "a stage silent for a whole stall window has nothing for a judge to read"
+    assert sig["stalled"] is True
+    assert "deadline_grace_s" not in sig, "no grace was asked for, so none may be claimed"
+
+
+def test_a_stage_that_goes_quiet_NEAR_its_wall_is_judged_and_keeps_the_whole_grace(tmp_path):
+    """The PRODUCTION shape (`stall_cap` 1800 under a multi-hour budget, node 72's own shape): the
+    stage talks until close to its wall, so the judge IS reached — and then goes quiet inside the
+    grace, which is where the silence window it had already half-spent used to kill it early."""
+    body = ("import time\n"
+            "for i in range(6):\n"
+            "    print(f'{i}/6', flush=True); time.sleep(0.1)\n"
+            "print('100%|##########| 664/664', flush=True)\n"
+            "time.sleep(3600)\n")
+    (tmp_path / "late.py").write_text(body, encoding="utf-8")
+    asked = []
+    sig: dict = {}
+    t0 = time.monotonic()
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "late.py"], str(tmp_path), 1.2,
+        stall_timeout=0.9,                      # SHORTER than the budget, and already half-spent
+        signals=sig, on_deadline=lambda tail: asked.append(tail) or 30.0,
+        deadline_grace_max_s=2.0)
+    elapsed = time.monotonic() - t0
+    assert len(asked) == 1 and "664/664" in asked[0], "the judge reads the bar it is there to read"
+    assert sig["deadline_grace_s"] == 2.0
+    assert elapsed >= 2.6, (
+        f"the grace was served for {elapsed - 1.2:.2f}s of its 2.0s (stall window 0.9s): {elapsed:.2f}s")

@@ -244,8 +244,24 @@ _MAX_STALL_S = 1800.0
 
 def _stall_window(timeout: float, cap: Optional[float] = None) -> Optional[float]:
     """Silence-before-kill for a stage, capped at `cap` (default `_MAX_STALL_S`) and never longer than
-    the stage's own deadline (for a short scorer the deadline fires first, so the stall check is a
-    harmless no-op). A `cap` of 0/None DISABLES the watchdog (only the hard deadline bounds the stage)."""
+    the stage's own DECLARED budget. A `cap` of 0/None DISABLES the watchdog (only the hard deadline
+    bounds the stage).
+
+    THE CLAMP'S INVARIANT USED TO BE "for a short scorer the deadline fires first, so the stall check
+    is a harmless no-op", AND THAT IS NO LONGER TRUE — `sandbox._tee_drain` gained a judge-granted
+    deadline GRACE, so `timeout` is the budget the stage was DECLARED, not the wall clock it can
+    actually reach (that is `timeout + deadline_grace_max_s`). What the clamp still buys is a real,
+    narrower thing: for a stage shorter than `cap` the window equals the budget, so a child that is
+    silent from birth is killed as STALLED — the salvageable verdict — a hair before the deadline
+    would call the same kill a plain timeout. What it costs is that for every such stage the two
+    clocks come due within one 250 ms poll of each other, which is precisely the collision a grace
+    lands in: the reviewer's repro (4 s budget, 600 s granted) killed the child 0.26 s into its
+    extension and recorded `deadline_grace_s: 600.0` for it.
+    THE FIX IS NOT HERE. Widening this window would only move the collision — the production regime
+    (`cap` 1800 against a multi-hour budget) is not clamped at all and stalls a graced child just as
+    fast, because 61 minutes of silence already exceeds a 30-minute window at the moment the grace is
+    granted. It is `_tee_drain`'s `grace_until`: a granted grace DEFERS the silence kill for exactly
+    the window it bought. Read that comment before changing this one."""
     if not timeout or timeout <= 0:
         return None
     if cap is None:
