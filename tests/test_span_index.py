@@ -749,6 +749,41 @@ def test_same_inode_non_growth_rewrite_rebuilds_when_coverage_lags(
     assert [span["span_id"] for span in refreshed.light_spans()] == ["new-a", "last-z"]
 
 
+def _await_inode_clock_past(reference_ns: int, directory: Path, timeout_s: float = 5.0) -> None:
+    """Block until THIS filesystem would stamp an inode change strictly later than ``reference_ns``.
+
+    Linux stamps inode times from the COARSE clock (`ktime_get_coarse_real_ts64`), which only advances
+    on the timer tick: measured on this box's overlayfs, `st_ctime_ns` moves in steps of exactly
+    3,999,897 ns (CONFIG_HZ=250) while the rewrite below — write, fsync, utime, stat — completes in a
+    median 0.68 ms. So both stats routinely land inside ONE tick, the kernel records the change it
+    really did make with the SAME ctime value it already had, and a strict `!=` fails for a reason
+    that has nothing to do with `span_index`. Driven at HEAD, the assertion below failed 3 of 5 runs
+    of this test ALONE and the observed delta was only ever 0 or exactly one tick, never anything
+    between — which is what identifies the clock rather than a lost update. (The "it fails only after
+    certain other test files" reading is the same race seen through timing noise: 11c29fb0, the
+    commit it was reported to pass at, fails here too.)
+
+    A PROBE file in the same directory is the measurement: it shares the source's filesystem and
+    therefore its clock, so once the probe carries a ctime past ``reference_ns`` any subsequent write
+    to the source must too. That keeps the assertion strict — the alternative, relaxing it to `>=`,
+    would retire the guard while leaving it looking present. A filesystem that never advances
+    `st_ctime_ns` at all (the geesefs/S3 mount on this box is the near case) cannot witness a
+    same-size rewrite with a restored mtime by ANY spelling of this test, so it skips — detected by
+    driving the clock, never by mount name.
+    """
+    probe = directory / ".ctime-clock-probe"
+    probe.write_bytes(b"")
+    deadline = time.monotonic() + timeout_s
+    try:
+        while probe.stat().st_ctime_ns <= reference_ns:
+            if time.monotonic() > deadline:
+                pytest.skip("this filesystem does not advance st_ctime_ns; the ctime fence "
+                            f"`span_index` relies on is unobservable here (stuck at {reference_ns})")
+            os.utime(probe)
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses descriptor ChangeTime, tested below")
 def test_posix_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp_path):
     source = tmp_path / "spans.jsonl"
@@ -767,6 +802,9 @@ def test_posix_cold_same_size_rewrite_with_restored_mtime_is_caught_by_ctime(tmp
     new = [old[0], row("new-mid", 1.0), old[2]]
     replacement = b"".join(orjson.dumps(item) + b"\n" for item in new)
     assert len(replacement) == before.st_size
+    # The rewrite has to be able to LAND on a later ctime than the one just observed, or the strict
+    # assertion below is testing the timer tick and not the fence. See `_await_inode_clock_past`.
+    _await_inode_clock_past(before.st_ctime_ns, tmp_path)
     with open(source, "r+b") as stream:
         stream.write(replacement)
         stream.flush()
