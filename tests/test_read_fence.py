@@ -912,22 +912,28 @@ def test_a_FAILED_chdir_out_of_a_root_does_not_disable_the_fence(tmp_path):
     assert rc != 0 and CHECKPOINT not in out
     assert "LoopLabSourceReadRefused" in err
 
-    # …and the flag only ever moves toward MORE checking. This half has to DISCRIMINATE, which a
-    # read of a harmless relative name after `chdir("/tmp")` does not: that path is outside every
-    # root, so it is allowed whether the flag was cleared (fast bail) or kept (abspath, then
-    # `_fenced` says no). Read the SOURCE TREE by a relative name instead — with the flag cleared
-    # the `..` escape would still be normalized, so the discriminating case is a chdir out followed
-    # by a chdir BACK IN, which under a clearing implementation leaves the flag False.
-    target = "experiments/baseline/final/model.safetensors"
-    rc2, out2, err2, _to2 = _run(f"""
+    # The same shape under `warn`, which is the half that proves the fence still SAW the read rather
+    # than that `deny` raised. It has to DISCRIMINATE, and two nearby spellings do not: a chdir back
+    # INTO the tree is refused by the chdir hook itself under `deny` whether the flag is monotonic or
+    # not, and a read of a harmless relative name after `chdir("/tmp")` is allowed either way. Under
+    # `warn` the read PROCEEDS in both implementations — so the observable that separates them is the
+    # violation LOG. With the flag cleared by the failed chdir, the relative name takes `_resolve`'s
+    # fast bail and nothing is ever recorded: the read is not merely allowed, it is invisible.
+    warn_run = tmp_path / "run-warn"
+    (warn_run / "nodes").mkdir(parents=True)
+    warn_fence = _install(warn_run, src, policy="warn")
+    rc2, out2, _err2, _to2 = _run("""
         import os
-        os.chdir("/tmp")                 # a real, SUCCESSFUL move out of the tree
-        os.chdir({str(src)!r})           # …and back in; under `deny` this refusal is the fence
-        print(open({target!r}).read())
-        """, src, fence)
-    assert rc2 != 0 and CHECKPOINT not in out2
-    assert "LoopLabSourceReadRefused" in err2, (
-        "a chdir back INTO the tree must be refused, and the read after it must never be reached")
+        try:
+            os.chdir("/nope/does/not/exist")
+        except OSError:
+            pass
+        print(open('experiments/baseline/final/model.safetensors').read())
+        """, src, warn_fence)
+    assert rc2 == 0 and CHECKPOINT in out2, "warn observes, it does not block"
+    logged = (warn_run / read_fence.FENCE_DIRNAME / read_fence.VIOLATION_LOG).read_text()
+    assert str(src / "experiments" / "baseline" / "final" / "model.safetensors") in logged, (
+        "a read the fence stopped resolving is a read nobody can review afterwards")
 
     # The plain outside-the-tree case still works, so the monotonic flag costs correctness nothing.
     rc3, out3, _err3, _to3 = _run("""
