@@ -2258,7 +2258,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 if (all(receipt_owned)
                         and self._producer_role_pair() is not None
                         and not serial_fallback):
-                    if self._request_card_build():
+                    # The mask travels with this election too (backlog F1g), for the same reason it
+                    # travels into `speculative_raw_actions` above and `_claim_existing_card_builds`
+                    # below. `_speculation_depth_used` states the rule: a Node already admitted to
+                    # the consumer is no longer prefetch inventory, and "retaining it in the count
+                    # makes depth=1 strictly serial". This call site could not observe a running
+                    # evaluation before F1f — the outer loop only turned between batches — so the
+                    # default empty mask was correct then and is not now: an occupancy-paced turn
+                    # reaches it WITH a GPU busy, and charging that node against the depth refuses
+                    # the election, appends nothing and leaves the freed slot dark for the whole
+                    # evaluation. `_card_phase_request_build` has always passed the session's own
+                    # copy of this set; it is the same object.
+                    if self._request_card_build(
+                            consumed_inflight=frozenset(
+                                getattr(self, "_eval_inflight", None) or ())):
                         await self._run_card_session(
                             [],
                             fold(self.store.read_all()),

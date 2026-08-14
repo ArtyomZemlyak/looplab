@@ -653,3 +653,66 @@ def test_the_occupancy_pace_stands_down_when_a_slot_could_be_filled_from_the_boa
     assert engine._occupancy_paced_creates(
         state, [{"kind": "evaluate", "node_id": node_id}, unstarted]) == [], (
         "an evaluate action this turn could have STARTED means the board is not empty")
+
+
+def test_the_occupancy_paced_card_lane_is_built_while_its_own_evaluation_still_runs(
+        tmp_path, monkeypatch):
+    """The RUNNING evaluation is not prefetch inventory, on the outer lane as well as the session's.
+
+    `_occupancy_paced_creates` hands the ordinary `creates` branch a receipt-owned Card lane — its
+    own docstring calls that half "the half that actually moves a GPU" — and
+    `_handle_create_actions` builds it through `_request_card_build`.  That election charges the
+    lane against `speculation_depth` via `_speculation_depth_used`, whose whole reason for taking a
+    `consumed_inflight` mask is stated in its docstring: *"a Node already admitted to the consumer
+    is no longer prefetch inventory: retaining it in the count makes depth=1 strictly serial."*
+
+    Before backlog F1f/F1g this call site could not observe a running evaluation at all — the outer
+    loop only turned between batches — so the mask's absence was correct.  F1g made the site
+    reachable mid-evaluation and threaded `_running_eval_node_ids()` into the raw lane and into
+    `_claim_existing_card_builds`, but the election in between kept the default empty mask.  The
+    node whose GPU is busy right now then counts against the depth, the election refuses, the turn
+    appends nothing, and the free slot stays dark for the whole evaluation — which is the 167.7
+    GPU-h state the pace exists to end.
+
+    Driven at ``speculation_depth < eval_parallel``, which is where the two spellings disagree: a
+    spelled depth is honoured as spelled, and a live `budget_extend` may widen `eval_parallel` over
+    a depth that stays at its `run_started` pin.  At AUTO-everything the two are equal and the
+    off-by-one hides the defect, which is why nothing in the suite saw it.
+    """
+
+    engine, _producer = _engine(tmp_path / "occupancy-depth-mask", depth=1)
+    engine._eval_parallel = 3                     # depth 1 < width 3: the disagreeing region
+    _start(engine)
+    _add_ready_draft(engine, "card-1", x=0.2)
+    _add_ready_draft(engine, "card-2", x=0.8)
+    node_id = _commit_speculative_node(engine)
+    _without_research(monkeypatch, engine)
+    engine._ensure_speculation_state()
+    engine._eval_inflight.add((node_id, 0))       # its GPU is busy RIGHT NOW
+
+    sessions: list[int] = []
+
+    async def _record_session(*_args, **_kwargs):
+        sessions.append(1)
+
+    monkeypatch.setattr(engine, "_run_card_session", _record_session)
+
+    events = engine.store.read_all()
+    before = events[-1].seq if events else -1
+    state = fold(events)
+    creates = engine._occupancy_paced_creates(
+        state, [{"kind": "evaluate", "node_id": node_id}])
+    # The precondition: the pace really did elect a receipt-owned Card for the free slot.
+    assert [action.get("_card_id") for action in creates] == ["card-2"], creates
+
+    anyio.run(lambda: engine._handle_create_actions(
+        creates, state, created_no_terminal=0, no_mint_turns=0,
+        decision_seq=before, max_es=None, max_s=None, start=0.0))
+
+    requested = [event for event in engine.store.read_all()
+                 if event.seq > before and event.type == "card_build_requested"]
+    assert requested, (
+        "the occupancy-paced Card lane produced nothing while a GPU was busy: the running "
+        "evaluation was charged against speculation_depth, so the election refused and the freed "
+        "slot stays dark for the whole evaluation")
+    assert sessions, "a durable request landed but no session was entered to serve it"
