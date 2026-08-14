@@ -18,10 +18,14 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
   risk, which is why they were already documented "always redacted") and the operator's own secret
   ENV VALUES (`redact_env_values`, below).
 * **`redact_output` only** — the ENTROPY pass, the half with a real false-positive cost, which is
-  why it is separable at all. It is ON by default since 2026-08-14 and the flag is now the way to
-  turn it OFF; see `_entropy_candidate` for the measurement that made a default-on entropy pass
-  safe (its false positives on this box's own corpus were 13/13 filesystem paths, and they are gone)
-  and for the one coverage class deliberately traded away.
+  why it is separable at all. It remains OPT-IN: `Settings.redact_output` still defaults to
+  `False`, and its own comment says why the default was deliberately NOT flipped in the change that
+  made flipping it cheap (a security default is the owner's call, not one box's corpus's). See
+  `_entropy_candidate` for the measurement that would justify a default-on entropy pass (its false
+  positives on this box's own corpus were 13/13 filesystem paths, and they are gone) and for the
+  one coverage class deliberately traded away. **Do not read that measurement as the posture**:
+  until the owner flips the field, a high-entropy base64 credential printed by an eval reaches the
+  durable tail unmasked unless a known shape or an env value catches it.
 
 `redact_output_tail` is the ONE spelling of that split; `engine/audit.py::Engine._redact` is its
 only production caller and funnels all six persisted output tails through it.
@@ -197,7 +201,8 @@ def _entropy_candidate(token: str) -> bool:
 # distinct masked tokens / 5,289 occurrences fall to 5 / 2,347, of which 2,343 are ONE opaque
 # account identifier and the remaining four are a paper DOI slug and two conference filenames. Over
 # the 744 persisted output TAILS specifically, the entropy pass now changes nothing at all (was 13,
-# all false) — which is the measurement `Settings.redact_output`'s default-on rests on.
+# all false) — which is the measurement a default-on `Settings.redact_output` would rest on. The
+# field is still `False`; the measurement is the argument for flipping it, not a report that it was.
 #
 # The cost is stated rather than hidden: a base64 credential CONTAINING a `/` is now scanned as its
 # slash-free runs, so one whose longest run falls under `min_len` escapes the pass. Measured on

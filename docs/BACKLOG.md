@@ -362,6 +362,130 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **The `engine` extra-metric channel authenticates against bytes the candidate authors** (found
+  2026-08-14 auditing the merge day against docs/36). `core/calibration.py:221
+  ::engine_declared_extra_metric_keys` grants `EXTRA_METRIC_ENGINE` — a member of
+  `EXTRA_METRIC_AUTHENTICATED` — on `code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX)`, and
+  `runtime/sandbox.py:1471`/`:1541` pass the candidate's own `solution.py` verbatim as that `code`.
+  The prefix is a public constant in the shipped tree, not a secret: driven, `tools/env_inspect.py
+  ::read_installed("looplab.core.calibration", 57, 14)` pages it out byte-for-byte with no package
+  allow-list, and `CliAgentDeveloper` (`agents/cli_agent.py:220`) is an external coding agent with a
+  real shell whose output IS `solution.py`. **Reproduction:**
+  `stdout_extra_metric_channels({"device_count": 8.0, "alloc_bytes": 4096.0, "my_auc": .99},
+  SPECULATION_CUDA_PROBE_CODE_PREFIX + '\nprint({"metric": .99, "device_count": 8})\n')` returns
+  `{'device_count': 'engine', 'alloc_bytes': 'engine', 'my_auc': 'auto'}`, and
+  `authenticated_extra_metrics_only` then keeps the first two under `auto_extra_metrics=false`.
+  **Bounded, and the bound is why this is residue rather than a P0:** it reaches only the probe's
+  four key names, it needs the prefix to actually EXECUTE (so a CUDA device), `extraMetricIsDeclared`
+  still answers false for `engine`, and nothing here touches the primary metric, the champion,
+  `feasible_nodes` or a violation. What it costs is the sentence the channel exists to make true —
+  the UI prints "Printed by LoopLab's own instrumentation … and verified against it" over a number
+  an agent printed, and the operator's own "authenticated only" switch admits it. **Not fixed
+  tonight on purpose:** the obvious narrowing (also require the exact key SET and the three static
+  values, as `speculation_quality.py:554-558::_validate_cuda_probe_artifact` does downstream) would
+  change what a partially-reporting calibration node is tagged, and under `auto_extra_metrics=false`
+  that strips the probe keys the receipt gate re-derives from `node_evaluated` — i.e. it can revoke
+  issued calibration receipts, which is exactly the careless RECORD-side change docs/36 warns about.
+  The honest alternative is to stop deriving the tag from the artifact's CONTENT and carry
+  "the engine spliced this" from the splicer, which needs a channel `runtime/` does not have today.
+
+- **The log-integrity receipt counts LINES and publishes them as RECORDS, and one line is up to 4096
+  events** (found 2026-08-14 auditing f78961a4). `eventstore.py:399::log_divergence` counts non-blank
+  complete LINES; `log_integrity` publishes those as `good_records`/`dropped_lines`, and
+  `integrity_sentence` (`:482-489`) and its browser mirror `ui/src/runIndex.js:45-56` both render
+  them as "records visible to replay" / "durable record(s) … NOT included". A batch envelope written
+  by `EventStore.append_many` carries up to 4096 events on ONE line, and `append_many` is on live
+  engine paths (`engine/audit.py:165`, `card_reservation.py:1131/1678/1822`, `orchestrator.py:3828`,
+  `speculation.py:1241/1994`) — i.e. every card-lane run. **Reproduction** (shipped writer, shipped
+  readers, driven): one `run_started` + three `append_many` batches of 5 + one `resume` = 5 physical
+  lines / **17 events**; delete one middle batch line; a fold then sees **6 events** and 11 are
+  invisible, while the receipt says `{good_records: 2, corrupt_line: 3, dropped_lines: 1}` and the
+  sentence every CLI and UI surface prints reads *"only 2 of 4 records are visible to replay and 1
+  durable record(s) behind that boundary are NOT included."* One missing record claimed, eleven
+  actually missing. **Cost:** this is the number whose entire job is to state the size of the loss,
+  and it understates it by the batch factor on exactly the runs that batch. An operator who reads
+  "1 record" concludes the boundary is cosmetic and goes on trusting `nodes`/`best_metric`; the
+  commit's own comment ("two surfaces disagreeing about the size of the log is the original defect
+  in miniature") describes what it reproduced. **Not fixed tonight:** counting events means decoding
+  each line behind the boundary and changes the wire MEANING of three fields across CLI, HTTP and
+  the UI at once, with `runIndex.js`'s `good + dropped + 1` arithmetic and the `corrupt_line`
+  (a genuine line number) having to move in the same change. Two smaller relatives found beside it,
+  worth folding into the same pass: the boundary row itself is a durable record replay excludes and
+  is counted in neither number (`good + dropped + 1` is the denominator, so the sentence's own
+  addition is one short); and `unreadable: True` is unreachable through every shipped surface —
+  `run_projections.py:147`'s `except Exception: continue` DROPS an unreadable run from `/api/runs`
+  entirely, so it reads as deleted rather than as "incomplete record", which is the opposite of the
+  direction `appstate.py:275-280` says it fails toward.
+
+- **The read-model watermark's digest covers `(seq, type)` only, so a content-edited log certifies
+  as `current`** (found 2026-08-14 auditing 1bfd3634). `readmodel.py:91::coverage_watermark` hashes
+  `[[seq, type], …]` and nothing about event DATA or run generation. **Reproduction** (driven):
+  build a readmodel over a 3-event log whose `node_evaluated.metric` is `53.05` (`nodes` row
+  `(0, 53.05)`), then edit that metric to `42.0` in place leaving seq and type untouched —
+  `readmodel_status` still answers `current`, `readmodel_is_current` still `True`, the digest is
+  byte-identical, and `fold()` of the same log now returns `42.0` while the certified projection
+  still says `53.05`. The module states what it hashes, so this is not a lie; the JUSTIFICATION is
+  the part that fails — "deterministic over the authenticated log: the bytes are immutable once
+  appended" (`:88-90`) — because the one divergent run in this corpus is a HAND-EDITED log, and the
+  commit merged one hour later (f78961a4) exists precisely because a log was edited. The same gap
+  covers identity: no generation token is in the preimage, so a reset producing an equal-length,
+  same-`(seq,type)` prefix certifies generation A's projection as current for generation B. **Cost:**
+  `readmodel.sqlite` is what external queries read and the code promises `ORDER BY metric` agrees
+  with `is_best` — a `current` stamp over a stale metric is a wrong champion presented as certified.
+  **Not fixed tonight:** adding a data digest or the generation token to the preimage changes the
+  digest of every readmodel already on disk, so all of them read `stale` until rebuilt — a migration
+  call, not a patch. Everything else about this artefact is fail-closed and driven clean: body and
+  watermark come from ONE materialized `rows = list(events)` (`:167-169`) in one transaction, so they
+  cannot name different sets; and an absent/duplicated/unparseable/unknown-version watermark, or an
+  empty digest on either side, all answer `unknown` and never `current`.
+
+- **The repair-rationale intake cap was raised at the wrong layer, so `_TRIAGE_RATIONALE_CAP` never
+  binds** (found 2026-08-14 auditing 4b2bd547). That commit moved the intake bound to
+  `crash_repair.py:60::_TRIAGE_RATIONALE_CAP = 2000` and applies it at `_ask_triage` (`:250`, `:261`,
+  `:277`) — i.e. to what the duck-typed `triage_crash` seam RETURNED. `UnifiedAgent.triage_crash` is
+  the ONLY implementation of that seam in the tree, it is the shipped default
+  (`Settings.unified_agent = True`, `config.py:1518`; `factory.py:311-313` returns it as both roles
+  under `backend="llm"`), and its own emit finalizer already cut the text:
+  `agents/unified_agent.py:447` — `str((args or {}).get("rationale", ""))[:300]`. So the 2000-char
+  bound is applied to a string that is at most 300 chars, and the extractor
+  `evaluate.py:2275::verify_repair(triage.get("rationale", ""), …)` reads exactly the truncated half
+  the commit set out to stop it reading. **Reproduction** (driven on this tree, no model):
+  `claimed_tokens(full)` on a 504-char diagnosis-first/`Fix:`-last rationale returns
+  `('train_cfg.yaml','KeyError','nll_cos','kl_div','log_target','rdrop_alpha','train_cfg',
+  'log_target=True')`; `claimed_tokens(full[:300])` returns `('KeyError','nll_cos','kl_div',
+  'log_target','log_target=True')` — every token naming what the repair actually CHANGED is gone and
+  only the cited baseline survives. That is the v7-node-0 shape the commit quotes, still live.
+  The new end-to-end test cannot see it: `tests/test_repair_verification.py:41-56::_Judge` is wired
+  directly as `researcher=` and never traverses `UnifiedAgent._finalize`. **Cost:** a repair that did
+  exactly what it promised keeps being stamped `unmet` on the durable `node_repaired.verified`
+  column and the stop judge keeps being told "the engine could not find what this fix said it would
+  change". The corpus figure the commit quotes ("83 of 123 rationales stored at exactly 300") is
+  equally explained by THIS cap. **Candidate fix, and why it was not applied tonight:** widen or drop
+  `unified_agent.py:447`'s `[:300]`. Blast radius is contained — every durable sink clips
+  independently at 300 (`evaluate.py:2291` `node_repaired.rationale`, `evaluate.py:2657`
+  `node_failed.triage_rationale`, `crash_repair.py:353` the critic), so no durable bytes move — but
+  it does shift the distribution of a RECORD-side verdict column, `agents/` sits below `engine/` so
+  the constant cannot be imported at module scope, and the sibling cap at `unified_agent.py:593`
+  needs the same call made deliberately rather than by symmetry.
+
+- **`write_file`/`edit_file` route around the stage-timeout-vs-budget refusal** (found 2026-08-14
+  auditing 8461ff43). `repo_write_tools.py:434` applies `stage_budget_refusal` inside
+  `_declare_stages` only; `_write` (`:622-643`) and `_edit` (`:645+`) apply the syntax and
+  manifest-collision rules and no budget rule. Driven on one `RepoWriteTools(time_budget=21600.0,
+  surface=['**/*','*.json'])`: `declare_stages(train timeout=172800)` is refused and stages nothing,
+  then `write_file('looplab_stages.json', <the same manifest>)` writes it and the staged manifest is
+  over budget at consume; and an ACCEPTED `declare_stages(timeout=100)` followed by
+  `edit_file('looplab_stages.json', '"timeout": 100' -> '"timeout": 172800')` lands 172800 too.
+  Bounded by the editable surface — the default `["**/*.py"]` correctly refuses the `.json`
+  (driven) — but `repo_task.py:983` records `edit_surface: ["**/*"]` as a configuration really used
+  on this box. **Related, and stated rather than filed as a second row:** `eval_stages.py:188-193`
+  DOES notice the divergence at consume time, and records it as a `tracing.operation(…,
+  enforced=False)` span whose own comment calls that "the FACT, into the record". `spans.jsonl` is an
+  explicit sidecar — not `events.jsonl`, not rebuilt by replay, absent from every export,
+  `looplab timings` and the node detail, and destroyable by the UI's trace clear — so an operator
+  looking for the divergence in the authoritative record finds nothing, while the metric the
+  8x-overspending eval produced stays selectable and can become champion.
+
 - **The assistant's containerized shell is unhardened** (found 2026-08-14 while wiring
   `sandbox_readonly_rootfs`). `tools/shell_tools.py:213` builds its OWN
   `make_docker_wrap(root, image, network="none")` and passes neither `mem`/`cpus` nor
