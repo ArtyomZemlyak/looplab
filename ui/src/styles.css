@@ -591,14 +591,21 @@ button { font: inherit; }
 .card-col-h { font-weight: 600; font-size: 11px; margin: 0 0 6px;
   text-transform: uppercase; letter-spacing: .03em; }
 .card-col.card-building .card-col-h, .card-col.card-running .card-col-h { color: var(--working-text); }
+/* Built, NOT started — deliberately not the working tone: `coded` exists precisely to stop the board
+   painting a pre-built speculative node as work in flight. */
+.card-col.card-coded .card-col-h { color: var(--fg-dim); }
 .card-col.card-evaluated .card-col-h { color: color-mix(in srgb, var(--ok) 52%, var(--fg)); }
+.card-col.card-failed .card-col-h { color: color-mix(in srgb, var(--fail) 48%, var(--fg)); }
 .card-col.card-gated .card-col-h { color: var(--alarm-text); }
 .card-col.card-dropped .card-col-h { color: var(--fg-mut); }
 .card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
   border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
-/* The Evaluated lane holds finished work, not successful work: a crashed node and a superseded
-   speculative prefetch land there beside a real result. Mark the ones that produced nothing so the lane
-   is scannable — the chip carries the words, this carries the shape (never colour alone). */
+/* These two rules were DEAD: no module ever emitted `card-outcome-*`, so the per-card marker their
+   comment described ("the Evaluated lane holds finished work, not successful work — a crashed node
+   and a superseded speculative prefetch land there beside a real result") never rendered. That
+   observation was right and is now answered where it belongs, in the fold: such cards no longer land
+   in Evaluated at all, they land in the `failed` lane (`card_ledger.py::_apply_card_status`). Kept as
+   selectors so a future per-card outcome marker has its shape ready — never colour alone. */
 .card-kanban-card.card-outcome-failed { border-left: 3px solid var(--fail); }
 .card-kanban-card.card-outcome-discarded { border-left: 3px solid var(--fg-mut); }
 .card-kanban-stmt { display: flex; align-items: flex-start; gap: 4px; font-size: 12px; line-height: 1.35; }

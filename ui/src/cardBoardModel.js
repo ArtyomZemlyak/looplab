@@ -19,27 +19,37 @@
 import { isRecord } from './panelPrimitives.js'
 
 // The lifecycle lanes, moved out of CardBoard.jsx so the board and its tests read ONE table.
-// `coded` is deliberately retained: `core/cards.py:784-793` documents it as a RESERVED lane the
-// fold does not currently emit (every pending Node collapses to `running`), and dropping it here
-// would silently change the board's contract the day the projection starts producing it.
+// `coded` was retained here for a year as a RESERVED lane the fold did not emit. It is now REAL
+// (2026-08-14): `card_ledger.py::_apply_card_status` splits the pending branch on the durable
+// eval-start boundary, so a speculatively pre-built node that is admitted but not dispatched lands
+// here instead of claiming Running. Keeping the row through all that time is why occupying it needed
+// no board change — which is the argument for keeping `speculating`/`built-awaiting-commit` too.
 export const CARD_COLUMNS = [
   ['proposed', 'Proposed', 'work item is open and has not started'],
-  // these speculative lanes are unreachable from the production Card projection:
-  // requested/done receipts live only in recovery journals, while public status derives from
-  // proposed/building/running/gated/evaluated/dropped. Paid in-flight or commit-buffered work therefore
-  // appears Proposed; project a bounded speculative owner state before advertising these lanes.
+  // `speculating` is occupied by the derived `state.card_authoring` overlay (see `cardAuthoring`
+  // below), never by the folded status: the requested/attempted receipts are a LIVENESS fact about a
+  // process running right now, which `Card.status` — a replay fact — deliberately cannot carry.
+  // `built-awaiting-commit` is still unreachable: nothing publishes a commit-buffered owner state.
   ['speculating', 'Speculating', 'speculative build requested'],
   ['building', 'Building', 'code is being produced'],
   ['built-awaiting-commit', 'Awaiting commit', 'build finished; durable node commit is pending'],
-  ['coded', 'Coded', 'code exists and is waiting to run'],
+  ['coded', 'Coded', 'an experiment is built and waiting to run — it has NOT started'],
   ['running', 'Running', 'evaluation is in flight'],
   ['evaluated', 'Evaluated', 'evidence has reached a verdict'],
+  // NOT "the hypothesis was refuted" — that is the verdict column's job (`tested`). This lane says
+  // every experiment this card owns ended without producing a result: it crashed, or it was a
+  // speculative build discarded before it ever ran (its node budget was refunded).
+  ['failed', 'No result', 'every experiment ended without producing one'],
   ['gated', 'Gated', 'trust or breeding gates exclude the available evidence'],
   ['dropped', 'Dropped', 'operator or engine removed the work item'],
 ]
 export const CARD_FROZEN_STATUSES = new Set(
-  ['proposed', 'building', 'coded', 'running', 'evaluated', 'gated', 'dropped'])
-export const CARD_OPTIONAL_STATUSES = new Set(['speculating', 'built-awaiting-commit', 'coded'])
+  ['proposed', 'building', 'coded', 'running', 'evaluated', 'failed', 'gated', 'dropped'])
+// Rendered only when a card is actually in them. `coded` and `failed` stay here after becoming
+// derivable: a serial run reaches neither, and an empty column is a question the operator has to
+// answer before they can ignore it.
+export const CARD_OPTIONAL_STATUSES = new Set(
+  ['speculating', 'built-awaiting-commit', 'coded', 'failed'])
 export const CARD_RENDER_LIMIT = 256 // mirrors PUBLIC_CARD_MAX_COUNT at the wire boundary
 
 // WHY a card is not selectable — and whether that is news.

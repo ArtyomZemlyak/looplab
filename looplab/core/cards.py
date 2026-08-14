@@ -955,20 +955,41 @@ class Card(BaseModel):
     created_at_node: int = 0
     # Lifecycle lane (DERIVED; frozen UI-contract vocabulary, kept OPEN so Layer 5 can add
     # speculating/built-awaiting-commit without a model rework): proposed (no node yet) | building
-    # (node_building in flight) | running (pending eval) | evaluated (>=1 terminal) | gated (only
-    # trust-gated / breed-excluded evidence) | dropped (drop/merge event). `coded` (pending node with
-    # code) is a RESERVED lane the fold does NOT currently produce — every pending Node collapses
-    # directly to `running` (see `_derive_cards`). NOT for want of a boundary any more: the log now
-    # carries `events/types.py::EV_NODE_EVAL_STARTED`, folded to `Node.eval_started`. It is stamped
-    # only on SPECULATIVE attempt-zero lifecycles (the ones whose budget refund needs it), and
-    # `_derive_cards` reads none of it, so the lane stays unreachable for a different reason: the
-    # projection, not the evidence. Deriving it means splitting the pending branch there.
+    # (node_building in flight) | coded (a node was BUILT for it and its evaluation is PROVABLY not
+    # started) | running (an evaluation is in flight) | evaluated (>=1 evidence node reached a
+    # measured result) | failed (every evidence node is terminal and NONE of them produced one) |
+    # gated (only trust-gated / breed-excluded evidence) | dropped (drop/merge event).
+    #
+    # `coded` was a RESERVED lane until 2026-08-14 and this comment used to say so. What made it
+    # derivable is the durable eval-start boundary — `events/types.py::EV_NODE_EVAL_STARTED`, folded
+    # to `Node.eval_started`, paired with the creator's own `Node.eval_start_boundary` promise — and
+    # what made deriving it URGENT is that `speculation_depth >= 2` builds nodes ahead on purpose, so
+    # a node sitting admitted-but-not-started is a designed state the board was rendering as
+    # "experiment running". The boundary is still stamped only on SPECULATIVE attempt-zero
+    # lifecycles, which is exactly why the split fails closed on the promise rather than on the
+    # absence of a row: a pending node that promised nothing keeps the `running` lane it always had.
+    #
+    # `failed` is the terminal twin, added in the same change: `evaluated` claimed a verdict for a
+    # card whose experiments only ever crashed or were discarded before running, while the card's own
+    # `verdict` (below) simultaneously said "open". Both are DERIVED in `_apply_card_status`.
     status: str = "proposed"
+    # The node ids `status` above was derived FROM — the lane's own subject, ascending. Empty for
+    # `proposed`/`dropped` (there is nothing to name) and, for `building`, the `node_building` marker
+    # node that `evidence` deliberately does NOT carry. A status is a RECORD-side statement (docs/36):
+    # it is what an operator reads to decide whether to intervene, so it must be checkable against
+    # the facts it keys on. NOT a second `evidence` list and never a superset of one — it is whatever
+    # the branch that chose the lane actually read, written by that same branch so the two cannot
+    # drift. (The `node_ids` spelling docs/23's field table used for this idea never existed on the
+    # model; `evidence` is and remains the audit set of nodes that TESTED the card.)
+    status_nodes: list[int] = Field(default_factory=list)
     # Research verdict (DERIVED via the shared `_evidence_verdict` helper — byte-identical to the
     # hash-joined hypothesis): open | testing | supported | tested | abandoned.
     verdict: str = "open"
     # Layer-1c compatibility flag for board filtering only: False for dropped/gated/abandoned, True for
-    # proposed/building/running/evaluated. It deliberately does NOT imply one fresh executable action exists.
+    # everything else — proposed/building/coded/running/evaluated/failed. It deliberately does NOT
+    # imply one fresh executable action exists. Note the two lanes added on 2026-08-14 are on the
+    # True side, which is the whole point: `coded` is a subset of what `running` was and `failed` a
+    # subset of what `evaluated` was, so neither may move this flag.
     actionable: bool = True
     # `actionable` is a compatibility/advisory board flag, never proof that a card is one executable
     # work item. Only the receipt-backed, fail-closed seam below is consumed by the active Card queue.
@@ -978,7 +999,11 @@ class Card(BaseModel):
     selection_blockers: list[CardSelectionBlocker] = Field(
         default_factory=lambda: ["identity_not_native"], max_length=16)
     selection_ready: bool = False
-    evidence: list[int] = Field(default_factory=list)   # node ids that tested it (== node_ids)
+    # node ids that TESTED it — the audit set every verdict/best_delta roll-up reads. docs/23's field
+    # table calls this row "`node_ids` / `evidence`"; only `evidence` was ever a field, and a reader
+    # going looking for `card.node_ids` gets `None` on every card in every run. See `status_nodes`
+    # above for the lane's own subject, which is a different (and sometimes disjoint) question.
+    evidence: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
     # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither

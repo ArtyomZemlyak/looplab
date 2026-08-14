@@ -1066,10 +1066,15 @@ def test_running_card_is_actionable():
 
 def test_tolerates_a_card_whose_only_node_was_superseded():
     # The Layer-5 freshness gate drops a stale speculation via node_failed(reason='superseded'). Such a
-    # card must fold CLEANLY (no crash). A superseded/failed node is NOT a Layer-1c exclusion lane: with
-    # no usable evidence the card lands in 'evaluated'/verdict 'open' and stays ACTIONABLE — the seam
-    # excludes only dropped/gated/abandoned. (Suppressing a stale speculation is L5's job, done at the
-    # NODE level via the freshness gate, not through this card flag.)
+    # card must fold CLEANLY (no crash). A superseded/failed node is NOT a Layer-1c exclusion lane: it
+    # stays ACTIONABLE, because the seam excludes only dropped/gated/abandoned. (Suppressing a stale
+    # speculation is L5's job, done at the NODE level via the freshness gate, not through this flag.)
+    #
+    # It lands in `failed`, not `evaluated`, and this assertion carried the OLD answer until
+    # 2026-08-14: 'evaluated' means "evidence has reached a verdict" on the board, which is exactly
+    # what the card's own verdict — 'open', i.e. `_evidence_verdict`'s "all evidence failed/infeasible
+    # — no verdict" — says did NOT happen. `actionable` is what did not move, and it is asserted here
+    # for that reason: the lane is a display distinction, not a new exclusion.
     st = fold(_mk([
         ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
         ("node_created", {"node_id": 1, "operator": "improve", "parent_ids": [],
@@ -1077,7 +1082,110 @@ def test_tolerates_a_card_whose_only_node_was_superseded():
         ("node_failed", {"node_id": 1, "reason": "superseded", "eval_seconds": 0}),
     ]))
     c = st.cards[hypothesis_id("stale speculation")]
-    assert c.status == "evaluated" and c.verdict == "open" and c.actionable is True
+    assert c.status == "failed" and c.verdict == "open" and c.actionable is True
+    assert c.status_nodes == [1]
+
+
+def test_a_built_but_unstarted_node_reads_coded_and_a_started_one_reads_running():
+    """The 2026-08-14 report: `card-2` on `runs/rubertlite-dr-unified-v7` said "experiment running"
+    while its node had been pre-built by `speculation_depth: 2` and never dispatched.
+
+    Both nodes here are `pending` and both promised the durable boundary (`eval_start_boundary`);
+    only one has the `node_eval_started` row. That row is the whole difference, and the lanes must
+    disagree — a card that claims work is happening when it is not is the defect being removed.
+    """
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft", "eval_start_boundary": True,
+                          "idea": {"operator": "draft", "hypothesis": "dispatched"}}),
+        ("node_eval_started", {"node_id": 1, "generation": 0}),
+        ("node_created", {"node_id": 2, "operator": "draft", "eval_start_boundary": True,
+                          "idea": {"operator": "draft", "hypothesis": "prefetched"}}),
+    ]))
+    running = st.cards[hypothesis_id("dispatched")]
+    coded = st.cards[hypothesis_id("prefetched")]
+    assert (running.status, running.status_nodes) == ("running", [1])
+    assert (coded.status, coded.status_nodes) == ("coded", [2])
+    # `coded` is a strict SUBSET of the old `running`, so nothing downstream may move with it: both
+    # engine readers spell the pair `{"coded", "running"}` and both lanes are outside the
+    # dropped/gated exclusion. If this ever diverges, the display fix has become a queue change.
+    assert coded.actionable is True and "card_terminal" not in coded.selection_blockers
+    assert coded.selection_blockers == running.selection_blockers
+
+
+def test_a_pending_node_that_promised_no_boundary_still_reads_running():
+    """FAIL CLOSED, and this is which way closed points.
+
+    A serial-lane node carries no `eval_start_boundary`, so the ABSENCE of a `node_eval_started` row
+    says nothing at all about it — a log written before that event existed says the same nothing
+    about a node whose sandbox has been training for forty minutes. Silence may not withdraw the
+    `running` claim; only the creator's own promise can. Three of the four pending cards in the
+    45-run corpus are this shape.
+    """
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "no promise"}}),
+    ]))
+    c = st.cards[hypothesis_id("no promise")]
+    assert c.status == "running" and c.status_nodes == [1]
+
+
+def test_a_card_with_one_running_and_one_built_node_reads_running():
+    # `running` outranks `coded`: work IS happening for this card, and the lane names only the nodes
+    # that make that true. The card that has nothing running is the one the operator must be able to
+    # tell apart.
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-0", "statement": "two attempts", "at_node": 0}),
+        ("node_created", {"node_id": 1, "operator": "draft", "eval_start_boundary": True,
+                          "idea": {"operator": "draft", "hypothesis": "two attempts",
+                                   "card_id": "card-0"}}),
+        ("node_eval_started", {"node_id": 1, "generation": 0}),
+        ("node_created", {"node_id": 2, "operator": "draft", "eval_start_boundary": True,
+                          "idea": {"operator": "draft", "hypothesis": "two attempts",
+                                   "card_id": "card-0"}}),
+    ]))
+    c = st.cards["card-0"]
+    assert c.status == "coded" or c.status == "running"
+    assert c.status == "running" and c.status_nodes == [1] and sorted(c.evidence) == [1, 2]
+
+
+def test_a_building_card_names_the_node_being_built_even_though_it_is_not_evidence():
+    # The one lane whose subject is NOT in `evidence` ("a build reservation is not evidence yet").
+    # Before `status_nodes` a Building card named no node anywhere on the wire, so the board's own
+    # claim could not be checked against anything.
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("card_added", {"id": "card-0", "statement": "being built", "at_node": 0}),
+        ("node_building", {"node_id": 7, "card_id": "card-0"}),
+    ]))
+    c = st.cards["card-0"]
+    assert c.status == "building" and c.status_nodes == [7] and c.evidence == []
+
+
+def test_a_gated_card_keeps_its_lane_when_its_only_node_also_failed():
+    # ORDER matters between the two terminal lanes and it is deliberate: `gated` is the one that
+    # feeds `actionable=False` and the `card_terminal` selection blocker, so `failed` is checked
+    # AFTER it and can only ever take cards that read `evaluated` today. No card may cross into or
+    # out of the exclusion lane because of a display fix.
+    #
+    # The trust exclusion is set on the folded state and the projection re-derived (the same idiom
+    # the actionable tests above use): `node_failed` carries no feasibility of its own, so building
+    # this shape from raw events would need a reward-hack flag on a crashed node — a fixture about
+    # the trust gate, not about this branch order.
+    st = fold(_mk([
+        ("run_started", {"run_id": "r", "task_id": "t", "direction": "max"}),
+        ("node_created", {"node_id": 1, "operator": "draft",
+                          "idea": {"operator": "draft", "hypothesis": "gated and failed"}}),
+        ("node_failed", {"node_id": 1, "reason": "crash"}),
+    ]))
+    assert st.cards[hypothesis_id("gated and failed")].status == "failed"
+    st.breed_excluded = {1}
+    _derive_cards(st)
+    c = st.cards[hypothesis_id("gated and failed")]
+    assert c.status == "gated" and c.actionable is False
+    assert "card_terminal" in c.selection_blockers
 
 
 def test_operator_pin_wins_over_engine_enrichment():

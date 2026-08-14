@@ -362,7 +362,8 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | `cross_run_prior` (matched concepts, prior runs+outcomes) | `cross_run_prior` — **re-home** | new field |
 | `foresight_rank` + `confidence` (+ source) | `hypothesis_ranked` + `foresight_selected` | reuse |
 | `footprint` (`gpus`, `mem?`, `timeout`; `proposed_by`, `finalized_by`) | Researcher proposes → Developer finalizes | new field (value used only in Layer 4) |
-| `node_ids` / `evidence` | nodes whose `idea.card_id == id` | derived |
+| `evidence` | nodes whose `idea.card_id == id` (or whose statement hash-joins) | derived |
+| `status_nodes` | the node ids the lifecycle `status` was derived from — for `building`, the reserved `node_building` node, which `evidence` deliberately never carries | derived (2026-08-14) |
 | `research_origin`, `lesson_refs`, `claim_refs` | `Node.research_origin`, memo, lessons/claims stores | link |
 | `steering_context` (why proposed: cues + strategist stance + memo id) | proposal-cue hints + `active_strategy` — **homeless today** | new field |
 | `status` (derived maturity/lifecycle) | `_derive_cards` from fields + `st.nodes` | derived |
@@ -371,6 +372,12 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 
 `footprint` is stored in Layer 1 but **not consumed** until Layer 4; storing it now keeps the schema
 stable and lets the Researcher/Developer start populating it immediately.
+
+The `evidence` row above read `node_ids / evidence` until 2026-08-14. **`node_ids` was never a
+field** — only `evidence` ever shipped — and the double spelling is why a reader folding the live run
+reported `node_ids: None` on every card and took it for a defect. Nothing is renamed: `evidence` is,
+and remains, the audit set the verdict/`best_delta` roll-ups read. The genuinely missing thing was a
+different question — *which* nodes make the lane say what it says — and that is `status_nodes`.
 
 ## 4. Card identity + migration off the statement hash
 
@@ -392,6 +399,20 @@ to link evidence, so a card can sit "open" forever despite being tested.
 - The Researcher, reading the board, references an existing card's `card_id` when proposing an idea for
   it; a genuinely new hypothesis mints a new card. (The prompt contract changes minimally in a later
   layer; in Layer 1 the researcher still states text and the engine mints/looks-up the card.)
+
+**So a board carries TWO id spellings and they are a LIFECYCLE distinction, not two writers
+disagreeing.** Worth stating outright, because an operator reading
+`runs/rubertlite-dr-unified-v7` in 2026-08 reported `card-0…card-3` sitting beside four ids like
+`add-r-drop-rdrop-alpha-0-5-on-top-of-the-best-dc-be0846` and reasonably asked which was authoritative.
+Measured on that run: every slug-id row is `identity.source = hypothesis_shadow`,
+`source = deep_research`, `selection_provenance.action_source = none` — a BELIEF from
+`hypothesis_added`, projected onto the board as an advisory row that owns no executable action; every
+`card-N` is `identity.source = card_added_receipt` — a WORK ITEM the engine reserved. The two never
+race for the same row: `_card_identity_map` **bridges** a belief's statement hash onto the native id
+the moment a work item is minted for that statement, which is why that run's SIX `hypothesis_added`
+rows and FOUR `card_added` rows fold to EIGHT cards and not ten. The board already says this in words
+rather than in id spelling — `identity_not_native` renders as *"a research idea, not yet a work
+item"* (`ui/src/cardBoardModel.js`), deliberately not as a fault.
 
 ## 5. New event types + registry classification
 
@@ -750,10 +771,32 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     independent of event arrival order. `card_enriched` must NOT overwrite any field present in
     `card_operator_edits` (or carry an `expected_card_version` CAS).
 28. `Card.status` is a DERIVED enum with a FROZEN UI-contract lane vocabulary
-    `{proposed|building|coded|running|evaluated|gated|dropped}`, kept OPEN so L5 can add
+    `{proposed|building|coded|running|evaluated|failed|gated|dropped}`, kept OPEN so L5 can add
     `speculating`/`built-awaiting-commit` without a model rework; it must distinguish true-open
     (no node → EXPLORE band) from `gated` (only trust-gated/breed-excluded nodes → excluded, not
     re-proposable as fresh).
+    **Amended 2026-08-14**, after an operator read `card-2` on `runs/rubertlite-dr-unified-v7` as
+    "experiment running" while node 2 had been pre-built by `speculation_depth: 2` and never
+    dispatched. `coded` and `failed` are now DERIVED, and the rule the vocabulary has to satisfy is
+    stronger than "distinguish open from gated": **a lane may not claim work is happening when it is
+    not, and may not claim evidence reached a verdict when nothing was measured.**
+    * `coded` splits the pending branch on the durable eval-start boundary — `Node.eval_start_boundary`
+      (the creator's promise, stamped on `node_created`) AND no folded `node_eval_started`. That is
+      the same pair `is_unevaluated_speculative_discard` proves the L5 refund from, and it fails
+      closed the same way: a pending node carrying no promise keeps `running`, because the absence of
+      a boundary row is only evidence when someone promised to write one.
+    * `failed` takes the cards whose evidence is entirely terminal and entirely without a result —
+      crashes and discarded speculative builds together, since "the experiments ended without a
+      result" is the only statement true of both and the attempts pane already carries which.
+    Both are strictly display: `actionable`, `selection_ready` and every `selection_blocker` are
+    unchanged (`coded` is a subset of the old `running`, which both engine readers already spell as
+    the pair `{"coded","running"}`; `failed` is a subset of the old `evaluated` and is evaluated
+    AFTER `gated`, the only lane that excludes). Verified over 45 preserved runs: 22 of 256 cards
+    change lane, and zero change verdict, actionability, readiness or blockers.
+    Each card also publishes **`status_nodes`** — the node ids that lane was derived FROM, stamped by
+    the branch that chose it so the two cannot drift. A status is a RECORD-side statement (docs/36):
+    it is what an operator reads to decide whether to intervene, so it owes them the subject it is
+    about. See §3's field table for what this is NOT (`evidence`, and the `node_ids` that never was).
 29. **Every new `EV_*` lands in exactly one bucket** (`test_event_types.py` guard). **Folded `_HANDLERS`**
     (main-task, additive): `card_added`, `card_merged`, `card_auto_dropped`, `card_enriched`, `card_ranked`,
     `card_build_requested`, `card_build_done`, and the L6 operator events (`card_reprioritized`,
@@ -798,8 +841,10 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
   `node_building` claim (ceiling `1+max(card_added ids)`); the two appends are not one transaction.
 - `node_building.card_id` as an additive data field (see decision 25); mint the card for speculative
   drafts too, decoupling card mint from idea proposal.
-- `Card.status` — derived open string; current replay emits proposed/building/running/evaluated/gated/dropped
-  and leaves additional future vocabulary visible rather than rejecting it.
+- `Card.status` — derived open string; current replay emits
+  proposed/building/coded/running/evaluated/failed/gated/dropped (`coded` and `failed` since
+  2026-08-14 — see decision 28) and leaves additional future vocabulary visible rather than
+  rejecting it. `Card.status_nodes` rides beside it: the node ids that lane was derived from.
 - `Card.evidence`/`best_delta`/`verdict` — computed by the **extracted pure helper** (values,
   never stamped onto Node/Hypothesis).
 - **Immutable seed statement** captured on `card_added`, held separate from any editable display
