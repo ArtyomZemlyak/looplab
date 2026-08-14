@@ -176,16 +176,27 @@ looplab run     [CONFIG|TASK] [-s k=v]   # YAML/JSON config, a bare task, or --g
 looplab resume  RUN_DIR                  # continue a crashed/incomplete run by replay
 looplab inspect RUN_DIR                  # raw launch snapshot + current folded best result
 looplab replay  RUN_DIR                  # pure fold of the event log → state (read-only)
+looplab readmodel RUN_DIR [--check]      # build the derived read model, or report whether it is stale
 looplab smoke                            # ping the configured LLM endpoint
 looplab approve RUN_DIR                  # ratify a paused run (HITL / onboarding)
 looplab bench   TASK.json ...            # capability self-benchmark across tasks
 looplab ui                               # serve the live React UI (auto-builds the bundle; needs [ui])
-looplab          # terminal control plane; local auto-start needs [ui], or use `tui --server URL`
+looplab tui                              # terminal control plane; local auto-start needs [ui], or `--server URL`
 looplab export-mlflow    RUN_DIR         # log the champion to MLflow
 looplab export-notebook  RUN_DIR         # export the champion as a runnable .ipynb
 ```
 
 Full flag-by-flag reference: [CLI reference](docs/guide/cli-reference.md).
+
+**The control plane authenticates itself on a shared origin.** `looplab ui` binds loopback, which is
+a real boundary on your own machine and none at all on a multi-user host: on JupyterHub every user's
+server answers on the same origin, so any same-origin page could drive `/api/*` — start a run, delete
+one, spend money. With `LOOPLAB_UI_TOKEN` unset the server therefore decides by where it is: a private
+origin stays open and byte-for-byte as before, and a shared hub **fails closed** — it mints a token
+into `~/.looplab/ui-token` (mode 600, reused across restarts, printed once with its path) and requires
+it on `/api/*`. Set `LOOPLAB_UI_TOKEN` yourself to choose the value, or `LOOPLAB_UI_ANONYMOUS=1` to
+opt out deliberately; the opt-out is logged. `looplab tui` reads the same file, so it keeps working
+untouched.
 
 ## Crash & resume (the keystone)
 
