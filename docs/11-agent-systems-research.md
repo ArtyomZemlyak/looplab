@@ -5,6 +5,11 @@
 > document remains evidence and design input, not a live status board. The current Deep Research
 > shipped/proposed split is maintained in [doc 28](28-deep-research-sota-roadmap-2026-08-10.md).
 
+> **2026-08-14 pointer.** [Doc 41](41-external-works-synergy-2026-08-14.md) maps this document's
+> D2 (memory hygiene), D3/G4 (stagnation-adaptive switching — still absent, grep-verified), G3
+> (misevolution) and G8 (context scoping) onto the August-2026 external cohort (EvoLib, PACEvolve,
+> AREX, Skill-SP, Frontis-MA1) with current module paths and a recommended order.
+
 **Method.** Three inputs, cross-checked against everything already shipped or planned so nothing
 below re-proposes known work: (1) a fresh 106-agent web deep-research pass over three streams —
 *deep-research system architectures*, *agentic best practices 2025–26*, *AI-R&D frontier 2026 Q1–Q2*

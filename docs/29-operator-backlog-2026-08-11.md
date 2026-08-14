@@ -403,6 +403,16 @@ operator questions are [doc 32](32-f1e-operator-declaration-options-2026-08-13.m
      while its sibling F1b carried a BUILT note from the same window — an operator triaging the
      backlog would re-schedule finished work. -->
 
+> **Status update (2026-08-14).** Two facts landed after the note above. (1) Doc 32's option C is
+> adopted: `metric_salvage.py::recheckable_salvage` requires `producer == OPERATOR_PRODUCED`
+> (`d9d12cc`), so an agent-declared pipeline can never be promoted, and the feature is named by
+> `Settings.metric_salvage_repair` (default `true`). Net effect, stated in the module's own RE-CHECK
+> section: in both of today's pipeline shapes the promotion is unreachable and v6 node 3 stays
+> salvaged. (2) Doc 32's recommended option D — finish the pipeline instead of promoting — is NOT
+> built: the stage-scoped machinery exists in the repair loop
+> (`command_eval._run_stages(start_stage=…)`, `evaluate._safe_reuse_start`), but the salvage path
+> still re-checks-or-leaves-salvaged and never resumes the stages after the corrected one.
+
 **Found by watching, 2026-08-13, and it is a systematic bias — not a one-off.** On
 `rubertlite-dr-unified-v6`:
 
@@ -842,9 +852,16 @@ record concern, because nothing the probe reads can reach the record except thro
 And `ctypes.dlopen` reaches libc, which reaches `execve` — no audit hook can close that, and the
 read fence's own symlink residual is stated the same way.
 
-## F3 · Node workspaces on `git worktree`
-
 ## F3 · Node workspaces on `git worktree` — **MEASURED AND DECLINED (2026-08-13)**
+
+> **Status update (2026-08-14).** Re-verified against the tree, and doc 37's ask — carry this row as
+> DECLINED WITH MEASUREMENT, never as deferred — is what the heading now says (a stray duplicate
+> heading from the rename was removed here). Doc 37 §8's R1 follow-up (record the workspace's real
+> size as a fold-ignored diagnostic) is NOT yet in code: `engine/workspace.py` still appends
+> `workspace_seeded` with only the `materialized` name list and no byte total. The root close is one
+> additive field — a byte sum taken during the seed walk, added to that payload with a reader-side
+> default (invariant #5-safe) — followed by the written retention policy doc 37 §8 requires before
+> any checkpoint reclaim.
 
 **Asked:** "move to git worktree?"
 
@@ -1173,10 +1190,21 @@ Kept here so they are not lost; each is a fix, not a feature.
   the PAUSE (the effect the operator asked for) separately from process exit, a retry that mints a
   FRESH intent when the old one has been superseded, and a UI that surfaces the remedy instead of a
   frozen "Stop requested…" chip.
-* **Node build and resume are silent.** Long waits with nothing on screen; the operator asked for
-  "maximum transparency". The pieces exist (`ui/src/buildingModel.js`, the `node_building` event) but
-  nothing streams what phase the build is in.
-* **Cross-run memory is mostly toy residue.** Measured through `/api/memory` on 2026-08-11: 161
+* **Node build and resume are silent.** FIXED 2026-08-13 (`b4416be`): the engine now emits a
+  `phase_progress` beacon at each step boundary of a build and of a resume
+  (`events/types.py::EV_PHASE_PROGRESS` — diagnostic, fold-ignored), and
+  `ui/src/buildingModel.js::openPhases` folds the beacons into the Dock strip, node card and age
+  clock. The record below is kept as written. Long waits with nothing on screen; the operator asked
+  for "maximum transparency". The pieces exist (`ui/src/buildingModel.js`, the `node_building`
+  event) but nothing streams what phase the build is in.
+* **Cross-run memory is mostly toy residue.** MECHANISMS LANDED, STORE NOT RE-AUDITED (2026-08-14):
+  the write path now merges exact and paraphrase duplicates
+  (`engine/lesson_hygiene.py::consolidate_lessons`), salvaged and trust-flagged metrics no longer
+  feed the cross-run writers (`engine/memory.py::unreliable_metric_ids`, 2026-08-13), and deleting a
+  run can purge its rows from the five shared stores (`serve/memory_cascade.py`). None of that
+  removes what is already in the store, so the 2026-08-11 measurement below stands until someone
+  purges the toy runs through the cascade and re-measures `/api/memory` — which is the close.
+  Measured through `/api/memory` on 2026-08-11: 161
   lessons of which 7 come from a real task, 163 notes of which **71 are distinct** (56% duplicates,
   one repeated 23 times), 10 cases of which 9 are test fixtures. Retrieval over that store is what
   produces the "changing x and y parameters regressed the metric" card the operator screenshotted.

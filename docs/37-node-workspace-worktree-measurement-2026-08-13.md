@@ -7,6 +7,18 @@ saves a sub-second per node against a node that trains for 40 minutes, and *brea
 correctness today* on the v1 testbed. The disk problem the proposal was reaching for turns out to be
 a different mechanism entirely, and §6 names it.
 
+> **Status update (2026-08-14).** §7's requested doc-29 edit landed:
+> `docs/29-operator-backlog-2026-08-11.md` §F3 now reads **MEASURED AND DECLINED (2026-08-13)**.
+> None of §8's three rungs has shipped: the event registry still carries only
+> `workspace_seeded`/`workspace_changed` (`events/types.py` — no workspace-size receipt anywhere),
+> no disk-budget cue exists beside the time-budget/GPU-budget hints in `engine/proposal_cues.py`,
+> and no retention policy or reaper exists in `looplab/`. R1 remains the recommended next step. Its
+> cheapest shape, respecting §9's caveat that a per-node walk on geesefs is not free: a fold-ignored
+> `DIAGNOSTIC_EVENTS` member appended at eval end from the eval path that already owns the workdir,
+> carrying total bytes plus the largest subtrees from a walk bounded by an explicit entry cap — with
+> the cap's exhaustion recorded in the receipt, so a truncated measurement can never read as a small
+> workspace.
+
 Everything below is measured, not reasoned. Where a number is a median over repetitions the spread is
 given, because two of the conclusions turn on whether a difference is real.
 

@@ -26,6 +26,11 @@ request: how hard is each borrow and exactly where does it land.
 > bare-integer recommendation tables, cross-references are always qualified as
 > **"doc 26 §4.2 #N"** vs **"doc 17 §27 #N"**.
 
+> **2026-08-14 pointer.** [Doc 41](41-external-works-synergy-2026-08-14.md) is the next analysis in
+> this line (AREX, Skill-SP, Frontis-MA1/OpenMLE, EvoLib, PACEvolve). It picks up §4.2 #9 (the
+> prior-injection hit-rate audit, as the measurement half of EvoLib-style memory consolidation) and
+> reaffirms §4.2 #12's charter-bound self-evolution boundary against the cohort's RL contours.
+
 ---
 
 ## TL;DR verdict

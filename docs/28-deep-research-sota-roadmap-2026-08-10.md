@@ -13,6 +13,14 @@ operator-facing UI
 > after code, replay/receipt contracts, tests, user-guide text and the process diagram land in the
 > same change. Current source/tests and `docs/guide/` remain runtime authority.
 
+> **Status update (2026-08-14).** DR-01..DR-13 are **still unshipped in master** (`d307542`): no
+> `research_episode_*` / `research_plan_*` / `research_question_*` event exists in
+> `events/types.py`, and no `EvidenceItem` / `ResearchEpisode` / `ProgressLedger` /
+> `ResearchQuestion` symbol exists anywhere under `looplab/`. The §1 shipped-baseline table remains
+> accurate. The next slice remains **DR-01 + DR-02 together (+ the DR-03 deterministic gate in the
+> same release)**, exactly as §9 decides. External validation of the ordering: see the AREX note
+> under DR-04.
+
 ## 0. Executive verdict
 
 LoopLab now has a strong production foundation for Deep Research: a bounded tool loop, typed
@@ -191,6 +199,13 @@ research agents. After verification:
 The loop is bounded by revision count, remaining episode budget and a no-progress detector over
 `(open_gaps, evidence_ids, draft_digest)`. A terminal memo may still contain uncertainty, but it must
 name it; the system must never turn exhausted budget into a clean trust badge.
+
+> **External confirmation (added 2026-08-14).** AREX (BAAI, arXiv:2607.21461, July 2026) implements
+> exactly this pair — verifier-directed refinement (DR-04) plus typed context compaction (DR-09) —
+> with "verification as the signal for the next round, not a final filter" as its central claim, and
+> reports the gains coming from the directed-revision loop rather than from wider fan-out. That is
+> independent, current evidence for this roadmap's priority order (DR-04 before DR-06 parallelism).
+> Full synergy analysis in [doc 41](41-external-works-synergy-2026-08-14.md).
 
 ### DR-05 · Crash-safe checkpoints
 

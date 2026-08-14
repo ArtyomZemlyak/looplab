@@ -136,6 +136,54 @@ Research only.
 | P2 | UI guide said the launch card was not editable, while the shipped card edits a validated draft and invalidates validation after change | documented workflow contradicted the guarded UI | **Fixed:** guide now describes editable fields and mandatory revalidation |
 | P2 | MCP wrapper comment said Auto runs calls inline, while UNKNOWN MCP effects deliberately ask even in Auto | security contract was correct in code/test but false in its owning comment | **Fixed:** comment now matches fail-closed behavior |
 
+> **Status update (2026-08-14) — the open architecture items above, re-verified against master
+> `d307542`.** One consolidated banner so the table's "Open …" dispositions stay honest:
+>
+> - **Prompt/context pinning — STILL OPEN.** No prompt-bundle/manifest pin exists; the PromptStore
+>   still hot-reloads mid-run, and the only run-start pins are the settings in `run_started` plus
+>   the two `core/setup_identity.py` digests (task payload + sorted config/workspace manifest).
+>   *Close at the root:* stamp a content hash per rendered prompt family into `run_started`
+>   (additive field) and let `render()` warn or refuse when live text diverges from the pinned hash
+>   for an in-flight phase.
+> - **Durable inner phases — STILL OPEN.** No `agent_phase_started` / `agent_checkpointed` /
+>   `agent_phase_completed` events exist in `events/types.py`; the inner trajectory still lives only
+>   in the diagnostic trace sidecar (`spans.jsonl` via `core/trace_append.py`), which is not folded
+>   and not resumable. *Close at the root:* land the three additive events of §1 below with a
+>   registry entry in the `BACKGROUND_APPENDABLE` style and one declared resume boundary in
+>   `agents/tool_loop.py::drive_tool_loop`.
+> - **Idempotent external/paid receipts — PARTIALLY CLOSED, at the serve/governance layer only.**
+>   `serve/paid_ledger.py` (claim→terminal receipt ledger, doc 25 SR-01),
+>   `engine/curation_protocol.py` (at-most-once finalize curation keyed by content digest) and
+>   `engine/steward_invocation.py` (operator `action_id` keying) all shipped. The engine eval path
+>   gained a durable start boundary (`EV_NODE_EVAL_STARTED`,
+>   `engine/evaluate.py::_record_eval_start_boundary`) but still has no attempt-scoped invocation id
+>   + completed receipt for an external/paid evaluator — that half of the row stays open.
+> - **Shared reserve/commit budget — STILL OPEN.** `core/llm_broker.py` is run-local concurrency
+>   ADMISSION (a closed lane vocabulary), not a budget; `engine/costs.py` is a durable POST-HOC
+>   metering ledger (`_commit_usage_delta`) with no reservation step; `CostAccountant(limit=...)`
+>   exists (`core/llm.py:1638-1641`) but `core/llm.py`'s own header still records that shipped
+>   Settings expose no dollar-cap field. *Close at the root:* a run-level reserve/commit pool checked
+>   at the broker's single admission choke point (both clients already pass through it), default
+>   `None` for compatibility.
+> - **Cancellation token — STILL OPEN (cooperative checks only).** `drive_tool_loop` takes a
+>   `cancel_check` probe (`agents/tool_loop.py:400,474-478`), eval watchdogs share `_evaluate`'s
+>   `kill_signal`, and stale speculation is dropped (`orchestrator._drop_stale_speculation`) — but
+>   nothing propagates a cancel into an in-flight provider request, external CLI process or MCP
+>   operation, which is what the row asked for.
+> - **`DeveloperResult` envelope — STILL OPEN.** Developer output remains `str` plus the mutable
+>   side channels `last_files`/`last_deleted`/`last_footprint` (registry
+>   `agents/roles.py:251::DEVELOPER_OUTPUT_ATTRS`); no immutable envelope type exists. Likewise the
+>   external CLI timeout is still a composition-independent constructor default of 600 s
+>   (`agents/cli_agent.py:226`; `agents/factory.py:396` passes none) with no priced/`unpriced`
+>   usage result.
+> - **Agent eval corpus — STILL OPEN.** No trajectory/handoff/prompt-injection eval ladder exists
+>   under `tests/`; the closest artifacts are the opt-in live smokes
+>   (`tests/test_live_scenarios.py`, `LOOPLAB_LIVE_SCENARIOS=1`) and the replay/outcome unit suites.
+> - **Canonical `RunProposal` service — STILL OPEN.** No such symbol exists; the three planning
+>   stacks below remain separate. The launch boundary itself hardened since
+>   (`serve/launch.py::_confine_task_file` + `task_file_roots`), which narrows the risk but is not
+>   the shared planner/schema.
+
 ## Duplication and taxonomy debt
 
 ### One word, several contracts

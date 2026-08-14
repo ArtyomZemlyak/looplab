@@ -230,6 +230,26 @@ better?"). Three parallel read-only audits, file:line evidence. Results:
 | 6 | Report/paper stage + reviewer agents | **Confirmed, but it is a declared non-goal** | `serve/report.py` = run summary (audit-only `report_generated`); `deep_research.py` memo = forward-looking steering doc; `trust/critic.py` = code sanity critic; the closest reviewer is `trust/verify.py` — a rubric-prompt pass grading *memo claims* as supported/unsupported (`verify.py:81-127`), not a deliverable review with an accept/revise loop. Note: idea→paper is listed as an explicit non-goal in `01-product-design.md:40` — adopting item 6 is a product-scope decision, not just an engineering gap. |
 | 7 | Tool retrieval + object-reference context | **Confirmed** | All tool specs are statically flattened into every prompt (`CompositeTools.specs()` `agent.py:34-35`; `McpTools` builds specs once, `mcp_tools.py:60-74`); vectorstore/embedding machinery serves knowledge retrieval, never tool selection; `skills.py` progressive disclosure covers skill *bodies* only. Tool-loop results are inlined + truncated to 4000 chars (`agent.py:256-260`) with generic middle-truncation/compaction (`context_budget.py`). Adjacent pattern that already exists: `run_tools.py` JIT reads by `node_id`/asset name ("just-in-time retrieval instead of stuffing everything into the prompt", `run_tools.py:1-2`) — the reference pattern is proven in-house for run state, just not for intra-loop tool outputs. |
 
+> **Status update (2026-08-14).** Two of the sharpest §7 findings have since been closed in the tree:
+>
+> - **§7 item 4 — "on `improve`, `parent.code` is never passed to the Developer at all": FIXED.**
+>   `engine/node_build.py:155-168::_implement` routes every improve/refine through
+>   `implement_from(idea, parent)` whenever the Developer supports it, and the `improve` build branch
+>   in `engine/orchestrator.py` passes the parent node in (an ensemble `merge` seeds from
+>   `parents[0]` the same way). The repo Developer seeds the build from the parent's ACTUAL files +
+>   deletions (`adapters/repo_developer.py:1329-1338::implement_from`, with the parent-aware
+>   `repair_from` beside it), and the capability is forwarded through every wrapper
+>   (`agents/roles.py:1420::ValidatingDeveloper`, `search/best_of_n.py:138`,
+>   `agents/unified_agent.py:137`). Residual gap: the plain single-script `LLMDeveloper`
+>   (`agents/roles.py:1069`) has no `implement_from` and still falls back to a fresh
+>   `implement(idea)` — the original claim survives only for non-repo templated/script tasks.
+> - **§7 item 5 — "concurrent runs never see each other's distilled lessons": FIXED by §8's M6, now
+>   ON BY DEFAULT.** §8 shipped the mechanism with mid-run cadences default 0 (opt-in); the shipped
+>   defaults are now `lessons_every=4` / `lessons_refresh_every=4` (`core/config.py:915-916`). Read
+>   side: `engine/lessons.py:221::maybe_refresh_lessons`, driven each loop turn from
+>   `engine/orchestrator.py:4754::_maybe_refresh_lessons`. The fleet launcher and
+>   cross-task/cross-run-root sharing remain open (ROADMAP F2), as §8 already records.
+
 **Net effect on the recommendation.** Ordering unchanged; framing sharpened. Items 1, 2 are even
 cheaper than estimated (extend existing `operator_yields` / `_reflect_lessons` machinery). Item 4's
 first step shrinks to "pass parent code into improve/refine_block and patch in place" — the full

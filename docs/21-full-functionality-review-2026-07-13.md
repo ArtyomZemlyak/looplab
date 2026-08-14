@@ -180,6 +180,19 @@ P3 cleanup list below.
 - **Fix:** guard with `try/except (ValueError, UnicodeDecodeError)` + `isinstance(body, dict)`.
 
 ### DOS-1 / MEM-1 · Log pager holds one global lock across a full-file scan, and its index is unbounded in event count
+
+> **Status update (2026-08-14).** DOS-1 is fixed: `serve/log_pages.py` now holds the shared
+> `self._lock` only around the registry dict, and the expensive work (the cold full `_scan`,
+> `_materialize`'s disk reads) runs under a per-path lock — `serve/_log_index.py::PathLocks.hold`,
+> the module doc 25 SC-04 extracted so `command_observation` and this pager share one spelling. A
+> slow scan now stalls one run's requests, not every run's. MEM-1 is only partially closed: the
+> 8-run LRU (`MAX_INDEXED_RUNS`) and per-row ceilings (`MAX_SOURCE_ROW_BYTES`,
+> `MAX_PLACEHOLDER_TYPE_CHARS`) bound run count and row width, but `_scan` still retains one `_Row`
+> per event with no per-run row-count cap, so a single multi-GB log still holds millions of rows in
+> memory. Closing that at the root is this entry's second fix half: a sparse boundary index (retain
+> every Nth row boundary, re-read the selected stripe exactly) or a per-run row cap with eviction —
+> either fails old cursors closed through the existing revision rotation.
+
 - **File:** `looplab/serve/log_pages.py:419` (lock scope), `:180` (index growth)
 - **Defect:** `page()` holds the single `self._lock` for its whole body, including the first-access
   `_scan` that reads the entire event log to build the index; every concurrent `log-page` request
