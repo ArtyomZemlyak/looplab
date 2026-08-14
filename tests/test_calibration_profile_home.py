@@ -53,7 +53,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # wrote `_EXPECTED_DIGEST = SPECULATION_CALIBRATION_PROFILE_DIGEST`, which compares the constant to
 # ITSELF and can never fail — proven by changing only the derivation (the profile schema string
 # v1->v2), which moved the digest and still reported 12 passed.
-_EXPECTED_DIGEST = "sha256:52423342aaf1c4c6776884dcf1294e049feb1ca9e4063802826f47393c5087dd"
+_EXPECTED_DIGEST = "sha256:d46e2af98e88c4e2b1f8fd754a91f1c5617f488873be8a5d874298e52708572a"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -169,7 +169,18 @@ _EXPECTED_DIGEST = "sha256:52423342aaf1c4c6776884dcf1294e049feb1ca9e4063802826f4
 #               a named forbidden calibration lifecycle event for the same reason. Both pins re-set.
 #               Note this change moves `speculation_implementation_digest` regardless (it hashes
 #               every shipped `.py`), so every previously issued receipt is revoked either way.
-_EXPECTED_FIELD_COUNT = 205
+#   2026-08-14  + train_monitor_tools (the watchdog judges get `read_log`/`metric_series` instead of
+#               a fixed slice of the tail). The 'field set changed too' branch again, and verified
+#               that way rather than from the count: diffing the Settings field set against the
+#               pre-merge tree reports exactly `['train_monitor_tools']` added and nothing removed,
+#               so a +2/-1 cannot be hiding behind the +1. Re-pinning is right and not merely
+#               necessary, because the field decides whether a replicate's kill judge may issue
+#               PAID tool calls and read arbitrary windows of the training log — i.e. it changes
+#               what evidence the stop decision was made on, which is exactly what a receipt
+#               asserts about its replicates. `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it OFF, so a
+#               resumed pre-2026-08-14 run replays on the old evidence and its receipt still
+#               describes what happened. Both pins re-set.
+_EXPECTED_FIELD_COUNT = 206
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

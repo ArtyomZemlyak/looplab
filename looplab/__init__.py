@@ -176,6 +176,9 @@ _LAYOUT = {
     "lessons_reconcile": "engine",
     "latebind": "core",
     "literature": "tools",
+    # the watchdog judges' bounded log reader + metric series — a `tools` provider like any other,
+    # registered so the flat `looplab.log_tools` alias resolves and the layout audit stays exhaustive.
+    "log_tools": "tools",
     "llm": "core",
     # the shared paid-call concurrency boundary is a canonical core module; registering
     # it keeps both the package-layout audit and the supported flat import alias exhaustive.
@@ -220,6 +223,9 @@ _LAYOUT = {
     "perm_modes": "tools",
     "policy": "search",
     "profile": "core",
+    # the owner-token boundary: minted-on-a-shared-origin control-plane auth, read by both the
+    # HTTP app and `serve/tui_api.py`, so it is a canonical serve module rather than a helper.
+    "owner_token": "serve",
     "projects": "serve",
     "protocol": "serve",
     "prompts": "core",

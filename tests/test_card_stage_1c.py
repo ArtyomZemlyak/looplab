@@ -168,11 +168,19 @@ def test_true_open_gated_and_superseded_only_evidence_have_distinct_lifecycles()
     )
     assert gated_card.selection_ready is False
     assert "card_terminal" in gated_card.selection_blockers
-    # A superseded terminal remains historically evaluated/actionable on the compatibility board. It
-    # is nevertheless closed to strict queue selection by its terminal work owner.
+    # A superseded terminal reads `failed`, not `evaluated` (2026-08-14). This assertion used to pin
+    # `evaluated` and its comment called that "historically evaluated on the compatibility board" —
+    # but the pair it produced was exactly the contradiction the lane split was written to remove:
+    # `evaluated` means "evidence has reached a verdict" while this same card's `verdict` is `open`,
+    # i.e. "all evidence failed, no verdict". A card whose only node was a speculative build the
+    # Layer-5 refund PROVED never ran has no verdict to have reached. `actionable` deliberately stays
+    # True and the card stays closed to strict queue selection by its terminal work owner — the lane
+    # is display only, and nothing crosses into or out of `gated`, the one lane that excludes.
+    # The three lifecycles this test is about stay distinct, and are now MORE distinct than before:
+    # proposed / gated / failed, where two of them used to share the word `evaluated`.
     assert superseded_card.evidence == [1]
     assert (superseded_card.status, superseded_card.verdict, superseded_card.actionable) == (
-        "evaluated", "open", True,
+        "failed", "open", True,
     )
     assert superseded_card.selection_ready is False
     assert "work_terminal" in superseded_card.selection_blockers
