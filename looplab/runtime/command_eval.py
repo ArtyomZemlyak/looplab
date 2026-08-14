@@ -2475,13 +2475,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # second, drift-prone re-derivation of the same question.
     #
     # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
-    # `EXTRA_METRIC_ENGINE` (`runtime/sandbox.py::stdout_extra_metric_channels`), names keys printed
-    # by source the ENGINE spliced into the artifact — and the one splicer that exists,
-    # `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a `solution.py` artifact and
-    # never a repo eval COMMAND. A repo task's argv runs the operator's own program over the agent's
-    # working set; nothing the engine authored is inside it, so every undeclared number on its
-    # stdout really is the candidate's. If that ever stops being true, this site gains the same
-    # `code`-authenticated third arm rather than a name list.
+    # `EXTRA_METRIC_ENGINE`, names keys printed by source the ENGINE spliced into the artifact — and
+    # the one splicer that exists, `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a
+    # `solution.py` artifact and never a repo eval COMMAND. A repo task's argv runs the operator's
+    # own program over the agent's working set; nothing the engine authored is inside it, so every
+    # undeclared number on its stdout really is the candidate's. If that ever stops being true, the
+    # third arm is granted where the engine can ATTEST it wrote the artifact
+    # (`engine/eval_dispatch.py` over `core/models.py::apply_engine_extra_metric_channels`) —
+    # never from the artifact's own bytes here, which are the candidate's, and never from a name list.
     # Same precedence as the values (`declared` wins a name collision), for the same reason.
     extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
                        **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)

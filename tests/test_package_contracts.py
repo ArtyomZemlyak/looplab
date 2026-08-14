@@ -92,10 +92,12 @@ def test_the_flat_alias_follows_the_move():
 
 
 def test_the_calibration_probe_moved_down_and_every_old_spelling_is_the_same_object():
-    """The probe the sandbox has to ask about extra-metric provenance (2026-08-14).
+    """The probe the engine has to ask about extra-metric provenance (2026-08-14).
 
-    `runtime/sandbox.py::stdout_extra_metric_channels` needs `engine_declared_extra_metric_keys`,
-    and `runtime` may import nothing above `core` — but the answer to that was a MOVE and never a
+    It moved because `runtime/sandbox.py` needed `engine_declared_extra_metric_keys` and `runtime`
+    may import nothing above `core`; the GRANT has since moved up to `engine/eval_dispatch.py`
+    (the byte-prefix check authenticated nothing, since the bytes are the candidate's), and `core`
+    remains right for a module `engine` and `search` both read — but the answer was a MOVE and never a
     copy: the probe source is an input to a calibration DIGEST, so a second copy of its key tuple is
     how the two silently drift apart. Both halves are asserted here, because either one alone is the
     bug: the module lives in `core`, AND every spelling of it names ONE object.
@@ -103,7 +105,7 @@ def test_the_calibration_probe_moved_down_and_every_old_spelling_is_the_same_obj
     assert not (ROOT / "agents" / "calibration.py").exists()
     canonical = importlib.import_module("looplab.core.calibration")
     # The retired dotted path routes through `_RENAMED`, not through a re-exporting shim: the
-    # sandbox resolves the classifier through this module on every call, and a second module object
+    # grant site resolves the classifier through this module on every call, and a second module object
     # would make the monkeypatch in `tests/test_auto_extra_metrics.py` a silent no-op.
     assert importlib.import_module("looplab.agents.calibration") is canonical
     assert importlib.import_module("looplab.calibration") is canonical

@@ -118,6 +118,37 @@ def _stable_effective_gpu_inventory(raw) -> list[dict]:
     return stable
 
 
+def engine_authored_artifacts(engine) -> bool:
+    """Does the ENGINE itself author every eval artifact in this run, rather than an agent?
+
+    THE ONE PLACE THAT ASSERTION IS MADE, and the reason it is made from engine state rather than
+    from the artifact. `core/calibration.py::engine_declared_extra_metric_keys` names the extra-metric
+    keys the engine's own CUDA probe prints, and until 2026-08-14 the whole grant was a byte-exact
+    prefix match against the code the sandbox was about to run — i.e. against `solution.py`, which on
+    a repo run is written by an external coding agent. The prefix is a public constant in the shipped
+    tree, so that authenticated nothing: prefix + one `print` earned the `engine` tag, and it survived
+    `auto_extra_metrics=false`, the operator's "authenticated only" switch. Nothing derivable from an
+    artifact the candidate writes can say who wrote it. This can, because it reads the engine's OWN
+    role wiring — state no candidate can reach, in a run no candidate participates in.
+
+    True in exactly one configuration: the speculation-calibration profile, whose Developer is the
+    engine's own probe splicer. `agents/roles.py::ToyObjectiveDeveloper.implement` splices the probe
+    UNCONDITIONALLY when `calibration_gpu_probe` is set, and that flag is deliberately not a
+    Settings/env/UI knob — `cli/__init__.py::_make_calibration_roles` is its only writer. So in that
+    run every artifact is engine-authored, and in every other run this is False and the fail-safe
+    `auto` stands.
+
+    EXACT TYPE, no wrapper and no subclass, matching `_calibration_role_pair_errors` right below —
+    which is the same rule for the same object and refuses the calibration run outright if it does
+    not hold. Total and fail-closed: any engine without a readable developer answers False.
+    """
+    from looplab.agents.roles import ToyObjectiveDeveloper
+
+    developer = getattr(engine, "developer", None)
+    return (type(developer) is ToyObjectiveDeveloper
+            and getattr(developer, "calibration_gpu_probe", False) is True)
+
+
 def _calibration_role_pair_errors(task, researcher, developer) -> list[str]:
     """Validate the two default-off purpose flags without accepting wrappers/subclasses."""
     from looplab.agents.roles import ToyObjectiveDeveloper, ToyResearcher

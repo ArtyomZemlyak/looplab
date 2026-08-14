@@ -23,41 +23,26 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
 from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
-                                   UNANSWERABLE_TRIAGE_ACTION, _rule_triage, _TRIAGE_REASK_LIMIT,
-                                   coerce_triage_action, is_transport_failure_verdict)
+                                   TRIAGE_RATIONALE_CAP, UNANSWERABLE_TRIAGE_ACTION, _rule_triage,
+                                   _TRIAGE_REASK_LIMIT, coerce_triage_action,
+                                   is_transport_failure_verdict)
 # The verification verdicts this module RENDERS (it never decides one). Two vocabularies live side
 # by side in this file now and they are not the same kind of thing: `AGENT_TRIAGE_ACTIONS` above is
 # what a model may answer, `REPAIR_*` below is what the engine measured. See
 # `engine/repair_verify.py`'s docstring for why they must not be merged.
 from looplab.engine.repair_verify import REPAIR_INERT, REPAIR_UNMET
 
-# THE INTAKE BOUND on the triage model's own free text, and it is an INTAKE bound only — every SINK
-# keeps its own, tighter cap for its own reason (`node_repaired.rationale` 300 after redaction,
-# `repair_log["fix"]` 200 for the judge's history, `node_failed.triage_rationale` 300,
-# `proposal_cues` 90). Those sinks are what bound the durable row and the prompt; this one bounds
-# only what the ENGINE carries between them, so tightening it buys nothing downstream and costs the
-# one reader that needs the whole sentence.
+# The intake bound on the triage model's free text. Its rationale, its measurement and the reason it
+# had to MOVE are at `engine/triage.py::TRIAGE_RATIONALE_CAP`: the seam's only implementation caps
+# the same string on its way OUT, so a bound applied here to what the seam RETURNED could never be
+# the widest one and both layers now read that single constant.
 #
-# It was 300 — the same number as the durable sink — and that silently truncated the input to
-# `repair_verify.verify_repair`, which reads the rationale to ask "did this repair do what it said?".
-# A crash rationale is written in one shape: DIAGNOSIS first ("diverged right after the R-Drop KL
-# term, unlike the working nll_cos runs"), then "Fix: <the concrete things I am about to change>".
-# So a cut at 300 lands almost exactly on the seam and feeds the extractor the CITATIONS while
-# discarding the CLAIMS — the one half it exists to check. Measured over `runs/` on 2026-08-14:
-# 83 of the 123 model-authored `node_repaired` rationales in the corpus are stored at exactly the
-# cap, i.e. the MEDIAN rationale the rung read was truncated; and over the 54 repairs whose full
-# text could be recovered from `spans.jsonl` and replayed, 5 verdicts are wrong because of it —
-# 3 of the 7 `unmet`s and 2 of the 3 `unstated`s are `verified` on the text the model actually
-# wrote. `rubertlite-dr-unified-v7` node 0 attempt 2 is the live instance: its only surviving claim
-# was `nll_cos`, cited as the BASELINE it was comparing against, while `kl_div`/`log_target`/
-# `rdrop_alpha` — named after the cut, and present in the diff — were never read.
-#
-# 2000 is not a round number picked for comfort: the 93 full rationales in the corpus run
-# 121-690 chars (median 330, p90 460), so this is ~2.9x the longest one ever written here and still
-# bounds a model that decides to answer with an essay. Widening it can only ADD claims, and a claim
-# that was met stays met, so no `verified` can become `unmet` by this change — the failure it fixes
-# is one-directional.
-_TRIAGE_RATIONALE_CAP = 2000
+# Kept under the private spelling this module has always used (bound BY VALUE at import, as it was
+# when the literal lived here). A caller that wants to move the bound moves it on `engine/triage.py`,
+# where the FINALIZER re-reads it on every call — this alias deliberately does not follow, because
+# the two layers are two different caps that merely happen to share a number, and a test that wants
+# to reproduce the historical truncation needs to move exactly one of them.
+_TRIAGE_RATIONALE_CAP = TRIAGE_RATIONALE_CAP
 
 
 def _accepted_kwargs(fn, candidates: dict) -> dict:

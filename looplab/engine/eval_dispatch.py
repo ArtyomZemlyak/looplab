@@ -13,9 +13,10 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.models import (EXTRA_METRIC_AUTO, normalize_extra_metric_channels,
-                                 normalize_extra_metrics)
+from looplab.core.models import (EXTRA_METRIC_AUTO, apply_engine_extra_metric_channels,
+                                 normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.engine.shared import effective_researcher_eval_timeout
+from looplab.engine.speculation_gate import engine_authored_artifacts
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
@@ -717,6 +718,21 @@ class EvalDispatchMixin:
             if etv is not None:
                 timeout = etv
             res = self.sandbox.run(node.code, str(workdir), timeout, env, cancel=cancel)
+            # WHO WROTE THE PRINT STATEMENT, asserted here because here is the only place that can.
+            # The sandbox tags every scraped stdout number `auto` — it is handed an opaque string and
+            # runs it, so authorship is exactly the question `runtime` cannot ask (and answering it
+            # from the string's own BYTES is what let a candidate forge the `engine` tag: see
+            # `core/calibration.py::engine_declared_extra_metric_keys`). The engine knows which
+            # artifacts it spliced itself, from its own role wiring, so the upgrade is applied here
+            # over the code that actually ran. It only ever raises `auto` -> `engine` on the probe's
+            # own key names, and only in a run whose Developer IS the engine's probe splicer.
+            #
+            # BEFORE the terminal payload, deliberately: `evaluate.py`'s
+            # `authenticated_extra_metrics_only` gate is expressed over this tag, so a tag settled
+            # after it would be a second, drift-prone answer to the same question.
+            res.extra_metrics_provenance = apply_engine_extra_metric_channels(
+                res.extra_metrics_provenance, node.code,
+                engine_authored=engine_authored_artifacts(self))
         # Intra-node sweep: if the solution reported a grid of trials, collapse them into the node's
         # scalar `metric` (the best feasible trial under the task direction) so fold/best-selection/
         # improve are untouched. Done BEFORE host grading so a host grader still has the final say on

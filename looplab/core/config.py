@@ -1428,11 +1428,13 @@ class Settings(BaseSettings):
     # `search/speculation_quality.py::_validate_cuda_probe_artifact` admits a calibration node by
     # the EXACT key schema on `extra_metrics`, and the gate — which could then only keep `declared`
     # — dropped all four keys, so the flag and the calibration receipt could not both be had. The
-    # probe's keys now arrive tagged `engine` (`core/calibration.py::
-    # engine_declared_extra_metric_keys` authenticates the artifact's source byte-exactly, the same
-    # prefix the validator checks), and the gate keeps them because they were never the candidate's
-    # numbers. It is still not a knob to reach for casually — it deletes the auto channel, and the
-    # tag is what closes the original defect.
+    # probe's keys now arrive tagged `engine` and the gate keeps them, because they were never the
+    # candidate's numbers. WHAT MAKES THAT TAG TRUE is `engine/eval_dispatch.py`'s grant, applied
+    # only when `engine/speculation_gate.py::engine_authored_artifacts` says the engine's own probe
+    # splicer authored this run's artifacts — NOT, as it was for a few hours on 2026-08-14, a
+    # byte-exact prefix match against the code about to run, which is code the candidate writes and
+    # which therefore let a forged pair through this very switch. It is still not a knob to reach
+    # for casually — it deletes the auto channel, and the tag is what closes the original defect.
     #
     # IT IS A WRITE-SIDE POLICY AND NOTHING ELSE. The fold never reads it, so it can never change
     # how an already-recorded run replays — which is why it is deliberately NOT pinned in

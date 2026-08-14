@@ -36,6 +36,7 @@ from looplab.runtime.command_eval import run_command_eval
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
 
+ROOT = Path(__file__).resolve().parents[1]
 _M = {"kind": "stdout_json", "key": "metric"}
 _LAT = {"kind": "stdout_json", "key": "latency"}
 
@@ -300,38 +301,139 @@ def test_the_flag_is_not_pinned_in_run_started(tmp_path):
 # does not stop a version number from being CALLED a metric." Re-measured over the WHOLE corpus (238
 # `*.jsonl` under `runs/`, not the three logs the first count sampled): 1,642 values, 10 distinct
 # keys, 1,636 of them the CUDA probe's four. The separating property is not the key's name and not
-# its shape — it is who authored the print statement, which the engine can answer, byte-exactly, for
-# the source it splices itself.
+# its shape — it is who authored the print statement.
+#
+# AND THAT QUESTION IS NOT ANSWERABLE FROM THE ARTIFACT (2026-08-14). The first implementation of
+# this channel granted `engine` on `code.startswith(SPECULATION_CUDA_PROBE_CODE_PREFIX)` inside
+# `runtime/sandbox.py` — where `code` is the candidate's own `solution.py`. The prefix is a public
+# constant in the shipped tree, so that authenticated nothing at all: the forgery below earned the
+# tag and survived `auto_extra_metrics=false`, the operator's "authenticated only" switch. The grant
+# now requires the ENGINE's own assertion that it authored the artifact, carried from its role wiring
+# (`engine/speculation_gate.py::engine_authored_artifacts`), and the prefix keeps its real job —
+# saying WHICH engine artifact this is, and therefore which keys are its own.
 
 
-def test_the_probe_declares_its_own_keys_only_behind_its_byte_exact_source():
-    """THE RULE, as a truth table. The key set is consulted ONLY after the artifact's source is
-    authenticated — so the name alone can never promote anything."""
+def _toy_engine(run_dir, developer):
+    from looplab.adapters.toytask import ToyTask
+    task = ToyTask.load(ROOT / "examples" / "toy_task.json")
+    researcher, _ = task.build_roles()
+    return Engine(run_dir, task=task, researcher=researcher, developer=developer,
+                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                  inline_repair=False, auto_install_deps=False)
+
+
+def _solution_tier_terminal(run_dir, code, developer):
+    """One solution-tier eval of exactly `code`, through the REAL engine, read back off disk.
+
+    Seeds `node_created` directly so the artifact under test is the one the sandbox runs — the
+    Developer object still matters, because it is what `engine_authored_artifacts` reads.
+    """
+    eng = _toy_engine(run_dir, developer)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": code})
+
+    async def _one():
+        await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+
+    anyio.run(_one)
+    rows = [e.data for e in EventStore(Path(run_dir) / "events.jsonl").read_all()
+            if e.type == "node_evaluated"]
+    assert rows, "the eval recorded no terminal to inspect"
+    return rows[0]
+
+
+def test_the_probe_declares_its_own_keys_only_behind_an_engine_authorship_assertion():
+    """THE RULE, as a truth table, and the conjunct that makes it a rule at all.
+
+    Both halves are required and the authorship half has NO DEFAULT: a caller that cannot assert the
+    engine wrote this artifact gets a TypeError, not the pre-2026-08-14 behaviour."""
     from looplab.agents.calibration import (SPECULATION_CUDA_PROBE_CODE_PREFIX,
                                             SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
                                             engine_declared_extra_metric_keys)
 
-    assert engine_declared_extra_metric_keys(SPECULATION_CUDA_PROBE_CODE_PREFIX + "print(1)\n") == (
+    real = SPECULATION_CUDA_PROBE_CODE_PREFIX + "print(1)\n"
+    assert engine_declared_extra_metric_keys(real, engine_authored=True) == (
         frozenset(SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS))
-    # THE TRAP THIS CLOSES, and the reason a name list would have been wrong: an agent-authored
-    # script printing the probe's own key names declares nothing at all.
+    # THE DEFECT, at the unit: the identical bytes, with nobody attesting the engine wrote them.
+    assert engine_declared_extra_metric_keys(real, engine_authored=False) == frozenset()
+    # The old call is not a quieter answer, it is an error.
+    with pytest.raises(TypeError):
+        engine_declared_extra_metric_keys(real)
+    # THE TRAP THE PREFIX STILL CLOSES, in an engine-authored run: a key NAME promotes nothing.
     assert engine_declared_extra_metric_keys(
-        'import json; print(json.dumps({"speculation_cuda_probe_v": 1}))\n') == frozenset()
+        'import json; print(json.dumps({"speculation_cuda_probe_v": 1}))\n',
+        engine_authored=True) == frozenset()
     # One byte off the front is not the engine's source.
     assert engine_declared_extra_metric_keys(
-        " " + SPECULATION_CUDA_PROBE_CODE_PREFIX) == frozenset()
+        " " + SPECULATION_CUDA_PROBE_CODE_PREFIX, engine_authored=True) == frozenset()
     # Total: a caller may pass whatever it has, and the fail-safe answer is always `auto`.
     for junk in (None, 123, b"bytes", ["code"]):
-        assert engine_declared_extra_metric_keys(junk) == frozenset()
+        assert engine_declared_extra_metric_keys(junk, engine_authored=True) == frozenset()
 
 
-def test_the_real_calibration_artifact_tags_its_four_keys_engine_and_nothing_else(tmp_path):
-    """Driven against the artifact the calibration DEVELOPER really builds, not a reconstruction —
-    and with a genuine measurement printed beside the probe's keys, because the whole claim is that
-    the two populations separate. `stdout_extra_metric_channels` takes the exact bytes the sandbox
-    is about to run, which is the one place source and output meet."""
+def test_a_candidate_that_pastes_the_public_probe_prefix_into_its_own_solution_earns_nothing():
+    """THE REPRODUCTION, driven, in the auditor's own shape — and the switch that used to admit it.
+
+    `CliAgentDeveloper` is an external coding agent with a real shell whose output IS `solution.py`,
+    and `tools/env_inspect.py::read_installed` pages `core/calibration.py` out verbatim with no
+    package allow-list, so the prefix is available to it. Prefix + one `print` used to return
+    `{'device_count': 'engine', 'alloc_bytes': 'engine', 'my_auc': 'auto'}`."""
+    from looplab.agents.calibration import SPECULATION_CUDA_PROBE_CODE_PREFIX
+    from looplab.core.models import apply_engine_extra_metric_channels
+    from looplab.runtime.sandbox import stdout_extra_metric_channels
+
+    forged = SPECULATION_CUDA_PROBE_CODE_PREFIX + '\nprint({"metric": .99, "device_count": 8})\n'
+    extras = {"device_count": 8.0, "alloc_bytes": 4096.0, "my_auc": .99}
+
+    # The capture tier answers `auto` for everything — it is handed an opaque string and runs it.
+    captured = stdout_extra_metric_channels(extras)
+    assert set(captured.values()) == {EXTRA_METRIC_AUTO}
+    # And the grant refuses to raise any of it, because no engine authored these bytes.
+    granted = apply_engine_extra_metric_channels(captured, forged, engine_authored=False)
+    assert granted == captured
+
+    # The cost of the old answer, stated where it landed: the operator's "authenticated only" switch
+    # kept the forged pair. Now it keeps nothing.
+    kept, kept_channels = authenticated_extra_metrics_only(extras, granted)
+    assert kept == {} and kept_channels == {}
+
+
+def test_the_authorship_assertion_reads_the_engines_own_wiring_and_never_the_artifact(tmp_path):
+    """The conjunct's own truth table. It is true in exactly one configuration — the calibration
+    profile, whose Developer is the engine's probe splicer and whose `calibration_gpu_probe` flag is
+    deliberately not a Settings/env/UI knob (`cli/__init__.py::_make_calibration_roles` is its only
+    writer). Every other run, including one whose artifact carries the prefix, answers False."""
+    from looplab.agents.roles import ToyObjectiveDeveloper
+    from looplab.engine.speculation_gate import engine_authored_artifacts
+
+    splicer = ToyObjectiveDeveloper(calibration_gpu_probe=True)
+    assert engine_authored_artifacts(_toy_engine(tmp_path / "cal", splicer)) is True
+    # The SAME class with the flag off — an ordinary Toy run — is not an engine-authored run.
+    assert engine_authored_artifacts(
+        _toy_engine(tmp_path / "toy", ToyObjectiveDeveloper())) is False
+
+    # Exact type, no subclass: a wrapper is not the splicer, matching the calibration role gate.
+    class _Wrapper(ToyObjectiveDeveloper):
+        pass
+
+    assert engine_authored_artifacts(
+        _toy_engine(tmp_path / "wrap", _Wrapper(calibration_gpu_probe=True))) is False
+    # Total and fail-closed on anything that is not an engine at all.
+    assert engine_authored_artifacts(object()) is False
+    assert engine_authored_artifacts(None) is False
+
+
+def test_the_real_calibration_artifact_still_tags_its_four_keys_engine_and_nothing_else():
+    """The other direction: the artifact the calibration DEVELOPER really builds keeps its channel,
+    with a genuine measurement printed beside the probe's keys because the whole claim is that the
+    two populations separate."""
     from looplab.agents.roles import (SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS,
                                       ToyObjectiveDeveloper)
+    from looplab.core.models import apply_engine_extra_metric_channels
     from looplab.core.models import Idea
     from looplab.runtime.sandbox import stdout_extra_metric_channels
 
@@ -340,38 +442,54 @@ def test_the_real_calibration_artifact_tags_its_four_keys_engine_and_nothing_els
              footprint={"gpus": 1}))
     extras = {**{k: 1.0 for k in SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS}, "train_auc": 0.99}
 
-    channels = stdout_extra_metric_channels(extras, code)
+    channels = apply_engine_extra_metric_channels(
+        stdout_extra_metric_channels(extras), code, engine_authored=True)
     assert channels == {**{k: EXTRA_METRIC_ENGINE for k in SPECULATION_CUDA_PROBE_EXTRA_METRIC_KEYS},
                         "train_auc": EXTRA_METRIC_AUTO}
-    # The SAME extras off an ordinary artifact stay `auto` in every position.
-    assert set(stdout_extra_metric_channels(extras, "print('hi')\n").values()) == {EXTRA_METRIC_AUTO}
+    # The SAME extras off an ordinary artifact stay `auto` in every position, even in that run.
+    assert set(apply_engine_extra_metric_channels(
+        stdout_extra_metric_channels(extras), "print('hi')\n",
+        engine_authored=True).values()) == {EXTRA_METRIC_AUTO}
 
 
-def test_a_solution_tier_run_of_engine_owned_source_records_engine_end_to_end(tmp_path, monkeypatch):
-    """The capture site DRIVEN — a real subprocess, a real stdout line, a real `RunResult`.
+def test_a_solution_tier_run_records_engine_only_when_the_engine_authored_the_artifact(tmp_path,
+                                                                                       monkeypatch):
+    """THE RECORD, DRIVEN BOTH WAYS — a real subprocess, a real stdout line, a real event log.
 
     The CUDA prefix cannot run without a device, so the engine-owned source here is a stand-in
-    spliced the same way; what is real is the whole path from `code` through `json_line_extras` to
-    the recorded channel map. The byte-exact half of the rule is the test above."""
+    declared the same way; what is real is the whole path from `node.code` through `json_line_extras`
+    and the engine's grant into `node_evaluated.extra_metrics_provenance`. The same bytes, evaluated
+    by two engines that differ only in their Developer, record two different channel maps — which is
+    the property, because the artifact cannot be what decides."""
     import looplab.agents.calibration as calibration_mod
+    from looplab.agents.roles import ToyObjectiveDeveloper
 
     probe = "# engine-owned probe source\n"
-    # The sandbox resolves the classifier through the calibration MODULE on every call, so the probe
-    # that owns the declaration is also the one seam a test patches — there is no copy in `runtime`
-    # that could answer differently.
+    # The grant resolves the classifier through the calibration MODULE on every call, so the probe
+    # that owns the declaration is also the one seam a test patches — there is no second copy of the
+    # key tuple anywhere that could answer differently.
     monkeypatch.setattr(
         calibration_mod, "engine_declared_extra_metric_keys",
-        lambda code: (frozenset({"harness_v", "device_count"})
-                      if isinstance(code, str) and code.startswith(probe) else frozenset()))
+        lambda code, *, engine_authored: (
+            frozenset({"harness_v", "device_count"})
+            if engine_authored and isinstance(code, str) and code.startswith(probe)
+            else frozenset()))
 
     code = probe + ('import json; print(json.dumps('
                     '{"metric": 1.0, "harness_v": 2.0, "device_count": 1.0, "recall": 0.25}))\n')
-    res = SubprocessSandbox().run(code, str(tmp_path))
 
-    assert res.extra_metrics == {"harness_v": 2.0, "device_count": 1.0, "recall": 0.25}
-    assert res.extra_metrics_provenance == {"harness_v": EXTRA_METRIC_ENGINE,
-                                            "device_count": EXTRA_METRIC_ENGINE,
-                                            "recall": EXTRA_METRIC_AUTO}
+    engine_authored = _solution_tier_terminal(
+        tmp_path / "spliced", code, ToyObjectiveDeveloper(calibration_gpu_probe=True))
+    assert engine_authored["extra_metrics"] == {"harness_v": 2.0, "device_count": 1.0,
+                                                "recall": 0.25}
+    assert engine_authored["extra_metrics_provenance"] == {"harness_v": EXTRA_METRIC_ENGINE,
+                                                           "device_count": EXTRA_METRIC_ENGINE,
+                                                           "recall": EXTRA_METRIC_AUTO}
+
+    # THE NEGATIVE CONTROL, and it is the whole fix: byte-identical source, an ordinary Developer.
+    forged = _solution_tier_terminal(tmp_path / "forged", code, ToyObjectiveDeveloper())
+    assert forged["extra_metrics"] == engine_authored["extra_metrics"]
+    assert set(forged["extra_metrics_provenance"].values()) == {EXTRA_METRIC_AUTO}
 
 
 def test_the_gate_no_longer_deletes_the_cuda_proof_the_receipt_path_re_derives():
