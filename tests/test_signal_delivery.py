@@ -230,6 +230,48 @@ def test_watchdog_reflection_keeps_latest_per_node_and_combines_both_signals():
     assert "50% bar of 4 finished sibling(s)" in out
 
 
+def test_watchdog_reflection_corrects_a_verdict_its_own_measurement_contradicts():
+    """A `broken`/`watch` reason is the model's reading of a ~30-second tail; the `trajectory` field
+    beside it is the engine's own measurement over the whole eval. When they disagree the next
+    proposer must see both.
+
+    This is the training-monitor twin of the ASHA branch's existing rule ("must not be narrated to
+    the next proposer as proof of a doomed run when same-progress peers say it is on track"), and it
+    is not hypothetical: `runs/rubertlite-dr-unified-v7` carried "Loss is pinned at ~23.0 ... showing
+    no learning trend from its initialization value" toward the next proposal about a node whose
+    loss had gone 24.28 -> 22.90."""
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_TRAIN_MONITOR_ALERT
+    events = _watchdog_lifecycle_events(1) + [
+        _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=1, generation=0, status="broken",
+                  reason="loss pinned at ~23.0, no learning trend", confidence=0.82,
+                  trajectory={"direction": "descending", "first": 24.2775, "last": 22.8989,
+                              "windows": 12, "points": 112}),
+    ]
+    out = watchdog_reflection(events)
+    assert "loss pinned at ~23.0" in out, "the verdict is NOT rewritten — both readings travel"
+    assert "still descending" in out and "24.28" in out and "22.9" in out
+
+
+def test_watchdog_reflection_is_byte_identical_without_a_measurement():
+    """Additive by construction: every row written before the measurement existed, and every row
+    about a log with no parseable loss, renders exactly as it did."""
+    from looplab.events.digest import watchdog_reflection
+    from looplab.events.types import EV_TRAIN_MONITOR_ALERT
+    base = _watchdog_lifecycle_events(1) + [
+        _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=1, generation=0, status="broken",
+                  reason="loss is nan", confidence=0.9),
+    ]
+    plain = watchdog_reflection(base)
+    for measured in ({"direction": "flat", "first": 5.0, "last": 5.0},
+                     {"direction": "unknown"}, {}, None, "not a dict"):
+        events = _watchdog_lifecycle_events(1) + [
+            _wd_event(10, EV_TRAIN_MONITOR_ALERT, node_id=1, generation=0, status="broken",
+                      reason="loss is nan", confidence=0.9, trajectory=measured),
+        ]
+        assert watchdog_reflection(events) == plain
+
+
 def test_watchdog_reflection_bounds_to_most_recent_nodes():
     from looplab.events.digest import watchdog_reflection
     from looplab.events.types import EV_ASHA_RANK

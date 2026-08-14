@@ -466,6 +466,24 @@ def watchdog_reflection(events, max_shown: int = 2, *, state: RunState | None = 
                 seg += f" ({reason})"
             if isinstance(conf, (int, float)) and not isinstance(conf, bool):
                 seg += f" [confidence {conf:.0%}]"
+            # THE ENGINE'S OWN MEASUREMENT, when it contradicts the narration above. Same rule as
+            # the ASHA branch below ("still useful curve context, but must not be narrated to the
+            # next proposer as proof of a doomed run when same-progress peers say it is on track"),
+            # for the same reason one watchdog over: the verdict is formed from a tail worth ~30
+            # seconds of a multi-hour run, and on `runs/rubertlite-dr-unified-v7` that carried
+            # "loss pinned at ~23.0 ... showing no learning trend from its initialization value"
+            # toward the next proposal about a node whose loss had gone 24.28 -> 22.90. `trajectory`
+            # is an ADDITIVE field (engine/train_monitor.py::trajectory_row); rows without it — and
+            # every row written before 2026-08-14 — render byte-identically to before.
+            measured = m.get("trajectory")
+            if isinstance(measured, dict) and measured.get("direction") == "descending":
+                first, last = measured.get("first"), measured.get("last")
+                if all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                       for v in (first, last)):
+                    seg += (f"; the engine measured this stage's own loss going {first:.4g} -> "
+                            f"{last:.4g} over the run so far, i.e. still descending")
+                else:
+                    seg += "; the engine measured this stage's own loss still descending"
             parts.append(seg)
         a = asha.get((nid, generation), (None, -1))[0]
         # Legacy rows represented only underperformance. A modern false row is the recovery edge.

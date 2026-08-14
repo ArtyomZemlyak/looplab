@@ -11,8 +11,16 @@ and implements the complete bounded phase stack:
   `train_monitor_alert` diagnostics for non-healthy verdicts;
 - Phase 2: self-pace later observations from the run budget, healthy streak, and bounded model hint;
 - Phase 3: only when `train_monitor_kill` is explicitly enabled, claim a CONFIRMED, sufficiently
-  confident `broken` verdict about an IDENTIFIED training stage and reuse the evaluation
-  cancel/tree-kill path. The node still terminates once with `reason=monitor_broken`.
+  confident `broken` verdict about an IDENTIFIED training stage — one the engine's own MEASURED loss
+  trajectory does not contradict — and reuse the evaluation cancel/tree-kill path. The node still
+  terminates once with `reason=monitor_broken`.
+
+WHO OWNS WHICH QUESTION. The judge is asked what a TAIL can answer — is anything anomalous, what is
+this run saying about itself — and the engine owns "is it still descending", because that is a
+statement about the whole curve and the tail is ~30 seconds of it (see the trajectory section
+below, measured on `runs/rubertlite-dr-unified-v7`). The measurement is derived from the
+candidate's own log text, so it is held to `engine/metric_salvage.py`'s rule: it may REFUSE an
+intervention and may never authorize one, and it reaches no metric, champion or selection record.
 
 Which log is judged is part of the contract, not an implementation detail: the eval writes one
 `<stage>.log` per stage plus `setup.log` (dep install) and, on the single-command path, `eval.log`.
@@ -33,6 +41,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Optional
@@ -109,6 +119,394 @@ def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000
             records.append(seg)
     out = "\n".join(records[-max_lines:])
     return out[-max_chars:] if len(out) > max_chars else out
+
+
+# ------------------------------------------------------------- the TRAJECTORY the tail cannot carry
+# WHY THIS EXISTS, measured on the live run `runs/rubertlite-dr-unified-v7` (2026-08-14).
+#
+# The digest above preserves the recent trajectory, and "recent" is far shorter than it reads. A
+# tqdm bar line is ~330 characters, so `max_chars=4000` truncates the 40 kept records to about TEN,
+# and those ten are the last ~30 seconds of a multi-hour run. Replayed against the real logs the
+# judge received exactly this:
+#
+#   node 0: 11.0197 11.0355 11.0296 11.0316 11.0278 11.0399 11.0236 11.0552 11.0445 11.0410
+#   node 1: 22.8906 22.9009 22.8881 22.8904 22.9011 22.9118 22.9024 22.8631
+#
+# and answered, correctly for what it was shown, "flat, no downward trend, possible plateau" — one
+# of them `broken` at confidence 0.82, "pinned at ~23.0 ... showing no learning trend from its
+# initialization value". Both nodes were learning: over their whole logs node 0 ran 15.73 -> 11.03
+# and node 1 24.28 -> 22.90. The curves DECELERATE, so inside any short window the movement is
+# below the step-to-step noise floor and "converged/stuck" is observationally identical to "still
+# descending slowly". No reader of the last N lines can tell them apart — the question was
+# unanswerable from the evidence, which is worse than an ambiguous verdict because it produces a
+# CONFIDENT wrong answer.
+#
+# So the engine measures the trajectory itself, deterministically, and two things follow:
+#   • the judge is HANDED that measurement (`trajectory_context`) alongside the tail, so its verdict
+#     is formed over the run rather than over half a minute of it;
+#   • "is it still descending" stops being the model's question at all — `trajectory_direction`
+#     owns it, and `should_monitor_kill` refuses a kill the measurement contradicts.
+#
+# WHAT THIS MEASUREMENT IS AND IS NOT (docs/36 line). The numbers come from text the CANDIDATE
+# wrote: the agent authors the training script and therefore authors the loss values an extractor
+# reads. That is the same route around a protected stage `engine/metric_salvage.py` refuses to open,
+# so this rung is held to the same rule — it may VETO an intervention and may never authorize one.
+# `trajectory_vetoes_kill` returns only True/False for "refuse", nothing here can raise a verdict to
+# `broken`, no value reaches the metric/champion/selection record, and the alert row carries the
+# measurement as observation, not as authority. A candidate that forges a descending loss buys
+# itself the right not to be killed early — which is precisely the pre-2026-08-14 behaviour for
+# every log the plan could not prove was training, and the direction that costs GPU hours instead of
+# discarding a healthy multi-hour run with no repair, no retry and no refunded `max_nodes` slot.
+
+# The `loss` KEY only, never `eval_loss`/`train_loss`/`val_loss`: those are different series and
+# interleaving them into one trajectory would manufacture the jumps this rule exists to distinguish
+# from real movement. The negative lookbehind is what excludes them (`_` precedes the `loss` in
+# `eval_loss`); an optional quote covers the `{'loss': 11.03, 'grad_norm': ...}` dict a HF Trainer
+# prints and the bare `loss=0.5` / `loss: 0.5` a hand-rolled loop prints.
+_LOSS_VALUE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|[-+]?nan|[-+]?inf(?:inity)?"
+_LOSS_POINT_RE = re.compile(
+    r"(?<![A-Za-z0-9_])['\"]?loss['\"]?\s*[:=]\s*(" + _LOSS_VALUE + r")", re.IGNORECASE)
+# The gradient norm is read for ONE purpose: `grad_norm: nan` is the earliest honest sign of a
+# blown-up run and it appears while the printed loss is still a finite-looking `0.0` (measured on
+# `runs/rubertlite-dr-unified-v6` node 5, the positive control — `{'loss': 0.0, 'grad_norm': nan}`
+# four steps before `{'loss': 1.2217858750118953e+25}`). It is never treated as a loss point.
+_GRAD_NORM_NONFINITE_RE = re.compile(
+    r"(?<![A-Za-z0-9_])['\"]?grad_norm['\"]?\s*[:=]\s*([-+]?nan|[-+]?inf(?:inity)?)", re.IGNORECASE)
+# A tqdm/Keras-style `done/total` counter. Only used to report HOW FAR THROUGH the run this is, which
+# is the one thing a plateau reading most needs and the tail states nowhere: "flat at epoch 21 of 50"
+# and "flat at epoch 49 of 50" are different facts about the same numbers.
+_PROGRESS_RE = re.compile(r"(?<![\d./])(\d{1,9})\s*/\s*(\d{1,9})(?![\d.])")
+
+# An observed value at least this many times the run's own opening scale is an EXPLOSION, not a
+# reading of the same curve. Deliberately generous: the point is to notice `1.2e25` beside `63.8`,
+# never to adjudicate a 3x spike, and its only effect is to withdraw the veto (see `_anomaly_of`).
+_TRAJECTORY_EXPLOSION_RATIO = 100.0
+# A net drop must clear BOTH the measured step-to-step noise floor and this fraction of the opening
+# level. The noise floor is the real test; the relative floor only stops a numerically-tiny drift on
+# a quiet log from reading as progress. Node 1's 5.8% and node 0's 30% clear it by three orders.
+_TRAJECTORY_MIN_RELATIVE_DROP = 0.001
+# Bounded history: one window per tick, and the cadence + `_MAX_MONITOR_LLM_CALLS` already bound a
+# node to ~200 ticks. Retained as a deque so a pathological run cannot grow this without limit; the
+# summary reads only the FIRST and LAST windows plus a median, so dropping the middle of an
+# overlong history would change nothing that matters, and dropping the oldest would.
+_MAX_TRAJECTORY_WINDOWS = 512
+
+
+@dataclass(frozen=True)
+class LossWindow:
+    """ONE tick's tail, reduced to the four facts a trajectory needs. Immutable and JSON-safe.
+
+    `masd` is the median absolute successive difference WITHIN this window — the step-to-step noise
+    floor, i.e. exactly how much the loss moves between adjacent logged steps for no reason. It is
+    measured per window and never across windows, because consecutive windows are ~10 minutes apart
+    and the jump between them is signal, not noise.
+
+    Every numeric field is Optional and `count` may be 0: a window whose only loss values are
+    non-finite has no numbers to summarize and MUST still exist, because its `nonfinite` count is
+    the anomaly signal. Dropping it (as this dataclass did before its non-finite-only case was
+    driven) silently withdrew the positive control — a log printing nothing but `loss: nan`
+    contributed no window at all, so no anomaly was ever seen.
+    """
+
+    median: Optional[float]
+    masd: Optional[float]
+    count: int
+    first: Optional[float]
+    last: Optional[float]
+    minimum: Optional[float]
+    maximum: Optional[float]
+    nonfinite: int = 0
+    progress_done: Optional[int] = None
+    progress_total: Optional[int] = None
+    at: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class LossTrajectory:
+    """What the engine MEASURED about the loss over the whole observed run, handed to the judge as
+    context and consulted by `should_monitor_kill` as a veto. Pure data; every field derived.
+
+    `direction` is the answer to the question the tail cannot answer:
+
+    - ``"descending"`` — the run's opening window sits above its latest by more than the measured
+      noise floor AND more than `_TRAJECTORY_MIN_RELATIVE_DROP` of the opening level, so the loss is
+      demonstrably not stuck at its initialization value;
+    - ``"rising"`` — the same test in the other direction (divergence);
+    - ``"flat"`` — the net movement does not clear the floor: genuinely converged, genuinely stuck,
+      or too early to tell apart. This rule deliberately does not choose between those three, which
+      is why `flat` is not evidence FOR a kill, only the absence of evidence against one;
+    - ``"unknown"`` — fewer than two windows, or no numeric loss in the log at all.
+    """
+
+    windows: int = 0
+    points: int = 0
+    first: Optional[float] = None
+    last: Optional[float] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    noise: Optional[float] = None
+    net: Optional[float] = None
+    direction: str = "unknown"
+    anomaly: str = ""
+    progress_done: Optional[int] = None
+    progress_total: Optional[int] = None
+    span_s: Optional[float] = None
+
+    @property
+    def anomalous(self) -> bool:
+        """Whether the numbers themselves carry evidence a TAIL can legitimately act on — a
+        non-finite loss/grad-norm or an explosion. Such a run is not 'descending' in any sense the
+        veto should protect, so the veto stands down and the model's `broken` verdict is left to
+        act (`runs/rubertlite-dr-unified-v6` node 5 is the worked case)."""
+        return bool(self.anomaly)
+
+
+def _median(values) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def parse_loss_points(text: str) -> tuple[list[float], int]:
+    """Every `loss:`/`loss=` value in `text`, in order, split into the FINITE ones and a count of
+    the non-finite ones. Pure/deterministic — no I/O.
+
+    Non-finite values are counted rather than kept: `nan` poisons every comparison it touches (see
+    `_normalize_monitor_confidence` for the same trap one field over), and their presence is itself
+    the signal — one is enough, their magnitude means nothing."""
+    finite: list[float] = []
+    nonfinite = 0
+    for match in _LOSS_POINT_RE.finditer(text or ""):
+        try:
+            value = float(match.group(1))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            finite.append(value)
+        else:
+            nonfinite += 1
+    if _GRAD_NORM_NONFINITE_RE.search(text or ""):
+        nonfinite += 1
+    return finite, nonfinite
+
+
+def _latest_progress(text: str) -> tuple[Optional[int], Optional[int]]:
+    """The LAST plausible `done/total` counter in the text, or (None, None).
+
+    Last, not first, because the digest ends at the newest rendered progress bar. `done <= total`
+    and a non-zero total are required so a date, a version or a ratio elsewhere in the line cannot
+    be reported to the judge as the run's position."""
+    done = total = None
+    for match in _PROGRESS_RE.finditer(text or ""):
+        try:
+            a, b = int(match.group(1)), int(match.group(2))
+        except (TypeError, ValueError):
+            continue
+        if b > 0 and 0 <= a <= b:
+            done, total = a, b
+    return done, total
+
+
+def summarize_loss_window(text: str, *, at: Optional[float] = None) -> Optional[LossWindow]:
+    """Reduce ONE tick's digest to a `LossWindow`, or None when it names no loss at all.
+    Pure/deterministic.
+
+    A window whose loss values are ALL non-finite is kept with `count=0` and no numbers — see
+    `LossWindow`: it carries the anomaly, which is the one thing a tail can decide by itself."""
+    values, nonfinite = parse_loss_points(text)
+    if not values and not nonfinite:
+        return None
+    done, total = _latest_progress(text)
+    if not values:
+        return LossWindow(median=None, masd=None, count=0, first=None, last=None,
+                          minimum=None, maximum=None, nonfinite=nonfinite,
+                          progress_done=done, progress_total=total, at=at)
+    diffs = [abs(b - a) for a, b in zip(values, values[1:])]
+    return LossWindow(
+        median=_median(values), masd=_median(diffs) if diffs else 0.0, count=len(values),
+        first=values[0], last=values[-1], minimum=min(values), maximum=max(values),
+        nonfinite=nonfinite, progress_done=done, progress_total=total, at=at)
+
+
+def _anomaly_of(rows, numeric) -> str:
+    """The one-phrase reason the numbers are not a curve to be protected, or ''. Pure.
+
+    Two rungs, both decided on VALUES rather than on prose: any non-finite loss or grad-norm
+    (over EVERY window, numeric or not), and a value at least `_TRAJECTORY_EXPLOSION_RATIO` times
+    the run's opening scale. Both are evidence a single tail genuinely carries, which is the whole
+    point — the veto exists because a tail cannot see a slow descent, not because a tail can see
+    nothing."""
+    if any(window.nonfinite for window in rows):
+        return "non-finite loss or grad_norm"
+    if not numeric:
+        return ""
+    opening = abs(numeric[0].median)
+    scale = opening if opening > 0 else 1.0
+    if any(abs(window.maximum) >= _TRAJECTORY_EXPLOSION_RATIO * scale for window in numeric):
+        return "loss exploded far beyond its opening scale"
+    return ""
+
+
+def summarize_trajectory(windows) -> LossTrajectory:
+    """Reduce the observed windows to the run-scale trajectory. Pure/deterministic — the whole
+    "is it still descending" decision is this one function plus `_anomaly_of`, so it has a truth
+    table (`tests/test_train_monitor_trajectory.py`) instead of being reachable only through a
+    simulated multi-hour eval."""
+    rows = [w for w in windows if isinstance(w, LossWindow)]
+    if not rows:
+        return LossTrajectory()
+    # Only windows that actually carry NUMBERS can state a direction; a non-finite-only window still
+    # counts as an observation and still carries its anomaly (see `summarize_loss_window`).
+    numeric = [w for w in rows if w.count]
+    points = sum(w.count for w in rows)
+    anomaly = _anomaly_of(rows, numeric)
+    last_seen = rows[-1]
+    common = dict(
+        windows=len(rows), points=points, anomaly=anomaly,
+        progress_done=last_seen.progress_done, progress_total=last_seen.progress_total,
+        span_s=((last_seen.at - rows[0].at)
+                if last_seen.at is not None and rows[0].at is not None else None),
+    )
+    if not numeric:
+        return LossTrajectory(direction="unknown", **common)
+    last = numeric[-1]
+    common.update(
+        first=numeric[0].first, last=last.last,
+        minimum=min(w.minimum for w in numeric), maximum=max(w.maximum for w in numeric),
+        noise=_median([w.masd for w in numeric]),
+    )
+    if len(numeric) < 2:
+        # ONE window is a tail by another name — the exact evidence this module exists because the
+        # judge cannot decide on. Report the numbers, refuse the direction.
+        return LossTrajectory(net=None, direction="unknown", **common)
+    # Window MEDIANS, not their endpoints: an endpoint is one sample and carries the full
+    # step-to-step scatter, while the median of ~10 samples is what makes a sub-noise drift legible.
+    net = numeric[0].median - last.median
+    floor = max(common["noise"], abs(numeric[0].median) * _TRAJECTORY_MIN_RELATIVE_DROP)
+    direction = "descending" if net > floor else ("rising" if net < -floor else "flat")
+    return LossTrajectory(net=net, direction=direction, **common)
+
+
+class LossTrajectoryTracker:
+    """Accumulates one `LossWindow` per monitor tick and reports the run-scale trajectory.
+
+    WHY AN ACCUMULATOR RATHER THAN A WIDER READ. `read_training_tail_raw` reads the last 128 KiB,
+    which at ~435 B/s of tqdm output is about five minutes; the monitor's cadence is up to thirty,
+    so consecutive tails do not even overlap and no single read can span the run. Re-reading the
+    whole file would (a) reintroduce the multi-GB load the bounded seek-to-tail read exists to
+    prevent and (b) still be a per-tick cost paid on a worker thread. The monitor already reads a
+    tail every tick from the first one onward, so keeping each tick's reduction costs nothing and
+    covers the run from its start at tick granularity — gaps between windows and all, which is
+    exactly why the noise floor is measured WITHIN a window and never across the gaps.
+
+    Per eval attempt and per LOG: `reset()` is called when the active stage log changes, because
+    two stages' losses are two different curves and splicing them would invent both a jump and a
+    trajectory. The attempt boundary is already handled upstream by `snapshot_training_logs`.
+    """
+
+    def __init__(self, max_windows: int = _MAX_TRAJECTORY_WINDOWS) -> None:
+        self._windows: deque = deque(maxlen=max(2, int(max_windows)))
+
+    def reset(self) -> None:
+        self._windows.clear()
+
+    def observe(self, text: str, *, at: Optional[float] = None) -> Optional[LossWindow]:
+        """Record one tick's digest. Returns the window kept, or None when the text carried no loss
+        value (a setup-ish or silent tick contributes nothing rather than an empty window)."""
+        window = summarize_loss_window(text, at=at)
+        if window is not None:
+            self._windows.append(window)
+        return window
+
+    def summary(self) -> LossTrajectory:
+        return summarize_trajectory(self._windows)
+
+
+def _fmt_loss(value: Optional[float]) -> str:
+    return "?" if value is None else f"{value:.6g}"
+
+
+def trajectory_context(trajectory: Optional[LossTrajectory]) -> str:
+    """The measured trajectory as prompt text, or "" when there is nothing measured yet.
+    Pure/deterministic.
+
+    Rides in the user message beside `monitor_stage_context`, above the log header, and is ADDITIVE
+    by construction: `_MONITOR_SYSTEM`, the stage line and the `LIVE TRAINING LOG (recent tail):`
+    header are unchanged (prompt strings are contracts), and an empty return reproduces the
+    historical message byte for byte.
+
+    It says what the tail is, which is the half that was missing: the model was reading ten lines as
+    though they were the run. Naming the noise floor beside the net change is what lets it tell
+    "flat" from "descending under the resolution of this window" without being told the answer."""
+    if trajectory is None or trajectory.windows <= 0:
+        return ""
+    lines = ["TRAJECTORY MEASURED BY THE ENGINE (not from the tail below — the tail is only this "
+             "stage's last few seconds; these numbers are read from the whole log this eval has "
+             "written so far, one reading per check):"]
+    span = ""
+    if trajectory.span_s and trajectory.span_s > 0:
+        span = f" spanning {trajectory.span_s / 60.0:.0f} min"
+    lines.append(f"  loss {_fmt_loss(trajectory.first)} -> {_fmt_loss(trajectory.last)} "
+                 f"(lowest seen {_fmt_loss(trajectory.minimum)}) over {trajectory.windows} "
+                 f"readings / {trajectory.points} logged points{span}")
+    if trajectory.net is not None and trajectory.noise is not None:
+        floor = trajectory.noise if trajectory.noise > 0 else None
+        ratio = f", {abs(trajectory.net) / floor:.0f}x the noise floor" if floor else ""
+        lines.append(f"  net change {-trajectory.net:+.6g}; step-to-step noise floor "
+                     f"{_fmt_loss(trajectory.noise)}{ratio}")
+    if (trajectory.progress_done is not None and trajectory.progress_total):
+        pct = 100.0 * trajectory.progress_done / trajectory.progress_total
+        lines.append(f"  position {trajectory.progress_done}/{trajectory.progress_total} "
+                     f"({pct:.0f}% of the reported total)")
+    verdict = {
+        "descending": "the loss IS still going down at run scale, even where a short window looks flat",
+        "rising": "the loss is going UP at run scale",
+        "flat": "no net movement beyond the noise floor at run scale",
+        "unknown": "not enough readings yet to state a direction",
+    }[trajectory.direction]
+    lines.append(f"  DIRECTION: {trajectory.direction} — {verdict}")
+    if trajectory.anomaly:
+        lines.append(f"  ANOMALY: {trajectory.anomaly}")
+    lines.append("These numbers are extracted from the log the training script itself wrote, so "
+                 "read them as the run's own report, and use them for the trend; use the tail "
+                 "below for anything the numbers cannot show (errors, warnings, stalls, what the "
+                 "run says about its own device and data).")
+    return "\n".join(lines)
+
+
+def trajectory_vetoes_kill(trajectory: Optional[LossTrajectory]) -> bool:
+    """Whether the MEASURED trajectory contradicts ending this run. Pure/deterministic.
+
+    True only for a demonstrably descending, non-anomalous curve. This is the deterministic half of
+    the split: the model keeps its verdict and its alert row, and this owns "is it still
+    descending". It can only ever REFUSE a kill — there is no return path from here that ends a
+    node — which is what keeps a rung built on the candidate's own log text on the right side of
+    docs/36: a wider action space, never a wider trusted set."""
+    return (trajectory is not None and trajectory.direction == "descending"
+            and not trajectory.anomalous)
+
+
+def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
+    """The compact, JSON-safe form stamped on `EV_TRAIN_MONITOR_ALERT`, or None.
+
+    Additive and fold-ignored; readers default an absent `trajectory` to "the engine measured
+    nothing", never to "flat". It is deliberately the MEASUREMENT and not a judgement: the row
+    carries what the loss did, so an audit of "was this verdict answerable?" reads the durable log
+    instead of re-deriving it from a log that has since grown."""
+    if trajectory is None or trajectory.windows <= 0:
+        return None
+    row = {"direction": trajectory.direction, "windows": trajectory.windows,
+           "points": trajectory.points}
+    for key in ("first", "last", "minimum", "noise", "net"):
+        value = getattr(trajectory, key)
+        if isinstance(value, float) and math.isfinite(value):
+            row[key] = round(value, 6)
+    if trajectory.anomaly:
+        row["anomaly"] = trajectory.anomaly[:64]
+    if trajectory.progress_done is not None and trajectory.progress_total:
+        row["progress"] = f"{trajectory.progress_done}/{trajectory.progress_total}"
+    return row
 
 
 # Phase 2 self-pacing constants. After this many CONSECUTIVE healthy verdicts (and no explicit
@@ -222,12 +620,13 @@ def _normalize_monitor_confidence(value: object) -> tuple[float, bool]:
 
 def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float,
                         log_role: str = LOG_ROLE_UNKNOWN, broken_streak: int = 0,
-                        confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS) -> bool:
+                        confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS,
+                        trajectory: Optional["LossTrajectory"] = None) -> bool:
     """Whether a verdict warrants an EARLY KILL (Phase 3). Pure/deterministic — the WHOLE kill decision
     surface, so what it takes to end a node is one testable expression rather than a scatter of loop
     state.
 
-    Four independent conjuncts, every one fail-closed on its default:
+    Five independent conjuncts, every one fail-closed on its default:
 
     - `enabled`: the opt-in (`train_monitor_kill`).
     - a `broken` verdict at confidence >= `threshold`. The prompt makes a slow/plateauing-but-progressing
@@ -246,10 +645,19 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
       caller that wants it; 0 or less cannot disable the requirement, because `broken_streak` counts
       the current tick and is therefore always >= 1 at a real call site. What COUNTS toward that
       streak is the caller's business and is spelled out on `_MONITOR_KILL_CONFIRM_TICKS`.
+    - the engine's own MEASURED `trajectory` does not contradict the verdict
+      (`trajectory_vetoes_kill`). The other four conjuncts all ask who is speaking and how often;
+      this one asks whether the question was answerable from what the speaker was shown. On v7 the
+      judge saw ten loss values spanning half a minute of a five-hour run and called a run that had
+      gone 24.28 -> 22.90 "pinned at ~23.0 ... showing no learning trend from its initialization
+      value" at confidence 0.82. `None` (no measurement) never vetoes, so a run that prints no
+      parseable loss at all is exactly as killable as it was before.
     """
     if not enabled or verdict is None or verdict.status != "broken":
         return False
     if log_role not in _KILL_ELIGIBLE_ROLES:
+        return False
+    if trajectory_vetoes_kill(trajectory):
         return False
     try:
         needed = int(confirm_ticks)
@@ -736,8 +1144,8 @@ class TrainingMonitorMixin:
             return min(cfg, derived)         # config is an upper bound: the user can only tighten it
         return cfg
 
-    def _training_verdict(self, digest: str, context: str,
-                          stage_context: str = "") -> Optional[TrainingVerdict]:
+    def _training_verdict(self, digest: str, context: str, stage_context: str = "",
+                          trajectory_text: str = "") -> Optional[TrainingVerdict]:
         """One-shot LLM judgment of the live log (SYNC — the caller runs it in a worker thread). Uses the
         Developer's client (the Developer wrote the loop, so it knows what its own logs should look like)
         with a fresh, STATELESS structured call — it never mutates the shared role object, so it is safe to
@@ -751,8 +1159,16 @@ class TrainingMonitorMixin:
         flat-loss + `CUDA not available` scorer tail: with the stage identity present, `deepseek-v4-flash`
         answers "cannot determine, the stage is 'score' not 'train'" and `qwen3.5-122b` answers healthy —
         neither says `broken`. Without it the same tail reads as three separate `broken` clauses at once.
+        `trajectory_text` (from `trajectory_context`) is the third such layer and the one that made the
+        question ANSWERABLE: scoping decides which log is read, the stage identity decides whether a
+        model shown the wrong one can notice, and this decides whether a model shown the right one has
+        enough of it. Measured, the digest the judge received was ~10 loss values over ~30 seconds of a
+        multi-hour run — see the trajectory section above for the two live cases where that produced a
+        confident "not learning" about a run that had descended 4.73 and 1.41 respectively.
+
         Additive by construction: `_MONITOR_SYSTEM` and the log header are unchanged (prompt strings are
-        contracts), and an empty `stage_context` reproduces the historical message byte for byte."""
+        contracts), and an empty `stage_context`/`trajectory_text` reproduces the historical message byte
+        for byte."""
         client = getattr(getattr(self, "developer", None), "client", None)
         if client is None:
             return None
@@ -760,6 +1176,7 @@ class TrainingMonitorMixin:
             {"role": "system", "content": _MONITOR_SYSTEM},
             {"role": "user", "content": ((context + "\n\n") if context else "")
              + ((stage_context + "\n\n") if stage_context else "")
+             + ((trajectory_text + "\n\n") if trajectory_text else "")
              + "LIVE TRAINING LOG (recent tail):\n" + digest
              + "\n\nClassify this run's health from the log evidence above."},
         ]
@@ -800,7 +1217,9 @@ class TrainingMonitorMixin:
         (the SAME tree-kill path an operator abort uses), then stops. `_evaluate` sees the killed eval and
         writes the node's single terminal `node_failed` (reason='monitor_broken'); replay reconstructs the
         node from that terminal and never re-invokes the LLM. A plateau is 'watch', never 'broken', so it
-        is never killed. The alert row records whether this monitor actually OWNED that terminal, so an
+        is never killed — and a `broken` verdict the engine's own measured trajectory contradicts is not
+        killed either: it neither arms the gate nor claims, it records the measurement beside the verdict
+        and keeps watching. The alert row records whether this monitor actually OWNED that terminal, so an
         audit of "which watchdog stopped what" reads the durable log instead of guessing.
 
         With no LLM client wired it degrades to trace-only observation. Exits when the eval finishes
@@ -847,6 +1266,14 @@ class TrainingMonitorMixin:
         # Bounded retry of one unchanged digest whose verdict never parsed (`_MONITOR_SAME_DIGEST_RETRIES`).
         failed_digest: Optional[str] = None
         failed_digest_tries = 0
+        # The run-scale loss curve, accumulated one reduction per tick from the tails this loop
+        # already reads (see `LossTrajectoryTracker`). It is what the judge is shown besides the
+        # tail and what `should_monitor_kill` consults; it is reset when the active stage log
+        # changes, alongside the kill gate, because two stages are two curves.
+        tracker = LossTrajectoryTracker()
+        # Tracked separately from `last_digest`, which is committed only on a PARSED verdict: an
+        # endpoint failure must not make the same window be counted twice as two readings.
+        last_tracked: Optional[str] = None
 
         def disarm() -> None:
             nonlocal broken_streak, armed_at, arm_looks
@@ -876,6 +1303,8 @@ class TrainingMonitorMixin:
                 if log_key != armed_key:
                     armed_key = log_key
                     disarm()                 # a different subject re-arms from zero
+                    tracker.reset()          # ...and a different subject is a different curve
+                    last_tracked = None
                 elif armed_at is not None and (
                         anyio.current_time() - armed_at) > _MONITOR_ARM_TTL_S:
                     disarm()                 # a stale arm is not evidence — see _MONITOR_ARM_TTL_S
@@ -891,6 +1320,14 @@ class TrainingMonitorMixin:
                 # window into a way for a broken run to survive by saying nothing.
                 if not tail:
                     continue                 # no live log yet (or none this watchdog may read)
+                # MEASURE BEFORE ASKING, and measure on EVERY tick with new bytes — including the
+                # ones the changed-digest gate below then declines to spend an LLM call on, and the
+                # ones whose verdict never parses. The trajectory's value is its span, so a window
+                # skipped here is a hole in the run's history that no later tick can refill.
+                if tail != last_tracked:
+                    tracker.observe(tail, at=anyio.current_time())
+                    last_tracked = tail
+                trajectory = tracker.summary()
                 unchanged = tail == last_digest
                 if unchanged:
                     if armed_at is None:
@@ -909,6 +1346,12 @@ class TrainingMonitorMixin:
                                 digest_lines=tail.count("\n") + 1, digest_chars=len(tail))
                     if resolved is not None and resolved.stage:
                         sp.set("stage", resolved.stage)
+                    if trajectory.windows:
+                        # The measured curve on the span too, so "why did (or didn't) it act" is
+                        # answerable from the trace and not only from the durable alert row.
+                        sp.set_many(trajectory=trajectory.direction,
+                                    trajectory_windows=trajectory.windows,
+                                    trajectory_points=trajectory.points)
                     if unchanged:
                         # The confirming look at a FROZEN log re-asks a byte-identical question. It
                         # defends against sampling noise, never against a systematic misread — say so
@@ -936,7 +1379,8 @@ class TrainingMonitorMixin:
                         # timeouts remain the upper bound for this ownership hand-off.
                         verdict = await anyio.to_thread.run_sync(
                             self._training_verdict, tail, context,
-                            monitor_stage_context(resolved, log_plan), abandon_on_cancel=False)
+                            monitor_stage_context(resolved, log_plan),
+                            trajectory_context(trajectory), abandon_on_cancel=False)
                         llm_calls += 1
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
@@ -994,7 +1438,21 @@ class TrainingMonitorMixin:
                                      and not isinstance(_kc, bool) else 0.8)
                         stop_decided = kill_signal is not None and should_monitor_kill(
                             verdict, enabled=getattr(self, "_train_monitor_kill", False),
-                            threshold=threshold, log_role=log_role, broken_streak=broken_streak)
+                            threshold=threshold, log_role=log_role, broken_streak=broken_streak,
+                            trajectory=trajectory)
+                        # The COUNTERFACTUAL, evaluated only when the measurement is what refused.
+                        # Pure and cheap, and it is what makes "the monitor would have ended this
+                        # node but for the curve it measured" a durable fact rather than something
+                        # an auditor has to re-derive from a log that has since grown.
+                        trajectory_veto = (not stop_decided and kill_signal is not None
+                                           and trajectory_vetoes_kill(trajectory)
+                                           and should_monitor_kill(
+                                               verdict,
+                                               enabled=getattr(self, "_train_monitor_kill", False),
+                                               threshold=threshold, log_role=log_role,
+                                               broken_streak=broken_streak))
+                        if trajectory_veto:
+                            sp.set("trajectory_veto", True)
                         # CLAIM BEFORE RECORDING. The sibling ASHA watchdog can decide on the same tick,
                         # and only one of them owns the node's terminal — so the alert must state what
                         # actually happened to the node, not what this monitor wanted. The guard->update
@@ -1006,14 +1464,18 @@ class TrainingMonitorMixin:
                             sp.set_many(stop_decided=True, kill=bool(claimed))
                         elif (verdict.status == "broken" and broken_streak == 1
                               and log_role in _KILL_ELIGIBLE_ROLES and kill_signal is not None
-                              and getattr(self, "_train_monitor_kill", False)):
+                              and getattr(self, "_train_monitor_kill", False)
+                              and not trajectory_vetoes_kill(trajectory)):
                             # ARMED, not acting: re-look promptly instead of after another full cadence
                             # (up to 30 min on a long budget), so confirmation costs seconds of a
                             # multi-hour budget rather than a meaningful slice of it. `armed_at` starts
                             # the TTL at the TRANSITION, never on a later broken tick — otherwise a
                             # flapping log could renew the arm indefinitely. It is also what licenses
                             # the changed-digest bypass, so a `LOG_ROLE_WORK` stage (advisory, this
-                            # branch not taken) never buys a re-look it could not act on.
+                            # branch not taken) never buys a re-look it could not act on. The
+                            # measured-trajectory veto is a conjunct here for exactly that reason:
+                            # a confirmation that `should_monitor_kill` will refuse anyway is a
+                            # billable re-ask and a changed-digest bypass bought for nothing.
                             next_sleep = min(next_sleep, _MONITOR_CONFIRM_DELAY_S)
                             armed_at, arm_looks = anyio.current_time(), 0
                             sp.set("kill_armed", True)
@@ -1038,6 +1500,17 @@ class TrainingMonitorMixin:
                                 "log_role": log_role}
                             if resolved is not None and resolved.stage:
                                 alert["stage"] = str(resolved.stage)[:64]
+                            # THE MEASUREMENT beside the verdict. `watchdog_reflection` narrates
+                            # this row to the next Researcher, and on v7 that meant carrying "loss
+                            # pinned at ~23.0 ... no learning trend" into the next proposal about a
+                            # run that had gone 24.28 -> 22.90. Additive and fold-ignored; an
+                            # absent `trajectory` means the engine measured nothing (an old row, or
+                            # a log printing no parseable loss), NEVER that the loss was flat.
+                            measured = trajectory_row(trajectory)
+                            if measured is not None:
+                                alert["trajectory"] = measured
+                            if trajectory_veto:
+                                alert["trajectory_veto"] = True
                             if not confidence_valid:
                                 alert["confidence_valid"] = False
                             if stop_decided:
