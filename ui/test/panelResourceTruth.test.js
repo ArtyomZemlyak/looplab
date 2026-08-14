@@ -144,13 +144,23 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
       nodes: 1, finished: true, phase: 'finished', label: 'Foreign task',
     }])
     assert.ok(document.querySelector('.panel-resource-toolbar'))
+    // The panel now RANKS, but only inside a comparable group, and the two runs above are not one:
+    // they share a task id and disagree about the direction, so they are two groups of one and each
+    // says a single observation is not a comparison. What replaced the blanket "ranking unavailable"
+    // sentence is the per-group refusal pair from `crossRunRank.js::groupClaim` — kept as an
+    // assertion here because a leaderboard that stops disclaiming what it did not measure is exactly
+    // the regression this file exists to catch.
     assert.match(document.body.textContent,
-      /Same-task run observations.*Cross-run ranking unavailable.*shared task ID does not bind metric name\/unit.*per-run observations/is)
-    assert.deepEqual([...document.querySelectorAll('tbody tr')].map(row => row.textContent), [
-      'Primary1max2finished', 'Secondary0.4 (confirmed mean)min3finished',
+      /Same-task run comparison.*A single observation is not a comparison.*no metric name, unit, dataset or evaluation protocol.*not a claim that each number is about the artifact/is)
+    assert.deepEqual([...document.querySelectorAll('tbody tr:not(.xr-group)')].map(row => row.textContent), [
+      '#1Primary12finished', '#1Secondary0.4 (confirmed mean)3finished',
+    ])
+    assert.deepEqual([...document.querySelectorAll('tr.xr-group')].map(row => row.textContent), [
+      'demo · higher is better · 1 of 1 ranked', 'demo · lower is better · 1 of 1 ranked',
     ])
     assert.equal(document.querySelector('tbody a')?.getAttribute('href'), '#/run/run-1')
-    assert.doesNotMatch(document.body.textContent, /comparable|best run|relative score|Overlay trajectories/i)
+    // Never ACROSS groups, and never outside the task: no combined ordering, no unitless score.
+    assert.doesNotMatch(document.body.textContent, /best run|relative score|z-score|percentile|overall/i)
     assert.doesNotMatch(document.body.textContent, /Foreign task/)
 
     await render(panels.CrossRunPanel, { key: 'bounded-observations', state: { task_id: 'demo' } })
@@ -158,7 +168,7 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
       run_id: `bounded-${index}`, task_id: 'demo', direction: 'max', best_metric: index,
       best_confirmed: null, nodes: 1, finished: true, phase: 'finished', label: `Bounded ${index}`,
     })))
-    assert.equal(document.querySelectorAll('tbody tr').length, 100)
+    assert.equal(document.querySelectorAll('tbody tr:not(.xr-group)').length, 100)
     assert.match(document.body.textContent, /2 additional observations omitted by the client render limit/)
 
     await render(panels.CrossRunPanel, { key: 'missing-task', state: { task_id: '' } })
