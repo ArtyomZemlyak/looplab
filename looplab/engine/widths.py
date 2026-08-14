@@ -84,12 +84,12 @@ def per_experiment_gpu_budget(pool, eval_parallel) -> Optional[int]:
 
 
 def proposal_derived_width(pool, footprints, *, ceiling) -> Optional[int]:
-    """How many experiments the PROPOSALS ask to run at once, capped by what the box can serve.
+    """How many experiments the box can serve AT THE FOOTPRINT THE PROPOSALS DECLARED.
 
     docs/29 F1: *"if I want to run one experiment per card — who decides that and how? Ideally
     automatically, from the propose."*  Today AUTO means one experiment per detected GPU, i.e. the
     width is a fact about the BOX.  This is the fact about the WORK, derived from the same declared
-    `footprint.gpus` the Researcher is already told a ceiling for by `per_experiment_gpu_budget`.
+    `footprint.gpus` the Researcher is already quoted a ceiling for by `per_experiment_gpu_budget`.
 
     ``footprints`` is one entry per OPEN proposal — the declared `gpus` as an int, or ``None`` for a
     card that declared nothing.  ``ceiling`` is the run's own launch treatment (`run_started`'s pinned
@@ -97,43 +97,55 @@ def proposal_derived_width(pool, footprints, *, ceiling) -> Optional[int]:
     the width its log was written under (invariant #6), so the proposals may narrow the run and may
     widen it back, but never past what the operator's launch actually authorized.
 
-    ``None`` means "derive nothing, leave the width alone", and it is the answer far more often than
-    a number is.  The three cases, each decided rather than inherited:
+    THE RULE IS ``min(pool // need, ceiling)``, where ``need`` is the WIDEST single declared footprint
+    among the open proposals.  Two cards declaring ``{"gpus": 2}`` on a two-GPU box settle to **1** —
+    which is what already happened, except that `run_started` claimed 2 while node 0 held both devices
+    (docs/29 F1b, measured).
 
-    * **no open proposals** -> ``None``.  An empty board is not a proposal to go serial; it is the
-      ordinary state between a terminal and the next research turn, and narrowing on it would make
-      the width oscillate with the Card board's own churn.
-    * **pool == 0** -> ``None``.  The width shares out DEVICES.  With none, AUTO already settled to
-      serial `1` (or the task is CPU-locked), there is nothing to divide, and a number derived here
-      would be about the Card count alone — which is a proposal to oversubscribe the CPU, not a
-      reading of the research.
-    * **a malformed pool/ceiling** -> ``None``, never a guess.  Same rule as `settle_width`: a value
-      that is not a width leaves the running envelope exactly as it was.
+    **The count of open proposals is deliberately NOT a term**, and that is the one edge worth
+    stating, because "one experiment per card" reads as though it should be.  The board holds one
+    ready card most of the time — it is the ordinary state between a terminal and the next research
+    turn — so a `min(demand, …)` term narrows the run to serial on board CHURN rather than on
+    anything the research said, and then widens it back a turn later, appending a durable row each
+    way.  It also buys nothing: `_run_card_session` fills up to `len(eval_inflight) < eval_parallel`
+    from whatever work exists, so a width above the number of ready cards already dispatches exactly
+    the ready cards.  What the width has to express is the SHAPE of the proposals (how much hardware
+    one of them wants), not the momentary LENGTH of the queue.
 
-    THE RULE WHEN THE PROPOSALS ASK FOR MORE THAN THE BOX HAS: **the surplus queues; the width never
-    oversubscribes the pool.**  ``demand`` is what the research wants (one experiment per open card);
-    ``capacity`` is ``pool // need``, where ``need`` is the WIDEST single declared footprint.  The
-    width is the minimum of demand, capacity and the launch ceiling.  Five proposals each declaring
-    one GPU on a two-GPU box settle to **2**, not 5.  Three reasons, and each is a defect this
-    function would otherwise introduce rather than a preference:
+    THE RULE WHEN THE PROPOSALS ASK FOR MORE CONCURRENCY THAN THE BOX HAS: **the surplus queues; the
+    width never oversubscribes the pool.**  Five proposals each declaring one GPU on a two-GPU box
+    settle to **2**, and three of them wait.  Three reasons, each a defect this function would
+    otherwise introduce rather than a preference:
 
     1. **It would make `per_experiment_gpu_budget` announce a lie.**  That rule tells the Researcher
-       it may declare ``pool // eval_parallel`` GPUs per experiment.  Capping the width at
-       ``pool // need`` keeps ``pool // width >= need``, so the ceiling the next proposal is quoted is
-       always at least what the open proposals already declared.  Let the width exceed the pool and
-       the announcement collapses to the ``eval_parallel > pool -> 1`` edge — the engine would tell a
-       Card "you may have one" one turn after admitting a Card that declared two.
+       it may declare ``pool // eval_parallel`` GPUs per experiment, re-quoted on every proposal off
+       the LIVE width.  Capping the width at ``pool // need`` keeps ``pool // width >= need``, so the
+       ceiling the next proposal is quoted is always at least what the open proposals already
+       declared.  Let the width exceed the pool and the announcement collapses to the
+       ``eval_parallel > pool -> 1`` edge — the engine would tell a Card "you may have one" one turn
+       after admitting a Card that declared two.
     2. **An eval slot above the device count buys no parallelism.**  It buys a node holding an eval
        slot while blocked in `resources.py::_acquire_gpus`, which is the barrier docs/29 F1f is about.
     3. **`_dispatch_evals`'s aged-head escape hatch stops working above the pool.**  It compares free
-       semaphore tokens against the width to detect a drained pool; a width above the batch's own
-       token total makes that test unreachable and wedges the batch.
+       semaphore tokens against the batch width to detect a drained pool; a width above the batch's
+       own token total makes that test unreachable and wedges the batch.
 
-    An undeclared footprint counts as ``1``, not as zero demand: `resources.py::_resource_request_
-    for_node` gives exactly one device to an undeclared footprint whenever the run is parallel and has
-    a pool, so one is what such a card will actually take.  A card declaring ``gpus: 0`` is genuinely
-    CPU-only and contributes no GPU demand — but it still contributes one unit of ``demand``, because
-    it is still an experiment somebody proposed to run.
+    ``None`` means "derive nothing, leave the width alone".  The three cases, each decided rather
+    than inherited:
+
+    * **no open proposals** -> ``None``.  There is no declared footprint to read, and an empty board
+      is not a statement about hardware.
+    * **pool == 0** -> ``None``.  The width shares out DEVICES.  With none, AUTO already settled to
+      serial `1` (or the task is CPU-locked) and there is nothing to divide.
+    * **a malformed pool/ceiling** -> ``None``, never a guess.  Same rule as `settle_width`: a value
+      that is not a width leaves the running envelope exactly as it was.
+
+    An undeclared footprint counts as ``1`` device of need, not zero: `resources.py::
+    _resource_request_for_node` gives exactly one device to an undeclared footprint whenever the run
+    is parallel and has a pool, so one is what such a card will actually take.  A card declaring
+    ``gpus: 0`` is genuinely CPU-only and needs no device, so it does not raise ``need`` at all — but
+    it cannot lower it either, which is why ``need`` floors at 1 rather than at 0 (a board of CPU-only
+    cards would otherwise divide by zero, and its honest width is the ceiling anyway).
 
     ``need > pool`` (a proposal declaring more devices than exist) yields capacity 0 and therefore a
     settled ``1`` — deliberately the same answer, for the same reason, as `per_experiment_gpu_budget`'s
@@ -146,16 +158,15 @@ def proposal_derived_width(pool, footprints, *, ceiling) -> Optional[int]:
     entries = list(footprints or ())
     if not entries or pool == 0:
         return None
-    demand = len(entries)
     need = 1
     for declared in entries:
         # Strict, like every other reader of a Researcher-authored number: a bool/float/string in a
-        # declaration is not a device count, and treating one as demand would let a malformed card
+        # declaration is not a device count, and treating one as demand would let one malformed card
         # reshape the run's execution treatment. Such a card falls back to the undeclared `1`.
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 0:
             declared = 1
         need = max(need, declared)
-    return max(1, min(demand, pool // need, ceiling))
+    return max(1, min(pool // need, ceiling))
 
 
 # The two bounds, named so a call site reads as the axis it settles rather than as a magic number.
