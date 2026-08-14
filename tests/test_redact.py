@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from looplab.core.redact import (redact_env_values, redact_output_tail, redact_persisted_text,
                                  redact_secrets, secret_env_values)
 
@@ -274,3 +276,169 @@ def test_default_run_does_not_persist_an_operator_env_secret(tmp_path, monkeypat
 def test_opt_in_entropy_pass_still_reaches_the_persisted_tail(tmp_path):
     tail, _ = _run_leaky_engine(tmp_path, [f"weights sha {_ENTROPY_BLOB}"], redact_output=True)
     assert _ENTROPY_BLOB not in tail and "***REDACTED***" in tail
+
+
+def test_the_entropy_pass_keeps_the_diagnostics_the_corpus_says_operators_need(tmp_path):
+    """THE NEGATIVE CONTROL, driven end-to-end with the lossy pass ON — the posture the docs
+    recommend for untrusted tiers, and the one where over-masking actually costs something.
+
+    Every string here is a real shape lifted from `runs/`: the exact tokens this pass masked before
+    `_entropy_candidate`/`_ENTROPY_TOKEN_CHARS`. If any one comes back as `***REDACTED***`, the
+    operator has lost the filename out of their own traceback — which is what 13 of 13 entropy
+    masks over the corpus's 744 persisted tails actually were.
+    """
+    survivors = [
+        '  File "/home/jovyan/data/looplab/runs/rubertlite-dr-unified-v2/nodes/node_0/'
+        'vectorsearch/training/collator.py", line 44, in __init__',
+        "rubert-tiny-lite-dense-retrieval-best-config-kno-ad73cfa5.md:22: key pitfalls",
+        "outputs/bigtest/query_embeddings_var",
+        "CrossBatchMultipleNegativesRankingLoss",
+        "vectorsearch/experiments/qwen3_hn_rubert-tiny-lite/final/model",
+    ]
+    tail, _ = _run_leaky_engine(tmp_path, survivors, redact_output=True)
+    assert "***REDACTED***" not in tail
+    for line in survivors:
+        assert line in tail, line
+
+
+# --- the entropy pass's COMPOSITION screen (the half that made a default flip safe) --------------
+#
+# Every FALSE-POSITIVE string below is lifted verbatim from `runs/` on this box, where the entropy
+# pass masked it before this screen existed: 13 of 13 changed tails were paths, and 162,472
+# `***REDACTED***` markers are already durable in the corpus's `spans.jsonl` from the ~30 ALWAYS-ON
+# `redact_persisted_text` boundaries, whose sampled contents are traceback paths and memory-note
+# filenames. This is not a hypothetical over-match; it is what shipped.
+
+_CORPUS_MUST_SURVIVE = [
+    "/home/jovyan/data/looplab/runs/rubertlite-dr-unified-v2/nodes/node_0/"
+    "vectorsearch/training/collator",
+    "rubert-tiny-lite-dense-retrieval-best-config-kno-ad73cfa5",
+    "4-gradient-scaling-for-infonce-at-low-temperatur-e9b812",
+    "outputs/bigtest/query_embeddings_var",
+    "CrossBatchMultipleNegativesRankingLoss",          # CamelCase identifier: no digit
+    "vectorsearch/experiments/qwen3_hn_rubert-tiny-lite/final/model",
+    "11/site-packages/pytorch_lightning/trainer/configuration_validator",
+]
+
+_CORPUS_MUST_MASK = [
+    "aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J",                 # base64-ish, both cases + digits
+    "dGhpcyBpcyBhIHRlc3Qgc2VjcmV0IHZhbHVlIDEyMzQ1Ng==",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+]
+
+
+@pytest.mark.parametrize("text", _CORPUS_MUST_SURVIVE)
+def test_entropy_pass_leaves_real_corpus_diagnostics_intact(text):
+    assert redact_secrets(f'  File "{text}.py", line 44, in __init__', entropy=True) == \
+        f'  File "{text}.py", line 44, in __init__'
+
+
+@pytest.mark.parametrize("token", _CORPUS_MUST_MASK)
+def test_entropy_pass_still_masks_an_unknown_shape_credential(token):
+    out = redact_secrets(f"connecting with {token} now", entropy=True)
+    assert token not in out and "***REDACTED***" in out
+
+
+def test_a_credential_embedded_in_a_path_is_masked_without_eating_the_path():
+    # The screen is per-token, so a real secret sitting inside a path still goes — and the
+    # directories around it survive, which is the whole difference from the old behaviour.
+    out = redact_secrets("/data/models/aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J/weights.bin", entropy=True)
+    assert "aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J" not in out
+    assert out.startswith("/data/models/") and out.endswith("/weights.bin")
+
+
+# --- invariant #6: a default flip must not change how an ALREADY-RECORDED run replays ------------
+
+def test_an_already_recorded_run_replays_byte_identically_whatever_the_live_default(tmp_path):
+    """A run RECORDED under the old posture must REPLAY exactly as recorded.
+
+    Driven, not asserted about the fold's source: a real run writes its tail with the entropy pass
+    off (what every log in `runs/` on this box carries), and the same file is then folded while the
+    LIVE default is on. The fold is pure and re-redacts nothing, so a default flip can neither
+    rewrite a run's history nor retroactively sanitize it — which is what invariant #6 owes an
+    operator who resumes a six-week-old run.
+    """
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    tail, _ = _run_leaky_engine(tmp_path, [f"weights sha {_ENTROPY_BLOB}"], redact_output=False)
+    assert _ENTROPY_BLOB in tail                     # recorded raw, as an old run would have
+
+    log = tmp_path / "r" / "events.jsonl"
+    on_disk = log.read_text(encoding="utf-8")
+    replayed = fold(EventStore(log).read_all())
+    assert any(_ENTROPY_BLOB in (n.stdout_tail or "") for n in replayed.nodes.values())
+    assert log.read_text(encoding="utf-8") == on_disk   # replay wrote nothing back
+
+
+def test_a_run_resumes_with_the_redaction_posture_it_recorded(tmp_path):
+    """Invariant #6's other half: `resume` restores Settings from the run's OWN
+    `config.snapshot.json`, which records this field EXPLICITLY rather than omitting it as a
+    default — so whatever the shipped default is or later becomes, a settled run re-enters with the
+    posture it was started under."""
+    from looplab.cli import load_run_settings
+    from looplab.core.config import Settings
+
+    snapshot = json.loads(Settings(redact_output=False).model_dump_json())
+    assert snapshot["redact_output"] is False        # the field is RECORDED, not omitted-as-default
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    restored = load_run_settings(tmp_path, strict=True)
+    assert restored.redact_output is False
+
+    # ...and it stays the RECORDED value even when the live default is the other one, which is the
+    # property invariant #6 actually owes: a flip of this field must never reach a settled run.
+    flipped = json.loads(Settings(redact_output=True).model_dump_json())
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(flipped), encoding="utf-8")
+    assert load_run_settings(tmp_path, strict=True).redact_output is True
+
+
+# --- the SEVENTH persisted output channel, found by the C2 sweep ---------------------------------
+
+def test_the_crash_triage_rationale_is_redacted_like_its_two_sibling_verdicts(tmp_path):
+    """`node_failed.triage_rationale` is LLM text about a crash, written to the durable log, and it
+    was the one judgement of its kind with no screen — `train_monitor` and `asha_monitor` redact
+    their `reason` for exactly this reason. Driven: a real failing eval, a judge that returns a
+    credential in its rationale, and the row read back off disk."""
+    import anyio
+    from pathlib import Path
+    from looplab.core.models import Idea
+    from looplab.engine.orchestrator import Engine
+    from looplab.search.policy import GreedyTree
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.adapters.toytask import ToyTask
+
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    secret = "sk-abcdefABCDEF0123456789TRIAGE"
+
+    class _CrashingDev:
+        def implement(self, idea):
+            return "raise SystemExit('boom')\n"
+
+        def repair(self, idea, code, error):
+            return "raise SystemExit('boom')\n"
+
+    class _Stub:
+        def propose(self, state, parent):
+            return Idea(operator="draft", params={"x": 1.0, "y": 1.0})
+
+    run_dir = tmp_path / "r"
+    eng = Engine(run_dir, task=task, researcher=_Stub(), developer=_CrashingDev(),
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1))
+    eng._triage_crash = lambda *a, **kw: {
+        "action": "abandon",
+        "rationale": f"the eval reads {secret} from the environment and the endpoint refuses it",
+    }
+    anyio.run(eng.run)
+
+    rows = [json.loads(l) for l in (run_dir / "events.jsonl").read_text().splitlines() if l.strip()]
+    # BOTH rows the judge's own words land on: the terminal's `triage_rationale` and, when the
+    # verdict was "repair", `node_repaired.rationale`. The sweep found them one after the other.
+    rationales = [r["data"].get("triage_rationale", "") for r in rows if r.get("type") == "node_failed"]
+    rationales += [r["data"].get("rationale", "") for r in rows if r.get("type") == "node_repaired"]
+    assert rationales and any(r.strip() for r in rationales), "no triage rationale was persisted"
+    joined = " ".join(rationales)
+    assert secret not in joined and "sk-***" in joined
+    assert "from the environment" in joined            # the diagnosis itself survives
+    # ...and nothing else in the whole log kept it either.
+    assert secret not in (run_dir / "events.jsonl").read_text()

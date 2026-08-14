@@ -267,3 +267,56 @@ def test_a_timed_out_agent_keeps_what_it_printed_before_it_hung(tmp_path):
     assert "resolving workspace deps" in (run.stdout_tail or "")
     assert "language server never became ready" in (run.stderr_tail or "")
     assert "timed out" in (run.stderr_tail or "").lower()      # the notice is kept too
+
+
+def test_a_cli_agents_captured_tails_are_screened_before_anything_can_read_them(tmp_path,
+                                                                                monkeypatch):
+    """C2 sweep: `cli_agent` builds three `AgentRun`s and NONE of them could call `Engine._redact`.
+
+    That is a LAYERING fact — the funnel is an engine method and `agents/` may not import upward —
+    so the screen lives on the `core` type every producer constructs (`core/validate.py::AgentRun`),
+    not as a copied regex at three call sites. Driven through the real subprocess path: a stub agent
+    prints a credential shape and one of THIS box's own secret env values, and the tails are read
+    back off `last_run`.
+    """
+    # The value is planted in the PARENT's environment under a secret NAME. `cli_agent` strips such
+    # names out of the child's env on purpose, so the child cannot read it — which is exactly how
+    # these bytes reach a tail in the field: echoed by something that was configured with them
+    # (a DSN in a library traceback, a tool printing its own resolved config), not by `os.environ`.
+    monkeypatch.setenv("C2CLI_DB_PASSWORD", "hunter2-correct-horse")
+    child = tmp_path / "leaky_agent.py"
+    child.write_text(
+        "import sys\n"
+        "print('resolving workspace deps from /home/ci/models/rubert-tiny-lite-v2/final')\n"
+        "print('auth sk-abcdefABCDEF0123456789TOKEN')\n"
+        "print('psycopg2.OperationalError: password hunter2-correct-horse rejected', file=sys.stderr)\n"
+        "open('solution.py', 'w').write('import json\\nprint(json.dumps({\"metric\": 1.0}))\\n')\n",
+        encoding="utf-8")
+    dev = CliAgentDeveloper(model="ollama/x", spec=PRESETS["opencode"],
+                            cmd_override=[sys.executable, str(child)], timeout=60)
+    dev.implement(Idea(operator="draft", params={}))
+
+    run = dev.last_run
+    assert run is not None and run.launched is True
+    out, err = run.stdout_tail or "", run.stderr_tail or ""
+    # The shape screen, and the env-VALUE screen — the two halves that need no configuration.
+    assert "sk-abcdefABCDEF0123456789TOKEN" not in out and "sk-***" in out
+    assert "hunter2-correct-horse" not in err and "***REDACTED_ENV***" in err
+    # ...and the diagnostic an operator actually reads survives: no `Settings` is reachable from a
+    # `core` dataclass, so the entropy half is deliberately NOT applied here and this path is intact.
+    assert "/home/ci/models/rubert-tiny-lite-v2/final" in out
+    assert "resolving workspace deps" in out
+
+
+def test_the_agent_run_screen_is_the_shared_redactor_and_not_a_second_spelling(tmp_path):
+    """A copied regex is the failure this is shaped to avoid, so pin that the two agree exactly."""
+    from looplab.core.redact import redact_output_tail
+    from looplab.core.validate import AgentRun
+
+    raw = "Authorization: Bearer abcdefABCDEF0123456789 while reading /var/data/emb_v3/index.faiss"
+    run = AgentRun(stdout_tail=raw, stderr_tail=raw)
+    expected = redact_output_tail(raw, entropy=False)
+    assert run.stdout_tail == expected == run.stderr_tail
+    assert "abcdefABCDEF0123456789" not in run.stdout_tail
+    assert "/var/data/emb_v3/index.faiss" in run.stdout_tail
+    assert AgentRun().stdout_tail == "" and AgentRun().stderr_tail == ""

@@ -17,13 +17,25 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
 * **always, at every tail** — the known credential SHAPES in `_PATTERNS` (negligible false-positive
   risk, which is why they were already documented "always redacted") and the operator's own secret
   ENV VALUES (`redact_env_values`, below).
-* **`redact_output=True` only** — the ENTROPY pass, which is the half with a real false-positive
-  cost: a 24-char base64/hex run of a legitimate data hash, model checksum or embedding dump reads
-  exactly like a credential to it. That cost is the reason the flag was off by default, and it is a
-  reason to gate the entropy pass, never a reason to gate the pattern pass.
+* **`redact_output` only** — the ENTROPY pass, the half with a real false-positive cost, which is
+  why it is separable at all. It is ON by default since 2026-08-14 and the flag is now the way to
+  turn it OFF; see `_entropy_candidate` for the measurement that made a default-on entropy pass
+  safe (its false positives on this box's own corpus were 13/13 filesystem paths, and they are gone)
+  and for the one coverage class deliberately traded away.
 
 `redact_output_tail` is the ONE spelling of that split; `engine/audit.py::Engine._redact` is its
 only production caller and funnels all six persisted output tails through it.
+
+**THREE PATTERNS ANSWER THREE DIFFERENT QUESTIONS, and none of them is a copy of another.**
+`envsafe.SECRET_ENV` ("may a child process SEE this variable?") over-matches on purpose — a bare
+`KEY`, plus `AUTH`/`COOKIE`/`WEBHOOK`/`DSN` — because withholding one variable too many from an
+eval costs nothing. `config._SECRET_ENV_NAME` ("what may an `api_key_env` be NAMED?") is the
+stricter sibling, and `tests/test_secret_env_pattern.py` holds those two together. This module's
+`_SECRET_KEY_RE` is the THIRD and is deliberately the narrowest: it screens a FIELD NAME inside
+free-form subprocess output, where over-matching does not cost a withheld variable but a destroyed
+diagnostic — `envsafe`'s bare `KEY` alternative would mask the value of every `key=` in an ML log,
+and its `AUTH` would eat `author=`. `_BENIGN_KEYS` exists for the same reason one level down. So
+this one must NOT be widened toward the other two; the direction of safety is the opposite here.
 """
 from __future__ import annotations
 
@@ -131,10 +143,77 @@ def _entropy(s: str) -> float:
     return -sum((c / n) * math.log2(c / n) for c in counts.values())
 
 
+_HAS_LOWER = re.compile(r"[a-z]")
+_HAS_UPPER = re.compile(r"[A-Z]")
+_HAS_DIGIT = re.compile(r"[0-9]")
+
+
+def _entropy_candidate(token: str) -> bool:
+    """Whether a long high-entropy run may be MASKED — the composition screen, and the thing that
+    keeps the entropy pass off ordinary ML diagnostics.
+
+    **Shannon entropy alone does not separate a credential from a path.** Measured 2026-08-14 over
+    every persisted output tail in `runs/` (743 non-blank `stdout_tail`/`stderr_tail`/`error`/
+    `reason` values across 45 event logs): the pattern+env pass changed **0** of them, and the
+    entropy pass changed **13 — all thirteen false positives**, every one a filesystem path inside
+    a traceback (`File "/home/…/nodes/node_0/vectorsearch/training/collator.py"` collapsing to
+    `File "***REDACTED***.py"`) or a results-table column label. Zero were credentials. The same
+    rule fires on the ~30 ALWAYS-ON `redact_persisted_text` boundaries, where it is not gated by
+    anything: 162,472 `***REDACTED***` markers are already durable in the corpus's `spans.jsonl`,
+    and the sampled ones are traceback paths and memory-note FILENAMES
+    (`rubert-tiny-lite-dense-retrieval-best-config-kno-ad73cfa5.md` -> `***REDACTED***.md`, i.e. the
+    Researcher shown a note list naming nothing). Destroying the filename in a traceback is
+    destroying the single most useful token an operator has.
+
+    What actually separates the two populations is CHARACTER COMPOSITION, not surprise: a path, a
+    slug, a snake/kebab identifier and a CamelCase class name each use one case class or no digits,
+    while a base64/base64url credential mixes both cases AND digits by construction. Requiring all
+    three takes the corpus's 138 distinct masked tokens (5,289 occurrences) down to 25 (2,373) on
+    its own, and to 5 (2,347) together with the `_ENTROPY_TOKEN_CHARS` separator rule below — which
+    is the other necessary half, since the 25 this screen still admits are all paths and URLs whose
+    own segments happen to mix case and digits. See that comment for the joint measurement.
+
+    KNOWN AND ACCEPTED: an all-lowercase or all-uppercase alphanumeric secret is no longer masked by
+    this pass (measured 70 % -> 0 % on random 32-char single-case alphanumerics). It is not a
+    regression in the screen that matters — the same string is caught by `_PATTERNS` if it has a
+    known shape, by `redact_env_values` if it is one of THIS operator's variables, and by neither
+    before or after if it is a bare hex digest (16 symbols never reaches the 4.2 cutoff, so hex
+    coverage was and remains 0 %). Trading a heuristic's tail for a redactor that does not blind the
+    operator's tracebacks is the whole reason the entropy half is separable at all.
+    """
+    return bool(_HAS_LOWER.search(token) and _HAS_UPPER.search(token)
+                and _HAS_DIGIT.search(token))
+
+
+# `/` is a SEPARATOR here, not a token character — the second half of the same fix, and BOTH halves
+# are needed. Composition alone still eats a path or URL whose own segments happen to mix case and
+# digits (`/data/models/<blob>/weights`, `github.com/ansh941/MnistSimpleCNN`): 25 distinct such
+# tokens survived the composition screen on the corpus and every one was a path or a URL. The
+# separator alone still eats the slash-free slugs (`4-gradient-scaling-for-infonce-at-low-
+# temperatur-e9b812`), the `Multiple…RankingLoss` class names and `default=DATA_SOURCE_TYPES`: 34
+# distinct, 2,689 occurrences.
+#
+# TOGETHER, re-measured over every durable string value in all 45 event logs: the corpus's 138
+# distinct masked tokens / 5,289 occurrences fall to 5 / 2,347, of which 2,343 are ONE opaque
+# account identifier and the remaining four are a paper DOI slug and two conference filenames. Over
+# the 744 persisted output TAILS specifically, the entropy pass now changes nothing at all (was 13,
+# all false) — which is the measurement `Settings.redact_output`'s default-on rests on.
+#
+# The cost is stated rather than hidden: a base64 credential CONTAINING a `/` is now scanned as its
+# slash-free runs, so one whose longest run falls under `min_len` escapes the pass. Measured on
+# uniform random base64: 32 chars 75.4 %, 40 chars 83.5 %, 64 chars 97.7 % (from ~100 %); base64url,
+# which has no `/` in its alphabet, is unaffected at 99.9 %. That residue is a heuristic's tail
+# inside an already-narrow residual — anything with a known shape is `_PATTERNS`' job and anything of
+# this operator's is `redact_env_values`' — and it is the price of a redactor that does not delete
+# the filename out of the operator's traceback.
+_ENTROPY_TOKEN_CHARS = r"A-Za-z0-9+=_\-"
+
+
 def redact_secrets(text: str, *, entropy: bool = True,
                    entropy_cutoff: float = 4.2, min_len: int = 24) -> str:
     """Mask credentials in `text`. Known patterns are always redacted; if `entropy`, also mask long
-    high-entropy tokens (likely base64/hex secrets) — conservative to avoid hashing false-positives."""
+    high-entropy tokens (likely base64/hex secrets) — conservative to avoid hashing false-positives
+    AND composition-screened by `_entropy_candidate`, which is what keeps paths and slugs intact."""
     if not text:
         return text
     for pat, repl in _PATTERNS:
@@ -142,8 +221,9 @@ def redact_secrets(text: str, *, entropy: bool = True,
     if entropy:
         def _mask(m: re.Match) -> str:
             tok = m.group(0)
-            return "***REDACTED***" if _entropy(tok) >= entropy_cutoff else tok
-        text = re.sub(rf"[A-Za-z0-9+/=_\-]{{{min_len},}}", _mask, text)
+            return ("***REDACTED***"
+                    if _entropy(tok) >= entropy_cutoff and _entropy_candidate(tok) else tok)
+        text = re.sub(rf"[{_ENTROPY_TOKEN_CHARS}]{{{min_len},}}", _mask, text)
     return text
 
 

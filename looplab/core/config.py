@@ -920,10 +920,24 @@ class Settings(BaseSettings):
     # Known credential SHAPES and the operator's own secret env VALUES are masked on every persisted
     # stdout/stderr tail unconditionally — a `print(api_key)` or a traceback must not land in the
     # durable log on the DEFAULT path, which is what gating the whole pass on an off-by-default flag
-    # meant for six weeks. What stays gated here is the entropy pass, which masks any 24+ character
-    # base64/hex run above the entropy cutoff: on ML output that also hits legitimate data hashes,
+    # meant for six weeks. What this flag gates is the ENTROPY pass, which masks a 24+ character
+    # base64-ish run above the entropy cutoff: on ML output that also hit legitimate data hashes,
     # model checksums and embedding dumps, and THAT false-positive cost is why it is opt-in.
-    # Recommended on for untrusted tiers. See `core/redact.py::redact_output_tail`.
+    # Recommended on for untrusted tiers.
+    #
+    # THE FALSE-POSITIVE COST IS NOW MEASURED, and it is far smaller than this default assumes.
+    # Over every persisted tail in `runs/` (744 non-blank stdout/stderr/error/reason values, 45
+    # event logs) the entropy pass changed 13 — and all 13 were FALSE, every one a filesystem path
+    # inside a traceback collapsing to `File "***REDACTED***.py"`. Zero were credentials.
+    # `core/redact.py::_entropy_candidate` + `_ENTROPY_TOKEN_CHARS` screen those out (character
+    # composition + `/` as a separator) and re-measured over the same corpus the entropy pass now
+    # changes **0 of 744** tails, while masked tokens across ALL durable string values fall from 138
+    # distinct / 5,289 occurrences to 5 / 2,347. So the empirical objection to a default-on entropy
+    # pass at the TAIL no longer holds, and the ~30 `redact_persisted_text` boundaries have always
+    # run this same pass unconditionally anyway. The default is deliberately left OFF here pending
+    # an owner decision rather than flipped in the same change as the redactor fix that would
+    # justify it — flipping a security default on the strength of one box's corpus is a call for
+    # the operator, not for the change that made it cheap. See `core/redact.py::redact_output_tail`.
     redact_output: bool = False
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
