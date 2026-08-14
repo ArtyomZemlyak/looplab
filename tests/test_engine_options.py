@@ -164,6 +164,9 @@ ATTR_BY_FIELD = {
     # `landlock` is private beside `_read_fence`, its sibling boundary: nothing outside
     # `engine/resources.py` reads it, and it is settled at construction.
     "metric_subject": "metric_subject",
+    # Public for the same reason `metric_subject` is: `engine/evaluate.py` reads it as a plain
+    # attribute at the one place the `node_evaluated` payload is built, and a test sets it directly.
+    "auto_extra_metrics": "auto_extra_metrics",
     "landlock": "_landlock",
 }
 

@@ -132,6 +132,88 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
     return out
 
 
+# WHICH CHANNEL PUT A VALUE IN `extra_metrics` — the SUBJECT question one rung down from
+# `runtime/metric_subject.py`, asked of the SECONDARY numbers instead of the primary one.
+#
+# THE OMISSION THIS CLOSES. `runtime/command_eval.py` fills `extra_metrics` from two channels and
+# only one of them is guarded:
+#
+#   declared — `EvalSpec.metrics`, the OPERATOR's own reader specs. It refuses `kind: "adapter"`
+#              with the same words `cross_check` uses ("an agent-authored gate reader defeats the
+#              trust boundary"). Used ZERO times across the whole preserved corpus.
+#   auto     — `runtime/sandbox.py::json_line_extras`: EVERY other numeric key on the candidate's
+#              own stdout JSON line. No declaration, no reader spec, no gate. It produced 12 of the
+#              12 extra metrics in the corpus, across 3 runs.
+#
+# Those 12 include `speculation_cuda_probe_v=1.0` — a schema VERSION number — beside `device_count`,
+# `alloc_bytes` and `device_ordinal`, and beside genuine measurements like `train_auc`/`cv_mean_auc`.
+# All of them were shown to the operator, exported to MLflow and served to reviewers in the same
+# visual place as the protected primary metric, with nothing marking the difference. The primary
+# metric has a subject, a `metric_provenance`, an enforcement rung and the protected `score` stage;
+# an extra metric had none of that AND came in through the unguarded door.
+#
+# docs/36 is the frame: what goes into the RECORD stays deterministic over AUTHENTICATED evidence.
+# An auto-captured number cannot be made authentic after the fact — the candidate wrote it — so the
+# fix is not to hide it but to make the record SAY which door it came through, at every consumer.
+EXTRA_METRIC_DECLARED = "declared"   # read by an operator-owned `EvalSpec.metrics` reader spec
+EXTRA_METRIC_AUTO = "auto"           # scraped off the candidate's own stdout; undeclared, unauthenticated
+# READER-SIDE ONLY, and never written: the answer for a value whose channel the log does not record.
+# Every log written before this shipped is in that state, which is why the default is NOT `declared`
+# — assuming the guarded channel for an untagged value would state exactly the thing that was never
+# true: 12 of the 12 preserved historical values came from `auto`. "unknown" is the honest reading,
+# and every consumer must treat it as at-least-as-untrusted as `auto` (it very probably IS `auto`).
+EXTRA_METRIC_UNKNOWN = "unknown"
+# The channels a WRITER may record. `EXTRA_METRIC_UNKNOWN` is deliberately outside it.
+EXTRA_METRIC_CHANNELS = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO)
+# Channels whose value is text the CANDIDATE authored, i.e. not authenticated evidence. `unknown` is
+# in here on purpose: a reader that cannot tell must not present the value as measured.
+EXTRA_METRIC_UNAUTHENTICATED = (EXTRA_METRIC_AUTO, EXTRA_METRIC_UNKNOWN)
+
+
+def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:
+    """Normalize the `extra_metrics` channel map to `{name: "declared"|"auto"}`.
+
+    Same untrusted-input discipline as `normalize_extra_metrics` (this arrives from an old or
+    hand-edited event log, and assignment validation is off): a non-dict, a non-string key, or a
+    value outside the WRITER vocabulary is dropped rather than coerced. A dropped entry is not
+    silently upgraded — it simply reads back as `EXTRA_METRIC_UNKNOWN` through
+    `extra_metric_channel`, which is the safe direction.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, raw in value.items():
+        if len(out) >= max_items or not isinstance(key, str) or raw not in EXTRA_METRIC_CHANNELS:
+            continue
+        out[key[:200]] = str(raw)
+    return out
+
+
+def extra_metric_channel(channels, key) -> str:
+    """Which channel a single extra metric came through, for any reader.
+
+    `EXTRA_METRIC_UNKNOWN` when the map is absent (a log written before the channel was recorded)
+    AND when the map is present but says nothing about this key. Both are the same fact to a reader
+    — nobody recorded where this number came from — and neither may be reported as `declared`."""
+    if isinstance(channels, dict):
+        found = channels.get(key)
+        if found in EXTRA_METRIC_CHANNELS:
+            return str(found)
+    return EXTRA_METRIC_UNKNOWN
+
+
+def declared_extra_metrics_only(extras, channels) -> tuple[dict, dict]:
+    """The `(extras, channels)` pair keeping ONLY the values an operator-owned reader produced.
+
+    This is what `Settings.auto_extra_metrics = false` records, and it is deliberately expressed in
+    terms of the TAG rather than re-deriving "which door did this come through" a second time: the
+    gate cannot drift from the label, and an untagged value (`unknown`) is dropped with the auto
+    ones because a reader that cannot prove it was declared must not admit it here either."""
+    kept = {k: v for k, v in (extras or {}).items()
+            if extra_metric_channel(channels, k) == EXTRA_METRIC_DECLARED}
+    return kept, {k: EXTRA_METRIC_DECLARED for k in kept}
+
+
 MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 
 
@@ -751,6 +833,13 @@ class Node(BaseModel):
     # False when any constraint was violated — such a node keeps its metric (for the audit
     # trail) but is excluded from best-selection.
     extra_metrics: dict[str, float] = Field(default_factory=dict)
+    # WHICH CHANNEL EACH EXTRA METRIC CAME THROUGH: `{name: "declared"|"auto"}` (see
+    # `EXTRA_METRIC_CHANNELS`). Additive with a reader-side default (invariant #5): absent on every
+    # log written before 2026-08-14 -> `{}` -> every key reads back `EXTRA_METRIC_UNKNOWN`, which is
+    # what the fold and every consumer must SAY rather than quietly assuming the guarded channel.
+    # A key missing from a PRESENT map reads `unknown` for the same reason — a later merge (trial
+    # collapse, salvage gates) that forgot to tag must not inherit its neighbours' authority.
+    extra_metrics_provenance: dict[str, str] = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
     # WHERE THIS NODE'S METRIC CAME FROM, when it was not simply measured. `None` for every ordinary
@@ -767,6 +856,11 @@ class Node(BaseModel):
     @classmethod
     def _normalize_extra_metrics(cls, value):
         return normalize_extra_metrics(value)
+
+    @field_validator("extra_metrics_provenance", mode="before")
+    @classmethod
+    def _normalize_extra_metrics_provenance(cls, value):
+        return normalize_extra_metric_channels(value)
     # Transient re-run marker (node_reset): "propose" | "implement" set it so the engine RE-RUNS this
     # existing node in place from that stage; cleared once the re-run's node_created lands. ("eval" resets
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,

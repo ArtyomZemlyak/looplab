@@ -484,7 +484,15 @@ def asha_judge_context(*, node_id: int, generation: int, direction: str, metric_
         lines.append(f"Latest sample: {metric_key}={_fmt(sample.value)}.")
     extras = {k: v for k, v in (extra_metrics or {}).items()}
     if extras:
-        lines.append("Other metrics reported alongside it: "
+        # NAMED as what they are. These come out of the live log the candidate's own training script
+        # writes — the same channel `runtime/sandbox.py::json_line_extras` auto-captures at the
+        # terminal, and the same trust story `metric_salvage.py` states one file over. The judge is
+        # deciding what to DO next (docs/36's first row), so it is right that it sees them; it is
+        # also right that it is told they are the experiment's self-report and not a measurement the
+        # engine stands behind, since a stop decision reasoned off a printed number is a decision
+        # the candidate influenced.
+        lines.append("Other metrics the experiment printed alongside it "
+                     "(self-reported by the training script, unverified): "
                      + ", ".join(f"{k}={_fmt(v)}" for k, v in list(extras.items())[:max_shown]) + ".")
     bar = rank_bar(comparable_population, direction, quantile=quantile)
     if comparable_population:

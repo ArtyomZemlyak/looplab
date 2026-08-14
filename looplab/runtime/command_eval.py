@@ -33,6 +33,11 @@ from typing import Optional
 # where all three can reach it. Re-exported here because THIS is where the stage contract is read.
 from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa: F401 (re-export)
                                   MAX_STAGE_ENV_VARS, merge_env, validate_env_map)
+# The `extra_metrics` CHANNEL vocabulary. It lives in `core/models.py` beside
+# `normalize_extra_metrics` because the fold, the UI projections and this writer must all spell the
+# two channels the same way — `runtime` may import `core`, and this is the site that KNOWS which
+# door each value came through.
+from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
                                      finite_timeout, json_line_extras,
@@ -2447,13 +2452,28 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     auto = (json_line_extras(out, metric.get("key", "metric"))
             if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
     extra = ({**auto, **declared} or None)
+    # WHICH DOOR EACH VALUE CAME THROUGH, recorded beside the values themselves. These two channels
+    # are not equally trustworthy and until 2026-08-14 the record could not tell them apart: the
+    # `declared` half is operator-owned and refuses an agent-authored `adapter` reader (the check
+    # ten lines up), while `auto` is EVERY other numeric key on the candidate's own stdout — no
+    # declaration, no reader spec, no gate. On the preserved corpus `declared` produced 0 of 12
+    # extra metrics and `auto` produced 12 of 12, including a schema VERSION number recorded as a
+    # metric, and all of them reached the operator, MLflow and the reviewer beside the protected
+    # primary. Tagging (rather than dropping) is what docs/36 asks for here: the RECORD stays
+    # deterministic over authenticated evidence by SAYING which evidence is authenticated, and the
+    # `auto_extra_metrics` gate one layer up is then expressible as "keep only the declared ones"
+    # instead of a second, drift-prone re-derivation of the same question.
+    # Same precedence as the values (`declared` wins a name collision), for the same reason.
+    extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
+                       **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)
     viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since)
             if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
     # it so the engine can collapse it to the node's best metric (no eval_spec change required).
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
-                     extra_metrics=extra, violations=(viol or None), trials=trials,
+                     extra_metrics=extra, extra_metrics_provenance=extra_channels,
+                     violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
                      diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
 

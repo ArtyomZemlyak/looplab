@@ -13,7 +13,8 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.models import normalize_extra_metrics
+from looplab.core.models import (EXTRA_METRIC_AUTO, normalize_extra_metric_channels,
+                                 normalize_extra_metrics)
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
@@ -752,3 +753,11 @@ class EvalDispatchMixin:
         extra = normalize_extra_metrics(best_t.get("extra_metrics"))
         if extra:
             res.extra_metrics = {**normalize_extra_metrics(res.extra_metrics), **extra}
+            # AUTO, unambiguously: a trial's extras come off the `{"trials": [...]}` line the
+            # candidate itself printed — there is no reader spec behind them and no operator
+            # declaration they could satisfy. Tagged here rather than left absent so they read as
+            # `auto` and not as the weaker `unknown`, which is reserved for logs written before the
+            # channel was recorded at all.
+            res.extra_metrics_provenance = {
+                **normalize_extra_metric_channels(res.extra_metrics_provenance),
+                **{k: EXTRA_METRIC_AUTO for k in extra}}

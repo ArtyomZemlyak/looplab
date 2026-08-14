@@ -42,7 +42,9 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX, NodeStatus,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
-                                 is_developer_error, is_developer_stuck, normalize_extra_metrics)
+                                 is_developer_error, is_developer_stuck,
+                                 EXTRA_METRIC_DECLARED, declared_extra_metrics_only,
+                                 normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
@@ -1891,6 +1893,14 @@ class EvaluateMixin:
                         res.violations = list(res.violations or []) + _gates["violations"]
                         res.extra_metrics = {**(res.extra_metrics or {}),
                                              **_gates["extra_metrics"]} or None
+                        # DECLARED, unambiguously: `salvage_gates` reads only `eval_spec["metrics"]`
+                        # — the operator's own reader specs, with `adapter` refused — so these are
+                        # the guarded channel even though the eval as a whole failed. Tagged at the
+                        # merge because that is where the source is known; the salvage helper
+                        # returns values, not authority.
+                        res.extra_metrics_provenance = {
+                            **(res.extra_metrics_provenance or {}),
+                            **{k: EXTRA_METRIC_DECLARED for k in _gates["extra_metrics"]}} or None
                         ok = True
                         node, attempt, salvage_cause_repaired, _fix = (
                             await self._repair_salvaged_cause(
@@ -2472,17 +2482,43 @@ class EvaluateMixin:
                     self.store.append(EV_SPEC_DRIFT,
                                       {"node_id": node_id, **res.drift, "generation": generation})
                 if ok:
+                    # THE ONE PLACE the extra-metric CHANNEL policy is applied, because it is the one
+                    # place the record is written. `Settings.auto_extra_metrics` (default ON =
+                    # today's behaviour) decides whether undeclared numbers scraped off the
+                    # candidate's stdout may enter the record at all; the tag decides whether a
+                    # reader can tell. The gate is expressed over the TAG (`declared_extra_metrics_only`)
+                    # so the two can never disagree about which values are which.
+                    #
+                    # A GATE HERE AND NOT AT CAPTURE, deliberately: both auto-capture channels
+                    # (`command_eval` for repo tasks, the two `sandbox.py` tiers for solution.py)
+                    # funnel through this payload, so one choke point covers both instead of two
+                    # half-plumbed switches. And this is a WRITE-side policy only — the fold never
+                    # consults it, so an already-recorded run replays identically under either value
+                    # (`tests/test_auto_extra_metrics.py`), which is what keeps invariant #6 honest
+                    # without adding a key to the `run_started` payload whose exact key SET
+                    # `search/speculation_quality.py` compares for equality.
+                    _extras = normalize_extra_metrics(res.extra_metrics)
+                    _extra_channels = normalize_extra_metric_channels(res.extra_metrics_provenance)
+                    if not bool(getattr(self, "auto_extra_metrics", True)):
+                        _extras, _extra_channels = declared_extra_metrics_only(_extras, _extra_channels)
                     _eval_payload = {
                         "node_id": node_id, "generation": generation,
                         "metric": res.metric,
                         "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
-                        "extra_metrics": normalize_extra_metrics(res.extra_metrics),   # #5 multi-objective
+                        "extra_metrics": _extras,   # #5 multi-objective
                         "violations": res.violations or [],
                         # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
                         # node_evaluated event (the sweep is a single atomic eval — eval_seconds is
                         # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                         "trials": res.trials or [],
                     }
+                    # Written only when there is something to say. `extra_metrics` is unconditional
+                    # (it is `{}` on the ordinary node), but a new UNCONDITIONAL key would change the
+                    # `node_evaluated` bytes of every node in every run — including the CUDA-probe
+                    # calibration nodes whose evidence the speculation gate re-derives — for no
+                    # information at all. Absent == "this node reported no extra metrics".
+                    if _extra_channels:
+                        _eval_payload["extra_metrics_provenance"] = _extra_channels
                     if _curve:                     # computed above, outside the write-lock (see the #7 note)
                         _eval_payload["resource_curve"] = _curve
                     if salvaged is not None:

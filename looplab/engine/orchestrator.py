@@ -604,6 +604,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         seed_mode = _opt("seed_mode")
         read_fence = _opt("read_fence")
         metric_subject = _opt("metric_subject")
+        auto_extra_metrics = _opt("auto_extra_metrics")
         landlock = _opt("landlock")
         max_nodes = _opt("max_nodes")
         policy_name = _opt("policy_name")
@@ -1111,6 +1112,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # module's own vocabulary so an unknown rung from another binary's snapshot degrades to the
         # conservative one rather than silently to the strictest.
         self.metric_subject = settle_metric_subject_mode(metric_subject)
+        # AUTO-CAPTURED EXTRA METRICS (see `Settings.auto_extra_metrics`). Read by
+        # `engine/evaluate.py` at the ONE place the `node_evaluated` payload is built, which is the
+        # only place an undeclared number can enter the record. A WRITE-side rung only: the fold
+        # never consults it, so it can never change how an already-recorded run replays.
+        self.auto_extra_metrics = bool(auto_extra_metrics)
         # Kernel read ALLOW-LIST (off|enforce). Read by `engine/resources.py`, which derives the
         # allow-list from the operator's declared mounts and stamps it into the child env; the
         # boundary itself is applied in the child, between fork and exec.

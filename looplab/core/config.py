@@ -1382,6 +1382,34 @@ class Settings(BaseSettings):
     # countable from `node_evaluated.metric_provenance` and needs no new instrumentation, which is
     # the whole reason the record ships first.
     metric_subject: str = "audit"
+    # AUTO-CAPTURED EXTRA METRICS: may an undeclared numeric key on the candidate's own stdout JSON
+    # line be RECORDED as one of this node's metrics? `runtime/sandbox.py::json_line_extras` takes
+    # every such key, so a task printing `{"metric": x, "recall@10": y}` reports both with no config
+    # — and a task printing `{"metric": x, "speculation_cuda_probe_v": 1.0}` records a schema
+    # VERSION number as a metric, which is exactly what 9 of the 12 preserved corpus values are.
+    #   true  (default) — capture them, TAGGED `auto` in `node_evaluated.extra_metrics_provenance`.
+    #   false           — record only the values an operator-owned `EvalSpec.metrics` reader
+    #                     produced. The auto ones are dropped from the record entirely.
+    #
+    # WHY ON IS THE DEFAULT, stated so the next reader does not have to guess. The tag, not the
+    # gate, is what closes the defect: an operator or a reviewer could not previously tell an
+    # agent-authored number from a protected measurement, and now every consumer can. Flipping this
+    # to `false` by default would instead DELETE information — including the CUDA-probe proof the
+    # speculation calibration gate authenticates by its own means
+    # (`search/speculation_quality.py::_validate_cuda_probe_artifact` checks the engine-owned code
+    # prefix, the exact key schema and the static values, none of which this flag can see), and
+    # including every legitimate `train_auc`/`cv_mean_auc` an operator reads today. A run that turns
+    # it off records strictly less and CANNOT be un-turned-off after the fact.
+    #
+    # IT IS A WRITE-SIDE POLICY AND NOTHING ELSE. The fold never reads it, so it can never change
+    # how an already-recorded run replays — which is why it is deliberately NOT pinned in
+    # `run_started` (a new unconditional key there would revoke every issued calibration receipt,
+    # whose check compares that payload's key SET for equality). Same shape as `metric_subject`: a
+    # per-eval recording rung, resolved from live config, affecting only what the NEXT eval writes.
+    # Deliberately NOT in `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`: that map exists to stop re-entry
+    # CHANGING an old run's treatment, and this field's shipped default is exactly the pre-field
+    # behaviour, so a pre-versioning snapshot resumes byte-identically without a row.
+    auto_extra_metrics: bool = True
     # LANDLOCK (`runtime/landlock.py`): apply a KERNEL read allow-list to the eval process and
     # everything it spawns. "off" (default) installs nothing; "enforce" derives the allow-list from
     # the operator's declared mounts (`runtime/read_allowlist.py`) and applies it in the child

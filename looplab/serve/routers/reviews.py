@@ -82,7 +82,15 @@ _REVIEW_COST_KEYS = ("cost", "calls", "priced_calls",
 _REVIEW_NODE_KEYS = {
     "id", "parent_ids", "operator", "idea", "code", "files", "deleted", "metric", "status",
     "error_reason", "confirmed_mean", "confirmed_std", "confirmed_seeds", "holdout_metric",
-    "generalization_gap", "eval_seconds", "extra_metrics", "violations", "feasible", "stages",
+    "generalization_gap", "eval_seconds", "extra_metrics",
+    # WITHOUT this key a reviewer sees `extra_metrics` and cannot tell an operator-declared
+    # measurement from a number the candidate simply printed — which is the whole defect. It is
+    # allow-listed for the same reason the values are: this scope is source EVIDENCE, and a value
+    # whose provenance is withheld is evidence presented as stronger than it is. It carries no
+    # portfolio identity (`{name: "declared"|"auto"}` over this node's own keys), so it raises none
+    # of the disclosure questions `origin` does.
+    "extra_metrics_provenance",
+    "violations", "feasible", "stages",
     # `origin` is deliberately ABSENT: it names a sibling run (see `_SUMMARY_OMIT_KEYS`), and this
     # route's closing `_scrub_json` carries no omit set, so allow-listing it here would disclose the
     # portfolio through the evidence scope even though the summary scope denies it.

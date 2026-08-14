@@ -63,7 +63,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   now the pattern rather than an anecdote: this literal has never once been the one that
   //   noticed. Verified as the paragraph prescribes — the catalogue was 177 keys and removing
   //   exactly `train_monitor_tools` gave back 176, so this is one real addition.
-  assert.equal(Object.keys(schema.fieldByKey).length, 177)
+  //   177 -> 178 (2026-08-14, same day): `auto_extra_metrics` — may an UNDECLARED numeric key on
+  //   an experiment's own stdout be RECORDED as one of that node's metrics. EIGHTH occurrence, and
+  //   the Python guard caught it first for the fourth consecutive time. Verified as the paragraph
+  //   prescribes rather than by bumping the number: the catalogue was 178 keys and removing exactly
+  //   `auto_extra_metrics` gave back 177, so this is one real addition with nothing renamed away
+  //   underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 178)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

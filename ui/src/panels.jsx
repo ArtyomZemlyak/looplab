@@ -10,6 +10,7 @@ import {
   shelfConcepts, SOURCE_RUN, UNTAGGED,
 } from './conceptShelf.js'
 import { Bars, ParallelCoords, Scatter } from './charts.jsx'
+import { EXTRA_METRIC_CHANNEL_HELP, unverifiedExtraMetricKeys } from './extraMetrics.js'
 import { hyperImportance } from './report.js'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
@@ -748,17 +749,31 @@ export function ParetoPanel({ state, onClose, onSelect }) {
     <Panel title="Pareto · Diversity · Operators" onClose={onClose} wide>
       {(() => {
         const { keys, front } = paretoFront(nodes, state.direction)
+        const unverified = unverifiedExtraMetricKeys(nodes, keys)
         const sortedFront = [...front].sort((a, b) => (state.direction === 'min'
           ? paretoMetric(a) - paretoMetric(b) : paretoMetric(b) - paretoMetric(a)))
         return <>
           <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
           {sortedFront.length
-            ? <DataTable caption="Pareto-optimal node metrics" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
+            ? <DataTable caption="Pareto-optimal node metrics" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th>
+                {/* A column heading carries the caveat, because a whole objective axis is either
+                    trustworthy or not — see `unverifiedExtraMetricKeys` for why ANY unverified
+                    reporter marks the column. This panel treats every extra as a cost-like
+                    objective, so an auto-captured value does not merely sit beside the metric: it
+                    changes WHICH nodes are shown as non-dominated. */}
+                {keys.map(k => <th key={k}>{k}{unverified.has(k)
+                  ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP.auto}> ⚠</span> : ''}</th>)}</tr></thead><tbody>
                 {sortedFront.map(n =>
                   <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
               </tbody></table></DataTable>
             : <div className="muted">No feasible evaluated nodes yet.</div>}
+          {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
+            ⚠ {[...unverified].join(', ')} {unverified.size === 1 ? 'is' : 'are'} not a declared
+            measurement: the value was taken from the experiment's own stdout, or the run predates
+            the record that would say. The front below is computed over it anyway — read it as a
+            trade-off the experiments <i>reported</i>, not one the engine verified.
+          </div>}
           {sortedFront.length > 0 && <div className="muted" style={{ marginTop: 8 }}>
             Confirmed mean is used when available; otherwise the recorded metric is used.
             {!keys.length && <> With one objective, every feasible node tied at the best displayed metric is

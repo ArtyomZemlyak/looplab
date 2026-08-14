@@ -114,6 +114,11 @@ class EngineOptions:
     # the same referent-less number as the product does, and `audit` costs one stat plus a bounded
     # digest per eval.
     metric_subject: str = "audit"
+    # May an UNDECLARED numeric key on the candidate's own stdout be recorded as one of the node's
+    # metrics (see `Settings.auto_extra_metrics`)? Same value on BOTH sides, and for the same reason
+    # `metric_subject` is: a bare `Engine(...)` writes the same record the product does, the
+    # historical behaviour is `True`, and the CHANNEL tag beside the values is written either way.
+    auto_extra_metrics: bool = True
     # Kernel read allow-list: off|enforce (see Settings.landlock for why off is the default and for
     # the exact evidence that would move it).
     landlock: str = "off"
