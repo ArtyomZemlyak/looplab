@@ -142,13 +142,23 @@ const notifyCommandRecord = (callback, record) => {
   try { callback(record) } catch { /* persistence/presentation must not break command execution */ }
 }
 
+// `allowRunMutationModes` is the transport tier of the fork-from-a-snapshot carve-out and is the
+// SECOND fence that gesture has to be admitted through: `RunView.jsx` decides whether the click is
+// allowed, and this decides whether the REQUEST is, from the run-access envelope
+// `runMode.js::setRunAccess` publishes. They are deliberately separate — this one holds for a caller
+// RunView never saw (a slash command, a recovered intent, another tab's surface) — so the exception
+// has to be named at both, and it is named by exactly one caller: `api.js::CONTROL.forkFrom`, with
+// `['history']` and nothing else. Empty for every other command, which is the historical behaviour
+// byte for byte. Do NOT reach for it to make some other action work in a read-only view: the reason
+// this one is admissible is a property of its PAYLOAD (`forkFromSeqModel.js`'s header), not a
+// property of the view.
 export async function submitRunCommand(runId, type, data = {}, {
   idempotencyKey = createIdempotencyKey(), expectedGeneration,
-  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, allowRunMutationModes = [],
 } = {}) {
   const path = runApiPath(runId, '/commands')
   assertNotReviewMutation(path)
-  assertRunMutationAllowed(path)
+  assertRunMutationAllowed(path, { allowModes: allowRunMutationModes })
   if (!validRunGeneration(expectedGeneration)) {
     throw runGenerationError(
       'invalid_run_generation',
@@ -251,7 +261,7 @@ export async function retryRunCommand(runId, commandId, {
 export async function runCommand(runId, type, data = {}, {
   waitMs = 8000, pollMs = 250, idempotencyKey = createIdempotencyKey(), submitRetries = 1,
   retryMs = 150, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
-  expectedGeneration = undefined,
+  expectedGeneration = undefined, allowRunMutationModes = [],
 } = {}) {
   // New intent: bind once to the current event-log generation. Transport retries and id-less
   // recovery pass this exact token back; they never silently substitute a generation observed later.
@@ -270,7 +280,7 @@ export async function runCommand(runId, type, data = {}, {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       record = await submitRunCommand(runId, type, data, {
-        idempotencyKey, expectedGeneration: generation, requestTimeoutMs,
+        idempotencyKey, expectedGeneration: generation, requestTimeoutMs, allowRunMutationModes,
       })
       notifyCommandRecord(onRecord, record)
       break

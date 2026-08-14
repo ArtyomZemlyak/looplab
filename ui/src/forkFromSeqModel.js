@@ -12,31 +12,95 @@
 // `looplab/serve/control_validation.py::_normalize_fork_receipt`.
 //
 // WHY A HISTORICAL VIEW MAY DO THIS AT ALL, when it refuses every other node action. Every other
-// action names a node and lets the LIVE state supply the rest — `RunView.jsx::onNodeAction` reads
-// `live2?.nodes?.[id]?.attempt`, so a click made while reading seq N is executed against whatever
-// the tail happens to hold. That is the reason for the blanket refusal and it still stands. This one
-// gesture is different in kind: the whole intent travels in the payload (the operator's idea
-// verbatim, the parent named by id, the generation THEY SAW), so there is nothing for the live tail
-// to fill in, and the server refuses the request outright if that generation has moved. It is a
-// CONTENT compare-and-swap, which is why it does not need — and must not have — a tail-seq CAS: a
-// live run appends several unrelated rows per second, so a seq fence would refuse a branch whose
-// meaning nothing had touched.
+// action names a node and a generation and then lets state the PAYLOAD DOES NOT CARRY decide what
+// happens: `RunView.jsx::onNodeAction` reads the generation out of `live2?.nodes?.[id]?.attempt` —
+// which is the SNAPSHOT while one is on screen and the live tail otherwise — and the engine then
+// applies the action to the node as it is when it services the command. So a reset or an abort
+// clicked at seq N either loses its CAS or, worse, lands on a lifecycle the operator was not
+// looking at. That is the reason for the blanket refusal and it still stands, unweakened. This one
+// gesture is different IN KIND rather than merely safer: the whole intent travels in the payload
+// (the operator's idea verbatim, the parent named by id, the generation THEY SAW), so there is
+// nothing left for any other state to fill in, and the server refuses the request outright if that
+// generation has moved. It is a CONTENT compare-and-swap, which is why it does not need — and must
+// not have — a tail-seq CAS: a live run appends several unrelated rows per second, so a seq fence
+// would refuse a branch whose meaning nothing had touched.
 //
-// NOT YET WIRED, and this is the whole of what is left (docs/BACKLOG.md survivor #11):
-//   1. add `'fork'` to `RunView.jsx::HISTORY_SAFE_PANELS` so the panel may open at `historyActive`;
-//   2. give `onNodeAction`'s `mutationReadOnlyMode` guard (RunView.jsx ~:1697) a narrow exception for
-//      THIS action only — `readOnlyMode` must keep refusing every other one, and `reviewMode`,
-//      `routeFenceBlocked`, `runAuthorityBlocked` and `startOverMutationBlocked` must keep refusing
-//      this one (a review capability is not steering authority, and an unresolved start-over is an
-//      open destructive operation);
-//   3. the form itself: `operator`, `rationale` and `params`, seeded by `forkIdeaFromSnapshot` from
-//      the SNAPSHOT node (never `live2`) and submitted through `CONTROL.forkFrom(runId, payload)`;
-//   4. a "Branch from here" item on the Dag node menu, enabled exactly when `forkSubmitDecision`
-//      says `ok` and otherwise showing `FORK_BLOCKED_REASONS[reason]`.
-// It was left out of the change that landed the rest because a `vite build` empties
-// `ui/dist/assets` (which breaks `test_server`'s static mount), nothing in the suite MOUNTS
-// `RunView`, and a GPU run was executing — so a ~3,000-line JSX edit had no way to prove the tree
-// still compiles. Everything below is driven by `ui/test/forkFromSeqModel.test.js` today.
+// [2026-08-14 — corrected. This paragraph used to say the click "is executed against whatever the
+// tail happens to hold". `live2` is `hist || live`, so in a historical view it is the SNAPSHOT's
+// attempt that would be sent, not the tail's. The conclusion is unchanged and the reason is
+// stronger: what the payload omits is supplied by a state the operator is not reading, whichever
+// one it is.]
+//
+// THE REACT HALF, wired 2026-08-14 (docs/BACKLOG.md survivor #11 is now closed):
+//   * `readOnlyNodeActionRefused` below IS the blanket refusal, restated as a function so its ONE
+//     exception has a truth table; `RunView.jsx::onNodeAction` calls it instead of testing
+//     `mutationReadOnlyMode` directly, and `mutationReadOnlyMode` itself is untouched.
+//   * `forkGestureAccess` is the full statement of that exception: only a HISTORICAL view, and only
+//     when nothing else is refusing — a review capability is not steering authority, a stale
+//     generation link names a run that is gone, an unresolved start-over is an open destructive
+//     operation, and an unloaded run has no generation to fence a command with.
+//   * `'fork'` is in `RunView.jsx::HISTORY_SAFE_PANELS`, and `ForkFromSeqPanel.jsx` is the form:
+//     `operator`, `rationale` and `params`, seeded by `forkIdeaFromSnapshot` from the SNAPSHOT node
+//     (never `live`), submitted through `CONTROL.forkFrom(runId, payload, { expectedGeneration })`.
+//   * `Dag.jsx::nodeMenuEntries` offers "Branch from here" and, in a historical snapshot, offers
+//     NOTHING ELSE — the other nine items are not shown-and-refused, they are absent.
+// Everything below is driven by `ui/test/forkFromSeqModel.test.js`; the panel, the menu table and
+// the fact that RunView asks this module rather than re-deriving the rule are driven by
+// `ui/test/forkFromSeqPanel.test.js`.
+
+// The action id the two halves of the gesture agree on: `Dag.jsx`'s menu emits it and
+// `RunView.jsx::onNodeAction` dispatches on it. A bare string literal spelled twice is how the menu
+// item comes to name an action nobody handles — the click would then fall through every branch of
+// `onNodeAction` and do nothing at all, with no error anywhere.
+export const FORK_FROM_SEQ_ACTION = 'fork-from-seq'
+
+// Why each blocker still refuses the branch, in the operator's words. These are NOT the same list as
+// `FORK_BLOCKED_REASONS`: those are about the branch (no node, an unedited idea), these are about
+// whether this VIEW may steer the run at all.
+export const FORK_ACCESS_REASONS = Object.freeze({
+  review: 'A review link is read-only. Branching steers the run, which is not a review capability.',
+  start_over: 'Start over must be resolved before changing this run.',
+  stale_link: 'This link targets an earlier run generation. Open the current generation to branch.',
+  unavailable: 'This run is not loaded, so a branch cannot be fenced to its generation.',
+  live: 'Branching this way starts from a snapshot. Open a point in the timeline first.',
+})
+
+/**
+ * May THIS view branch from a snapshot at all?
+ *
+ * The whole of the exception carved out of the historical view's blanket refusal, in one place so
+ * the panel, the menu and the guard cannot come to disagree about it. `history` is the only
+ * read-only reason that admits the gesture; every other one still refuses it, and `live` refuses it
+ * from the other side — with no snapshot there is no vantage point to record, and `observed_seq`
+ * would have to be invented.
+ */
+export function forkGestureAccess({
+  historyActive = false, reviewMode = false, routeFenceBlocked = false,
+  runAuthorityBlocked = false, startOverMutationBlocked = false,
+} = {}) {
+  if (reviewMode) return { ok: false, reason: 'review' }
+  if (startOverMutationBlocked) return { ok: false, reason: 'start_over' }
+  if (routeFenceBlocked) return { ok: false, reason: 'stale_link' }
+  if (runAuthorityBlocked) return { ok: false, reason: 'unavailable' }
+  if (!historyActive) return { ok: false, reason: 'live' }
+  return { ok: true, reason: null }
+}
+
+/**
+ * The historical view's blanket refusal of node actions, and its ONE exception.
+ *
+ * Stated here rather than inline in `RunView.jsx::onNodeAction` because the next reader of that
+ * guard will assume the refusal was loosened, and a rule with a truth table is checkable where an
+ * `&&` in a 3,000-line component is not. `mutationReadOnlyMode` is computed exactly as it always
+ * was and is passed in; nothing in this module may widen it.
+ */
+export function readOnlyNodeActionRefused(action, {
+  mutationReadOnlyMode = false, forkAccess = null,
+} = {}) {
+  if (!mutationReadOnlyMode) return false
+  if (action !== FORK_FROM_SEQ_ACTION) return true
+  return !forkAccess?.ok
+}
 
 // The idea fields carried over from the snapshot into the branch. Deliberately a CLOSED list of the
 // operator-authored substance, and the two exclusions are the load-bearing part:
@@ -212,6 +276,27 @@ export function classifyForkFailure(error) {
     message: 'The branch may or may not have been queued. Reload the run before submitting it '
       + 'again, or it may be created twice.',
   }
+}
+
+/**
+ * After a failed submission, may the operator press the same button again?
+ *
+ * This is the rendered consequence of the distinction above and the reason the panel has to make it
+ * at all. Three outcomes, three affordances:
+ *
+ *  - a proven pre-append refusal the operator can still fix from this snapshot (a payload the
+ *    validator rejected) leaves the form live: nothing was queued, so editing and resubmitting is
+ *    exactly right;
+ *  - `moved` is equally proven and equally un-queued, but it is NOT fixable here — every resubmit
+ *    from this snapshot names the same superseded generation and earns the same 409. The form
+ *    fences and the panel offers the only thing that helps, which is to go and read the node as it
+ *    is now;
+ *  - `applied: null` must never re-arm. The branch may already be queued, and this queues a PAID
+ *    unit of work: a second press is how one idea becomes two experiments.
+ */
+export function forkRetryable(failure) {
+  if (!failure) return true
+  return failure.applied === false && !failure.moved
 }
 
 /**

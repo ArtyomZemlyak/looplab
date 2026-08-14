@@ -43,6 +43,9 @@ import {
   refreshCommentOperationRecoveries, subscribeCommentOperationRecoveries,
 } from './commentRecoveryStorage.js'
 import { useStartOverCoordination, useStartOverRecovery } from './useStartOverRecovery.js'
+import {
+  FORK_FROM_SEQ_ACTION, forkGestureAccess, readOnlyNodeActionRefused,
+} from './forkFromSeqModel.js'
 import RunScreen from './RunScreen.jsx'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
@@ -127,6 +130,9 @@ const GpuPanel = lazyNamed(loadPanels, 'GpuPanel')
 const HyperImportancePanel = lazyNamed(loadPanels, 'HyperImportancePanel')
 const CrossRunPanel = lazyNamed(loadPanels, 'CrossRunPanel')
 const CollabPanel = lazy(() => import('./CollabPanel.jsx'))
+// Its own chunk, not `loadPanels`: it is reachable only from a historical snapshot's node menu, so
+// bundling it with the hub panels would ship a steering form to every run-list visitor.
+const ForkFromSeqPanel = lazy(() => import('./ForkFromSeqPanel.jsx'))
 const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
@@ -182,11 +188,21 @@ const INSTALLATION_LINKS = GLOBAL_DESTINATIONS.filter(
   entry => INSTALLATION_ROUTE_VIEWS.includes(entry.key))
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
 // config, raw detail, another run, or a sidecar stay closed so `seq + panel` cannot create a hybrid.
-const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data'])
+// `fork` is the one entry here that MUTATES, and it belongs by the same rule rather than as an
+// exception to it: it derives everything it sends from this exact snapshot — the parent, that
+// parent's generation and the idea it seeds the form with all come from the fold on screen, never
+// from `live` — so it cannot produce the hybrid this list exists to prevent. Whether the operator is
+// ALLOWED to steer from here is a separate question that `forkGestureAccess` answers, and this set
+// is not that answer: `?panel=fork` opening is not permission to submit.
+const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data', 'fork'])
 const START_OVER_SAFE_PANELS = new Set([
   'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data',
   'compare', 'crossrun', 'artifacts', 'registry', 'memory', 'events', 'gpu',
 ])
+// The node menu a HISTORICAL snapshot offers: one item. Module-level and frozen because it is a
+// prop whose identity feeds a `useMemo` in `Dag.jsx` — rebuilt per render it would re-derive the
+// menu on every poll tick.
+const FORK_ONLY_NODE_MENU = Object.freeze([FORK_FROM_SEQ_ACTION])
 const LIVE_INSPECT_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
 
@@ -717,6 +733,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const mutationReadOnlyMode = readOnlyMode || runAuthorityBlocked || startOverMutationBlocked
   const mutationReadOnlyReason = reviewMode ? 'review'
     : startOverMutationBlocked ? 'start-over' : 'history'
+  // The ONE gesture a historical snapshot may run, and the whole statement of when it may
+  // (`forkFromSeqModel.js`'s header says why it, and nothing else, is admissible here).
+  // `mutationReadOnlyMode` above is UNCHANGED and every other node action still meets it head-on:
+  // this is a carve-out beside the refusal, not a loosening of it. Note it is false on a live run
+  // too — a branch records the vantage point it was formed at, and live has none.
+  const forkAccess = useMemo(() => forkGestureAccess({
+    historyActive, reviewMode, routeFenceBlocked, runAuthorityBlocked, startOverMutationBlocked,
+  }), [historyActive, reviewMode, routeFenceBlocked, runAuthorityBlocked, startOverMutationBlocked])
   const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
   const panelAllowed = (name) => {
     if (reviewMode) return reviewPanelAllowed(name, reviewEvidence)
@@ -775,6 +799,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const returnToLiveAndFocusWorkspace = () => {
     if (!returnToLive()) return
     requestAnimationFrame(() => routeMainRef.current?.focus({ preventScroll: true }))
+  }
+  // The branch panel's two exits, and both are the same movement: leave the snapshot for the live
+  // run. ONE route update rather than close-the-panel-then-return-live, because `?panel=fork` on a
+  // LIVE address is a form its own access rule refuses — the operator would watch it blink into a
+  // refusal on the way out. `nodeId` is the parent to re-read after a superseded branch, else null
+  // keeps whatever was selected.
+  const openLiveNodeFromFork = (nodeId) => {
+    const value = Number(nodeId)
+    const id = Number.isSafeInteger(value) && value >= 0 ? value : null
+    panelReturnFocusRef.current = null
+    const next = route.update(current => ({
+      ...routeWithSelectedNode(current, id ?? current.nodeId),
+      view: 'dag', panel: null, sequence: null,
+    }))
+    // A refused push leaves the historical address authoritative, so its notices still describe the
+    // visible state — the same rule `returnToLive` states directly above.
+    if (next?.sequence != null) return
+    setRouteNotice('')
+    setAttemptFenceNotice('')
+    attemptFenceFocusPendingRef.current = false
+    timeline.jumpToLive()
   }
   useLayoutEffect(() => {
     // The mutation boundary follows URL hydration too. A generation-fenced link is fail-closed until
@@ -1694,7 +1739,20 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return feedback
   }
   const onNodeAction = async (action, arg, context = null) => {
-    if (mutationReadOnlyMode) {
+    // THIS IS STILL THE BLANKET REFUSAL, and the next reader is asked not to assume otherwise: the
+    // predicate below refuses EVERY action in a read-only view exactly as `if (mutationReadOnlyMode)`
+    // did, with one carve-out — branching from the snapshot — which `forkFromSeqModel.js` states as a
+    // truth table rather than as an `&&` buried in a 3,000-line component.
+    //
+    // The reason it is one action and not a relaxed rule: every branch below names a node and then
+    // lets state THE PAYLOAD DOES NOT CARRY decide what happens — the generation two lines down comes
+    // out of `live2`, and the engine applies the command to the node as it is when it services it. A
+    // reset clicked at seq N therefore acts on a lifecycle the operator is not looking at. Branching
+    // is different in kind: the panel builds the whole intent (the edited idea, the parent by id, the
+    // generation THEY SAW) and the server refuses outright if that generation has moved, so there is
+    // nothing for the unseen state to supply. A review capability, a stale-generation link, an
+    // unresolved start-over and an unloaded run each keep refusing it — `forkGestureAccess`.
+    if (readOnlyNodeActionRefused(action, { mutationReadOnlyMode, forkAccess })) {
       showToast(startOverMutationBlocked
         ? 'Start over must be resolved before changing this run.'
         : reviewMode ? 'This review link is read-only'
@@ -1710,6 +1768,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         return
       }
       const id = arg
+      // The branch is routed to, never executed here — the PANEL is the gesture, because the payload
+      // is an idea the operator edits and not a click. Deliberately above the `live2` read below:
+      // this arm reads no run state at all, which is the property that lets it run at seq N. One
+      // atomic route update, so the subject and the panel share a history entry and Back returns to
+      // the snapshot rather than to a half-open form.
+      if (action === FORK_FROM_SEQ_ACTION) {
+        if (!confirmRetainedPanelClose()) return
+        panelReturnFocusRef.current = context?.returnFocus || null
+        route.update(current => ({
+          ...routeWithSelectedNode(current, id), view: 'dag', panel: 'fork',
+        }))
+        return
+      }
       const generation = live2?.nodes?.[id]?.attempt
       if (action === 'explore') {
         const f = checkedCommand(await CONTROL.fork(runId, id, generation), {
@@ -2623,7 +2694,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {historyActive && <div className="history-banner" role="status">
         <span className="history-lock" aria-hidden="true">◷</span>
         <b>Historical snapshot · gen {gen} · seq {history.resolvedSeq} of {seq}</b>
-        <span>read-only · actions target live and are disabled</span>
+        {/* This said "actions target live and are disabled" until the branch gesture landed, and
+            that sentence was the reason for the blanket refusal, not decoration — so it has to stay
+            true now that exactly one action does NOT target live. */}
+        <span>{forkAccess.ok
+          ? 'read-only · every action targets live and is disabled, except branching from an experiment'
+          : 'read-only · actions target live and are disabled'}</span>
         <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>Return to live</button>
       </div>}
 
@@ -2846,12 +2922,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           inert={compactWorkspace && showInspector ? '' : undefined}
           aria-hidden={compactWorkspace && showInspector ? 'true' : undefined}>
           <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
+            {/* A read-only view still opens the node menu when the ONE admissible gesture is
+                available, and `nodeMenuActions` is what keeps the other nine items off it — they are
+                absent rather than shown-and-then-refused. Everywhere else this is unchanged: no fork
+                access in a read-only view still means no menu at all, and a live run gets the full
+                menu WITHOUT the branch item (`Dag.jsx::NODE_MENU_ITEMS`'s `snapshotOnly`). */}
             <Dag key={`experiment-graph:${runId}:${generation || 'pending'}`}
               state={state} selectedId={selectedId} onSelect={onCanvasSelect}
               compact={compactWorkspace}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
-              onAutoCollapse={autoCollapse} onNodeAction={mutationReadOnlyMode ? null : onNodeAction}
+              onAutoCollapse={autoCollapse}
+              onNodeAction={mutationReadOnlyMode && !forkAccess.ok ? null : onNodeAction}
+              nodeMenuActions={forkAccess.ok ? FORK_ONLY_NODE_MENU : null}
               mergeArm={mutationReadOnlyMode ? null : mergeFrom}
               selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
               highlightIds={conceptHighlight} />
@@ -2981,6 +3064,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         expectedGeneration={generation} reviewMode={reviewMode}
         onClose={() => { closePanel(); setComparePair(null) }} />}
       {panel === 'crossrun' && panelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
+      {/* Everything this form sends comes from `hist`, the exact fold on screen — never `live2`,
+          which is `hist || live` and would silently seed a LIVE idea into a branch the operator
+          believes they read at seq N. `viewSeq` is the SERVER-resolved seq of that snapshot for the
+          same reason: `observed_seq` records a vantage point the run really reached, and the
+          requested seq is only what was asked for. `access` travels as a prop so the panel prints
+          the refusal instead of rendering a form that cannot submit. */}
+      {panel === 'fork' && panelAllowed('fork') && <ForkFromSeqPanel runId={runId}
+        node={hist?.nodes?.[selectedId] ?? null} viewSeq={currentHistory?.resolvedSeq ?? null}
+        expectedGeneration={generation} access={forkAccess} liveNodes={live?.nodes || null}
+        onToast={showToast} onClose={closePanel} onOpenLive={openLiveNodeFromFork} />}
       {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId}
         onSelect={selectNode} onOpenComment={openComment} onToast={showToast} onClose={closePanel}
         reviewRouteState={routeState} reviewMode={reviewMode}

@@ -244,7 +244,18 @@ export const CONTROL = {
   // here is the one the operator SAW; the server validates `forked_from` and stamps its two derived
   // fields (see `control_validation.py::_normalize_fork_receipt`). Never hand-build this body: the
   // receipt and the CAS must carry ONE generation, which is the model's invariant, not this call's.
-  forkFrom: (rid, payload) => runCommand(rid, 'inject_node', payload),
+  //
+  // The only RUN COMMAND that names `allowRunMutationModes`, and `['history']` is its whole content:
+  // the client's own run-access envelope marks a run being read at seq N read-only, so without this
+  // the request never leaves the browser (`runMode.js::assertRunMutationAllowed`). It admits the
+  // HISTORICAL mode only — a review capability, a stale-generation link and an unresolved start-over
+  // each keep refusing this command exactly as they refuse every other one. `resetRun` below is the
+  // seam's other caller and is deliberately wider (`start-over`/`stale-link`/`history`): Start over
+  // is the operation that RESOLVES those two states, so refusing it in them would strand the run. A
+  // branch resolves nothing, which is why its list is one entry long.
+  forkFrom: (rid, payload, options = {}) => runCommand(rid, 'inject_node', payload, {
+    ...options, allowRunMutationModes: ['history'],
+  }),
   reopen: (rid) => runCommand(rid, 'run_reopened', {}),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).

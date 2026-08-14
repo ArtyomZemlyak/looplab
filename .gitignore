@@ -80,3 +80,8 @@ ui/.looplab-ui-build.lock
 # normal build; only a process killed mid-publish can leave either behind (see serve/uibuild.py).
 ui/.dist.looplab-stage/
 ui/.dist.looplab-previous/
+# A HAND build's staging dir. `vite build` with no --outDir empties `ui/dist/assets`, which is the
+# directory a running `looplab ui` has mounted as static files — so proving the tree compiles while a
+# run is being watched means `vite build --outDir .dist.stage --emptyOutDir` and never touching the
+# live bundle. Nothing consumes it; delete it when you are done.
+ui/.dist.stage/

@@ -29,8 +29,18 @@ test('every mutable DAG experiment exposes a named native menu trigger', async (
   // The gate was renamed AND widened: `mutationReadOnlyMode` is `readOnlyMode` plus lost run
   // authority plus an in-progress start-over. Pinning the old name meant this assertion stopped
   // running exactly when the gate grew the conditions most worth checking.
-  assert.match(runView, /onNodeAction=\{mutationReadOnlyMode \? null : onNodeAction\}/,
-    'history and review modes must not expose mutating node actions')
+  //
+  // [2026-08-14] It grew a CARVE-OUT, and this pin had to move with it rather than be made green:
+  // a HISTORICAL snapshot now opens the menu for exactly one action, branching from the snapshot
+  // (`forkFromSeqModel.js` says why that one and no other — its whole intent is in the payload).
+  // What this assertion still holds is the half that did not change: review, a stale-generation
+  // link, an unresolved start-over and an unloaded run all still get `null`, because `forkAccess.ok`
+  // is false in every one of them. That is a truth table now, driven in `forkFromSeqPanel.test.js`;
+  // here the property is that the component asks it instead of exposing the menu unconditionally.
+  assert.match(runView, /onNodeAction=\{mutationReadOnlyMode && !forkAccess\.ok \? null : onNodeAction\}/,
+    'review, stale-link and start-over must not expose node actions at all')
+  assert.match(runView, /nodeMenuActions=\{forkAccess\.ok \? FORK_ONLY_NODE_MENU : null\}/,
+    'and a read-only view that CAN branch must be offered that one item, not the whole menu')
   assert.match(runView, /const mutationReadOnlyMode = readOnlyMode \|\| runAuthorityBlocked \|\| startOverMutationBlocked/,
     'a run whose authority was lost, or that is mid start-over, must not offer node mutations either')
   assert.match(runView, /const readOnlyMode = reviewMode \|\| historyActive \|\| routeFenceBlocked/)
@@ -46,7 +56,16 @@ test('DAG action popup follows the ARIA menu keyboard pattern and restores focus
   const dag = await source('Dag.jsx')
 
   assert.match(dag, /className="node-menu" role="menu" aria-label=\{`Actions for experiment #\$\{menu\.nodeId\}`\}/)
-  assert.equal((dag.match(/<button type="button" role="menuitem" tabIndex=\{-1\}/g) || []).length, 9)
+  // [2026-08-14] This counted nine hand-written `<button role="menuitem">`s. The menu became a
+  // TABLE when a historical snapshot needed to offer one item and not nine, so there is now a single
+  // button template — which is a stronger form of the same property, not a weaker one: every row is
+  // a real menuitem with the roving tab stop BY CONSTRUCTION, and a tenth item cannot ship without
+  // them. The count moved to the table, and `forkFromSeqPanel.test.js` drives which rows each view
+  // actually gets.
+  assert.equal((dag.match(/<button type="button" key=\{entry\.id\} role="menuitem" tabIndex=\{-1\}/g) || []).length, 1,
+    'one template, so no row can be built without menu semantics')
+  assert.equal((dag.match(/^ {2}\{ id: /gm) || []).length, 10,
+    'ten actions in the table: the nine the live menu has always offered, plus the snapshot branch')
   assert.match(dag, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\{ preventScroll: true \}\)/)
   for (const key of ['Tab', 'ArrowDown', 'ArrowUp', 'Home', 'End', 'Escape']) {
     assert.ok(dag.includes(`event.key === '${key}'`), `${key} must be handled by the menu`)

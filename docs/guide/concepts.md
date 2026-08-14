@@ -513,6 +513,31 @@ When the run *has* moved, the operator is told so rather than having their branc
 a parent that was re-run answers `409 stale parent #3: current generation is 1`, and a tombstoned or
 aborted parent answers 409 as well. Nothing is queued in either case.
 
+**That refusal arrives in two different shapes, and a client has to read both.** The legacy
+`/control` route answers a stale parent with the 409 above. The durable `/commands` route answers
+`200` with a **rejected record** — `{"status": "rejected", "error": {"code":
+"command_target_not_found", "message": "stale parent #3: …"}}` — because a command that never
+reached the log still produced a durable record saying so. Both are proof that the intake refused
+*before* appending anything, which is the only thing that licenses telling an operator "nothing was
+queued". A client that reads only the HTTP status would degrade the second one into "outcome
+unknown" and invite a second branch for one idea; one that reads only the record's wrapper text
+would find the wrapper's message rather than the refusal's. `tests/test_fork_from_seq.py` pins the
+asymmetry and `ui/src/forkFromSeqModel.js::classifyForkFailure` is the browser half that reads it.
+
+**Where it is in the UI.** Open a point in the timeline, right-click (or use the node's action
+trigger on) the experiment you want to branch from, and take **Branch from here…**. That is the only
+item the menu offers in a historical snapshot — every other node action is still refused there, and
+they are absent rather than shown and then refused. The panel seeds `operator`, `rationale` and
+`params` from the snapshot's own idea and refuses an unedited copy, since that is not a new
+experiment. It carries the evaluation profile, timeout and search space across; it deliberately does
+**not** carry the concept envelope, the Card, the hypothesis or the footprint — a branch you authored
+is not inside the Researcher's Card budget and should not assert a taxonomy you did not write. On a
+refusal the form stays live so you can fix and resubmit; if the run moved under you it fences and
+offers to take you back to live to re-read the parent; and if the outcome is *unknown* — a timeout,
+a 5xx — it fences with no retry at all, because branching queues paid work and a second press is how
+one idea becomes two experiments. The item is not on a live run's menu: a branch records the vantage
+point it was formed at, and a live view has none.
+
 **Reopening a *finished* run starts a new search epoch.** The nodes you add with the extra budget are
 a fresh candidate set, so reopening bumps `search_epoch` and re-opens the promotion gates: the
 multi-seed **confirmation** pass runs again (already-confirmed nodes are reused for free, only the new
