@@ -251,6 +251,25 @@ export const NARR = {
     validate: d => ownValue(d, 'depth'),
     render: (d) => `prefetch depth ${d.previous ?? '?'} → ${d.depth}${note(d.reason, 90)}`,
   },
+  // docs/29 F1. The run CHANGED ITS EXECUTION WIDTH, which is exactly the kind of thing an operator
+  // debugs as something else when it is silent ("why is my 4-GPU box running one experiment"). The
+  // engine already says it at WARNING; this is the same fact in the feed. Either axis may be absent
+  // — `llm_parallel` only moves when it was itself AUTO — so neither is assumed present.
+  run_width_settled: {
+    validate: d => ownAny(d, ['eval_parallel', 'llm_parallel']),
+    render: (d) => {
+      const before = (d.previous && typeof d.previous === 'object') ? d.previous : {}
+      const axes = ['eval_parallel', 'llm_parallel']
+        .filter(axis => ownValue(d, axis))
+        .map(axis => `${axis} ${before[axis] ?? '?'} → ${d[axis]}`)
+        .join(', ')
+      const ev = (d.evidence && typeof d.evidence === 'object') ? d.evidence : {}
+      const from = ev.widest_declared_gpus != null && ev.gpu_pool != null
+        ? ` (${ev.open_proposals ?? '?'} open proposal(s) wanting up to ${ev.widest_declared_gpus} GPU(s) of ${ev.gpu_pool})`
+        : ''
+      return `width re-pinned from the proposals — ${axes}${from}`
+    },
+  },
   hypothesis_merged: {
     validate: d => ownValue(d, 'statement'),
     render: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
@@ -464,7 +483,7 @@ export const GROUPS = [
   // test and then handing it to the Developer, which is exactly what this chip filters for.
   ['proposal', 'proposals', 'node_building node_created card_added card_build_requested card_build_attempted card_build_done card_enriched card_ranked'],
   ['eval', 'results', 'node_eval_started node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
-  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot speculation_depth_settled'],
+  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot speculation_depth_settled run_width_settled'],
   ['research', 'research', 'research_completed research_attempted deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
   ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
   ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded train_monitor_alert asha_rank asha_verdict'],
