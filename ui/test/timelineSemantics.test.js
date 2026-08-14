@@ -83,7 +83,7 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 })
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
-  const [dock, api] = await Promise.all([source('Dock.jsx'), source('api.js')])
+  const dock = await source('Dock.jsx')
   // The deadline argument is part of this read's contract, not decoration: without it the read
   // inherited `deadlineGet`'s flat 8 s while `/nodes/{n}/trace?limit=512` measured 4.3-15.6 s on the
   // live server for a SIX-span node, so the client aborted a request the server was about to answer
@@ -91,8 +91,27 @@ test('expanded node trace polls only its exact live lifecycle and refreshes once
   // Inspector, so the two node-trace readers cannot disagree about what "too slow" means.
   assert.match(dock,
     /traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit,[\s\S]*?traceReadDeadlineMs\(nodeTraceLimit\)\)/)
-  assert.match(api,
-    /export const traceReadQuery = \(expectedGeneration, attempt, limit\) => \{[\s\S]*?query\.set\('attempt', attempt\)[\s\S]*?query\.set\('limit', limit\)[\s\S]*?query\.set\('expected_generation', expectedGeneration\)/)
+  // DRIVEN, not pinned as source text. This assertion used to be a regex over `api.js` naming
+  // `traceReadQuery`'s exact three-parameter signature, and the trace-episode-seek merge added a
+  // fourth (`before`, the window anchor) — so the regex stopped matching a function whose contract
+  // was intact, and the whole test went red for a change that broke nothing. A pin that fails on a
+  // compatible change is the same defect as one that passes on a breaking change: it stops
+  // reporting on the property. Calling it reports on the property.
+  const { traceReadQuery } = await import('../src/api.js')
+  const query = new URLSearchParams(traceReadQuery('gen-abc', 3, 512).slice(1))
+  assert.equal(query.get('attempt'), '3')
+  assert.equal(query.get('limit'), '512')
+  assert.equal(query.get('expected_generation'), 'gen-abc')
+  // The anchor is optional and additive: omitting it must not change the other three, or a surface
+  // that never seeks would start reading a different window than the one it asks for.
+  const anchored = new URLSearchParams(traceReadQuery('gen-abc', 3, 512, 'span-7').slice(1))
+  assert.equal(anchored.get('before'), 'span-7')
+  for (const key of ['attempt', 'limit', 'expected_generation']) {
+    assert.equal(anchored.get(key), query.get(key))
+  }
+  assert.equal(query.get('before'), null)
+  // An empty read names nothing rather than sending a bare `?`.
+  assert.equal(traceReadQuery(null, null, 0), '')
   assert.match(dock,
     /d\?\.node_id !== traceNid \|\| d\?\.attempt !== traceGeneration[\s\S]*?!traceGenerationMatches\(d, expectedTraceGeneration\)/)
   // liveBuilding maps nodeId to generation for EVERY concurrent build (parallel_build>1), so each
