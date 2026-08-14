@@ -207,11 +207,29 @@ def _path_stat(path: Path) -> dict:
 def task_file_roots(root: Path) -> list[Path]:
     """Where a launch `task_file` may live — the ONE derivation, shared with the task CATALOGUE.
 
-    `routers/misc.py::list_tasks` offers the operator a pick-list built from exactly these three
+    `routers/misc.py::list_tasks` offers the operator a pick-list built from exactly these
     directories, and this is the same list because **the catalogue IS the declaration of what is
     launchable**. Two hand-synced copies would drift in the only two directions that matter: the UI
     offering a file the launcher then refuses, or — the direction that costs something — the launcher
     accepting a path the operator never declared runnable.
+
+    WHY NOT WIDER, and why this is not `runtime/read_allowlist.py`'s question. That module derives
+    what an EVAL may read from the operator's `data:`/`references:` mount declarations — i.e. from a
+    task that has already been admitted. Here there is no task yet, only a path out of an HTTP body,
+    so deriving the roots from the file's own declarations would be circular: the document being
+    decided about would supply the rule that admits it. The only non-circular declaration available
+    before a task exists is the catalogue, which is what this is.
+
+    WHY NOT the operator's home or data mount as a default root, measured on this box: the four real
+    task files here live in `/home/jovyan/data/*-task.json`, and adding that directory would admit
+    the whole data mount — datasets, model caches, every other tenant's files — i.e. an allow-list
+    that allows almost everything. It is also not the path that was in use: all four were launched
+    through `looplab run <path>` (the CLI reads its argument directly and never enters this module),
+    and every HTTP-launched run in the corpus that recorded a `ui_meta.json` carried an INLINE task
+    with no `source_task_file` at all. So this list refuses no launch that has actually happened —
+    but an operator who moves those files into the UI needs a way to say so that does not amount to
+    "declare my whole disk", which is what `LOOPLAB_TASKS_DIR` is, and why it takes a LIST: having to
+    choose one of two task directories is a reason to point it at their common ancestor instead.
 
     Resolved here so the containment compare below is against real directories: an allowed root that
     is itself a symlink must be compared by its target, or containment answers about a name.
@@ -220,7 +238,9 @@ def task_file_roots(root: Path) -> list[Path]:
     dirs = [repo / "examples", root]
     env_dir = os.environ.get("LOOPLAB_TASKS_DIR")
     if env_dir:
-        dirs.insert(0, Path(env_dir))
+        # `os.pathsep`-separated, like PATH. Declared roots come FIRST so the message an operator
+        # reads on a refusal names their own directory before the shipped ones.
+        dirs[:0] = [Path(part) for part in env_dir.split(os.pathsep) if part.strip()]
     out: list[Path] = []
     for d in dirs:
         try:
@@ -247,9 +267,12 @@ def _confine_task_file(root: Path, expanded: str) -> Path:
 
     * **resolve, THEN contain.** `Path.resolve()` follows every symlink, so a symlink planted inside
       an allowed root that points at `/etc/shadow` resolves outside it and is refused here. Checking
-      containment on the unresolved path and then resolving would admit exactly that. This is why
-      there is no separate `is_symlink()` rung the way `safe_run_dir` needs one — that function must
-      keep a name it is about to CREATE, this one only ever reads.
+      containment on the unresolved path and then resolving would admit exactly that. It is also why
+      there is no separate `is_symlink()` REFUSAL the way `safe_run_dir` has one — that function must
+      keep a name it is about to CREATE, this one only ever reads, and a symlink that stays inside a
+      declared root is a legitimate way for an operator to name a task. What this ordering does NOT
+      cover is a link that appears after the answer: that is `read_confined_task_file`'s `O_NOFOLLOW`,
+      which is applied to the path THIS function returns, i.e. one that already holds no symlinks.
     * **contain BEFORE `exists()`.** `expandvars` runs on caller text, so `task_file: "$OPENAI_API_KEY"`
       expands to the secret's VALUE and the pre-existing `task_file_not_found` message echoes the
       resolved path back to the caller verbatim. Refusing on containment first means every message

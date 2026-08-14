@@ -606,3 +606,37 @@ def test_genesis_card_cannot_read_a_task_file_outside_the_declared_roots(tmp_pat
     assert _defaults_backend_llm({}, str(smuggled), {}, {}) is True
     # ...and with the server's run root supplied, the same path is refused and no hint is derived.
     assert _defaults_backend_llm({}, str(smuggled), {}, {}, root) is False
+
+
+def test_declared_tasks_dir_takes_a_list(tmp_path, monkeypatch):
+    """`LOOPLAB_TASKS_DIR` is `os.pathsep`-separated. An operator with tasks in two places must not
+    have to choose — the way out of that choice is pointing it at the common ancestor, which is how
+    an allow-list ends up allowing a whole disk. Both declared dirs are admitted AND both are in the
+    catalogue, because the two are one derivation."""
+    import os as _os
+
+    root = tmp_path / "runroot"
+    root.mkdir()
+    first, second = tmp_path / "team", tmp_path / "mine"
+    for index, directory in enumerate((first, second)):
+        directory.mkdir()
+        (directory / f"task-{index}.json").write_text(json.dumps(_toy()), encoding="utf-8")
+    monkeypatch.setenv("LOOPLAB_TASKS_DIR", _os.pathsep.join([str(first), str(second)]))
+
+    client = TestClient(make_app(root))
+    offered = {t["path"] for t in client.get("/api/tasks").json()["tasks"]}
+    for index, directory in enumerate((first, second)):
+        source = directory / f"task-{index}.json"
+        response = client.post("/api/start/preflight", json={
+            "run_id": f"declared-{index}", "task_file": str(source),
+        })
+        assert response.status_code == 200, response.text
+        assert str(source.resolve()) in offered
+    # A sibling of the declared dirs is still refused — the list declares them, not their parent.
+    outside = tmp_path / "not-declared.json"
+    outside.write_text(json.dumps(_toy()), encoding="utf-8")
+    refusal = client.post("/api/start/preflight", json={
+        "run_id": "sibling", "task_file": str(outside),
+    })
+    assert refusal.status_code == 400
+    assert refusal.json()["detail"]["code"] == "task_file_not_allowed"

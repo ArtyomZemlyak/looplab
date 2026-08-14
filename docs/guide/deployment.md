@@ -131,8 +131,9 @@ is refused with `400 task_file_not_allowed`, naming the allowed roots and never 
 path. The path is resolved *before* it is checked, so a symlink planted inside an allowed root that
 points outside it is refused too, and the check runs before any probe that would report whether a
 file exists. This is the same list `GET /api/tasks` builds the launch pick-list from, so what the UI
-offers and what the launcher accepts cannot drift apart. Set `LOOPLAB_TASKS_DIR` to declare a task
-directory outside the run root.
+offers and what the launcher accepts cannot drift apart. Set `LOOPLAB_TASKS_DIR` to declare task
+directories outside the run root — it takes an `os.pathsep`-separated **list**, so having tasks in two
+places is not a reason to point it at their common ancestor and declare a whole disk.
 
 The allow-listed file is then read **once, through one descriptor**, and the bytes read are the bytes
 parsed and the bytes fingerprinted into the launch token. A name that passed the check and a file

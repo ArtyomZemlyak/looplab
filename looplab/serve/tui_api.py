@@ -87,6 +87,7 @@ class Api:
     def __init__(self, base_url: str, token: Optional[str] = None, timeout: float = 30.0):
         self.base = base_url.rstrip("/")
         self.token = token or os.environ.get("LOOPLAB_UI_TOKEN") or self._stored_token() or ""
+        self.timeout = timeout
 
     @staticmethod
     def _stored_token() -> str:
@@ -97,7 +98,6 @@ class Api:
             return read_owner_token_file() or ""
         except Exception:       # noqa: BLE001 - an unreadable/unsafe token file is not a TUI error
             return ""
-        self.timeout = timeout
 
     def _headers(self, body: bool = False) -> dict:
         h = {"Accept": "application/json"}

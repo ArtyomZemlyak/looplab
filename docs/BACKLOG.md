@@ -397,7 +397,19 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   path-echoing `task_file_not_found` message can no longer be an oracle (`expandvars` on caller text
   meant `task_file: "$SOME_API_KEY"` echoed the secret's value back). Driven by six real requests in
   `tests/test_launch_preflight.py`. Note this bounds the AUTHENTICATED operator — a token never fixed
-  it.
+  it. **[2026-08-14 — the roots were re-derived against this box rather than assumed.** The four real
+  task files here are `/home/jovyan/data/*-task.json` and none of them is under a declared root — but
+  all four were launched with `looplab run <path>`, which reads its argument directly and never
+  enters `launch.py`, and every HTTP-launched run in the corpus with a `ui_meta.json` carried an
+  INLINE task (no `source_task_file` key exists anywhere in `runs/`). So the list refuses no launch
+  that has happened. It is deliberately NOT widened to the data mount — that would admit datasets,
+  model caches and every co-tenant's files, i.e. an allow-list that allows almost everything — and
+  `LOOPLAB_TASKS_DIR` now takes an `os.pathsep`-separated LIST instead, because "I have tasks in two
+  directories" is exactly the pressure that ends with an operator declaring their whole disk. Also
+  recorded in `task_file_roots`' own docstring: this is NOT `runtime/read_allowlist.py`'s question —
+  that one derives an eval's reads from an ALREADY-ADMITTED task's mount declarations, and using the
+  same shape here would be circular, since the document being decided about would supply the rule
+  that admits it.]
 
 - 🟡 **P2 · B1 host-side scoring + read-only eval mount (S–M).** Mount inputs `-v root:/work:ro` +
   separate writable `out/`; candidate writes `predictions.json`, host scores it. *Closes the rest of
