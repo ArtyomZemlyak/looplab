@@ -91,6 +91,7 @@ from looplab.events.types import (
     EV_RUN_FINISHED,
     EV_RUN_REOPENED,
     EV_RUN_STARTED,
+    EV_RUN_WIDTH_SETTLED,
     EV_SETUP_FINISHED,
     EV_SETUP_STARTED,
     EV_SETUP_STEP,
@@ -304,6 +305,16 @@ _CALIBRATION_TREATMENT_EVENT_TYPES = frozenset({
 _FORBIDDEN_CALIBRATION_LIFECYCLE_EVENTS = frozenset({
     EV_BUDGET_EXTEND,
     EV_LOG_REPAIRED,
+    # docs/29 F1. A proposal-derived width re-pin is a run that CHANGED ITS EXECUTION TREATMENT
+    # mid-log, which is precisely what this receipt asserts did not happen: the width is inside the
+    # runtime-scope digest and inside `_comparable_config`'s replicate equality, so a trajectory that
+    # ran part of itself at another width is not the clean attempt-zero A/B protocol measured here.
+    # `Engine._settle_proposal_width` already refuses to fire on a calibration lane (the profile
+    # SPELLS all four widths as `1`, so no axis is AUTO, and the calibration flag is checked outright)
+    # — this is the OTHER end of the same rule, and it is named rather than left to the
+    # `_CALIBRATION_COMMON_EVENT_TYPES` allow-list because an unlisted type is refused as an anonymous
+    # unexpected row. Six GPU runs is too expensive a thing to debug from "unexpected event type".
+    EV_RUN_WIDTH_SETTLED,
     EV_NODE_ABORT,
     EV_NODE_REPAIRED,
     EV_NODE_RESET,
