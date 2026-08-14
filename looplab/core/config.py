@@ -1386,20 +1386,32 @@ class Settings(BaseSettings):
     # line be RECORDED as one of this node's metrics? `runtime/sandbox.py::json_line_extras` takes
     # every such key, so a task printing `{"metric": x, "recall@10": y}` reports both with no config
     # — and a task printing `{"metric": x, "speculation_cuda_probe_v": 1.0}` records a schema
-    # VERSION number as a metric, which is exactly what 9 of the 12 preserved corpus values are.
-    #   true  (default) — capture them, TAGGED `auto` in `node_evaluated.extra_metrics_provenance`.
-    #   false           — record only the values an operator-owned `EvalSpec.metrics` reader
-    #                     produced. The auto ones are dropped from the record entirely.
+    # VERSION number as a metric. Re-measured 2026-08-14 over the whole corpus (238 logs under
+    # `runs/`): 1,642 values, 10 keys, and 1,636 of them are that version number and its three CUDA
+    # probe siblings — i.e. the corpus is 99.6 % diagnostics by volume and 6 values of measurement.
+    #   true  (default) — capture them, TAGGED in `node_evaluated.extra_metrics_provenance` with the
+    #                     channel that produced each: `auto` for the candidate's own stdout,
+    #                     `engine` for the keys the engine's OWN spliced probe source declares.
+    #   false           — record only the values the candidate did not author: an operator-owned
+    #                     `EvalSpec.metrics` reader's, and the engine probe's. The auto ones are
+    #                     dropped from the record entirely.
     #
     # WHY ON IS THE DEFAULT, stated so the next reader does not have to guess. The tag, not the
     # gate, is what closes the defect: an operator or a reviewer could not previously tell an
     # agent-authored number from a protected measurement, and now every consumer can. Flipping this
-    # to `false` by default would instead DELETE information — including the CUDA-probe proof the
-    # speculation calibration gate authenticates by its own means
-    # (`search/speculation_quality.py::_validate_cuda_probe_artifact` checks the engine-owned code
-    # prefix, the exact key schema and the static values, none of which this flag can see), and
-    # including every legitimate `train_auc`/`cv_mean_auc` an operator reads today. A run that turns
-    # it off records strictly less and CANNOT be un-turned-off after the fact.
+    # to `false` by default would instead DELETE information — every legitimate
+    # `train_auc`/`cv_mean_auc` an operator reads today. A run that turns it off records strictly
+    # less and CANNOT be un-turned-off after the fact.
+    #
+    # WHAT `false` NO LONGER DELETES (2026-08-14). It used to take the CUDA-probe proof with it:
+    # `search/speculation_quality.py::_validate_cuda_probe_artifact` admits a calibration node by
+    # the EXACT key schema on `extra_metrics`, and the gate — which could then only keep `declared`
+    # — dropped all four keys, so the flag and the calibration receipt could not both be had. The
+    # probe's keys now arrive tagged `engine` (`agents/calibration.py::
+    # engine_declared_extra_metric_keys` authenticates the artifact's source byte-exactly, the same
+    # prefix the validator checks), and the gate keeps them because they were never the candidate's
+    # numbers. It is still not a knob to reach for casually — it deletes the auto channel, and the
+    # tag is what closes the original defect.
     #
     # IT IS A WRITE-SIDE POLICY AND NOTHING ELSE. The fold never reads it, so it can never change
     # how an already-recorded run replays — which is why it is deliberately NOT pinned in

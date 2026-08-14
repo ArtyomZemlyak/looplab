@@ -142,10 +142,14 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
 #              with the same words `cross_check` uses ("an agent-authored gate reader defeats the
 #              trust boundary"). Used ZERO times across the whole preserved corpus.
 #   auto     — `runtime/sandbox.py::json_line_extras`: EVERY other numeric key on the candidate's
-#              own stdout JSON line. No declaration, no reader spec, no gate. It produced 12 of the
-#              12 extra metrics in the corpus, across 3 runs.
+#              own stdout JSON line. No declaration, no reader spec, no gate. It produced ALL of
+#              them: 1,642 recorded values over 10 distinct keys, across 9 runs. (This block first
+#              said "12 of 12, across 3 runs" — that count sampled three `runs/*/events.jsonl` and
+#              counted a probe NODE where it meant a probe VALUE. The corrected figure is measured
+#              over all 238 `*.jsonl` under `runs/`, and it is stated here because the shape of the
+#              population, not just its size, is what the third channel below turns on.)
 #
-# Those 12 include `speculation_cuda_probe_v=1.0` — a schema VERSION number — beside `device_count`,
+# They include `speculation_cuda_probe_v=1.0` — a schema VERSION number — beside `device_count`,
 # `alloc_bytes` and `device_ordinal`, and beside genuine measurements like `train_auc`/`cv_mean_auc`.
 # All of them were shown to the operator, exported to MLflow and served to reviewers in the same
 # visual place as the protected primary metric, with nothing marking the difference. The primary
@@ -153,21 +157,58 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
 # an extra metric had none of that AND came in through the unguarded door.
 #
 # docs/36 is the frame: what goes into the RECORD stays deterministic over AUTHENTICATED evidence.
-# An auto-captured number cannot be made authentic after the fact — the candidate wrote it — so the
+# A number the CANDIDATE wrote cannot be made authentic after the fact, so for that population the
 # fix is not to hide it but to make the record SAY which door it came through, at every consumer.
+# The third channel below is the other half: some of what arrives through this door was never the
+# candidate's, and for THAT population the record can say so deterministically.
 EXTRA_METRIC_DECLARED = "declared"   # read by an operator-owned `EvalSpec.metrics` reader spec
 EXTRA_METRIC_AUTO = "auto"           # scraped off the candidate's own stdout; undeclared, unauthenticated
+# THE ENGINE'S OWN DIAGNOSTIC, riding the auto-capture channel because it has no other door.
+#
+# Tagging made the channel visible; it did not stop a version number from being CALLED a metric, and
+# that residual was left open on purpose. Re-measured 2026-08-14 over the WHOLE preserved corpus (238
+# `*.jsonl` under `runs/`, not the three logs the first count sampled): 1,642 recorded values, 10
+# distinct keys, and they are TWO populations, not one.
+#
+#   1,636 values / 4 keys — `speculation_cuda_probe_v`, `device_count`, `alloc_bytes`,
+#       `device_ordinal`, across 7 runs. A schema VERSION, a hardware inventory count, and two
+#       constants of the request the probe made. None of them measures the experiment. Every one was
+#       printed by `agents/calibration.py`'s own source, which the ENGINE splices ahead of the Toy
+#       objective; `search/speculation_quality.py::_validate_cuda_probe_artifact` then authenticates
+#       them by engine-owned code prefix, exact key schema and static values.
+#   6 values / 6 keys — `train_auc`, `test_auc`, `cv_mean_auc`, `cv_std_auc`, `std`,
+#       `overfitting_gap`, across 2 runs. Genuine measurements an agent-authored script printed.
+#
+# So `auto` was a FALSE statement about 99.6 % of the corpus: "the candidate wrote it, nobody checked
+# it" is exactly backwards for a number the engine wrote and the receipt gate checks. The separating
+# property is not the key's NAME (a list is the heuristic `json_line_extras` already carries, and
+# `alloc_bytes`/`device_count` are perfectly good measurements for a memory benchmark) and not its
+# SHAPE (see `agents/calibration.py::engine_declared_extra_metric_keys` for why constancy is both
+# untestable on this corpus and undecidable at capture) — it is WHO AUTHORED THE PRINT STATEMENT,
+# which the engine can answer for exactly the artifacts it authored itself, byte-exactly.
+#
+# THE HONEST LIMIT, stated here because this constant is where a reader will look for it: this
+# separates the two populations only where the engine wrote the writer. Inside an agent-authored
+# artifact nothing available at capture tells a diagnostic from a measurement — `{"metric": .9,
+# "seed": 42, "n_train": 5000, "val_auc": .88}` offers no signal — and there `auto` stays the
+# complete and correct answer.
+EXTRA_METRIC_ENGINE = "engine"
 # READER-SIDE ONLY, and never written: the answer for a value whose channel the log does not record.
 # Every log written before this shipped is in that state, which is why the default is NOT `declared`
 # — assuming the guarded channel for an untagged value would state exactly the thing that was never
-# true: 12 of the 12 preserved historical values came from `auto`. "unknown" is the honest reading,
-# and every consumer must treat it as at-least-as-untrusted as `auto` (it very probably IS `auto`).
+# true: every one of the preserved historical values came from `auto`. "unknown" is the honest
+# reading, and every consumer must treat it as at-least-as-untrusted as `auto` (it very probably IS).
 EXTRA_METRIC_UNKNOWN = "unknown"
 # The channels a WRITER may record. `EXTRA_METRIC_UNKNOWN` is deliberately outside it.
-EXTRA_METRIC_CHANNELS = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO)
+EXTRA_METRIC_CHANNELS = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE)
 # Channels whose value is text the CANDIDATE authored, i.e. not authenticated evidence. `unknown` is
 # in here on purpose: a reader that cannot tell must not present the value as measured.
 EXTRA_METRIC_UNAUTHENTICATED = (EXTRA_METRIC_AUTO, EXTRA_METRIC_UNKNOWN)
+# ...and its complement, the two channels whose value something OTHER than the candidate vouched for:
+# an operator-owned reader spec, or engine-owned source verified byte-exactly. Written as its own
+# tuple rather than as `not in UNAUTHENTICATED` so a channel added later must be classified on
+# purpose in both directions instead of defaulting into the trusted half.
+EXTRA_METRIC_AUTHENTICATED = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_ENGINE)
 
 
 def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:
@@ -202,16 +243,28 @@ def extra_metric_channel(channels, key) -> str:
     return EXTRA_METRIC_UNKNOWN
 
 
-def declared_extra_metrics_only(extras, channels) -> tuple[dict, dict]:
-    """The `(extras, channels)` pair keeping ONLY the values an operator-owned reader produced.
+def authenticated_extra_metrics_only(extras, channels) -> tuple[dict, dict]:
+    """The `(extras, channels)` pair keeping ONLY the values the CANDIDATE did not author.
 
     This is what `Settings.auto_extra_metrics = false` records, and it is deliberately expressed in
     terms of the TAG rather than re-deriving "which door did this come through" a second time: the
     gate cannot drift from the label, and an untagged value (`unknown`) is dropped with the auto
-    ones because a reader that cannot prove it was declared must not admit it here either."""
+    ones because a reader that cannot prove where a value came from must not admit it here either.
+
+    IT KEEPS `engine` AS WELL AS `declared`, and that is the point of the third channel rather than
+    an incidental widening. The flag's question is "may an UNDECLARED number the candidate printed
+    enter the record?" — and until the engine's own CUDA probe could be told apart from the
+    candidate's stdout, the only available answer dropped the probe too, which silently broke
+    `search/speculation_quality.py::_validate_cuda_probe_artifact` (an exact-key-schema check) and
+    with it every calibration receipt. That is why the gate had to stay effectively unusable
+    alongside calibration. Both kept channels are vouched for by something other than the candidate,
+    which is the property the flag was always reaching for.
+
+    Named for the property and not for one of its members: a gate called `declared_..._only` that
+    keeps `engine` is the same kind of lie about the record this whole family exists to remove."""
     kept = {k: v for k, v in (extras or {}).items()
-            if extra_metric_channel(channels, k) == EXTRA_METRIC_DECLARED}
-    return kept, {k: EXTRA_METRIC_DECLARED for k in kept}
+            if extra_metric_channel(channels, k) in EXTRA_METRIC_AUTHENTICATED}
+    return kept, {k: extra_metric_channel(channels, k) for k in kept}
 
 
 MAX_LESSON_NODE_COUNT = (1 << 31) - 1

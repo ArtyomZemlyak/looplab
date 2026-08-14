@@ -413,15 +413,46 @@ def json_line_extras(text: str, primary_key: str = "metric") -> dict:
 _json_line_extras = json_line_extras
 
 
-def auto_extra_metric_channels(extras) -> Optional[dict]:
-    """The channel map for a set of extras that ALL came from `json_line_extras`, i.e. off the
-    candidate's own stdout with nothing declaring or checking them.
+def stdout_extra_metric_channels(extras, code=None) -> Optional[dict]:
+    """The channel map for a set of extras that ALL came from `json_line_extras`, i.e. off the final
+    JSON line of the artifact's own stdout.
 
     Every solution-tier `RunResult` is in that state by construction — the `solution.py` sandboxes
     have no operator reader spec to consult at all — so this is the one spelling both of them use.
-    `None` for an empty/absent set, matching the `extra_metrics or None` shape beside it."""
-    from looplab.core.models import EXTRA_METRIC_AUTO
-    return {str(k): EXTRA_METRIC_AUTO for k in (extras or {})} or None
+    `None` for an empty/absent set, matching the `extra_metrics or None` shape beside it.
+
+    ONE STDOUT LINE, TWO POPULATIONS. `auto` is the default and the fail-safe answer: the candidate
+    printed it, nobody checked it. But the engine also SPLICES its own source into an artifact — the
+    speculation calibration's CUDA probe — and the four numbers that source prints are a schema
+    version, a device count and two request constants, i.e. diagnostics the engine wrote and
+    `search/speculation_quality.py` independently authenticates. Calling those `auto` was a false
+    statement about 1,636 of the 1,642 values in the preserved corpus (see
+    `core/models.py::EXTRA_METRIC_ENGINE`), so `code` — the exact bytes this sandbox is about to run
+    — lets the probe's own module say which keys are its own.
+
+    WHY THE CLASSIFICATION IS HERE AND NOT AT THE CONSUMER: `auto` vs `engine` is a fact about the
+    ARTIFACT, known only where the source and its output meet, and it is gone by the time a reader
+    has a folded `Node`. A consumer re-deriving it would be re-deriving it from the key NAME, which
+    is the heuristic this replaces. And not inside `json_line_extras` either: that scanner is handed
+    text and nothing else, so who wrote the print statement is exactly the question it cannot ask.
+
+    `code` is OPTIONAL and defaults to the safe answer, so a third-party `Sandbox` implementation
+    that never passes it reports `auto` for everything — under-claiming, never over-claiming."""
+    from looplab.agents.calibration import engine_declared_extra_metric_keys
+    from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE
+    # Deferred, and cheap: `agents/calibration.py` is constants plus this one predicate and imports
+    # nothing at all, so `runtime` naming it costs no cycle and no import weight. It is deliberately
+    # not copied down into `core`/`runtime` — the probe source is an input to a calibration DIGEST,
+    # and a second copy of its key tuple is how the two silently drift apart.
+    engine_keys = engine_declared_extra_metric_keys(code)
+    return {str(k): (EXTRA_METRIC_ENGINE if k in engine_keys else EXTRA_METRIC_AUTO)
+            for k in (extras or {})} or None
+
+
+# NO back-compat alias for the previous name `auto_extra_metric_channels`, deliberately: it had no
+# importer outside this module, and an alias whose name asserts the answer is `auto` is a decoy —
+# the next caller reaching for it would pass no `code` and get the pre-2026-08-14 behaviour back
+# while looking correct. A stale spelling must be an ImportError.
 
 
 def json_line_trials(text: str) -> Optional[list]:
@@ -1335,7 +1366,7 @@ class SubprocessSandbox:
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if to else _parse_metric(out)), timed_out=to,
                          extra_metrics=_extras,
-                         extra_metrics_provenance=auto_extra_metric_channels(_extras),
+                         extra_metrics_provenance=stdout_extra_metric_channels(_extras, code),
                          trials=(None if to else json_line_trials(out)))
 
 
@@ -1398,7 +1429,7 @@ class DockerSandbox:
         return RunResult(exit_code=rc, stdout=out, stderr=err,
                          metric=(None if timed_out else _parse_metric(out)), timed_out=timed_out,
                          extra_metrics=_extras,
-                         extra_metrics_provenance=auto_extra_metric_channels(_extras),
+                         extra_metrics_provenance=stdout_extra_metric_channels(_extras, code),
                          trials=(None if timed_out else json_line_trials(out)))
 
 

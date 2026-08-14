@@ -6,9 +6,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED, EXTRA_METRIC_UNKNOWN,
-  EXTRA_METRIC_CHANNEL_LABEL, extraMetricChannel, extraMetricIsDeclared,
-  unverifiedExtraMetricKeys,
+  EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED, EXTRA_METRIC_ENGINE, EXTRA_METRIC_UNKNOWN,
+  EXTRA_METRIC_CHANNEL_LABEL, EXTRA_METRIC_CHANNEL_HELP, extraMetricChannel,
+  extraMetricIsDeclared, unverifiedExtraMetricKeys,
 } from '../src/extraMetrics.js'
 
 const node = (extras, provenance) => ({ extra_metrics: extras, extra_metrics_provenance: provenance })
@@ -23,7 +23,7 @@ test('a tagged value reports the channel the record carries', () => {
 })
 
 test('an untagged historical value reads unknown, never declared', () => {
-  // The 12 preserved values are exactly this shape, and all 12 were in fact auto-captured — so
+  // Every preserved value is exactly this shape, and every one was in fact auto-captured — so
   // `declared` here would be the one answer that is provably wrong.
   const n = node({ train_auc: 0.99 }, undefined)
   assert.equal(extraMetricChannel(n, 'train_auc'), EXTRA_METRIC_UNKNOWN)
@@ -60,4 +60,31 @@ test('a legacy population marks every column it reports', () => {
   const legacy = [node({ train_auc: 0.99, test_auc: 0.92 }, undefined)]
   assert.deepEqual([...unverifiedExtraMetricKeys(legacy, ['train_auc', 'test_auc'])],
     ['train_auc', 'test_auc'])
+})
+
+test('an engine diagnostic is named as one, and is still not a measurement', () => {
+  // The third channel (2026-08-14). 1,636 of the corpus's 1,642 values are these four keys: numbers
+  // LoopLab's OWN spliced probe source printed and its source authenticates. Two things must be
+  // true at once and they pull in opposite directions — `auto` under-claims them ("nobody checked
+  // it" is false), and `declared` would over-claim them ("the operator is reading a result" is also
+  // false). The channel carries the trust; `extraMetricIsDeclared` keeps the caveat.
+  const n = node({ speculation_cuda_probe_v: 1, train_auc: 0.99 },
+    { speculation_cuda_probe_v: EXTRA_METRIC_ENGINE, train_auc: EXTRA_METRIC_AUTO })
+  assert.equal(extraMetricChannel(n, 'speculation_cuda_probe_v'), EXTRA_METRIC_ENGINE)
+  assert.equal(extraMetricIsDeclared(n, 'speculation_cuda_probe_v'), false)
+  assert.equal(EXTRA_METRIC_CHANNEL_LABEL[EXTRA_METRIC_ENGINE], 'engine diagnostic')
+  assert.match(EXTRA_METRIC_CHANNEL_HELP[EXTRA_METRIC_ENGINE], /not a measurement/)
+  // ...so a results table still caveats the column, and now for the RIGHT reason.
+  assert.deepEqual([...unverifiedExtraMetricKeys([n], ['speculation_cuda_probe_v'])],
+    ['speculation_cuda_probe_v'])
+})
+
+test('every writable channel has a label and a help string', () => {
+  // A channel added to the vocabulary without a label renders as `undefined` next to a number,
+  // which is worse than the unlabelled table this whole family replaced.
+  for (const channel of [EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE,
+    EXTRA_METRIC_UNKNOWN]) {
+    assert.equal(typeof EXTRA_METRIC_CHANNEL_LABEL[channel], 'string')
+    assert.equal(typeof EXTRA_METRIC_CHANNEL_HELP[channel], 'string')
+  }
 })

@@ -43,7 +43,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  coerce_node_id,
                                  developer_artifact_footprint, developer_stuck_reason,
                                  is_developer_error, is_developer_stuck,
-                                 EXTRA_METRIC_DECLARED, declared_extra_metrics_only,
+                                 EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
@@ -2486,8 +2486,11 @@ class EvaluateMixin:
                     # place the record is written. `Settings.auto_extra_metrics` (default ON =
                     # today's behaviour) decides whether undeclared numbers scraped off the
                     # candidate's stdout may enter the record at all; the tag decides whether a
-                    # reader can tell. The gate is expressed over the TAG (`declared_extra_metrics_only`)
-                    # so the two can never disagree about which values are which.
+                    # reader can tell. The gate is expressed over the TAG
+                    # (`authenticated_extra_metrics_only`) so the two can never disagree about which
+                    # values are which — and since the tag learned to name the engine's OWN spliced
+                    # probe source (`EXTRA_METRIC_ENGINE`), turning the flag off no longer deletes
+                    # the CUDA proof the calibration receipt gate re-derives from this very payload.
                     #
                     # A GATE HERE AND NOT AT CAPTURE, deliberately: both auto-capture channels
                     # (`command_eval` for repo tasks, the two `sandbox.py` tiers for solution.py)
@@ -2500,7 +2503,8 @@ class EvaluateMixin:
                     _extras = normalize_extra_metrics(res.extra_metrics)
                     _extra_channels = normalize_extra_metric_channels(res.extra_metrics_provenance)
                     if not bool(getattr(self, "auto_extra_metrics", True)):
-                        _extras, _extra_channels = declared_extra_metrics_only(_extras, _extra_channels)
+                        _extras, _extra_channels = authenticated_extra_metrics_only(
+                            _extras, _extra_channels)
                     _eval_payload = {
                         "node_id": node_id, "generation": generation,
                         "metric": res.metric,

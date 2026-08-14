@@ -2456,13 +2456,22 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # are not equally trustworthy and until 2026-08-14 the record could not tell them apart: the
     # `declared` half is operator-owned and refuses an agent-authored `adapter` reader (the check
     # ten lines up), while `auto` is EVERY other numeric key on the candidate's own stdout — no
-    # declaration, no reader spec, no gate. On the preserved corpus `declared` produced 0 of 12
-    # extra metrics and `auto` produced 12 of 12, including a schema VERSION number recorded as a
-    # metric, and all of them reached the operator, MLflow and the reviewer beside the protected
-    # primary. Tagging (rather than dropping) is what docs/36 asks for here: the RECORD stays
-    # deterministic over authenticated evidence by SAYING which evidence is authenticated, and the
-    # `auto_extra_metrics` gate one layer up is then expressible as "keep only the declared ones"
-    # instead of a second, drift-prone re-derivation of the same question.
+    # declaration, no reader spec, no gate. On the preserved corpus `declared` produced 0 of the
+    # 1,642 recorded values and `auto` produced all of them, including a schema VERSION number
+    # recorded as a metric, and all of them reached the operator, MLflow and the reviewer beside the
+    # protected primary. Tagging (rather than dropping) is what docs/36 asks for here: the RECORD
+    # stays deterministic over authenticated evidence by SAYING which evidence is authenticated, and
+    # the `auto_extra_metrics` gate one layer up is then expressible over the TAG instead of a
+    # second, drift-prone re-derivation of the same question.
+    #
+    # ONLY TWO CHANNELS HERE, and that is a fact about this tier rather than an omission. The third,
+    # `EXTRA_METRIC_ENGINE` (`runtime/sandbox.py::stdout_extra_metric_channels`), names keys printed
+    # by source the ENGINE spliced into the artifact — and the one splicer that exists,
+    # `agents/roles.py::ToyObjectiveDeveloper`'s CUDA probe, produces a `solution.py` artifact and
+    # never a repo eval COMMAND. A repo task's argv runs the operator's own program over the agent's
+    # working set; nothing the engine authored is inside it, so every undeclared number on its
+    # stdout really is the candidate's. If that ever stops being true, this site gains the same
+    # `code`-authenticated third arm rather than a name list.
     # Same precedence as the values (`declared` wins a name collision), for the same reason.
     extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
                        **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)
