@@ -1073,6 +1073,22 @@ class RunState(BaseModel):
     # legacy behaviour. Excluded from the public dump so those old logs keep their exact shape.
     eval_parallel: int = Field(default=0, ge=0, le=1024, exclude=True)
     llm_parallel: int = Field(default=0, ge=0, le=64, exclude=True)
+    # docs/29 F1 — the widths this run RE-PINNED mid-run from what the research proposed
+    # (`events/replay.py::_on_run_width_settled`, written by
+    # `engine/orchestrator.py::_settle_proposal_width`). SEPARATE fields from the two pins above, for
+    # exactly the reason `speculation_depth_settled` is separate from `speculation_depth_pinned`: each
+    # fact has ONE writer, neither handler reads the other's field before writing its own, so the two
+    # rows may be spliced in either order and land on the same treatment (invariant #5). Folding a
+    # repin ONTO the pin would not be order-tolerant — `_on_run_started` ASSIGNS, so a repin row folded
+    # ahead of it would simply be overwritten, which is the measured defect the depth pair records.
+    #
+    # `None` = this run never repinned = the `run_started` pin stands, which is every pre-existing log
+    # and every run whose proposals never moved the width. The resolution of the two lives in
+    # `Engine._repin_settled_widths` (the re-entry hook) rather than in the fold, because the third
+    # layer of the precedence — an operator's `budget_extend` — is applied by the engine per turn and
+    # has to win over both. Excluded from the public dump like the pins they qualify.
+    eval_parallel_settled: Optional[int] = Field(default=None, ge=1, le=1024, exclude=True)
+    llm_parallel_settled: Optional[int] = Field(default=None, ge=1, le=64, exclude=True)
     # D1 holdout-gated promotion (folded from run_started; False for old logs -> byte-identical
     # legacy selection). When True, best-selection prefers the holdout metric among the nodes
     # that carry one (the val-top-k re-scored on the unseen partition at finish).

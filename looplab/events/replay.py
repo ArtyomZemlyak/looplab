@@ -92,6 +92,7 @@ from looplab.events.types import (
     EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
+    EV_RUN_WIDTH_SETTLED,
     EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
@@ -3534,6 +3535,46 @@ def _on_speculation_depth_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     _settle_folded_speculation_depth(st)
 
 
+def _on_run_width_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Adopt one proposal-derived RE-PIN of the run's concurrency widths (docs/29 F1).
+
+    LAST WRITE WINS, into fields of this row's own, and both halves of that matter.
+
+    *Into its own fields*, never onto `run_started`'s `eval_parallel`/`llm_parallel`, is what makes
+    the pair ORDER-TOLERANT against `run_started` itself (invariant #5). `_on_run_started` ASSIGNS, so
+    a repin folded ahead of it would be silently overwritten and the fold would land on the pin — the
+    exact defect measured for the `speculation_depth` pair (4 at splice position 0, 0 everywhere
+    else), written down there rather than left to be rediscovered here. Each field has one writer and
+    neither handler reads the other's before writing its own; `Engine._repin_settled_widths` resolves
+    them, and it is the only place that has to know the precedence.
+
+    *Last write wins*, not the minimum `_on_speculation_depth_settled` takes, because this repin is
+    genuinely TWO-WAY. The depth ratchet only ever narrows, so a minimum reproduced the engine's own
+    sequence for free. A width follows what the research proposed: it narrows when the Cards declare
+    wide footprints and widens back — never past the launch pin — when they stop. A minimum would turn
+    one wide proposal into a permanent serialization of the run, and a maximum would make a
+    hand-edited row able to widen a treatment the engine had already narrowed. LWW over a total log
+    order is what the engine actually did, and it is what a resume has to reproduce.
+
+    Nothing here is re-derived. The row's `evidence` records the pool, the demand and the widest
+    declared footprint the decision was made from, for `looplab inspect` and the operator; the fold
+    reads only the two integers, so a resume on a box with a different GPU count continues at the
+    width THIS RUN chose rather than at one recomputed from the new host. That is the whole reason the
+    decision needs a durable event and not a per-turn recomputation.
+
+    Bounds are strict, and the floor is 1 rather than 0 for a reason `settle_width` states: a live
+    `0` is not AUTO, and a repin row is a live value by definition. A malformed or out-of-range field
+    is DROPPED INDEPENDENTLY of its sibling — one poisoned axis in a hand-edited row must not also
+    discard a valid re-pin of the other, and dropping leaves that axis at whatever the previous rows
+    and the `run_started` pin already established.
+    """
+    for key, upper in (("eval_parallel", 1024), ("llm_parallel", 64)):
+        value = d.get(key)
+        if type(value) is not int or not 1 <= value <= upper:
+            continue
+        setattr(st, f"{key}_settled", value)
+
+
 def _on_card_build_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Advance exactly one positional Card-build request and retain its successful node link.
 
@@ -3773,6 +3814,7 @@ _HANDLERS = {
     EV_CARD_BUILD_REQUESTED: _on_card_build_requested,
     EV_CARD_BUILD_ATTEMPTED: _on_card_build_attempted,
     EV_SPECULATION_DEPTH_SETTLED: _on_speculation_depth_settled,
+    EV_RUN_WIDTH_SETTLED: _on_run_width_settled,
     EV_CARD_BUILD_DONE: _on_card_build_done,
     EV_CARD_MERGED: _on_card_merged,
     EV_CARD_AUTO_DROPPED: _on_card_dropped,

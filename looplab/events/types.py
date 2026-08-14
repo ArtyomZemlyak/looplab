@@ -288,6 +288,33 @@ EV_CARD_BUILD_ATTEMPTED = "card_build_attempted"
 # same depth. Absent on every pre-existing log, where the reader-side default is simply the depth
 # `run_started` pinned, so old runs behave exactly as before.
 EV_SPECULATION_DEPTH_SETTLED = "speculation_depth_settled"
+# docs/29 F1 — the run's concurrency WIDTH, RE-PINNED mid-run from what the research proposed.
+# `run_started` pins the width the run launched at, and that pin is load-bearing for replay: a resume
+# on a different box continues the run's own treatment instead of re-deriving one off the new
+# hardware (invariant #6). So a width derived from the PROPOSALS cannot be a per-turn recomputation —
+# there has to be a durable row saying the run changed treatment, and this is it.
+#
+# ENGINE-APPENDED, and deliberately NOT `budget_extend`, which is the shape docs/29 F1 pointed at.
+# Four reasons, each of which is a defect rather than a preference:
+#   * `budget_extend` is a CONTROL event (`serve/protocol.py::CONTROL_EVENTS`), i.e. a HUMAN intent
+#     the UI/CLI author. `_repin_settled_widths` stands aside on any axis a control event has taken
+#     over — so the engine's own first repin would permanently disable the re-entry refusal that
+#     invariant #6 rests on, for the operator too.
+#   * it folds into `state.budget_overrides`, which `_apply_control_overrides` re-applies every turn.
+#     Engine and operator writing the same cell leaves no way to say the human's number outranks the
+#     research's, which is the precedence this feature needs.
+#   * `_apply_control_overrides` RAISES on any non-empty `budget_overrides` during a speculation
+#     calibration run — an engine-authored one would hard-crash the calibration lane.
+#   * `search/speculation_quality.py::_FORBIDDEN_CALIBRATION_LIFECYCLE_EVENTS` contains
+#     `budget_extend`, so writing one would silently disqualify every run as calibration evidence.
+#
+# The fold is LAST-WRITE-WINS into fields of its OWN (`eval_parallel_settled`/`llm_parallel_settled`),
+# never onto `run_started`'s pins, which is what keeps it order-tolerant against `run_started` itself
+# (invariant #5) — the exact defect `_on_speculation_depth_settled`'s own comment records. Unlike the
+# depth ratchet this is TWO-WAY: proposals narrow the run when they declare wide footprints and widen
+# it back when they stop, so a minimum would be wrong. Absent on every pre-existing log, where the
+# reader-side default is `None` = "the run never repinned" = the `run_started` pin, unchanged.
+EV_RUN_WIDTH_SETTLED = "run_width_settled"
 EV_RUN_REOPENED = "run_reopened"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended by /resume pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
