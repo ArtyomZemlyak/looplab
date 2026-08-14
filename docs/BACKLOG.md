@@ -389,6 +389,53 @@ site that proves it is open.
   The honest alternative is to stop deriving the tag from the artifact's CONTENT and carry
   "the engine spliced this" from the splicer, which needs a channel `runtime/` does not have today.
 
+- **The repair-rationale intake cap was raised at the wrong layer, so `_TRIAGE_RATIONALE_CAP` never
+  binds** (found 2026-08-14 auditing 4b2bd547). That commit moved the intake bound to
+  `crash_repair.py:60::_TRIAGE_RATIONALE_CAP = 2000` and applies it at `_ask_triage` (`:250`, `:261`,
+  `:277`) — i.e. to what the duck-typed `triage_crash` seam RETURNED. `UnifiedAgent.triage_crash` is
+  the ONLY implementation of that seam in the tree, it is the shipped default
+  (`Settings.unified_agent = True`, `config.py:1518`; `factory.py:311-313` returns it as both roles
+  under `backend="llm"`), and its own emit finalizer already cut the text:
+  `agents/unified_agent.py:447` — `str((args or {}).get("rationale", ""))[:300]`. So the 2000-char
+  bound is applied to a string that is at most 300 chars, and the extractor
+  `evaluate.py:2275::verify_repair(triage.get("rationale", ""), …)` reads exactly the truncated half
+  the commit set out to stop it reading. **Reproduction** (driven on this tree, no model):
+  `claimed_tokens(full)` on a 504-char diagnosis-first/`Fix:`-last rationale returns
+  `('train_cfg.yaml','KeyError','nll_cos','kl_div','log_target','rdrop_alpha','train_cfg',
+  'log_target=True')`; `claimed_tokens(full[:300])` returns `('KeyError','nll_cos','kl_div',
+  'log_target','log_target=True')` — every token naming what the repair actually CHANGED is gone and
+  only the cited baseline survives. That is the v7-node-0 shape the commit quotes, still live.
+  The new end-to-end test cannot see it: `tests/test_repair_verification.py:41-56::_Judge` is wired
+  directly as `researcher=` and never traverses `UnifiedAgent._finalize`. **Cost:** a repair that did
+  exactly what it promised keeps being stamped `unmet` on the durable `node_repaired.verified`
+  column and the stop judge keeps being told "the engine could not find what this fix said it would
+  change". The corpus figure the commit quotes ("83 of 123 rationales stored at exactly 300") is
+  equally explained by THIS cap. **Candidate fix, and why it was not applied tonight:** widen or drop
+  `unified_agent.py:447`'s `[:300]`. Blast radius is contained — every durable sink clips
+  independently at 300 (`evaluate.py:2291` `node_repaired.rationale`, `evaluate.py:2657`
+  `node_failed.triage_rationale`, `crash_repair.py:353` the critic), so no durable bytes move — but
+  it does shift the distribution of a RECORD-side verdict column, `agents/` sits below `engine/` so
+  the constant cannot be imported at module scope, and the sibling cap at `unified_agent.py:593`
+  needs the same call made deliberately rather than by symmetry.
+
+- **`write_file`/`edit_file` route around the stage-timeout-vs-budget refusal** (found 2026-08-14
+  auditing 8461ff43). `repo_write_tools.py:434` applies `stage_budget_refusal` inside
+  `_declare_stages` only; `_write` (`:622-643`) and `_edit` (`:645+`) apply the syntax and
+  manifest-collision rules and no budget rule. Driven on one `RepoWriteTools(time_budget=21600.0,
+  surface=['**/*','*.json'])`: `declare_stages(train timeout=172800)` is refused and stages nothing,
+  then `write_file('looplab_stages.json', <the same manifest>)` writes it and the staged manifest is
+  over budget at consume; and an ACCEPTED `declare_stages(timeout=100)` followed by
+  `edit_file('looplab_stages.json', '"timeout": 100' -> '"timeout": 172800')` lands 172800 too.
+  Bounded by the editable surface — the default `["**/*.py"]` correctly refuses the `.json`
+  (driven) — but `repo_task.py:983` records `edit_surface: ["**/*"]` as a configuration really used
+  on this box. **Related, and stated rather than filed as a second row:** `eval_stages.py:188-193`
+  DOES notice the divergence at consume time, and records it as a `tracing.operation(…,
+  enforced=False)` span whose own comment calls that "the FACT, into the record". `spans.jsonl` is an
+  explicit sidecar — not `events.jsonl`, not rebuilt by replay, absent from every export,
+  `looplab timings` and the node detail, and destroyable by the UI's trace clear — so an operator
+  looking for the divergence in the authoritative record finds nothing, while the metric the
+  8x-overspending eval produced stays selectable and can become champion.
+
 - **The assistant's containerized shell is unhardened** (found 2026-08-14 while wiring
   `sandbox_readonly_rootfs`). `tools/shell_tools.py:213` builds its OWN
   `make_docker_wrap(root, image, network="none")` and passes neither `mem`/`cpus` nor
