@@ -25,8 +25,7 @@ from looplab.core.config import (Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.serve.appstate import (
-    _DELETE_FENCE_PREFIX, _DELETE_QUARANTINE_PREFIX, _DELETE_RECEIPT_PREFIX,
-    _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
@@ -81,8 +80,7 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
     if (resolved.name.lower() in _RESERVED_RUN_IDS
             or resolved.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
-                _RESET_RECEIPT_PREFIX, _DELETE_FENCE_PREFIX,
-                _DELETE_RECEIPT_PREFIX, _DELETE_QUARANTINE_PREFIX))):
+                _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         # Digest/operation-suffixed lifecycle and trace-clear files reserve their whole prefixes.
         _reject(400, "reserved_run_id", f"run_id {resolved.name!r} is reserved", "run_id")
     if requested.is_symlink():

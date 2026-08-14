@@ -500,3 +500,43 @@ def test_one_patch_of_the_gpu_envelope_is_observed_on_both_sides_of_the_split(tm
     assert error is None and intent is not None, error
     assert calls == [0, 1], (
         "the append-time re-check probed the real hardware instead of the one patched name")
+
+
+def test_every_deletion_service_prefix_reaches_all_five_consumers():
+    """A run root holds four kinds of deletion service file, and FIVE places must skip them:
+    `appstate.AppState.run_dir` (refuse one as a run ID), `launch` (refuse one as a NEW run id),
+    `reset_route` (refuse one as a reset target), `run_projections.run_summaries` (do not scan one
+    as a run) and `deletion_service._SERVICE_PREFIXES`. All of them used to respell
+    the prefixes as string literals, and the identity sidecar — added last — reached only one of
+    them. A hand-copied prefix does not go red when its writer changes; it silently stops
+    recognizing that writer's files, which is the failure mode that shipped a `.identity.json`
+    sidecar colliding with the receipt glob and 503-ing the endpoint.
+
+    Derived from the WRITERS' own constants, so a fifth prefix added to `deletion_transaction` fails
+    here rather than in whichever consumer was forgotten."""
+    from looplab.core import run_deletion
+    from looplab.serve import appstate, deletion_service, deletion_transaction, run_projections
+
+    written = {value for name, value in vars(deletion_transaction).items()
+               if name.startswith("DELETE_") and name.endswith("_PREFIX")
+               and isinstance(value, str)}
+    written.add(run_deletion.RUN_DELETION_FENCE_PREFIX)
+    assert len(written) == 4, f"the writer set changed: {sorted(written)}"
+    assert all(p.startswith(".looplab-delete-") for p in written)
+
+    assert set(appstate._DELETE_SERVICE_PREFIXES) == written
+    assert written <= set(deletion_service._SERVICE_PREFIXES)
+    # `launch` reads the same tuple by name, so it cannot hold a subset of it.
+    from looplab.serve import launch, reset_route
+    for consumer in (launch, reset_route):
+        assert consumer._DELETE_SERVICE_PREFIXES is appstate._DELETE_SERVICE_PREFIXES, (
+            f"{consumer.__name__} must read the shared tuple, not a copy of it")
+    # `run_summaries` spells its tuple inline, so read the names it actually passes to `startswith`.
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(run_projections.run_summaries))
+    skipped = {node.id for node in ast.walk(tree)
+               if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+               and node.id.endswith("_PREFIX")}
+    assert {getattr(run_projections, name) for name in skipped} == written, (
+        f"run_summaries skips {sorted(skipped)}, which is not the writer set")

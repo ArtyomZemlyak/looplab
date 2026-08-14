@@ -1769,10 +1769,21 @@ def project_card_trace(spans: list[dict], *, card_id: str, node_ids: list,
             stamped = str(attributes.get("card_id") or "")
             if stamped != str(card_id) and str(tid) not in owned_traces:
                 continue
-            start = _finite_number(root.get("start"), nonnegative=True)
-            # The sort key coerces a missing start to 0.0 so a malformed span cannot raise
-            # comparing None against a float; the ROW below still carries the real value.
-            matches.append(((start if isinstance(start, (int, float)) else 0.0),
+            # `_finite_number` is TOTAL: a missing, non-numeric, non-finite, out-of-range or
+            # negative `start` all come back as its `default` of 0.0, and it has no branch that
+            # returns None. So the sort key needs no coercion of its own. There WAS one here —
+            # `start if isinstance(start, (int, float)) else 0.0` — under a comment saying it kept a
+            # malformed span from raising on None against float. That branch was unreachable and the
+            # comment described a guarantee its own callee already makes, which is the worse half:
+            # it reads as the thing protecting the sort, so hardening `_finite_number` looked
+            # optional. This IS the sort's protection, and it lives one call down.
+            #
+            # A malformed start therefore sorts as 0.0, i.e. OLDEST, and the cap keeps it ahead of
+            # real rows. That is deliberate: the cap's rule is oldest-first because the row it must
+            # never drop is the card's own first proposal, and a span whose start we cannot read is
+            # not evidence that it came later. `str(tid)` is the tie-break, so a batch of them still
+            # orders deterministically rather than by dict insertion.
+            matches.append((_finite_number(root.get("start"), nonnegative=True),
                             str(tid), tid, root))
     matched_research = len(matches)
     matches.sort(key=lambda m: (m[0], m[1]))
