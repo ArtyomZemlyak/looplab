@@ -122,6 +122,123 @@ def test_the_staged_path_binds_at_the_score_stage_and_names_the_producing_stage(
 
 
 # --------------------------------------------------------------------------------------------
+# The one attempt shape where an OLDER artifact is the subject on purpose
+
+
+def _reuse_pipeline(wd: Path) -> list:
+    """train writes the checkpoint ONCE — a second run of it leaves the earlier attempt's bytes in
+    place, which is exactly the state a stage-scoped re-run scores and the state a NORMAL attempt
+    must still call stale. No `expect` on `train`, so the same two stages can be driven both ways:
+    the reuse skips the stage entirely, and the full re-run must reach `score` for the subject to be
+    bound at all."""
+    (wd / "t.py").write_text(
+        "import pathlib\n"
+        "p = pathlib.Path('out/model.bin'); p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "if not p.exists():\n"
+        "    p.write_bytes(b'trained')\n", encoding="utf-8")
+    (wd / "s.py").write_text("print('{\"metric\": 0.7}')\n", encoding="utf-8")
+    return [{"name": "train", "command": [sys.executable, "t.py"]},
+            {"name": "score", "command": [sys.executable, "s.py"], "needs": ["out/model.bin"]}]
+
+
+def test_a_checkpoint_the_engine_itself_chose_to_reuse_is_the_subject_not_a_stale_leftover(tmp_path):
+    """The measured shape: `runs/rubertlite-dense-retrieval` has 21 nodes whose `train` row is
+    `reused` (0.0 s) with `score` re-run beside it, and `runs/rubert-dr-0807` three more. On every
+    one of those the checkpoint predates the attempt BY CONSTRUCTION — that is what `start_stage`
+    means — so binding the subject against this attempt's clock calls the engine's own reuse
+    `stale`, records an operator-blaming message under the shipped `audit` default, and under
+    `require` mints the `metric_salvaged` row that takes the node out of `feasible_nodes()`.
+
+    Both directions are driven here, because scoping this rule and DELETING it look identical from
+    the reuse side: the same on-disk state under a NORMAL attempt must still be stale (the positive
+    control), and so must a `start_stage` that names no stage in the pipeline — that reuses nothing,
+    the pipeline runs from the top, and the fail-safe direction is the strict floor.
+    """
+    import hashlib
+    stages = _reuse_pipeline(tmp_path)
+    kw = dict(stages=stages, subject=["out/model.bin"])
+
+    first = run_command_eval([], str(tmp_path), 60, _METRIC, **kw)
+    assert first.metric == 0.7 and first.metric_subject["subject_bound"] is True
+
+    # Age it past `_FRESH_EPS`: from here on it is an EARLIER attempt's checkpoint in the workdir
+    # every later attempt reuses — indistinguishable on disk from the leftover the rule exists for.
+    old = os.path.getmtime(tmp_path / "out" / "model.bin") - 3600
+    os.utime(tmp_path / "out" / "model.bin", (old, old))
+
+    reused = run_command_eval([], str(tmp_path), 60, _METRIC, start_stage="score", **kw)
+    assert [s["status"] for s in reused.stages] == ["reused", "ok"]
+    prov = reused.metric_subject
+    assert prov["subject_bound"] is True, prov
+    assert "unbound_reason" not in prov
+    # …bound to the REAL bytes, not merely flagged as acceptable.
+    assert prov["subjects"][0]["digest"] == hashlib.sha256(b"trained").hexdigest()
+    assert unbound_subject_violation_rows(prov, reused.metric, "require") == []
+
+    # POSITIVE CONTROL, same bytes and same workdir: a full attempt re-ran `train`, it wrote nothing
+    # new, and this attempt's number cannot be about the old checkpoint.
+    normal = run_command_eval([], str(tmp_path), 60, _METRIC, **kw)
+    assert [s["status"] for s in normal.stages] == ["ok", "ok"]
+    assert normal.metric == 0.7                              # the number is read either way…
+    assert normal.metric_subject["subject_bound"] is False    # …and has no referent
+    assert normal.metric_subject["unbound_reason"] == "stale"
+    rows = unbound_subject_violation_rows(normal.metric_subject, normal.metric, "require")
+    assert [r["name"] for r in rows] == [SALVAGE_VIOLATION]
+
+    # SECOND CONTROL: an unknown `start_stage` reuses NOTHING (`_run_stages` runs from index 0), so
+    # the relaxation must not fire on the mere presence of the argument.
+    typo = run_command_eval([], str(tmp_path), 60, _METRIC, start_stage="scor", **kw)
+    assert [s["status"] for s in typo.stages] == ["ok", "ok"]
+    assert typo.metric_subject["unbound_reason"] == "stale"
+
+
+def test_the_subject_and_the_secondary_readers_share_one_derivation_of_this_attempts_freshness():
+    """The two decisions were derived 300 lines apart and disagreed, which is the whole defect: the
+    tail relaxed the constraint/extra/cross-check readers under a stage-scoped re-run while the
+    subject binding kept the strict floor, so a reuse kept its gates and lost its metric's referent.
+    One rule, stated where it can be reviewed."""
+    from looplab.runtime.command_eval import attempt_freshness_floor, reused_stage_count
+    stages = [{"name": "train", "command": []}, {"name": "score", "command": []}]
+    assert reused_stage_count(stages, "score") == 1          # `train` is reused
+    assert reused_stage_count(stages, "train") == 0          # re-run from the top: nothing reused
+    assert reused_stage_count(stages, "typo") == 0           # unknown name -> full re-run
+    assert reused_stage_count(None, "score") == 0            # a single command reuses nothing
+    assert attempt_freshness_floor(1000.0, stages, "score") is None
+    assert attempt_freshness_floor(1000.0, stages, "train") == 1000.0
+    assert attempt_freshness_floor(1000.0, stages, "typo") == 1000.0
+    assert attempt_freshness_floor(1000.0, None, "score") == 1000.0
+    assert attempt_freshness_floor(1000.0) == 1000.0
+
+
+def test_a_reused_nodes_metric_stays_selectable_under_require(tmp_path):
+    """The property that matters, driven through a real eval and a real fold: the reuse the engine
+    chose must leave the node in `feasible_nodes()`. A record that merely says `subject_bound` while
+    the violation row is still minted would fail the same way the defect did."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_NODE_CREATED, EV_NODE_EVALUATED, EV_RUN_STARTED
+    wd = tmp_path / "node0"
+    wd.mkdir()
+    stages = _reuse_pipeline(wd)
+    kw = dict(stages=stages, subject=["out/model.bin"])
+    run_command_eval([], str(wd), 60, _METRIC, **kw)                      # attempt 1: trains
+    old = os.path.getmtime(wd / "out" / "model.bin") - 3600
+    os.utime(wd / "out" / "model.bin", (old, old))
+    res = run_command_eval([], str(wd), 60, _METRIC, start_stage="score", **kw)   # the re-run
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r1", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append(EV_NODE_CREATED, {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}}, "code": ""})
+    store.append(EV_NODE_EVALUATED, {
+        "node_id": 0, "metric": res.metric, "metric_provenance": res.metric_subject,
+        "violations": unbound_subject_violation_rows(res.metric_subject, res.metric, "require")})
+    st = fold(store.read_all())
+    assert st.nodes[0].feasible is not False
+    assert [n.id for n in st.feasible_nodes()] == [0]
+    assert st.nodes[0].metric_provenance["subject_bound"] is True
+
+
+# --------------------------------------------------------------------------------------------
 # The enforcement — and that it lands on SELECTION, not merely in the record
 
 

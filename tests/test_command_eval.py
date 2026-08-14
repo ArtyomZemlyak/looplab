@@ -729,3 +729,14 @@ def test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_und
     assert stale.metric == 1.0                                # the fresh stdout metric is untouched
     assert stale.extra_metrics is None, "a stale artifact was reported as this eval's metric"
     assert stale.violations == [{"name": "budget", "value": None, "max": 5, "min": None}]
+
+    # A `start_stage` that names NO stage in the pipeline reuses nothing — `_run_stages` falls back
+    # to a full re-run, the fail-safe direction — so the relaxation must not fire on the mere
+    # presence of the argument. It did, because this line tested `start_stage` for truthiness while
+    # `_run_stages` resolved it against the stage list; both now go through
+    # `command_eval.attempt_freshness_floor`, which is also what the metric SUBJECT binds with.
+    typo = run_command_eval([sys.executable, "evaluate.py"], str(tmp_path), 30, _M,
+                            start_stage="evaluate", **kw)         # the stage is named "eval"
+    assert [s["status"] for s in typo.stages] == ["ok", "ok"]
+    assert typo.extra_metrics is None
+    assert typo.violations == [{"name": "budget", "value": None, "max": 5, "min": None}]

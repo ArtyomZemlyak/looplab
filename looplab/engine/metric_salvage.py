@@ -672,10 +672,18 @@ def salvage_gates(eval_spec, metric: float, stdout: str, workdir: str,
 
     THREE DELIBERATE DIFFERENCES from the tail, each because the situation is not the same:
       * FAIL CLOSED ON FRESHNESS. `since` is this attempt's start for every reader, where the tail
-        relaxes secondary readers under a stage-scoped re-run (`_reader_since`). A stale constraint
-        file therefore reads as unverifiable -> violation. That is the safe direction: the node is
-        already excluded under the default rung, so the cost is confined to `select`, where the
-        alternative is admitting an unmeasured metric under an unchecked bound.
+        relaxes secondary readers under a stage-scoped re-run
+        (`command_eval.attempt_freshness_floor`, which since 2026-08-14 is also what the metric
+        SUBJECT binds with). A stale constraint file therefore reads as unverifiable -> violation.
+        That is the safe direction: the node is already excluded under the default rung, so the cost
+        is confined to `select`, where the alternative is admitting an unmeasured metric under an
+        unchecked bound. KNOW WHAT IT COSTS THERE, because it is the same off-by-one-attempt shape
+        the subject binding had: on a stage-scoped re-run the reused stages' artifacts CANNOT be
+        newer than this attempt, so under `select` + an operator-produced stage a readable constraint
+        reads unverifiable and re-excludes a node the operator admitted. Deliberate and unchanged —
+        this is the FAILED-eval path, where exclusion is the conservative direction and admitting a
+        number under an unchecked bound is not — but it is a policy choice, not an oversight, and
+        flipping it needs its own evidence rather than a symmetry argument with the tail.
       * NO `wrap`. Same argument as `read_salvageable_metric`: `adapter` is refused, and every other
         reader parses host files or the captured stdout in-process.
       * DRIFT IS A REFUSAL, NOT A RECORD. The caller must abandon the salvage when this returns a

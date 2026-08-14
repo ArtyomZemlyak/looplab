@@ -119,7 +119,11 @@ DIGEST_SAMPLED = "sha256-sampled"
 #   stale         — it is there and predates this eval attempt. The number cannot be about it: a
 #                   leftover from an earlier repair attempt in a deliberately reused workdir is the
 #                   measured shape here (v6 nodes ran up to 4 repair attempts), and admitting it is
-#                   how a metric ends up describing a checkpoint from two attempts ago.
+#                   how a metric ends up describing a checkpoint from two attempts ago. NOT the shape
+#                   where the engine ITSELF reused the earlier stages (`start_stage`) — there the
+#                   older artifact is the subject on purpose, and the caller passes no floor at all
+#                   (`command_eval.attempt_freshness_floor`). This slug is a claim about an artifact
+#                   nobody chose to reuse.
 #   unreadable    — it exists and could not be stat'ed/digested (a FUSE error, a permission).
 UNBOUND_REASONS = ("not_declared", "escapes", "missing", "empty", "stale", "unreadable")
 
@@ -208,6 +212,15 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     SUBJECT is a different claim: it is what this eval's number is about, so an artifact that predates
     the attempt cannot be it. That asymmetry is the whole reason this is not just another `needs`
     entry.
+
+    WHAT `since` MEANS, AND WHY THE CALLER DERIVES IT. `since` is "the floor for THIS attempt", and
+    on exactly one attempt shape there is no such floor: a stage-scoped re-run, where the engine
+    itself skipped the earlier stages (`command_eval::reused_stage_count`) so the previous attempt's
+    checkpoint IS this attempt's subject. `command_eval.attempt_freshness_floor` owns that decision
+    and passes `None` there — one derivation shared with the secondary readers' relaxation, so a
+    reuse cannot keep its constraint readers and lose its metric's referent. This module does not
+    re-derive it: it cannot see the stage list, and a leaf that guessed at the caller's reuse
+    decision is how the two came to disagree in the first place.
     """
     p = confine(workdir, rel) if confine is not None else _fallback_confine(workdir, rel)
     if p is None:

@@ -416,6 +416,45 @@ still not getting the property the operator asked for.
 * **`read_fence.py` is not superseded** — it is demoted from *the* mechanism to the *message* rung, and
   it must stay, because Landlock's refusal is an `OSError` and the fence's is deliberately not.
 
+### Amendment 2026-08-14 — the freshness half is SCOPED to attempts that produce their own artifact
+
+The binding refuses a subject that predates the attempt (`unbound_reason: "stale"`), and §1's argument
+for it is right for a normal attempt: `verify_stage_inputs` deliberately has no freshness rule because
+an INPUT may legitimately predate its stage, while this attempt's NUMBER cannot be about an earlier
+attempt's checkpoint — v6 nodes ran up to 4 repair attempts in one workdir.
+
+**It is wrong for the one attempt the engine itself declares a reuse.** On a stage-scoped re-run
+(`start_stage`, chosen by `_safe_reuse_start` after proving the repair did not touch the earlier
+stages, and paid for by `inline_repair_retrain_cap`) the whole point of skipping `train` is that the
+earlier attempt's checkpoint IS this attempt's subject. Binding it against this attempt's clock called
+the engine's own reuse `stale`: under the shipped `audit` rung a false referent plus an
+operator-blaming message, and under `require` a `metric_salvaged` row that takes the node out of
+`feasible_nodes()` — a metric excluded for a reuse nobody was wrong to make.
+
+The corpus shape it fires on: `runs/rubertlite-dense-retrieval` has **21 nodes** whose `train`
+`stage_finished` row is `reused` (0.0 s) with `score` re-run beside it — 33 reused rows in all — and
+`runs/rubert-dr-0807` three more. (`rubertlite-dr-unified-v6`/`v7` are *not* among them: every repair
+there took the full-retrain branch, and v6 has the one `full_retrain_charged` row to show for it.)
+
+The fix is a scope, not a deletion, and it is one derivation shared by the two decisions that turn on
+it — `runtime/command_eval.py::attempt_freshness_floor`, over
+`reused_stage_count(stages, start_stage)`:
+
+* the metric SUBJECT binding at the score stage's start, and
+* the tail's already-shipped relaxation of the secondary readers (constraints, extra metrics, the
+  drift cross-check), which had the same rule spelled 300 lines away as `None if start_stage else …`.
+
+Sharing it also closed a hole in the second: a `start_stage` naming no stage reuses nothing —
+`_run_stages` falls back to a full re-run, the fail-safe direction — and the truthiness test dropped
+the freshness gate anyway. What keeps its floor unconditionally is the PRIMARY metric read (it comes
+from the final, re-RUN stage, so a no-op stage must not promote an old value), the stall-salvage read
+beside it, and `verify_stage_artifacts`, which is held to its own stage's start.
+
+Driven in both directions by `tests/test_metric_subject.py::
+test_a_checkpoint_the_engine_itself_chose_to_reuse_is_the_subject_not_a_stale_leftover` — the reuse
+binds and mints no row, the same on-disk state under a normal attempt is still `stale` and still
+excluded under `require`, and an unknown `start_stage` is still strict.
+
 ### What survives, what is dead weight
 
 | | |
