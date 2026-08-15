@@ -318,7 +318,13 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   one lane that does exclude. Both are `CARD_OPTIONAL_STATUSES` — rendered only when occupied, so a
   serial run's board is unchanged. Each card also publishes `status_nodes`, the node ids the lane was
   derived from, so the board's claim is checkable; for a `building` card that is the reserved
-  `node_building` node, which `evidence` deliberately never carries. Unknown future
+  `node_building` node, which `evidence` deliberately never carries. Since 2026-08-15 a card whose
+  ONLY work item was a speculative build the freshness gate discarded before dispatch reads
+  **Proposed**, not Failed: an idea that was never executed is not evidence of anything, so those
+  node ids move out of `evidence` into `discarded_nodes` — published beside it, so the operator can
+  still see exactly which Developer builds the run paid for and threw away — and the question is
+  claimable again. It comes back at most ONCE; a card that collects a second such discard keeps both,
+  reads Failed and retires, which is what stops a returned idea from looping. Unknown future
   statuses remain visible rather than being hidden. Cards expose receipt
   completeness, selection readiness/blockers, lineage and evidence-node links. Operator controls can
   edit display text, pin the 1-based visible priority, pin a configured GPU request, or deliberately

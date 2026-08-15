@@ -362,6 +362,63 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
+  re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card
+  freshness gate discards before dispatch; nothing returned the HYPOTHESIS. The discarded node stayed
+  in `Card.evidence`, and **three** readers key on that one list, so one never-executed build retired
+  the question three ways: `search/card_selection.py::_strictly_selection_ready` wants
+  `not card.evidence` (and `events/card_ledger.py::_apply_card_selection_readiness` derives
+  `owner_state="terminal"` from the same list and stamps the `work_terminal` blocker), so the Card
+  lane can never elect it again; `RunState.open_research_beliefs` filters on `if c.evidence`, so it
+  leaves the CLAIMABLE untested feed; and `agents/roles.py::attempted_board_prompt_cards` admits it
+  and renders it under *"each already has an experiment — do NOT propose one of these again as if it
+  were new"*, closed by *"A failed experiment is re-attempted by the engine itself, under the same
+  card, without being asked."* **Both sentences are false about a build that never ran** — nothing
+  re-attempts a superseded prefetch — so the board did not merely forget the idea, it instructed the
+  one role that could have re-proposed it not to. **The 2026-08-14 card-lane change did not fix this
+  and the earlier filing's terminal detail is stale**: a superseded card now reads `failed` rather
+  than `evaluated`, which is a truer word for the same retirement; driven post-merge, the card was
+  still `selection_ready=False`, blockers `['work_terminal']`, `eligible_cards` without it, and still
+  in the do-NOT-repropose block. **Measured:** `rubertlite-dr-unified-v7` permanently lost five
+  directions — card-3 "hard-negative mining" (deep-research memo `memo:sha256:10f4085b…`), card-4
+  "label smoothing", plus CCR reweighting, multi-positive averaging and R-Drop.
+  **THE FIX is at the one place the false statement is minted** (`events/card_ledger.py::
+  _apply_unexecuted_discards`, a new `derive_cards` phase between the merge fold and verdicts): a node
+  `core/models.py::is_unevaluated_speculative_discard` PROVES never ran leaves `evidence` for the new
+  additive `Card.discarded_nodes`, so all three readers become correct at once with no second
+  vocabulary for "evidence that is not evidence" — the same argument
+  `node_counts_toward_card_budget` makes for living in `core`. Nothing is un-written: the ids are
+  published on the wire (`serve/public_cards.py`) so the operator still sees which Developer builds
+  the run paid for and threw away, and enrichment ATTRIBUTION (`node_to_card`, footprint,
+  `research_origin`) walks `evidence + discarded_nodes`, because attribution is not evidence and a
+  returned card must keep the memo it was proposed from.
+  **THE BOUND IS ONCE PER CARD** and it is the design content: a returned idea that is re-elected and
+  re-superseded burns a Developer build each time. One supersede is a statement about FRESHNESS AT A
+  MOMENT and says nothing about the idea; a second is a durable, twice-repeated fact that this card
+  cannot be built inside this board's rate of change, which IS information about the card. At two
+  discards NONE is forgiven — a COUNT, never a choice of which one, which is what keeps the phase
+  order-tolerant — the card reads `failed` and retires for good. Worst case two Developer builds per
+  card, under `refunded_node_reservations`' one-whole-budget cap. Subsumption gets no special case: a
+  subsumed card simply loses the next election to whatever subsumed it and sits on the board costing
+  nothing. **Resurrection was chosen over visibility-only** because the loss is not merely invisible,
+  it is a false RECORD-side statement (docs/36) that an operator cannot correct by reading it — the
+  proposal prompt actively fences the direction off. **`gated` stays unreachable and it is provable,
+  not argued:** the filter fires only when the discards are the card's WHOLE evidence set, so the one
+  transition it can cause is `failed` → `proposed` via the empty-`ev_nodes` branch.
+  **Re-derived over all 46 preserved runs (270 cards, 212 nodes): 9 cards in 4 runs change, every one
+  `failed` → `proposed`; zero `gated` cards move and zero champions move.** Six of the nine become
+  selection-ready; the other three come back carrying the pre-existing `freshness_stale` blocker, so
+  the board really had moved past them and no new rule was needed to say so — including the LIVE
+  `rubertlite-dr-unified-v8`'s card-2, which returns `freshness_stale` and is therefore not
+  re-electable, so a resume of that run on this code elects nothing new. Driven end to end in
+  `tests/test_unexecuted_discard_returns_the_idea.py`: a real engine, a real supersede, the return
+  read off `eligible_cards` AND the real proposal prompt; the bound driven by superseding the SAME
+  card twice and asserting the third turn buys no build at all; a negative control where the node's
+  eval-start boundary WAS appended (still terminalized, still charged, still retired); the `gated`
+  guard and the order-tolerance of the count driven on the phase itself. Verified non-vacuous by
+  mutating a throwaway copy three ways — phase removed, bound widened to `>= 1`, whole-set
+  requirement dropped — each caught by exactly its own test.
+
 - **[FIXED 2026-08-15, same day — a REGRESSION shipped that morning] The transparent-launcher
   registry was inert for 8 of its 10 members** (found by the merge-day review, re-derived against the
   base commit). `adapters/repo_task.py::_TRANSPARENT_LAUNCHERS` was a `frozenset` and the walk

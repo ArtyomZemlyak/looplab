@@ -1832,6 +1832,88 @@ def _fold_merged_cards(st: RunState, identity: _CardIdentity, ledger: _CardLedge
     return control_ids
 
 
+def _apply_unexecuted_discards(st: RunState, ledger: _CardLedger) -> None:
+    """Take the node ids that PROVABLY never ran out of ``Card.evidence`` and record them beside it.
+
+    THE DEFECT. A speculative prefetch superseded by the Card freshness gate is terminalized
+    ``node_failed(reason="superseded")`` before it ever reaches a sandbox. The Layer-5 refund gives
+    the run back its node SLOT (``core/models.py::node_counts_toward_card_budget``) — and nothing gave
+    back the IDEA. The discarded node stayed in its Card's ``evidence``, and three separate readers key
+    on exactly that list, so one never-executed build retired the hypothesis three times over:
+
+    * ``search/card_selection.py::_strictly_selection_ready`` wants ``not card.evidence``, and the
+      fold's own readiness pass derives ``owner_state="terminal"`` from the same list and stamps the
+      ``work_terminal`` blocker — so the Card lane can never elect it again;
+    * ``RunState.open_research_beliefs`` filters on ``if c.evidence``, so it leaves the claimable
+      untested-belief feed the Researcher proposal prompt is built from;
+    * ``agents/roles.py::attempted_board_prompt_cards`` admits it (``c.evidence`` is non-empty) and
+      renders it under *"each already has an experiment — do NOT propose one of these again as if it
+      were new"*, followed by *"A failed experiment is re-attempted by the engine itself, under the
+      same card, without being asked"*. Both sentences are FALSE about this card: there is no
+      experiment, and nothing re-attempts a superseded prefetch. So the board did not merely forget
+      the idea, it instructed the one role that could have re-proposed it not to.
+
+    Measured cost: ``runs/rubertlite-dr-unified-v7`` permanently lost "hard-negative mining" and
+    "label smoothing", both deep-research directions, to builds that never ran.
+
+    THE RULE IS THE ONE ALREADY PROVEN, not a new one. ``is_unevaluated_speculative_discard`` is the
+    four-fact durable proof the budget refund is built on (both speculative receipts, the creator's
+    promised eval-start boundary with no boundary ever appended, the writer's pre-dispatch marker, and
+    corroborating execution evidence — zero charged seconds, no ``stage_finished`` row). If that
+    predicate holds, the node did not run; if the node did not run, the question it was built to answer
+    is UNTESTED, and calling it evidence is the false statement. Deciding it here rather than at each
+    reader is what keeps the three lanes from disagreeing about what "tested" means — the same argument
+    ``node_counts_toward_card_budget`` makes for living in ``core`` rather than in ``search``.
+
+    THE BOUND IS ONCE PER CARD, and it is the design content. A returned idea that is re-elected,
+    re-built and re-superseded burns a Developer call each time, and a supersede is a statement about
+    FRESHNESS AT A MOMENT, so nothing about the first one predicts the second. The first discard is
+    therefore returned; a card that has accumulated TWO keeps them both in ``evidence`` and retires for
+    good, reading ``failed`` with ``status_nodes`` naming them. The argument for that asymmetry: one
+    supersede says only that the board moved while this build ran and says nothing about the idea, while
+    a second says the same card has now twice failed to be built inside this board's rate of change —
+    which IS a durable fact about the card, and the run should stop paying for it. Deterministic and
+    order-tolerant because it is a COUNT over the folded node set, never a choice of which discard to
+    forgive: at two, none is forgiven. Worst case per card is exactly two Developer builds, and the
+    physical ceiling (``search/card_selection.py::refunded_node_reservations``) still caps the run's
+    total refunds at one whole operator budget underneath it.
+
+    SUBSUMPTION NEEDS NO SPECIAL CASE, which is why there is none. If something better subsumed the
+    idea while its build ran, the returned Card simply loses the next election to the thing that
+    subsumed it and sits on the board costing nothing — the election is already the mechanism that
+    compares candidates, and re-deciding merit here would be exactly the model-free-but-invented
+    judgement docs/36 refuses.
+
+    ``gated`` STAYS UNREACHABLE FROM HERE, and that is why the filter requires the discards to be the
+    card's ONLY evidence. ``_apply_card_status``'s ``gated`` branch fires when EVERY evidence node is
+    trust-gated/breed-excluded/infeasible; removing a discarded node from a MIXED evidence set could
+    turn a set that was not all-excluded into one that is, minting a ``gated`` card — the one lane that
+    feeds ``actionable=False`` and the ``card_terminal`` blocker. Requiring the discards to be the whole
+    set makes the only status transition this phase can cause ``failed`` -> ``proposed`` (via the empty
+    ``ev_nodes`` branch), which is provable rather than argued. It also keeps the change to its subject:
+    a Card that also holds a real experiment HAS been tested, and is not what was retired.
+
+    ``discarded_nodes`` is stamped UNCONDITIONALLY, including for the retired two-discard case and for
+    cards that keep their evidence — nothing is un-written, and the loss stays visible to an operator
+    whichever side of the bound the card falls on.
+
+    Placed after the merge fold (which UNIONS alias evidence, so the count must see the merged set) and
+    before verdicts/status/readiness (which are the readers). ``_apply_card_enrichment`` runs later and
+    unions this list back in for node ATTRIBUTION — a novelty/footprint signal riding the discarded
+    node's Idea still belongs to its card; attribution is not evidence.
+    """
+
+    for c in ledger.cards.values():
+        discarded = sorted(
+            node_id for node_id in c.evidence
+            if (node := st.nodes.get(node_id)) is not None
+            and is_unevaluated_speculative_discard(st, node)
+        )
+        c.discarded_nodes = discarded
+        if len(discarded) == 1 and set(discarded) == set(c.evidence):
+            c.evidence = []
+
+
 def _apply_card_verdicts(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
@@ -2140,7 +2222,11 @@ def _apply_card_enrichment(
     #     overrides (step 7) run AFTER, so an operator pin always wins over an engine enrichment.
     node_to_card: dict[int, str] = {}
     for cid, c in cards.items():
-        for nid in c.evidence:
+        # ATTRIBUTION, not evidence — `_apply_unexecuted_discards` already took the proven-never-run
+        # ids out of `evidence`, and a novelty/cross-run/footprint sidecar produced during that build
+        # still belongs to the card it was built for. Dropping them here would silently un-home those
+        # signals as a side effect of returning the idea, which is the opposite of the intent.
+        for nid in [*c.evidence, *c.discarded_nodes]:
             node_to_card.setdefault(nid, cid)   # first card claiming a node wins (evidence is per-card)
 
     incomplete_cards = _recompact_card_enrichment(
@@ -2149,8 +2235,12 @@ def _apply_card_enrichment(
         cards[card_id]._card_enrichment_complete = False
 
     # Researcher-proposed footprint + research origin ride the linking node's Idea/Node (earliest wins).
+    # Same ATTRIBUTION rule as `node_to_card` above: a discarded prefetch's Idea still carries the
+    # footprint and the research memo the card was proposed from, and losing the RESEARCH ORIGIN is the
+    # sharpest form of the loss being fixed — the retired ideas measured on `rubertlite-dr-unified-v7`
+    # came from deep research, and a returned card that no longer names its memo is half a return.
     for c in cards.values():
-        for nid in c.evidence:
+        for nid in [*c.evidence, *c.discarded_nodes]:
             n = st.nodes.get(nid)
             if n is None or n.idea is None:
                 continue
@@ -2644,6 +2734,7 @@ def derive_cards(
     aliases = _card_merge_aliases(st, identity)
     control_ids = _card_control_ids(identity, ledger)
     control_ids = _fold_merged_cards(st, identity, ledger, aliases, control_ids)
+    _apply_unexecuted_discards(st, ledger)
     _apply_card_verdicts(st, ledger, control_ids)
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_nodes = _card_building_ids(st, ledger, aliases)
