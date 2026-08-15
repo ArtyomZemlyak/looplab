@@ -50,6 +50,15 @@ _V7_NODE1 = next(
      if candidate.exists()),
     Path("/nonexistent/train.log"))
 
+# The LARGEST log in the corpus (88 MB) — the one that proved `_MAX_SCAN_BYTES` was not the bound a
+# whole-run scan was actually subject to. `_corpus_roots` is re-listed per candidate on purpose: the
+# two files do not have to come from the same checkout.
+_V2_NODE3 = next(
+    (candidate for base in _corpus_roots()
+     for candidate in [base / "rubertlite-dr-unified-v2" / "nodes" / "node_3" / "train.log"]
+     if candidate.exists()),
+    Path("/nonexistent/train.log"))
+
 
 def _tools(tmp_path, body: str, name: str = "train.log", **kw):
     path = tmp_path / name
@@ -127,6 +136,76 @@ def test_a_bounded_answer_says_so_and_names_the_call_that_continues_it(tmp_path)
     assert 'mode="head"' in out and "max_bytes" in out
     head = tools.execute("read_log", {"mode": "head", "lines": 5, "max_bytes": 4096})
     assert "later bytes not read" in head and 'mode="tail"' in head
+
+
+def test_the_scan_ceiling_is_not_the_reader_ceiling(tmp_path, monkeypatch):
+    """The regression. `read_log` bounds ONE ANSWER's read; `metric_series` bounds a whole-run SCAN.
+    `_read_window` clamped both by the reader's number, so nothing below `size - _MAX_READ_BYTES` was
+    reachable at any parameter and `whole_run=true` answered with a tail while calling it the whole
+    run — the head 61.8 % of the corpus's largest log.
+
+    Driven at a small reader ceiling rather than with a 34 MB fixture: the property is that the two
+    bounds are SEPARATE, and the number they are separate at is not what makes it true.
+    """
+    import looplab.tools.log_tools as lt
+    monkeypatch.setattr(lt, "_MAX_READ_BYTES", 4_096)
+    body = ("\r1/9999 [0:00:01<9:00:00] loss: 999.0\n" + "x" * 200_000 + "\n"
+            + "\r9998/9999 [3:00:00<0:00:01] loss: 1.0\n")
+    size = len(body.encode())
+    tools = _tools(tmp_path, body)
+    whole = tools.execute("metric_series", {"metric": "loss", "whole_run": True})
+    # It reached the run's opening value, which lives 200 KB below a 4 KB reader ceiling.
+    assert "first=999" in whole
+    assert f"Read {size:,} of {size:,} bytes" in whole
+    assert "does NOT start at the run's start" not in whole
+    # ...and `read_log` is still bound by its OWN ceiling: raising one did not raise the other.
+    page = tools.execute("read_log", {"mode": "tail", "lines": 2, "max_bytes": 10_000_000})
+    assert f"covers bytes {size - 4_096:,}-{size:,}" in page
+
+
+def test_a_whole_run_scan_is_one_read_and_not_a_ladder(tmp_path):
+    """Cost. An unbounded window has nothing to discover, so escalating to it re-PARSES the same
+    prefix at every rung — measured on the 88 MB log, six reads parsing 88 MB to cover 33.5 MB of it.
+    The parse is 51 ms/MB and the cold geesefs read 10 ms/MB, so a wasted rung is the expensive half.
+    """
+    body = "".join(f"\r{i}/20000 [{i // 3600}:{(i // 60) % 60:02d}:{i % 60:02d}<0:00:01] "
+                   f"loss: {20000 - i}\n" for i in range(0, 20_000, 3))
+    tools = _tools(tmp_path, body)
+    whole = tools.execute("metric_series", {"metric": "loss", "whole_run": True, "bucket_s": 3600})
+    assert "in 2 reads" not in whole and "reads" not in whole.split("bytes")[1].split("\n")[0]
+    assert "first=20000" in whole
+
+
+def test_a_scan_the_ceiling_truncates_says_its_first_bucket_is_mid_run(tmp_path):
+    """When the ceiling genuinely binds, the head IS unreachable — and that is only acceptable if the
+    answer says so in the words that change how it is read. The text this replaced told a caller who
+    had just passed `whole_run=true` to pass `whole_run=true`, i.e. named a remedy already spent."""
+    body = ("\r1/9999 [0:00:01<9:00:00] loss: 999.0\n" + "x" * 60_000 + "\n"
+            + "\r9998/9999 [3:00:00<0:00:01] loss: 1.0\n")
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                          max_scan_bytes=8_192)
+    out = tools.execute("metric_series", {"metric": "loss", "whole_run": True})
+    assert "does NOT start at the run's start" in out
+    assert "MID-RUN value" in out
+    assert "%) are below it" in out and "8,192-byte scan ceiling" in out
+    # The spent remedy is gone from an already-whole_run answer, and still offered to a tail.
+    assert "whole_run=true reads from the start" not in out
+    assert "whole_run=true reads from the start" in tools.execute("metric_series", {"metric": "loss"})
+
+
+def test_the_unread_head_is_counted_from_the_attempt_floor(tmp_path):
+    """A related receipt counted bytes below `LogSource.floor` as "not read — mode=head for the run's
+    start". No parameter reaches them by design (rule 1), so that both overstated the loss and named a
+    call that cannot deliver it — and a resumed node's floor is its whole predecessor's log, i.e.
+    exactly when the number is largest."""
+    old = "OLD-ATTEMPT loss: 99.0\n" * 500
+    new = "".join(f"new step {i} loss: {10 - i * 0.1}\n" for i in range(40))
+    tools = _tools(tmp_path, old + new, floor=len(old.encode()))
+    out = tools.execute("read_log", {"mode": "head", "lines": 3})
+    assert f"{len(old.encode()):,} earlier bytes not read" not in out
+    assert "a previous attempt's and are never read" in out
 
 
 def test_the_torn_leading_record_of_a_seek_is_dropped_and_said(tmp_path):
@@ -410,6 +489,39 @@ def test_the_operators_two_questions_on_a_real_five_hour_run():
     # window that covers seconds of a run measured in hours.
     slice_window = _window(last_10s)
     assert slice_window["max"] - slice_window["min"] < max(medians) - min(medians)
+
+
+@pytest.mark.skipif(not _V2_NODE3.exists(), reason="the runs/ corpus is not in this checkout")
+def test_the_whole_run_of_the_corpuss_largest_log_is_actually_the_whole_run():
+    """The 88 MB log, which is what made this a defect and not a stray constant.
+
+    `_read_window` clamped every read by `_MAX_READ_BYTES`, so `whole_run=true` here answered from
+    byte 54,394,576 — the head 61.8 % unreachable at any parameter — and reported the last four
+    hours as the run. What that cost is the point: the truncated series says `first=5.8873
+    last=5.7632 net=-0.1241`, i.e. a loss that has barely moved, to a judge whose question is "is
+    this run learning?". The whole log says `first=13.1645 last=5.7632 net=-7.4013`. Sixty times the
+    movement, on the same bytes, from the same call.
+
+    It costs ~5 s (one read; 51 ms/MB of record split + regex, and cold geesefs I/O is 10 ms/MB of
+    it) — the SAME wall clock the broken six-read ladder paid to cover 38 % of the file.
+    """
+    size = os.path.getsize(_V2_NODE3)
+    assert size > 33_554_432, "this test is about a log larger than the READER's ceiling"
+    tools = LogQueryTools([LogSource(name="train.log", path=_V2_NODE3)], default="train.log")
+    whole = tools.execute("metric_series", {"metric": "loss", "whole_run": True, "bucket_s": 3600})
+    assert f"Read {size:,} of {size:,} bytes" in whole      # every byte, and in ONE read
+    assert "in 2 reads" not in whole and "in 6 reads" not in whole
+    assert "does NOT start at the run's start" not in whole
+    window = _window(whole)
+    assert window["first"] > 13.0 and window["net"] < -7.0
+    # The truncated answer is still derivable, and it is the misleading one — same file, same call,
+    # only the ceiling moved. This is the negative control for the paragraph above.
+    clipped = LogQueryTools([LogSource(name="train.log", path=_V2_NODE3)], default="train.log",
+                            max_scan_bytes=33_554_432)
+    short = clipped.execute("metric_series", {"metric": "loss", "whole_run": True,
+                                              "bucket_s": 3600})
+    assert _window(short)["net"] > -1.0
+    assert "does NOT start at the run's start" in short and "62 %) are below it" in short
 
 
 @pytest.mark.skipif(not _V7_NODE1.exists(), reason="the runs/ corpus is not in this checkout")

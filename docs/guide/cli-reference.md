@@ -1522,6 +1522,45 @@ looplab harden MEMORY_DIR [--rounds 1]
 | `MEMORY_DIR` | *(required)* | Memory dir; the exploit suite lives at `<memory_dir>/exploits.jsonl` |
 | `--rounds N` | `1` | Hacker/fixer iterations |
 
+## `landlock-check`
+
+Print the KERNEL read allow-list a run would grant under `landlock="enforce"`, and prove the ruleset
+applies. **This is the documented validation path for [`Settings.landlock`](configuration.md), which
+ships `off`** — read it before you flip that default, not after.
+
+```bash
+looplab landlock-check RUN_DIR [--no-probe]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run dir; the allow-list is derived from its own `task.snapshot.json` |
+| `--probe / --no-probe` | `--probe` | Fork a child, apply the ruleset, and prove a read inside the allow-list succeeds while one outside it is refused. The fork is why the irreversible `restrict_self` cannot touch your shell. |
+
+What it prints, in order: the Landlock ABI this kernel offers; **the mounts the task declares**, each
+marked if it is not present on this box; the full allow-list (workdir, run dir, the `data:` /
+`references:` mount sources, the interpreter, the model cache, the machine tiers); and `added: N
+skipped: M`. **A skipped rule is a DENIAL under an allow-list, never a no-op**, so any `skipped` is
+exit 1 and names the path that would be refused.
+
+**It fails closed when it cannot see what it is verifying** (exit 2, a one-line refusal): a missing
+`task.snapshot.json`, or one that no longer rebuilds into a valid task. That distinction is the whole
+point of the command — "this task declares no mounts" and "I could not look" must not print the same
+thing, because what follows a green light here is `LOOPLAB_LANDLOCK=enforce` on a real GPU eval, and
+a mount missing from a kernel allow-list does not degrade: the eval dies mid-training on a
+`PermissionError` reading the dataset. (Until 2026-08-15 the command read the wrong key and derived
+its list with the operator's mounts silently dropped, then reported `skipped: 0`.)
+
+The procedure before anyone flips the default:
+
+```bash
+looplab landlock-check RUN_DIR          # read the mounts + list, confirm `skipped: 0`
+LOOPLAB_LANDLOCK=enforce looplab run …  # then ONE real eval, and check it completed
+```
+
+The evidence that justifies the flip is that eval, not this command — this only tells you the ruleset
+is well-formed, contains your declarations, and applies.
+
 ## `tensorboard`
 
 Serve TensorBoard over a run's per-node training logs — online curves for all metrics the training

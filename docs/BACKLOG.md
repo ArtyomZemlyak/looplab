@@ -362,6 +362,63 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15, same day — and the fix cost nothing, which is the part worth keeping]
+  `metric_series(whole_run=true)` could not reach the head of any log over 33.5 MB, and said the
+  opposite** (found 2026-08-15 auditing the merge day's `tools/log_tools.py`). `_MAX_SCAN_BYTES`
+  (128 MiB) bounds a whole-run SCAN and `_MAX_READ_BYTES` (32 MiB) bounds ONE `read_log` answer —
+  two bounds answering two questions — but `_read_window` clamped every read by the READER's number,
+  so the escalation ladder walked up to a ceiling it could not spend, re-read the same 33.5 MB twice,
+  and nothing below `size - _MAX_READ_BYTES` was reachable at any parameter. **Reproduced, driven:**
+  on `rubertlite-dr-unified-v2/nodes/node_3/train.log` (88 MB) the head **61.8 %** was unreadable and
+  the answer's own receipt read *"earlier bytes not scanned — whole_run=true reads from the start"*
+  to a caller who had just passed `whole_run=true`; `rubert-dr-0807/nodes/node_1/train.log` (45 MB),
+  the first 11.4 MB. **What it cost, measured on that log:** the truncated series reports
+  `first=5.8873 last=5.7632 net=-0.1241` — a loss that has barely moved over four hours — and the
+  whole log reports `first=13.1645 last=5.7632 net=-7.4013`. Sixty times the movement, same bytes,
+  same call, to a judge whose question is "is this run learning?" and whose verdict can kill a
+  multi-hour GPU node. **THE FIX:** `_read_window` takes the CALLER's ceiling as a required
+  parameter (a default would restore exactly this), and an unbounded window skips the ladder — it
+  has nothing to discover, and each rung re-PARSES the prefix. `_MAX_SCAN_BYTES` did NOT move: it is
+  a bound on the judge's request path, not on the corpus, and at the measured 51 ms/MB of record
+  split + regex it is ~6.9 s worst case against a `train_monitor_interval_s=600` cadence, covering
+  the largest log 1.5x over. **Cost of reaching 100 % instead of 38 %: none** — the same 88 MB log
+  now answers in 1 read / 4.9 s where the broken 6-read ladder took 4.7 s to cover a third of it,
+  because I/O is 5-16 % of a scan (geesefs 101 MB/s cold, ~300 MB/s warm) and the ladder was already
+  paying for the whole file. Above the ceiling the head IS unreachable and the receipt now says the
+  thing that changes how the series is read — *"this series does NOT start at the run's start … the
+  first bucket is a MID-RUN value"* — rather than naming a remedy already spent. Driven in
+  `tests/test_log_tools.py`, including against the real 88 MB log with the truncated answer kept as
+  the negative control; all five tests fail on the pre-fix tree. **Residue:** `read_log` mode=search
+  is a TAIL read bounded by `_MAX_READ_BYTES`, so the START of a log over 32 MB is unsearchable
+  (head/range/tail all still reach their own end). Left as stated rather than fixed: the answer is
+  capped at 100 hits / `_MAX_LINES` records regardless, so widening buys reach for one mode at the
+  price of the per-answer bound's whole rationale.
+
+- **[FIXED 2026-08-15, same day] `looplab landlock-check` verified a ruleset containing none of the
+  operator's mounts** (found 2026-08-15 the same pass). `cli/inspect_cmds.py` read `task.get("repo")`
+  — which is the repo ROOT PATH, not a spec. **Censused over all 46 preserved
+  `runs/*/task.snapshot.json`: 45 `NoneType`, 1 `str`, 0 dicts.** So `spec` was always `None` and the
+  mounts were dropped, or — for the `str` shape, which ships in `examples/repo_composable_task.json`
+  and one preserved run — it reached `read_allowlist.mount_sources` and raised
+  `AttributeError: 'str' object has no attribute 'get'`. **Reproduced:** `landlock-check
+  runs/rubert-dr-0807` printed 16 rules holding neither of that task's two real declared mounts
+  (`/home/jovyan/data/datasets/dense-retrieval/rubertlite`, the base model) and then `skipped: 0`,
+  exit 0; a run dir with NO `task.snapshot.json` at all also printed a green list and exit 0. This is
+  the documented gate for flipping `Settings.landlock` to enforce, so what follows that green light
+  is a real GPU eval under a kernel allow-list built without the dataset — and a missing mount does
+  not degrade, it `EACCES` mid-training. No test drove the command body. **THE FIX:** the spec now
+  comes from where the ENGINE gets it — `TaskAdapter.repo_spec()` over the re-validated snapshot
+  (`existing_run=True`, as `resume`/`finalize` do), because `engine/resources.py::_landlock_allow`
+  passes exactly `self._repo_spec` and a gate that derives its input differently from the thing it
+  gates is not a gate. It PRINTS the declared mounts and their count before the allow-list (`0` on a
+  repo task is the fact the operator checks against their own `data:` block), marks one that is not
+  on this box, and FAILS CLOSED with a `ConfigRefusal` (one line, exit 2) when the snapshot is
+  missing or no longer rebuilds — "this task declares no mounts" and "I could not look" must not
+  print the same. A task that genuinely has no repo spec names its KIND, so that line cannot be
+  confused with the refusal. Five driven tests in `tests/test_metric_subject.py` (the read
+  allow-list's own section), all five failing on the pre-fix tree; `docs/guide/cli-reference.md`
+  gained the command, which it had never documented.
+
 - **[FIXED 2026-08-14, same day — kept as the record of what a content-derived tag cannot do]
   The `engine` extra-metric channel authenticated against bytes the candidate authors** (found
   2026-08-14 auditing the merge day against docs/36). **THE FIX, and the argument for it:** the
