@@ -44,7 +44,7 @@ from looplab.engine.orchestrator import (
 )
 from looplab.search.policy import make_policy
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
-from looplab.runtime.sandbox import make_sandbox
+from looplab.runtime.sandbox import docker_tier_kwargs, make_sandbox
 from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
 from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
@@ -860,9 +860,10 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         task=task,
         researcher=researcher,
         developer=developer,
-        sandbox=make_sandbox(settings.trust_mode, image=settings.docker_image,
-                             mem=settings.sandbox_memory, cpus=settings.sandbox_cpus,
-                             readonly_rootfs=settings.sandbox_readonly_rootfs,
+        # `docker_tier_kwargs(settings)` is the ONE Settings->container translation the three Docker
+        # surfaces share (see its docstring); the two `*_local` caps are spelled here because they
+        # belong to the SUBPROCESS tier and have no container to describe.
+        sandbox=make_sandbox(settings.trust_mode, **docker_tier_kwargs(settings),
                              mem_local=settings.sandbox_memory_local,
                              fsize_local=settings.sandbox_fsize_local),
         policy=make_policy(settings.policy, n_seeds=settings.n_seeds,

@@ -1657,7 +1657,12 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         from looplab.tools.write_tools import WriteTools
         from looplab.tools.shell_tools import ShellTools
         from looplab.tools.git_tools import GitTools
+        # `settings=` is what makes the containerized shell a full member of the untrusted tier:
+        # `docker_image`, `sandbox_memory`/`sandbox_cpus` and `sandbox_readonly_rootfs` reach it
+        # through the SAME `sandbox.docker_tier_kwargs` the eval tiers use. Without it the
+        # operator's container configuration stopped at the engine and this surface ran uncapped.
         sh = ShellTools(roots, mode=mode, trust_mode=trust_mode, approver=approver,
+                        settings=settings,
                         default_cwd=REPO_ROOT)   # the spec promises "default: repo root", not $HOME
         backup_dir = Path(run_root) / "assistant" / "backups"
         providers += [WriteTools(roots, mode=mode, approver=approver, repo_root=REPO_ROOT,

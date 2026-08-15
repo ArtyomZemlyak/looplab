@@ -523,6 +523,13 @@ node fails and its stderr is fed back to the agent's repair.
 | `untrusted` | `docker run --rm --network none --pids-limit 1024 --cap-drop ALL --security-opt no-new-privileges --memory 4g -v workspace:/work` | no network, fork-bomb guard, all Linux capabilities dropped, no privilege escalation, memory-capped (`sandbox_memory`; optional `--cpus` via `sandbox_cpus`), only the workspace mounted; metric read from the bind mount on the host. |
 | `hostile` | the above **+ gVisor** (`--runtime runsc`) | kernel-level isolation for actively hostile code. |
 
+The same row applies to the **operator assistant's shell** (`run_command`/`run_tests`/`git`), which
+is the third containerized surface of this tier and is built from the same
+`sandbox.docker_tier_kwargs` translation — so raising `sandbox_memory` or setting
+`sandbox_readonly_rootfs` moves the chat shell and the eval together. Under `trusted_local` the
+assistant's shell runs directly on your box and makes no isolation claim at all (see the trust-boundary
+note at the top of `tools/shell_tools.py`); the container is what `untrusted`/`hostile` buy.
+
 **Other guards** on the agent's path: the [Genesis](#preferred-let-genesis-author-it) repo scout is
 read-only and allow-lists file types — credential files (`.env`, keys, `~/.ssh`, …, anything
 secret-shaped) are **refused and hidden**, so the LLM API key in the server env can't leak to a model.

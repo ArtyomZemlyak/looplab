@@ -939,15 +939,55 @@ site that proves it is open.
   looking for the divergence in the authoritative record finds nothing, while the metric the
   8x-overspending eval produced stays selectable and can become champion.
 
-- **The assistant's containerized shell is unhardened** (found 2026-08-14 while wiring
-  `sandbox_readonly_rootfs`). `tools/shell_tools.py:213` builds its OWN
-  `make_docker_wrap(root, image, network="none")` and passes neither `mem`/`cpus` nor
-  `readonly_rootfs`, so none of the container tier's limits reach it. Reachable — `serve/assistant.py`
-  constructs `ShellTools` for the operator's chat assistant (NOT the Developer, which has
-  `tools/dev_probe.py`'s Python probe and no shell at all). Lower severity than a candidate's code for
-  that reason: it runs under a trust mode with an approver rather than as untrusted output. The fix is
-  a constructor parameter plus settings plumbing that `mem`/`cpus` also lack today, which is why it was
-  left rather than half-wired.
+- **~~The assistant's containerized shell is unhardened~~** (filed 2026-08-14; **re-derived, corrected
+  and CLOSED 2026-08-15**). The filing said "none of the container tier's limits reach it" and that
+  the plumbing `mem`/`cpus` "also lack today". Both are wrong, and the second is what kept the row
+  open: `engine/eval_dispatch.py` had threaded `sandbox_memory`/`sandbox_cpus`/`sandbox_readonly_rootfs`
+  since they shipped — only the assistant surface had no plumbing. **Measured** (argv built from the
+  real builders on shipped `Settings`, docker CLI absent on this box so nothing beyond argv is
+  claimed): the shell got `--rm --network none --pids-limit 1024 --cap-drop ALL --security-opt
+  no-new-privileges`, because `make_docker_wrap` routes through `sandbox.docker_run_argv` and those
+  flags are unconditional there. What it did NOT get was the CALLER-supplied column — `--memory 4g`
+  (the shipped default, present on the eval tier beside it), `--cpus`, `--read-only`/`--tmpfs`, and
+  the operator's `docker_image`. **The filing missed the worst one**: under `trust_mode="hostile"` it
+  also got no `--runtime runsc`, so the operator who chose the true-isolation tier ran the one surface
+  that executes `git`/`pytest`/`pip` on a shared kernel. Severity is still bounded the way the filing
+  says — an approver gates it and it is the operator's own chat, not candidate output.
+  **Fix: the shared derivation, not a fifth keyword argument.** `runtime/sandbox.py::docker_tier_kwargs`
+  is now the ONE `Settings` -> container translation (image, mem, cpus, readonly rootfs, and what
+  `hostile` MEANS via `HOSTILE_RUNTIME`), consumed by all three surfaces — `cli/__init__.py`'s
+  `make_sandbox`, `eval_dispatch`'s `make_docker_wrap`, and `ShellTools`. **Alternatives rejected:**
+  (a) *pass the five values at the third call site* — that is this repo's recurring defect with a
+  longer argument list, and it would have put a second copy of `"runsc" if hostile` in `tools/`;
+  (b) *state a narrower boundary honestly instead of fixing it* (document the assistant shell as
+  "container-shaped, not tier-grade") — rejected because the flags were already 5/9 present, so the
+  surface was not a different boundary but the same one missing its configured half, and a doc saying
+  so would have to be re-derived by every reader; (c) *refuse when a shell gets no `Settings`* —
+  rejected in favour of resolving `None` to `Settings()`, so an unconfigured surface gets the SHIPPED
+  container rather than a weaker one. **Proved by driving it**, not by a source pin:
+  `tests/test_docker_hardening_parity.py` now builds all three tiers from ONE `Settings` and asserts
+  every boundary row on each, with the assistant tier captured at `sandbox.run_argv` through the real
+  `ShellTools.execute` -> permission gate -> wrap path. Non-vacuity checked by mutating a throwaway
+  tree four ways (revert the wrap construction / drop the trust-mode override / weaken the no-settings
+  fallback / drop `settings=` in `serve/assistant.py`): 12, 1, 1 and 1 failures respectively. Worth
+  recording that the pre-fix construction restored *with a comment carrying the string
+  `docker_tier_kwargs`* still passed the source-scan test in that same file and was caught only by the
+  driven ones — the CLAUDE.md rule, observed.
+  **Residue deliberately left open.** (1) *Nothing here was run against a daemon.* There is no docker
+  CLI on this box (`which docker` -> not found), so every claim is about the argv `docker run` would
+  be given; the `docker`-marked tests skip here and the property is asserted at argv level, which is
+  the same level the two pre-existing tiers were ever asserted at. (2) *The parity table is still a
+  hand-written tier list.* It has three members because someone noticed the third; a FOURTH
+  containerized surface would be invisible to it in exactly the way the assistant shell was. The
+  source-scan test over the three known translation sites is a partial hedge and is evadable by a
+  comment, as above. Deriving the tier list from the tree (every `make_docker_wrap`/`DockerSandbox`
+  construction) was not attempted. (3) *`--network` is not in the bundle* — it is not a `Settings`
+  field and all surfaces take the `none` default, so an operator who needs egress still cannot ask
+  for it, and this change did not invent a knob for that. (4) *The shell's mount root is
+  `roots[0]`*, which for the assistant is `$HOME`, so the container's `/work` is the operator's whole
+  home directory, writable, as root inside. That is unchanged, is consistent with the shell's
+  `trusted_local` confinement (the same roots), and is a different question from tier parity — but a
+  `--read-only` rootfs does not protect it, and the row above should not be read as claiming it does.
 
 - **Three spellings of the RunResult timeout-nulling** — `runtime/sandbox.py:1314-1320`
   (`SubprocessSandbox`), `sandbox.py:1375-1381` (`DockerSandbox`), `runtime/command_eval.py:2286-2304`
