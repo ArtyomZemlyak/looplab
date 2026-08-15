@@ -646,6 +646,22 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   is derived from text the agent itself wrote, so it is stated in the judge's history as evidence
   and never stops anything on its own. Both ride on the durable `node_repaired` row, so a resume
   continues the streak rather than refunding it.
+  **How precise the advisory half is, re-measured 2026-08-15 over every repair on this box:** on the
+  two GPU runs the rung has actually graded it produced four `unmet` verdicts and one of them was a
+  real broken promise. Two of the three misses are now fixed, and both fixes move the verdict AWAY
+  from an accusation the text cannot support rather than toward one. A token the rationale only ever
+  used to cite **another** experiment — "node 1's identical mining config (`mining_type=1`,
+  `n_negatives=2`) already passed" — is evidence the rationale reasons *from*, not a promise it
+  makes, so it can no longer convict on its own; the verdict becomes `unstated`, the one that already
+  means "I could not check this", and never `verified`. And a claim written as an **abbreviation of
+  the identifier the code uses** — `grad_accum` against a diff that sets
+  `gradient_accumulation_steps` — now counts as met. Replayed over all 2,480 preserved repairs,
+  exactly three rows move and **no `inert` verdict moves at all**, so nothing about which nodes stop
+  repairing changes. The asymmetry behind both choices: a missed discrepancy is worse than a spurious
+  one only while spurious ones are rare, and at one-in-four they were not — a line the judge is shown
+  that is usually wrong is a line the judge learns to discount. What is deliberately still `unmet`:
+  a rationale that names the broken component and then edits a different file. That is a diagnosis
+  rather than a promise, but "you said the bug was in X and did not touch X" is worth saying.
 - **ablation-driven refinement** — neutralize a parameter (or a whole code block with
   `ablate_code_blocks`) to find the highest-impact lever, then refine it (`ablate_every`).
 - **merge / ensemble** — recombine two parents: a param mean, or a code-recombination ensemble
