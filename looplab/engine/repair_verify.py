@@ -388,8 +388,24 @@ def changed_region(prev_files, repaired_files, prev_code, new_code, *, cap: int 
     return "\n".join(parts)
 
 
-def _abbreviated_identifier(token: str, region: str):
+def region_identifiers(region: str) -> set:
+    """Every identifier the diff contains — the abbreviation matcher's whole search space.
+
+    HOISTED OUT of `_abbreviated_identifier`, which rebuilt it with `set(_IDENT_RE.findall(region))`
+    once PER CLAIMED TOKEN. `changed_region` is capped at 40 KB, `claimed_tokens` is uncapped (a
+    2,000-char rationale — `triage.TRIAGE_RATIONALE_CAP` — yields tens to low hundreds of tokens),
+    and one corpus node recorded 2,345 repairs, so the scan was quadratic in exactly the two numbers
+    that grow together. It is a pure function of the region, so computing it once per `verify_repair`
+    is the same answer for every token.
+    """
+    return set(_IDENT_RE.findall(region or ""))
+
+
+def _abbreviated_identifier(token: str, region: str, identifiers=None):
     """The identifier IN THE DIFF that `token` is an abbreviation of, or None.
+
+    `identifiers` is `region_identifiers(region)` when the caller already has it; `None` derives it,
+    which keeps this callable on its own (the truth-table tests do exactly that).
 
     Pure and total. Part-wise PREFIX matching in order: `grad_accum` -> `gradient_accumulation_steps`
     because "gradient".startswith("grad") and "accumulation".startswith("accum"). The diff's
@@ -411,7 +427,7 @@ def _abbreviated_identifier(token: str, region: str):
     parts = (token or "").split("_")
     if len(parts) < _ABBREV_MIN_PARTS or any(len(p) < _ABBREV_MIN_PART_CHARS for p in parts):
         return None
-    for cand in set(_IDENT_RE.findall(region or "")):
+    for cand in (region_identifiers(region) if identifiers is None else identifiers):
         if cand == token:
             continue  # an exact hit is `_claim_met`'s own answer, already given
         cand_parts = cand.split("_")
@@ -432,7 +448,7 @@ def _abbreviated_identifier(token: str, region: str):
     return None
 
 
-def _claim_met(token: str, changed_paths, region: str) -> bool:
+def _claim_met(token: str, changed_paths, region: str, identifiers=None) -> bool:
     """A file claim is met by the CHANGE SET (a path, not text); everything else by the region."""
     if _FILE_RE.fullmatch(token):
         base = token.rsplit("/", 1)[-1]
@@ -448,7 +464,7 @@ def _claim_met(token: str, changed_paths, region: str) -> bool:
         return True
     # THE CODEBASE'S SPELLING, NOT THE PROSE'S. Last, so it can only ever turn a miss into a hit and
     # never change an exact match's answer.
-    return _abbreviated_identifier(token, region) is not None
+    return _abbreviated_identifier(token, region, identifiers) is not None
 
 
 def _citation_clauses(text: str) -> list:
@@ -464,14 +480,17 @@ def _citation_clauses(text: str) -> list:
     return out
 
 
-def _is_citation_only(token: str, rationale: str) -> bool:
+def _is_citation_only(token: str, rationale: str, clauses=None) -> bool:
     """Does EVERY occurrence of this token sit inside a clause about another experiment?
+
+    `clauses` is `_citation_clauses(rationale)` when the caller already has it — same hoist, same
+    reason, as `region_identifiers` above: this ran once per UNMET token over the whole rationale.
 
     Every, not any: "node 1 used nll_cos; I deleted the nll_cos path" promises something, and one
     citation of a name must not buy amnesty for a real claim about it elsewhere in the same text.
     """
     text = rationale if isinstance(rationale, str) else ""
-    clauses = _citation_clauses(text)
+    clauses = _citation_clauses(text) if clauses is None else clauses
     if not clauses:
         return False
     hits = [m.start() for m in re.finditer(re.escape(token), text)]
@@ -495,7 +514,10 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     claims = claimed_tokens(rationale)
     if not claims:
         return RepairVerification(REPAIR_UNSTATED)
-    unmet = tuple(t for t in claims if not _claim_met(t, changed_paths, region))
+    # ONE derivation each, shared by every token. Both were per-token scans of an input that does not
+    # change across the loop — see `region_identifiers` for the two numbers that made that quadratic.
+    identifiers = region_identifiers(region)
+    unmet = tuple(t for t in claims if not _claim_met(t, changed_paths, region, identifiers))
     if len(unmet) < len(claims):
         return RepairVerification(REPAIR_VERIFIED, claims)
     # NOTHING WAS MET — but a token the rationale only ever used to cite ANOTHER experiment is not a
@@ -504,7 +526,8 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     # really contains it; it may not CONVICT here. Demoting rather than dropping is the point: the
     # token stays in `claims`, and `unstated` says "I could not check this", which is a fact the
     # judge is already shown and which a model gains nothing by steering into.
-    convicting = tuple(t for t in unmet if not _is_citation_only(t, rationale))
+    clauses = _citation_clauses(rationale if isinstance(rationale, str) else "")
+    convicting = tuple(t for t in unmet if not _is_citation_only(t, rationale, clauses))
     if not convicting:
         return RepairVerification(REPAIR_UNSTATED, claims)
     return RepairVerification(REPAIR_UNMET, claims, convicting)

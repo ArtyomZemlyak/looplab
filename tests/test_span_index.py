@@ -2960,3 +2960,42 @@ def test_no_site_re_derives_the_trace_root():
     assert offenders == [], (
         "a private trace-root resolution came back; call `traceview.trace_root_span` instead "
         f"(doc 25 EV-10): {offenders}")
+
+
+def test_every_per_node_evidence_route_refuses_a_stale_attempt_in_ONE_shape(tmp_path):
+    """`node_attempt_changed` is ONE wire contract, and the client branches on it.
+
+    It was raised from a dozen sites here, each with its own hand-copied four-key body and nothing
+    holding them together — and the newest route (`/episodes`) was written by copying the previous
+    one verbatim, pre-read block and post-read CAS included. This drives the shape across every
+    per-node evidence surface at once: same code, same keys, same remediation, and a MESSAGE that
+    names the evidence the operator was reading (the one field that legitimately differs).
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from looplab.serve.server import make_app
+
+    _http_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    # `logs`/`metrics` fence on an EXACT attempt; the two trace windows and the episode map serve an
+    # earlier attempt as a historical read and refuse only one the node has never reached.
+    surfaces = {
+        "logs": "logs", "metrics": "metrics",
+        "trace": "trace", "conversation": "conversation", "episodes": "episodes",
+    }
+    seen = {}
+    for name, path in surfaces.items():
+        response = client.get(f"/api/runs/demo/nodes/0/{path}", params={"attempt": 9})
+        assert response.status_code == 409, (name, response.text)
+        detail = response.json()["detail"]
+        assert set(detail) == {"code", "node_id", "expected_attempt", "current_attempt",
+                               "message", "remediation"}, (name, detail)
+        assert detail["code"] == "node_attempt_changed"
+        assert detail["node_id"] == 0
+        assert detail["expected_attempt"] == 9 and detail["current_attempt"] == 0
+        assert detail["remediation"] == "Reload node state and request the current attempt."
+        seen[name] = detail["message"]
+    # Non-vacuous: the message really is per-surface, so collapsing it into the builder would be a
+    # loss the operator can read.
+    assert len(set(seen.values())) == len(seen), seen
+    assert "episodes" in seen["episodes"] and "trace" in seen["trace"]

@@ -239,3 +239,78 @@ def test_the_browser_label_table_names_exactly_the_phases_this_engine_emits():
     assert labelled == registered, (
         f"unlabelled phases render the caller's fallback: {sorted(registered - labelled)}; "
         f"labels for phases nothing emits are dead: {sorted(labelled - registered)}")
+
+
+# ------------------------------------------- what a CONCURRENT append site owes invariant #1 (2026-08-15)
+
+def test_the_diagnostic_classification_the_concurrent_append_leans_on_is_enforced_at_import():
+    """`_progress` appends `EV_PHASE_PROGRESS` DIRECTLY from the speculative producer worker and
+    from the parallel-build worker threads. Invariant #1 permits a non-main-task append only for a
+    fold-ignored DIAGNOSTIC type, and `_progress`'s own docstring says so — but the module carried no
+    assertion, while every sibling concurrent-diagnostic writer (`evaluate.py`, `eval_dispatch.py`,
+    both watchdogs) asserts it AT the append site.
+
+    Driven, not pinned: the module SOURCE is re-executed with the registry membership removed, which
+    is what a later registry edit folding this type would look like. The guard has to be at IMPORT and
+    not inside `_emit`, whose body is wrapped in a containment `except Exception` that would swallow
+    it.
+
+    Executed into a THROWAWAY namespace rather than through `importlib.reload`: reloading rebinds
+    `SharedEngineMixin` to a new class object while `Engine` still inherits the old one, which is a
+    process-wide identity change made to prove a local property.
+    """
+    from pathlib import Path
+
+    import looplab.events.types as types_mod
+    import looplab.engine.shared as shared
+
+    source = Path(shared.__file__).read_text(encoding="utf-8")
+    original = types_mod.DIAGNOSTIC_EVENTS
+    try:
+        types_mod.DIAGNOSTIC_EVENTS = tuple(e for e in original if e != EV_PHASE_PROGRESS)
+        with pytest.raises(AssertionError, match="fold-ignored DIAGNOSTIC"):
+            exec(compile(source, shared.__file__, "exec"),
+                 {"__name__": "looplab.engine.shared_folded_probe", "__file__": shared.__file__})
+    finally:
+        types_mod.DIAGNOSTIC_EVENTS = original
+    # ...and the same source is fine once the membership is back, so the probe proved the assertion
+    # and not merely that the module can be made to fail.
+    exec(compile(source, shared.__file__, "exec"),
+         {"__name__": "looplab.engine.shared_probe", "__file__": shared.__file__})
+    assert EV_PHASE_PROGRESS in shared.DIAGNOSTIC_EVENTS
+
+
+def test_a_body_that_reports_a_fact_named_ok_does_not_destroy_the_failure_it_was_reporting(tmp_path):
+    """The yielded dict exists so a body can add what it LEARNED, and `learned["ok"]` used to be a
+    duplicate-keyword `TypeError`.
+
+    Raised at the CALL site — outside `_emit`'s containment — from inside the `finally`, where it
+    REPLACES the exception the phase was propagating. So a build that failed for a real reason
+    surfaced as a TypeError about keyword arguments, and the beacon that was supposed to narrate the
+    failure destroyed it. `seconds` is the other colliding name; `detail` collisions were always
+    absorbed by the dict merge, which is what made this easy to introduce and hard to notice.
+    """
+    from looplab.engine.shared import SharedEngineMixin
+    from looplab.events.eventstore import EventStore
+
+    class _E(SharedEngineMixin):
+        pass
+
+    engine = _E()
+    engine.store = EventStore(tmp_path / "events.jsonl")
+
+    with pytest.raises(RuntimeError, match="the real failure"):
+        with engine._progress(PROGRESS_STAGE_BUILD, "implement") as learned:
+            learned["ok"] = "whatever the body thinks"
+            learned["seconds"] = 999
+            learned["files"] = 3
+            raise RuntimeError("the real failure")
+
+    _rows, beacons = _beacons(tmp_path)
+    finished = [b for b in beacons if b["status"] == "finished"]
+    assert len(finished) == 1
+    # The engine's own fields are authority and win the merge; the body's fact rides beside them.
+    assert finished[0]["ok"] is False
+    assert isinstance(finished[0]["seconds"], float)
+    assert finished[0]["files"] == 3
+    assert finished[0]["stage"] == PROGRESS_STAGE_BUILD and finished[0]["phase"] == "implement"

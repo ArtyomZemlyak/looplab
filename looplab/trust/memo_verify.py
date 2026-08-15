@@ -213,6 +213,23 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
     The memo event is an audit snapshot, while reset/tombstone/abort commands can arrive before finalization.
     A positive cross-run claim therefore needs both the exact evidence the verifier saw and a second current-
     generation/active-lifecycle check. Legacy rows have no identity receipt and intentionally return unknown.
+
+    LIFECYCLE WAS NOT ENOUGH, and the missing half is `engine/memory.py::unreliable_metric_ids`
+    (2026-08-15). Every check below asks whether a cited node still EXISTS in the state the verifier
+    saw it in; none asked whether this run trusts its number. So a node the run itself refuses to
+    select on — SALVAGED and not admitted (`metric_salvaged`, i.e. nobody measured the value), or
+    hard reward-hack/leakage flagged under `trust_gate=gate|block` — could ratify a D8 claim as
+    `supported` into the shared `research_claims.jsonl`, which later runs retrieve as evidence. That
+    is the identical leak the salvage fix closed for `lessons.jsonl`/`skills/`, one consumer over:
+    `engine/memory.py::select_comparison_pairs` and `engine/lessons_distill.py` have both consulted
+    that predicate since it was written, and this — the only other writer of a durable CROSS-RUN
+    claim grounded in a node — did not.
+
+    THE PREDICATE IS DELIBERATELY NOT `promotion_eligible_nodes`, for the reason its own docstring
+    gives: a CONSTRAINT-violating node's number really was measured and its exclusion is a fact about
+    the bound, so it keeps its place here. What is refused is a claim resting on a number nobody
+    measured or nobody earned. Function-local import, mirroring `unreliable_metric_ids`' own imports
+    of its two halves: `engine` imports `trust`, so the module-level edge would be a cycle.
     """
     claim_receipt = research_evidence_receipt(claim)
     evidence = verdict_row.get("evidence") if isinstance(verdict_row, dict) else None
@@ -235,6 +252,18 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
         return None, "verification evidence identity does not match the claim"
     aborted = set(getattr(state, "aborted_nodes", ()))
     final_nodes = getattr(state, "nodes", {})
+    from looplab.engine.memory import unreliable_metric_ids
+    try:
+        unreliable = unreliable_metric_ids(state)
+    except Exception:  # noqa: BLE001 — see below; this contains, it never permits
+        # FAIL CLOSED, and note this is the OPPOSITE containment decision from the predicate's own.
+        # `unreliable_metric_ids` deliberately has no `except` because swallowing there returns the
+        # EMPTY set, i.e. answers "everything is reliable" for a state nobody could read. Here the
+        # answer runs the other way: a state this cannot be evaluated over is not permission to
+        # ratify, so an unreadable one refuses every claim rather than admitting it. Contained at all
+        # because the alternative is an exception escaping into finalize, where it strips the
+        # verification from a whole memo with no reason recorded anywhere.
+        return None, "verification could not establish whether this run trusts the cited node(s)"
     expected_node_refs: list[dict[str, int]] = []
     expected_node_identities: set[tuple[int, int]] = set()
     for nid in cited_nodes:
@@ -243,6 +272,12 @@ def finalize_verified_evidence(claim: dict, verdict_row: dict,
                 or n.status not in (NodeStatus.evaluated, NodeStatus.failed)
                 or type(n.attempt) is not int or n.attempt < 0):
             return None, "verification evidence lifecycle is stale"
+        # A DISTINCT refusal from the lifecycle one above, because the remedies are different: a
+        # stale lifecycle means the run moved under the verdict, this means the run does not trust
+        # the node's number at all and never will.
+        if nid in unreliable:
+            return None, ("verification evidence rests on a node whose metric this run refuses to "
+                          "select on")
         identity = (nid, n.attempt)
         if identity not in expected_node_identities:
             expected_node_identities.add(identity)

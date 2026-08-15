@@ -274,6 +274,40 @@ _MECHANICAL_MARKERS = (
     "is not defined", "no attribute",
 )
 
+# THE BOUND ON REPAIRING BLIND, i.e. on the branch F5 added below — a `crash` this path can say
+# NOTHING about, repaired anyway because abandoning it outright throws away a node one edit would
+# have fixed. It is deliberately TIGHTER than the caller's `max_attempts`, and the reason is that in
+# the configuration this whole function serves, `max_attempts` is the only other thing left:
+#
+#   * no judge (`unified_agent` off) is exactly why control is here at all, and
+#     `crash_repair.py::_repair_critic` reads `researcher.repair_critic` — the SAME object that
+#     would have carried `triage_crash` — so a run without one has no critic either;
+#   * `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins `inline_repair_attempts: 0` on every resumed
+#     pre-versioning run, which `evaluate._effective_repair_cap` reads as the engine's absolute
+#     `_UNLIMITED_REPAIR_CEILING` of 50;
+#   * `repair_judgment.repair_redone_work_stop`, the SECONDS floor beside it, returns None whenever
+#     the task declares no pipeline cost at all — it is the right bound and it is not always there.
+#
+# Driven, that product is 51 full pipeline evaluations for one undiagnosable `RuntimeError`
+# (`tests/test_first_stage_repair_cost.py`), on a task whose one pipeline may be multi-hour. 50 is
+# the ceiling under a JUDGE that can say "I no longer know how to fix this"; with no judge there is
+# nothing to defer to and the ceiling is doing all of the work alone.
+#
+# 12 IS NOT A NEW NUMBER. It is the pre-F8 `Settings.inline_repair_attempts` default, calibrated
+# against the longest legitimate chain on record — `runs/rubert-dr-0805` node 0, eight repairs (six
+# stale-dependency migrations plus two on its actual research question) — plus room for a chain half
+# again as long, which is precisely the calibration a COUNT-driven loop needs and the one the F8
+# redesign retired because a judgement replaced it. Where no judgement exists, the count it replaced
+# is the honest bound. It clears every legitimate chain in the corpus (v8 node 3's four first-stage
+# repairs included) and cuts the blind runaway from 51 evaluations to 13.
+#
+# It bounds ONLY the undiagnosed branch. A MECHANICAL crash names what to change in its own
+# traceback, so the rule path is not guessing there and keeps the caller's cap unchanged — the six
+# migrations above are all mechanical, and shortening them is how a node dies before it reaches its
+# research question. And it is a `min` with `max_attempts`, never a widening: an operator who spelled
+# a smaller cap keeps it.
+_RULE_BLIND_CRASH_ATTEMPTS = 12
+
 # --- The triage-verdict contract ---------------------------------------------------------------
 # WHETHER TO KEEP REPAIRING THIS NODE. The inline-repair loop consults the triage model once per
 # attempt, and its answer IS the stopping rule (`engine/evaluate.py`), backstopped by the operator's
@@ -473,8 +507,22 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     # unchanged, so a drift rejection or an `idea_rejected` still ends the node here as before. The
     # rule path still never returns `reject_idea`: condemning a whole lineage remains the model's
     # call, and this path has no way to form it.
-    if reason == "crash" and attempt <= max_attempts:
-        return {"action": "repair",
-                "rationale": "crash with attempts remaining and no judge wired (rule-based)"}
+    #
+    # ...AND IT HAS A BOUND OF ITS OWN, because "the floors sit under it" was measured to be one
+    # floor in the configuration that reaches here (see `_RULE_BLIND_CRASH_ATTEMPTS` for the three
+    # that are inert and the 51 evaluations that fall out of it). Repairing blind is worth a bounded
+    # number of tries and is not worth fifty; the mechanical branch above is untouched.
+    if reason == "crash" and not mechanical:
+        blind_cap = min(int(max_attempts), _RULE_BLIND_CRASH_ATTEMPTS)
+        if attempt <= blind_cap:
+            return {"action": "repair",
+                    "rationale": "crash with attempts remaining and no judge wired (rule-based)"}
+        # Named separately from the catch-all below: an operator reading this terminal must be able
+        # to tell "your cap ran out" from "nothing here could say what to change next", because the
+        # remedies are different (raise the cap vs wire a triage model).
+        return {"action": "abandon",
+                "rationale": (f"a crash this rule path cannot classify has had its {blind_cap} blind "
+                              f"repair attempt(s) and no triage model is wired to decide what to "
+                              f"change next (rule-based)")}
     return {"action": "abandon",
             "rationale": "non-repairable failure or attempts exhausted (rule-based)"}

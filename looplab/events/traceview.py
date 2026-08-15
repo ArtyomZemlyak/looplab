@@ -1058,24 +1058,47 @@ def claimed_build_traces(spans, *, _normalized: bool = False) -> dict:
     conflicting: set[str] = set()
     for span in (spans if _normalized else _normalize_spans(spans)):
         attributes = span.get("attributes")
-        if not isinstance(attributes, dict):
+        node_id = attributes.get("node_id") if isinstance(attributes, dict) else None
+        claim = span_build_trace_claim(attributes, span.get("trace_id"), node_id)
+        if claim is None:
             continue
-        claimed = attributes.get(NODE_BUILD_TRACE_ATTRIBUTE)
-        node_id = attributes.get("node_id")
-        if not isinstance(claimed, str) or not claimed or node_id is None:
-            continue
-        # A span may not claim its OWN trace: that is what `node_id` already says, and honouring it
-        # would let one stamped span silently re-attribute every sibling in a shared trace.
-        if claimed == str(span.get("trace_id") or ""):
-            continue
-        generation = attributes.get("generation")
-        generation = generation if type(generation) is int and generation >= 0 else 0
+        claimed, generation = claim
         prior = claims.setdefault(claimed, (node_id, generation))
         if str(prior[0]) != str(node_id):
             conflicting.add(claimed)
     for trace_id in conflicting:
         claims.pop(trace_id, None)
     return claims
+
+
+def span_build_trace_claim(attributes, trace_id, node_id):
+    """The claim ONE span makes on the trace that BUILT its node: `(claimed_trace_id, generation)`,
+    or None when this span makes none.
+
+    THE PER-SPAN HALF of `claimed_build_traces`, extracted 2026-08-15 because it had TWO bodies.
+    `span_index.SpanIndex._claim_build_trace` re-stated it row by row (an index gets an append
+    without a rebuild, so it cannot fold the whole list) under a docstring promising it was "kept
+    byte-for-byte equivalent" BY HAND. Two self-consistent bodies is exactly the shape that lets the
+    INDEXED route and the no-index fallback answer differently about the same node with nothing going
+    red — and what this rule decides is whether a node's trace shows its whole Developer build or two
+    spans, i.e. the F7 defect that left 91 % of one run's spans unattributable. The AGGREGATION
+    (first claim wins, a contested trace is awarded to neither) stays with each caller, because the
+    index has to make that refusal permanent across appends and a one-pass fold does not.
+
+    Three rules, all of them here now:
+      * a claim needs a claiming node — an unstamped span names nothing;
+      * a span may NOT claim its own trace, which is what its `node_id` already says, and honouring
+        it would let one stamped span silently re-attribute every sibling in a shared trace;
+      * the claim carries the CLAIMING span's lifecycle, defaulted to generation 0, so a
+        `node_reset` rebuild reaches its own build and not the abandoned one.
+    """
+    if not isinstance(attributes, dict) or node_id is None:
+        return None
+    claimed = attributes.get(NODE_BUILD_TRACE_ATTRIBUTE)
+    if not isinstance(claimed, str) or not claimed or claimed == str(trace_id or ""):
+        return None
+    generation = attributes.get("generation")
+    return claimed, (generation if type(generation) is int and generation >= 0 else 0)
 
 
 def claimed_trace_node_id(claimed, trace_id, *, generation: Optional[int] = None):

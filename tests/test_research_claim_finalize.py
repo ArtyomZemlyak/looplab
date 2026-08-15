@@ -26,6 +26,12 @@ def _node(node_id: int, *, generation: int = 0, tombstoned: bool = False) -> Nod
 def _finalize_claims(tmp_path, research, *, run_id: str = "run-finalize", nodes=(),
                      aborted=()) -> list[dict]:
     engine = SimpleNamespace(memory_dir=str(tmp_path))
+    # `store_research_claims` is typed `final: RunState` and is handed a real fold in production, so
+    # this double has to carry every field the finalize path reads off one. `trust_gate` and
+    # `reward_hacks` joined that set on 2026-08-15, when `finalize_verified_evidence` began asking
+    # `engine/memory.py::unreliable_metric_ids` whether the run trusts the cited node's metric —
+    # without them the predicate raised, and the claim silently persisted with no `verification` key
+    # at all rather than with a stated verdict.
     final = SimpleNamespace(
         research=research,
         run_id=run_id,
@@ -33,6 +39,8 @@ def _finalize_claims(tmp_path, research, *, run_id: str = "run-finalize", nodes=
         direction="max",
         nodes={node.id: node for node in nodes},
         aborted_nodes=list(aborted),
+        trust_gate="audit",
+        reward_hacks=[],
     )
     LessonMemory(engine).store_research_claims(final)
     return load_research_claims(tmp_path)

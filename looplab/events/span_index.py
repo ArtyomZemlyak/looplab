@@ -51,8 +51,8 @@ from looplab.core.trace_files import (
 from looplab.events.eventstore import (
     JsonlRecordInvalid, _interprocess_lock, decode_jsonl_line, scan_jsonl_region)
 from looplab.events.traceview import (
-    NODE_BUILD_TRACE_ATTRIBUTE, _normalize_span, _strip_span_io, claimed_trace_node_id,
-    effective_node_id, root_span_generation, root_span_node_id,
+    _normalize_span, _strip_span_io, claimed_trace_node_id,
+    effective_node_id, root_span_generation, root_span_node_id, span_build_trace_claim,
     trace_root_generation, trace_root_node_id, trace_root_span)
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
@@ -600,20 +600,19 @@ class SpanIndex:
     def _claim_build_trace(self, light: dict, attributes: dict, nid, tid) -> None:
         """Record this span's claim on the run-scoped trace that BUILT its node.
 
-        The rule and its rationale are `traceview.claimed_build_traces`; this is the incremental
-        half, applied one row at a time so an append gets it without a rebuild. Kept byte-for-byte
-        equivalent to that function: a self-claim is ignored, the claim carries the CLAIMING span's
-        lifecycle, and a trace two different nodes claim is awarded to neither.
+        The per-span DECISION is `traceview.span_build_trace_claim` — one body, called from here per
+        appended row and from `claimed_build_traces` per folded list, because two hand-synced copies
+        of it could make the indexed route and the no-index fallback answer differently about the
+        same node with nothing going red. What stays here is the AGGREGATION, which is genuinely not
+        the same as the fold's: an index must make a conflict permanent across later appends.
         """
-        claimed = attributes.get(NODE_BUILD_TRACE_ATTRIBUTE)
-        if (not isinstance(claimed, str) or not claimed or claimed == str(tid)
-                # A contested trace stays dropped for the rest of this index's life. Without this
-                # the FIRST claimant's next row would simply re-instate it, which makes the refusal
-                # depend on file order — the one thing an attribution rule may not do.
-                or claimed in self.build_claim_conflicts):
+        claim = span_build_trace_claim(attributes, tid, nid)
+        # A contested trace stays dropped for the rest of this index's life. Without this the FIRST
+        # claimant's next row would simply re-instate it, which makes the refusal depend on file
+        # order — the one thing an attribution rule may not do.
+        if claim is None or claim[0] in self.build_claim_conflicts:
             return
-        generation = attributes.get("generation")
-        generation = generation if type(generation) is int and generation >= 0 else 0
+        claimed, generation = claim
         prior = self.build_claims.get(claimed)
         if prior is None:
             self.build_claims[claimed] = (nid, generation)
@@ -795,14 +794,31 @@ class SpanIndex:
 
         A node also reaches the run-scoped trace that BUILT it — the Card lane's `card_build` and its
         `plan`/`stages`/tool/generation subtree, which run before any node id exists and therefore
-        carry none. Those traces are not candidates by ``node_tids`` (no row in them names the node);
-        they are named by the node's OWN `materialize_node` span, and `build_claims` resolved that
-        link over the WHOLE index. See `traceview.claimed_build_traces`.
+        carry none. Those traces are usually not candidates by ``node_tids`` (no row in them names
+        the node); they are named by the node's OWN `materialize_node` span, and `build_claims`
+        resolved that link over the WHOLE index. See `traceview.claimed_build_traces`.
+
+        ONE PASS OVER THE UNION OF THE TWO CANDIDATE SETS, and that is the fix rather than a tidy-up.
+        This was two loops, and a trace can be in BOTH sets — the build trace holds one span stamped
+        with the target (a row written after the id was reserved) AND carries the node's claim.
+        Neither loop's guards excluded the other's, so every row the two selections share was
+        appended TWICE and survived `sorted`: `node_span_count`, `_node_window_snapshot`'s `total`,
+        `light_spans_for_node` and `full_spans_for_node` all double-counted, and the last re-read the
+        same byte offsets to build a window containing each span twice.
+        `traceview._bounded_node_trace_tail` — the no-index half — cannot reach that, because it
+        resolves ONE scope per trace in a dict, and the two selections must agree.
+
+        So the SCOPE rule is now that function's, stated once: a trace whose root names no node and
+        which this node CLAIMS is scoped by the claim (and is fenced by the CLAIM's lifecycle, never
+        by the producer trace's root, which ran before the node existed); anything else is fenced by
+        its root generation and scoped by its root node. A claim only ever FILLS a None — a trace
+        whose root names a node is already that node's, and the two other readers
+        (`_conversation_bands`, `build_trace_view`) consult the claim only on an empty root, so a
+        selection that did otherwise would hand the conversation rows it then refuses to render.
         """
         target = str(node_id)
-        tids = self.node_tids.get(target, ())
         rows: list[int] = []
-        for tid in tids:
+        for tid in {*self.node_tids.get(target, ()), *self.node_build_tids.get(target, ())}:
             trace_rows = list(self.by_tid.get(tid, ()))
             if not trace_rows:
                 continue
@@ -817,44 +833,26 @@ class SpanIndex:
             # for the generation and then the node id paid for it twice, per candidate trace, per
             # request, on traces that reach 14,507 spans.
             trace_root = trace_root_span(trace_spans, _normalized=True)
-            if (generation is not None
-                    and root_span_generation(trace_root) != generation):
+            scope = root_span_node_id(trace_root)
+            # Shaped exactly like `_bounded_node_trace_tail`'s `trace_scope` loop, branch for branch,
+            # because the two must agree: a CLAIMED build trace is fenced by the CLAIM's lifecycle
+            # and never by its root's (it ran before the node existed, so its root carries whatever
+            # generation context the producer thread happened to inherit); everything else is fenced
+            # by the root's.
+            claimed_nid = (claimed_trace_node_id(self.build_claims, tid, generation=generation)
+                           if scope is None else None)
+            if claimed_nid is not None:
+                scope = claimed_nid
+            elif generation is not None and root_span_generation(trace_root) != generation:
                 continue
-            root_nid = root_span_node_id(trace_root)
-            # A trace is only a candidate because `node_tids` saw the target on SOME row. Shared
-            # long-lived traces can also carry newer rows stamped for other nodes. Filter by the
-            # shared per-span-first/root-fallback attribution rule BEFORE totals and tail limits;
-            # otherwise another node's newest row consumes the window and the requested node looks
-            # empty while its total falsely counts foreign rows.
+            # A trace is only a candidate because `node_tids` saw the target on SOME row, or because
+            # this node claims it. Shared long-lived traces can also carry newer rows stamped for
+            # other nodes. Filter by the shared per-span-first/root-fallback attribution rule BEFORE
+            # totals and tail limits; otherwise another node's newest row consumes the window and the
+            # requested node looks empty while its total falsely counts foreign rows.
             rows.extend(
                 row for row in trace_rows
-                if (effective := effective_node_id(self.light[row], root_nid)) is not None
-                and str(effective) == target
-            )
-        for tid in self.node_build_tids.get(target, ()):
-            # No root GENERATION fence here — the build ran before the node existed, so its
-            # lifecycle comes from the CLAIM (checked by `claimed_trace_node_id`) and never from the
-            # producer's trace root.
-            if claimed_trace_node_id(
-                    self.build_claims, tid, generation=generation) is None:
-                continue
-            trace_rows = list(self.by_tid.get(tid, ()))
-            if not trace_rows:
-                continue
-            # A claim only ever FILLS a None. A trace whose root names a node is already that node's
-            # — in both other readers (`_conversation_bands`, `build_trace_view`) the claim is
-            # consulted only when `trace_root_node_id` came back empty, and a selection that did not
-            # match them would hand the conversation rows it then refuses to render.
-            if root_span_node_id(
-                    trace_root_span([self.light[row] for row in trace_rows],
-                                    _normalized=True)) is not None:
-                continue
-            # The claim SUPPLIES the trace-level fallback this trace never had, so the very same
-            # per-span-first rule applies: a build-trace row with no id of its own is this node's,
-            # and one carrying another node's id still belongs to that node.
-            rows.extend(
-                row for row in trace_rows
-                if (effective := effective_node_id(self.light[row], target)) is not None
+                if (effective := effective_node_id(self.light[row], scope)) is not None
                 and str(effective) == target
             )
         return sorted(rows)

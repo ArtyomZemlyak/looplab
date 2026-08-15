@@ -2993,24 +2993,39 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 or getattr(self, "_spec_builds", None)):
             return False
         overrides = getattr(state, "budget_overrides", None) or {}
-        # The CEILING is the run's own launch treatment, read from the log first: a resume onto a
-        # bigger box must not be able to widen past what this run was authorized to run at, and
-        # `_eval_parallel_launched` on a resumed process describes the NEW box (invariant #6).
-        pinned = self._recorded_settled_width(state, "eval_parallel", EVAL_WIDTH_MAX)
-        ceiling = pinned if pinned else self._eval_parallel_launched
-        # …but the log's `eval_parallel` may itself already be a re-pin, and a re-pin must never
-        # become its own ceiling — that would ratchet the width monotonically down and make one wide
-        # proposal permanent. The PIN is the ceiling, always.
+        # THE CEILING IS THE LAUNCH PIN, ALWAYS, and it is read from exactly one place for that
+        # reason. Two rules meet here and only one spelling satisfies both:
+        #
+        #   * a resume onto a bigger box must not widen past what this run was authorized to run at,
+        #     because `_eval_parallel_launched` on a resumed process describes the NEW box
+        #     (invariant #6) — so the LOG outranks this process;
+        #   * a re-pin must never become its own ceiling, or the width ratchets monotonically down
+        #     and one wide proposal is permanent — so the pin outranks the re-pin.
+        #
+        # `_recorded_settled_width` answers the OPPOSITE of the second rule by contract: its whole
+        # docstring is "the re-pin wins over the pin", because it answers "what width were the events
+        # after this row produced under?". That is the right question for resume reconciliation and
+        # the wrong one for a ceiling, so this reads `state.eval_parallel` — the `run_started` pin —
+        # directly. A log with no valid pin predates the pin entirely, and there the only launch
+        # treatment that exists is this process's own resolution.
         launch_pin = getattr(state, "eval_parallel", 0)
-        if type(launch_pin) is int and 1 <= launch_pin <= EVAL_WIDTH_MAX:
-            ceiling = launch_pin
-        settled = {}
-        if (self._eval_parallel_startup_auto
+        ceiling = (launch_pin if type(launch_pin) is int and 1 <= launch_pin <= EVAL_WIDTH_MAX
+                   else self._eval_parallel_launched)
+        if not (self._eval_parallel_startup_auto
                 and not any(key in overrides for key in ("max_parallel", "eval_parallel"))):
-            width = proposal_derived_width(len(getattr(self, "_gpu_ids", None) or []),
-                                           self._proposal_footprints(state), ceiling=ceiling)
-            if width is not None and width != self._eval_parallel:
-                settled["eval_parallel"] = width
+            return False
+        # ONE reading of the board and of the pool, shared by the DECISION and by the RECEIPT it
+        # writes. `_proposal_footprints` walks every Card in `state.cards` and runs
+        # `effective_card_footprint` per selection-ready one, so asking twice per turn paid for that
+        # walk twice — and, worse, let the receipt describe footprints the width was NOT derived
+        # from if anything moved the board between the two calls. Evidence that does not come from
+        # the decision's own inputs is not evidence.
+        pool = len(getattr(self, "_gpu_ids", None) or [])
+        footprints = self._proposal_footprints(state)
+        settled = {}
+        width = proposal_derived_width(pool, footprints, ceiling=ceiling)
+        if width is not None and width != self._eval_parallel:
+            settled["eval_parallel"] = width
         if not settled:
             return False
         # llm_parallel FOLLOWS, but only where it was itself AUTO — AUTO llm width IS the settled eval
@@ -3032,8 +3047,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             follow = min(LLM_WIDTH_MAX, settled["eval_parallel"])
             if follow != self._llm_parallel:
                 settled["llm_parallel"] = follow
-        pool = len(getattr(self, "_gpu_ids", None) or [])
-        footprints = self._proposal_footprints(state)
         payload = {
             **settled,
             "previous": {"eval_parallel": self._eval_parallel, "llm_parallel": self._llm_parallel},

@@ -21,7 +21,23 @@ import time
 from typing import Optional
 
 from looplab.engine.cadence import cadence_due
-from looplab.events.types import EV_PHASE_PROGRESS, assert_progress_phase
+from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS, assert_progress_phase
+
+# INVARIANT #1's APPEND-SITE ASSERTION, which every other concurrent-diagnostic writer carries
+# (`evaluate.py`, `eval_dispatch.py`, both watchdogs). `_progress` appends `EV_PHASE_PROGRESS`
+# directly from the speculative producer worker and from the parallel-build worker threads, and the
+# ONLY thing that makes a non-main-task append legal there is the type being fold-ignored — its own
+# docstring says so. The claim had no enforcement here, so a later registry edit that folded this
+# type would have made every one of those workers an unguarded writer of folded state.
+#
+# AT MODULE SCOPE, not inside `_emit`, and that placement is the whole point: `_emit`'s body is
+# wrapped in a containment `except Exception` (a progress beacon may never fail the work it reports
+# on), which would swallow the AssertionError and leave the guard reading as if it held. Import time
+# is also where a registry mistake belongs — it is a coding error, exactly like the phase check
+# `assert_progress_phase` makes outside that same containment.
+assert EV_PHASE_PROGRESS in DIAGNOSTIC_EVENTS, (
+    "phase_progress is appended from concurrent workers; invariant #1 permits that only for a "
+    "fold-ignored DIAGNOSTIC type")
 
 
 def effective_researcher_eval_timeout(engine, idea) -> Optional[float]:
@@ -155,12 +171,20 @@ class SharedEngineMixin:
         store = getattr(self, "store", None) if enabled else None   # bare Engine.__new__ instances
                                                                     # in tests carry no store either
 
-        def _emit(status: str, **extra):
+        def _emit(status: str, extra: Optional[dict] = None):
+            # `extra` is a MAPPING and not `**kwargs`, because the caller's `learned` dict flows into
+            # it: splatting `**learned` beside fixed keywords made `learned["ok"]` (or `["seconds"]`)
+            # a duplicate-keyword TypeError raised AT THE CALL SITE — outside this containment, from
+            # inside the `finally` below, where it REPLACES the exception the phase was propagating.
+            # A body reporting what it learned would then have destroyed the failure it was
+            # reporting. A merge cannot collide; the engine's own keys are merged last so a body
+            # cannot overwrite the beacon's authority fields either.
             if store is None:
                 return
             try:
                 store.append(EV_PHASE_PROGRESS,
-                             {"stage": stage, "phase": phase, "status": status, **detail, **extra})
+                             {**detail, **(extra or {}),
+                              "stage": stage, "phase": phase, "status": status})
             except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
                 pass
 
@@ -177,7 +201,7 @@ class SharedEngineMixin:
             ok = False
             raise
         finally:
-            _emit("finished", seconds=round(time.time() - t0, 3), ok=ok, **learned)
+            _emit("finished", {**learned, "seconds": round(time.time() - t0, 3), "ok": ok})
 
     # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
     # `engine/cadence.py` states why since-last and not `n % every == 0`; the NAME lives here because
