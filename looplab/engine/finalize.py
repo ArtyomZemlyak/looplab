@@ -491,7 +491,15 @@ def _build_readmodel_atomic(events, path: Path) -> RunState:
 
 
 def _flush_trace_exporter(engine: "Engine") -> bool:
-    """Barrier accepted async spans before any derived trace reader snapshots ``spans.jsonl``."""
+    """Settle accepted async spans before any derived trace reader snapshots ``spans.jsonl``.
+
+    The barrier waits for every accepted row's single delegate ATTEMPT, in-flight ones included —
+    not for its success. A row whose attempt raised is absent from the artifact and counted in the
+    `looplab.exporter.loss` receipt this same barrier emits, and `True` here does not deny that
+    (`core/tracing.py::AsyncJsonlSpanExporter.force_flush`). Its one call site discards this
+    return value on purpose — see the comment there: the projection is built either way, because a
+    partial trace beats no trace.
+    """
     flush = getattr(getattr(engine, "tracer", None), "force_flush", None)
     if not callable(flush):
         return True  # compatibility engines and the historical synchronous exporter

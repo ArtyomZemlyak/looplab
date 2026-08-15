@@ -84,8 +84,17 @@ so the visible delta sum is a lower bound rather than a complete postmortem coun
 timeout deliberately does not append a late loss receipt after lifecycle ownership is released; its
 process-local `dropped_shutdown_timeout` counter remains available to the owner that observed the timeout.
 
-`force_flush` is a reusable visibility barrier and `shutdown` is a one-shot bounded wait. Their timeout
-limits only how long the caller waits; Python cannot interrupt a worker already inside filesystem I/O.
+`force_flush` is a reusable barrier over accepted work and `shutdown` is a one-shot bounded wait. Their
+timeout limits only how long the caller waits; Python cannot interrupt a worker already inside filesystem
+I/O. **State the barrier exactly, because two nearby claims are false.** It settles every row accepted
+before or during the call — the wait clears only on an empty queue, no active row AND a retired worker, so
+a row already handed to the writer holds the barrier just as a waiting one does. What it settles is the one
+delegate ATTEMPT, not its success: an accepted row whose attempt raised is permanently absent from
+`spans.jsonl`, and `force_flush` still returns `True`, because that boolean reports whether the LOSS
+RECEIPT failed. So a reader behind the barrier sees every span that was written plus a
+`looplab.exporter.loss` row counting the ones that were not — never a silent hole — and a caller wanting
+"the artifact contains every span I queued" must read `export_failures` / the receipt rather than the
+return value.
 Finalization flushes immediately before reading `spans.jsonl` for `trace.json`/`tree.html`, and
 `Engine.run()` always performs one bounded terminal shutdown in `finally` for success, error,
 cancellation, pause and abort paths. A span that closes after `run()` returns is rejected. If shutdown

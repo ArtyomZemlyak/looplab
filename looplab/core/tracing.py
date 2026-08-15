@@ -8,6 +8,13 @@ Design (see 08-tracing-architecture.md):
 - When `opentelemetry-api` (+ an SDK/exporter configured via OTEL_* env) is importable, each
   span is ALSO opened as a genuine OpenTelemetry span, so ANY OTLP collector (Jaeger / Tempo /
   Honeycomb / …) receives it with no code change. Without the package the bridge is a no-op.
+- Export is ASYNCHRONOUS, so a reader/owner boundary raises a barrier (`Tracer.force_flush`) over
+  everything the exporter has accepted — a row already handed to the writer included, not just the
+  queued ones. State what it settles precisely: the ONE delegate attempt each accepted row gets, and
+  not that attempt's success. A row whose attempt raised is permanently absent from `spans.jsonl` and
+  the barrier still returns True, because that boolean reports the LOSS RECEIPT. The absence is never
+  silent — the same barrier emits a coalesced `looplab.exporter.loss` row and `export_failures`
+  counts it — but a caller who needs "every span I queued is in the artifact" must read those.
 - Spans are diagnostics — HARD-SEPARATE from the domain `events.jsonl`. `replay.fold` never
   reads spans, so tracing can be incomplete/non-deterministic without touching engine state.
   Events carry the active (trace_id, span_id) (see eventstore) so the UI can join the research
@@ -1558,6 +1565,21 @@ class AsyncJsonlSpanExporter:
     ) -> bool:
         """Wait for work accepted before/during the barrier and its loss receipt.
 
+        What is COVERED: every row accepted before or during the barrier has had its one delegate
+        attempt RETURN before this call does — the wait clears on `not self._queue and not
+        self._active and not worker_alive`, so a row already handed to the writer holds the barrier
+        exactly like a waiting one.  A queue-only barrier would not, which is what
+        `tests/test_tracing.py::test_force_flush_waits_for_a_row_already_handed_to_the_writer`
+        drives.
+
+        What is NOT covered, and the return value says so about neither: an accepted row gets
+        EXACTLY ONE attempt (retrying an ambiguous append could double-export), so a row whose
+        attempt RAISED is permanently absent from `spans.jsonl` while this still returns True.
+        `True` means the loss RECEIPT did not fail; it never means every accepted span is on disk.
+        Loss is readable only in `metrics()["export_failures"]` and in the durable coalesced
+        `looplab.exporter.loss` row this same barrier emits.  A caller that needs "the artifact I am
+        about to read contains every span I queued" must read those, not this boolean.
+
         The timeout bounds only the caller's wait; Python cannot safely interrupt a worker already in
         filesystem I/O.  False therefore never claims that the underlying call was cancelled.
         """
@@ -1766,7 +1788,13 @@ class Tracer:
         self,
         timeout_millis: Optional[float] = TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS,
     ) -> bool:
-        """Make all accepted local spans visible before a reader/owner boundary.
+        """Settle every accepted local span's export attempt before a reader/owner boundary.
+
+        Deliberately NOT "make all accepted spans visible": the async exporter gives each accepted
+        row one delegate attempt and reports a failed attempt through its loss receipt, not through
+        this boolean (see `AsyncJsonlSpanExporter.force_flush`).  So a reader behind this barrier
+        sees every span whose write SUCCEEDED plus a `looplab.exporter.loss` row counting the ones
+        that did not — never a silent hole.
 
         The synchronous exporter has no pending work. Optional/custom exporters without the method
         retain that compatibility behavior; an exporter implementation failure stays diagnostic and

@@ -1209,6 +1209,15 @@ Installing the `[otel]` extra and explicitly selecting OTLP (`OTEL_TRACES_EXPORT
 `OTEL_EXPORTER_OTLP(_TRACES)_ENDPOINT`) sends the same spans to any OTLP collector (Jaeger / Tempo /
 Honeycomb) with no code change. Spans are diagnostics only — `replay` never reads them.
 
+**What "the trace is complete" means at a reader boundary.** Span export is asynchronous, so before any
+derived artifact is built (`trace.json`, `tree.html`) finalization raises a barrier over everything the
+exporter has accepted — including a row already handed to the writer, not just the ones still queued. The
+barrier settles each accepted row's *one* write attempt (retrying an ambiguous append could double-export a
+span), and a row whose attempt failed is **counted, not hidden**: the same barrier emits a
+`looplab.exporter.loss` span carrying the dropped/failed deltas, which `trace.json.summary` sums into
+`dropped_spans` / `export_failures` / `exporter_loss_receipts`. So an operator reading a trace is never
+looking at a silent hole — a missing span is always accompanied by a receipt saying how many are missing.
+
 **Per-operation traces.** A node's own work (propose → implement → repair, then evaluate/training)
 is one trace, shown under the node. But every OTHER LLM sub-operation runs in its **own** named trace
 (`new_trace`) — `strategist_consult`, `hypothesis_merge`, `deep_research`, `report`, `lessons_distill`/
