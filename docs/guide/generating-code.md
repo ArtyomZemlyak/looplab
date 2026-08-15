@@ -496,9 +496,13 @@ node fails and its stderr is fed back to the agent's repair.
 - **The agent** (the LLM / coding agent) **cannot author or change** those commands, nor the file the
   metric is read from. The metric-source file (a `file_json`/`file_regex` path or an onboarding
   adapter) is auto-protected, and so is the **entrypoint** your `cmd` executes whenever the argv names
-  a file the editable repo already ships (`cmd.protect_entrypoint`, default `true`). An entrypoint the
-  repo does *not* ship is the agent's to author by design, and a `cmd` that names no in-repo file at
-  all is warned about at submit rather than silently unprotected. The surface gate is
+  a file the editable repo already ships (`cmd.protect_entrypoint`, default `true`) — including
+  behind a transparent launcher and its own options (`chrt -f 99 python score.py`,
+  `nice -n 10 python -m pkg.mod`, `srun --gres=gpu:1 …`, and `env`/`taskset`/`stdbuf`/`ionice`/
+  `time`/`nohup`/`setsid`). An entrypoint the repo does *not* ship is the agent's to author by
+  design, and a `cmd` that names no in-repo file at all — a shell wrapper, a console script,
+  `torchrun`/`accelerate`/`deepspeed`, or a launcher spelling LoopLab will not guess at — is warned
+  about at submit rather than silently unprotected. The surface gate is
   *reject-not-strip* (a patch touching anything outside `edit_surface`, or a protected/escape path like
   `..`/absolute, is rejected wholesale). So the agent's only influence on execution is the **code it
   writes inside `edit_surface`**, which runs under the sandbox tier — it can't issue an arbitrary host
