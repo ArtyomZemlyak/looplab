@@ -465,6 +465,74 @@ site that proves it is open.
   evaluated nodes uniquely with three DISTINCT digests (nodes 1 and 4 chose the same experiment name
   and produced different bytes) — but that is a re-derivation over preserved directories, not a run
   that recorded it live, so `Settings.metric_subject` keeps its `audit` default.
+- **[FIXED 2026-08-15] A test harness whose own timeout was indistinguishable from the product
+  defect it guarded — `test_finalizer_flushes_the_local_queue_before_building_trace_json`.** The test
+  holds the exporter's writer hostage inside `_export_line` from before `Engine.run` until the
+  finalizer's `force_flush` releases it, then asserts the queued span reached `trace.json`. The
+  hostage waited `release.wait(5)` — a budget that has to span the WHOLE run — **inside the exporter's
+  worker thread**, whose `except Exception` containment (`core/tracing.py::_worker_main`) is correct
+  and swallows anything raised there, because tracing may never crash the observed operation. So on a
+  loaded box the harness timed out, its `AssertionError` was swallowed, the row was counted as an
+  export FAILURE, and the test reported the exact symptom it exists to detect: **a span missing from
+  the artifact.** A harness that fails *as* the defect it guards is worse than no harness — it was
+  read as "the barrier drops a row a caller queued before it", which would be a real
+  absence-reads-as-nothing-happened defect, and it is not one.
+  **Measured on this box 2026-08-15**, whole-file runs at 8-way parallelism, instrumented to record
+  the hostage's wait, the exporter metrics at barrier return and the bytes on disk: **160 runs, 25
+  failures; every PASS had `Engine.run` ≤ 4.93 s and every FAILURE ≥ 5.04 s — a perfectly clean split
+  at the 5 s budget, with `run_s > 5 ⟺ failure` holding for 160/160** (that run is ~1.0 s on an idle
+  box and was observed up to 15.8 s under the parallel suite). In every one of the 25 the delegate was
+  never called at all (`release.wait(5)` returned False having waited exactly 5.0 s), `export_failures
+  == 1`, `dropped_spans == 0`, `exported_spans == 34` of `accepted_spans == 35`, `force_flush`
+  returned `True`, and 23 of 25 carried the durable `looplab.exporter.loss` receipt (the other two
+  lost the receipt's own attempt to the same still-held stub) — i.e. the product behaved exactly as
+  specified and the harness did not.
+  **The product hypothesis was driven and REFUTED**: the suspicion was that `_active` clears before
+  `_export_line` appends, so the barrier returns over an unwritten row. It does not — the wait clears
+  only on `not queue and not _active and not worker_alive`, and a new tier-1 guard
+  (`test_force_flush_waits_for_a_row_already_handed_to_the_writer`) drives it with the writer held
+  open and no engine at all; mutating the barrier to a queue-only wait turns it red **10/10**, and the
+  unmutated tree green **10/10**.
+  **`248a81ca` is EXONERATED.** It was suspected on 5/55 (master) vs 0/50 (`0f20474f`, before it).
+  Interleaved under identical load, 48 runs per arm: **5/48 on master and 5/48 on `0f20474f`**, same
+  test, same mechanism, indistinguishable run-time distributions (median 2.03 s vs 2.10 s). Its only
+  `tracing.py` hunk adds `build_trace` to the structural-attribute caps and cannot reach the exporter.
+  The earlier 0/50 was below detection power at that batch's load, which is the trap this row records:
+  **a wall-clock flake bisects to whatever commit was measured while the box was busy.**
+  **THE FIX is two rules, both about where a harness may fail.** (1) A hostage Event released by a
+  later phase of the same run is a DEADLOCK guard, not a synchronization budget — the wait is now
+  `_HOSTAGE_DEADLOCK_GUARD_S = 120.0`, a bound no observed run approaches (max seen 15.8 s). (2) Never
+  `assert` in the held thread: the outcome is RECORDED and asserted on the main thread FIRST, so a
+  tripped guard says "the harness timed out" instead of "the barrier lost a row". The sibling
+  `test_engine_run_terminally_drops_a_background_span_closed_after_return` had the identical shape at
+  30 s (it failed once in the same 64 runs) and takes the same treatment.
+  **Proved by DRIVING it, not by asserting it.** A ~10 % flake cannot demonstrate a fix at any
+  affordable run count, so the trigger was made deterministic: a plugin sleeping 6 s once on the run's
+  first `EventStore.append` — squarely inside the interval the hostage had to cover — applied
+  identically to both trees. **Unfixed 20/20 FAILED, fixed 0/20 FAILED.** The natural-load arm is
+  reported as the null it is: 64 runs per arm interleaved after the box quietened produced 0 failures
+  on BOTH, which measures the load and not the fix, and is exactly the trap that made the original
+  bisection look conclusive.
+  **Alternatives rejected.** *Raise the budget to 30 s* — the same bug with a rarer trigger, and it
+  leaves the mis-attribution, which is the part that cost a session. *Release the hostage from the
+  test body after `anyio.run` returns* — that removes the wall clock but also removes the property:
+  the whole point is that the row must land because the BARRIER released it, not because the run
+  ended. *Make the exporter re-raise instead of swallowing* — that inverts a correct product rule
+  (invariant: diagnostics never crash the observed operation) to suit a test. *Retry a failed delegate
+  attempt so the barrier could promise durability* — refused for the reason already in the exporter's
+  docstring: an exception after an ambiguous append would double-export the row.
+  **Residue left open, deliberately.** The contract statements were made exact rather than the
+  behaviour changed: `force_flush` settles each accepted row's ONE delegate attempt, not its success,
+  and its `True` reports only whether the loss RECEIPT failed — a caller wanting "the artifact holds
+  every span I queued" must read `export_failures` / the `looplab.exporter.loss` row. That is now said
+  in `AsyncJsonlSpanExporter.force_flush`, `Tracer.force_flush`, `finalize._flush_trace_exporter`,
+  `docs/08-tracing-architecture.md` and `docs/guide/concepts.md`, and pinned by
+  `test_force_flush_returns_true_for_a_row_whose_one_attempt_failed`. **Still open:** no reader of
+  `trace.json` surfaces a non-zero `export_failures` as a WARNING — the number is in
+  `trace.json.summary` and nothing tells an operator to look, so the honest receipt is only as good as
+  the habit of reading it. And the suite has no sweep for the general pattern (a wall-clock wait in a
+  thread whose exception a production containment block swallows); these two were found by reading,
+  not by a guard.
 
 - **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
   re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card

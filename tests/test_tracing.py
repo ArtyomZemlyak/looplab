@@ -17,7 +17,8 @@ from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.core.tracing import JsonlSpanExporter, Tracer, current_ids
+from looplab.core.tracing import (
+    AsyncJsonlSpanExporter, JsonlSpanExporter, Tracer, current_ids)
 from looplab.agents.tool_loop import _trace_preview
 from looplab.events.traceview import build_trace_view, load_spans
 
@@ -389,6 +390,32 @@ def test_trace_json_written_and_grouped_by_node(tmp_path):
     assert tv2["summary"]["spans"] == tv["summary"]["spans"]
 
 
+# A hostage Event that a LATER PHASE of the same run releases is a DEADLOCK guard, not a
+# synchronization budget: what the holder waits for happens when the engine reaches it, and the
+# engine's wall clock is set by the box, never by this test. The two tests below used 5 s and 30 s,
+# and the 5 s one had to span the WHOLE of `Engine.run` — measured 2026-08-15 on this box, that run
+# is ~1.0 s idle but 0.8-15.8 s under an 8-way parallel suite, and the flake tracked it exactly:
+# over 160 instrumented whole-file runs, every pass had `run_s` <= 4.93 s and every failure
+# `run_s` >= 5.04 s, i.e. `run_s > 5 <=> failure` held 160/160 (25 failures). The tree three days
+# older failed at the SAME 5/48 under identical interleaved load, so no commit introduced it.
+#
+# Worse than the flake is how it PRESENTED. The holder runs inside the exporter's worker thread,
+# whose `except Exception` containment (`core/tracing.py::_worker_main`) is CORRECT — tracing must
+# never crash the observed operation — so a tripped harness timeout was swallowed, the row was
+# counted as an export FAILURE, and the test then reported the one symptom it exists to detect:
+# a span missing from `trace.json`. A harness that fails as the product defect it is guarding
+# against is worse than no harness. So: never `assert` in the held thread, RECORD the outcome and
+# assert it on the main thread FIRST, and size the wait as a bound no engine run can reach.
+_HOSTAGE_DEADLOCK_GUARD_S = 120.0
+
+
+def _barrier_span(name):
+    """A minimal well-formed span record for the two exporter-barrier unit guards."""
+    return {"name": name, "kind": "operation", "trace_id": "t" * 32, "span_id": "s" * 16,
+            "parent_id": None, "run_id": "r", "attributes": {}, "events": [],
+            "status": "OK", "start": 1.0, "duration_s": 0.1}
+
+
 def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
     """A queued row must be present in derived trace artifacts before Engine.run returns."""
     engine = _engine(tmp_path)
@@ -397,11 +424,17 @@ def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
     real_force_flush = engine.tracer.force_flush
     started = threading.Event()
     release = threading.Event()
+    guard_tripped = []
     flush_calls = 0
 
     def blocked_export(line, **kwargs):
         started.set()
-        assert release.wait(5)
+        if not release.wait(_HOSTAGE_DEADLOCK_GUARD_S):
+            # Raise rather than fall through: returning would claim a row was written that never
+            # reached the writer. The exporter's containment swallows this, which is why the main
+            # thread — not this one — is what turns it into a verdict.
+            guard_tripped.append(line[:80])
+            raise RuntimeError("test harness deadlock guard tripped, not a product failure")
         return real_export_line(line, **kwargs)
 
     def releasing_flush(*, timeout_millis):
@@ -418,9 +451,106 @@ def test_finalizer_flushes_the_local_queue_before_building_trace_json(tmp_path):
 
     anyio.run(engine.run)
 
+    # FIRST, and before any claim about the artifact: this run measured the barrier and not the box.
+    assert not guard_tripped, (
+        f"the held writer waited {_HOSTAGE_DEADLOCK_GUARD_S}s without the finalizer's barrier "
+        f"releasing it, so the missing row below would be the HARNESS and not the barrier: "
+        f"{guard_tripped}")
     assert flush_calls >= 1
     trace_view = orjson.loads((tmp_path / "run" / "trace.json").read_bytes())
     assert b'"name":"queued-before-finalize"' in orjson.dumps(trace_view)
+
+
+def test_force_flush_waits_for_a_row_already_handed_to_the_writer(tmp_path):
+    """The barrier covers work IN FLIGHT, not merely the waiting queue.
+
+    A row whose single delegate attempt has already STARTED is the case a queue-only barrier gets
+    wrong: the queue is empty, so a naive wait returns while the bytes are still unwritten and the
+    reader behind the barrier snapshots a file missing a row the caller queued BEFORE it. Drive it
+    with the writer held open by the main thread — no engine, so nothing here is coupled to a wall
+    clock the box owns.
+    """
+    exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl")
+    real_export_line = exporter._writer._export_line
+    in_writer = threading.Event()
+    proceed = threading.Event()
+    guard_tripped = []
+
+    def held_export(line, **kwargs):
+        in_writer.set()
+        # Same rule as `_HOSTAGE_DEADLOCK_GUARD_S`: never decide anything in a thread whose
+        # exceptions the exporter's containment swallows. Here the release is the MAIN thread's own
+        # `proceed.set()` a few lines down, so this bound can only be reached by a real deadlock.
+        if not proceed.wait(_HOSTAGE_DEADLOCK_GUARD_S):
+            guard_tripped.append("proceed never arrived")
+        return real_export_line(line, **kwargs)
+
+    exporter._writer._export_line = held_export
+    assert exporter.export(_barrier_span("queued-before-barrier")) is True
+    assert in_writer.wait(30)             # the worker owns the row and is inside the delegate
+
+    returned = threading.Event()
+    result = []
+
+    def barrier():
+        result.append(exporter.force_flush(timeout_millis=60_000))
+        returned.set()
+
+    flusher = threading.Thread(target=barrier)
+    flusher.start()
+    try:
+        # THE PROPERTY: the queue is already empty, so only in-flight accounting can hold the
+        # barrier here. A barrier that returned now would publish a file without this row.
+        assert not returned.wait(0.5)
+        source = tmp_path / "spans.jsonl"
+        assert not source.exists() or b"queued-before-barrier" not in source.read_bytes()
+        proceed.set()
+        assert returned.wait(60)
+    finally:
+        proceed.set()
+        flusher.join(timeout=60)
+
+    assert not guard_tripped, guard_tripped
+    assert result == [True]
+    assert b'"name":"queued-before-barrier"' in (tmp_path / "spans.jsonl").read_bytes()
+    assert exporter.metrics()["exported_spans"] == 1
+
+
+def test_force_flush_returns_true_for_a_row_whose_one_attempt_failed(tmp_path):
+    """What the barrier does NOT promise, stated as a test.
+
+    An accepted row gets EXACTLY ONE delegate attempt (retrying an ambiguous append could
+    double-export). When that attempt raises, the row is gone: the barrier still returns True,
+    because its boolean answers whether the LOSS RECEIPT failed and not whether every accepted row
+    landed. Loss is readable in `export_failures` and in the durable `looplab.exporter.loss` row —
+    never in the return value. A caller reading `True` as "every accepted span is on disk" is
+    reading a promise this barrier does not make.
+    """
+    exporter = AsyncJsonlSpanExporter(tmp_path / "spans.jsonl")
+    real_export_line = exporter._writer._export_line
+    refused = []
+
+    def refuse_once(line, **kwargs):
+        if not refused and b"doomed" in line:
+            refused.append(line)
+            raise OSError("the delegate attempt failed after the row was accepted")
+        return real_export_line(line, **kwargs)
+
+    exporter._writer._export_line = refuse_once
+    assert exporter.export(_barrier_span("doomed")) is True
+    assert exporter.force_flush(timeout_millis=60_000) is True
+
+    written = (tmp_path / "spans.jsonl").read_bytes()
+    assert b'"name":"doomed"' not in written           # accepted, attempted once, not durable
+    metrics = exporter.metrics()
+    assert metrics["accepted_spans"] == 1
+    assert metrics["exported_spans"] == 0
+    assert metrics["export_failures"] == 1
+    assert metrics["dropped_spans"] == 0               # a failed attempt is not a drop
+    receipts = [orjson.loads(row) for row in written.splitlines()
+                if b"looplab.exporter.loss" in row]
+    assert len(receipts) == 1
+    assert receipts[0]["attributes"]["looplab.exporter.export_failures"] == 1
 
 
 def test_finalizer_does_not_swallow_a_deep_trace_json_artifact(tmp_path, monkeypatch):
@@ -466,11 +596,17 @@ def test_engine_run_terminally_drops_a_background_span_closed_after_return(tmp_p
     assert exporter._lifecycle_fence is True
     opened = threading.Event()
     release = threading.Event()
+    guard_tripped = []
 
     def close_after_owner_returns():
         with engine.tracer.span("late-background", new_trace=True):
             opened.set()
-            assert release.wait(30)
+            # Same rule as `_HOSTAGE_DEADLOCK_GUARD_S`'s comment: this wait spans the whole of
+            # `Engine.run` and its release is the main thread's `finally`, so the bound is a
+            # deadlock guard. Record; the main thread decides (an AssertionError here would close
+            # the span with an exception and change what the test measures).
+            if not release.wait(_HOSTAGE_DEADLOCK_GUARD_S):
+                guard_tripped.append("release never arrived")
 
     background = threading.Thread(target=close_after_owner_returns)
     background.start()
@@ -483,6 +619,7 @@ def test_engine_run_terminally_drops_a_background_span_closed_after_return(tmp_p
         release.set()
         background.join(timeout=2)
 
+    assert not guard_tripped, guard_tripped
     assert not background.is_alive()
     assert source.read_bytes() == at_return
     metrics = exporter.metrics()
