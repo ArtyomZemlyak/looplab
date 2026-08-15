@@ -14,6 +14,12 @@ and the module makes no security claim). But it means that once shell is enabled
 approved in a confirm mode), `run_command ["cat", "~/.ssh/id_rsa"]` returns the key to the model — the
 per-file secret gate is NOT a boundary here. The real boundary for untrusted code is the `untrusted`
 trust_mode's `docker run --network none` wrap, not the secret gate.
+
+That wrap is built from `sandbox.docker_tier_kwargs` — the SAME translation the two eval tiers use —
+so this surface is a full member of the tier rather than a container that resembles one. It was not
+until 2026-08-15: it passed only `(root, image, network="none")`, which inherits every flag
+`docker_run_argv` applies unconditionally and none of the caller-supplied ones, so it ran with no
+`--memory` and, under `trust_mode="hostile"`, on the shared-kernel runtime.
 """
 from __future__ import annotations
 
@@ -52,8 +58,8 @@ def _tail(s: str, n: int) -> str:
 class ShellTools:
     def __init__(self, roots, mode: str = "plan", trust_mode: str = "trusted_local",
                  approver: Optional[Callable[[dict], str]] = None, timeout: float = 120.0,
-                 max_output: int = _MAX_OUTPUT, image: str = "python:3.12-slim",
-                 default_cwd=None):
+                 max_output: int = _MAX_OUTPUT, image: Optional[str] = None,
+                 default_cwd=None, settings=None):
         self._roots = _pathsafe.resolve_roots(roots)
         # Where a command runs when the model gives no cwd. The spec promises "default: repo root" —
         # without an explicit value we can only fall back to the first root (which in the assistant's
@@ -64,6 +70,11 @@ class ShellTools:
         self.approver = approver or default_approver
         self.timeout = timeout
         self.max_output = max_output
+        # The operator's container configuration, read through `sandbox.docker_tier_kwargs` at wrap
+        # time (see `exec_argv`). `image=` stays an explicit per-instance OVERRIDE and defaults to
+        # None — a second hardcoded copy of `Settings.docker_image`'s default is exactly how the two
+        # ended up describing different containers on the same box.
+        self._settings = settings
         self.image = image
         self.applied: list[dict] = []
         self._wrap = None            # built lazily on first exec (fails loudly if docker is missing)
@@ -208,9 +219,23 @@ class ShellTools:
         if refusal:
             return refusal
         # Under a non-trusted tier, run inside docker (--network none). Built once; loud if unavailable.
+        # THIS SURFACE IS A FULL MEMBER OF THE TIER, not a container that merely resembles one.
+        # It used to pass `(root, image, network="none")` and nothing else, so it inherited only the
+        # flags `docker_run_argv` applies unconditionally (`--rm --network none --pids-limit 1024
+        # --cap-drop ALL --security-opt no-new-privileges`) and none of the CALLER-supplied column:
+        # measured on shipped defaults it ran with no `--memory 4g`, and under a `hostile`
+        # trust mode with no `--runtime runsc` — a shared-kernel container on the tier chosen
+        # BECAUSE a shared kernel was not enough. `sandbox_readonly_rootfs`/`sandbox_cpus` could not
+        # reach it at all. `docker_tier_kwargs` is the ONE translation the eval tiers use, so this
+        # cannot drift from them again; a `settings=None` construction resolves to the SHIPPED
+        # defaults rather than to an unbounded container.
         if self.trust_mode and self.trust_mode != "trusted_local" and self._wrap is None:
             from looplab.runtime.command_eval import make_docker_wrap
-            self._wrap = make_docker_wrap(str(self._roots[0]), self.image, network="none")
+            from looplab.runtime.sandbox import docker_tier_kwargs
+            tier = docker_tier_kwargs(self._settings, trust_mode=self.trust_mode)
+            if self.image:                       # explicit per-instance override, else Settings'
+                tier["image"] = self.image
+            self._wrap = make_docker_wrap(str(self._roots[0]), network="none", **tier)
         if background:
             from looplab.runtime.bg_tasks import MANAGER
             self.applied.append(action)

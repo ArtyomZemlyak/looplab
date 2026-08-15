@@ -639,11 +639,15 @@ class EvalDispatchMixin:
             # Symlink-mounted data/reference sources ride along as same-path binds (the /work
             # bind alone leaves their symlinks dangling in the container) — read-only unless the
             # source's `edit` permission grants writes (mount-layer enforcement of edit:false).
+            # The Settings -> container translation (image, mem/cpus, readonly rootfs, and what
+            # "hostile" means) comes from `sandbox.docker_tier_kwargs`, the ONE derivation all three
+            # Docker surfaces share — the solution tier via `make_sandbox`, this command tier, and
+            # the operator assistant's shell. `self` IS the source: the Engine copies those five
+            # `Settings` fields onto itself under the same names. Only the per-EVAL arguments
+            # (`binds`, `env`) are spelled here, because only this tier has them.
+            from looplab.runtime.sandbox import docker_tier_kwargs
             wrap = (command_eval.make_docker_wrap(
-                        root, self.docker_image,
-                        mem=self.sandbox_memory or None, cpus=self.sandbox_cpus or None,
-                        readonly_rootfs=self.sandbox_readonly_rootfs,
-                        runtime=("runsc" if self.trust_mode == "hostile" else None),
+                        root, **docker_tier_kwargs(self),
                         binds=self._data_binds(workdir),
                         env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
                     if self.trust_mode in ("untrusted", "hostile") else None)

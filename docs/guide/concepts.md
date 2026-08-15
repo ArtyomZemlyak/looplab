@@ -767,6 +767,16 @@ The sandbox tier is chosen by **trust mode**, not your environment (`make_sandbo
 | `untrusted` | `DockerSandbox` (`--network none`) | Executing untrusted code on shared infra (hosted/multi-tenant UI) |
 | `hostile` | `DockerSandbox` (`--network none` + gVisor `--runtime runsc`) | Actively hostile code — a real kernel-level isolation boundary |
 
+The tier has **three** containerized surfaces, not two, and they are built from one derivation
+(`sandbox.docker_tier_kwargs`): the generated `solution.py` (`DockerSandbox`), an arbitrary RepoTask
+command (`make_docker_wrap`), and the **operator assistant's shell** (`run_command` / `run_tests` /
+`git`, `tools/shell_tools.py`) whenever `trust_mode` is not `trusted_local`. So `docker_image`,
+`sandbox_memory`, `sandbox_cpus`, `sandbox_readonly_rootfs` and the `hostile` runtime apply to the
+chat shell exactly as they apply to an eval. Before 2026-08-15 that third surface passed none of
+them: it got the unconditional flags (`--rm --network none --pids-limit 1024 --cap-drop ALL
+--security-opt no-new-privileges`) and ran with no `--memory` cap and, under `hostile`, on the
+shared-kernel runtime.
+
 Additional safety monitors are off by default. Under the default `trust_gate=audit` they only surface signals;
 `gate`/`block` acts only on high-precision signals:
 

@@ -190,6 +190,86 @@ def require_docker_cli(what: str) -> None:
             "found on PATH. Install Docker or use trust_mode='trusted_local'.")
 
 
+# The OCI runtime the `hostile` tier MEANS. Named once because two readers derive it —
+# `make_sandbox` (the solution tier) and `docker_tier_kwargs` (both wrap tiers) — and a reader that
+# quietly answered `None` would run on the shared kernel while the operator believed they had asked
+# for a user-space one. That is not a missing cap; it is a different tier wearing this tier's name.
+HOSTILE_RUNTIME = "runsc"
+
+# The `Settings` fields that DESCRIBE a Docker tier, as data. `docker_tier_kwargs` is the only thing
+# that reads them, which is the point: a caller that re-lists them is the second copy.
+DOCKER_TIER_FIELDS = ("trust_mode", "docker_image", "sandbox_memory", "sandbox_cpus",
+                      "sandbox_readonly_rootfs")
+
+
+def docker_tier_kwargs(source=None, *, trust_mode: Optional[str] = None) -> dict:
+    """`Settings` -> the keyword bundle EVERY Docker tier is built from. ONE derivation.
+
+    `docker_run_argv` already made "what flags does a hardened container get" a single home, and
+    that closed the drift between the two tiers that BUILD an argv. It did not close the drift one
+    level up — "what does the OPERATOR's configuration mean for a container" — and that gap had
+    three call sites answering it independently:
+
+      * `cli/__init__.py::_engine` -> `make_sandbox` (the `solution.py` tier),
+      * `engine/eval_dispatch.py` -> `make_docker_wrap` (the RepoTask command tier),
+      * `tools/shell_tools.py` -> `make_docker_wrap` (the operator assistant's shell),
+
+    and the third answered it with nothing at all. Measured 2026-08-15 on shipped defaults, the
+    assistant's containerized shell got `--rm --network none --pids-limit 1024 --cap-drop ALL
+    --security-opt no-new-privileges` (those ride on `docker_run_argv` and so were never at risk)
+    and NOT `--memory 4g`; under `trust_mode="hostile"` it also got no `--runtime runsc`, i.e. the
+    operator who chose the true-isolation tier got a shared-kernel container for the one surface
+    that can run `git`, `pytest` and `pip` on their box. `sandbox_readonly_rootfs` and
+    `sandbox_cpus` were unreachable from it by construction.
+
+    So the fix is not five more keyword arguments at a third call site — that is the same defect
+    with a longer argument list. It is that the TRANSLATION has a name and one body.
+
+    `source` is anything carrying the `DOCKER_TIER_FIELDS` names: `Settings` itself (the assistant
+    and the CLI have one) or the `Engine` that copied them onto itself field-for-field (the eval
+    tier). `None` means "no configuration reached this surface", and it resolves to `Settings()` —
+    the SHIPPED defaults — rather than to an empty bundle, because an unconfigured caller getting a
+    weaker container than a configured one is exactly the silent downgrade `require_docker_cli`
+    exists to refuse. A missing field on a non-`None` source raises rather than defaulting, for the
+    same reason. Note `Settings` is a `BaseSettings`, so that fallback also picks up this process's
+    `LOOPLAB_SANDBOX_*`/`LOOPLAB_DOCKER_IMAGE` environment — deliberately: the env is where the
+    operator's answer lives when no object carried it, and it can only make the container the same
+    or tighter than the shipped one, never looser. It costs ~3.7 ms and is paid once per surface
+    (the wrap is built lazily and cached), so it stays a construction rather than a module global —
+    a module-level `Settings()` would freeze the environment at import time.
+
+    `trust_mode` overrides `source.trust_mode` for the RUNTIME derivation, and exists because a
+    surface that decides to containerize on its OWN trust mode must pick its runtime from that same
+    mode. `ShellTools` takes `trust_mode` as a constructor argument (it is what decides whether
+    there is a container at all) and may be handed no settings; deriving "is this hostile?" from a
+    different object than the one that said "containerize" is how a `hostile` surface ends up on the
+    shared-kernel runtime — the exact defect this function closes, reintroduced one level up.
+
+    Returns keys accepted verbatim by BOTH builders (`make_docker_wrap` and `DockerSandbox` /
+    `make_sandbox`), so neither caller re-spells one. `network` is deliberately NOT here: it is not
+    a `Settings` field, both wrap tiers take the `none` default, and inventing a translation for it
+    would put a knob in this bundle that no operator can set.
+    """
+    if source is None:
+        from looplab.core.config import Settings   # local: `core` must not be imported at runtime
+        source = Settings()                        #   module scope here (layering + startup cost)
+    missing = [f for f in DOCKER_TIER_FIELDS if not hasattr(source, f)]
+    if missing:
+        raise ConfigRefusal(
+            f"{type(source).__name__} cannot describe a Docker tier: it is missing "
+            f"{', '.join(missing)}. A container built from a partial description would be weaker "
+            "than the configured one without saying so; pass a Settings (or None for the shipped "
+            "defaults).")
+    return {"image": source.docker_image,
+            # "" is how every caller spells "unbounded"; `docker_run_argv` omits the flag for a
+            # falsy value rather than passing `--memory ""`, which is a docker CLI error.
+            "mem": source.sandbox_memory or None,
+            "cpus": source.sandbox_cpus or None,
+            "runtime": (HOSTILE_RUNTIME
+                        if (trust_mode or source.trust_mode) == "hostile" else None),
+            "readonly_rootfs": source.sandbox_readonly_rootfs}
+
+
 # The writable scratch a `--read-only` container still needs, and the ONE place it is enumerated.
 # It is deliberately the same set `runtime/read_allowlist.py` grants `readwrite` OUTSIDE the node's
 # own workdir minus the kernel/device tiers a container gets from the runtime anyway: `/tmp` and
@@ -1589,7 +1669,10 @@ def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = No
     if trust_mode == "hostile":
         # B4+ true-isolation tier: shared-kernel container hardening is NOT an isolation boundary for
         # untrusted LLM code; run under gVisor (runsc) by default. Override via `runtime`.
-        kwargs.setdefault("runtime", "runsc")
+        # `HOSTILE_RUNTIME`, not the literal: `docker_tier_kwargs` derives the same value for the
+        # two WRAP tiers, and a tier disagreeing with its siblings about what "hostile" means is
+        # a shared-kernel container under a name that promises a user-space one.
+        kwargs.setdefault("runtime", HOSTILE_RUNTIME)
         return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
     # `Settings.trust_mode` is a free-form string too (this ladder is the vocabulary), so a typo
     # arrives from `-s trust_mode=…` and is an operator input error, not a bug — name the tiers.
