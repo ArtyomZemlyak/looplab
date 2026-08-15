@@ -3,7 +3,18 @@ import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createServer } from 'vite'
+import { createServer, parseAst } from 'vite'
+
+// A depth-first ESTree walk — the same small helper `traceEpisodeModel.test.js` carries, and for the
+// same reason: a comment is not an AST node, so a call pin has to be read as a tree.
+const walk = (node, visit) => {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) { for (const child of node) walk(child, visit); return }
+  if (typeof node.type === 'string') visit(node)
+  for (const key of Object.keys(node)) {
+    if (key !== 'type' && key !== 'loc') walk(node[key], visit)
+  }
+}
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
@@ -17,13 +28,48 @@ test('DAG accessibility reports feasibility as an honest three-way state', async
     server: { middlewareMode: true },
   })
   try {
-    const { dagFeasibilityLabel } = await vite.ssrLoadModule('/src/Dag.jsx')
+    const { dagFeasibilityLabel, dagObjectiveSourceLabel } =
+      await vite.ssrLoadModule('/src/Dag.jsx')
     assert.equal(dagFeasibilityLabel(false), 'infeasible')
     assert.equal(dagFeasibilityLabel(true), 'feasible')
     assert.equal(dagFeasibilityLabel(null), 'constraint status not reported')
     assert.equal(dagFeasibilityLabel(undefined), 'constraint status not reported')
     assert.match(await source('Dag.jsx'), /dagFeasibilityLabel\(node\.feasible\)/,
       'the three-way label must feed the native node selection control')
+
+    // WHAT THE NUMBER IS, beside WHETHER THE NODE WAS ADMITTED. Two questions, two clauses, both
+    // true at once: under `metric_salvage: "select"` the engine really does admit the node
+    // (`feasible = not violations`, and that rung mints no row), so `feasible` stays correct — while
+    // the number it competes on was recovered from a failed eval rather than measured. The card's
+    // visual chrome carries no salvage mark either, so a screen-reader user heard "metric 0.7433,
+    // feasible, current champion" and that was the whole story.
+    const admitted = {
+      feasible: true, violations: [],
+      metric_provenance: { salvaged: true, source: 'declared_reader', stage: 'train' },
+    }
+    assert.equal(dagObjectiveSourceLabel(admitted), 'objective salvaged')
+    assert.equal(dagFeasibilityLabel(admitted.feasible), 'feasible', 'the engine’s own answer')
+    assert.equal(dagObjectiveSourceLabel({
+      violations: [{ name: 'metric_salvaged', salvage: { condition: 'metric_subject_unbound' } }],
+    }), 'objective measured, no subject')
+    // Total over junk and silent where nothing was recorded: a caveat nobody wrote down must not be
+    // invented, which is the rule `trustSemantics.js::objectiveMetricSource` is total under.
+    for (const measured of [{ feasible: true, violations: [] }, {}, null, undefined]) {
+      assert.equal(dagObjectiveSourceLabel(measured), null, JSON.stringify(measured) ?? 'nullish')
+    }
+    // And the accessible name reads it. AST over the compiled module, not a substring: a commented
+    // out call is not an AST node. What this tier proves is that the call is THERE — `ExpNode` is
+    // not exported and mounting ReactFlow to hear the label is a different test than this file is.
+    const compiled = await vite.transformRequest('/src/Dag.jsx', { ssr: true })
+    const called = new Set()
+    walk(parseAst(compiled.code), node => {
+      if (node.type !== 'CallExpression') return
+      const callee = node.callee?.type === 'MemberExpression' ? node.callee.property : node.callee
+      if (callee?.type === 'Identifier') called.add(callee.name)
+    })
+    assert.ok(called.has('dagObjectiveSourceLabel'),
+      'the node’s accessible name must say what its number is, not only that it was admitted')
+    assert.ok(called.has('dagFeasibilityLabel'))
   } finally {
     await vite.close()
   }

@@ -23,6 +23,8 @@ import {
   createDagCanvasRefitScheduler, DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag,
 } from './dagViewport.js'
 import { FORK_FROM_SEQ_ACTION } from './forkFromSeqModel.js'
+import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
+  objectiveSourceCaveated } from './trustSemantics.js'
 
 // The node menu as DATA rather than eleven hand-written buttons, because since 2026-08-14 the answer
 // to "which of these does this view offer?" is no longer always "all of them": a HISTORICAL snapshot
@@ -189,6 +191,21 @@ export function dagFeasibilityLabel(feasible) {
   return 'constraint status not reported'
 }
 
+// WHAT THE NODE'S NUMBER IS, for the accessible name — the same `trustSemantics.js` vocabulary the
+// Metrics tab, the Pareto front, the champion card and the cross-run row already print, said in
+// words rather than as a coloured pill.
+//
+// It is a SECOND clause and not a change to `dagFeasibilityLabel` above, because they answer
+// different questions and both answers are true at once: under `metric_salvage: "select"` the engine
+// admits the node (`feasible = not violations`, and that rung mints no row), so `feasible` is
+// correct, while the number it competes on was recovered from a failed eval rather than measured.
+// A screen-reader user was the only one getting neither — the card's visual chrome carries no
+// salvage mark either, so "metric 0.7433, feasible, current champion" was the whole story.
+export function dagObjectiveSourceLabel(node) {
+  const source = objectiveMetricSource(node)
+  return objectiveSourceCaveated(source) ? `objective ${OBJECTIVE_SOURCE_LABEL[source.channel]}` : null
+}
+
 function ExpNode({ data }) {
   const { node, state, workId, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
@@ -235,6 +252,7 @@ function ExpNode({ data }) {
   const selectionLabel = [
     `Experiment #${node.id}`, op.label, node.status || 'unknown status',
     m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
+    m == null ? null : dagObjectiveSourceLabel(node),
     dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,

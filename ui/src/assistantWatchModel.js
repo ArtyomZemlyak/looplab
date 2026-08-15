@@ -9,6 +9,8 @@
 // the honesty rules here are about which of those two a row is, and they are stated rather than
 // spread across JSX conditionals.
 
+import { durationLabel } from './format.js'
+
 // Mirrors `serve/assistant_watch.py::WATCH_TERMINAL_STATUSES` field for field. A status this
 // module has never heard of is treated as NOT terminal on purpose: an unknown status from a newer
 // server must read as "still going, we do not recognise this" and keep the row visible, never as
@@ -54,9 +56,12 @@ export function nextCheckText(watch, now = Date.now() / 1000) {
   if (!Number.isFinite(due) || due <= 0) return ''
   const delta = due - now
   if (delta <= 1) return 'now'
-  if (delta < 90) return `in ${Math.round(delta)}s`
-  if (delta < 5400) return `in ${Math.round(delta / 60)}m`
-  return `in ${Math.round(delta / 3600)}h`
+  // The tiering is `format.js::durationLabel`, the same one the run's live-status age and the node
+  // episode picker print — this strip owns only the `in …` wording and the `now` floor above. The
+  // top tier used to be a bare `in 3h` here; rounding to the minute inside the hour is still the
+  // "honest to the nearest unit" this function's own rule asks for (the clocks disagree by seconds,
+  // not by half-hours), and it is what stops one interval reading two ways on one screen.
+  return `in ${durationLabel(delta)}`
 }
 
 // The wake-up budget, shown as a fraction and ONLY when it can move. A one-shot run-state watch has

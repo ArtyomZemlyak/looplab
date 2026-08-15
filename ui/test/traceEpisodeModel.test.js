@@ -7,7 +7,18 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createServer } from 'vite'
+import { createServer, parseAst } from 'vite'
+
+// A depth-first walk over an ESTree tree. Small on purpose: the alternative is a substring pin, and
+// `tests/_source_scan.py`'s rule holds in this language too — a comment is not an AST node.
+const walk = (node, visit) => {
+  if (!node || typeof node !== 'object') return
+  if (Array.isArray(node)) { for (const child of node) walk(child, visit); return }
+  if (typeof node.type === 'string') visit(node)
+  for (const key of Object.keys(node)) {
+    if (key !== 'type' && key !== 'loc') walk(node[key], visit)
+  }
+}
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const vite = await createServer({
@@ -56,8 +67,13 @@ test('only an episode that can be sought to is offered', () => {
   assert.equal(map.status, 'ready')
   assert.equal(map.total, 2)
   assert.deepEqual(map.kinds[0].episodes.map(e => e.anchor), ['r1', 'r4'])
-  // And a map of nothing BUT unanchored rows is empty, not ready-with-no-choices.
-  assert.equal(buildEpisodeMap(payload([episode({ anchor: null })])).status, 'empty')
+  assert.equal(map.dropped, 2, 'the rows this fold refused are counted, not discarded')
+  // And a map of nothing BUT unanchored rows is UNSEEKABLE, not empty and not ready-with-no-choices:
+  // the node has those steps, this fold simply cannot point at any of them.
+  const none = buildEpisodeMap(payload([episode({ anchor: null })]))
+  assert.equal(none.status, 'unseekable')
+  assert.equal(none.dropped, 1)
+  assert.equal(episodeMapNotice(none), 'This experiment has 1 earlier step and it cannot be jumped to.')
 })
 
 test('kinds read in the order the node lived them, with their counts', () => {
@@ -137,7 +153,10 @@ test('a bounded map keeps the engine’s own numbering and says it stopped short
 test('an episode summarises only what it recorded', () => {
   assert.equal(episodeDurationLabel(episode({ seconds: 12 })), '12s')
   assert.equal(episodeDurationLabel(episode({ seconds: 600 })), '10m')
-  assert.equal(episodeDurationLabel(episode({ seconds: 7200 })), '2.0h')
+  // `2h`, not the `2.0h` this module used to print on its own: the tiering is now
+  // `format.js::durationLabel`, shared with the live-status age strip an operator reads on the same
+  // screen. See test/durationLabel.test.js.
+  assert.equal(episodeDurationLabel(episode({ seconds: 7200 })), '2h')
   assert.equal(episodeDurationLabel(episode({ seconds: null })), '')
   assert.equal(episodeDurationLabel(episode({ seconds: 'soon' })), '')
   const full = episodeSummary(episode({ ordinal: 17, reason: 'crash' }), 0)
@@ -146,4 +165,68 @@ test('an episode summarises only what it recorded', () => {
   const bare = episodeSummary(
     { anchor: 'a', label: 'train', seconds: null, spans: 0, generations: 0 }, 0)
   assert.equal(bare, '#1')
+})
+
+test('a map that can point at nothing never claims the trace fits in one window', () => {
+  // TWO FACTS, ONE STATUS — the defect this split fixes. `empty` used to be reached both by a node
+  // with genuinely no earlier steps and by a payload that REPORTED earlier steps the map could not
+  // offer, and `Inspector.jsx::TraceEpisodes` prints EPISODE_MAP_EMPTY for that status. So a node
+  // whose own `/episodes` answer said "900 more" was told its whole trace fits in one window, with
+  // the count it was carrying (`omitted`) rendered nowhere: the notice was only reachable from the
+  // `ready` branch. That is the "a partial read must never read as an absent history" rule this
+  // vocabulary exists for, arriving through the one branch with no way to say what it knew.
+  const genuinelyEmpty = buildEpisodeMap(payload([]))
+  assert.equal(genuinelyEmpty.status, 'empty')
+  assert.equal(genuinelyEmpty.partial, false)
+  assert.equal(episodeMapNotice(genuinelyEmpty), '', 'nothing omitted, nothing to say')
+
+  // The server's map stopped short and every row it did return was unanchored.
+  const bounded = buildEpisodeMap(payload([episode({ anchor: null })], { omitted_episodes: 900 }))
+  assert.equal(bounded.status, 'unseekable')
+  assert.notEqual(bounded.status, 'empty', 'the sentence "fits in one window" must be unreachable')
+  assert.equal(bounded.partial, true)
+  assert.equal(bounded.omitted, 900)
+  assert.equal(bounded.dropped, 1)
+  const notice = episodeMapNotice(bounded)
+  assert.match(notice, /901 earlier steps/, 'omitted and dropped are both steps out of reach')
+  assert.match(notice, /none of them can be jumped to/)
+  assert.doesNotMatch(notice, /most recent 0/, 'a zero-count caption reads as a bug, not a fact')
+
+  // Omitted alone, with nothing returned at all, is the same status for the same reason.
+  const withheld = buildEpisodeMap(payload([], { omitted_episodes: 12 }))
+  assert.equal(withheld.status, 'unseekable')
+  assert.match(episodeMapNotice(withheld), /12 earlier steps/)
+
+  // A READY map that also dropped rows says so: `total` is what can be sought to, and the two
+  // unreachable populations are named apart because only one of them has a remedy.
+  const partial = buildEpisodeMap(payload(
+    [episode({ anchor: 'r1' }), episode({ anchor: null }), episode({ anchor: null })],
+    { omitted_episodes: 5 }))
+  assert.equal(partial.status, 'ready')
+  assert.equal(partial.total, 1)
+  assert.equal(partial.dropped, 2)
+  assert.match(episodeMapNotice(partial), /most recent 1 of 8 steps\. 2 cannot be jumped to\./)
+})
+
+test('the control renders four map outcomes, not three', async () => {
+  // The model's four outcomes are only worth having if the surface renders four: `TraceEpisodes`
+  // needed the branch, and without it the new status falls through every condition and the operator
+  // gets an open picker with nothing in it — quieter than the lie, still not the count.
+  //
+  // Read as AST over the COMPILED module rather than as substrings of the source: a commented-out
+  // branch is not an AST node, and esbuild rewrites `'unseekable'` to `"unseekable"`, so a text pin
+  // here would be quote-sensitive on top of being satisfiable by a comment.
+  const compiled = await vite.transformRequest('/src/Inspector.jsx', { ssr: true })
+  const statuses = new Set()
+  walk(parseAst(compiled.code), node => {
+    if (node.type !== 'BinaryExpression' || node.operator !== '===') return
+    if (node.right?.type !== 'Literal' || typeof node.right.value !== 'string') return
+    // `map?.status === '<x>'` — the optional chain is a ChainExpression around the member read.
+    const left = node.left?.type === 'ChainExpression' ? node.left.expression : node.left
+    if (left?.type === 'MemberExpression' && left.property?.name === 'status'
+        && left.object?.name === 'map') statuses.add(node.right.value)
+  })
+  for (const status of ['unavailable', 'empty', 'unseekable', 'ready']) {
+    assert.ok(statuses.has(status), `TraceEpisodes must render the ${status} map`)
+  }
 })

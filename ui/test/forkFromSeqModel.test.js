@@ -5,10 +5,11 @@
 // about a PAID unit of work, exactly the distinction `traceClearModel.js` exists to keep honest for
 // a destructive one.
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { createServer } from 'vite'
+import { createServer, parseAst } from 'vite'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const vite = await createServer({
@@ -19,8 +20,9 @@ const model = await vite.ssrLoadModule('/src/forkFromSeqModel.js')
 test.after(() => vite.close())
 
 const {
-  FORK_BLOCKED_REASONS, FORK_IDEA_FIELDS, buildForkPayload, classifyForkFailure,
-  forkIdeaEdited, forkIdeaFromSnapshot, forkLandedNotice, forkSubmitDecision,
+  FORK_BLOCKED_REASONS, FORK_IDEA_FIELDS, FORK_UNPROVEN_4XX_STATUSES, buildForkPayload,
+  classifyForkFailure, forkIdeaEdited, forkIdeaFromSnapshot, forkLandedNotice, forkRetryable,
+  forkSubmitDecision,
 } = model
 
 // A node exactly as the historical `/state?seq=` projection serves it: the concept envelope is
@@ -212,4 +214,50 @@ test('a landed branch still says what the snapshot could not show', () => {
   // String-keyed node maps (the /state wire shape) resolve the same as numeric ones.
   assert.equal(forkLandedNotice({ node, live: { 3: { status: 'pending' } }, viewSeq: 12 }), null)
   assert.equal(forkLandedNotice({ node: null, live: {}, viewSeq: 1 }), null)
+})
+
+test('the 4xx statuses that prove nothing are a NAMED list, and the classifier reads it', () => {
+  // These three were spelled inline, unnamed, mid-expression (`status !== 408 && status !== 425 &&
+  // status !== 429`) in the one decision that gates a PAID re-submit: `classifyForkFailure` turns it
+  // into `applied`, `forkRetryable` turns `applied` into whether the submit button re-arms, and a
+  // press re-arms into a second GPU experiment for one idea. A status silently leaving that chain is
+  // not something grep can find, so the list is a constant with the reason written beside it — the
+  // third such fork in this codebase, after `commandModel.js::TRANSIENT_HTTP` and
+  // `traceClearModel.js::TRACE_CLEAR_RETRYABLE_STATUSES`.
+  assert.deepEqual([...FORK_UNPROVEN_4XX_STATUSES], [408, 425, 429])
+  // Membership above is the pin; below is the CONSEQUENCE, so a member that stops being read by the
+  // classifier is red even while the constant still lists it.
+  for (const status of FORK_UNPROVEN_4XX_STATUSES) {
+    const verdict = classifyForkFailure({ status, message: 'proxy said so' })
+    assert.equal(verdict.applied, null, `${status}: a proxy can synthesize this AFTER forwarding`)
+    assert.equal(verdict.code, 'unknown')
+    assert.equal(forkRetryable(verdict), false, `${status} must never re-arm a paid submit`)
+  }
+  // And every OTHER 4xx is the validator refusing before any append: the form stays live, because
+  // nothing was queued and the operator can still fix the payload from this snapshot.
+  const proven = [400, 401, 403, 404, 409, 410, 413, 422, 428, 499]
+  for (const status of proven) {
+    assert.ok(!FORK_UNPROVEN_4XX_STATUSES.includes(status), `${status} is not a "try again" status`)
+    const verdict = classifyForkFailure({ status, message: 'refused' })
+    assert.equal(verdict.applied, false, `${status} is a proven pre-append refusal`)
+    assert.equal(forkRetryable(verdict), true, `${status} must leave the form usable`)
+  }
+})
+
+test('the forked status list is the fork lifecycle’s own, not the command lifecycle’s', async () => {
+  // Same three numbers as `commandModel.js::TRANSIENT_HTTP` and deliberately NOT the same constant:
+  // that one answers "may this command READ be retried", this one answers "can the server prove
+  // nothing was appended". This test does NOT assert the two stay equal — that would re-couple what
+  // was forked on purpose. It asserts the fork: two module-owned lists, so a change made for the
+  // command lifecycle cannot move a paid submission between "nothing was queued" and "unknown".
+  const commandModel = await vite.ssrLoadModule('/src/commandModel.js')
+  assert.notEqual(FORK_UNPROVEN_4XX_STATUSES, commandModel.TRANSIENT_HTTP)
+  // Read as IMPORTS, not as text: this module's own comment names `commandModel.js::TRANSIENT_HTTP`
+  // to say why it does not use it, so a substring pin here would fail on the explanation.
+  const source = await readFile(new URL('../src/forkFromSeqModel.js', import.meta.url), 'utf8')
+  const imported = []
+  for (const node of parseAst(source).body) {
+    if (node.type === 'ImportDeclaration') imported.push(node.source.value)
+  }
+  assert.deepEqual(imported, [], 'this module owns its list; it imports nothing at all')
 })
