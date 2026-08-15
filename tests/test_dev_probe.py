@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.runtime import landlock
+from looplab.runtime import landlock, read_fence
 from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
 from looplab.tools.dev_probe import _MAX_TIMEOUT, DevProbeTools
@@ -649,3 +649,71 @@ def test_the_engines_own_interpreter_is_what_answers():
     which answer was about its eval."""
     out = _probe("import sys; print('EXE', sys.executable)")
     assert f"EXE {sys.executable}" in out
+
+
+# ---------------------------------------------- the mutation events are ONE table, not two copies
+
+
+def _launcher_binding(name):
+    """The VALUE the generated launcher binds to *name*, without running the launcher.
+
+    It cannot simply be exec'd: `sys.addaudithook` is irreversible and the launcher installs one at
+    module level, which would fence the rest of the session. So the assignment is located in the
+    parsed source and only its right-hand side is evaluated — `frozenset(...) | frozenset(...)` is
+    an expression over builtins, and a comment carrying an event name is not an AST node."""
+    import ast
+
+    tree = ast.parse(dev_probe.render_launcher("/tmp/probe.py"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            return eval(compile(ast.Expression(node.value), "<launcher>", "eval"), {})
+    raise AssertionError(f"the launcher no longer binds {name}")
+
+
+# What this surface refuses BEYOND the shared registry, and why each is not in it. `read_fence`
+# fences paths under a ROOT, where every one of these lowers to an `os.*` event or an `open` on the
+# same path; here the rule is "no write anywhere", so the high-level name is refused on its own.
+_PROBE_ONLY_MUTATIONS = {
+    "os.startfile",
+    "shutil.copyfile", "shutil.copymode", "shutil.copystat", "shutil.copytree", "shutil.move",
+    "shutil.rmtree", "shutil.unpack_archive",
+}
+
+
+def test_the_launcher_splices_the_mutation_registry_rather_than_keeping_a_second_copy():
+    """One table, two surfaces. The `os.*` half of the probe's `_MUTATE` IS
+    `read_fence.MUTATION_EVENTS` — which `tests/test_read_fence.py` re-derives from a recording audit
+    hook on the running interpreter, so a CPython release that renames or drops an event goes red
+    once instead of leaving THIS launcher checking an event nothing raises any more. A hand-kept
+    copy inherits none of that guard, which is why the copy was the defect and not the list."""
+    mutate = _launcher_binding("_MUTATE")
+    assert set(read_fence.MUTATION_EVENTS) <= mutate, (
+        "the launcher stopped covering an event the shared registry names")
+    assert mutate - set(read_fence.MUTATION_EVENTS) == _PROBE_ONLY_MUTATIONS, (
+        "this surface's additions beyond the registry changed; state the new one and why it is not "
+        "in the registry")
+
+
+def test_an_event_added_to_the_registry_reaches_the_launcher_with_no_edit_here(monkeypatch):
+    """The splice, driven: that is what "one source of truth" MEANS. Extend the registry and the
+    generated launcher refuses the new event — no second list to remember, which is exactly what the
+    copy could not do."""
+    monkeypatch.setitem(read_fence.MUTATION_EVENTS, "os.futuremutator", ((0, None),))
+    assert "os.futuremutator" in _launcher_binding("_MUTATE")
+
+
+@pytest.mark.parametrize("event", ["os.remove", "os.rename", "os.chmod", "os.utime"])
+def test_a_spliced_event_is_live_in_a_real_probe_child(outside, event):
+    """…and the spliced set is not just text: each of these is refused by a real probe, with the
+    victim file still there afterwards. The registry is the writer; the disk is the assertion."""
+    victim = outside / "existing.txt"
+    call = {"os.remove": f"os.remove({str(victim)!r})",
+            "os.rename": f"os.rename({str(victim)!r}, {str(outside / 'gone')!r})",
+            "os.chmod": f"os.chmod({str(victim)!r}, 0o600)",
+            "os.utime": f"os.utime({str(victim)!r}, (0, 0))"}[event]
+    before = victim.stat()
+    out = _probe(f"import os\n{call}\nprint('THROUGH')")
+    assert "THROUGH" not in out and event in read_fence.MUTATION_EVENTS
+    assert victim.exists() and victim.read_text(encoding="utf-8") == "original"
+    assert victim.stat().st_mode == before.st_mode and victim.stat().st_mtime == before.st_mtime

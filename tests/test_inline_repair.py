@@ -405,6 +405,48 @@ def test_dash_m_is_read_only_from_a_python_interpreter_and_never_glued(tmp_path)
         assert reach is not None and "trainer/__main__.py" in reach, exe
 
 
+def test_a_dash_m_the_PROGRAM_consumes_is_not_an_entry_point(tmp_path):
+    """`-m` after the script is the SCRIPT's flag, and reading it as the interpreter's put a file
+    into the closure that the stage never imports.
+
+    `["python", "train.py", "-m", "models.resnet"]` is a `--model` a training script consumes. The
+    scan looked at every token, so whenever `models/resnet.py` happened to exist it joined the
+    import closure — and the closure's two readers pull in OPPOSITE directions. `_safe_reuse_start`
+    only ever REFUSES reuse on a wider closure (safe, just wasteful), but `_stage_rollback` rung 4
+    uses a NON-EMPTY intersection as the thing that PERMITS a full-pipeline rollback, so a repair
+    touching an unrelated `models/resnet.py` could authorize re-running a stage that has nothing to
+    do with it. CPython stops reading its own options at the first non-option token; so does this.
+    """
+    _mk_repo(tmp_path)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "models" / "resnet.py").write_text("r = 1\n", encoding="utf-8")
+    (tmp_path / "train.py").write_text("import loss\n", encoding="utf-8")
+    stages = [{"name": "train", "command": ["python", "train.py", "-m", "models.resnet"]},
+              {"name": "score", "command": ["python", "looplab_eval.py"]}]
+
+    reach = Engine._stage_reachable_files([stages[0]], tmp_path)
+    assert reach is not None and "train.py" in reach and "loss.py" in reach
+    assert "models/resnet.py" not in reach, (
+        "the script's own -m argument was read as the interpreter's entry point")
+    assert "models/__init__.py" not in reach
+
+    # The reader that makes it matter: a repair touching only that file must NOT read as reaching
+    # this stage, in either direction.
+    e = Engine.__new__(Engine)
+    assert e._safe_reuse_start(stages, "score", {"models/resnet.py"}, tmp_path) == "score"
+
+    # Interpreter FLAGS before `-m` are still crossed; the first non-flag token still ends the scan.
+    assert Engine._module_entry_candidates(["python", "-u", "-m", "trainer"]) == ["trainer"]
+    assert Engine._module_entry_candidates(["python", "train.py", "-m", "trainer"]) == []
+    # Only the FIRST `-m`: a program repeating the flag cannot add a second entry point.
+    assert Engine._module_entry_candidates(["python", "-m", "trainer", "-m", "models.resnet"]) \
+        == ["trainer"]
+    # A flag that takes a SEPARATE argument ends the scan rather than being guessed past — the same
+    # fail-closed answer a glued `-mpkg` gets, and the stage simply stays opaque.
+    assert Engine._module_entry_candidates(["python", "-X", "utf8", "-m", "trainer"]) == []
+
+
 def test_stage_reachable_files_transitive_and_subdir_imports(tmp_path):
     # The reachable set must follow TRANSITIVE + dotted + subdir-sibling imports, else a repair that
     # edits a training dependency two hops down (or in a package submodule) escapes and a stale

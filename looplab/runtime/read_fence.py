@@ -164,6 +164,10 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from looplab.core.atomicio import atomic_write_text
+# The DENY side reads the operator's declared mounts through the GRANT side's enumeration of them —
+# see `fence_inputs`. `read_allowlist` imports nothing but stdlib and never imports this module, so
+# the edge is one-way and cannot cycle.
+from looplab.runtime.read_allowlist import mount_sources
 
 # The env var the engine uses to hand a launch its fence, and the directory name under the run dir.
 # `run_argv` consumes the var and prepends the directory to PYTHONPATH; it is deliberately an
@@ -319,13 +323,29 @@ def fence_inputs(repo_spec: Optional[dict], *, allow: Iterable = ()) -> tuple:
         a = _norm_root(extra)
         if a and a not in allowed:
             allowed.append(a)
-    for name, ds in (spec.get("data", {}) or {}).items():
-        src = ds.get("path") if isinstance(ds, dict) else ds
+    # The declared mounts come from `read_allowlist.mount_sources` — ONE enumeration of one operator
+    # declaration, not two. This module and that one are the two spellings of a single policy (see
+    # its docstring, and `test_the_two_spellings_of_the_boundary_agree_about_the_declared_mounts`),
+    # and until 2026-08-15 each walked `data:`/`references:` itself and they already DISAGREED: this
+    # side called `ref.get("path")` unguarded, so a `references:` entry that is not a dict raised
+    # AttributeError out of the fence's own derivation, while the grant side skipped it. A
+    # disagreement here is not a tidiness point — the audit hook would permit a read the kernel
+    # ruleset denies, and a Landlock refusal is `EACCES` -> `PermissionError` -> an `OSError`, i.e.
+    # precisely the silent `except OSError:` skip both modules' refusal types exist to avoid.
+    #
+    # The GUARDED reading is the correct one and it is a decision, not a merge artifact. `data:`
+    # values have a bare-string back-compat shape (`adapters/repo_task.py::RepoTask.data`) and
+    # `mount_sources` keeps it; `references:` has never had one — it is a list of `ReferenceSpec`
+    # dumps — so a non-dict entry there is a malformed declaration, and a malformed declaration must
+    # degrade to "no declaration" rather than take down the derivation, the same rule
+    # `command_eval`'s `isinstance` degradations state for a public entry point handed raw dicts.
+    #
+    # The MODE (`read` vs `readwrite` for `edit: true`) is deliberately dropped: allow-listing here
+    # is an exemption from a DENY prefix, not a write grant, and which mounts may be written is the
+    # Landlock tier's question. Carving a mount out of both halves of the fence is the behaviour
+    # this has always had.
+    for src, _mode in mount_sources(spec):
         a = _norm_root(src)
-        if a and a not in allowed:
-            allowed.append(a)
-    for ref in (spec.get("references", []) or []):
-        a = _norm_root(ref.get("path"))
         if a and a not in allowed:
             allowed.append(a)
     # An allow prefix that is not under any root is dead weight on the hot path — drop it so the
@@ -556,6 +576,25 @@ def _as_str(p):
         return None
 
 
+def _join(base, name):
+    """`base` + separator + `name`, WITHOUT doubling the separator when `base` is the root itself.
+
+    The one directory whose name already ends in a separator is `/`, and the naive
+    `base + _SEP + name` spells it `//repo`. That is not cosmetic here: `_prefixed` is a byte-exact
+    prefix compare, `'//repo/'.startswith(('/repo/',))` is False, and the fenced target directly
+    under `/` was therefore NOT refused while the identical call against `/home/x/repo` was — the
+    asymmetry a mutation fence cannot have. It reaches `_fenced_target` from both sides: a root one
+    level down (`rpartition` leaves an EMPTY head, so the base is `_real('/')`) and a relative name
+    resolved against a cwd or a `dir_fd` that IS `/`. `realpath` happens to collapse a leading
+    double separator, which is why only the `_abspath` fallback and the empty-head case bite — one
+    rule here rather than two accidents relied upon. Reachability, stated rather than assumed: no
+    root `fence_inputs` derives has one component (`_too_broad` drops those), so today the shipped
+    derivation does not produce that shape. That rule answers a different question — whether fencing
+    a root would break the interpreter — and `render` is public, so the join carries its own
+    rule."""
+    return base + name if base.endswith(_SEP) else base + _SEP + name
+
+
 def _fenced_dir(p):
     """`_fenced` for an argument naming a DIRECTORY the process is about to work from — `os.chdir`.
 
@@ -595,9 +634,9 @@ def _fenced_target(path, dir_fd):
             base = _fd_path(dir_fd)
             if base is None:
                 return None
-        r = base + _SEP + r
+        r = _join(base, r)
     head, _sep, tail = r.rpartition(_SEP)
-    return _prefixed(_real(head or _SEP) + _SEP + tail)
+    return _prefixed(_join(_real(head or _SEP), tail))
 
 
 def _dir_fd(args, index):

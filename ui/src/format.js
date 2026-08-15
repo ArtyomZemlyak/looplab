@@ -25,6 +25,40 @@ export function fmtElapsedSeconds(v) {
   return `${Math.round(v)}s`
 }
 
+// HOW LONG, IN ONE PLACE — the tiered duration label every surface that prints an interval shares.
+//
+// Three tiers and TWO boundaries, named rather than spelled inline, because three surfaces had each
+// re-derived the same two numbers and the top tier had already drifted: for one and the same
+// interval the run's live-status age printed `3h 25m` (narration.js), a node's episode picker `3.4h`
+// (traceEpisodeModel.js) and the standing-watch strip `3h` (assistantWatchModel.js). An operator
+// reads the first two side by side — the episode picker sits inside the run screen the status strip
+// captions — so one interval was labelled two ways on one screen. Nothing anywhere stated a reason
+// for the three to differ, so they are now one rendering; what stays at each call site is only its
+// own wording around the number (`in 3h 26m`, `3h 26m`).
+//
+// It lives HERE and not in narration.js, which is where the first of the three was: narration.js
+// reaches `markdown.jsx`, so plain `node --test` cannot import it, and the two pure models that need
+// this are driven directly by `node --test` (the house pattern). format.js imports nothing, which is
+// what lets all three reach one definition. `util.js` re-exports it, so narration.js pulls it in
+// beside `fmt` exactly as before.
+export const DURATION_SECOND_TIER_MAX_S = 90     // below this, bare seconds: `89s` beats `1m 29s`
+export const DURATION_MINUTE_TIER_MAX_S = 5400   // below this, whole minutes — up to `90m`
+
+export function durationLabel(v) {
+  // Not `Number(v)`: `Number(null)` and `Number('')` are 0, so a coercing guard would render an
+  // ABSENT duration as `0s`. Only a real number is a measurement.
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return ''
+  if (v < DURATION_SECOND_TIER_MAX_S) return `${Math.round(v)}s`
+  if (v < DURATION_MINUTE_TIER_MAX_S) return `${Math.round(v / 60)}m`
+  const hours = Math.floor(v / 3600)
+  const minutes = Math.round((v % 3600) / 60)
+  // 7,199 s is 1 h 59.98 m, and rounding the remainder on its own printed `1h 60m` — carry it into
+  // the hour instead. The narration copy this consolidates had that bug; it was simply unreachable
+  // in its own tests, which is the other half of why three copies is worse than one.
+  if (minutes >= 60) return `${hours + 1}h`
+  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
+}
+
 // UNPRICED IS NOT FREE. `llm_cost.cost` is the sum of the amounts providers actually stated, and a
 // provider that states nothing contributes 0 — so `$0` was shown for runs nobody ever priced
 // (measured: `rubert-dr-0805`, 354 calls / 11,616,993 tokens / "$0"), and a partial total was shown

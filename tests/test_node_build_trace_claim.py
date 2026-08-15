@@ -363,3 +363,87 @@ def test_the_trace_tab_keeps_the_build_under_its_node_when_the_window_seeks_into
     assert set(scoped["nodes"]) == {"0"}
 
     assert build_trace_view(_Scalars, window, light=True)["nodes"] == {}
+
+
+# --- ONE body for the per-span decision, ONE selection per trace (2026-08-15) --------------------
+
+def test_the_indexed_and_folded_claim_maps_are_the_same_decision(tmp_path):
+    """`SpanIndex._claim_build_trace` used to RE-STATE `claimed_build_traces` row by row, under a
+    docstring promising it was "kept byte-for-byte equivalent" by hand.
+
+    Two self-consistent bodies is exactly the shape that lets the indexed route and the no-index
+    fallback answer differently about one node with nothing going red, and what this rule decides is
+    whether a node's trace shows its whole Developer build or two spans. The per-span DECISION is now
+    one function; only the aggregation (which the index must make permanent across appends) is still
+    per-caller. Driven over the shapes the rule is made of, both ways round.
+    """
+    index = _card_lane_run(tmp_path)
+    spans = index.light_spans(None)
+    assert index.build_claims == claimed_build_traces(spans, _normalized=True)
+    assert index.build_claims == {BUILD_TRACE: (0, 0)}
+
+    from looplab.events.traceview import span_build_trace_claim
+
+    # the three rules, as a truth table on the shared predicate
+    attrs = {"node_id": 0, "generation": 3, "build_trace": BUILD_TRACE}
+    assert span_build_trace_claim(attrs, NODE_TRACE, 0) == (BUILD_TRACE, 3)
+    assert span_build_trace_claim(attrs, BUILD_TRACE, 0) is None      # never its own trace
+    assert span_build_trace_claim(attrs, NODE_TRACE, None) is None    # a claim needs a claimant
+    assert span_build_trace_claim({"node_id": 0}, NODE_TRACE, 0) is None
+    assert span_build_trace_claim(None, NODE_TRACE, 0) is None
+    for bad in ("", 17, ["x"], None):
+        assert span_build_trace_claim({"node_id": 0, "build_trace": bad}, NODE_TRACE, 0) is None
+    # a missing/《negative》/non-int generation is the claim's own zero, never the trace's
+    for bad in (None, -1, "2", True):
+        assert span_build_trace_claim(
+            {"node_id": 0, "generation": bad, "build_trace": BUILD_TRACE},
+            NODE_TRACE, 0) == (BUILD_TRACE, 0)
+
+
+def _claimed_build_that_also_names_the_node(tmp_path):
+    """A build trace that is in BOTH candidate sets: the node CLAIMS it, and one row inside it
+    carries the node's id (a span written after the id was reserved). Its ROOT still names no node,
+    which is what makes it a build trace at all."""
+    index = _card_lane_run(tmp_path)
+    rows = [json.loads(line) for line in
+            (tmp_path / "spans.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    for row in rows:
+        if row["span_id"] == "implement-gen":
+            row["attributes"]["node_id"] = 0
+            row["attributes"]["generation"] = 0
+    (tmp_path / "spans.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    index = SpanIndex(tmp_path / "spans.jsonl")
+    index._rebuild((tmp_path / "spans.jsonl").stat().st_size)
+    return index, rows
+
+
+def test_a_build_trace_that_also_names_its_node_is_selected_once(tmp_path):
+    """The two candidate sets can OVERLAP, and the row selection was two loops over them.
+
+    A claimed build trace holding one span stamped with the target is in `node_tids` (for that span)
+    AND in `node_build_tids` (for the claim), and neither loop's guards excluded the other's — so
+    every row the two selections share was appended TWICE and survived `sorted`. `node_span_count`,
+    `_node_window_snapshot`'s `total`, `light_spans_for_node` and `full_spans_for_node` all
+    double-counted, and the last re-read the same byte offsets to build a window holding each span
+    twice. The no-index half cannot reach it, because it resolves ONE scope per trace in a dict.
+    """
+    index, rows = _claimed_build_that_also_names_the_node(tmp_path)
+    assert index.build_claims == {BUILD_TRACE: (0, 0)}
+
+    light = index.light_spans_for_node(0, None, generation=0)
+    ids = [s["span_id"] for s in light]
+    assert len(ids) == len(set(ids)), f"duplicated spans in the node window: {ids}"
+    assert index.node_span_count(0, generation=0) == len(ids) == 10
+
+    full = index.full_spans_for_node(0, 512, generation=0)
+    full_ids = [s["span_id"] for s in full]
+    assert len(full_ids) == len(set(full_ids)), full_ids
+
+    # ...and it agrees with the no-index reader over the same rows, which is the point of one rule.
+    payload = build_conversation(
+        _Scalars, full, 0, claimed_traces=index.node_build_traces(0, generation=0),
+        _normalized=True)
+    assert _labels(payload) == ["stages", "plan", "card_build", "train"]
+    fallback = build_conversation(_Scalars, rows, 0)
+    assert _labels(fallback) == _labels(payload)

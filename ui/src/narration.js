@@ -1,4 +1,4 @@
-import { fmt, fmtCost } from './util.js'
+import { durationLabel, fmt, fmtCost } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { crossRunPriorNarration } from './crossRunPrior.js'
 import { livePhase } from './buildingModel.js'
@@ -620,9 +620,8 @@ export function liveStatusAgeLabel(live, log = [], now = Date.now() / 1000) {
   const seconds = Math.floor(now - started)
   // A negative age is clock skew between the engine host and the browser, not a fact about the run.
   if (!Number.isFinite(seconds) || seconds < STATUS_AGE_MIN_S) return ''
-  if (seconds < 90) return `${seconds}s`
-  if (seconds < 5400) return `${Math.round(seconds / 60)}m`
-  const hours = Math.floor(seconds / 3600)
-  const minutes = Math.round((seconds % 3600) / 60)
-  return minutes ? `${hours}h ${minutes}m` : `${hours}h`
+  // The TIERING is `format.js::durationLabel`, shared with the node episode picker and the standing
+  // watch strip — this surface's own rule is only the noise floor above, which says when an age is
+  // worth printing at all. See that function for why the three stopped each keeping their own copy.
+  return durationLabel(seconds)
 }

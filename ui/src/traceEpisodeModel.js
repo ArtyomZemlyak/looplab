@@ -23,6 +23,9 @@
 // ANCHOR (`?before=<span_id>`, the same window ending at a chosen step instead of at the newest
 // one). This module turns that map into the choices a picker offers and the position it reports.
 
+// The ONE tiered duration rendering (`format.js` imports nothing, so a pure model may reach it).
+import { durationLabel } from './format.js'
+
 // The kinds a node's own trace records, in the words the operator uses. Only a RENAME lives here: a
 // label with no row keeps its recorded spelling verbatim, because inventing a friendly name for a
 // band nobody has seen is how a map starts describing something the trace does not contain.
@@ -46,28 +49,42 @@ const anchored = episode => typeof episode?.anchor === 'string' && episode.ancho
 /**
  * Fold one `/nodes/{n}/episodes` payload into what a picker can offer.
  *
- * Four outcomes, and they are deliberately four rather than "a list that may be empty":
+ * FOUR outcomes, and they are deliberately four rather than "a list that may be empty":
  *   unavailable — the map could not be read. NEVER the same as "this node has no episodes": a
  *                 failed read that renders as an empty picker tells the operator their node has no
  *                 history, which is the lie the whole projection vocabulary exists to prevent.
- *   empty       — read fine, nothing to seek to (a node whose whole trace fits in one window).
+ *   empty       — read fine, and there is genuinely nothing to seek to: the node's whole trace fits
+ *                 in one window. NOTHING was omitted and nothing was dropped — that is what makes
+ *                 the sentence this status prints ("fits in one window") true.
+ *   unseekable  — read fine, the node HAS earlier steps, and not one of them can be pointed at:
+ *                 either the server's own map stopped short (`omitted_episodes > 0`) or every row it
+ *                 returned lacked an anchor. Split out of `empty` on 2026-08-15, because the two
+ *                 were one status carrying `omitted` forward while forcing `total: 0` — so a node
+ *                 whose payload said "there are 900 more episodes" was told its whole trace fits in
+ *                 one window. That is exactly the "a partial read must never read as an absent
+ *                 history" lie the other three outcomes were written to prevent, arriving through
+ *                 the one branch that had no way to say what it knew.
  *   ready       — kinds to choose from.
- * `partial` rides alongside: the server's map has its own ceiling, and a map that stops short must
- * say so rather than let its oldest row read as the node's beginning.
+ * `partial` rides alongside all four: the server's map has its own ceiling, and a map that stops
+ * short must say so rather than let its oldest row read as the node's beginning.
  *
  * An episode with no usable `anchor` is dropped, not disabled: the anchor IS the seek, so a row
  * without one is a choice that cannot be made, and a picker offering it would be a dead control.
+ * `dropped` is that count, carried rather than discarded for the same reason `omitted` is — the two
+ * are different facts (one the server withheld, one this fold refused) and both are steps the
+ * operator cannot reach, so `episodeMapNotice` states them together and never as an absence.
  */
 export const buildEpisodeMap = payload => {
   if (!payload || typeof payload !== 'object' || payload.projection?.unavailable === true) {
-    return { status: 'unavailable', kinds: [], total: 0, omitted: 0, partial: true }
+    return { status: 'unavailable', kinds: [], total: 0, omitted: 0, dropped: 0, partial: true }
   }
   const rows = Array.isArray(payload.episodes) ? payload.episodes : []
   const omitted = safeCount(payload.projection?.omitted_episodes)
+  let dropped = 0
   const kinds = []
   const byLabel = new Map()
   for (const row of rows) {
-    if (!anchored(row)) continue
+    if (!anchored(row)) { dropped += 1; continue }
     const label = row.label == null ? '' : String(row.label)
     let kind = byLabel.get(label)
     if (!kind) {
@@ -79,18 +96,22 @@ export const buildEpisodeMap = payload => {
     }
     kind.episodes.push(row)
   }
-  // Read fine, nothing to seek to. Reached both by a node whose whole trace fits in one window and
-  // by a map whose every row lacked an anchor — the operator's move is the same in both, and neither
-  // is a failed read, which is the distinction the `unavailable` branch above exists to keep.
+  // Read fine, nothing to OFFER — and the two reasons for that are not one fact. A node whose whole
+  // trace fits in one window has no earlier steps at all; a map that stopped short, or whose every
+  // row lacked an anchor, has them and cannot point at them. The operator's move differs too: the
+  // first is finished reading, the second is looking at a control that will not take them where the
+  // steps are. Neither is a failed read, which is the distinction the `unavailable` branch keeps.
   if (!kinds.length) {
-    return { status: 'empty', kinds: [], total: 0, omitted, partial: omitted > 0 }
+    const status = omitted > 0 || dropped > 0 ? 'unseekable' : 'empty'
+    return { status, kinds: [], total: 0, omitted, dropped, partial: omitted > 0 || dropped > 0 }
   }
   return {
     status: 'ready',
     kinds,
     total: kinds.reduce((sum, kind) => sum + kind.episodes.length, 0),
     omitted,
-    partial: omitted > 0,
+    dropped,
+    partial: omitted > 0 || dropped > 0,
   }
 }
 
@@ -166,16 +187,13 @@ export const episodeOrdinal = (episode, index) => {
   return Number.isSafeInteger(index) && index >= 0 ? index + 1 : null
 }
 
-const seconds = value => (typeof value === 'number' && Number.isFinite(value) && value >= 0
-  ? value : null)
-
-export const episodeDurationLabel = episode => {
-  const value = seconds(episode?.seconds)
-  if (value == null) return ''
-  if (value < 90) return `${Math.round(value)}s`
-  if (value < 5400) return `${Math.round(value / 60)}m`
-  return `${(value / 3600).toFixed(1)}h`
-}
+// How long an episode took, in the run's ONE duration rendering (`format.js::durationLabel`, shared
+// with the live-status age and the standing-watch strip). This copy printed the top tier as `3.4h`
+// against the status strip's `3h 25m` for the same interval — and those two surfaces are read side
+// by side, the picker being inside the run screen the strip captions. `durationLabel` keeps this
+// module's own "absent is not zero" rule: only a real number is a duration, so a missing `seconds`
+// stays out rather than rendering as `0s`.
+export const episodeDurationLabel = episode => durationLabel(episode?.seconds)
 
 /** The one-line summary a chosen episode shows beside the picker. Never invented: absent stays out. */
 export const episodeSummary = (episode, index) => {
@@ -197,11 +215,34 @@ export const episodeSummary = (episode, index) => {
 // The notice the control prints when the map itself is bounded. Stated as a count, never as an
 // adjective — the same rule `traceWindowNotice` follows, and for the same reason: an operator whose
 // map stops short needs to know it stops short, or they will read its oldest row as the beginning.
-export const episodeMapNotice = map => (map?.omitted > 0
-  ? `Showing the most recent ${map.total} of ${map.total + map.omitted} steps.`
-  : '')
+//
+// TOTAL over every status, because it is the ONLY thing the `unseekable` branch has to say and the
+// branch exists precisely because that branch used to say nothing. Two shapes, and the split is on
+// whether anything can be reached at all rather than on the status name: with rows to offer it
+// captions them, and with none it states the size of what is out of reach — "the most recent 0 of
+// 900" is arithmetically true and reads as a bug, which is not the sentence to hand somebody who
+// has just been told their trace fits in one window.
+export const episodeMapNotice = map => {
+  const total = safeCount(map?.total)
+  const omitted = safeCount(map?.omitted)
+  const dropped = safeCount(map?.dropped)
+  if (!omitted && !dropped) return ''
+  const known = total + omitted + dropped
+  // `dropped` is named separately wherever it is non-zero: an omitted episode can be reached by
+  // asking the server for more, one this fold refused for a missing anchor cannot be reached at all,
+  // and rolling them into one number would promise a remedy for half of them.
+  const unreachable = dropped ? ` ${dropped} cannot be jumped to.` : ''
+  if (!total) {
+    return known === 1
+      ? 'This experiment has 1 earlier step and it cannot be jumped to.'
+      : `This experiment has ${known} earlier steps and none of them can be jumped to.`
+  }
+  return `Showing the most recent ${total} of ${known} steps.${unreachable}`
+}
 
 // What the control says when the map could not be read. A failed map is not an absent history, and
 // the remedy is to try again — never "this node has no earlier steps".
 export const EPISODE_MAP_UNAVAILABLE = 'Could not read this experiment’s steps.'
+// And the one status that may claim there is nothing earlier to see. It is now reachable ONLY when
+// the payload proves it: no omitted episodes, no dropped rows. See `buildEpisodeMap`.
 export const EPISODE_MAP_EMPTY = 'This experiment’s whole trace fits in one window.'

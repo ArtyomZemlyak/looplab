@@ -41,7 +41,8 @@ from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable r
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
     _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
-from looplab.serve.owner_token import log_owner_token_decision, resolve_owner_token
+from looplab.serve.owner_token import (
+    log_owner_token_decision, on_shared_origin, resolve_owner_token)
 from looplab.serve.projects import ProjectStore
 from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
 from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
@@ -362,7 +363,14 @@ def _warm_route_matching(app: "FastAPI") -> None:
     _warm(app.routes)
 
 
-def make_app(run_root: str | os.PathLike) -> "FastAPI":
+def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) -> "FastAPI":
+    """Build the ASGI app. `bind_host` is the address this app is about to be PUBLISHED on.
+
+    It exists for exactly one decision — `owner_token.on_shared_origin`, i.e. whether an unset
+    `LOOPLAB_UI_TOKEN` means "unauthenticated" — and it is a keyword with a None default so every
+    embedded caller (the suite, an in-process mount) keeps the behaviour it had: no bind, no claim
+    about exposure, private. `serve()` below is the one caller that knows the answer and passes it.
+    """
     if FastAPI is None:
         raise _ui_extra_error("fastapi")
     from looplab.serve.appstate import AppState
@@ -446,10 +454,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # a per-DEPLOYMENT credential rather than user identity or RBAC. See the deployment guide.
     # WHAT AN UNSET LOOPLAB_UI_TOKEN MEANS is `serve/owner_token.py`'s decision, and it is not one
     # answer: on a private origin it still means "unauthenticated", byte-for-byte the historical
-    # local single-user behaviour; on the SHARED JupyterHub origin this server already detects and
-    # warns about, it now fails closed by MINTING a token rather than serving the control plane to
+    # local single-user behaviour; on a SHARED origin — the JupyterHub one this server already
+    # detects and warns about, OR a non-loopback `bind_host` this process was published on — it now
+    # fails closed by MINTING a token rather than serving the control plane to
     # any same-origin page. That module states why, and what it costs.
-    ui_token, ui_token_source = resolve_owner_token()
+    ui_token, ui_token_source = resolve_owner_token(bind_host)
 
     def _owner_authenticated(request: "Request") -> bool:
         supplied = request.headers.get("X-LoopLab-Token", "")
@@ -472,8 +481,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             },
         )
 
-    if _on_shared_hub():
-        log_owner_token_decision(ui_token, ui_token_source)
+    # The SAME predicate the decision was made with — not `_on_shared_hub()`, which would decide to
+    # fail closed on a published bind and then say nothing at all about it (including the once-only
+    # line carrying the minted token, i.e. the operator's only way to learn a credential they never
+    # chose). One witness, both branches.
+    if on_shared_origin(bind_host):
+        log_owner_token_decision(ui_token, ui_token_source, bind_host)
     if ui_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
@@ -768,4 +781,7 @@ def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765
     # root_path: ASGI mount prefix for a NON-stripping proxy (JupyterHub non-strip / reverse-proxy
     # subpath). Empty for local + the common prefix-stripping jupyter-server-proxy (the SPA derives
     # its own prefix from the page path), so this is a no-op there.
-    uvicorn.run(make_app(run_root), host=host, port=port, root_path=root_path, log_level="info")
+    # `host` travels INTO the app, not only into uvicorn: it is the fact that decides whether an
+    # unset owner token may mean "unauthenticated" (`serve/owner_token.py::on_shared_origin`).
+    uvicorn.run(make_app(run_root, bind_host=host), host=host, port=port, root_path=root_path,
+                log_level="info")

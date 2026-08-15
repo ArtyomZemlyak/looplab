@@ -7,6 +7,8 @@ import { costPricing, fmt, isSweep, operatorMeta } from './util.js'
 import { nodeTheme } from './conceptId.js'
 import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
+import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
+  objectiveSourceCaveated } from './trustSemantics.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -286,6 +288,35 @@ export function trustCaveats(state, best) {
     out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
   if (best && best.confirmed_mean == null)
     out.push({ kind: 'single-seed', severity: 'warn', text: 'champion is single-seed (not multi-seed confirmed)', panel: 'trust' })
+  // WHAT THE CHAMPION'S NUMBER IS, in the aggregator every run-level claim is built from.
+  //
+  // The salvage/subject vocabulary was wired into four DISPLAY surfaces (the Metrics tab, the Pareto
+  // front, the archive elites, the cross-run champion row) and not into this list — which is the one
+  // the Report headline, the model card and both exports read. So under `metric_salvage: "select"`,
+  // the rung that mints NO violation row, every branch above found nothing: no reward-hack row, no
+  // infeasible node, and, for a multi-seed champion, no single-seed caveat either. `verdict` then
+  // computed `trust = 'unverified'` and published "Improved the metric by X — champion #N is robust
+  // across N seeds; no trust flags are recorded" about a number the protected scoring path never
+  // read, while the Pareto tab one click away marked that same node `salvaged`.
+  //
+  // Read through the SAME two helpers as those four surfaces (`trustSemantics.js` owns the
+  // vocabulary, and its whole reason for existing is that a second home drifts), so the headline and
+  // the tabs cannot come to disagree about one node — and read from the CHAMPION, because this is a
+  // claim about the run's own result rather than a census of the tree.
+  //
+  // `alarm`, not `warn`, and deliberately: severity is what `verdict` turns into `trust: 'suspect'`
+  // and the headline's "the win is flagged, treat with caution". The champion's metric being
+  // unmeasured does not qualify the win, it is the win's own evidence — the same grade as the
+  // champion-flagged reward-hack branch at the top of this function, and for the same reason.
+  const objective = best ? objectiveMetricSource(best) : null
+  if (objectiveSourceCaveated(objective)) {
+    out.push({
+      kind: 'objective-source',
+      severity: 'alarm',
+      text: `champion’s objective is ${OBJECTIVE_SOURCE_LABEL[objective.channel]}`,
+      panel: 'trust',
+    })
+  }
   return out
 }
 

@@ -7,6 +7,7 @@ throw away the object that armed the watch and pick it up with a fresh one.
 """
 from __future__ import annotations
 
+import ast
 import json
 import time
 
@@ -896,3 +897,284 @@ def test_a_wake_up_may_not_arm_further_watches(tmp_path):
                   for kw in (call.keywords or []) if kw.arg == "watches"]
     assert watches_kw, "the wake-up runner must pass `watches` explicitly, not inherit a default"
     assert all(isinstance(kw.value, ast.Constant) and kw.value.value is None for kw in watches_kw)
+
+
+# ------------------------------------------------------------------ "cannot tell" is not evidence
+def test_an_unreadable_chat_is_never_read_as_a_deleted_one(tmp_path):
+    """The sweep is wired to an IRREVERSIBLE delete, so its answer has to be tri-state.
+
+    `session_exists` used to be a bool, and every unprovable answer collapsed onto "gone": a
+    transient EIO on the mount a run root lives on, a `meta.json` read while it was being rewritten,
+    a record this build cannot validate. Each of those then unlinked a LIVE chat's standing watches
+    — and the operator's own instruction inside them.
+    """
+    store = _store(tmp_path)
+    unknown = store.arm(session="unreadable", instruction="keep me",
+                        trigger={"kind": "schedule", "every_s": 60})
+    gone = store.arm(session="deleted", instruction="remove me",
+                     trigger={"kind": "schedule", "every_s": 60})
+
+    def _answer(sid):
+        return None if sid == "unreadable" else False      # None == cannot tell
+
+    removed = WatchService(store, observe_run=lambda r: None, run_turn_fn=lambda *a: {},
+                           append_turn=lambda *a: None,
+                           session_exists=_answer)._sweep_orphaned_watches()
+
+    assert store.get(unknown["id"])["status"] == "armed", "an unprovable answer must not delete"
+    assert store.get(gone["id"]) is None
+    assert [row["id"] for row in removed] == [gone["id"]]
+
+
+def test_the_servers_own_session_probe_tells_unreadable_from_absent(tmp_path):
+    """The other half of the same rule, through the REAL probe the router injects.
+
+    Driven against a real `SessionStore` rather than a stub, because the shapes that were being read
+    as "gone" are exactly the ones a stub does not have: an unreadable/corrupt `meta.json` beside a
+    session directory that is plainly there.
+    """
+    from looplab.serve.assistant import SessionStore
+    from looplab.serve.routers.assistant import watch_session_exists
+
+    store = SessionStore(tmp_path)
+    live = store.create(title="live")["id"]
+    corrupt = store.create(title="corrupt")["id"]
+    meta = tmp_path / "assistant" / corrupt / "meta.json"
+    meta.write_text("{not json", encoding="utf-8")
+
+    assert watch_session_exists(store, live) is True
+    assert watch_session_exists(store, corrupt) is None, (
+        "a chat we cannot READ is not a chat that is gone")
+    assert watch_session_exists(store, "0" * 16) is False
+    # …and an unrecognized `mode` is the same class of unprovable: the record is there and this
+    # build declines to vouch for it, which is not evidence that the operator deleted the chat.
+    meta.write_text(json.dumps({**store.create(title="x"), "id": corrupt, "mode": "bypassEvery"}),
+                    encoding="utf-8")
+    assert watch_session_exists(store, corrupt) is None
+
+
+# ------------------------------------------------------------------ tri-state liveness
+def test_an_inconclusive_liveness_probe_never_fires_an_engine_stopped_watch():
+    """`_engine_liveness` returns None when it could not tell, and a watch is a PAID one-shot: a
+    false `engine_stopped` spends a model call, tells the operator a healthy training run stopped,
+    and then retires — so the real stop is never reported at all."""
+    assert observed_run_states({"phase": "search", "engine_running": None}) == frozenset({"search"})
+    assert observed_run_states({"phase": "search"}) == frozenset({"search"})
+    assert observed_run_states({"phase": "search", "engine_running": False}) == frozenset(
+        {"search", "engine_stopped"})
+    # The explicit keyword takes the same three answers.
+    assert observed_run_states({"phase": "search"}, engine_running=False) == frozenset(
+        {"search", "engine_stopped"})
+
+
+def test_an_inconclusive_probe_does_not_wake_the_watch(tmp_path):
+    """The same rule where it costs money: through `tick`, with a run whose liveness is unknown."""
+    store = _store(tmp_path)
+    turns = []
+    rows = {"demo": {"phase": "search", "engine_running": None, "nodes": 3}}
+    svc = _service(store, rows=rows, turns=turns)
+    rec = store.arm(session="s1", instruction="tell me when it stops",
+                    trigger={"kind": "run_state", "run": "demo", "until": ["engine_stopped"]})
+
+    svc.tick(now=time.time())
+    assert turns == [], "an unreadable liveness probe is not a stopped engine"
+    assert store.get(rec["id"])["status"] == "armed"
+
+    rows["demo"] = {"phase": "search", "engine_running": False, "nodes": 3}
+    svc.tick(now=time.time() + 3600)
+    assert len(turns) == 1 and store.get(rec["id"])["status"] == "done"
+
+
+# ------------------------------------------------------------------ what the model is woken with
+def test_the_observation_is_a_summary_row_and_survives_the_preamble_cap(tmp_path):
+    """The wake-up context is JSON-dumped with `sort_keys=True` and cut at 1,500 chars, so an
+    observation carrying a per-node map truncates inside `nodes` and never reaches `phase`, `run` or
+    `states` — the very facts the turn was woken for."""
+    store = _store(tmp_path)
+    turns = []
+    # A read-model row is WIDE (the run list's own row carries goal, concepts, themes, caveats…).
+    # The observation is a PROJECTION of it, so the record and the preamble stay the size of the
+    # facts the watch is about however wide the row grows.
+    row = {"run_id": "demo", "phase": "finished", "finished": True, "nodes": 40,
+           "best_metric": 0.42, "engine_running": False,
+           "goal": "G" * 4000, "themes": ["t"] * 200}
+    svc = _service(store, rows={"demo": row}, turns=turns)
+    rec = store.arm(session="s1", instruction="report the champion",
+                    trigger={"kind": "run_state", "run": "demo", "until": ["finished"]})
+
+    svc.tick(now=time.time())
+    (_record, instruction), = turns
+    assert "report the champion" in instruction
+    for fact in ('"run": "demo"', '"phase": "finished"', '"states"', '"best_metric": 0.42',
+                 '"nodes": 40'):
+        assert fact in instruction, fact
+    assert "GGGG" not in instruction, "the wake-up context must not be spent on the whole row"
+    assert set(store.get(rec["id"])["last_observation"]) == {
+        "run", "phase", "finished", "engine_running", "nodes", "best_metric", "states"}
+
+
+def test_the_server_observes_a_run_as_the_run_list_row_it_promises(tmp_path):
+    """Driven through the REAL injected observation against a real run directory: the contract
+    `observed_run_states` documents is a `run_summaries` row, and the state payload's `nodes` is the
+    whole per-node map (plus it carries no `best_metric` at all)."""
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.routers.assistant import watch_observe_run
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"x": 1.0}}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 0.25, "eval_seconds": 1.0})
+
+    srv = make_app(tmp_path).state.looplab
+    row = watch_observe_run(srv, "demo")
+
+    assert row["nodes"] == 1, "a COUNT, not the per-node map"
+    assert row["best_metric"] == 0.25
+    assert "phase" in row and "engine_running" in row
+    assert watch_observe_run(srv, "no-such-run") is None
+
+
+# ------------------------------------------------------------------ the scheduler's own failures
+def test_a_scheduler_failure_reaches_an_error_sink(tmp_path):
+    """`_loop`'s containment `except` exists so one bad record cannot kill the thread. With no sink
+    wired it also means standing monitoring can stop producing wake-ups forever with no line
+    anywhere — unattributable, which is the same silence this module exists to remove."""
+    seen = []
+    store = _store(tmp_path)
+    svc = WatchService(store, observe_run=lambda r: None, run_turn_fn=lambda *a: {},
+                       append_turn=lambda *a: None, interval_s=0.01,
+                       on_error=seen.append)
+    svc.tick = lambda **_kw: (_ for _ in ()).throw(RuntimeError("bad record"))
+    svc.start()
+    deadline = time.time() + 5.0
+    while not seen and time.time() < deadline:
+        time.sleep(0.02)
+    svc.stop()
+
+    assert seen and isinstance(seen[0], RuntimeError)
+
+
+def test_the_server_wires_a_sink_that_records_the_failure(caplog):
+    """The wiring itself, through the app: the class names four collaborators and this was the one
+    left None."""
+    import inspect
+
+    from looplab.serve.routers import assistant as router_mod
+
+    source = inspect.getsource(router_mod.build_router)
+    tree = ast.parse(source.lstrip())
+    call = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "WatchService")
+    wired = {kw.arg for kw in call.keywords}
+    assert {"observe_run", "run_turn_fn", "append_turn", "session_exists", "on_error"} == wired, (
+        "the class names four collaborators plus the store; `on_error` was the one left None")
+
+    sink = next(node for node in ast.walk(tree)
+                if isinstance(node, ast.FunctionDef) and node.name == "_watch_scheduler_error")
+    with caplog.at_level("WARNING", logger="looplab.server"):
+        # Run the REAL sink body, not a stand-in for it: a wiring assertion that never executes the
+        # thing it wired is satisfied by a sink that raises.
+        namespace = {"_log": router_mod._log}
+        exec(compile(ast.Module(body=[sink], type_ignores=[]), "<sink>", "exec"), namespace)
+        namespace["_watch_scheduler_error"](RuntimeError("scheduler exploded"))
+    assert "scheduler exploded" in caplog.text
+
+
+# ------------------------------------------------------------------ the cap, and the tick's cost
+def test_two_concurrent_arms_cannot_step_over_the_active_cap(tmp_path):
+    """The cap is the module's stated bound on UNATTENDED SPEND and nothing downstream re-checks it,
+    so a check-then-act with the count outside the lock is the whole bound."""
+    import threading as _threading
+
+    store = _store(tmp_path)
+    ready = _threading.Barrier(WATCH_MAX_ACTIVE_PER_SESSION + 4)
+    armed, refused = [], []
+
+    def _arm():
+        ready.wait()
+        try:
+            armed.append(store.arm(session="s1", instruction="x",
+                                   trigger={"kind": "schedule", "every_s": 60}))
+        except WatchRefusal:
+            refused.append(True)
+
+    threads = [_threading.Thread(target=_arm) for _ in range(WATCH_MAX_ACTIVE_PER_SESSION + 4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert len(armed) == WATCH_MAX_ACTIVE_PER_SESSION, len(armed)
+    assert len(refused) == 4
+    assert len(store.list(session="s1", active_only=True)) == WATCH_MAX_ACTIVE_PER_SESSION
+
+
+def test_a_tick_costs_what_the_ARMED_watches_cost_not_the_history(tmp_path):
+    """The scheduler polls every 2 s for the life of the server, and terminal records are only ever
+    removed by a session deletion — so a `due()` that re-reads and re-parses every file on disk gets
+    steadily more expensive at doing nothing."""
+    store = _store(tmp_path)
+    for _ in range(6):
+        settled = store.arm(session=f"s{_}", instruction="x",
+                            trigger={"kind": "schedule", "every_s": 60})
+        store.cancel(settled["id"])
+    live = store.arm(session="live", instruction="x", trigger={"kind": "schedule", "every_s": 60})
+
+    reads = []
+    real_read = store._read
+    store._read = lambda wid: (reads.append(wid), real_read(wid))[1]
+    due = store.due(now=time.time() + 3600)
+
+    assert [r["id"] for r in due] == [live["id"]]
+    assert set(reads) == {live["id"]}, reads
+    # …and a record this process has NOT settled is still discovered, so a second process (or a
+    # hand-written record) is never invisible to the scheduler.
+    other = WatchStore(tmp_path).arm(session="elsewhere", instruction="x",
+                                     trigger={"kind": "schedule", "every_s": 60})
+    assert other["id"] in {r["id"] for r in store.due(now=time.time() + 3600)}
+
+
+def test_cancel_is_the_update_rule_and_not_a_second_copy_of_it(tmp_path):
+    """Two copies of the terminal-refusal rule are one commit away from being two rules."""
+    store = _store(tmp_path)
+    rec = store.arm(session="s1", instruction="x", trigger={"kind": "schedule", "every_s": 60})
+
+    calls = []
+    real_update = store.update
+    store.update = lambda wid, **fields: (calls.append((wid, fields)), real_update(wid, **fields))[1]
+    cancelled = store.cancel(rec["id"], reason="stopped by the operator")
+
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["last_error"] == "stopped by the operator"
+    assert calls and calls[0][0] == rec["id"]
+    # The rule it inherits: a terminal never moves again, and a bad id is not a crash.
+    assert store.cancel(rec["id"])["status"] == "cancelled"
+    assert store.cancel("not-an-id") is None
+
+
+# ------------------------------------------------------------------ nobody is watching a wake-up
+def test_an_unattended_turn_denies_a_confirm_instead_of_parking_the_scheduler():
+    """A wake-up runs INLINE on the scheduler's single daemon thread. `_make_approver` blocks on an
+    Event until the operator answers or `_PERM_TIMEOUT` (900 s) elapses — and nobody opens a confirm
+    card for a turn a clock started, so every `ask` decision froze every watch on the server for
+    fifteen minutes AND 409'd the operator's own messages in that chat.
+
+    Driven through the real router's approver: it must answer at once, and it must SAY SO."""
+    from looplab.serve.protocol import PERM_DENY
+    from looplab.serve.routers.assistant import unattended_denial_note, unattended_watch_approver
+
+    declined = []
+    approver = unattended_watch_approver(declined)
+
+    started = time.time()
+    verdict = approver({"tool": "write_file", "tool_kind": "write", "label": "edit config.yaml"})
+
+    assert verdict == PERM_DENY
+    assert time.time() - started < 1.0, "an unattended confirm must not wait for a human"
+    assert declined == ["edit config.yaml"]
+    note = unattended_denial_note(declined)
+    assert "edit config.yaml" in note and "declined" in note

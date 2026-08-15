@@ -247,13 +247,22 @@ def test_deny_records_the_refusal_beside_the_run(tmp_path):
 # --------------------------------------------------------------------------- the predicate
 
 
-def _predicate(roots, allow=()):
-    """The generated fence's own `_fenced`, WITHOUT installing its irreversible audit hook."""
+def _fence_ns(roots, allow=()):
+    """The generated fence's whole namespace, WITHOUT installing its irreversible audit hook.
+
+    `_PROBE_NAME` is what makes this possible: exec'd under that name the template defines its
+    predicates and skips `sys.addaudithook`, so the rare-path helpers (`_fenced_dir`,
+    `_fenced_target`, `_fd_path`) can be driven directly and not only through a child process."""
     src = read_fence.render(roots, allow, policy="deny", log="", run="")
     ns = {"__name__": read_fence._PROBE_NAME}
     exec(compile(src, "sitecustomize.py", "exec"), ns)
     assert "_hook" in ns and ns.get("_POLICY") == "deny"
-    return ns["_fenced"]
+    return ns
+
+
+def _predicate(roots, allow=()):
+    """The generated fence's own `_fenced` — the `open` half of that namespace."""
+    return _fence_ns(roots, allow)["_fenced"]
 
 
 @pytest.mark.parametrize("path,refused", [
@@ -285,9 +294,7 @@ def test_predicate_normalizes_the_shapes_open_actually_receives():
 def test_the_directory_predicate_catches_the_root_itself():
     """`open` names a file INSIDE a root; `os.chdir` names the root, which carries no trailing
     separator and therefore misses the prefix test the hot path uses."""
-    src = read_fence.render(("/src/repo/",), ("/src/repo/data/",), policy="deny", log="", run="")
-    ns = {"__name__": read_fence._PROBE_NAME}
-    exec(compile(src, "sitecustomize.py", "exec"), ns)
+    ns = _fence_ns(("/src/repo/",), ("/src/repo/data/",))
     assert ns["_fenced"]("/src/repo") is None                # the open path is deliberately unchanged
     assert ns["_fenced_dir"]("/src/repo") == "/src/repo"
     # Both spellings of the root are caught, and both REPORT the resolved form: `_fenced_dir` runs
@@ -981,3 +988,102 @@ def test_settings_vocabulary_matches_the_module(tmp_path):
     assert Settings().read_fence == "deny"
     with pytest.raises(ValueError):
         Settings(read_fence="warn-only")
+
+
+# ------------------------------------------------------- the join, and the one enumeration of mounts
+
+
+@pytest.mark.parametrize("root,target", [("/repo/", "/repo"), ("/home/x/repo/", "/home/x/repo")])
+def test_a_mutation_of_the_root_itself_is_refused_at_every_depth(root, target):
+    """`shutil.rmtree(<the source root>)` reaches `os.rename`/`os.rmdir` on the ROOT's own name, and
+    that name rpartitions to an EMPTY head — so the parent is `/` for a root one level down.
+
+    The join spelled `_real('/') + '/' + 'repo'` = `//repo`, which `_prefixed` compares byte-exactly
+    against `('/repo/',)` and does not match: the target directly under `/` went THROUGH while the
+    identical call against `/home/x/repo` was refused. A depth-dependent fence is not a fence, and
+    the parametrization is the point — both rows are one rule.
+
+    Nothing here touches the filesystem (`realpath` of an absent path is its own normalization), so
+    this drives the shape a real `/repo` would have without needing one.
+    """
+    ns = _fence_ns((root,))
+    assert ns["_fenced_target"](target, None) == target
+    assert ns["_fenced_target"](target + "/final/model.safetensors", None) is not None
+
+
+def test_a_relative_mutation_through_a_dir_fd_on_the_root_directory_is_refused(tmp_path):
+    """The same join from the other side: `os.remove('repo', dir_fd=<fd of />)`.
+
+    CPython audits the RELATIVE name, so the fence rebuilds the path from the descriptor — and when
+    the descriptor IS `/` the base already ends in a separator. `/proc/self/fd` is the real resolver
+    here, which is why this opens a real fd rather than faking one."""
+    ns = _fence_ns(("/repo/",))
+    fd = os.open(os.sep, os.O_RDONLY)
+    try:
+        assert ns["_fd_path"](fd) == os.sep, "the descriptor resolver did not name the root"
+        assert ns["_fenced_target"]("repo", fd) == "/repo"
+        assert ns["_fenced_target"]("etc", fd) is None       # …and nothing else becomes fenced
+    finally:
+        os.close(fd)
+
+
+def test_the_declared_mounts_have_ONE_enumeration_for_both_halves_of_the_boundary(tmp_path):
+    """`fence_inputs` (deny) reads the operator's mounts through `read_allowlist.mount_sources`
+    (grant) rather than walking `data:`/`references:` a second time.
+
+    Two walks of one declaration is a disagreement waiting to happen, and these two had already
+    diverged: the fence called `ref.get("path")` unguarded. A malformed `references:` entry
+    therefore raised AttributeError out of the DENY derivation while the GRANT side skipped it — and
+    a boundary whose two halves answer differently is one where the audit hook permits a read the
+    kernel ruleset refuses with `EACCES`, i.e. the silent `except OSError:` skip both modules exist
+    to avoid. Driven by asking both halves about the SAME spec, mounts and malformed rows included.
+    """
+    src, _sib, run_dir, wd, _models = _world(tmp_path)
+    (src / "refdocs").mkdir()
+    (src / "models").mkdir()          # a mount source INSIDE the editable root: the carve-out case
+    spec = {"editables": [{"name": ".", "path": str(src)}],
+            # every shape the two schemas allow, plus the two malformed rows: `data:` has a
+            # bare-string back-compat form (`RepoTask.data`) and `references:` has never had one.
+            "data": {"corpus": {"path": str(src / "corpus")},
+                     "legacy": str(src / "models"),
+                     "junk": {"name": "no path at all"}},
+            "references": [{"name": "docs", "path": str(src / "refdocs")}, "not-a-dict"]}
+
+    roots, allowed, _dropped, _swallowed = read_fence.fence_inputs(spec)
+    grants = dict(read_allowlist.derive(workdir=str(wd), run_dir=str(run_dir), repo_spec=spec))
+    declared = {os.path.realpath(p) for p, _mode in read_allowlist.mount_sources(spec)}
+
+    assert declared == {os.path.realpath(str(src / d)) for d in ("corpus", "models", "refdocs")}
+    assert {os.path.realpath(a) for a in allowed} == declared, (
+        "the DENY side no longer carves out exactly the mounts the GRANT side names")
+    for mount in declared:
+        assert grants.get(mount) in ("read", "readwrite")
+    assert roots == [str(src) + os.sep] and os.path.realpath(str(src)) not in grants
+
+
+def test_a_malformed_reference_entry_degrades_to_no_declaration_rather_than_raising():
+    """WHICH reading is correct, stated as a test. `references:` is a list of `ReferenceSpec` dumps
+    and never had a bare-string form, so a non-dict entry is a malformed declaration — and a
+    malformed declaration must degrade to "no declaration", never take down the derivation that a
+    node's whole fence is rendered from (`command_eval`'s `isinstance` rule, one module over).
+
+    A `data:` bare string is the opposite case: that shape is real, and it stays a mount."""
+    roots, allowed, _dropped, _swallowed = read_fence.fence_inputs(
+        {"editables": [{"name": ".", "path": "/src/repo"}],
+         "data": {"legacy": "/src/repo/corpus"},
+         "references": ["/src/repo/docs", None, 7]})
+    assert roots == ["/src/repo" + os.sep]
+    assert allowed == ["/src/repo/corpus" + os.sep], "a malformed row changed what the fence allows"
+
+
+def test_this_module_owns_the_only_refusal_sentence_the_boundary_can_deliver():
+    """`read_allowlist.refusal_hint` was a second, DEAD refusal sentence — zero callers for its whole
+    life, and unreachable in principle: the kernel rung answers `EACCES` with no room for a sentence,
+    and this module's hook already carries one that names the same fix. Deleting it is the fix; this
+    is what stops it (or a third) coming back as text nobody reads."""
+    assert not hasattr(read_allowlist, "refusal_hint")
+    assert "mount" in read_fence.REFUSAL_MESSAGE and "{path}" in read_fence.REFUSAL_MESSAGE
+    assert "{path}" in read_fence.MUTATION_REFUSAL_MESSAGE
+    assert not [name for name in vars(read_allowlist)
+                if "refus" in name.lower() or "message" in name.lower()], (
+        "a refusal sentence in the GRANT module is a sentence no refusal can carry")

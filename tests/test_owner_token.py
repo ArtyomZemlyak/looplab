@@ -140,3 +140,81 @@ def test_the_startup_line_names_the_file_and_prints_a_minted_token_once(tmp_path
 
     assert minted and minted in text
     assert str(owner_token.owner_token_path()) in text
+
+
+# ------------------------------------------------------------------ the OTHER shared origin
+def test_a_published_bind_fails_closed_exactly_like_the_hub(tmp_path, monkeypatch):
+    """`looplab ui --host 0.0.0.0` publishes the control plane — start/delete runs, edit settings,
+    shell-executing experiments — to everything that can route to the box.
+
+    The fail-closed decision was keyed on two JupyterHub env variables alone, so this invocation
+    answered `private` and served all of it unauthenticated; the module's own argument for that
+    ("it already binds loopback, and that is the exposed configuration") is true of the hub and
+    simply false here. The property is "published on an origin this deployment does not own", and
+    the bind host is the second witness of it.
+    """
+    client = TestClient(make_app(tmp_path, bind_host="0.0.0.0"))
+
+    assert client.get("/api/runs").status_code == 401
+    minted = owner_token.read_owner_token_file()
+    assert minted
+    assert client.get("/api/runs", headers={"X-LoopLab-Token": minted}).status_code == 200
+    assert client.get("/api/health").status_code == 200
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.1.5", "::1", "[::1]", "localhost", None])
+def test_a_private_bind_is_still_open_and_mints_nothing(tmp_path, host, monkeypatch):
+    """The historical local single-user path, and the embedded one: `make_app(root)` with no bind
+    claims no exposure and must behave byte-for-byte as before."""
+    client = TestClient(make_app(tmp_path, bind_host=host))
+
+    assert client.get("/api/runs").status_code == 200
+    assert owner_token.resolve_owner_token(host) == (None, owner_token.SOURCE_PRIVATE_ORIGIN)
+    assert not owner_token.owner_token_path().exists()
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "", "::", "10.1.2.3", "looplab.example.com"])
+def test_every_non_loopback_bind_is_treated_as_published(host):
+    """Including the empty string (a socket bind reads it as every interface) and a hostname this
+    process cannot classify — the fail-closed direction is the whole point."""
+    assert owner_token.on_shared_origin(host) is True
+    assert owner_token.on_shared_origin("127.0.0.1") is False
+
+
+def test_the_anonymous_opt_out_still_works_on_a_published_bind(tmp_path, monkeypatch, caplog):
+    """The escape hatch is unchanged and stays EXPLICIT and logged — and the line must name the
+    exposure that actually fired, not tell a `--host 0.0.0.0` operator about jupyter-server-proxy."""
+    monkeypatch.setenv(owner_token.OWNER_ANONYMOUS_ENV, "1")
+    with caplog.at_level("WARNING", logger="looplab.server"):
+        client = TestClient(make_app(tmp_path, bind_host="0.0.0.0"))
+
+    assert client.get("/api/runs").status_code == 200
+    assert not owner_token.owner_token_path().exists()
+    assert "UNAUTHENTICATED" in caplog.text and "0.0.0.0" in caplog.text
+    assert "JupyterHub" not in caplog.text
+
+
+def test_the_published_bind_decision_is_LOGGED_with_its_minted_token(tmp_path, monkeypatch, caplog):
+    """A server that fails closed and says nothing is one nobody can unlock: the minted value is
+    printed exactly once, at the moment it is created, and the branch that decides whether to log
+    must be the SAME predicate that decided to mint."""
+    with caplog.at_level("WARNING", logger="looplab.server"):
+        make_app(tmp_path, bind_host="0.0.0.0")
+
+    minted = owner_token.read_owner_token_file()
+    assert minted and minted in caplog.text
+    assert str(owner_token.owner_token_path()) in caplog.text
+
+
+def test_serve_hands_the_bind_host_to_the_app(monkeypatch, tmp_path):
+    """The value has to actually TRAVEL: `looplab ui --host` -> `serve(host=…)` -> `make_app`."""
+    from looplab.serve import server as server_mod
+
+    seen = {}
+    monkeypatch.setattr(server_mod, "make_app", lambda root, **kw: seen.update(root=root, **kw))
+    monkeypatch.setitem(__import__("sys").modules, "uvicorn", type("U", (), {
+        "run": staticmethod(lambda app, **kw: seen.update(uvicorn_host=kw.get("host")))})())
+
+    server_mod.serve(tmp_path, host="0.0.0.0", port=1)
+
+    assert seen["bind_host"] == "0.0.0.0" and seen["uvicorn_host"] == "0.0.0.0"

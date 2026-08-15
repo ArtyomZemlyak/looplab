@@ -2074,9 +2074,21 @@ class EvaluateMixin:
                 # may rewrite `looplab_stages.json`, so a hoisted number would license the chain
                 # against a pipeline the node no longer has.
                 if floor_stop is None and self._inline_repair and self._inline_repair_retrain_cap:
+                    # `eval_spec_time_budget` AND NOT the raw `timeout` key, which is the base
+                    # profile's number and not the one this eval runs under. A spec spelling
+                    # `timeout: 600` beside `profiles: {full: {timeout: 21600}}` gets 21600 from
+                    # `build_command` the moment a node selects that profile, so licensing the chain
+                    # against 600 charged a 6-hour attempt at a 10-minute pipeline's rate and fired
+                    # this floor on the FIRST failure — no repair ever attempted, and a terminal
+                    # quoting a pipeline cost 36x below the one the run actually declared.
+                    # `declared_pipeline_seconds`' own docstring already named the right number
+                    # ("`_eval_pipeline`'s resolved timeout"); this is the derivation the rest of the
+                    # engine quotes to both roles (docs/29 F1h), so the floor and the budget the
+                    # Developer sized its schedule against are now one number.
+                    from looplab.runtime.command_eval import eval_spec_time_budget
                     _pipeline_s = declared_pipeline_seconds(
                         self._resolved_stages(node, workdir),
-                        (self._eval_spec or {}).get("timeout")
+                        eval_spec_time_budget(self._eval_spec)
                         if isinstance(self._eval_spec, dict) else None)
                     floor_stop = repair_redone_work_stop(
                         chain_seconds=prior_repair_seconds + total_eval,
@@ -2114,7 +2126,24 @@ class EvaluateMixin:
                 # bytes begin and a repairer diagnosing attempt N cannot read attempt N-1's curve as
                 # its own. That is the same floor `read_training_tail_raw` respects — one boundary,
                 # now three readers.
-                _repair_tools = repair_log_tools(self, workdir, _log_plan, _log_snapshot)
+                #
+                # OFF THE EVENT LOOP, and it is not a plain argument evaluation: `monitor_log_sources`
+                # GLOBS the workdir and then `open`s + probes each stage log for this attempt's byte
+                # floor. On the geesefs/S3 mounts a run root usually lives on, a directory lookup that
+                # misses costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so
+                # building it inline stalled the whole engine loop — every concurrent eval, both
+                # watchdogs and the run loop — for the duration. It is the same defect
+                # `train_monitor._monitor_training` was fixed for on 2026-08-15, at the one call site
+                # where the consumer is NOT itself offloaded, so the hand-off has to be its own.
+                #
+                # `abandon_on_cancel=True` by the rule the orchestrator's own reads state: this is a
+                # PURE READ that spends nothing, appends nothing and rebinds no run-scoped state — it
+                # returns a fresh provider — so a pause/abort may drop it without leaving anything
+                # half-done. The paid call BELOW is the opposite case and is deliberately untouched
+                # here (see `_repair_critic`'s comment for the convention those three share).
+                _repair_tools = await anyio.to_thread.run_sync(
+                    repair_log_tools, self, workdir, _log_plan, _log_snapshot,
+                    abandon_on_cancel=True)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,

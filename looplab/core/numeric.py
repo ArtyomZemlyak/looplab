@@ -1,4 +1,4 @@
-"""Parameter-space numeric primitives: the numeric subset of a param dict, and the IDW k-NN core.
+"""Shared numeric primitives: the median, the numeric subset of a param dict, and the IDW k-NN core.
 
 Neither has anything to do with the event log, yet both lived in `events/digest.py` (doc 25 XP-12),
 and `runtime/proxy.py` imported `events` for the sole purpose of reaching a math function — the one
@@ -13,6 +13,28 @@ where it is.
 from __future__ import annotations
 
 import math
+
+
+def median(values) -> float:
+    """The median of `values`, sorted. Raises IndexError on an EMPTY input — deliberately, because
+    both callers reduce a set they have already proved non-empty and a 0.0 there would be a reading
+    nothing measured.
+
+    Shared by `tools/log_tools.py::bucket_series` (the judge-facing per-bucket median) and
+    `engine/train_monitor.py` (the loss-trajectory veto's per-window median and its noise floor).
+    Those two were byte-identical copies, and they reduce the SAME data one trust tier apart: a
+    window median that disagreed with the bucket median of the same log would put the deterministic
+    veto and the number the judge reads off `metric_series` in silent contradiction.
+
+    NOTE two further copies exist and are deliberately NOT this function, because they answer the
+    empty case differently and their callers depend on that: `search/concept_analytics.py::_median`
+    returns None (an un-scored concept has no baseline) and `engine/speculation.py::_median` returns
+    0.0 (an unmeasured build width falls back to the AUTO default).
+    """
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def numeric_params(params: dict, keys=None) -> dict:

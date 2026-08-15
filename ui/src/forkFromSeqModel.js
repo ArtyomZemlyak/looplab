@@ -210,6 +210,22 @@ const FORK_REFUSALS = Object.freeze({
 
 const STALE_PARENT_RE = /stale parent #(\d+): current generation is (\d+)/
 
+// The three 4xx statuses that do NOT prove the intake refused. Everything else in the 4xx range is a
+// validator saying no before anything was appended; these three a PROXY can synthesize after it has
+// already forwarded the request, so the branch may be sitting in the queue.
+//
+// The same three numbers as `commandModel.js::TRANSIENT_HTTP` and
+// `traceClearModel.js::TRACE_CLEAR_RETRYABLE_STATUSES`, and — as there — deliberately NOT the same
+// constant. `TRANSIENT_HTTP` answers "may this command read be retried"; this one answers "can the
+// server prove nothing was appended", which is what `classifyForkFailure` turns into `applied` and
+// `forkRetryable` turns into whether the submit button re-arms. Sharing the list would let a change
+// made for the command lifecycle move a PAID submission between "nothing was queued, edit and
+// resubmit" and "outcome unknown, do not press again" — one idea becoming two GPU experiments.
+// NAMED rather than spelled inline mid-expression because it is the fourth site of these three
+// numbers and the one that spends money: a status quietly dropping out of an unlabelled
+// `status !== 408 && …` chain is not a thing grep can find.
+export const FORK_UNPROVEN_4XX_STATUSES = Object.freeze([408, 425, 429])
+
 /**
  * Classify a failed branch submission.
  *
@@ -253,7 +269,7 @@ export function classifyForkFailure(error) {
     .filter(code => text.includes(code)).map(code => FORK_REFUSALS[code])[0]
   if (known) return { applied: false, moved: false, code: detail || 'refused', message: known }
   if (typeof status === 'number' && status >= 400 && status < 500
-      && status !== 408 && status !== 425 && status !== 429) {
+      && !FORK_UNPROVEN_4XX_STATUSES.includes(status)) {
     return {
       applied: false,
       moved: false,

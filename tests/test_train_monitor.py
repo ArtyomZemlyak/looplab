@@ -236,6 +236,101 @@ def test_monitor_no_span_without_a_log(tmp_path):
     assert [s for s in spans if s.get("name") == "train_monitor"] == []
 
 
+def test_building_the_log_tools_costs_one_source_derivation_and_not_two(tmp_path):
+    """`_log_query_tools` ran `monitor_log_sources` once just to decide whether there was anything
+    to hand back, and then handed the SAME derivation in as a callable that ran it again on the
+    provider's first read. That derivation globs the workdir and opens + fstats every stage log,
+    with `attempt_byte_floor` probe-READING each one — so on the geesefs/S3 mounts this repo
+    documents it is the most expensive thing a judge tick does, and it was being done twice before
+    the model had asked a single question.
+
+    The probe's own answer serves the FIRST read and nothing else: a later tool call must still
+    re-derive, because a new stage log appearing mid-eval is exactly what the callable is for."""
+    import looplab.engine.train_monitor as _tm_mod
+
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("\r1/2 [0:00:01<0:00:01] loss: 1.0\n")
+    plan = _tm_mod.EvalLogPlan(roles={_tm_mod._log_name_key("train.log"):
+                                      ("train", _tm_mod.LOG_ROLE_TRAINING)})
+    derivations = []
+    real = _tm_mod.monitor_log_sources
+
+    def counting(workdir, plan=None, snapshot=None):
+        derivations.append(1)
+        return real(workdir, plan, snapshot)
+
+    _tm_mod.monitor_log_sources = counting
+    try:
+        tools = _tm_mod._log_query_tools(wd, plan, None)
+        assert tools is not None
+        assert len(derivations) == 1                       # the existence probe
+        assert "loss: 1.0" in tools.execute("read_log", {"mode": "tail"})
+        assert len(derivations) == 1, "the probe's own answer was thrown away"
+        # ...and the NEXT call sees the filesystem again, which is the whole point of the callable.
+        (wd / "score.log").write_text("scoring\n")
+        tools.execute("read_log", {"mode": "tail"})
+        assert len(derivations) == 2
+    finally:
+        _tm_mod.monitor_log_sources = real
+
+
+def test_the_log_tools_derivation_happens_off_the_event_loop_thread(tmp_path):
+    """`monitor_log_tools` is FILESYSTEM work — it globs the workdir for `*.log`, opens + fstats
+    every stage log the plan names, and `attempt_byte_floor` probe-READS each one. It was passed as
+    an ARGUMENT to `anyio.to_thread.run_sync`, which means Python evaluated it on the EVENT-LOOP
+    thread before the hand-off ever happened, once per tick per running eval. Every other filesystem
+    touch in this loop is deliberately handed to a worker (`_observe_log`), and on the geesefs/S3
+    mounts this repo documents a single stat of an absent file costs 105-950 ms — so this one
+    blocked the whole engine loop while looking like a plain argument.
+
+    Driven by IDENTITY, not by source shape: record the thread the derivation runs on and the thread
+    the loop itself runs on, and assert they differ.
+    """
+    import looplab.engine.train_monitor as _tm_mod
+
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\n")
+    derived_on: list = []
+    real = _tm_mod.monitor_log_tools
+
+    def _recording(engine, workdir, log_plan=None, log_snapshot=None):
+        derived_on.append(threading.get_ident())
+        return real(engine, workdir, log_plan, log_snapshot)
+
+    async def drive():
+        tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
+        host = _MonitorStub(tracer, interval=0.02)
+        host._monitor_cadence = lambda: 0.0
+        host._train_monitor_tools = True
+        judged = threading.Event()
+
+        def _verdict(digest, context, stage_context="", trajectory_text="", tools=None):
+            judged.set()
+            return None
+
+        host._training_verdict = _verdict
+        cancel = threading.Event()
+        loop_thread = threading.get_ident()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(host._monitor_training, 0, 0, str(wd), cancel)
+            await anyio.to_thread.run_sync(judged.wait, abandon_on_cancel=True)
+            tg.cancel_scope.cancel()
+        return loop_thread
+
+    original = _tm_mod.monitor_log_tools
+    _tm_mod.monitor_log_tools = _recording
+    try:
+        loop_thread = anyio.run(drive)
+    finally:
+        _tm_mod.monitor_log_tools = original
+    assert derived_on, "the judge never got its tools built at all"
+    assert loop_thread not in derived_on, (
+        "the log-source derivation ran on the event-loop thread — it is an argument evaluated "
+        "before the worker hand-off again")
+
+
 # --------------------------------------------------------------------------- Phase 1: LLM verdict
 from looplab.events.types import EV_TRAIN_MONITOR_ALERT  # noqa: E402
 

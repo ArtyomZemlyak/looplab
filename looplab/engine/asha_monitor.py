@@ -796,12 +796,28 @@ class AshaMonitorMixin:
                             # multi-hour budget, and its client usage is billable against shared run
                             # state. Join an in-flight call on eval cancellation (abandon_on_cancel=False)
                             # so no detached worker can emit cost after the node/run has finalized.
+                            def _judge():
+                                """The paid call AND the source derivation it needs, both in the worker.
+
+                                `monitor_log_tools` is FILESYSTEM work — it globs the workdir for
+                                `*.log`, opens + fstats every stage log the plan names, and
+                                `attempt_byte_floor` probe-READS each one. As an ARGUMENT to
+                                `run_sync` it was evaluated on the EVENT-LOOP thread, which is the
+                                one place in this tick that pays for a slow mount: on the geesefs/S3
+                                mounts `runs/` lives on, an `lstat` of a file that is NOT there
+                                costs 105-950 ms (`core/fence.py::_warm_directory_lookup` measured
+                                it), so one blocking derivation per tick per running eval stalls the
+                                whole engine loop. The identical defect and the identical fix as
+                                `train_monitor.py`'s `_judge`, and it has to be stated twice because
+                                the two watchdogs build their tools at their own call sites. Still
+                                built PER TICK, for the reason it always was: the log the judge
+                                would read is being written while it thinks.
+                                """
+                                return self._asha_verdict(
+                                    context, monitor_log_tools(self, workdir, log_plan, log_snapshot))
+
                             verdict = await anyio.to_thread.run_sync(
-                                self._asha_verdict, context,
-                                # Per tick, for the reason the training monitor's is: the log the
-                                # judge would read is being written while it thinks.
-                                monitor_log_tools(self, workdir, log_plan, log_snapshot),
-                                abandon_on_cancel=False)
+                                _judge, abandon_on_cancel=False)
                             judge_calls += 1
                         conf, confidence_valid = _normalize_monitor_confidence(
                             getattr(verdict, "confidence", None))

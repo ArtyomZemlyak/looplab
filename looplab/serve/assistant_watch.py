@@ -114,8 +114,9 @@ survive a deletion they asked for. It is a receipt-returning operation because i
 (the precedent is `serve/deletion_service.py` / `serve/memory_cascade.py`): it returns what it
 removed, by id, status and condition — and deliberately NOT the instruction it just deleted.
 `bootstrap` sweeps the same rule over records left by an out-of-band deletion or by a server that
-predates the cascade, through the injected `session_exists`; an unprovable answer leaves the watch
-alone, because "cannot tell" must never delete.
+predates the cascade, through the injected `session_exists` — whose answer is deliberately TRI-STATE
+(there / provably gone / cannot tell), because an unprovable answer must leave the watch alone and a
+boolean cannot say that.
 """
 from __future__ import annotations
 
@@ -258,8 +259,18 @@ def observed_run_states(row: Optional[dict], *, engine_running: Optional[bool] =
     if phase in WATCH_RUN_STATES:
         states.add(phase)
     if engine_running is None:
-        engine_running = bool(row.get("engine_running"))
-    if not engine_running:
+        engine_running = row.get("engine_running")
+    # TRI-STATE, exactly as `engine_proc._engine_liveness` publishes it: True held, False
+    # definitively free, None the probe could not tell (an `lstat` that raised on the mount a run
+    # root lives on, a row that carries no liveness column at all). Only a definite False is
+    # EVIDENCE that the engine stopped, and collapsing the other two into it (`bool(...)`, which is
+    # what this said until 2026-08-15) fires an `engine_stopped` watch on a healthy training run at
+    # the first transient hiccup — and that watch is a ONE-SHOT, so it spends a paid model call,
+    # tells the operator the run stopped, goes `done`, and the REAL stop is then never reported at
+    # all. Every other consumer of this probe already reads it this way (`_engine_alive` is `is not
+    # False`, `attention.py` is `engine_running is not False`); a watch that spends money on the
+    # answer is the last surface that should be the one guessing.
+    if engine_running is False:
         states.add("engine_stopped")
     return frozenset(states)
 
@@ -277,6 +288,16 @@ class WatchStore:
     def __init__(self, run_root):
         self.dir = Path(run_root) / "assistant" / _WATCH_DIR
         self._lock = threading.Lock()
+        # Ids this process has PROVEN terminal. The scheduler ticks every 2 s and `due()` used to
+        # re-read, re-parse and re-validate every file in the directory each time — including every
+        # terminal record, which nothing but `delete_for_session` ever unlinks, so the cost of one
+        # tick grew with the server's whole watch HISTORY rather than with the watches it can still
+        # service. This is deliberately a memo of ONE fact and not a mirror of the store: a terminal
+        # is FINAL (`WATCH_TERMINAL_STATUSES`, and nothing in this module transitions out of one), so
+        # "skip it" can never go stale, while a full in-memory index would be wrong the moment a
+        # second process — or a test writing a record by hand — armed one behind our back. Unknown
+        # ids are still read from disk, so anything new is still found.
+        self._settled: set[str] = set()
 
     # ---- paths / io -----------------------------------------------------------------------
     def _path(self, watch_id: str) -> Path:
@@ -284,18 +305,24 @@ class WatchStore:
             raise WatchRefusal("bad watch id")
         return self.dir / f"{watch_id}.json"
 
+    def _note_settled(self, record: Optional[dict]) -> Optional[dict]:
+        """Record that this id is terminal, at the ONE point every read and write passes through."""
+        if record is not None and record.get("status") in WATCH_TERMINAL_STATUSES:
+            self._settled.add(record["id"])
+        return record
+
     def _read(self, watch_id: str) -> Optional[dict]:
         try:
             record = json.loads(self._path(watch_id).read_text(encoding="utf-8"))
         except (OSError, ValueError, WatchRefusal):
             return None
-        return record if self._valid(record) else None
+        return self._note_settled(record) if self._valid(record) else None
 
     def _write(self, record: dict) -> dict:
         self.dir.mkdir(parents=True, exist_ok=True)
         record = {**record, "updated": time.time()}
         atomic_write_text(self._path(record["id"]), json.dumps(record))
-        return record
+        return self._note_settled(record)
 
     @staticmethod
     def _valid(record) -> bool:
@@ -340,11 +367,6 @@ class WatchStore:
             default=WATCH_DEFAULT_MAX_WAKEUPS, what="max_wakeups"))
         lifetime = _bounded_float(lifetime_s, low=WATCH_MIN_INTERVAL_S, high=WATCH_MAX_LIFETIME_S,
                                   default=WATCH_DEFAULT_LIFETIME_S, what="lifetime_s")
-        active = [w for w in self.list(session=session) if w["status"] not in WATCH_TERMINAL_STATUSES]
-        if len(active) >= WATCH_MAX_ACTIVE_PER_SESSION:
-            raise WatchRefusal(
-                f"this chat already has {len(active)} active watches (max "
-                f"{WATCH_MAX_ACTIVE_PER_SESSION}); stop one before arming another")
         record = {
             "id": secrets.token_hex(8),
             "session": str(session),
@@ -374,6 +396,18 @@ class WatchStore:
             # record without the key reads the same way — absent is "never seen".
             record["run_seen"] = False
         with self._lock:
+            # COUNT AND WRITE UNDER ONE LOCK. This was a check-then-act with the count outside the
+            # lock and the write inside it, so two arms racing (two tabs, or the agent tool and the
+            # HTTP route) both read `n` and both wrote, leaving the session above its cap. The cap is
+            # this module's stated bound on UNATTENDED SPEND — every active watch is up to
+            # `max_wakeups` paid model calls nobody is watching — and nothing downstream re-checks
+            # it, so the arm is the only place it can hold.
+            active = [w for w in self.list(session=session)
+                      if w["status"] not in WATCH_TERMINAL_STATUSES]
+            if len(active) >= WATCH_MAX_ACTIVE_PER_SESSION:
+                raise WatchRefusal(
+                    f"this chat already has {len(active)} active watches (max "
+                    f"{WATCH_MAX_ACTIVE_PER_SESSION}); stop one before arming another")
             return self._write(record)
 
     @staticmethod
@@ -411,13 +445,15 @@ class WatchStore:
     def get(self, watch_id: str) -> Optional[dict]:
         return self._read(watch_id)
 
-    def list(self, *, session: Optional[str] = None, active_only: bool = False) -> list[dict]:
+    def _entries(self) -> list:
         try:
-            entries = sorted(self.dir.iterdir())
+            return sorted(self.dir.iterdir())
         except OSError:
             return []
+
+    def list(self, *, session: Optional[str] = None, active_only: bool = False) -> list[dict]:
         out = []
-        for path in entries:
+        for path in self._entries():
             if path.suffix != ".json" or WATCH_ID_RE.fullmatch(path.stem) is None:
                 continue
             record = self._read(path.stem)
@@ -432,10 +468,27 @@ class WatchStore:
         return out
 
     def due(self, *, now: Optional[float] = None) -> list[dict]:
-        """Armed watches whose next check has come round, oldest-due first (fair under a cap)."""
+        """Armed watches whose next check has come round, oldest-due first (fair under a cap).
+
+        This runs every `WatchService.interval_s` (2 s) for the life of the server, so it costs what
+        a TICK costs — and it deliberately does not go through `list()`, which reads and parses every
+        record on disk. A terminal record is never serviced again and is only ever removed by a
+        session deletion, so the ones this server has already settled accumulate: `_settled` skips
+        them without opening the file. An id this process has not proven terminal is still read from
+        disk, so a watch armed by another process (or written by hand in a test) is still found.
+        """
         ts = time.time() if now is None else float(now)
-        ready = [r for r in self.list()
-                 if r.get("status") == "armed" and float(r.get("next_due", 0) or 0) <= ts]
+        ready = []
+        for path in self._entries():
+            if path.suffix != ".json" or WATCH_ID_RE.fullmatch(path.stem) is None:
+                continue
+            if path.stem in self._settled:
+                continue
+            record = self._read(path.stem)      # memoizes a terminal it finds, for the next tick
+            if record is None or record.get("status") != "armed":
+                continue
+            if float(record.get("next_due", 0) or 0) <= ts:
+                ready.append(record)
         ready.sort(key=lambda r: float(r.get("next_due", 0) or 0))
         return ready
 
@@ -462,13 +515,12 @@ class WatchStore:
             return self._write({**record, "status": "waking", "claimed_at": ts})
 
     def cancel(self, watch_id: str, *, reason: str = "stopped by the operator") -> Optional[dict]:
-        with self._lock:
-            record = self._read(watch_id)
-            if record is None:
-                return None
-            if record["status"] in WATCH_TERMINAL_STATUSES:
-                return record
-            return self._write({**record, "status": "cancelled", "last_error": str(reason)[:300]})
+        """The operator's stop, which is `update` with a status — deliberately not a second copy of
+        it. This spelled out the same lock/read/None-guard/terminal-guard/write ladder line for line,
+        i.e. TWO implementations of the terminal-refusal rule this module's docstring calls
+        load-bearing ("a wake-up that finishes after the operator stopped its watch must not re-arm
+        it"). Two copies of a rule are one commit away from being two rules."""
+        return self.update(watch_id, status="cancelled", last_error=str(reason)[:300])
 
     def delete_for_session(self, session: str) -> list[dict]:
         """Remove every watch this chat owns, and RETURN the receipt of what was removed.
@@ -646,7 +698,9 @@ class WatchService:
         self.observe_run = observe_run          # run_id -> the read model's row (or None)
         self.run_turn_fn = run_turn_fn          # (record, instruction) -> the turn result dict
         self.append_turn = append_turn          # (session, turn dict) -> None
-        self.session_exists = session_exists    # session id -> does that chat still exist?
+        # session id -> True (there) / False (PROVABLY gone) / None (cannot tell). The third answer
+        # is not a nicety: this one is wired to an irreversible delete. See `_sweep_orphaned_watches`.
+        self.session_exists = session_exists
         self.interval_s = float(interval_s)
         self.on_error = on_error
         self._thread: Optional[threading.Thread] = None
@@ -684,22 +738,33 @@ class WatchService:
         """Delete the watches of chats that no longer exist. See `WatchStore.delete_for_session`.
 
         `session_exists` is INJECTED like the other three collaborators, so this module still knows
-        nothing about how a chat is stored. An exception from it means "cannot tell", and cannot
-        tell must never delete: the watch is left exactly as it was.
+        nothing about how a chat is stored. Its answer is TRI-STATE, and that is the whole safety of
+        this sweep: `False` means the chat is PROVABLY gone, `True` means it is there, and anything
+        else — `None`, or a raise — means "cannot tell". Only a proof deletes.
+
+        It was `bool(self.session_exists(sid))`, which reads every unprovable answer as "gone" and
+        then irreversibly unlinks a live chat's standing watches, including the operator's own
+        sentence inside them. The reachable shapes are ordinary rather than exotic: the session
+        store's metadata read catches `(OSError, ValueError)` and returns None, so a transient
+        EIO/EACCES on the mount a run root lives on, a `meta.json` observed mid-rewrite, or a record
+        whose `mode` this build does not recognize each answered "this chat is gone" — while a RAISE,
+        the only shape this treated as unprovable, is the narrowest of them.
         """
         if self.session_exists is None:
             return []
         removed, answered = [], {}
         for record in self.store.list():
             sid = record.get("session")
-            if sid not in answered:
-                try:
-                    answered[sid] = bool(self.session_exists(sid))
-                except Exception:  # noqa: BLE001 - an unreadable chat is not a deleted one
-                    answered[sid] = True
-                if not answered[sid]:
-                    removed.extend(self.store.delete_for_session(sid))
-                    answered[sid] = True      # handled; do not sweep the same chat twice
+            if sid in answered:
+                continue
+            # Assume nothing is provable until it is: every early exit below leaves the watch alone.
+            answered[sid] = True
+            try:
+                present = self.session_exists(sid)
+            except Exception:  # noqa: BLE001 - an unreadable chat is not a deleted one
+                continue
+            if present is False:
+                removed.extend(self.store.delete_for_session(sid))
         return removed
 
     def ensure_started(self) -> None:
@@ -780,9 +845,14 @@ class WatchService:
             # (the run's own directory is the thing that disappears).
             record = self.store.update(record["id"], run_seen=True) or record
         states = observed_run_states(row)
+        # A PROJECTION of the row, never the row: this is written to the durable record on every poll,
+        # echoed by the HTTP list, and JSON-dumped into the wake-up preamble under a 1,500-char cap —
+        # so an observation that carries whatever the read model happened to return is one that
+        # truncates before the fields the model was woken for. `engine_running` keeps its tri-state
+        # (`None` = the liveness probe could not tell) for the same reason `observed_run_states` does.
         observation = {"run": run_id, "phase": row.get("phase"),
                        "finished": bool(row.get("finished")),
-                       "engine_running": bool(row.get("engine_running")),
+                       "engine_running": row.get("engine_running"),
                        "nodes": row.get("nodes"), "best_metric": row.get("best_metric"),
                        "states": sorted(states)}
         if not states.intersection(trigger.get("until") or ()):

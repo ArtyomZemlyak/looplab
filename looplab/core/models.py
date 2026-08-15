@@ -209,6 +209,24 @@ EXTRA_METRIC_UNAUTHENTICATED = (EXTRA_METRIC_AUTO, EXTRA_METRIC_UNKNOWN)
 # tuple rather than as `not in UNAUTHENTICATED` so a channel added later must be classified on
 # purpose in both directions instead of defaulting into the trusted half.
 EXTRA_METRIC_AUTHENTICATED = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_ENGINE)
+# THE READER THAT MAKES THE SENTENCE ABOVE TRUE. "Classified on purpose in both directions" is a
+# claim about a tuple that, until this line, had ZERO readers in `looplab/`, `tests/` or `ui/` —
+# `EXTRA_METRIC_AUTHENTICATED` is consulted by `nodes_extra_metrics` below and its complement by
+# nothing at all, so a fifth channel would have joined `EXTRA_METRIC_CHANNELS`, defaulted out of
+# BOTH tuples, and been silently treated as unauthenticated-by-omission by every reader that tests
+# membership of the trusted half. That is the "defaulting into the trusted half" failure read in the
+# mirror, and it is not caught by any test that does not already know the new channel's name.
+#
+# So the two tuples must PARTITION the vocabulary a reader can see, which is the writer vocabulary
+# plus the one reader-side answer: exhaustive (nothing unclassified) and disjoint (nothing claiming
+# both). A bare `assert` at import, like the five registry cross-checks in
+# `serve/control_validation.py`: adding a channel without classifying it is a coding error to be
+# fixed before the process starts, not a runtime condition to survive.
+assert (set(EXTRA_METRIC_AUTHENTICATED) | set(EXTRA_METRIC_UNAUTHENTICATED)
+        == set(EXTRA_METRIC_CHANNELS) | {EXTRA_METRIC_UNKNOWN}
+        and not set(EXTRA_METRIC_AUTHENTICATED) & set(EXTRA_METRIC_UNAUTHENTICATED)), (
+    "every extra-metric channel a reader can see must be classified as authenticated or not, "
+    "exactly once")
 
 
 def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:

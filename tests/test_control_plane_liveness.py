@@ -641,6 +641,50 @@ def test_a_legacy_timed_out_pause_record_can_be_retried_into_a_fresh_intent(tmp_
     assert stored["superseded_event_seqs"] == [spent.seq]
 
 
+@pytest.mark.parametrize("postcondition", ["paused", "paused_and_stopped"])
+@pytest.mark.parametrize("engine_alive", [True, False])
+def test_a_promoted_pause_reports_whether_the_engine_let_go(tmp_path, postcondition, engine_alive):
+    """A pause that reaches `succeeded` must say whether the engine PROCESS is still working.
+
+    That observation is the whole difference between "paused, and the engine is finishing a
+    multi-hour evaluation" and "paused, and the driver has released engine.lock" — only the second
+    can be reset or deleted, so it is what the operator acts on. It was attached only to a record
+    whose postcondition read exactly `paused`, while the rule that PROMOTES a record deliberately
+    reads the legacy `paused_and_stopped` the same way — i.e. exactly the pre-2026-08-13 records
+    this reconciliation exists to unwedge succeeded carrying nothing at all. Both spellings, both
+    liveness answers, driven through the real reconciliation.
+    """
+    world = _World(tmp_path / "runs")
+    srv = world.srv
+    rd = world.seed(f"legacy-{postcondition}-{int(engine_alive)}", alive=engine_alive)
+    # The engine must not acknowledge: a timed-out record whose effect HAS folded is the state the
+    # promotion path exists for, and an ack would drive the command to a terminal by another route.
+    world.acking[rd.name] = False
+    store = EventStore(rd / "events.jsonl")
+    command_id = "cmd_" + "c3d4" * 8
+    landed = store.append(EV_PAUSE, {"_command_id": command_id})
+    record = {
+        "id": command_id, "event_type": EV_PAUSE, "event_seq": landed.seq,
+        "baseline_seq": landed.seq - 1, "data": {},
+        "postcondition": postcondition, "status": "timed_out",
+        "created_at": 1.0, "updated_at": 2.0, "engine_policy": "no_spawn",
+        "run_generation": srv.commands.run_generation(rd),
+        "error": {"code": "postcondition_timeout", "retryable": True,
+                  "message": f"{postcondition} was not observed in time"},
+    }
+    (rd / ".commands").mkdir(parents=True, exist_ok=True)
+    (rd / ".commands" / f"{command_id}.json").write_text(json.dumps(record))
+    try:
+        promoted = srv.commands.get(rd, command_id)
+    finally:
+        world.close()
+
+    # NON-VACUOUS: the promotion really happened, from the durable record, on this read.
+    assert promoted["status"] == "succeeded", promoted
+    assert promoted["reconciled_from"] == "timed_out"
+    assert promoted["engine_stopped"] is (not engine_alive)
+
+
 def test_a_retry_that_could_only_time_out_again_refuses_and_names_the_way_out(tmp_path):
     """The other side of the same rule: where a fresh intent must NOT be minted, `/retry` says so.
 

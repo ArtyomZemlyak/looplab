@@ -627,7 +627,9 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   broken registry, and v6 node 5 halved a batch size three times against an OOM that never happened.
   None of the three may decide *what the result was* — every stop terminalizes carrying the eval's
   own authenticated failure reason, so no model's word moves a metric, a champion, selectability or a
-  violation. The **floors** stay underneath: an absolute ceiling of 50 repairs per node, the eval-time
+  violation. The **floors** stay underneath: an absolute ceiling of 50 repairs per node — 12 for a
+  crash the *rule* path cannot classify, because 50 is the ceiling under a judge that can say "I no
+  longer know how to fix this" and there is no judge on that branch — the eval-time
   budget, `systemic_failure_stop`, and the money ceiling. Both the budget and that history are read
   back off the **event log**, so `looplab resume` continues a node's repair chain instead of starting
   a fresh one on top of it. A judge that

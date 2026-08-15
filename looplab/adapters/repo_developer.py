@@ -1103,13 +1103,9 @@ class LLMRepoDeveloper:
                 # really did need ~27960 s against a 21600 s budget, and a refusal nobody can read
                 # afterwards leaves that operator with a run that keeps under-delivering for no
                 # stated reason. Zero-work marker span, the same shape as `plan_steps_failed` below.
-                from looplab.core import tracing as _tr
-                from looplab.runtime.command_eval import stages_over_time_budget
-                _bud = self._eval_time_budget()
-                for _nm, _t in stages_over_time_budget(stages, _bud):
-                    with _tr.operation("stage_timeout_over_budget", stage=_nm, declared_s=_t,
-                                       budget_s=_bud, at="declare", enforced=True):
-                        pass
+                from looplab.runtime.command_eval import record_stages_over_time_budget
+                record_stages_over_time_budget(
+                    stages, self._eval_time_budget(), at="declare", enforced=True)
                 return over
             miss = _missing_stage_input_paths(stages)   # a hallucinated non-existent data path → re-declare
             if miss:

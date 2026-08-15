@@ -199,3 +199,103 @@ def test_reposcout_reads_a_log_but_refuses_secrets(tmp_path):
     assert "epoch 1 loss=0.5" in sc.execute("read_file", {"path": str(tmp_path / "eval.log")})
     assert '"span_id"' in sc.execute("read_file", {"path": str(tmp_path / "spans.jsonl")})
     assert "refused" in sc.execute("read_file", {"path": str(tmp_path / ".env")})
+
+
+# ------------------------------------ the assistant's trace window can be AIMED, not only widened
+def _make_long_run(tmp_path: Path, episodes: int = 6) -> Path:
+    """A run whose node recorded several episodes — the shape a bounded tail cannot show.
+
+    `runs/rubert-dr-0804` node 1 is the measured original: 14,507 spans over 3 h 50 m across 2,345
+    inline repairs, all of them generation 0 (inline repair does not bump `Node.attempt`), of which
+    the default window reaches the last 7.6 minutes. Six episodes and a small window is the same
+    fact at test size.
+    """
+    rd = tmp_path / "long"
+    rd.mkdir()
+    from looplab.events.eventstore import EventStore
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "long", "task_id": "t", "goal": "g", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"x": 1.0}}})
+    tracing.set_llm_capture(True)
+    t = Tracer(JsonlSpanExporter(rd / "spans.jsonl"), run_id="long")
+    for i in range(episodes):
+        with t.span(f"repair_{i}", new_trace=True, node_id=0):
+            with tracing.generation(op="chat", model="m",
+                                    messages=[{"role": "user", "content": f"fix attempt {i}"}]) as g:
+                g.output(f"episode-{i}-output")
+    return rd.parent
+
+
+def test_the_assistant_can_map_a_nodes_episodes_and_seek_its_trace_window(tmp_path, monkeypatch):
+    """F6's seekable window reached the two HTTP routes and NOT this surface — which is the one an
+    operator actually asks "what happened in this node".
+
+    The window is the newest N spans of one `(node_id, generation)`, so without an anchor every
+    earlier episode is unreachable at any parameter, and the docstring's claim that the assistant
+    "reads exactly what the human sees" stopped being true the day `?before=` shipped.
+    """
+    from looplab.events import traceview
+
+    root = _make_long_run(tmp_path)
+    monkeypatch.setattr(traceview, "TRACE_CONVERSATION_SPAN_CAP", 2)
+    rts = MachineRunsTools(root)
+
+    tail = rts.execute("read_run_trace", {"run_id": "long", "node_id": 0})
+    assert "episode-5-output" in tail, "the tail is what an unanchored read shows"
+    assert "episode-0-output" not in tail
+    # …and it SAYS what it left out, beside the control that reaches it. A bounded window that does
+    # not is read as the whole node.
+    assert "outside this window" in tail and "read_run_trace_episodes" in tail
+
+    mapped = rts.execute("read_run_trace_episodes", {"run_id": "long", "node_id": 0})
+    assert "6 episode(s)" in mapped
+    anchors = [line.split("anchor=")[1].strip() for line in mapped.splitlines() if "anchor=" in line]
+    assert len(anchors) == 6, mapped
+    assert "repair_0" in mapped and "repair_5" in mapped
+
+    seeked = rts.execute("read_run_trace",
+                         {"run_id": "long", "node_id": 0, "before": anchors[0]})
+    assert "episode-0-output" in seeked, "the window MOVED to the anchored episode"
+    assert "episode-5-output" not in seeked
+    assert anchors[0] in seeked, "the answer echoes where the window was placed"
+
+
+def test_an_anchor_this_run_does_not_know_is_refused_not_degraded_to_the_tail(tmp_path):
+    """The routes' rule (`_settle_window_anchor`), for the same reason: answering with the NEWEST
+    spans under an older episode's label is worse than answering nothing — and worse still for a
+    reader that cannot see the label."""
+    root = _make_long_run(tmp_path)
+    out = MachineRunsTools(root).execute(
+        "read_run_trace", {"run_id": "long", "node_id": 0, "before": "not-a-span-id"})
+
+    assert "episode-5-output" not in out, "a refused anchor must not silently become the tail"
+    assert "read_run_trace_episodes" in out, "the refusal names the move that works"
+
+
+def test_the_episode_map_shows_both_ends_and_counts_what_it_elided(tmp_path):
+    """A map is what a long node is READ THROUGH, so it may not be a tail either: the first
+    episodes are where a bug first showed and the last are where it died. Both ends, the middle
+    counted, and every row reachable by ordinal."""
+    root = _make_long_run(tmp_path, episodes=70)
+    rts = MachineRunsTools(root)
+
+    mapped = rts.execute("read_run_trace_episodes", {"run_id": "long", "node_id": 0})
+    assert "70 episode(s)" in mapped
+    assert "repair_0 " in mapped and "repair_69 " in mapped
+    assert "20 episode(s) elided" in mapped
+
+    paged = rts.execute("read_run_trace_episodes",
+                        {"run_id": "long", "node_id": 0, "from_index": 30, "limit": 5})
+    assert "repair_0 " not in paged and "repair_69 " not in paged
+    assert len([line for line in paged.splitlines() if "anchor=" in line]) == 5
+
+
+def test_the_new_trace_tools_stay_soft_failing_reads(tmp_path):
+    """Every tool here answers a SENTENCE, never an exception: `drive_tool_loop` does not guard
+    `tools.execute`, so one odd shape would end the whole assistant turn."""
+    rts = MachineRunsTools(tmp_path)
+    for name in ("read_run_trace", "read_run_trace_episodes"):
+        assert "no such run" in rts.execute(name, {"run_id": "nope", "node_id": 0})
+    names = {f["function"]["name"] for f in rts.specs()}
+    assert "read_run_trace_episodes" in names

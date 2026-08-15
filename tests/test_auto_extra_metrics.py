@@ -527,3 +527,36 @@ def test_the_gate_no_longer_deletes_the_cuda_proof_the_receipt_path_re_derives()
 
     with pytest.raises(ValueError):
         _validate_cuda_probe_artifact(_Stripped())
+
+
+def test_the_two_classification_tuples_partition_the_channel_vocabulary():
+    """`EXTRA_METRIC_UNAUTHENTICATED` is written as its own tuple so "a channel added later must be
+    classified on purpose in both directions" — and until 2026-08-15 NOTHING read it, so nothing
+    made that true.
+
+    A fifth channel would have joined `EXTRA_METRIC_CHANNELS`, defaulted out of BOTH tuples, and been
+    treated as unauthenticated-by-omission by every reader that tests membership of the trusted half
+    (`nodes_extra_metrics` is one) — silently, because no test that does not already know the new
+    channel's name can notice. The import-time assertion is the reader that closes it; this drives
+    that it really refuses, by re-executing the module with a fifth channel spliced in.
+    """
+    import looplab.core.models as models
+
+    assert (set(models.EXTRA_METRIC_AUTHENTICATED) | set(models.EXTRA_METRIC_UNAUTHENTICATED)
+            == set(models.EXTRA_METRIC_CHANNELS) | {models.EXTRA_METRIC_UNKNOWN})
+    assert not (set(models.EXTRA_METRIC_AUTHENTICATED)
+                & set(models.EXTRA_METRIC_UNAUTHENTICATED))
+
+    source = Path(models.__file__).read_text(encoding="utf-8")
+    fifth = source.replace(
+        'EXTRA_METRIC_CHANNELS = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE)',
+        'EXTRA_METRIC_CHANNELS = (EXTRA_METRIC_DECLARED, EXTRA_METRIC_AUTO, EXTRA_METRIC_ENGINE,\n'
+        '                         "attested")')
+    assert fifth != source, "the vocabulary moved; this splice no longer names it"
+    namespace: dict = {"__name__": "looplab.core.models_fifth_channel_probe",
+                       "__file__": models.__file__}
+    with pytest.raises(AssertionError, match="classified as authenticated or not"):
+        exec(compile(fifth, models.__file__, "exec"), namespace)
+    # Executed into a THROWAWAY namespace, never reloaded: rebinding `looplab.core.models` would give
+    # the process a second `Node`/`RunState` while every importer still holds the first.
+    assert "attested" not in models.EXTRA_METRIC_CHANNELS

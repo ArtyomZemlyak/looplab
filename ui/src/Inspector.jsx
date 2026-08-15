@@ -2175,6 +2175,12 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
       {map?.status === 'unavailable' && <span className="muted" role="status">
         {EPISODE_MAP_UNAVAILABLE}</span>}
       {map?.status === 'empty' && <span className="muted" role="status">{EPISODE_MAP_EMPTY}</span>}
+      {/* READ FINE, AND NOT EMPTY. This node has earlier steps and the map can point at none of
+          them — a bounded server map, or rows with no anchor. It used to fall into `empty` above
+          and tell the operator their whole trace fits in one window while its own payload said
+          otherwise; the count is the only honest thing there is to say, so the notice says it. */}
+      {map?.status === 'unseekable' && <span className="muted" role="status">
+        {episodeMapNotice(map)}</span>}
       {map?.status === 'ready' && <>
         <label className="muted" htmlFor={`${pickerId}-kind`}>step </label>
         <select id={`${pickerId}-kind`} className="text" value={activeKind || ''}

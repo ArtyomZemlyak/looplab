@@ -514,3 +514,4 @@ def test_a_work_role_log_is_readable_and_still_carries_no_authority(tmp_path):
     tools = LogQueryTools(lambda: tm.monitor_log_sources(tmp_path, plan))
     assert LOG_ROLE_WORK in tools.execute("read_log", {"log": "train.log", "mode": "tail",
                                                        "lines": 1})
+

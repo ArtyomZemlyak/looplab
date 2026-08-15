@@ -185,13 +185,8 @@ class EvalStagesMixin:
             # whichever profile THIS eval selected — comparing against the 60 s smoke profile would
             # report every full-fidelity `train` stage as a divergence.
             _budget = command_eval.eval_spec_time_budget(es)
-            _over = command_eval.stages_over_time_budget(preceding, _budget)
-            if _over:
-                from looplab.core import tracing
-                for _nm, _t in _over:
-                    with tracing.operation("stage_timeout_over_budget", stage=_nm, declared_s=_t,
-                                           budget_s=_budget, at="resolve", enforced=False):
-                        pass
+            command_eval.record_stages_over_time_budget(
+                preceding, _budget, at="resolve", enforced=False)
             # the operator's cmd is the FINAL + protected scoring stage; reuse the already
             # profile-resolved command/timeout (build_command) so smoke/full still applies.
             final = {"name": "score",
@@ -424,18 +419,40 @@ class EvalStagesMixin:
         the eval workdir — so the module's file is reachable by exactly the rule
         `_module_file_candidates` already states for an `import`. Only the SEPARATE two-token spelling
         is read; a glued `-mpkg.mod` is left alone and the stage stays opaque, because a bound that has
-        to guess where a flag ends is not a bound."""
+        to guess where a flag ends is not a bound.
+
+        ONLY THE INTERPRETER'S OWN `-m` COUNTS, and only the first of them. `-m` is an ordinary short
+        flag that PROGRAMS use for their own arguments, and scanning the whole argv read
+        `["python", "train.py", "-m", "models.resnet"]` — a `--model` the training script consumes —
+        as an entry point, crediting `models/resnet.py` to the closure whenever that file happened to
+        exist. That is harmless in one of the closure's two readers and not in the other:
+        `_safe_reuse_start` only ever REFUSES reuse on a wider closure, but `_stage_rollback` rung 4
+        uses a NON-EMPTY intersection as the thing that PERMITS a full-pipeline rollback, so a repair
+        touching an unrelated `models/resnet.py` could authorize re-running a stage that never
+        imports it. CPython stops reading its own options at the first non-option token, so this does
+        too: a token that is not a flag is the program, and every `-m` after it is the program's.
+
+        A flag that takes a SEPARATE argument (`-c code`, `-X opt`, `-W spec`) ends the scan at that
+        argument rather than skipping it, which is the same fail-closed answer this already gives a
+        glued `-mpkg.mod`: no entry point is credited, the stage exposes no local script, and
+        `_stage_reachable_files` returns None — opaque. Guessing which flags consume a value is
+        exactly the "bound that has to guess where a flag ends" the paragraph above refuses to be."""
         out: list = []
         if not cmd or not isinstance(cmd[0], str):
             return out
         argv0 = str(cmd[0]).replace("\\", "/").rsplit("/", 1)[-1]
         if not EvalStagesMixin._PY_INTERPRETER_RE.match(argv0):
             return out
-        for i, tok in enumerate(cmd):
-            if tok == "-m" and i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
+        for i, tok in enumerate(cmd[1:], start=1):
+            if not isinstance(tok, str) or not tok.startswith("-"):
+                break                    # the program itself — the interpreter is done reading options
+            if tok != "-m":
+                continue                 # another interpreter flag (`-u`, `-O`, `-W`, …)
+            if i + 1 < len(cmd) and isinstance(cmd[i + 1], str):
                 mod = cmd[i + 1].strip()
                 if re.match(r"^[\w.]+$", mod) and not mod.startswith("."):
                     out.append(mod)
+            break                        # `-m` ends option processing in CPython too
         return out
 
     @staticmethod

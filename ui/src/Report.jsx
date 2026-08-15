@@ -6,7 +6,8 @@ import { analyze, buildModelCard, verdict, paramDiffLabel, toMarkdown, hyperImpo
 import MemoCard from './MemoCard.jsx'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
-import { reportStepIdentity } from './trustSemantics.js'
+import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
+  objectiveSourceHelp, reportStepIdentity } from './trustSemantics.js'
 import { DataTable, downloadBlob } from './accessibility.jsx'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
@@ -137,6 +138,20 @@ function ChampionCard({ best, state }) {
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
   const direction = nodeTheme(best, state)
+  // The champion card is the report's own statement of the result, and it printed the number bare —
+  // the fifth surface of the salvage/subject vocabulary, and the one where the number IS the claim.
+  // Same call, same label, same sentence as the Metrics tab, the Pareto front and the cross-run
+  // champion row (`panels.jsx::CrossRunPanel`), so the run's headline result cannot read as measured
+  // on the page whose whole subject is that result while reading `salvaged` one tab over.
+  //
+  // The `feasible` row below is deliberately UNTOUCHED. Under `metric_salvage: "select"` the engine
+  // really does admit this node — `feasible = not violations`, and that rung mints no row — so `yes`
+  // is the engine's own answer to the question that row asks. `trustSemantics.js` states the split:
+  // feasibility asks "why is this node excluded", the objective source asks "what is this number",
+  // and a node can honestly be `feasible` and `salvaged` at once. Softening the feasibility word
+  // here would put this card back in disagreement with the Trust tab, one vocabulary over.
+  const objective = objectiveMetricSource(best)
+  const objectiveCaveated = objectiveSourceCaveated(objective)
   return (
     <div className="champion-card">
       <div className="kv">
@@ -144,7 +159,9 @@ function ChampionCard({ best, state }) {
           {direction ? ` · primary concept axis ${direction}` : ''}</div>
         <div className="k">metric</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
           ? <span className="muted"> ±{fmt(best.confirmed_std)} over {best.confirmed_seeds} seed{best.confirmed_seeds === 1 ? '' : 's'}</span>
-          : <span className="muted"> (single-seed)</span>}</div>
+          : <span className="muted"> (single-seed)</span>}
+          {objectiveCaveated && <span className="warn" title={objectiveSourceHelp(objective)}>
+            {' · '}{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>}</div>
         <div className="k">params</div><div className="v">{Object.keys(best.idea?.params || {}).length
           ? Object.entries(best.idea.params).map(([k, val]) => `${k}=${fmt(val)}`).join(', ') : '—'}</div>
         {(best.parent_ids || []).length > 0 && <><div className="k">lineage</div><div className="v">{best.parent_ids.map(p => '#' + p).join(' → ')}</div></>}

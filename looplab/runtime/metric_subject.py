@@ -296,8 +296,9 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     """The identity record for ONE declared subject, or `{"bound": False, "reason": …}`.
 
     `confine` is `command_eval._confined` (injected rather than imported, so this module stays a leaf
-    `command_eval` imports and not the other way round). Absent, containment falls back to the same
-    resolve-and-compare rule; the injected one is preferred so there is a single definition in play.
+    `command_eval` imports and not the other way round). Absent, `_fallback_confine` reaches THAT
+    SAME function through a deferred import — one body either way, so a caller that does not inject
+    cannot be held to a weaker containment rule than the engine's own path is.
 
     FRESHNESS IS ENFORCED HERE and it is the one predicate the artifact contract's input side
     deliberately does NOT have. `verify_stage_inputs` has no freshness rule on purpose — a stage
@@ -422,12 +423,25 @@ def bind_glob(workdir, pattern: str, *, since: Optional[float] = None,
 
 
 def _fallback_confine(workdir, rel):
-    try:
-        path = (Path(workdir) / rel).resolve()
-        root = Path(workdir).resolve()
-        return path if (path == root or root in path.parents) else None
-    except (OSError, ValueError, RuntimeError):
-        return None
+    """`command_eval._confined`, reached when no caller injected it — the SAME body, not a copy.
+
+    It was a fourth hand-written spelling of the containment guard doc 25 RA-05 extracted
+    `_confined` to be the single home of (its own docstring says it "replaces three hand-copies").
+    The two bodies
+    happened to agree when this was written, which is exactly what makes the shape dangerous: the
+    injected path decides whether a recorded number is a claim about bytes inside the node's own
+    workdir, and a rule with two bodies drifts on the day one of them is fixed. `_confined` has
+    already been fixed once — `Path.resolve()` raises `RuntimeError` on a symlink loop the candidate
+    can create in its own workdir, and pre-extraction that escaped `read_metric` and took down the
+    RUN instead of failing the node.
+
+    The import is DEFERRED, which keeps the property `bind_one`'s docstring names: at module level
+    this stays a leaf `command_eval` imports and not the other way round. `command_eval` reaches
+    this module the same way (`bind_metric_subject`), so neither import runs while the other is
+    executing and there is no cycle to open. It costs one `sys.modules` lookup per declared subject,
+    on a path that is about to `stat` and digest a checkpoint."""
+    from looplab.runtime.command_eval import _confined
+    return _confined(workdir, rel)
 
 
 def bind(subject, workdir, *, since: Optional[float] = None,

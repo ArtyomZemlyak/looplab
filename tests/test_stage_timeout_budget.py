@@ -256,3 +256,76 @@ def test_the_protected_score_stage_still_runs_under_the_operator_number(tmp_path
     assert res.stages[0]["status"] == "ok"        # the preceding stage still ran
     # Killed at the OPERATOR's 2 s, nowhere near the 5 s it wanted or the 60 s the manifest claimed.
     assert res.stages[-1]["name"] == "score" and res.stages[-1]["seconds"] < 4.0
+
+
+# --------------------------------------------------------------- ONE writer of the marker (2026-08-15)
+
+def test_both_producers_of_the_marker_span_emit_the_identical_row_shape(tmp_path):
+    """The two sites that emit `stage_timeout_over_budget` were the same loop written twice.
+
+    They are the ONLY producers of the span an operator is told to read as evidence that their budget
+    is too small, and nothing type-checks a `tracing.operation` kwarg — so an attribute added, a
+    literal misspelled or the span renamed on one side puts a differently-shaped row into the SAME
+    trace under the same name, and which shape the operator gets depends on which door the manifest
+    came through (authoring refusal vs resolve-time record).
+
+    Driven through the real writer at both settings: the attribute SET must be identical and the only
+    values that may differ are the two the call sites own.
+    """
+    from looplab.runtime.command_eval import record_stages_over_time_budget
+
+    stages = [{"name": "train", "command": ["python", "train.py"], "timeout": 60.0},
+              {"name": "mine", "command": ["python", "mine.py"], "timeout": 90.0}]
+    spans = tmp_path / "spans.jsonl"
+    tr = Tracer(JsonlSpanExporter(str(spans)), run_id="r")
+    with tr.span("evaluate", new_trace=True, node_id=0):
+        assert record_stages_over_time_budget(stages, 2.0, at="resolve", enforced=False) == 2
+        assert record_stages_over_time_budget(stages, 2.0, at="declare", enforced=True) == 2
+
+    rows = _over_budget_rows(spans)
+    assert len(rows) == 4
+    shapes = {frozenset(r["attributes"]) for r in rows}
+    assert len(shapes) == 1, f"the two producers emit different attribute sets: {shapes}"
+    resolve = [r["attributes"] for r in rows if r["attributes"]["at"] == "resolve"]
+    declare = [r["attributes"] for r in rows if r["attributes"]["at"] == "declare"]
+    assert len(resolve) == 2 and len(declare) == 2
+    for left, right in zip(resolve, declare):
+        differing = {k for k in left if left[k] != right[k]}
+        assert differing == {"at", "enforced"}, differing
+    assert [(a["stage"], a["declared_s"]) for a in resolve] == [("train", 60.0), ("mine", 90.0)]
+
+
+def test_a_fitting_manifest_and_an_absent_budget_both_emit_nothing():
+    """The writer keeps `stages_over_time_budget`'s own two fail-open answers rather than restating
+    them: nothing over the budget, and no budget to be over."""
+    from looplab.runtime.command_eval import record_stages_over_time_budget
+
+    fits = [{"name": "train", "command": ["python", "t.py"], "timeout": 1.0}]
+    assert record_stages_over_time_budget(fits, 2.0, at="resolve", enforced=False) == 0
+    assert record_stages_over_time_budget(
+        [{"name": "t", "command": ["python", "t.py"], "timeout": 9e9}], None,
+        at="declare", enforced=True) == 0
+
+
+def test_the_two_call_sites_reach_the_shared_writer_and_spell_no_span_of_their_own():
+    """AST, not a substring: what must hold is that neither caller still CALLS `tracing.operation`
+    for this span, because a second body is what the shared writer exists to remove."""
+    import ast
+    import inspect
+    import textwrap
+
+    from looplab.adapters.repo_developer import LLMRepoDeveloper as RepoDev
+    from looplab.engine.eval_stages import EvalStagesMixin as _Mixin
+
+    for source in (textwrap.dedent(inspect.getsource(_Mixin._resolve_stages)),
+                   textwrap.dedent(inspect.getsource(RepoDev._declare_stages_phase))):
+        tree = ast.parse(source)
+        called = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        names = {getattr(n.func, "attr", getattr(n.func, "id", "")) for n in called}
+        assert "record_stages_over_time_budget" in names
+        for call in called:
+            if getattr(call.func, "attr", "") == "operation":
+                first = call.args[0] if call.args else None
+                assert not (isinstance(first, ast.Constant)
+                            and first.value == "stage_timeout_over_budget"), (
+                    "a caller still opens the marker span itself")

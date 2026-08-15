@@ -510,3 +510,77 @@ def test_the_parallel_dispatcher_asks_its_own_semaphore_how_many_slots_it_has():
         assert isinstance(node.comparators[0].left, ast.Name), (
             "the drained-pool test reads a live attribute; it must read the batch's captured width")
         assert node.comparators[0].left.id == "batch_width"
+
+
+# --------------------------------------------------------------------------- #
+# The ceiling reads ONE row, and it is the launch pin (2026-08-15)
+# --------------------------------------------------------------------------- #
+
+def test_a_log_with_no_launch_pin_does_not_ratchet_itself_down_through_its_own_repin(
+        tmp_path, monkeypatch):
+    """The mirror of `test_the_launch_pin_and_not_the_last_repin_is_the_ceiling`, on the path where
+    the pin is absent.
+
+    The ceiling used to be seeded from `_recorded_settled_width`, whose CONTRACT is the opposite one
+    — "the re-pin wins over the pin", because it answers "what width were the events after this row
+    produced under?". On the normal path that seed was dead computation (a valid `run_started` pin
+    overwrote it two lines later); on a log with no valid pin it was the ceiling, i.e. exactly the
+    re-pin-as-its-own-ceiling this feature's adjacent comment forbids. One 2-GPU Card then narrowed
+    the run permanently: the wide cards leave the board and the run cannot widen back, because its
+    own last narrowing has become the bound.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "run")
+    anyio.run(engine.run)
+    _propose(engine, 2, 2)
+    assert engine._settle_proposal_width(fold(engine.store.read_all())) is True
+    assert engine._eval_parallel == 1
+
+    # A log whose `run_started` carries no usable width — a pre-pin run, or a hand-edited row the
+    # fold refused. `_recorded_settled_width` still answers 1 here, off the re-pin.
+    state = fold(engine.store.read_all())
+    state.eval_parallel = 0
+    assert Engine._recorded_settled_width(state, "eval_parallel", 1024) == 1
+    _propose(engine, 1, 1)
+    state = fold(engine.store.read_all())
+    state.eval_parallel = 0
+    for card in state.cards.values():
+        if (card.footprint or {}).get("gpus") == 2:
+            card.selection_ready = False
+    assert engine._settle_proposal_width(state) is True
+    assert engine._eval_parallel == 2, (
+        "the run stayed at the width its own last re-pin put it at — a re-pin became its ceiling")
+
+
+def test_the_receipt_describes_the_very_board_the_width_was_derived_from(tmp_path, monkeypatch):
+    """`_proposal_footprints` was asked TWICE per turn — once for the decision, once for the receipt.
+
+    It walks every Card in `state.cards` and runs `effective_card_footprint` per selection-ready one,
+    so the second ask is both wasted work and a second answer: anything that moves the board between
+    the two calls makes the durable `evidence` describe footprints the width was not derived from,
+    and evidence that does not come from the decision's own inputs is not evidence.
+
+    Driven by making the second call visibly disagree with the first: if the receipt is built from a
+    second reading, it says so.
+    """
+    monkeypatch.setattr(_orch, "_detect_gpu_ids", lambda: [0, 1])
+    _gpu_capable(monkeypatch)
+    engine = _engine(tmp_path / "run")
+    anyio.run(engine.run)
+    _propose(engine, 2, 2)
+
+    real = Engine._proposal_footprints
+    calls: list = []
+
+    def _counted(self, state):
+        calls.append(1)
+        # A board that "moved" between the decision and the receipt. Only a SECOND reading can see it.
+        return real(self, state) if len(calls) == 1 else [1, 1, 1, 1, 1, 1, 1]
+
+    monkeypatch.setattr(Engine, "_proposal_footprints", _counted)
+    assert engine._settle_proposal_width(fold(engine.store.read_all())) is True
+
+    assert len(calls) == 1, "the board was read twice for one decision"
+    evidence = _width_rows(engine)[-1]["evidence"]
+    assert evidence["open_proposals"] == 2 and evidence["widest_declared_gpus"] == 2, evidence
