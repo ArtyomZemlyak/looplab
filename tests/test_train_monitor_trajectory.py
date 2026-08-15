@@ -169,6 +169,40 @@ def test_a_drop_under_the_measured_noise_floor_is_not_a_direction():
     assert trajectory.direction == "flat"
 
 
+def test_a_zero_scale_curve_cannot_manufacture_a_direction_out_of_an_epsilon():
+    """The floor used to be `max(noise, |opening| * _TRAJECTORY_MIN_RELATIVE_DROP)`, and BOTH terms
+    collapse to 0.0 on a window of `loss: 0.0`: the masd of identical values is 0, and 0.001 x 0 is
+    0. So `net > floor` became `net > 0` and an epsilon of drift read as `descending` — which then
+    VETOES every `broken` verdict for the rest of the node, i.e. a degenerate window bought a
+    multi-hour run permanent immunity from the kill this rule exists to allow.
+
+    `{'loss': 0.0, 'grad_norm': nan}` is this module's own positive control
+    (`runs/rubertlite-dr-unified-v6` node 5) — but only the `grad_norm: nan` beside it rescued that
+    case, through `_anomaly_of`. A run that prints the zero WITHOUT the nan had nothing, which is
+    what `_TRAJECTORY_MIN_ABSOLUTE_DROP` is for.
+    """
+    trajectory = summarize_trajectory(_windows([0.0, 0.0], [0.0, 0.0], [-1e-9, -1e-9],
+                                               [-1e-9, -1e-9]))
+    assert trajectory.noise == 0.0, "the degenerate window this is about: no measurable scatter"
+    assert trajectory.net and 0 < trajectory.net < 1e-6
+    assert trajectory.direction == "flat"
+    assert trajectory_vetoes_kill(trajectory) is False
+    # ...and the same in the other direction: an epsilon UP is not divergence either.
+    rising = summarize_trajectory(_windows([0.0, 0.0], [0.0, 0.0], [1e-9, 1e-9], [1e-9, 1e-9]))
+    assert rising.direction == "flat"
+
+
+def test_the_absolute_floor_is_inert_wherever_the_relative_one_has_anything_to_say():
+    """It may only ever WITHDRAW a veto, never mint one, so the thing to prove is that it changes
+    nothing at any scale a real run works at: the relative floor is already >= 1e-6 for any opening
+    above 1e-3, so every curve the corpus contains is decided exactly as before."""
+    assert _tm._TRAJECTORY_MIN_ABSOLUTE_DROP <= 1e-3 * _tm._TRAJECTORY_MIN_RELATIVE_DROP
+    # A tiny but honest descent well inside the relative floor's reach still reads as descending.
+    trajectory = summarize_trajectory(_windows(*[[1.0 - 0.01 * k, 1.0 - 0.01 * k] for k in range(5)]))
+    assert trajectory.direction == "descending"
+    assert trajectory_vetoes_kill(trajectory) is True
+
+
 def test_divergence_reads_as_rising():
     trajectory = summarize_trajectory(_windows(*[[1.0 + k, 1.02 + k, 0.98 + k] for k in range(6)]))
     assert trajectory.direction == "rising"
@@ -296,14 +330,22 @@ def test_the_durable_row_carries_the_measurement_not_a_judgement():
 
 
 def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
-    """The loop hands `_training_verdict` to `to_thread.run_sync` POSITIONALLY, and every test that
-    substitutes a stub for it re-declares that signature by hand.
+    """The loop calls `_training_verdict` POSITIONALLY, and every test that substitutes a stub for it
+    re-declares that signature by hand.
 
     A stub one parameter short raises `TypeError` INSIDE the loop's own per-tick
     `except Exception: continue`, so the monitor spins instead of failing — measured: adding
     `trajectory_text` turned `test_monitor_cancellation_joins_the_paid_verdict_worker` into a hang,
     not a red test. Bind the real call site's argument count against the real signature so the next
-    parameter cannot strand a stub silently."""
+    parameter cannot strand a stub silently.
+
+    TWO call shapes count, because the loop moved between them: the verdict used to be handed to
+    `to_thread.run_sync` as a callable plus its arguments, and since the log-tools derivation was
+    pushed into the worker (it globs + fstats the workdir, and as a `run_sync` ARGUMENT it ran on the
+    event-loop thread) it is CALLED inside a closure the worker runs instead. Both are the same fact
+    — N positional arguments reaching that method — so the finder takes either rather than pinning
+    the dispatch shape, which is not the property.
+    """
     import ast
     import inspect
     from pathlib import Path
@@ -315,10 +357,13 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        func = node.func
         first = node.args[0] if node.args else None
-        if (isinstance(first, ast.Attribute) and first.attr == "_training_verdict"):
+        if isinstance(func, ast.Attribute) and func.attr == "_training_verdict":
+            passed = len(node.args)            # called directly, in the worker's closure
+        elif isinstance(first, ast.Attribute) and first.attr == "_training_verdict":
             passed = len(node.args) - 1        # everything after the callable itself
-    assert passed is not None, "the loop must still dispatch _training_verdict to a worker thread"
+    assert passed is not None, "the loop must still call _training_verdict on a worker thread"
     parameters = inspect.signature(_tm.TrainingMonitorMixin._training_verdict).parameters
     positional = [n for n, p in parameters.items()
                   if n != "self" and p.kind is p.POSITIONAL_OR_KEYWORD]

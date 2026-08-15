@@ -16,6 +16,7 @@ from looplab.tools.log_tools import (
     LogQueryTools,
     LogSource,
     _Clock,
+    _DEFAULT_LINES,
     _squeeze,
     bucket_series,
     scan_series,
@@ -110,6 +111,67 @@ def test_the_source_map_is_re_derived_per_call(tmp_path):
     tools.execute("read_log", {})
     tools.execute("read_log", {})
     assert len(seen) >= 2
+
+
+def test_one_source_derivation_per_call_and_a_fresh_one_next_call(tmp_path):
+    """Both halves of the same rule, and they pull in opposite directions.
+
+    The map is EXPENSIVE in a way its shape hides: the production resolver
+    (`train_monitor.monitor_log_sources`) globs the workdir and opens + fstats every stage log, with
+    `attempt_byte_floor` probe-READING each one, on mounts where a stat can cost most of a second.
+    So the scope of a derivation is stated rather than left to whichever helpers happen to ask:
+    ONE per entry, however many `sources()` reads the body makes — today `_resolve` is the only one
+    and the guard is what keeps a second reader from quietly doubling a judge tick's filesystem work.
+    (`train_monitor._log_query_tools`'s own probe is the other half, driven in
+    `tests/test_train_monitor.py`.)
+
+    And the map must STILL be re-derived between calls, because the active stage log moves during an
+    eval (setup -> train -> score) — a cache that outlived a call would answer about `train.log`
+    while the model was reading `score.log`, which is the defect the callable exists to prevent.
+    """
+    (tmp_path / "train.log").write_text("".join(f"line {i} loss: {1.0 / (i + 1)}\n"
+                                                for i in range(50)))
+    seen: list = []
+
+    def resolve():
+        seen.append(1)
+        # A new stage log APPEARS between calls, which is what the second half of this is about.
+        return [LogSource(name=path.name, path=path) for path in sorted(tmp_path.glob("*.log"))]
+
+    tools = LogQueryTools(resolve, default="train.log")
+    for call, args in ((tools.specs, ()), (tools.execute, ("read_log", {"mode": "tail"})),
+                       (tools.execute, ("metric_series", {"metric": "loss"}))):
+        seen.clear()
+        call(*args)
+        assert len(seen) == 1, f"{call} derived the source map {len(seen)} times"
+    # The rule stated over the scope itself, because the bodies above happen to read `sources()`
+    # exactly once today: EVERY read inside one entry shares one derivation, and a read outside is
+    # its own. That is what stops a second reader added later from silently doubling a judge tick's
+    # filesystem work — and what stops the sharing from outliving the call.
+    seen.clear()
+    with tools._one_derivation():
+        for _ in range(5):
+            tools.sources()
+    assert len(seen) == 1
+    tools.sources()
+    assert len(seen) == 2
+    # ...and the next call sees a log that was not there before.
+    (tmp_path / "score.log").write_text("scoring now\n")
+    assert "score.log" in tools.execute("read_log", {"log": "score.log", "mode": "tail"})
+
+
+def test_the_median_is_one_definition_shared_with_the_trajectory_veto():
+    """`log_tools._median` and `train_monitor._median` were byte-identical copies reducing the SAME
+    log one trust tier apart — the judge-facing bucket median and the deterministic veto's per-window
+    median. A drift between them would put the number a judge reads and the number the engine acts on
+    in silent contradiction."""
+    from looplab.core.numeric import median as core_median
+    from looplab.engine import train_monitor as tm
+    from looplab.tools import log_tools as lt
+
+    assert lt.median is core_median and tm._median is core_median
+    assert core_median([3.0, 1.0, 2.0]) == 2.0
+    assert core_median([1.0, 2.0, 3.0, 4.0]) == 2.5
 
 
 def test_bytes_below_the_attempt_floor_are_never_returned(tmp_path):
@@ -217,10 +279,66 @@ def test_the_torn_leading_record_of_a_seek_is_dropped_and_said(tmp_path):
             assert row.startswith("record-0")          # never half a record
 
 
-def test_a_range_past_the_scanned_window_says_how_to_reach_it(tmp_path):
+def test_a_range_past_the_end_of_the_log_says_so_without_a_spent_remedy(tmp_path):
+    """A record number that does not exist is answered with the number that does — and NOT with
+    "raise max_bytes", which is what this said when `range` was a window: on the logs the search
+    sweep exists for that was advice the caller was already at the ceiling of."""
     tools = _tools(tmp_path, "a\nb\nc\n")
     out = tools.execute("read_log", {"mode": "range", "start": 99, "lines": 3})
-    assert "past the 3 records" in out and "max_bytes" in out
+    assert "past the 3 record(s) this log holds" in out
+    assert "whole log from this attempt's start" in out
+    assert "max_bytes" not in out
+
+
+def test_a_range_seeks_to_a_record_beyond_the_reader_window(tmp_path):
+    """THE regression, and it is the same one `test_a_search_hit_in_the_logs_head_is_returned` drives
+    one mode over: a search's receipt hands the caller a RECORD NUMBER as an address, and `range` read
+    a window up from the floor bounded by `max_read_bytes`, so on a log bigger than that ceiling the
+    address did not resolve for most of the matches the sweep can find.
+
+    Driven end to end at a small reader ceiling: the sweep names a hit's number, and that number is
+    spent on `mode="range"` — which is what "a remedy the caller has not already spent" means here.
+    """
+    body = "".join(("BOOM traceback here\n" if i == 4_000 else f"quiet {i:05d} padding padding\n")
+                   for i in range(6_000))
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                          max_read_bytes=4_096)
+    found = tools.execute("read_log", {"mode": "search", "pattern": "BOOM", "context": 0})
+    number = int(next(row for row in found.splitlines() if row.startswith(">")).split(":")[0][1:])
+    assert number == 4_001
+    # The window read cannot see it at ANY parameter — that is the bound this seek is not subject to.
+    head = tools.execute("read_log", {"mode": "head", "lines": 2_000, "max_bytes": 10_000_000})
+    assert "BOOM" not in head
+    ranged = tools.execute("read_log", {"mode": "range", "start": number, "lines": 2})
+    assert "BOOM traceback here" in ranged
+    assert f"records {number}-{number + 1}" in ranged
+
+
+def test_a_range_the_seek_cannot_reach_names_the_remedy_that_is_not_spent(tmp_path):
+    """Three refusals, and the point is which one is printed to whom. A caller who set their own
+    small `max_bytes` is told to raise it; a caller already at the TOOL's ceiling is not — nothing
+    raises that, so they are given the byte the seek reached and the mode that looks past it by
+    content. Telling the second caller to raise a parameter they are already at the cap of is the
+    spent-remedy defect this whole mode was rewritten for."""
+    body = "".join(f"quiet {i:06d} padding padding\n" for i in range(3_000))
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    at_cap = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                           max_search_bytes=8_192)
+    out = at_cap.execute("read_log", {"mode": "range", "start": 2_900, "lines": 2})
+    assert "8,192-byte ceiling" in out and "no record number reaches it" in out
+    assert "raise max_bytes" not in out
+    assert _resume_byte(out) > 0                        # a byte the seek really reached
+    # ...and the caller who has NOT spent it is told to.
+    roomy = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log")
+    own = roomy.execute("read_log", {"mode": "range", "start": 2_900, "lines": 2,
+                                     "max_bytes": 8_192})
+    assert "your 8,192-byte max_bytes" in own and "raise max_bytes" in own
+    # ...and spending it works.
+    assert "quiet 002899" in roomy.execute("read_log", {"mode": "range", "start": 2_900,
+                                                        "lines": 2})
 
 
 def test_the_result_stays_under_the_agent_loop_cap(tmp_path):
@@ -449,6 +567,197 @@ def test_a_search_hit_number_is_a_record_number_mode_range_can_re_read(tmp_path)
                                                                "lines": 1})
 
 
+# ------------------------------------------- rule 3 again: what a MODEL-AUTHORED pattern may cost
+def test_a_backtracking_pattern_cannot_park_the_sweep_past_its_deadline(tmp_path):
+    """`pattern` is the one argument a model writes freely, and `re` is a backtracking engine with no
+    timeout. `(a+)+$` against a long run of `a` is exponential in the input length, and a sweep may
+    parse `_MAX_SEARCH_BYTES` of records — so before this bound one tool call could hold the
+    watchdog's worker for the rest of a multi-hour node.
+
+    DRIVEN, not pinned: a real catastrophic pattern against a real file of records built to catch on
+    it, with the deadline set low so the test itself is fast. The properties are that the call
+    RETURNS, that it returns in the deadline's order of magnitude and not the pattern's, and that it
+    says what it did not reach with a `from_byte` a caller can spend.
+    """
+    import time as _time
+
+    import looplab.tools.log_tools as lt
+    # 18 `a`s ahead of a failing `$` is ~32 ms of backtracking per record, measured — small enough
+    # that the test is quick and large enough that 300 of them is ~9.5 s of sweep, i.e. the file is
+    # only searchable inside the deadline because the deadline stops it.
+    body = "".join("a" * 18 + f"b{i}\n" for i in range(300))
+    tools = _tools(tmp_path, body)
+    monkey = lt._SEARCH_DEADLINE_S
+    try:
+        lt._SEARCH_DEADLINE_S = 0.5
+        began = _time.monotonic()
+        out = tools.execute("read_log", {"mode": "search", "pattern": "(a+)+$"})
+        cost = _time.monotonic() - began
+    finally:
+        lt._SEARCH_DEADLINE_S = monkey
+    # It came back at all, and in the deadline's order of magnitude rather than the pattern's — the
+    # slack is one record's match, which is the residual this bound does NOT close (see
+    # `_SEARCH_DEADLINE_S`), and it is well under the ~9.5 s an unbounded sweep of this file costs.
+    assert cost < 4.0
+    assert "search deadline" in out and "FLOOR" in out
+    # ...and the byte it names is one it really reached: spending it moves the sweep forward.
+    resumed = _resume_byte(out)
+    assert 0 <= resumed < len(body.encode())
+
+
+def test_the_deadline_stop_never_skips_the_bytes_it_did_not_sweep(tmp_path):
+    """The stop UNDERSTATES how far it got, deliberately: it names the start of the batch it was in,
+    so resuming re-reads those bytes rather than stepping over the records after the stop. Skipping
+    is the one thing a bounded answer in this module may never do — a `from_byte` that jumped the
+    unswept tail of a batch would silently lose every match in it.
+
+    Driven with a deadline of zero, which stops the sweep on its very first record: the resume byte
+    must then be the sweep's own floor, and paging from it must find the match that is there.
+    """
+    body = "".join(("BOOM\n" if i == 500 else f"quiet {i:05d}\n") for i in range(1_000))
+    tools = _tools(tmp_path, body)
+    assert "1 match(es)" in tools.execute(                 # the control: it finds it normally
+        "read_log", {"mode": "search", "pattern": "BOOM"})
+
+    import looplab.tools.log_tools as lt
+    monkey = lt._SEARCH_DEADLINE_S
+    try:
+        # A deadline already in the past — the check fires before the first record is matched.
+        lt._SEARCH_DEADLINE_S = 1e-9
+        out = tools.execute("read_log", {"mode": "search", "pattern": "BOOM"})
+    finally:
+        lt._SEARCH_DEADLINE_S = monkey
+    assert "search deadline" in out
+    assert _resume_byte(out) == 0                          # nothing was claimed as examined
+    # ...and the honest resume byte still reaches the match, which a skipped-batch byte would not.
+    again = tools.execute("read_log", {"mode": "search", "pattern": "BOOM",
+                                       "from_byte": _resume_byte(out)})
+    assert "1 match(es)" in again and "BOOM" in again
+
+
+def test_a_record_with_no_delimiter_is_matched_over_a_bounded_prefix_and_says_so(tmp_path):
+    """The other amplifier: a log with no `\\n` and no `\\r` hands the matcher up to
+    `_SEARCH_CHUNK * 8` = 8 MiB as ONE record. What a caller's pattern is exposed to is capped at
+    `_MAX_MATCH_CHARS`, and — because a bound that does not announce itself is the defect the rest of
+    this module is about — the receipt counts the records it clipped."""
+    import looplab.tools.log_tools as lt
+    monkey = lt._MAX_MATCH_CHARS
+    try:
+        lt._MAX_MATCH_CHARS = 64
+        tools = _tools(tmp_path, "x" * 400 + "LATE-MARK" + "\n")
+        out = tools.execute("read_log", {"mode": "search", "pattern": "LATE-MARK"})
+        assert "no record matches" in out                   # past the cap, so not looked for
+        assert "1 record(s) were longer than 64 characters" in out
+        assert "not ruled out" in out
+        # A record inside the cap is matched whole, and nothing is announced about it.
+        short = _tools(tmp_path, "EARLY-MARK here\n", name="score.log")
+        found = short.execute("read_log", {"mode": "search", "pattern": "EARLY-MARK"})
+        assert "1 match(es)" in found and "were longer than" not in found
+    finally:
+        lt._MAX_MATCH_CHARS = monkey
+
+
+def test_a_ceiling_reached_inside_a_delimiterless_region_still_gets_the_ceiling_receipt(tmp_path):
+    """The carry path used to `continue` past the ceiling bookkeeping, so a sweep that spent its
+    whole budget inside a region with no record delimiter fell out with no stop recorded and printed
+    the "stopped for neither reason" branch — the one that does NOT name the ceiling and does not say
+    the count is a floor. Driven with a file whose readable region is one long delimiter-free run."""
+    body = "z" * 60_000 + "\nTAIL-MARK\n"
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                          max_search_bytes=8_192)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "TAIL-MARK"})
+    assert "8,192-byte search ceiling" in out
+    assert "is NOT ruled out" in out and "FLOOR" in out
+    # ...and the byte it names really continues it, rather than being a short-read's guess.
+    for _page in range(40):
+        out = tools.execute("read_log", {"mode": "search", "pattern": "TAIL-MARK",
+                                         "from_byte": _resume_byte(out)})
+        if "1 match(es)" in out:
+            break
+    assert "TAIL-MARK" in out
+
+
+def test_the_search_render_touches_each_record_once(tmp_path):
+    """Closing the middle to fit the cap re-derives the two blocks, and the loop used to re-render
+    every SURVIVING row from scratch each time round — a `_squeeze` regex sub plus a `clip` per row
+    per iteration, i.e. O(groups^2 x rows). Measured at the advertised `lines=100, context=20`: 1.225
+    s of CPU to produce a 3.6 KB answer, on the request path of a judge that fires on a timer.
+
+    The property is not "it is fast", it is that a record is RENDERED ONCE — which is what a memo by
+    record number buys, and which stays true however many groups the cap closes."""
+    body = "".join(f"record {i:05d} BOOM some quite long trailing text to make this row wide\n"
+                   for i in range(5_000))
+    tools = _tools(tmp_path, body)
+    rendered: list = []
+    real = LogQueryTools._render
+
+    def counting(self, record, raw_mode):
+        rendered.append(record)
+        return real(self, record, raw_mode)
+
+    LogQueryTools._render = counting
+    try:
+        out = tools.execute("read_log", {"mode": "search", "pattern": "BOOM", "lines": 100,
+                                         "context": 20})
+    finally:
+        LogQueryTools._render = real
+    assert "5000 match(es)" in out                          # the cap really did bind and close groups
+    assert "further match(es)" in out
+    assert rendered, "nothing was rendered at all"
+    assert len(rendered) == len(set(rendered)), (
+        f"{len(rendered)} render calls for {len(set(rendered))} distinct records")
+
+
+# --------------------------------------------------------- numeric arguments as a transport sends them
+def test_a_numeric_string_argument_is_the_number_it_spells(tmp_path):
+    """Many LLM tool-call transports serialize integers as JSON strings, and the strict
+    `isinstance(value, (int, float))` this replaced returned the DEFAULT for one. The sharp case is
+    `from_byte`: it is the value a ceiling receipt tells the caller to pass BACK, so a quoted one
+    restarted the sweep at the attempt floor and handed the judge the same first page again — an
+    unbreakable loop for a judge quoting its own receipt."""
+    body = "".join(f"\r{i}/1000 [{i // 60}:{i % 60:02d}:00<0:10:00] quiet {i:05d} loss: {1000 - i}\n"
+                   for i in range(1_000))
+    tools = _tools(tmp_path, body)
+    floor_page = tools.execute("read_log", {"mode": "search", "pattern": "quiet 00001",
+                                            "context": 0})
+    assert "1 match(es)" in floor_page
+    # A quoted from_byte past that record must NOT find it — i.e. it was honoured, not defaulted.
+    skipped = tools.execute("read_log", {"mode": "search", "pattern": "quiet 00001",
+                                         "context": 0, "from_byte": "20000"})
+    assert "no record matches" in skipped
+    assert "earlier bytes were skipped by from_byte" in skipped
+    # ...and the same for the other slots a transport can quote.
+    assert "records 1-3 " in tools.execute("read_log", {"mode": "head", "lines": "3"})
+    assert "records 7-8 " in tools.execute("read_log", {"mode": "range", "start": "7",
+                                                        "lines": "2"})
+    hourly = tools.execute("metric_series", {"metric": "loss", "whole_run": "yes",
+                                             "bucket_s": "3600"})
+    assert "buckets of 1:00:00" in hourly
+
+
+def test_a_bool_or_garbage_argument_falls_back_rather_than_becoming_a_number(tmp_path):
+    """Accepting strings must not accept anything else: `True` is an `int` in Python and `lines=True`
+    is not a request for one record."""
+    tools = _tools(tmp_path, "".join(f"line {i}\n" for i in range(200)))
+    for bad in (True, "many", "", "  ", None, float("nan"), float("inf")):
+        out = tools.execute("read_log", {"mode": "head", "lines": bad})
+        assert f"records 1-{_DEFAULT_LINES} " in out, bad
+
+
+def test_a_zero_second_window_is_askable(tmp_path):
+    """`last_s` went through `... and last_s`, so a legitimate zero — "what did it print just now" —
+    was silently promoted to "everything the scan covered". Same rule `_int_arg` states for
+    `context=0`."""
+    body = "".join(f"\r{i}/100 [0:{i:02d}:00<0:10:00] loss: {100 - i}\n" for i in range(1, 60))
+    tools = _tools(tmp_path, body)
+    whole = tools.execute("metric_series", {"metric": "loss"})
+    just_now = tools.execute("metric_series", {"metric": "loss", "last_s": 0})
+    assert "59 reading(s)" in whole
+    assert "1 reading(s)" in just_now and "the last 0s you asked for" in just_now
+
+
 # ------------------------------------------------------------------------------------------ the clock
 def test_a_nested_concurrent_bar_does_not_advance_the_run_clock():
     """MEASURED failure #1: summing every bar restart reported `runs/rubertlite-dr-unified-v7` node 1
@@ -510,6 +819,43 @@ def test_every_sample_lands_in_exactly_one_bucket():
     for width in (1.0, 5.0, span / 3, span):
         rows = bucket_series(samples, start=samples[0].t, end=samples[-1].t, width=width)
         assert sum(r["n"] for r in rows) == len(samples), width
+
+
+def test_bucketing_is_one_forward_pass_and_agrees_with_the_per_bucket_scan():
+    """It re-scanned the WHOLE sample list once per bucket, and `_metric_series` builds
+    `_MAX_BUCKETS`=200 of them whenever `bucket_s` is omitted — O(200 x samples) of pure CPU on the
+    judge's request path, measured at 1.67 s for 200k samples against ~900 ms to read the bytes they
+    came from. The samples arrive non-decreasing in `t` (`_Clock.t` is monotone by construction), so
+    the walk is one pass.
+
+    Two assertions, because either alone is weak: that the rows are EXACTLY what the per-bucket scan
+    produced (the membership test is preserved comparison for comparison), and that the cost is the
+    one-pass one — a 20x margin over the measured 0.08 s, well clear of a slow box.
+    """
+    import time as _time
+
+    from looplab.tools.log_tools import _Sample
+
+    samples = [_Sample(t=i * 0.01, value=(i % 97) * 0.5, step=i, total=200_000, finite=i % 500 != 0)
+               for i in range(200_000)]
+    end = samples[-1].t
+    width = end / 200
+
+    def per_bucket(start, end, width):
+        """The shape this replaced, kept here as the reference the walk must agree with."""
+        count = int(max(1, ((end - start) / width) + 1))
+        return [[s.t for s in samples
+                 if s.t >= start + i * width
+                 and (s.t < start + i * width + width
+                      or (i == count - 1 and s.t <= start + i * width + width + 1e-6))]
+                for i in range(count)]
+
+    began = _time.monotonic()
+    rows = bucket_series(samples, start=0.0, end=end, width=width)
+    cost = _time.monotonic() - began
+    assert sum(r["n"] for r in rows) == len(samples)        # reduce, never drop
+    assert [r["n"] for r in rows] == [len(b) for b in per_bucket(0.0, end, width) if b]
+    assert cost < 1.6, f"one pass over 200k samples took {cost:.3f}s"
 
 
 def test_a_bucket_reports_the_spread_it_reduced():

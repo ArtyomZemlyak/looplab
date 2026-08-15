@@ -50,6 +50,10 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.llm_broker import in_llm_lane
+# The median the trajectory reduces its windows with. It was a byte-identical private copy here and
+# in `tools/log_tools.py`, which reduce the SAME log one trust tier apart (the deterministic veto's
+# per-window median, and the judge-facing `metric_series` bucket median) — see `core/numeric.py`.
+from looplab.core.numeric import median as _median
 # The log-role vocabulary is stamped on the DURABLE `EV_TRAIN_MONITOR_ALERT` row, so it lives in
 # `events/types.py` where readers below the engine (`events/digest.py`'s `watchdog_reflection`) can
 # name a role without importing the engine (layering: `events` imports only `core`). Imported here
@@ -211,6 +215,27 @@ _TRAJECTORY_EXPLOSION_RATIO = 100.0
 # level. The noise floor is the real test; the relative floor only stops a numerically-tiny drift on
 # a quiet log from reading as progress. Node 1's 5.8% and node 0's 30% clear it by three orders.
 _TRAJECTORY_MIN_RELATIVE_DROP = 0.001
+# ...and the floor BOTH of the other two collapse to zero at, which is not a hypothetical: a window
+# of `loss: 0.0` values has a masd of 0.0 (the noise floor) AND an opening scale of 0.0 (the relative
+# floor), so `net > floor` became `net > 0` and an epsilon of drift read as `descending`. Driven:
+# windows of `loss: 0.0` then `loss: -1e-9` answered `direction='descending', net=1e-09, noise=0.0`,
+# and a descending trajectory VETOES every `broken` verdict for the rest of the node — so a
+# degenerate window bought a multi-hour node permanent immunity from the kill it exists to allow.
+# `{'loss': 0.0, 'grad_norm': nan}` is the exact shape of this module's own positive control
+# (`runs/rubertlite-dr-unified-v6` node 5); only the `grad_norm: nan` beside it rescued that case,
+# through `_anomaly_of`, and a run that prints the zero without the nan had nothing.
+#
+# 1e-6 is chosen so it is INERT wherever either real floor has anything to say: the relative floor is
+# already >= 1e-6 for any opening scale >= 1e-3, i.e. for every run in `runs/` and for any loss a
+# 4-decimal logger (the HF Trainer rounds its logged loss to 4 places) can even express a movement
+# in. It binds only where the opening median is below 1e-3 AND the within-window noise is below 1e-6
+# — a curve at that scale has no legible direction, which is what `flat` means.
+#
+# Raising the floor can only ever turn `descending`/`rising` into `flat`, i.e. WITHDRAW a veto and
+# never mint one, which is the only direction this measurement is allowed to move in (see the trust
+# note above `_LOSS_POINT_RE`): `flat` is not evidence FOR a kill, it is the absence of evidence
+# against one, so the judge's own verdict decides again exactly as it did before the veto existed.
+_TRAJECTORY_MIN_ABSOLUTE_DROP = 1e-6
 # Bounded history: one window per tick, and the cadence + `_MAX_MONITOR_LLM_CALLS` already bound a
 # node to ~200 ticks. Retained as a deque so a pathological run cannot grow this without limit; the
 # summary reads only the FIRST and LAST windows plus a median, so dropping the middle of an
@@ -255,8 +280,9 @@ class LossTrajectory:
     `direction` is the answer to the question the tail cannot answer:
 
     - ``"descending"`` — the run's opening window sits above its latest by more than the measured
-      noise floor AND more than `_TRAJECTORY_MIN_RELATIVE_DROP` of the opening level, so the loss is
-      demonstrably not stuck at its initialization value;
+      noise floor, more than `_TRAJECTORY_MIN_RELATIVE_DROP` of the opening level, AND more than
+      `_TRAJECTORY_MIN_ABSOLUTE_DROP` (the floor the first two both collapse to zero at, on a window
+      of `loss: 0.0`), so the loss is demonstrably not stuck at its initialization value;
     - ``"rising"`` — the same test in the other direction (divergence);
     - ``"flat"`` — the net movement does not clear the floor: genuinely converged, genuinely stuck,
       or too early to tell apart. This rule deliberately does not choose between those three, which
@@ -285,13 +311,6 @@ class LossTrajectory:
         veto should protect, so the veto stands down and the model's `broken` verdict is left to
         act (`runs/rubertlite-dr-unified-v6` node 5 is the worked case)."""
         return bool(self.anomaly)
-
-
-def _median(values) -> float:
-    ordered = sorted(values)
-    n = len(ordered)
-    mid = n // 2
-    return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
 def parse_loss_points(text: str) -> tuple[list[float], int]:
@@ -409,7 +428,11 @@ def summarize_trajectory(windows) -> LossTrajectory:
     # Window MEDIANS, not their endpoints: an endpoint is one sample and carries the full
     # step-to-step scatter, while the median of ~10 samples is what makes a sub-noise drift legible.
     net = numeric[0].median - last.median
-    floor = max(common["noise"], abs(numeric[0].median) * _TRAJECTORY_MIN_RELATIVE_DROP)
+    # THREE floors, and the third is the one that keeps the other two from both being 0.0 — see
+    # `_TRAJECTORY_MIN_ABSOLUTE_DROP` for the degenerate `loss: 0.0` window that made `net > floor`
+    # into `net > 0` and handed a node a permanent veto over its own kill.
+    floor = max(common["noise"], abs(numeric[0].median) * _TRAJECTORY_MIN_RELATIVE_DROP,
+                _TRAJECTORY_MIN_ABSOLUTE_DROP)
     direction = "descending" if net > floor else ("rising" if net < -floor else "flat")
     return LossTrajectory(net=net, direction=direction, **common)
 
@@ -1255,11 +1278,27 @@ def _log_query_tools(workdir, log_plan, log_snapshot):
     The map stays a CALLABLE even on the repair path, where the eval is already over and it cannot
     move. That is deliberate: a second, frozen construction here would be a second answer to "which
     logs exist", and the whole point of this function is that there is one.
+
+    The "is there anything to name" probe is the FIRST derivation and the provider is handed it, so
+    the construction costs one derivation and not two. It matters because the derivation is not
+    cheap: `monitor_log_sources` globs the workdir and opens + fstats every stage log, with
+    `attempt_byte_floor` probe-READING each one, on mounts where a stat can cost most of a second.
+    `LogQueryTools` holds it for the rest of THIS call and drops it again (`_one_derivation`), so a
+    later tool call still re-derives — a new stage log appearing mid-eval is exactly what the
+    callable is for.
     """
     from looplab.tools.log_tools import LogQueryTools
-    if not monitor_log_sources(workdir, log_plan, log_snapshot):
+    first = monitor_log_sources(workdir, log_plan, log_snapshot)
+    if not first:
         return None
-    return LogQueryTools(lambda: monitor_log_sources(workdir, log_plan, log_snapshot))
+    pending = [first]
+
+    def resolve():
+        # The probe's own answer serves the first read; every later one re-derives, because the
+        # active stage log MOVES during an eval and a frozen map answers about the wrong phase.
+        return pending.pop() if pending else monitor_log_sources(workdir, log_plan, log_snapshot)
+
+    return LogQueryTools(resolve)
 
 
 def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
@@ -1607,15 +1646,32 @@ class TrainingMonitorMixin:
                         # recorded on shared run state. Join an in-flight call on eval cancellation so
                         # no detached worker can emit cost after the node/run has finalized. Endpoint
                         # timeouts remain the upper bound for this ownership hand-off.
+                        stage_text = monitor_stage_context(resolved, log_plan)
+                        trajectory_text = trajectory_context(trajectory)
+
+                        def _judge():
+                            """The paid call AND the source derivation it needs, both in the worker.
+
+                            `monitor_log_tools` is FILESYSTEM work — it globs the workdir for
+                            `*.log` and opens + fstats every stage log the plan names, and
+                            `attempt_byte_floor` probe-READS each one. As an ARGUMENT to
+                            `run_sync` it was evaluated on the EVENT-LOOP thread, which is the one
+                            place in this tick that pays for a slow mount: on the geesefs/S3 mounts
+                            `runs/` lives on, an `lstat` of a file that is NOT there costs
+                            105-950 ms (`core/fence.py::_warm_directory_lookup` measured it), so
+                            one blocking derivation per tick per running eval stalls the whole
+                            engine loop. Every other filesystem touch in this loop is already
+                            handed to a worker (`_observe_log` above); this one just looked like a
+                            plain argument. Still built PER TICK, for the reason it always was: the
+                            tool reads the live log while the judge is thinking, so it must see the
+                            file as it is now and not as it was when the eval started.
+                            """
+                            return self._training_verdict(
+                                tail, context, stage_text, trajectory_text,
+                                monitor_log_tools(self, workdir, log_plan, log_snapshot))
+
                         verdict = await anyio.to_thread.run_sync(
-                            self._training_verdict, tail, context,
-                            monitor_stage_context(resolved, log_plan),
-                            trajectory_context(trajectory),
-                            # Built HERE, per tick, in the same thread hand-off as the call it serves:
-                            # the tool reads the live log while the judge is thinking, so it must see
-                            # the file as it is now, not as it was when the eval started.
-                            monitor_log_tools(self, workdir, log_plan, log_snapshot),
-                            abandon_on_cancel=False)
+                            _judge, abandon_on_cancel=False)
                         llm_calls += 1
                     if verdict is None:
                         # NO PARSEABLE ANSWER this tick — an endpoint failure, model output that failed
