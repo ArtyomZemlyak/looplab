@@ -109,16 +109,18 @@ It does not mean one thing, because the exposure is not the same on both deploym
 |---|---|---|
 | **Private** (`looplab ui` on loopback, Compose published to loopback, a per-user host) | Unauthenticated, exactly as before | Nothing else shares the origin; the token is defence in depth, and a mandatory unlock gate on a laptop buys nothing. |
 | **Shared JupyterHub origin** (`jupyter-server-proxy`, detected from `JUPYTERHUB_SERVICE_PREFIX`/`JUPYTERHUB_API_TOKEN`) | **Fails closed**: the server generates a token, stores it `0600` at `~/.looplab/ui-token`, logs the path and the value at startup, and default-denies `/api/*` | Every user's app and every other proxied page live on ONE browser origin, and the same-origin policy is per-origin, not per-path. An unauthenticated control plane there can be driven by any same-origin page: start a run, delete a run, edit settings, name a `task_file`. |
+| **A non-loopback bind** (`looplab ui --host 0.0.0.0`, or any `--host` that is not a loopback address) | **Fails closed**, identically | The hub was only ever an INSTANCE of the general property, "is this control plane published somewhere that is not just this machine". Keying the decision on the two hub environment variables meant `--host 0.0.0.0` published start/delete-run, settings, `task_file` and shell-executing experiments on every interface while answering "private origin" — the one deployment where the unlock gate is not defence in depth but the whole boundary. |
 
 Read a minted token back with `cat ~/.looplab/ui-token` (or `$LOOPLAB_UI_TOKEN_FILE`), then unlock the
 UI with it. `looplab tui` reads the same file, so it keeps working without an exported variable. The
 file is reused across restarts — an already-unlocked tab does not have to be re-unlocked — and a
 token file that is a symlink or readable by anyone else is **refused at startup** rather than used.
 
-Two deliberate non-choices: the server already binds loopback, and `jupyter-server-proxy` connects to
-loopback itself, so "bind loopback-only when unset" cannot be the boundary here; and refusing to start
-would break the Launcher-tile deployment whose whole point is that there is no terminal in which to
-export a variable. A minted credential is fail-closed *and* recoverable.
+Two deliberate non-choices: "bind loopback-only when unset" cannot be the boundary, because on the hub
+the server *already* binds loopback and `jupyter-server-proxy` connects to it there — the bind host
+answers the question for a direct `--host`, and answers nothing at all for a proxy; and refusing to
+start would break the Launcher-tile deployment whose whole point is that there is no terminal in which
+to export a variable. A minted credential is fail-closed *and* recoverable.
 
 `LOOPLAB_UI_ANONYMOUS=1` restores the previous open behaviour on a shared origin — for a deployment
 whose origin is private in a way the detection cannot see. It is deliberately something you turn on,
