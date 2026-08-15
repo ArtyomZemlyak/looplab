@@ -863,11 +863,12 @@ probe and each run-list row); `looplab repair-log RUN_DIR` names the exact bound
 `docs/guide/cli-reference.md#repair-log` explains what causes one. The banner is not dismissible
 because nothing you can do in the browser makes it stop being true.
 
-**A `salvaged` or `trust-flagged` pill beside a run's best metric.** The run selected on a number its
-own record carries a caveat about, and the caveat travels with the number so the portfolio cannot read
-it as a plain measurement. There are exactly two, they come from the server
+**A `salvaged`, `trust-flagged` or `params overridden` pill beside a run's best metric.** The run
+selected on a number its own record carries a caveat about, and the caveat travels with the number so the
+portfolio cannot read it as a plain measurement. There are exactly three, they come from the server
 (`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
-operator set rather than a bug:
+operator set or a fact the engine derived — none of them a bug report. The first two qualify **how** the
+number was measured; the third qualifies **what it is a number for**:
 
 - **`salvaged`** — the champion's evaluation FAILED and the run recovered the number with its own
   declared reader. Under the default `metric_salvage: audit` such a node is excluded from selection
@@ -876,12 +877,22 @@ operator set rather than a bug:
 - **`trust-flagged`** — the champion carries a high-precision reward-hack or leakage signal and this
   run's `trust_gate` is `audit`, which surfaces without enforcing. Under `gate`/`block` the node could
   not have been selected, so this pill and those rungs never coexist.
+- **`params overridden`** — the champion's own committed `.py` code assigns a **different** value to a
+  parameter its experiment record declares, so the declared configuration is not the one the result was
+  produced under. The metric itself was measured normally; what is in question is the recipe beside it.
+  This is the one pill that is non-empty on this box today: `rubertlite-dr-unified-v8` node 3 is that
+  run's champion at 0.762048 with `train.training.batch_size` declared 8192 and `train.py:31` assigning
+  4096 (and `gradient_accumulation_steps` 2 → 4). The engine derives it from the declaration and the
+  bytes it committed and never from anything a model wrote about them; a repair that introduces one also
+  stamps `param_overrides` on its `node_repaired` row, which is what the node's repair history shows.
 
-Neither pill is a claim that anything is wrong with the run: it is the claim that the number in the
-`best` column is not the same kind of evidence as the one beside it. **An absent pill is not a
-certificate either** — `reward_hack_detect` is off by default, so the second caveat is silent on most
-runs, and only what a run RECORDED can be reported. Open the run and read the node's Trust and Metrics
-tabs before reusing its configuration.
+No pill is a claim that anything is wrong with the run: it is the claim that the number in the `best`
+column is not the same kind of evidence as the one beside it, and none of them moves a rank, a champion
+or a selection. **An absent pill is not a certificate either** — `reward_hack_detect` is off by default,
+so the second caveat is silent on most runs; the third is silent on every task whose space declares its
+parameters by bare name (the toy and benchmark spaces), and on a divergence expressed in a config file
+rather than in code. Only what a run RECORDED can be reported. Open the run and read the node's Trust
+and Metrics tabs before reusing its configuration.
 
 **`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's
 `esbuild` runs a **native binary** during install/build. `EACCES` when *executing* it means the

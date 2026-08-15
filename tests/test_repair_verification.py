@@ -8,6 +8,7 @@ The measurement that motivated the rung, and the two-tier design it forced, are 
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import anyio
@@ -1038,3 +1039,319 @@ def test_the_triage_providers_construction_does_not_park_the_engine_loop(tmp_pat
         assert len(during) >= 3, (
             f"the event loop made {len(during)} tick(s) while the triage provider was being built — "
             "the construction is running on the loop")
+
+
+# ============================================================ the declared-parameter override rung
+# A DIFFERENT QUESTION FROM EVERY TEST ABOVE, asked of different inputs. `verify_repair` compares the
+# rationale against the diff; `declared_param_overrides` compares the RECORD's declared coordinates
+# against the committed bytes and never reads a rationale at all. See `repair_verify`'s docstring for
+# the incident. Everything below is tier 1 — the real function over the champion's real bytes, and
+# the real engine loop for the two columns.
+
+# The champion's REAL declared params, verbatim from `runs/rubertlite-dr-unified-v8`'s
+# `node_created` for node 3 (seq 1510). Kept whole rather than reduced to the two keys under test,
+# because the rung has to pick those two out of fifteen without convicting on the other thirteen.
+_V8_NODE3_PARAMS = {
+    "loss.dcl": 1.0, "loss.rdrop_alpha": 0.5, "loss.temperature": 0.05, "loss.thr": 0.1,
+    "loss.uniformity_weight": 0.0, "loss.use_batch_centering": 0.0,
+    "train.negatives.mining_type": 1.0, "train.negatives.n_negatives": 2.0,
+    "train.training.batch_size": 8192.0, "train.training.gradient_accumulation_steps": 2.0,
+    "train.training.learning_rate": 0.001, "train.training.max_grad_norm": 1.0,
+    "train.training.n_epochs": 15.0, "train.training.warmup_ratio": 0.2,
+    "train.training.weight_decay": 0.1,
+}
+
+# …and the head of that node's REAL `vectorsearch/train.py` after attempt 4's repair, verbatim
+# (lines 1-33 of the file on disk). The comment is kept because it is the evidence for the SYSTEM
+# half of this finding — the repair states that it avoided `config.yaml` to keep the completed
+# `mine` stage reusable, which is `_safe_reuse_start`'s non-`.py` clause naming itself as the reason
+# a comparison-bearing parameter left the declared config.
+_V8_NODE3_TRAIN_PY = '''#!/usr/bin/env python
+import os
+from loguru import logger
+
+from vectorsearch.config import Config
+
+
+def main():
+    os.environ["TOKENIZERS_PARALLELISM"] = "0"
+
+    config = Config()
+
+    # R-Drop adds a second full forward pass through the model (see NLLCosLoss.forward step 9),
+    # roughly doubling forward-activation memory vs the DCL-only parent run. At per-device batch
+    # 8192 (x4 sentence-features = 32768 sequences) that OOMs even on a 140GB H200. Halve the
+    # per-device batch and double gradient accumulation to keep the SAME effective batch size
+    # (8192 x 2 accum = 16384) while fitting in memory. Config is pydantic-mutable, so this is a
+    # train.py-only change (no config.yaml edit) that leaves the completed `mine` stage reusable.
+    config.train.training.batch_size = 4096
+    config.train.training.gradient_accumulation_steps = 4
+
+    train_cfg = config.train
+    return train_cfg
+'''
+
+# The SAME file as it stood before that repair — node 3's `node_created` shipped no `train.py` at
+# all, and its siblings (nodes 0/1/4/5/6/8, all declaring the same 8192/2) carry this shape: the
+# config object is read and never written. This is the negative control's real source.
+_V8_SIBLING_TRAIN_PY = '''#!/usr/bin/env python
+from vectorsearch.config import Config
+
+
+def main():
+    config = Config()
+    train_cfg = config.train
+    return train_cfg
+'''
+
+
+def test_the_champions_real_shape_is_the_rung_this_was_built_for():
+    """THE FINDING, on the exact bytes. `runs/rubertlite-dr-unified-v8` node 3 became the run's
+    champion at 0.762048 — +0.0236 over the next node, the other four inside a 0.0017 spread —
+    while `idea.params` AND the node's own `config.yaml` both say `batch_size 8192` /
+    `gradient_accumulation_steps 2` and the code that ran says 4096 / 4. Only the code said so."""
+    rows = [o.as_row() for o in declared_param_overrides(
+        _V8_NODE3_PARAMS, {"vectorsearch/train.py": _V8_NODE3_TRAIN_PY})]
+    assert rows == [
+        {"param": "train.training.batch_size", "declared": 8192.0, "code": 4096.0,
+         "file": "vectorsearch/train.py", "line": 19},
+        {"param": "train.training.gradient_accumulation_steps", "declared": 2.0, "code": 4.0,
+         "file": "vectorsearch/train.py", "line": 20},
+    ], rows
+    # The other THIRTEEN declared parameters are not convicted. A rung that fired on `loss.dcl`
+    # because the word appears in a comment would be noise the reader learns to discount.
+    assert {r["param"] for r in rows} == {"train.training.batch_size",
+                                          "train.training.gradient_accumulation_steps"}
+
+
+def test_a_node_whose_code_agrees_with_its_declaration_gains_nothing():
+    """THE NEGATIVE CONTROL, and it is a real one: node 3's siblings declare the IDENTICAL fifteen
+    parameters and ship a `train.py` that only reads the config. Silence is the whole point — if
+    this rung answered on them it would fire on every node in the run and mean nothing."""
+    assert declared_param_overrides(
+        _V8_NODE3_PARAMS, {"vectorsearch/train.py": _V8_SIBLING_TRAIN_PY}) == ()
+    # And an assignment that AGREES with the declaration is equally silent: writing the declared
+    # number into code is what the Developer is asked to do, not a divergence.
+    agreeing = _V8_SIBLING_TRAIN_PY + "    config.train.training.batch_size = 8192\n"
+    assert declared_param_overrides(_V8_NODE3_PARAMS,
+                                    {"vectorsearch/train.py": agreeing}) == ()
+
+
+def test_the_repair_that_introduced_it_is_the_one_attributed():
+    """`baseline_files` separates 'this attempt did it' from 'it was already there'. Node 3's
+    attempt 5 rewrote the SAME file (it also promised an epoch cut, which never landed) and must not
+    be charged a second time for lines attempt 4 wrote — a repair history that accused every later
+    attempt of the same divergence would be unreadable."""
+    before, after = {}, {"vectorsearch/train.py": _V8_NODE3_TRAIN_PY}
+    assert len(declared_param_overrides(_V8_NODE3_PARAMS, after, baseline_files=before)) == 2
+    # Attempt 5: same file rewritten, same two assignments already present.
+    again = _V8_NODE3_TRAIN_PY + "    logger.info(config)\n"
+    assert declared_param_overrides(_V8_NODE3_PARAMS, {"vectorsearch/train.py": again},
+                                    baseline_files=after) == ()
+    # …while the WHOLE-NODE question still answers, which is what `champion_caveats` asks.
+    assert len(declared_param_overrides(_V8_NODE3_PARAMS,
+                                        {"vectorsearch/train.py": again})) == 2
+
+
+def test_a_bare_name_declaration_is_never_convicted():
+    """`PARAM_OVERRIDE_MIN_PARTS`. A dotted key is a path into a config object; `lr` is a word, and
+    any local of that name in any file would meet it. The corpus has exactly one instance of the
+    shape this refuses — `rubertlite-dense-retrieval` node 36 declares a bare `distill_alpha=0.5`
+    and `train.py:117` assigns 0.0 inside a missing-teacher fallback branch — and refusing it is the
+    decision, not an oversight: it is conditional code, so 'the declaration was overridden' is not
+    a fact the bytes support."""
+    assert PARAM_OVERRIDE_MIN_PARTS >= 2
+    src = "def f(cfg):\n    self.distill_alpha = 0.0\n    lr = 0.5\n"
+    assert declared_param_overrides({"distill_alpha": 0.5, "lr": 0.001}, {"t.py": src}) == ()
+    # The same value under a DOTTED declaration is checkable and is answered — but the WHOLE
+    # declared suffix has to match, so `model.distill_alpha` is NOT met by `self.distill_alpha`.
+    # That is what makes the suffix rule safe: only the receiver's own name is ignored.
+    assert declared_param_overrides({"model.distill_alpha": 0.5}, {"t.py": src}) == ()
+    assert len(declared_param_overrides({"self.distill_alpha": 0.5}, {"t.py": src})) == 1
+
+
+def test_the_target_is_parsed_and_not_pattern_matched():
+    """NON-VACUITY, in the direction that produces a false claim about a real run. The whole
+    false-positive family here is text that LOOKS like an assignment — a comment, a docstring, a
+    string literal, an `==` comparison — and `ast` does not have any of them. A regex would convict
+    on all four."""
+    decoys = (
+        "# config.train.training.batch_size = 4096\n"
+        's = "config.train.training.batch_size = 4096"\n'
+        'DOC = """\nconfig.train.training.batch_size = 4096\n"""\n'
+        "if config.train.training.batch_size == 4096:\n    pass\n")
+    assert declared_param_overrides(_V8_NODE3_PARAMS, {"t.py": decoys}) == ()
+    # A subscript path is the same declaration reached by key, and IS read.
+    assert len(declared_param_overrides(
+        _V8_NODE3_PARAMS,
+        {"t.py": 'cfg["train"]["training"]["batch_size"] = 4096\n'})) == 1
+
+
+def test_a_computed_value_is_not_resolved_and_a_broken_file_is_not_evidence():
+    """Two fail-closed edges. A non-literal right-hand side would need a second evaluator to
+    compare, and constant-folding agent code is not this rung's job; a file that does not parse is
+    an agent writing something, not a statement about a parameter. Both answer silence."""
+    computed = "BS = 8192\nconfig.train.training.batch_size = BS // 2\n"
+    assert declared_param_overrides(_V8_NODE3_PARAMS, {"t.py": computed}) == ()
+    assert declared_param_overrides(_V8_NODE3_PARAMS, {"t.py": "def (:\n"}) == ()
+    # `True` is `isinstance(int)`; reporting it as agreeing with a declared 1.0 would be the record
+    # asserting something nobody wrote.
+    assert declared_param_overrides({"a.flag": 1.0}, {"t.py": "cfg.a.flag = True\n"}) == ()
+
+
+def test_this_rung_cannot_be_reached_or_evaded_by_anything_the_agent_WROTE_ABOUT_it():
+    """THE TRUST LINE, driven rather than asserted. `unmet` is decided over model-authored text and
+    is therefore visible-but-not-trusted; this rung reads the DECLARATION and the BYTES, so the same
+    bytes must produce the same answer under any rationale at all — including one that denies the
+    change and one that is empty."""
+    files = {"vectorsearch/train.py": _V8_NODE3_TRAIN_PY}
+    base = declared_param_overrides(_V8_NODE3_PARAMS, files)
+    assert len(base) == 2
+    # The function's signature carries no rationale to give it, which is the structural half.
+    assert "rationale" not in inspect.signature(declared_param_overrides).parameters
+    # And the behavioural half: `verify_repair` moves under these two texts, this does not.
+    denying = verify_repair("I did not touch batch_size or gradient_accumulation_steps.",
+                            changed={"vectorsearch/train.py"}, region="")
+    claiming = verify_repair("halve per-step batch to 4096 and raise grad_accum to 4",
+                            changed={"vectorsearch/train.py"},
+                            region=_V8_ABBREVIATION_REGION)
+    assert denying.verdict != claiming.verdict, "precondition: the text rung really does move here"
+    assert declared_param_overrides(_V8_NODE3_PARAMS, files) == base
+
+
+# ------------------------------------------------- the two columns, driven through the real engine
+class _OverridingDev:
+    """A developer whose repair writes an imperative override of a DECLARED parameter into the
+    whole-file artifact — node 3's shape, reduced to what the toy sandbox will run. It still fails,
+    so the loop runs to the operator's cap rather than to a metric."""
+
+    def implement(self, idea):
+        return _BAD
+
+    def repair(self, idea, code, error):
+        return (_BAD + "class _C:\n    pass\n"
+                "config = _C()\nconfig.train = _C()\nconfig.train.training = _C()\n"
+                "config.train.training.batch_size = 4096\n")
+
+
+def test_the_engine_stamps_the_override_on_the_durable_row_and_the_judge_reads_it(tmp_path):
+    """THE PROPERTY, end to end through the real loop: a repair moves a declared coordinate, the
+    engine derives that from its own bytes, writes it on the durable `node_repaired` row, and the
+    NEXT attempt's judge is told. Nothing here is hand-written into the log."""
+    dev, judge = _OverridingDev(), _Judge()
+    evs, _ = _drive(tmp_path / "override", dev, judge, inline_repair_attempts=2,
+                    seed_params={"train.training.batch_size": 8192.0})
+
+    rows = _repairs(evs)
+    assert rows, "expected the loop to make at least one repair"
+    overrides = rows[0].data.get("param_overrides")
+    assert overrides, f"no param_overrides column: {rows[0].data.keys()}"
+    assert overrides[0]["param"] == "train.training.batch_size"
+    assert overrides[0]["declared"] == 8192.0 and overrides[0]["code"] == 4096.0
+    # …and it reaches the live judge's history, which is where the next repair decision is made.
+    history = "\n".join(judge.histories)
+    assert "THE EXPERIMENT'S OWN RECORD DECLARES" in history
+    assert "train.training.batch_size is declared 8192.0" in history
+
+
+def test_a_repair_that_moves_no_declared_coordinate_writes_no_column_at_all(tmp_path):
+    """NEGATIVE CONTROL for the column. An absent key and an empty list are different facts — the
+    first says nobody looked (an old row), the second would say the engine looked and found none —
+    and the judge history must render byte-identically to what it always did on such a row."""
+    dev, judge = _MovingDev(), _Judge()
+    evs, _ = _drive(tmp_path / "clean", dev, judge, inline_repair_attempts=2,
+                    seed_params={"train.training.batch_size": 8192.0})
+
+    rows = _repairs(evs)
+    assert rows and all("param_overrides" not in r.data for r in rows)
+    assert "THE EXPERIMENT'S OWN RECORD DECLARES" not in "\n".join(judge.histories)
+
+
+def test_the_override_column_is_additive_and_the_fold_ignores_it(tmp_path):
+    """Invariant #5, same shape as the verification columns' own test one screen up."""
+    def _log(extra):
+        p = tmp_path / f"ev{len(extra)}.jsonl"
+        s = EventStore(p)
+        s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+        s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": ""},
+                                  "code": _BAD})
+        s.append("node_repaired", dict({"node_id": 0, "attempt": 1, "code": _GOOD}, **extra))
+        return fold(EventStore(p).read_all())
+
+    bare = _log({})
+    stamped = _log({"param_overrides": [{"param": "a.b", "declared": 1.0, "code": 2.0,
+                                         "file": "t.py", "line": 3}]})
+    assert bare.model_dump() == stamped.model_dump()
+    # …and it survives the resume path the judge reads it back through.
+    p = tmp_path / "durable.jsonl"
+    s = EventStore(p)
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""},
+                              "code": _BAD})
+    s.append("node_repaired", {"node_id": 0, "generation": 0, "attempt": 1, "changed": ["t.py"],
+                               "verified": REPAIR_VERIFIED, "triage_action": "repair",
+                               "param_overrides": [{"param": "a.b", "declared": 1.0, "code": 2.0,
+                                                    "file": "t.py", "line": 3}]})
+    _attempts, rows, _unp = ev_mod._durable_repair_ledger(EventStore(p).read_all(), 0, 0)
+    assert rows[0]["param_overrides"][0]["param"] == "a.b"
+    assert "THE EXPERIMENT'S OWN RECORD DECLARES" in _format_repair_log(rows)
+
+
+def test_a_non_finite_coordinate_is_dropped_on_both_sides():
+    """It is REACHABLE and it would break this rung twice. `search/archive.py` carries the same guard
+    and names the routes (a `1e309` literal JSON-folds straight to `inf`; NaN is agent-supplied).
+    `nan != anything` is True, so a NaN declaration would report a divergence against ANY assignment;
+    and the value then rides on a durable event, where `json.dumps` writes a bare `NaN`/`Infinity`
+    that is not JSON and that every browser reader of the log fails to parse. Silence is the right
+    answer for a coordinate that cannot be compared — and every row this rung DOES emit must survive
+    a strict JSON round trip, which is the half a type check alone would not catch."""
+    assert declared_param_overrides({"a.b": float("nan")}, {"t.py": "cfg.a.b = 2\n"}) == ()
+    assert declared_param_overrides({"a.b": float("inf")}, {"t.py": "cfg.a.b = 2\n"}) == ()
+    # …and from the CODE side, where `1e400` is how a literal becomes `inf`.
+    assert declared_param_overrides({"a.b": 1.0}, {"t.py": "cfg.a.b = 1e400\n"}) == ()
+    rows = [o.as_row() for o in declared_param_overrides({"a.b": 1.0}, {"t.py": "cfg.a.b = 2\n"})]
+    assert json.loads(json.dumps(rows, allow_nan=False)) == rows
+
+
+class _RepeatOverridingDev:
+    """Writes the override ONCE and then keeps editing around it — the shape that exposes whether
+    the attribution has a prior for the artifact that has no path."""
+
+    def __init__(self):
+        self.n = 0
+
+    def implement(self, idea):
+        return _BAD
+
+    def repair(self, idea, code, error):
+        self.n += 1
+        head = (_BAD + "class _C:\n    pass\n"
+                "config = _C()\nconfig.train = _C()\nconfig.train.training = _C()\n"
+                "config.train.training.batch_size = 4096\n")
+        return head + f"# attempt {self.n}\n"
+
+
+def test_the_whole_file_artifact_is_attributed_by_the_same_rule_as_a_path(tmp_path):
+    """THE ARTIFACT THAT HAS NO PATH still needs a prior, and without `baseline_code` it has none —
+    so every later attempt would re-report an override the FIRST one introduced and the judge's
+    history would accuse each of them of a line none of them wrote. A code-artifact task has no
+    `files` at all, so this is the ONLY attribution path those tasks have."""
+    dev, judge = _RepeatOverridingDev(), _Judge()
+    evs, _ = _drive(tmp_path / "repeat", dev, judge, inline_repair_attempts=3,
+                    seed_params={"train.training.batch_size": 8192.0})
+
+    rows = _repairs(evs)
+    assert len(rows) >= 2, "precondition: the loop made more than one repair"
+    assert rows[0].data.get("param_overrides"), \
+        "the attempt that introduced it must carry the column"
+    later = [r for r in rows[1:] if "param_overrides" in r.data]
+    assert not later, f"a later attempt re-reported an override it did not write: {later}"
+    # …and the unit rule underneath it, stated directly.
+    before = "config.train.training.batch_size = 4096\n"
+    after = before + "# something else\n"
+    assert declared_param_overrides({"train.training.batch_size": 8192.0}, {},
+                                    code=after, baseline_code=before) == ()
+    assert len(declared_param_overrides({"train.training.batch_size": 8192.0}, {},
+                                        code=after, baseline_code="")) == 1

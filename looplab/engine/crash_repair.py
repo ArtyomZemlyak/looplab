@@ -103,6 +103,23 @@ def _format_repair_log(repair_log) -> str:
             note = ("\n    the engine could not find what this fix said it would change ("
                     + ", ".join(str(u) for u in (r.get("unmet") or [])[:6])
                     + ") anywhere in what it actually changed.")
+        # A SECOND, INDEPENDENT sentence, and it is deliberately not part of the verdict ladder
+        # above: "did this fix do what it said" and "did it move a number this experiment is being
+        # COMPARED on" are different questions, and a repair can be `verified` and still have done
+        # the second (v8 node 3 attempt 4 is exactly that row — it promised the batch/accum swap and
+        # delivered it, onto the node that became the run's champion). Appended rather than
+        # substituted so every existing row renders byte-identically to what it did before, per the
+        # prompt-text contract; a row with no `param_overrides` key renders nothing at all.
+        _overrides = [o for o in (r.get("param_overrides") or []) if isinstance(o, dict)]
+        if _overrides:
+            note += ("\n    NOTE — this fix moved a parameter THE EXPERIMENT'S OWN RECORD DECLARES: "
+                     + "; ".join(
+                         f"{o.get('param')} is declared {o.get('declared')} but "
+                         f"{o.get('file')}:{o.get('line')} assigns {o.get('code')}"
+                         for o in _overrides[:4])
+                     + ". The declared value is what this node is ranked against its siblings by, "
+                       "so if the change was deliberate say so in your rationale; if it was not, "
+                       "putting it back is a fix.")
         out.append(
             f"attempt {r.get('attempt')}: failed with — {' '.join(str(r.get('error', '')).split())}\n"
             f"    the fix claimed: {str(r.get('fix', '')).strip() or '(no rationale)'}\n"

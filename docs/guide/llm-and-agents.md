@@ -492,12 +492,24 @@ at `223/361 [31:29<19:50]`, about twenty minutes from a result. The 522-characte
 `node_repaired` row contains the last two renders of the *second* bar and nothing else. The verdict
 read that bar's elapsed field as training progress ("node 3 is still in epoch 1 at 31:20"; `31:20` is
 verbatim the `222/361` render) and prescribed halving the batch **and** cutting `n_epochs` 15 → 8.
-Six GPU-hours went in the bin — and are going in again. That epochs cut **never landed**:
-`repair_verify` stamped `unmet: ['grad_accum', 'n_epochs']` on the same row, no repaired file sets
-it and the node's `config.yaml` still reads `n_epochs: 15`. So the wrong diagnosis bought a fix
-that is inert against the real failure — attempt 6 is re-running the same 10,590 steps, measured
-live at `1928/10590 [57:46]` (1.798 s/step), which projects 19,038 s of training plus ~3,058 s of
-retrieval at attempt 5's own pace: 22,096 s against the same 22,000 s ceiling.
+Six GPU-hours went in the bin. That epochs cut **never landed**: `repair_verify` stamped
+`unmet: ['grad_accum', 'n_epochs']` on the same row, no repaired file sets it and the node's
+`config.yaml` still reads `n_epochs: 15`.
+
+**The projection that stood here — 22,096 s into the same 22,000 s ceiling, extrapolated live from
+`1928/10590 [57:46]` at 1.798 s/step — has since been FALSIFIED by the run, and it is corrected here
+rather than left standing** (the same figure is still quoted at five other sites, which belong to the
+change that measured it: `docs/BACKLOG.md`, `docs/guide/configuration.md`'s `repair_log_tools` row,
+the process diagram's `e_ir` block, `core/config.py` and `engine/train_monitor.py`). The retry took
+**19,915.75 s** and PASSED. What saved it was not the epoch cut but a second edit in the same repair,
+which deleted the in-`train` `test_model()` call on the note that the full-index retrieval "is run
+independently by the protected `score` stage" — and `score` then ran 3,130.3 s of its own. The point
+survives the correction and is sharper for it: a diagnosis this wrong prescribed a compute cut the
+node did not need, and the change that actually fixed it rode along in the same session. The node
+recorded **0.762048** and is the run's champion. It carries one further mark from that chain — on the
+record, not on the metric: attempt 4's OOM fix set `batch_size 4096` / `gradient_accumulation_steps
+4` imperatively in `train.py` while `idea.params` AND `config.yaml` both still declare 8192 / 2. See
+`engine/repair_verify.py::declared_param_overrides` and the `params_overridden` champion caveat.
 
 With `repair_log_tools` on (the default) the judge gets the same `read_log` / `metric_series` pair
 the two live-eval watchdogs already have, over the same map: the stage logs this eval's own resolved
