@@ -429,6 +429,71 @@ site that proves it is open.
   guard and the order-tolerance of the count driven on the phase itself. Verified non-vacuous by
   mutating a throwaway copy three ways — phase removed, bound widened to `>= 1`, whole-set
   requirement dropped — each caught by exactly its own test.
+- **[FIXED 2026-08-15] The developer probe's rule 2 ("no write ANYWHERE") was overclaimed: two
+  filesystem-mutating calls were covered by NEITHER of its two mechanisms**, and one of them creates
+  a regular zero-byte file. Found by the merge-day review, reproduced by driving a real
+  `DevProbeTools`. `tools/dev_probe.py` enforced rule 2 with a CPython audit hook (a file's
+  EXISTENCE) and `RLIMIT_FSIZE 0` (its CONTENT in the kernel) — **`os.mknod` and `os.mkfifo` raise no
+  audit event at all, and the rlimit bounds bytes, not existence**, so both succeeded OUTSIDE the
+  disposable replica while `open(<source>/train.py)` was correctly refused. **Cost:** `os.mknod`
+  yields a REGULAR ZERO-BYTE FILE, which satisfies a `needs`/`expect` PRESENCE check and, dropped
+  into an editable root as an empty `.py`, shadows a real module for every later node in the run —
+  and the probe emits no domain event precisely BECAUSE rules 2-4 are supposed to make it
+  side-effect-free, so a write through this hole was invisible to the record.
+  **THE SET WAS RE-DERIVED, NOT PATCHED FROM THE TWO NAMES.** The whole audited-event surface was
+  measured with a recording hook in a subprocess on CPython 3.12.11 — `read_fence.MUTATION_EVENTS`'s
+  own method, for its own reason — over every path-based mutating call in `os`, plus the fd-based
+  ones, `shutil`, `socket`, `sqlite3`, `tempfile`, `pathlib`, `ctypes` and four native writers. Three
+  populations came out: **raises NOTHING** — `os.mknod` (all of S_IFREG/S_IFIFO/S_IFSOCK, and via
+  `dir_fd`), `os.mkfifo` (same), and every NATIVE writer (`pyarrow.parquet.write_table` raises ZERO
+  audit events; `h5py.File(p, "w")` raises none naming the file; `ctypes`->`libc.open(O_CREAT)`);
+  **raises an event nothing was checking** — `sqlite3.connect` and `socket.bind` on an `AF_UNIX`
+  path; **covered** — everything else, `os.unlink`->`os.remove`, `os.replace`->`os.rename`,
+  `os.lchown`->`os.chown`, `os.ftruncate`/`fchmod`/`fchown`->their path events, every `shutil` entry
+  lowering to an `os.*` or `open`, and every fd-based write reachable only through an audited `open`.
+  Driven through a real probe before the fix, 7 of 14 aimed at a directory outside the replica went
+  THROUGH with `exit=0`, and `sqlite3`/`pyarrow` left a 0-byte file behind even while dying on
+  SIGXFSZ.
+  **THE FIX IS A THIRD RUNG AT THE KERNEL, and the argument against the alternatives is the reason.**
+  `runtime/landlock.py` gains a second ruleset SHAPE that is the inverse of its read allow-list:
+  `NO_MUTATION_HANDLED` handles every filesystem-mutating access right and grants NOTHING, spliced
+  into `dev_probe`'s own generated launcher by `no_mutation_source()` (in-process, before the program
+  — the launcher is already a fresh single-threaded interpreter, so the `preexec_fn`-under-a-threaded-
+  parent deadlock `_RLIMIT_LAUNCHER` records does not arise and no extra exec is paid). *Pre-empting
+  the two names at the `sitecustomize` seam was rejected as the boundary*: it is exactly the denylist
+  this module's docstring refuses, and it was measurably incomplete on the day it would have shipped —
+  `pyarrow.parquet.write_table(t, "torch.py")` creates the identical 0-byte regular file with no
+  Python-level name to rebind. *Narrowing rule 2's claim* was the honest fallback and is not needed,
+  because the boundary exists: the kernel's path walk does not care which language asked. *An
+  allow-list-shaped Landlock ruleset* (the `Settings.landlock` shape) is wrong here for the reason
+  that keeps THAT one opt-in — an empty allow-list denies everything including reads, an enumerated
+  one fails closed in an unpredictable place, and nobody has run one through a real GPU eval; this
+  ruleset handles no READ bit, so it cannot refuse a read, and grants nothing, so it has no list to
+  enumerate. It gets **no `Settings` field** (which would revoke every issued calibration receipt) and
+  is always on. The seam rebinding is KEPT and demoted to the MESSAGE rung, stated as such in three
+  places: the kernel answers `EACCES` -> `PermissionError` -> an `OSError`, the silent-skip shape this
+  surface's refusal type deliberately is not, so where a Python name exists the probe still raises
+  `LoopLabProbeRefused`. Same division of labour the hook already had with `RLIMIT_FSIZE`.
+  **Driven** in `tests/test_dev_probe.py`: every spelling found (6 mknod/mkfifo variants, three native
+  writers, `AF_UNIX` bind, `ctypes`->libc) refused from a REAL probe with the target absent from disk
+  afterwards — the assertion is the disk, never the message; the refusal proved not to be caught by
+  `except OSError:`; `_UNAUDITED_MUTATORS` RE-DERIVED from the interpreter over 17 `os` mutators, so a
+  third unaudited call goes red; and the negative controls — the editable source read still refused
+  and still not an `OSError`, a declared `data:` mount still readable, `cat` still unable to reach the
+  source, `CUDA_VISIBLE_DEVICES=''`, the staged replica still importable. A 19-program battery of
+  realistic probe work is **byte-identical** to the pre-fix tree except one joblib warning whose errno
+  moves EFBIG -> EACCES (the same refusal, from the neighbouring rung). Invariant #6 checked by
+  folding all 46 preserved event logs (19,739 events) in both trees: identical.
+  **Residue, stated not patched:** Landlock is the only one of the three rungs that can be absent (a
+  kernel < 5.13), and there the EXISTENCE half falls back to what CPython audits — the launcher prints
+  ONE line on the probe's own stderr naming that, rather than running under a quieter version of the
+  same sentence. ABI 2 mediates neither `chmod`/`chown`/`utime` nor `ftruncate` on an open fd (no
+  ownership/mode rights; `FS_TRUNCATE` is ABI 3) — all four raise their own audit event and the hook
+  refuses them, which is the complementarity working in the other direction. And rule 3's half of the
+  `ctypes` residual stays open: the WRITE half is now closed (driven, `libc.open(O_CREAT)` returns -1
+  and creates nothing) but `execve` is not a filesystem mutation and ABI 2 does not mediate it.
+  `docs/38-fence-coverage-audit-2026-08-13.md` is a dated audit and was deliberately NOT rewritten;
+  this row is the record of what its map missed.
 
 - **[FIXED 2026-08-15, same day — a REGRESSION shipped that morning] The transparent-launcher
   registry was inert for 8 of its 10 members** (found by the merge-day review, re-derived against the
