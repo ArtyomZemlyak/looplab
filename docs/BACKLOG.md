@@ -650,6 +650,15 @@ site that proves it is open.
   attempt 6 is re-running the same 10,590 steps at `1928/10590 [57:46]` = 1.798 s/step, which
   projects 19,038 s of training plus ~3,058 s of retrieval at attempt 5's own pace = **22,096 s
   against the same 22,000 s ceiling**. The same 6.1 GPU-hours are being spent to reach the same kill.
+  **[RETRACTED 2026-08-15 — the run falsified this projection while it was being written.]** Attempt
+  6's `train` passed in **19,915.75 s**, `score` ran 3,130.3 s, and the node recorded **0.762048** to
+  become v8's champion. The margin came from a SECOND edit in attempt 5 that this entry missed —
+  deleting the in-`train` `test_model()` call, which moved the full-index retrieval out of the train
+  budget into the protected `score` stage (attempt 4's `train.py` calls `test_model(...)`; attempt
+  5's carries the import and a note that retrieval "is run independently"). The `n_epochs` cut still
+  never landed. **The finding this entry is about is untouched**: the verdict came off a 522-char
+  tail holding only the second progress bar and was wrong about where the time went. Being rescued
+  by an unrelated edit in the same repair is not the diagnosis working.
   **Population, measured over all of `runs/`** (2,481 `node_repaired` rows, 14 runs). `reason` is a
   recent field: 12 rows carry `timeout`/`crash` (11 + 1), all in v7/v8. **Eight of those twelve make
   a claim about training PROGRESS or PHASE, and exactly ONE is contradicted by the node's own log** —

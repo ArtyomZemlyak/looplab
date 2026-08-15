@@ -540,8 +540,13 @@ class Settings(BaseSettings):
     # bar, and the verdict read its elapsed field as training progress ("still in epoch 1 at 31:20").
     # It then prescribed a fix for a problem the node did not have. (Its `n_epochs` 15->8 never
     # landed — `repair_verify` stamped `unmet` on that row and `config.yaml` still says 15 — so the
-    # measured cost is not an altered experiment but an inert one: attempt 6 re-ran the same 10,590
-    # steps at 1.798 s/step, projecting 22,096 s against the same 22,000 s ceiling.)
+    # experiment was not altered. This comment projected attempt 6 at 22,096 s into the same
+    # 22,000 s ceiling, extrapolated live at 1.798 s/step; THE RUN FALSIFIED THAT. Attempt 6's
+    # `train` passed in 19,915.75 s and the node recorded 0.762048 and became v8's champion. What
+    # bought the ~2,100 s was neither the epoch cut nor the batch halving but a SECOND edit in the
+    # same repair, deleting the in-`train` `test_model()` call — the full-index retrieval then ran
+    # as the protected `score` stage's own 3,130.3 s. The diagnosis was still wrong about where the
+    # time was going; it is the PROJECTION that is retracted, not the misdiagnosis.)
     # OFF restores the historical ask byte for byte (no `_REPAIR_LOOK_INVITATION`, no extra tools).
     # Cost, measured on node 3's real workdir (mean of 5, warm): the engine-side derivation is
     # 1.35 ms per failed attempt for the whole added path (log plan + attempt-floor snapshot +

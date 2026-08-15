@@ -1350,10 +1350,18 @@ def repair_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     The evidence that refutes it was 83,697 characters back in the same file, on a plain
     non-progress-bar line. 6.1 GPU-hours were discarded — and then spent AGAIN: the epochs cut never
     landed (`repair_verify` stamped `unmet: ['grad_accum', 'n_epochs']` on that row, no repaired file
-    sets it, `config.yaml` still reads 15), so attempt 6 re-ran the SAME 10,590 steps and, measured
-    live at `1928/10590 [57:46]` = 1.798 s/step, projects 19,038 s of training + ~3,058 s of
-    retrieval = 22,096 s against the same 22,000 s ceiling. A wrong diagnosis bought a fix that was
-    inert against the actual failure, which is the cost this widening is meant to stop.
+    sets it, `config.yaml` still reads 15), so attempt 6 re-ran the SAME 10,590 steps. This docstring
+    projected that retry at 22,096 s into the same 22,000 s ceiling, extrapolated live at
+    1.798 s/step. **THE RUN FALSIFIED THE PROJECTION AND IT IS RETRACTED HERE**: `train` passed in
+    19,915.75 s, `score` ran 3,130.3 s, and the node recorded 0.762048 to become v8's champion. What
+    bought the margin was a SECOND edit in the same repair — deleting the in-`train` `test_model()`
+    call, so the full-index retrieval moved out of the train budget and into the protected `score`
+    stage (verified in the durable change set: attempt 4's `train.py` CALLS `test_model(...)`,
+    attempt 5's carries the import and a note that retrieval "is run independently").
+    **What this rung exists for is UNCHANGED and is not the projection**: the verdict was drawn from
+    a 522-character tail holding only the second progress bar, and it was wrong about where the time
+    was going. A misdiagnosis that happens to be rescued by an unrelated edit in the same repair is
+    not a diagnosis that worked.
 
     So the fix is the same one, one role over: let it ASK the log instead of being handed the end of
     it. Everything else — the boundary, the floor, the source map — is `monitor_log_tools`' and is
