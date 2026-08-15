@@ -111,6 +111,38 @@ def _format_repair_log(repair_log) -> str:
     return "\n".join(out)
 
 
+def _coerced_critic_verdict(out) -> dict:
+    """One WIRED critic answer, normalized to `{action, rationale, source}` — the two branches that
+    used to be a bare `coerce_critic_action` plus a `not isinstance(out, dict)` early return.
+
+    Hoisted out of `_repair_critic` so the ANSWER can be stamped on the span before it closes and so
+    the three-way split has a truth table (`tests/test_repair_judgment.py`). The split is the point:
+    `coerce_critic_action` fails open to `continue`, which is right for the loop and useless for a
+    reader — a critic that returned nothing, one that answered a word out of the enum and one that
+    genuinely said "keep going" all become the same verdict, and the operator auditing why a chain
+    ran to six attempts needs to know which happened. Only `model` means an opinion was given.
+
+    Never sees the not-wired / no-trajectory branches: those return before the call, so their sources
+    are minted at their own `return`s."""
+    from looplab.engine.repair_judgment import (AGENT_CRITIC_ACTIONS, CRITIC_SOURCE_MODEL,
+                                                CRITIC_SOURCE_NO_VERDICT,
+                                                CRITIC_SOURCE_OUT_OF_ENUM, DEFAULT_CRITIC_ACTION,
+                                                coerce_critic_action)
+    if not isinstance(out, dict):
+        # Includes the `None` a `UnifiedAgent` with no pilot model returns.
+        return {"action": DEFAULT_CRITIC_ACTION, "rationale": "the repair critic returned no verdict",
+                "source": CRITIC_SOURCE_NO_VERDICT}
+    raw = out.get("action")
+    action = coerce_critic_action(raw)
+    # Read off the RAW value the same way the coercion does, rather than comparing `action` to a
+    # default: `continue` is a legal emit, so `action == DEFAULT_CRITIC_ACTION` cannot tell a real
+    # "keep going" from a rejected one.
+    readable = str(raw or "").strip().lower() in AGENT_CRITIC_ACTIONS
+    return {"action": action,
+            "rationale": str(out.get("rationale", ""))[:300],
+            "source": CRITIC_SOURCE_MODEL if readable else CRITIC_SOURCE_OUT_OF_ENUM}
+
+
 class CrashRepairMixin:
     """The engine's crash-triage/repair-context cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
@@ -297,16 +329,28 @@ class CrashRepairMixin:
         `_rule_triage` can at least recognise a mechanical crash. "Are these attempts circling?" has
         no rule form — that is the whole finding of the deleted error-signature counter, which
         answered it with a regex and was defeated by a Cyrillic identifier, a blank stderr and a
-        varying request id. A heuristic here would be that mistake with a new name."""
-        from looplab.engine.repair_judgment import (CRITIC_CONTINUE, DEFAULT_CRITIC_ACTION,
-                                                    coerce_critic_action,
+        varying request id. A heuristic here would be that mistake with a new name.
+
+        WHAT IT RETURNS IS ALSO A RECORD, since 2026-08-15: `source` names WHICH of the six branches
+        below produced the verdict, because `continue` alone is five different facts and the operator
+        auditing a chain could not tell them apart. A critic that answered "keep going", one whose
+        endpoint was down, one that was never wired and one that answered a word the coercion could
+        not read all produced the identical row — and on `rubertlite-dr-unified-v8` that ambiguity was
+        the whole reason `repair_critic_after` could not be calibrated by anyone reading the run. It
+        is ENGINE-MINTED at each `return` (see `repair_judgment.py::CRITIC_SOURCES`); the model never
+        supplies it and the coercion never accepts one."""
+        from looplab.engine.repair_judgment import (CRITIC_CONTINUE, CRITIC_SOURCE_NO_TRAJECTORY,
+                                                    CRITIC_SOURCE_UNREACHABLE,
+                                                    CRITIC_SOURCE_UNWIRED, DEFAULT_CRITIC_ACTION,
                                                     format_repair_trajectory)
         fn = getattr(self.researcher, "repair_critic", None)
         if not callable(fn):
-            return {"action": CRITIC_CONTINUE, "rationale": "no repair critic wired"}
+            return {"action": CRITIC_CONTINUE, "rationale": "no repair critic wired",
+                    "source": CRITIC_SOURCE_UNWIRED}
         trajectory = format_repair_trajectory(repair_log)
         if not trajectory:
-            return {"action": CRITIC_CONTINUE, "rationale": "no repair trajectory to judge yet"}
+            return {"action": CRITIC_CONTINUE, "rationale": "no repair trajectory to judge yet",
+                    "source": CRITIC_SOURCE_NO_TRAJECTORY}
         try:
             from looplab.agents.roles import _state_brief
             try:
@@ -318,8 +362,21 @@ class CrashRepairMixin:
             # Own span, and it bands as `triage` beside the stop decision it belongs to rather than
             # inflating `evaluate` — the same trace-attribution rule `_ask_triage` documents.
             extra = {"trajectory": trajectory, "attempt": attempt, "brief": brief, "state": state}
-            with self.tracer.span("repair_critic", attempt=attempt):
+            with self.tracer.span("repair_critic", attempt=attempt) as sp:
                 out = fn(node, **_accepted_kwargs(fn, extra))
+                # THE SPAN LEARNS THE ANSWER TOO, and this is deliberately the cheaper HALF of the
+                # record rather than the record itself: the durable one is
+                # `events/types.py::EV_REPAIR_CRITIC_VERDICT`, because `spans.jsonl` is optional
+                # (tracing may be off) and destroyable (`serve/trace_clear.py`). What the span adds
+                # is the answer sitting beside the model's own prompt/completion I/O in the trace
+                # view, which is where somebody debugging a bad verdict is already looking.
+                # Inside the `with` because a span is written on CLOSE — set after it, the attribute
+                # would reach an already-flushed record.
+                verdict = _coerced_critic_verdict(out)
+                sp.set("verdict", verdict["action"])
+                sp.set("critic_source", verdict["source"])
+                sp.set("critic_rationale", verdict["rationale"])
+            return verdict
         except BudgetExceeded:      # the hard budget stop must propagate, not degrade to a verdict
             raise
         except Exception as exc:  # noqa: BLE001 - a critic whose CALL failed has no opinion. It is
@@ -329,13 +386,13 @@ class CrashRepairMixin:
             # behaviour exactly. Reporting a provider outage from here would ALSO be the wrong
             # diagnosis twice over — `_triage_crash` reached the same endpoint moments earlier and
             # would have said so itself.
+            #
+            # It stays DISTINGUISHABLE in the record even though it is indistinguishable in
+            # behaviour: `unreachable` is what tells an operator that "no stops" means the critic
+            # never spoke, not that it kept approving.
             return {"action": DEFAULT_CRITIC_ACTION,
-                    "rationale": f"the repair critic could not be reached ({type(exc).__name__})"}
-        if not isinstance(out, dict):
-            # Includes the `None` a `UnifiedAgent` with no pilot model returns.
-            return {"action": DEFAULT_CRITIC_ACTION, "rationale": "the repair critic returned no verdict"}
-        return {"action": coerce_critic_action(out.get("action")),
-                "rationale": str(out.get("rationale", ""))[:300]}
+                    "rationale": f"the repair critic could not be reached ({type(exc).__name__})",
+                    "source": CRITIC_SOURCE_UNREACHABLE}
 
     def _repair_error_context(self, reason: str, error: str,
                               state: Optional[RunState] = None, node=None) -> str:

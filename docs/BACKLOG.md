@@ -422,7 +422,7 @@ site that proves it is open.
   table is per-program and this box's coreutils/util-linux; a busybox or BSD spelling of the same
   option falls to `[]` + warning rather than to a wrong file, which is the designed direction.
 
-- **The repair critic's VERDICT is not recorded — only that it was asked** (observed on
+- **[FIXED 2026-08-15, same day] The repair critic's VERDICT is not recorded — only that it was asked** (observed on
   `rubertlite-dr-unified-v8`, 2026-08-15). `engine/evaluate.py:2127`'s `repair_critic` span carries
   `{attempt, node_id, generation}` and nothing else, and a `continue` verdict appends no event at all;
   only a STOP is visible, and then only indirectly, as the `abandon` triage_action it produces. So an
@@ -434,6 +434,28 @@ site that proves it is open.
   one day because the mechanism said nothing about its own reasoning; that one was fixed by making the
   refusal name its cause. F8's whole premise is that a JUDGEMENT replaces a counter, and a judgement
   that leaves no trace cannot be reviewed, tuned or trusted.
+  **VERIFIED FIRST:** `runs/rubertlite-dr-unified-v8`'s `spans.jsonl` holds `repair_critic` spans
+  whose whole attribute map is `{attempt, node_id, generation}` with `events: []`, and its
+  `events.jsonl` contains the string "critic" **zero** times.
+  **THE FIX is a durable DIAGNOSTIC row, not a richer span** — `events/types.py::
+  EV_REPAIR_CRITIC_VERDICT`, appended from `_evaluate`'s attempt loop under `_write_lock` on EVERY
+  consultation, carrying the verdict, its rationale, `after`/`durable_repairs` (the cadence that
+  fired beside the chain it fired on) and `judged`, the authenticated per-attempt causes it
+  compared. The span gains the same three attributes, but it cannot BE the record: `spans.jsonl` is
+  optional (tracing may be off) and destroyable (`serve/trace_clear.py` is an operator button,
+  `reset_transaction.py` removes it), and three of the six outcomes never open a span at all.
+  Folding it was rejected on doc 36's line — a `continue` moves nothing, so folding would create
+  `RunState` derived from an LLM verdict, one refactor from a selection reader.
+  **A second vocabulary came out of the measurement:** `repair_judgment.py::CRITIC_SOURCES`
+  (`model` / `not_wired` / `no_trajectory` / `unreachable` / `no_verdict` / `out_of_enum`), because
+  the critic FAILS OPEN and so "6 consultations, 0 stops" reads identically whether the critic
+  approved six times or never spoke once — which is the fact that actually blocks calibrating
+  `repair_critic_after`. Engine-minted at each return, disjoint from `CRITIC_ACTIONS`,
+  `TRIAGE_ACTIONS` and `REPAIR_VERDICTS`, and rejected by both coercions; the guard asserts all of
+  it. Driven both ways plus the negative control and a three-part selection-neutrality proof (fold
+  equality with the rows removed, splice-position tolerance at every offset, and the paid-proposal
+  CAS fence unmoved) in `tests/test_repair_judgment.py`. Docs moved in the same change
+  (`docs/guide/configuration.md`, `docs/infographic/agent-architecture.html`).
 
 - **[FIXED 2026-08-15, same day] The Metrics tab called a number `measured` that the engine refuses
   to call measured** (found by the merge-day record-honesty review). `ui/src/Inspector.jsx::Metrics`

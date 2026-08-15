@@ -472,6 +472,36 @@ EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
 # makes "at most one rollback per suspect stage per node" survive a resume — a bound a resume refunds
 # is not a bound, and this one guards hours of GPU time.
 EV_STAGE_ROLLBACK = "stage_rollback"
+# WHAT F8's REPAIR CRITIC ANSWERED, and on what evidence. One row per consultation, written whatever
+# the verdict is — including `continue`, which is the row that matters most and the one a
+# stop-shaped record would never hold.
+#
+# WHY IT IS AN EVENT AND NOT JUST A SPAN. The critic already had a `repair_critic` span, and it
+# carried `{attempt, node_id, generation}` — the fact of a consultation and nothing about its answer.
+# Measured on `rubertlite-dr-unified-v8`: 3 spans, `events: []` on every one, zero occurrences of the
+# word "critic" anywhere in `events.jsonl`. Three reasons the span cannot be the record:
+#   * `spans.jsonl` is DESTROYABLE and OPTIONAL. `serve/trace_clear.py` is an operator-facing button
+#     that rewrites it, `serve/reset_transaction.py` lists it among the files a reset removes, and
+#     tracing can be off entirely (`looplab timings` prints "tracing off or pre-tracing run"). F8's
+#     premise is that a JUDGEMENT replaces a counter as the stop rule; the record of a stop rule
+#     cannot be the one file the product offers to delete.
+#   * Three of the six `CRITIC_SOURCES` never open a span at all — `not_wired` and `no_trajectory`
+#     return before the `with`, and `unreachable` closes it as an error carrying no verdict. Those
+#     are exactly the cases where "6 consultations, 0 stops" is misleading.
+#   * The verdict has to be joinable to the durable repair chain it judged (`node_repaired` rows in
+#     the same log), and a cross-file join through a sidecar with its own health caveats is not a
+#     join an operator will make.
+# It is NOT FOLDED, and that is the same decision stated from the other side: a `continue` moves no
+# metric, champion, selectability or violation (`engine/evaluate.py` says so at the call site, doc 36
+# requires it), so folding it would create `RunState` derived from an LLM verdict — one refactor away
+# from a selection reader, which is precisely doc 36's line. A STOP does change the run, but through
+# the `abandon` triage outcome and the node terminal that already fold; this row is the REASON beside
+# them, never a second authority for them.
+# Appended from `_evaluate`'s attempt loop under `_write_lock` — a concurrent eval child, which is
+# invariant #1's `DIAGNOSTIC_EVENTS` seam (`deps_installed`/`full_retrain_charged` are appended from
+# the same loop). Position-immaterial for the same READER-side reason they are:
+# `speculation.py::_proposal_authority_seq` excludes DIAGNOSTIC_EVENTS wholesale.
+EV_REPAIR_CRITIC_VERDICT = "repair_critic_verdict"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -649,7 +679,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
-    EV_STAGE_ROLLBACK,
+    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT,
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
