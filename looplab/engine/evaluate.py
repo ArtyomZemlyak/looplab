@@ -86,8 +86,9 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # than re-derived, because the same verdict has to be written to the durable row, read back off the
 # log by `_durable_repair_ledger` and rendered by `_format_repair_log`, and a second spelling of
 # `REPAIR_VERDICTS` would let those three disagree silently.
-from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, REPAIR_VERDICTS, changed_region,
-                                          inert_streak, verify_repair)
+from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_CAP, REPAIR_VERDICTS,
+                                          changed_region, declared_param_overrides, inert_streak,
+                                          verify_repair)
 
 # How many repair calls may answer with something that is not Python before the loop calls it a
 # provider failure rather than a truncation. NOT operator-settable and deliberately small: this is
@@ -413,6 +414,17 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         if d.get("verified") in REPAIR_VERDICTS:
             row["verified"] = str(d.get("verified"))
             row["unmet"] = [str(u) for u in (d.get("unmet") or [])][:12]
+        # The declared-coordinate column, read back under the SAME absent-means-absent rule: this
+        # column is written only when non-empty, so a missing key is either an old row or a repair
+        # that moved nothing, and `_format_repair_log` renders neither. Rows are re-shaped rather
+        # than passed through — an event payload is JSON the engine wrote, but a resumed reader
+        # should not inherit whatever shape a future writer put there.
+        _overrides = [o for o in (d.get("param_overrides") or []) if isinstance(o, dict)]
+        if _overrides:
+            row["param_overrides"] = [
+                {"param": str(o.get("param") or ""), "declared": o.get("declared"),
+                 "code": o.get("code"), "file": str(o.get("file") or ""),
+                 "line": o.get("line")} for o in _overrides[:PARAM_OVERRIDE_CAP]]
         rows.append(row)
     return attempts, rows, unparseable
 
@@ -2408,6 +2420,20 @@ class EvaluateMixin:
                     triage.get("rationale", ""), changed=changed, deleted=new_deleted,
                     code_changed=_code_changed,
                     region=changed_region(prev_files, repaired_files, node.code, new_code))
+                # AND DID IT MOVE A DECLARED COORDINATE? A different question from the one above,
+                # asked of different inputs: the Researcher's `idea.params` (in `node_created`, never
+                # written by a repair) against the `.py` bytes this repair just committed. The
+                # rationale is not read at all, so this sits in `REPAIR_INERT`'s trust tier — see
+                # `repair_verify`'s docstring for the v8-node-3 incident, where the run's CHAMPION
+                # ran at `batch_size 4096 / grad_accum 4` while every record of it — `idea.params`
+                # AND the node's own `config.yaml` — said 8192 / 2, and for why the reuse rule that
+                # made a `.py`-only edit the cheap route is deliberately NOT loosened for it.
+                # `baseline_files` narrows this to what THIS repair introduced: a divergence the
+                # Developer authored at build time is a fact about the node, not about the attempt,
+                # and the node-wide question is asked by `champion_caveats` off folded state.
+                _param_overrides = [o.as_row() for o in declared_param_overrides(
+                    node.idea.params, repaired_files, code=new_code,
+                    baseline_files=prev_files, baseline_code=node.code or "")]
                 async with self._write_lock:
                     repair_payload = {
                         "node_id": node_id, "generation": generation,
@@ -2436,6 +2462,15 @@ class EvaluateMixin:
                         # because it is model-derived text riding in an event payload.
                         "verified": _verification.verdict,
                         "unmet": list(_verification.unmet[:12]),
+                        # A DECLARED COORDINATE THIS REPAIR MOVED, if any. Additive and fold-ignored
+                        # (invariant #5), and OMITTED when empty rather than written as `[]`: an
+                        # absent key on an old row means "nobody looked", which is not the same fact
+                        # as "looked and found none" — the same distinction `_durable_repair_ledger`
+                        # already keeps for `verified`. Unlike `unmet` this is NOT model-derived
+                        # text: every field is a number or a path out of bytes the engine holds, so
+                        # it is capped for event-payload hygiene and not for trust.
+                        **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
+                           if _param_overrides else {}),
                         # The AUTHENTICATED cause of the failure this repair answers — F8's critic
                         # compares causes across attempts, and the only trustworthy source of "what
                         # kind of failure was that" is `_failure_reason` over the sandbox's
@@ -2491,6 +2526,12 @@ class EvaluateMixin:
                     "changed": _changed_col,
                     "verified": _verification.verdict,
                     "unmet": list(_verification.unmet[:12]),
+                    # Same omit-when-empty rule as the durable row above, and for the same reason:
+                    # `_format_repair_log` renders this row and the rebuilt one identically, so a
+                    # `[]` here and an absent key there would render two different histories for
+                    # one node depending on whether the process had resumed.
+                    **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
+                       if _param_overrides else {}),
                     "reason": reason,
                     "stages_passed": _depth})
                 # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`

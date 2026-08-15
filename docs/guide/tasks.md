@@ -378,7 +378,23 @@ is the complementary half of the same two families the cross-run exclusion joins
 rather than salvaged-and-excluded, flagged-and-not-enforced rather than flagged-and-enforced — and it is
 derived from those same two predicates, never re-read off the rows (`engine/champion_caveats.py`).
 Measured over the 46 preserved runs when it shipped: 37 carry a best metric and none of them is
-caveated, so this fences a reachable state rather than describing the corpus.
+caveated by either, so those two fence a reachable state rather than describing the corpus.
+
+**A THIRD caveat is not about how the number was measured but about what it is a number FOR**, and
+unlike the two above it is not empty (since 2026-08-15). `params_overridden` says the champion's own
+committed `.py` code assigns a different value to a parameter its `Idea` declares — so the run publishes
+a result at coordinates it never occupied, and `idea.params` is not decoration: it is what
+`core/numeric.py::numeric_params` hands the surrogate, the panel, the proxy, the diversity archive's
+niches and the novelty distance, and what `search/operators.py::merge_idea` does arithmetic on when it
+breeds two parents. Measured over the same 46 logs: exactly ONE of 297 nodes answers, and it is a
+champion — `rubertlite-dr-unified-v8` node 3 (0.762048, +0.0236 clear of the field) declared
+`batch_size 8192` / `gradient_accumulation_steps 2` in both its `idea.params` and its `config.yaml`
+while `vectorsearch/train.py:31-32` set 4096 / 4. The effective batch was identical and the change was
+sound; what was missing was any record of it, and the run's next node — a mean-merge of that champion
+with node 1 — was minted from the declared 8192/2 rather than the 6144/3 the true parents imply. Like
+every other caveat it is derived from the declaration and the bytes the engine committed, never from
+model-authored text, and it moves no metric, champion, selection or violation
+(`engine/repair_verify.py::declared_param_overrides` owns the rule and its bounds).
 
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine

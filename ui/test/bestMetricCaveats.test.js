@@ -20,6 +20,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
   CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED, bestMetricCaveatLabel,
   bestMetricCaveatNotice, bestMetricCaveats, bestMetricCaveated,
 } from '../src/runIndex.js'
@@ -69,10 +70,22 @@ test('each caveat says what the number is AND that the run selected on it anyway
     best_metric_caveats: [CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED] })
   assert.match(both, /NOT measured/)
   assert.match(both, /reward-hacking or leakage signal/)
+  // THE THIRD MEMBER says something the other two cannot, and the wording has to keep the two
+  // apart: the metric was measured normally, and what is in question is the recipe beside it. It
+  // is the one caveat that is non-empty on this box's corpus (v8 node 3, the champion — declared
+  // `batch_size 8192`, `train.py:31` assigns 4096).
+  const overridden = bestMetricCaveatNotice({
+    best_metric_caveats: [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN] })
+  assert.match(overridden, /assigns a different value to a parameter its own experiment record/)
+  assert.match(overridden, /the declared configuration is not the one this result was produced/)
+  assert.match(overridden, /metric itself was measured normally/)
+  assert.doesNotMatch(overridden, /no sentence for/,
+    'a server slug the browser knows must never fall through to the unknown-caveat sentence')
   // The label is a table cell's width, and `salvaged` is deliberately the same word
   // `trustSemantics.js::OBJECTIVE_SALVAGED` prints for the node inside the run.
   assert.equal(bestMetricCaveatLabel(CHAMPION_CAVEAT_SALVAGED), 'salvaged')
   assert.equal(bestMetricCaveatLabel(CHAMPION_CAVEAT_TRUST_FLAGGED), 'trust-flagged')
+  assert.equal(bestMetricCaveatLabel(CHAMPION_CAVEAT_PARAMS_OVERRIDDEN), 'params overridden')
 })
 
 // ---------------------------------------------------------------------------------------------

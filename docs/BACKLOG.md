@@ -705,43 +705,141 @@ site that proves it is open.
   it was. (3) The population number is 1, from a corpus where `reason` has only been recorded on two
   runs; it is a lower bound on a young field, not a rate.
 
-- **[OPEN, added 2026-08-15] A repair may change a hyperparameter that is PART OF THE COMPARISON,
-  and nothing in the record would say so (P1, M).** Filed as the separate defect it is, and filed
-  with its evidence stated accurately, because the obvious version of this story is false. **On node
-  3 the change did not land.** The attempt-5 rationale said *"cut n_epochs 15->8 to bring total
-  wall-time near node 1's"*, `repair_verify` answered `unmet: ['grad_accum', 'n_epochs']`, no
-  repaired file sets it and `config.yaml` still reads 15 — so this node is NOT an instance of the
-  defect landing. It is an instance of the engine ASKING for it and the repair failing to do what it
-  said, which are two different bugs and only one of them is this row.
-  **Why the row exists anyway.** The ask is designed in, not accidental:
-  `engine/crash_repair.py::_repair_error_context`'s `[failure kind: timeout]` directive tells the
-  Developer to reduce compute by *"fewer estimators/boosting rounds, **fewer epochs**, fewer CV folds
-  or seeds…"*. A repair acting on a CORRECT timeout diagnosis has exactly the authority node 3's
-  rationale claimed, and if it applies the change there is nothing that marks the resulting number.
-  `node_repaired` carries `files`/`changed`/`rationale`/`verified`; `node_evaluated` carries the
-  metric; no row says "this experiment's declared training length is no longer the one its siblings
-  ran". `engine/repair_verify.py` is the nearest rung and answers a different question — did the diff
-  do what the rationale SAID — so a repair that states "cut n_epochs 15->8" and does it is `verified`,
-  which is correct and is precisely the problem. Note also that the only thing that stopped it here
-  was a MISS by the repair, i.e. nothing that can be relied on: had `unmet` been `verified`, the
-  number this node eventually reports would have been R-Drop at 8 epochs ranked against node 1's
-  15-epoch 0.7384, inside the same rationale that names that comparison.
-  **Not folded into the row above, on purpose.** That one is about what the repairer may SEE; this is
-  about what the RECORD says after it acts. Widening the first cannot touch the second by
-  construction (docs/36: a wider action space must not widen the trusted set), and a better-informed
-  repairer is if anything MORE likely to correctly conclude "this really is too slow, cut the epochs".
-  **Sketch, not a decision.** The comparison-bearing quantity is whatever the Researcher's Idea
-  declared; a repair that changes one is not illegitimate — the alternative is discarding the node —
-  it is *unremarked*. Candidates, increasing cost: a `comparability` note minted on `node_repaired`
-  when a repair's diff moves a declared idea parameter, carried onto `node_evaluated` and rendered
-  beside the metric the way `best_metric_caveats` renders the salvage and trust-gate caveats
-  (`engine/champion_caveats.py` is the shape); or the stronger form, where such a node is admitted
-  but held out of same-family ranking. Both need a definition of "declared parameter" the engine can
-  DERIVE rather than a model assert, which is the open design question — and note that
-  `repair_verify`'s claim extractor already parses parameter names out of a rationale, which is the
-  wrong side of the trust line to build this on (the agent writes the rationale).
-  **Evidence to start from:** `runs/rubertlite-dr-unified-v8` node 3, attempts 4 and 5 (the ask, the
-  claim, and the `unmet` that recorded the miss).
+- **[FIXED 2026-08-15 — and the earlier filing's central claim was FALSE] A repair changed a
+  hyperparameter that is PART OF THE COMPARISON, and nothing in the record said so (P1, M).** This
+  row was filed the same day saying *"on node 3 the change did not land"*, on the strength of the
+  attempt-5 rationale (*"cut n_epochs 15->8"*), the `unmet: ['grad_accum', 'n_epochs']` verdict
+  beside it, and a `config.yaml` that still reads 15. Every one of those facts is correct and the
+  CONCLUSION drawn from them is not: it looked at the epoch claim and never at the parameter pair
+  the SAME node's attempt 4 really did move. **IT LANDED, ON THE CHAMPION.**
+
+  **The measurement, re-derived from the run directory and the event log.**
+  `runs/rubertlite-dr-unified-v8` node 3 (R-Drop α=0.5 over node 1's DCL loss) is the run's best at
+  **0.762048** — +0.0236 over node 1's 0.738425, with the other four evaluated nodes (0.736689,
+  0.737647, 0.738174, 0.738425) inside a 0.0017 spread. Three records of that one experiment
+  disagree: `node_created.idea.params` says `train.training.batch_size 8192.0` /
+  `gradient_accumulation_steps 2.0`; `vectorsearch/configs/config.yaml` says `8192` / `2`; and
+  `vectorsearch/train.py:31-32`, written by attempt 4 after `config = Config()`, says **4096 / 4**.
+  The training log settles which one ran — the config dump the script itself prints reads
+  `"batch_size": 4096, "gradient_accumulation_steps": 4`. **The science is fine and the repair said
+  so** (8192×2 and 4096×4 are the same 16,384 effective batch); the RECORD is not, because neither
+  the event log nor the node's own config states what ran. Only the code does.
+
+  **The coordinates are LOAD-BEARING, which the original filing's sketch left as an open design
+  question rather than an established fact.**
+  `idea.params` is what `core/numeric.py::numeric_params` projects for `search/surrogate.py`,
+  `search/panel.py`, `search/proxy.py`, `search/archive.py`'s niches and `engine/novelty.py`'s
+  distance — all of them OFF or pass-through on this run's settings (`surrogate_proposer=false`,
+  `policy=greedy`, `researcher_panel=1`, `novelty_gate=false`, `proxy_scoring=false`), which is why
+  "decorative" was a live possibility worth checking. It is not decorative, and the proof is on the
+  same run: **node 8 is a `search/operators.py::merge_idea` mean-merge of nodes 3 and 1** — an
+  ENGINE-authored arithmetic node, rationale `"mean-merge of nodes 3,1"` — and it was minted with
+  `batch_size 8192.0` / `grad_accum 2.0`, the mean of two 8192s and two 2s. Had node 3's coordinates
+  been the ones it ran, node 8 would have been minted at **6144 / 3**. Those params then travel into
+  `adapters/repo_developer.py`'s "implement … with parameters {…}" prompt, i.e. into the code the
+  sandbox runs. Beyond proposal: `search/coverage.py`'s param-niche count (a recorded
+  `coverage_snapshot`), the run-end archive summary, the champion notebook `cli/export_cmds.py`
+  exports, and the `"Best so far: node N params={…}"` line `agents/roles.py` shows the Researcher.
+  Nothing here moves a METRIC, a CHAMPION, SELECTABILITY or a VIOLATION — champion selection is by
+  metric alone — which is exactly the boundary the fix had to stay inside.
+
+  **AND THE ENGINE CREATED THE INCENTIVE.** The repair's own comment names the reason it did not
+  edit the config: *"Config is pydantic-mutable, so this is a train.py-only change (no config.yaml
+  edit) that leaves the completed `mine` stage reusable."* `eval_stages.py::_safe_reuse_start` fails
+  closed on ANY non-`.py` change, node 3's `mine` stage had just cost **2,304 s**, and the log shows
+  it `reused` at 0.0 s on each of the two attempts that followed. So the reuse rule paid 4,608
+  seconds of GPU time for moving a comparison-bearing parameter out of the declared config and into
+  code no record reads. That is what upgrades this from "an agent was sloppy" to a defect of the
+  system, and it is the half the first filing did not have.
+
+  **POPULATION, measured over all 46 preserved logs (297 nodes, 2,481 `node_repaired` rows).**
+  Nodes whose committed `.py` code contradicts a dotted declared parameter: **ONE**, node 3, and it
+  is the champion. Repairs that introduced one: **ONE**, attempt 4. The denominator is small and is
+  quoted with it — 25 of the 297 nodes declare a dotted numeric parameter at all, all on
+  `rubertlite-dr-unified-v{2,6,7,8}`; the toy and benchmark spaces declare bare names. TWO adjacent
+  populations were measured and are NOT this defect: five nodes whose declaration is contradicted by
+  their YAML CONFIG rather than by code (`live-asha-0804` node 2, v2 node 3, v7 nodes 1 and 2, v8
+  node 0 — four of them diverging at CREATION, so a Developer defect and not a repair one), and one
+  bare-name conditional override (`rubertlite-dense-retrieval` node 36, `distill_alpha` 0.5 declared
+  / 0.0 assigned inside a missing-teacher fallback, present at creation, zero repairs).
+
+  **THE FIX IS (a): SAY IT, in the two records a reader meets.** Both derive from the DECLARATION
+  (`Idea.params`, minted into `node_created` by the Researcher and never by a repair) and the
+  committed BYTES — `engine/repair_verify.py::declared_param_overrides`, which never reads a
+  rationale at all and so sits in `REPAIR_INERT`'s trust tier rather than `REPAIR_UNMET`'s.
+  (1) `node_repaired.param_overrides`, additive and fold-ignored, carrying the ATTRIBUTION half
+  (only what THIS repair introduced), rendered into the judge's repair history beside `changed` and
+  `unmet`. (2) `engine/champion_caveats.py`'s third slug `params_overridden` on every `/api/runs`
+  row, asked of the FOLD so any replay recomputes it — the surface that sketch had already named
+  ("rendered beside the metric the way `best_metric_caveats` renders the salvage and trust-gate
+  caveats"), reached by the derivation it could not find.
+  Bounds, each measured rather than chosen: a declared key must carry ≥2 dotted parts
+  (`PARAM_OVERRIDE_MIN_PARTS` — a bare `lr` would be met by any local of that name, and the corpus's
+  one instance of that shape is conditional code); the target is parsed with `ast`, never matched by
+  pattern, so a comment, a docstring, a string literal and an `==` all read as nothing; the declared
+  parts must be a contiguous SUFFIX of the assignment target, so only the receiver's own name is
+  ignored; and both values must be numeric literals, because constant-folding agent code would make
+  this a second evaluator. The claim is deliberately NARROWER than the story: *the node's own
+  committed code assigns this declared parameter a different literal*, never "this is what ran" —
+  a dead branch is indistinguishable to any static reader, and absence is silence, never a
+  certificate. **Replayed over all 46 logs: ONE thing moves**, v8's `best_metric_caveats`
+  `[]` → `['params_overridden']`. Every champion, every metric, every feasible set and every
+  violation row is byte-identical. `tests/test_repair_verification.py` and
+  `tests/test_champion_metric_caveats.py` drive it at tier 1 with node 3's real bytes as the fixture
+  and its siblings' as the negative control; eight mutations of a throwaway tree were checked red.
+
+  **WHAT WAS REJECTED, and why each rejection is a measurement and not a preference.**
+  *(b) let a repair AMEND `idea.params`, or write an `effective_params` beside them.* Refused.
+  `params` is the operator/Researcher's DECLARATION and it is the input to selection-adjacent
+  machinery — `merge_idea` does arithmetic on it, the surrogate fits on it, the archive buckets by
+  it. docs/36's line is that what enters the RECORD stays deterministic over AUTHENTICATED evidence,
+  and a value parsed out of an agent-authored diff is not authenticated: the agent writes the code,
+  so it would be writing its own coordinates, and a coordinate is a lever on which experiments get
+  proposed next. `effective_params` is the same object with a softer name — the moment any reader
+  prefers it, the agent has an amendment channel. The asymmetry is the point: a CAVEAT can only ever
+  subtract confidence, an amendment can add it.
+  *(c) loosen `_safe_reuse_start` so a config-only edit keeps reuse.* Refused, and the corpus decides
+  it. Of the 2,481 repair rows, 76 carry a non-empty change set and **17 change a non-`.py` file**;
+  of those 17, only **3 had a completed earlier stage to forfeit** (`stages_passed ≥ 1`: v2 node 4
+  attempt 1, v8 node 0 attempts 3 and 4) — **and all three also changed `looplab_stages.json`**,
+  which rewrites the pipeline's argv and is refused by a separate clause that cannot be loosened at
+  all. So the widening would have bought **ZERO** reuse across every repair this box has ever made,
+  at the cost of the invariant. It is also unsafe on this very node: `mine_stage.py` reads the same
+  `config.yaml` (its `n_negatives=2` and mining `batch_size 4096` live there), so a config-only
+  exemption would have scored a stale `mine` artifact on node 3 itself. `_safe_reuse_start`'s own
+  docstring already refused the `needs`-based version of this on 2026-08-14 for two independent
+  reasons — `needs` is a PRECONDITION and not a bound, and 2 of 129 stages declare it — and both
+  still hold. The rung that would make it safe is ENFORCEMENT (`runtime/read_allowlist.py` +
+  `runtime/landlock.py` scoped to a stage's own declared inputs), which is where that file is
+  already waiting; this row does not move it.
+  *(d) state the residue and do nothing.* Refused because the residue is not hypothetical any more:
+  it is the run's champion, and the number is being published.
+
+  **WHAT IS LEFT OPEN, measured rather than assumed.** The CONFIG-FILE route (five corpus nodes) is
+  not covered — the rung would have to know which file a pipeline reads and by what key path, which
+  is `_safe_reuse_start`'s own unsolved problem one file over. Neither is a bare-name declaration, a
+  non-literal right-hand side (`batch // 2`, `args.bs`), an override expressed through the stage
+  manifest's argv (three corpus instances, all `rubertlite-dense-retrieval`), or an assignment in a
+  branch that never executes — the last is why the wording is about the code and not about the run.
+  And nothing here reaches the STRONGER form that sketch named, holding such a node out of
+  same-family ranking: that would be selection machinery driven by a static read of agent-written
+  code, which is the line this fix exists to stay behind.
+  **Evidence:** `runs/rubertlite-dr-unified-v8` node 3 — `node_created` seq 1510 (the declaration),
+  `node_repaired` attempt 4 seq 1983 (the change), `vectorsearch/train.py:31-32` and
+  `vectorsearch/configs/config.yaml:281,283` (the disagreement), `train.log` (what ran), the
+  `stage_finished` rows `{mine ok 2304.266s}` then `{mine reused 0.0s}` twice (the incentive), and
+  node 8's `node_created` (the propagation).
+  **One adjacent claim was falsified while re-deriving this and is deliberately NOT fixed here** — it
+  belongs to the `repair_log_tools` change that measured it. Six sites (the row above in this file,
+  `docs/guide/configuration.md`'s `repair_log_tools` row, the process diagram's `e_ir` block,
+  `core/config.py`, `engine/train_monitor.py` and `docs/guide/llm-and-agents.md`) project node 3's
+  attempt 6 at **22,096 s into the same 22,000 s ceiling**, extrapolated live at 1.798 s/step before
+  it finished. It finished: `train` **ok in 19,915.75 s**, then `score` ok in 3,130.3 s, and the node
+  recorded 0.762048 and became champion. The `n_epochs` cut still never landed; what moved the
+  retrieval cost out of the train budget was a SECOND edit in attempt 5, deleting the in-`train`
+  `test_model()` call on the note that the full-index retrieval "is run independently by the
+  protected `score` stage". Only `llm-and-agents.md` is corrected in this change, with a pointer to
+  the other five.
 
 - **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
   re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card

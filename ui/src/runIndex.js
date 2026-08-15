@@ -71,8 +71,16 @@ export function sourceIntegrityNotice(run = {}) {
 // portfolio row and that node's Metrics tab must not describe one number two ways. An UNKNOWN slug
 // is kept and rendered rather than dropped: a server that learns a third caveat must not read as a
 // clean run to an older browser.
+//
+// The THIRD member is not of that pair and the difference is worth keeping straight: `salvaged` and
+// `trust_flagged` qualify HOW the number was measured, while `params_overridden` qualifies WHAT it
+// is a number FOR — the champion's own committed code assigns a different value to a parameter its
+// Idea declares, so the run is publishing a result at coordinates it never occupied. It is the one
+// member that is non-empty on this box's corpus today (v8 node 3, batch_size 8192 declared / 4096 in
+// code, on the champion), which is why the row must be able to say it.
 export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
+export const CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = 'params_overridden'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -92,6 +100,7 @@ export const bestMetricCaveated = (run = {}) => bestMetricCaveats(run).length > 
 const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_SALVAGED]: 'salvaged',
   [CHAMPION_CAVEAT_TRUST_FLAGGED]: 'trust-flagged',
+  [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]: 'params overridden',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -110,7 +119,12 @@ export function bestMetricCaveatNotice(run = {}) {
       : slug === CHAMPION_CAVEAT_TRUST_FLAGGED
         ? 'The node this number comes from carries a high-precision reward-hacking or leakage '
           + 'signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.'
-        : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+        : slug === CHAMPION_CAVEAT_PARAMS_OVERRIDDEN
+          ? 'The node this number comes from ships code that assigns a different value to a '
+            + 'parameter its own experiment record declares, so the declared configuration is not '
+            + 'the one this result was produced under. The run selected on it anyway — the metric '
+            + 'itself was measured normally; what is in question is what it is a measurement of.'
+          : `The server reports a caveat this view has no sentence for: “${slug}”.`))
   return sentences.join(' ')
 }
 

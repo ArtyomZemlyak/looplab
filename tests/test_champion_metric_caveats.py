@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
+from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
+                                             CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
                                              CHAMPION_CAVEATS, champion_metric_caveats)
 from looplab.engine.memory import unreliable_metric_ids
 from looplab.engine.metric_salvage import OPERATOR_PRODUCED, SalvagedMetric
@@ -54,7 +55,9 @@ def _run(tmp_path, name, *, nodes, trust_gate="audit", hacks=()):
     for node in nodes:
         store.append("node_created", {
             "node_id": node["id"], "parent_ids": [], "operator": "draft",
-            "idea": {"operator": "draft", "params": {}, "rationale": "seed"}, "code": "pass\n"})
+            "idea": {"operator": "draft", "params": node.get("params") or {},
+                     "rationale": "seed"},
+            "code": "pass\n", "files": node.get("files") or {}})
         payload = {"node_id": node["id"], "generation": 0, "metric": node["metric"],
                    "violations": node.get("violations", [])}
         if node.get("provenance") is not None:
@@ -183,15 +186,20 @@ def test_an_advisory_signal_is_not_a_caveat(tmp_path):
     assert _row(srv, "advisory")["best_metric_caveats"] == []
 
 
-def test_both_caveats_ride_together_in_vocabulary_order(tmp_path):
-    """They are independent facts about one number and neither hides the other. The ORDER is the
+def test_every_caveat_rides_together_in_vocabulary_order(tmp_path):
+    """They are independent facts about one number and none hides another. The ORDER is the
     vocabulary's, not discovery's, so an unchanged run cannot look changed to a client diffing the
-    row between two polls."""
+    row between two polls — which is why this drives the WHOLE registry rather than a pair, and goes
+    red the day a member is appended without a rule for where it sorts. (The fixture bytes are
+    defined below with the third member; a node can be salvaged, flagged AND diverging at once.)"""
     srv = _run(tmp_path, "both", nodes=[
         {"id": 0, "metric": 0.81, "violations": SALVAGE.violation_rows("select"),
-         "provenance": SALVAGE.as_event()}], trust_gate="audit", hacks=[(0, "protected_missing")])
+         "provenance": SALVAGE.as_event(), "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_OVERRIDING_TRAIN_PY}}],
+        trust_gate="audit", hacks=[(0, "protected_missing")])
     row = _row(srv, "both")
-    assert row["best_metric_caveats"] == [CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED]
+    assert row["best_metric_caveats"] == [CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
+                                          CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]
     assert list(CHAMPION_CAVEATS) == row["best_metric_caveats"], "the registry IS the order"
 
 
@@ -260,3 +268,103 @@ def test_the_caveat_vocabulary_is_the_one_the_browser_prints():
     for slug in CHAMPION_CAVEATS:
         assert f"= '{slug}'" in source, f"the browser has no constant for the server's {slug!r}"
     assert "best_metric_caveats" in source, "the browser must read the field by its shipped name"
+
+
+# ================================================== the third member: what the number is a number FOR
+# The two members above qualify HOW the champion's metric was measured. This one qualifies WHAT it is
+# a measurement of, and unlike them it is NOT empty on this box: `runs/rubertlite-dr-unified-v8`
+# node 3 is the run's champion at 0.762048 and its own `vectorsearch/train.py` sets
+# `batch_size = 4096` / `gradient_accumulation_steps = 4` over an `idea.params` (and a `config.yaml`)
+# declaring 8192 / 2. The real bytes are the fixture, reduced to what a fold needs.
+
+_V8_PARAMS = {"loss.rdrop_alpha": 0.5, "train.training.batch_size": 8192.0,
+              "train.training.gradient_accumulation_steps": 2.0,
+              "train.training.n_epochs": 15.0, "train.training.learning_rate": 0.001}
+
+# Verbatim from that node's repaired `train.py`, comment included — the comment is the SYSTEM half of
+# the finding (the repair states it avoided `config.yaml` to keep the completed `mine` stage
+# reusable, i.e. `_safe_reuse_start`'s non-`.py` clause naming itself as the reason).
+_V8_OVERRIDING_TRAIN_PY = (
+    "from vectorsearch.config import Config\n\n\n"
+    "def main():\n"
+    "    config = Config()\n"
+    "    # Config is pydantic-mutable, so this is a train.py-only change (no config.yaml edit)\n"
+    "    # that leaves the completed `mine` stage reusable.\n"
+    "    config.train.training.batch_size = 4096\n"
+    "    config.train.training.gradient_accumulation_steps = 4\n")
+
+# The same file as node 3's SIBLINGS ship it: the identical declaration, read and never written.
+_V8_AGREEING_TRAIN_PY = (
+    "from vectorsearch.config import Config\n\n\n"
+    "def main():\n"
+    "    config = Config()\n"
+    "    return config.train.training.batch_size\n")
+
+
+def test_a_champion_whose_code_contradicts_its_declaration_reaches_the_portfolio_row(tmp_path):
+    """THE FINDING, through the real projection. The number was measured normally — no salvage, no
+    flag, nothing the other two members can see — and it is published at coordinates the experiment
+    never occupied. `idea.params` is not decoration: it is what `core/numeric.py::numeric_params`
+    hands the surrogate, the panel, the proxy, the archive's niches and the novelty distance, and
+    what `search/operators.py::merge_idea` does ARITHMETIC on. On the live run that is not
+    hypothetical — node 8 is a mean-merge of nodes 3 and 1 and inherited `8192`/`2` from a parent
+    that ran `4096`/`4`, so it was minted at 8192/2 where the true parents' mean is 6144/3."""
+    srv = _run(tmp_path, "overridden", nodes=[
+        {"id": 1, "metric": 0.738425, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_AGREEING_TRAIN_PY}},
+        {"id": 3, "metric": 0.762048, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_OVERRIDING_TRAIN_PY}},
+    ])
+    state = _state(srv, "overridden")
+    assert state.best_node_id == 3, "precondition: the diverging node really is this run's champion"
+    assert state.best().feasible and not state.best().violations, (
+        "precondition: nothing else caveats this number — it was measured, unsalvaged and unflagged")
+
+    row = _row(srv, "overridden")
+    assert row["best_metric"] == 0.762048, "the METRIC does not move; only what is said about it"
+    assert row["best_metric_caveats"] == [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]
+
+
+def test_a_champion_whose_code_matches_its_declaration_gains_nothing(tmp_path):
+    """THE NEGATIVE CONTROL, and a real one: node 3's siblings declare the IDENTICAL parameters and
+    ship a `train.py` that only reads them. Measured over all 46 preserved logs, exactly ONE of 297
+    nodes answers here — if the rule fired on the siblings it would fire on every node in the run
+    and mean nothing, which is the failure mode `test_a_measured_run_gains_no_label` guards for the
+    other two members."""
+    srv = _run(tmp_path, "agreeing", nodes=[
+        {"id": 1, "metric": 0.738425, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_AGREEING_TRAIN_PY}},
+        {"id": 3, "metric": 0.762048, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_AGREEING_TRAIN_PY}},
+    ])
+    assert _row(srv, "agreeing")["best_metric_caveats"] == []
+    # …and neither does a run whose space declares BARE names, which is every toy/benchmark run on
+    # the box: `PARAM_OVERRIDE_MIN_PARTS` refuses to read a local variable as a declaration.
+    srv2 = _run(tmp_path, "bare", nodes=[
+        {"id": 0, "metric": 0.9, "params": {"lr": 0.1},
+         "files": {"t.py": "def f():\n    lr = 0.5\n"}}])
+    assert _row(srv2, "bare")["best_metric_caveats"] == []
+
+
+def test_the_caveat_moves_no_champion_no_selection_and_no_violation(tmp_path):
+    """THE BOUND, and it is the whole licence for this member existing at all: the diverging node
+    stays feasible, stays selectable, keeps its metric and keeps its empty violation list. Nothing
+    an agent wrote — the code IS agent-written — may move any of those four, and the only thing this
+    rung does is add a sentence beside the number (docs/36). Replayed over all 46 preserved logs on
+    2026-08-15, exactly one thing moved: v8's `best_metric_caveats` `[]` -> `['params_overridden']`,
+    with every champion, every metric, every feasible set and every violation row unchanged."""
+    srv = _run(tmp_path, "bounded", nodes=[
+        {"id": 0, "metric": 0.70, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_AGREEING_TRAIN_PY}},
+        {"id": 1, "metric": 0.99, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_OVERRIDING_TRAIN_PY}},
+    ])
+    state = _state(srv, "bounded")
+    best = state.best()
+    assert state.best_node_id == 1 and best.metric == 0.99
+    assert best.feasible and best.violations == []
+    assert 1 in {n.id for n in state.feasible_nodes()}
+    assert champion_metric_caveats(state) == [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]
+    # The caveat is a member of the closed vocabulary, so `bestMetricCaveatLabel` has a word for it
+    # and no client renders it as an unknown slug.
+    assert CHAMPION_CAVEAT_PARAMS_OVERRIDDEN in CHAMPION_CAVEATS

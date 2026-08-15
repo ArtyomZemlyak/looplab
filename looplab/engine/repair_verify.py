@@ -191,10 +191,76 @@ separate vocabulary for the same reason `metric_salvage.SALVAGE_CAUSE_TRIAGE_ACT
 absent from `TRIAGE_ACTIONS`: mixing a marker into a verdict enum breaks the emit schema in one
 direction and makes a reader treat the enum as exhaustive in the other. The two tuples are
 cross-referenced rather than merged; `tests/test_repair_verification.py` drives both rules.
+
+--------------------------------------------------------------------------------------------------
+`declared_param_overrides` — A THIRD RUNG, ASKING A DIFFERENT QUESTION, AND IT NEVER READS THE
+RATIONALE AT ALL.
+
+`verify_repair` asks *did the repair do what it SAID*. This asks *does the code the engine committed
+still agree with the parameters the record DECLARES* — and both inputs are things the engine holds:
+`Idea.params`, minted into `node_created` by the Researcher (never by a repair), and the `.py` bytes
+of `node_repaired.files`. So it sits in `REPAIR_INERT`'s trust tier, not `REPAIR_UNMET`'s: no wording
+evades it, none summons it, and a model that writes a more persuasive rationale changes nothing here.
+
+**THE INCIDENT, on the live run's CHAMPION.** `rubertlite-dr-unified-v8` node 3 (R-Drop α=0.5 on
+node 1's DCL loss) became the run's best at **0.762048**, +0.0236 over the next node while the other
+four evaluated nodes sit inside a 0.0017 spread. Three records of that experiment disagree:
+`node_created.idea.params` says `train.training.batch_size 8192` / `gradient_accumulation_steps 2`;
+the node's own `vectorsearch/configs/config.yaml` says 8192 / 2; and `vectorsearch/train.py` lines
+31-32 — written by attempt 4's repair, after `config = Config()` — say **4096 / 4**. The training log
+confirms which one ran (`"batch_size": 4096, "gradient_accumulation_steps": 4` in the config dump the
+script itself prints). The SCIENCE is fine and the repair said so: 8192x2 and 4096x4 are the same
+16384 effective batch. The RECORD is not, because `idea.params` are the COORDINATES the search
+machinery models the space with, and it is not decorative — measured on that same run, node 8 is a
+`search/operators.py::merge_idea` mean-merge of nodes 3 and 1, i.e. an ENGINE-AUTHORED arithmetic
+node whose declared `batch_size 8192` / `grad_accum 2` are the mean of two 8192s and two 2s. Had node
+3's coordinates been the ones it ran, node 8 would have been minted at 6144 / 3. Same readers for
+`core/numeric.py::numeric_params` throughout: `search/surrogate.py`, `search/panel.py`,
+`search/proxy.py`, `search/archive.py`'s niches, `engine/novelty.py`'s distance, the champion
+notebook `cli/export_cmds.py` exports, and the "Best so far: node N params={…}" line
+`agents/roles.py` puts in front of the Researcher.
+
+**AND THE ENGINE CREATED THE INCENTIVE, which is what makes this a defect of the system rather than
+a sloppy agent.** The repair's own comment names the reason it did not edit `config.yaml`: *"Config
+is pydantic-mutable, so this is a train.py-only change (no config.yaml edit) that leaves the
+completed `mine` stage reusable."* `eval_stages.py::_safe_reuse_start` refuses reuse on ANY non-`.py`
+change, and node 3's `mine` stage had just cost **2,304 s**; it was then `reused` at 0.0 s on both of
+the two attempts that followed. So the reuse rule paid a repair 4,608 seconds of GPU time to move a
+comparison-bearing parameter OUT of the declared config and into code no record reads. That rule is
+NOT loosened here and must not be — the `mine` stage on this very node reads `config.yaml` (its
+`n_negatives` and mining `batch_size` are in the same file), so a config-only reuse exemption would
+have scored a stale checkpoint on precisely this node; `_safe_reuse_start`'s own docstring already
+refused the `needs`-based version of that widening on 2026-08-14 and the argument is unchanged.
+What changes is that the divergence is now SAID OUT LOUD.
+
+WHAT IT CLAIMS, EXACTLY, AND WHY THE WORDING IS NARROWER THAN THE STORY ABOVE. The derivable fact is
+*the node's own committed code assigns this declared parameter a different literal* — a statement
+about two artifacts. It is deliberately NOT "this is what ran": an assignment behind a dead branch,
+or in a helper nobody calls, is indistinguishable to any static reader, and a rung that overclaimed
+would be making an assertion on the candidate's behalf. Absence is likewise SILENCE and never a
+certificate — the same rule `champion_caveats.py` states for its empty list. Both directions of
+error are cheap by construction: a false positive costs a caveat line nobody can act on, a false
+negative leaves the record exactly where it was.
+
+THE BOUNDS, each load-bearing:
+  * The declared key must carry at least `PARAM_OVERRIDE_MIN_PARTS` dotted parts. A bare `lr` or `x`
+    (the toy/benchmark spaces) would be met by any local of that name; a dotted `train.training.
+    batch_size` is a path into a config object and English does not produce one by accident.
+  * The code target is parsed with `ast`, never a regex — the input IS Python by construction, and
+    the whole false-positive family here is comments and string literals, which `ast` does not have.
+    A file that does not parse is skipped (an agent may commit anything), never guessed at.
+  * The declared parts must be a contiguous SUFFIX of the target's own parts, so
+    `config.train.training.batch_size` and `cfg["train"]["training"]["batch_size"]` both match while
+    the receiver's name is nobody's business.
+  * Both values must be NUMERIC. A computed right-hand side (`batch // 2`, `args.bs`) is not
+    comparable and is dropped rather than resolved — constant-folding agent code is a second
+    evaluator, and this rung is not one.
 """
 from __future__ import annotations
 
+import ast
 import difflib
+import math
 import re
 from dataclasses import dataclass
 
@@ -508,6 +574,243 @@ def verify_repair(rationale, *, changed, deleted=(), code_changed: bool = False,
     if not convicting:
         return RepairVerification(REPAIR_UNSTATED, claims)
     return RepairVerification(REPAIR_UNMET, claims, convicting)
+
+
+# --- The declared-parameter override rung (see the module docstring) -----------------------------
+# A declared key must be DOTTED to be checkable. `train.training.batch_size` is a path into a config
+# object; `lr` is a word, and a rung that convicted on a bare word would fire on any local of that
+# name in any file. Same shape and same reason as `_ABBREV_MIN_PARTS` above.
+PARAM_OVERRIDE_MIN_PARTS = 2
+
+# How many overrides a single row may carry. A durable event column, so it is bounded like every
+# other one; the cap can only ever UNDER-report, which is the direction this rung fails in anyway.
+PARAM_OVERRIDE_CAP = 12
+
+# Total source bytes `declared_param_overrides` will parse for one node. A repaired working set is
+# whatever the Developer wrote and this runs inside the attempt loop; over the bound the remaining
+# files are skipped, which under-reports and never mis-reports.
+_PARAM_SOURCE_CAP = 2_000_000
+
+# The one name the whole-file solution artifact is reported by — the same one `changed_region` uses,
+# so a reader meets one spelling for the source that has no path.
+_WHOLE_FILE = "<whole-file solution>"
+
+
+@dataclass(frozen=True)
+class ParamOverride:
+    """One declared `Idea.params` key whose committed code assigns it a DIFFERENT numeric literal.
+
+    `param` is the declared key verbatim (the coordinate name the search machinery uses), `declared`
+    the value `node_created` recorded, `code` the literal the assignment carries, `path` the file it
+    is in and `line` its line. Frozen and JSON-shaped: `as_row` is what rides on the durable event.
+    """
+    param: str
+    declared: float
+    code: float
+    path: str
+    line: int
+
+    def as_row(self) -> dict:
+        return {"param": self.param, "declared": self.declared, "code": self.code,
+                "file": self.path, "line": self.line}
+
+
+def _numeric_literal(node):
+    """The float value of a numeric literal AST node (`4096`, `-1`, `0.5`), else None.
+
+    `ast.UnaryOp(USub)` is spelled out because a negative literal is not one node in Python's
+    grammar. Anything with a NAME or a CALL in it is not a literal and is not resolved — see the
+    docstring's fourth bound. Bools are excluded: `True` is `isinstance(int)` and comparing it to a
+    declared `1.0` would report agreement nobody wrote."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _numeric_literal(node.operand)
+        return None if inner is None else -inner
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+            and not isinstance(node.value, bool):
+        val = float(node.value)
+        # `1e400` parses to `inf` and a huge int overflows the conversion; either would ride onto a
+        # durable event as a bare `Infinity`, which is not JSON. Same rule as the declared side.
+        return val if math.isfinite(val) else None
+    return None
+
+
+def _assignment_target_parts(node):
+    """The dotted path an assignment TARGET names, outermost-last, or None if it names no path.
+
+    `config.train.training.batch_size` -> `["config", "train", "training", "batch_size"]`, and
+    `cfg["train"]["training"]["batch_size"]` -> the same tail, because a config object reached by
+    attribute and one reached by key are the same declaration to the reader this serves. A subscript
+    whose index is not a plain string constant (`row[i]`) makes the whole target unreadable and
+    answers None — a partial path would silently match on its suffix, which is the one thing the
+    suffix rule below cannot survive."""
+    parts: list = []
+    cur = node
+    while True:
+        if isinstance(cur, ast.Attribute):
+            parts.append(cur.attr)
+            cur = cur.value
+        elif isinstance(cur, ast.Subscript):
+            key = cur.slice
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                return None
+            parts.append(key.value)
+            cur = cur.value
+        elif isinstance(cur, ast.Name):
+            parts.append(cur.id)
+            break
+        else:
+            return None                       # a call, a literal, a tuple — names no stable path
+    parts.reverse()
+    return parts
+
+
+def _assigned_numeric_paths(source: str) -> dict:
+    """`(dotted path) -> (value, line)` for every numeric-literal assignment in one Python source.
+
+    LAST WRITE WINS on a repeated path, matching what the interpreter would do if both ran in order —
+    and if they are in exclusive branches the rung is over-reading either way, which is the residual
+    the docstring states rather than guesses at. Unparseable source answers `{}`: an agent may commit
+    anything, and a `SyntaxError` is not evidence about a parameter.
+
+    Walks `Assign` and `AnnAssign` (`config.train.batch_size: int = 4096`) and deliberately NOT
+    `AugAssign`: `x += 1` carries no absolute value to compare a declaration against.
+    """
+    try:
+        tree = ast.parse(source or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):  # noqa: BLE001 — not evidence
+        return {}
+    out: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        val = _numeric_literal(value)
+        if val is None:
+            continue
+        for tgt in targets:
+            parts = _assignment_target_parts(tgt)
+            if parts:
+                out[tuple(parts)] = (val, getattr(node, "lineno", 0))
+    return out
+
+
+def declared_param_overrides(params, files, *, code: str = "", baseline_files=None,
+                             baseline_code: str = ""):
+    """The declared `Idea.params` keys this working set's own `.py` code assigns a DIFFERENT number.
+
+    Pure, total and deterministic over two things the engine holds — the Researcher's declaration and
+    the bytes the engine committed. It never reads a rationale, so no agent text can summon or evade
+    a row; see the module docstring for the incident, the bounds and what the claim is NOT.
+
+    `files` is a `{path: content}` map (`node.files` / `node_repaired.files`); `code` is the
+    whole-file solution artifact when there is one, reported under the same `<whole-file solution>`
+    name `changed_region` uses. `baseline_files` optionally narrows the answer to overrides THIS
+    repair INTRODUCED: a path already assigned the same value in the baseline is not this repair's
+    doing, and the attribution matters because a divergence a repair created and one the Developer
+    authored at build time are different facts about the record. Omit BOTH for the whole-node
+    question — handing over either one is what turns the attribution on.
+    `baseline_code` is that same baseline for the whole-file artifact and is NOT optional when
+    `baseline_files` is given on a code-artifact task: the artifact has no path, so without it the
+    attribution has no prior to compare against and every later attempt re-reports an override the
+    FIRST one introduced — the judge's history would then accuse each attempt of a line none of them
+    wrote.
+
+    Ordered by declared key, then file, then line, so the same inputs always produce the same list
+    (a durable event column and a projection both read this — a set-ordered answer would make an
+    unchanged run look changed to every client diffing it).
+    """
+    declared: dict = {}
+    for key, value in (params or {}).items():
+        if not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        # NON-FINITE IS DROPPED ON BOTH SIDES, and it is not fastidiousness. A NaN/inf param is
+        # REACHABLE — `search/archive.py` carries the same guard and names the routes (a `1e309`
+        # literal JSON-folds straight to `inf`; NaN is agent-supplied) — and it would break this rung
+        # twice over. `nan != anything` is True, so every declaration carrying one would report a
+        # divergence against any assignment at all; and the value then rides on a DURABLE event,
+        # where Python's `json.dumps` writes a bare `NaN`/`Infinity` that is not JSON and that every
+        # browser reader of the log fails to parse. Silence is the right answer for a coordinate that
+        # cannot be compared.
+        if not math.isfinite(float(value)):
+            continue
+        parts = tuple(p for p in key.split(".") if p)
+        if len(parts) < PARAM_OVERRIDE_MIN_PARTS:
+            continue                          # a bare name is a word, not a path (see the constant)
+        declared[key] = (parts, float(value))
+    if not declared:
+        return ()
+
+    # A SOUND PRE-FILTER, and it is a cost decision rather than a rule. An assignment reaching
+    # `train.training.batch_size` MUST contain the literal `batch_size` — as an attribute, or as the
+    # string constant of a subscript key — so a file without it cannot produce a row and skipping it
+    # cannot change the answer.
+    #
+    # MEASURED, AND IT BUYS NOTHING ON THE CASE THIS WAS BUILT FOR, which is worth saying rather than
+    # implying: all five `.py` files in the v8 champion's 112 KB working set match one of the fifteen
+    # declared tails (`config.py` on `temperature`/`learning_rate`, `mine_negatives.py` on
+    # `n_negatives`/`batch_size`, `loss.py` on `rdrop_alpha`, …), so nothing is skipped and the whole
+    # call is 15.5 ms — 30.4 ms with a baseline, which parses the same paths twice. That is the
+    # budget to know: `champion_metric_caveats` calls the whole-node form on every `/api/runs` poll,
+    # and over all 46 preserved runs it totals 17-21 ms, essentially all of it the two repo runs whose
+    # champion carries a working set (15-17 ms + 11-14 ms across them; every other run is ~0.01 ms
+    # because its champion declares bare names or ships no `.py`). The filter is kept because a
+    # substring scan is strictly cheaper than a parse and a working set naming parameters it does not
+    # touch is the ordinary case; it is not kept on the strength of a saving it did not produce here.
+    tails = {parts[-1] for parts, _ in declared.values()}
+    sources: list = []
+    budget = _PARAM_SOURCE_CAP
+    for path in sorted(files or {}):
+        text = (files or {}).get(path)
+        if not isinstance(text, str) or not str(path).endswith(".py"):
+            continue
+        if not any(t in text for t in tails):
+            continue
+        if budget <= 0:
+            break
+        budget -= len(text)
+        sources.append((str(path), text))
+    if isinstance(code, str) and code.strip() and any(t in code for t in tails):
+        sources.append((_WHOLE_FILE, code))
+
+    # The baseline is only ever CONSULTED for a path a source above produced, so parse those files
+    # and no others (same pre-filter, same soundness argument).
+    # ATTRIBUTING AT ALL is decided by whether ANY baseline was handed over, because a code-artifact
+    # task has no `files` to pass and would otherwise have no way to ask the narrowed question.
+    attribute = baseline_files is not None or bool(baseline_code)
+    base_paths: dict = {}
+    if attribute:
+        _wanted = {p for p, _ in sources}
+        for path in sorted(baseline_files or {}):
+            text = (baseline_files or {}).get(path)
+            if str(path) in _wanted and isinstance(text, str):
+                base_paths[str(path)] = _assigned_numeric_paths(text)
+        # The whole-file artifact under the SAME synthetic name it is reported by, so the one source
+        # that has no path is attributed by the same rule as the ones that do.
+        if _WHOLE_FILE in _wanted and isinstance(baseline_code, str):
+            base_paths[_WHOLE_FILE] = _assigned_numeric_paths(baseline_code)
+
+    out: list = []
+    for path, text in sources:
+        assigned = _assigned_numeric_paths(text)
+        for target, (val, line) in assigned.items():
+            for key, (parts, decl) in declared.items():
+                # SUFFIX, not equality: the receiver (`config`, `cfg`, `self.conf`) is the caller's
+                # local name and says nothing about which declaration the path reaches.
+                if len(target) < len(parts) or tuple(target[-len(parts):]) != parts:
+                    continue
+                if val == decl:
+                    continue                  # the code AGREES with the declaration — nothing to say
+                if attribute:
+                    prior = base_paths.get(path, {}).get(target)
+                    if prior is not None and prior[0] == val:
+                        continue              # already there before this repair — not its doing
+                out.append(ParamOverride(param=key, declared=decl, code=val,
+                                         path=path, line=int(line)))
+    out.sort(key=lambda o: (o.param, o.path, o.line))
+    return tuple(out[:PARAM_OVERRIDE_CAP])
 
 
 def inert_streak(repair_log) -> int:
