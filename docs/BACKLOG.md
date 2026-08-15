@@ -757,11 +757,19 @@ site that proves it is open.
   is the champion. Repairs that introduced one: **ONE**, attempt 4. The denominator is small and is
   quoted with it — 25 of the 297 nodes declare a dotted numeric parameter at all, all on
   `rubertlite-dr-unified-v{2,6,7,8}`; the toy and benchmark spaces declare bare names. TWO adjacent
-  populations were measured and are NOT this defect: five nodes whose declaration is contradicted by
-  their YAML CONFIG rather than by code (`live-asha-0804` node 2, v2 node 3, v7 nodes 1 and 2, v8
-  node 0 — four of them diverging at CREATION, so a Developer defect and not a repair one), and one
-  bare-name conditional override (`rubertlite-dense-retrieval` node 36, `distill_alpha` 0.5 declared
-  / 0.0 assigned inside a missing-teacher fallback, present at creation, zero repairs).
+  populations were measured and are NOT this defect. **(i) The YAML-CONFIG route: FIVE nodes** —
+  `rubertlite-dr-unified-v2` node 3 (`loss.temperature` 0.05 declared / 0.01 in
+  `train.loss.temperature`), v7 node 1 (`batch_size` and `gradient_accumulation_steps`), v7 node 2
+  and v8 node 9 (`n_epochs`), and v8 node 0 (`batch_size` and `n_epochs`) — **all five already
+  diverging at `node_created`**, so this route is Developer-authored and not repair-authored. The
+  rule matters and is stated because two obvious ones are both wrong: anchoring the declared key at
+  the YAML ROOT misses v2 node 3, whose `loss.temperature` sits under `train.`, while matching on the
+  LAST COMPONENT alone convicts that same node four more times against `adapter.training.*` and
+  `test.retriever.*`, which are different config sections entirely. The number above uses the
+  contiguous-SUFFIX rule the shipped code rung uses, over every YAML in each working set.
+  **(ii) One bare-name conditional override**: `rubertlite-dense-retrieval` node 36, `distill_alpha`
+  declared 0.5 and `train.py:117` assigning 0.0 inside the `elif teacher_ckpt …` missing-teacher
+  fallback — present at creation, zero repairs.
 
   **THE FIX IS (a): SAY IT, in the two records a reader meets.** Both derive from the DECLARATION
   (`Idea.params`, minted into `node_created` by the Researcher and never by a repair) and the

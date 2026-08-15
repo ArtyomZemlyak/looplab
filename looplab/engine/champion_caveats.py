@@ -96,10 +96,12 @@ reachable but OCCUPIED, by the best result this box has produced. (The denominat
 should be quoted: 25 of those 297 nodes declare a dotted numeric parameter at all, all of them on the
 four `rubertlite-dr-unified-v{2,6,7,8}` runs; the toy and benchmark spaces declare bare names, which
 `PARAM_OVERRIDE_MIN_PARTS` excludes by design.) TWO shapes it deliberately does not see, both
-measured: a declaration contradicted by the node's YAML CONFIG rather than by its code (five nodes —
-`live-asha-0804` node 2, v2 node 3, v7 nodes 1 and 2, v8 node 0 — a different route to the same
-defect, left open because the rung would have to know which config file the pipeline reads and by
-what key path), and a BARE-name declaration overridden in a conditional branch
+measured: a declaration contradicted by the node's YAML CONFIG rather than by its code (five nodes,
+re-derived under this rung's OWN contiguous-suffix rule against every YAML in each working set —
+`rubertlite-dr-unified-v2` node 3 and v7 nodes 1 and 2 and v8 nodes 0 and 9, ALL FIVE already
+diverging at node_created, so this route is a Developer-authored defect and not a repair-authored one
+— left open because the rung would have to know which config file the pipeline reads and by what key
+path), and a BARE-name declaration overridden in a conditional branch
 (`rubertlite-dense-retrieval` node 36, `distill_alpha` declared 0.5, `train.py:117` assigning 0.0
 inside a missing-teacher fallback) — the one corpus instance of exactly the two shapes
 `PARAM_OVERRIDE_MIN_PARTS` and the "not a claim about what ran" wording exist to refuse.
