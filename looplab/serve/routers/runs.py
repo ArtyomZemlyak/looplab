@@ -1948,6 +1948,41 @@ def build_router(srv) -> APIRouter:
         state = frame.get("state") if isinstance(frame, dict) else None
         return node_attempt_from_payload(state if isinstance(state, dict) else {}, nid)
 
+    # The node-lifecycle compare-and-swap every per-node evidence route runs, spelled ONCE.
+    #
+    # `node_attempt_changed` is raised from a dozen places here and each carried its own hand-copied
+    # four-key body — so the wire contract of a refusal the UI branches on (`useTraceRetry`,
+    # `traceScrollModel.js`'s superseded-vs-unreadable vocabulary) lived in a dozen literals that
+    # nothing held together, and the newest route was written by copying the previous one verbatim.
+    # The MESSAGE is a required argument because it is the half that legitimately differs: it names
+    # the evidence being read ("its trace", "its episodes") and the operator reads it.
+    def _attempt_cas_409(nid: int, expected: Optional[int], current: Optional[int], message: str, *,
+                         remediation: str = "Reload node state and request the current attempt.",
+                         **extra) -> HTTPException:
+        return HTTPException(409, {
+            "code": "node_attempt_changed",
+            "node_id": nid,
+            **extra,
+            "expected_attempt": expected,
+            "current_attempt": current,
+            "message": message,
+            "remediation": remediation,
+        })
+
+    def _assert_attempt_unchanged(rd: Path, nid: int, current_attempt: int, *, message: str) -> int:
+        """Re-read the node's lifecycle AFTER a trace read and refuse if it moved.
+
+        Returns the (unchanged) attempt so a caller can use it without a third read. The `is not
+        None else 0` settle is part of the rule and not incidental: a setup/pseudo-node and a legacy
+        trace row have no folded lifecycle marker, so they are attempt zero on BOTH sides of the CAS
+        — and a helper that skipped it would compare `None` against `0` and refuse every such read.
+        """
+        observed = _cached_node_attempt(rd, nid)
+        after_attempt = observed if observed is not None else 0
+        if after_attempt != current_attempt:
+            raise _attempt_cas_409(nid, current_attempt, after_attempt, message)
+        return after_attempt
+
     def _legacy_node_log_dir_identity(rd: Path, nid: int) -> Optional[tuple[int, int]]:
         """Prove a legacy attempt-zero log directory is this run's exact node child.
 
@@ -2107,14 +2142,8 @@ def build_router(srv) -> APIRouter:
                 raise HTTPException(404, "no such node")
             current_attempt = 0
         if attempt is not None and attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": attempt,
-                "current_attempt": current_attempt,
-                "message": "The node was reset before its logs were read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(nid, attempt, current_attempt,
+                                   "The node was reset before its logs were read.")
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
@@ -2197,14 +2226,11 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Reload run state and request the current generation.",
             })
         if after_attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": current_attempt,
-                "current_attempt": after_attempt,
-                "message": "The node was reset while its logs were being read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            # NOT `_assert_attempt_unchanged`: this route's `after_attempt` carries the legacy
+            # log-directory identity recheck above (a replaced directory reads as None), so the
+            # value being compared is not the plain settled lifecycle the helper re-reads.
+            raise _attempt_cas_409(nid, current_attempt, after_attempt,
+                                   "The node was reset while its logs were being read.")
         return {**payload, "node_id": nid, "attempt": current_attempt,
                 "run_generation": after_generation or None}
 
@@ -2221,25 +2247,16 @@ def build_router(srv) -> APIRouter:
         if current_attempt is None:
             raise HTTPException(404, "no such node")
         if attempt is not None and attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": attempt,
-                "current_attempt": current_attempt,
-                "message": "The node was reset before its metric evidence was read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(nid, attempt, current_attempt,
+                                   "The node was reset before its metric evidence was read.")
         m = fenced_node_metrics(_node_dir(rd, nid), current_attempt)
+        # This route folds fresh state rather than reading the payload cache, and an absent node is a
+        # 404 above rather than attempt zero, so it keeps its own re-read (see the settle note on
+        # `_assert_attempt_unchanged`) and shares only the refusal body.
         after_attempt = _node_attempt(srv.state(rd), nid)
         if after_attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": current_attempt,
-                "current_attempt": after_attempt,
-                "message": "The node was reset while its metric evidence was being read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(nid, current_attempt, after_attempt,
+                                   "The node was reset while its metric evidence was being read.")
         return {"node_id": nid, "attempt": current_attempt, "metrics": m}
 
     def _settle_window_anchor(rd: Path, before: Optional[str]) -> Optional[str]:
@@ -2333,34 +2350,19 @@ def build_router(srv) -> APIRouter:
         # new one.  What stays refused is an attempt this node has NEVER reached: no such lifecycle
         # exists, and answering it with the current one would publish live spans under a future label.
         if attempt is not None and attempt > current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": attempt,
-                "current_attempt": current_attempt,
-                "message": "The node was reset before its trace was read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(nid, attempt, current_attempt,
+                                   "The node was reset before its trace was read.")
         attempt = current_attempt if attempt is None else attempt
         # 0/absent settles to the default inside `node_trace_view` — the one settle rule owns it, so
         # this route does not get a second opinion about what an unrequested window means.
         payload = _node_trace(rd, nid, cap=limit, attempt=attempt, before=anchor)
         _assert_trace_reset_clear(rd)
-        after_observed_attempt = _cached_node_attempt(rd, nid)
-        after_attempt = after_observed_attempt if after_observed_attempt is not None else 0
         # The post-read CAS is UNCHANGED and stays unconditional: a lifecycle that moves under the
         # read is still refused, for a historical selection too.  Relaxing it as well would be a
         # second contract change bought for nothing — the client already recovers a superseded read
         # (`useTraceRetry`), and this fence is what the reset-safety tests drive.
-        if after_attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": current_attempt,
-                "current_attempt": after_attempt,
-                "message": "The node was reset while its trace was being read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+        _assert_attempt_unchanged(rd, nid, current_attempt,
+                                  message="The node was reset while its trace was being read.")
         after_generation = srv.commands.run_generation(rd)
         if (after_generation != before_generation
                 or (expected_generation is not None
@@ -2402,14 +2404,8 @@ def build_router(srv) -> APIRouter:
         # served as asked, an attempt this node never reached is refused. A map of a lifecycle that
         # does not exist would be a map of the current one under a false label.
         if attempt is not None and attempt > current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": attempt,
-                "current_attempt": current_attempt,
-                "message": "The node was reset before its episodes were read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(nid, attempt, current_attempt,
+                                   "The node was reset before its episodes were read.")
         read_attempt = current_attempt if attempt is None else attempt
         try:
             payload = srv.node_episode_map(rd, nid, generation=read_attempt)
@@ -2418,17 +2414,8 @@ def build_router(srv) -> APIRouter:
         # The same post-read lifecycle CAS the window routes apply: a reset landing under this read
         # abandons every anchor in the map, and publishing them would hand the operator seek keys
         # into a lifecycle that no longer exists.
-        after_attempt = _cached_node_attempt(rd, nid)
-        after_attempt = after_attempt if after_attempt is not None else 0
-        if after_attempt != current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": current_attempt,
-                "current_attempt": after_attempt,
-                "message": "The node was reset while its episodes were being read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+        _assert_attempt_unchanged(rd, nid, current_attempt,
+                                  message="The node was reset while its episodes were being read.")
         generation = _finish_trace_read(rd, before_generation, expected_generation)
         return _trace_response({**payload, "node_id": str(nid), "attempt": read_attempt,
                                 "run_generation": generation or None})
@@ -2776,14 +2763,9 @@ def build_router(srv) -> APIRouter:
         current_attempt = _cached_node_attempt(rd, nid)
         current_attempt = current_attempt if current_attempt is not None else 0
         if attempt is not None and attempt > current_attempt:
-            raise HTTPException(409, {
-                "code": "node_attempt_changed",
-                "node_id": nid,
-                "expected_attempt": attempt,
-                "current_attempt": current_attempt,
-                "message": "The node was reset before its conversation evidence was read.",
-                "remediation": "Reload node state and request the current attempt.",
-            })
+            raise _attempt_cas_409(
+                nid, attempt, current_attempt,
+                "The node was reset before its conversation evidence was read.")
         # What is READ vs what the lifecycle CAS fences: the span window, the validator and the
         # echoed identity all follow the REQUESTED generation, while `recheck_lifecycle` below keeps
         # fencing the node's CURRENT one exactly as before — so a reset landing under the read is
@@ -2809,7 +2791,13 @@ def build_router(srv) -> APIRouter:
             return observed, revision, count, conditional_ok
 
         def recheck_lifecycle() -> str | None:
-            """The same post-read CAS also fences a bodyless conditional hit."""
+            """The same post-read CAS also fences a bodyless conditional hit.
+
+            The attempt is observed BEFORE the reset marker and the run generation and refused
+            AFTER them, so this keeps its own re-read rather than calling
+            `_assert_attempt_unchanged` — moving the observation past those two probes would change
+            the instant the CAS is taken on a conditional hit. Only the refusal body is shared.
+            """
             after_attempt = _cached_node_attempt(rd, nid)
             after_attempt = after_attempt if after_attempt is not None else 0
             _assert_trace_reset_clear(rd)
@@ -2825,14 +2813,9 @@ def build_router(srv) -> APIRouter:
                     "remediation": "Reload run state and request the current generation.",
                 })
             if after_attempt != current_attempt:
-                raise HTTPException(409, {
-                    "code": "node_attempt_changed",
-                    "node_id": nid,
-                    "expected_attempt": current_attempt,
-                    "current_attempt": after_attempt,
-                    "message": "The node was reset while its conversation evidence was being read.",
-                    "remediation": "Reload node state and request the current attempt.",
-                })
+                raise _attempt_cas_409(
+                    nid, current_attempt, after_attempt,
+                    "The node was reset while its conversation evidence was being read.")
             return after_generation
 
         idx = None
@@ -3007,14 +2990,10 @@ def build_router(srv) -> APIRouter:
 
     def _artifact_attempt_conflict(node_id: int, expected_attempt: Optional[int],
                                    current_attempt: Optional[int], message: str) -> None:
-        raise HTTPException(409, {
-            "code": "node_attempt_changed",
-            "node_id": node_id,
-            "expected_attempt": expected_attempt,
-            "current_attempt": current_attempt,
-            "message": message,
-            "remediation": "Reload Files and request the current node attempt.",
-        })
+        # The same refusal body as the trace family, with the Files surface's own remediation — the
+        # one field that legitimately differs, because it names where the operator re-reads.
+        raise _attempt_cas_409(node_id, expected_attempt, current_attempt, message,
+                               remediation="Reload Files and request the current node attempt.")
 
     @router.get("/api/runs/{run_id}/artifacts")
     def artifacts(run_id: str, expected_generation: str = Query(...)):
@@ -3106,16 +3085,13 @@ def build_router(srv) -> APIRouter:
                 })
             target_attempt = _node_attempt(srv.state(rd), target_node_id)
             if node_id != target_node_id:
-                raise HTTPException(409, {
-                    "code": "node_attempt_changed",
-                    "node_id": target_node_id,
-                    "expected_node_id": node_id,
-                    "current_node_id": target_node_id,
-                    "expected_attempt": attempt,
-                    "current_attempt": target_attempt,
-                    "message": "The requested file now belongs to a different node identity.",
-                    "remediation": "Reload Files and request the current node and attempt.",
-                })
+                # The one refusal in this family that names TWO identities, so it carries the extra
+                # node_id pair through the same builder rather than restating the common four keys.
+                raise _attempt_cas_409(
+                    target_node_id, attempt, target_attempt,
+                    "The requested file now belongs to a different node identity.",
+                    remediation="Reload Files and request the current node and attempt.",
+                    expected_node_id=node_id, current_node_id=target_node_id)
             if target_attempt is None or attempt != target_attempt:
                 _artifact_attempt_conflict(
                     target_node_id, attempt, target_attempt,

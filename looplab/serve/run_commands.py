@@ -263,6 +263,15 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
     return None
 
 
+# The postcondition values that mean "the operator asked this run to PAUSE", in one place. Two of
+# them coexist on purpose and forever: `paused` is what `control_validation.py` mints today, and
+# `paused_and_stopped` is the LEGACY spelling every durable record written before 2026-08-13 still
+# carries (a durable record is never rewritten). Every reader must accept BOTH — reading only the
+# new one is how a legacy record gets promoted to `succeeded` while missing the `engine_stopped`
+# observation `_succeeded` attaches, which is the one thing that tells a paused-with-a-live-engine
+# run from a paused-and-released one.
+PAUSE_POSTCONDITIONS = frozenset({"paused", "paused_and_stopped"})
+
 # NOTE (2026-08-13): `PAUSE_OBSERVATION_MAX_EXTENSIONS` / `_extend_landed_pause_observation` /
 # `_pause_is_folded` lived here. They existed to keep a `paused_and_stopped` command from timing out
 # while the pause had landed and the engine was still working — a bounded number of extra observation
@@ -1856,12 +1865,22 @@ class RunCommandService:
         # Release only this command's lease so an immediate next command/finalize-resume is not held
         # behind a stale Popen claim; external/reset and other-command leases remain untouched.
         self._clear_spawn_claim(rd, str(record.get("id") or ""))
-        if record.get("postcondition") == "paused":
+        if record.get("postcondition") in PAUSE_POSTCONDITIONS:
             # The half that is no longer a GATE is still worth REPORTING: a pause that has folded
             # while the engine is finishing a multi-hour evaluation is a different situation from one
             # whose driver has already released engine.lock, and the operator acts differently on the
             # two (only the second can be reset/deleted). Observation, not a precondition — a false
             # here never keeps the command out of `succeeded`.
+            #
+            # BOTH SPELLINGS, exactly as `_postcondition` reads them. This said `== "paused"` while
+            # the rule one layer down deliberately accepts the LEGACY `paused_and_stopped` too — and
+            # that legacy value is the whole reason the reading was widened: it is what every record
+            # a pre-2026-08-13 server wedged still carries, so those were precisely the records that
+            # reached `succeeded` here with no `engine_stopped` key at all, and the UI cannot then
+            # tell "paused, the engine is still finishing a multi-hour eval" from "paused, the driver
+            # released engine.lock" — the distinction that decides whether the run can be reset or
+            # deleted. Spelled once, in `PAUSE_POSTCONDITIONS`, so the observation and the gate
+            # cannot drift again.
             record = dict(record)
             record["engine_stopped"] = self._engine_state(rd) is False
         return self._terminal(path, record, "succeeded")
@@ -2766,7 +2785,7 @@ class RunCommandService:
                 return False
             observation.state()  # prove the complete log, including the marked intent, still folds
             return True
-        if kind in {"paused", "paused_and_stopped"}:
+        if kind in PAUSE_POSTCONDITIONS:
             # THE EFFECT THE OPERATOR ASKED FOR, observed on its own. The pause is a folded flag, so
             # this is satisfied the moment the intent is durable — which is the point: the engine
             # PROCESS exit is a second, much later effect (it finishes the in-flight evaluation
@@ -3246,8 +3265,7 @@ class RunCommandService:
             # and the driver-liveness half of the condition (`alive`) is untouched, so a live
             # engine still slides its own deadline whether or not it has appended yet.
             progress_seq = observation.max_non_control_seq
-            if ((record.get("postcondition") in {"paused", "paused_and_stopped",
-                                                 "finished_and_stopped"}
+            if ((record.get("postcondition") in (PAUSE_POSTCONDITIONS | {"finished_and_stopped"})
                  or spec.engine_policy is not EnginePolicy.NO_SPAWN)
                     and (alive or observation.has_domain_progress(last_progress_seq))):
                 last_progress_seq = progress_seq

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import math
 import os
 import re
@@ -36,7 +37,7 @@ from looplab.serve.assistant import (
     sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.assistant_watch import (
     SessionWatches, WatchDeferred, WatchRefusal, WatchService, WatchStore)
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.http import json_object
 from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
@@ -47,6 +48,10 @@ from looplab.tools.perm_modes import (
 from looplab.core.redact import redact_secrets
 
 ASSISTANT_SHARE_HEADER = "X-LoopLab-Share"
+
+# One logger with the server's own name, so a standing-watch failure lands where an operator already
+# looks for server lines rather than in a dropped exception (see `_watch_scheduler_error`).
+_log = logging.getLogger("looplab.server")
 
 # Cadence for draining the assistant worker's queue from the event loop (see `gen` below). The poll
 # only runs while the worker has produced NOTHING, so it bounds idle latency, not throughput; the
@@ -292,6 +297,129 @@ def _shared_title(messages: list[dict]) -> str:
         if visible:
             return visible[:SHARE_TITLE_MAX_CHARS]
     return "Shared chat"
+
+
+# ------------------------------------------------------------------ standing watches (§F4)
+# Module level, not closures inside `build_router`: these three are the whole decision layer
+# of an UNATTENDED turn — what the server saw, and what it refuses to do with nobody watching —
+# and a rule nobody can call is a rule nobody can test. They take what they need as arguments
+# (the `srv` bag, the store, a list to record into) rather than being assigned onto `srv`,
+# which would be a new late-bound router protocol (`serve/router_wiring.py`) for no reason.
+def watch_observe_run(srv, run_id: str):
+    """What the server SEES of a run — the trigger's whole evidentiary basis (doc 36).
+
+    Returns the read model's folded state row, or None when there is no run here RIGHT NOW. The
+    three outcomes are deliberately distinct:
+      * 404 / 410 -> None: not there. This says nothing about WHY, on purpose — `run_dir` 404s
+        alike for a deleted run, a typo and a run whose directory exists but whose
+        `events.jsonl` has not been written yet (the launch window), and only the watch record
+        knows whether it has ever seen this run. `WatchService` owns that distinction; it is not
+        one an observation can make. (A 410 does prove the run existed once, but it arrives as
+        the same None; a never-seen run under deletion therefore waits out the appearance grace
+        instead of retiring at once, which is bounded and costs a few cached `stat`s.)
+      * 503 -> RAISE: the deletion fence itself is unreadable, which is a transient storage
+        fault on the mounts a run root lives on. A watch must not give up on one of those.
+      * anything else -> the row, phase and liveness included.
+
+    THE ROW IS THE RUN-LIST SUMMARY, not the folded `/state` projection, because that is the
+    shape `observed_run_states` documents and `WatchService` stores. The state payload's `nodes`
+    is the whole per-node MAP, and this row is written to the durable record as
+    `last_observation` on every poll and echoed by `GET /api/assistant/watches` — but worse, it
+    is what `wakeup_instruction` truncates to 1,500 chars with `sort_keys=True`, so on any run
+    with more than a couple of nodes the model's wake-up context ended INSIDE `nodes` and never
+    reached `phase`, `run` or `states`: the observation it was woken for. (`best_metric` was
+    additionally always null there — the summary row is where that field lives.) The summary
+    fold is the same `file_identity`-cached one the run list already pays for, and `only=`
+    bounds it to this run rather than folding the whole workspace.
+
+    `engine_running` is stamped here from the LIVE probe and kept TRI-STATE (`_engine_liveness`,
+    not `_engine_alive`): the summary row deliberately carries no liveness column at all, since
+    that is a lock probe and not a fact about the log, and `observed_run_states` must be able to
+    tell "definitely stopped" from "could not tell" — see its own note.
+    """
+    try:
+        rd = srv.run_dir(run_id)
+    except HTTPException as exc:
+        if exc.status_code in (404, 410):
+            return None
+        raise
+    rows = [row for row in srv.run_summaries(only={rd.name}) if row.get("run_id") == rd.name]
+    if not rows:
+        # `run_dir` proved the directory and its event log are there, so this is a run whose
+        # summary fold could not be completed right now (a half-written log, a racing reset).
+        # Not-there is the observation `WatchService` already handles conservatively.
+        return None
+    return {**rows[0], "engine_running": _engine_liveness(rd)}
+
+
+def watch_session_exists(sessions: "SessionStore", sid) -> Optional[bool]:
+    """Does the chat that owns a watch still exist? — the ownership model's read side.
+
+    TRI-STATE, because its consumer is an IRREVERSIBLE delete: True there, False provably gone,
+    None cannot tell. It answered `validated_meta(sid) is not None`, which collapses three facts
+    into one — `SessionStore._read_meta` catches `(OSError, ValueError)` and returns None, and
+    `_valid_meta` rejects a record this build cannot vouch for — so a transient EIO/EACCES on the
+    mount, a `meta.json` read mid-rewrite, or an unrecognized `mode` each read as "this chat is
+    gone" and took a LIVE chat's standing watches (and the operator's own instruction inside them)
+    with it.
+
+    The proof of absence is the session DIRECTORY, and `SessionStore.list()` is where this router
+    can ask for it without re-deriving the store's own id/path rule: it yields a row for every
+    session directory that exists, INCLUDING one whose metadata it could not read or validate
+    (`_cleanup_meta`), which is precisely the difference between "unreadable" and "not there". An
+    unreadable session ROOT raises out of it, and `_sweep_orphaned_watches` reads a raise as
+    "cannot tell" too. `validated_meta` stays the fast path: one file read, no transcript
+    materialized, and it is what answers for every healthy chat.
+    """
+    sid = str(sid)
+    if sessions.validated_meta(sid) is not None:
+        return True
+    if any(row.get("id") == sid for row in sessions.list()):
+        return None            # the chat's storage is there; we simply could not read it
+    return False
+
+
+# The label an approval card would have carried, for a turn with nobody to show it to. Bounded
+# like every other public action field (`_make_approver`'s `public_limits`).
+def _declined_action_label(action: dict) -> str:
+    action = action if isinstance(action, dict) else {}
+    for key in ("label", "verb", "tool", "tool_kind"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:160]
+    return "an action needing approval"
+
+
+def unattended_watch_approver(declined: list):
+    """The approver for a turn NOBODY IS WATCHING — an immediate, recorded deny.
+
+    `_make_approver` registers a confirm request and BLOCKS its thread on an Event until the
+    operator answers or `_PERM_TIMEOUT` (900 s) elapses. That is exactly right for a turn a human
+    started and is looking at, and exactly wrong here: a wake-up is machine-initiated, so nobody
+    is going to open the confirm card, and every `ask` decision therefore parks the scheduler's
+    SINGLE daemon thread for a quarter of an hour — during which `tick()` services no other watch
+    on the whole server, and `_acquire_turn` 409s the operator's own messages in that chat
+    because the slot is still held.
+
+    Waiting cannot be made safe by shortening it: what is missing is the human, not the timeout.
+    So an unattended turn is denied at the gate — the same value the confirm path resolves to
+    when a card is never answered, reached in microseconds instead of 900 seconds — and the
+    refusal is REPORTED (`unattended_denial_note`) rather than swallowed. This narrows what a
+    watch may do; it can never widen it, because only actions the mode decided to ASK about reach
+    an approver at all (`perm_modes.refusal_for`), reads are inline in every mode, and a `plan`
+    watch's mutations were already denied by policy before this.
+    """
+    def approver(action: dict) -> str:
+        declined.append(_declined_action_label(action))
+        return PERM_DENY
+    return approver
+
+
+def unattended_denial_note(declined: list) -> str:
+    shown = ", ".join(dict.fromkeys(declined))[:400]
+    return (f"[standing watch] {len(declined)} action(s) needing your approval were declined "
+            f"automatically, because nobody is watching an automatic wake-up: {shown}. "
+            f"Ask for them again in this chat and approve them there.")
 
 
 def build_router(srv) -> APIRouter:
@@ -1509,30 +1637,7 @@ def build_router(srv) -> APIRouter:
 
     # ---------------------------------------------------------------- standing watches (§F4)
     def _watch_observe_run(run_id: str):
-        """What the server SEES of a run — the trigger's whole evidentiary basis (doc 36).
-
-        Returns the read model's folded state row, or None when there is no run here RIGHT NOW. The
-        three outcomes are deliberately distinct:
-          * 404 / 410 -> None: not there. This says nothing about WHY, on purpose — `run_dir` 404s
-            alike for a deleted run, a typo and a run whose directory exists but whose
-            `events.jsonl` has not been written yet (the launch window), and only the watch record
-            knows whether it has ever seen this run. `WatchService` owns that distinction; it is not
-            one an observation can make. (A 410 does prove the run existed once, but it arrives as
-            the same None; a never-seen run under deletion therefore waits out the appearance grace
-            instead of retiring at once, which is bounded and costs a few cached `stat`s.)
-          * 503 -> RAISE: the deletion fence itself is unreadable, which is a transient storage
-            fault on the mounts a run root lives on. A watch must not give up on one of those.
-          * anything else -> the row, phase and liveness included.
-        """
-        try:
-            rd = srv.run_dir(run_id)
-        except HTTPException as exc:
-            if exc.status_code in (404, 410):
-                return None
-            raise
-        payload = srv.state_payload(rd)
-        state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
-        return dict(state)
+        return watch_observe_run(srv, run_id)
 
     def _watch_run_turn(record: dict, instruction: str) -> dict:
         """Run ONE wake-up turn, through the SAME `run_turn` an operator-typed turn goes through.
@@ -1557,15 +1662,16 @@ def build_router(srv) -> APIRouter:
             if exc.status_code == 409:
                 raise WatchDeferred("the chat is busy") from exc
             raise
+        declined: list[str] = []
         try:
             s = _llm_settings()
             from looplab.core.llm import make_llm_client_for
             client = make_llm_client_for(s, factory=srv.make_llm_client)
-            approver = _make_approver(sid, mode, turn_epoch, cancel_ev)
+            approver = unattended_watch_approver(declined)
             _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev)
             history = list(sess["messages"])
             turn_id = secrets.token_hex(8)
-            return _assistant_run_turn(
+            res = _assistant_run_turn(
                 client, root, history, instruction, mode,
                 alive_fn=_engine_alive, settings=s, approver=approver,
                 on_step=_on_step, on_todos=_on_todos, cancel_check=cancel_ev.is_set,
@@ -1578,6 +1684,14 @@ def build_router(srv) -> APIRouter:
                 watches=None)
         finally:
             _release_turn(sid, cancel_ev, turn_epoch)
+        if declined and isinstance(res, dict):
+            # SAY IT IN THE CHAT. The deny above is the honest answer, but a refusal the operator
+            # cannot see is the same silence this whole module exists to remove: they would find a
+            # wake-up reporting that it "could not" do the thing they asked for, with no way to learn
+            # that the server declined it rather than the run refusing it.
+            res = {**res, "reply": ((res.get("reply") or "").rstrip() + "\n\n" +
+                                    unattended_denial_note(declined)).strip()}
+        return res
 
     def _watch_append(session: str, turn: dict) -> None:
         # Unconditional append, NOT `append_if_len`: a wake-up is not racing a stale reply of its
@@ -1585,19 +1699,23 @@ def build_router(srv) -> APIRouter:
         # conditional append exists to drop a cancelled turn's stale reply; a watch has no such twin.
         _asst.append(session, turn)
 
-    def _watch_session_exists(sid) -> bool:
-        """Does the chat that owns a watch still exist? — the ownership model's read side.
+    def _watch_session_exists(sid) -> Optional[bool]:
+        return watch_session_exists(_asst, sid)
 
-        `validated_meta` rather than `get`: this is asked once per record at startup and must not
-        materialize a transcript to answer. A malformed id raises, and `_sweep_orphaned_watches`
-        reads a raise as "cannot tell" and leaves the record alone, which is the direction a
-        deletion sweep has to fail in.
-        """
-        return _asst.validated_meta(str(sid)) is not None
+    def _watch_scheduler_error(exc: BaseException) -> None:
+        """Where a scheduler failure GOES. Without this sink `WatchService._loop`'s containment
+        `except` — which exists so one bad record cannot kill the thread — drops the exception with
+        no line anywhere, so standing monitoring could stop producing wake-ups for the life of the
+        process, silently and unattributably. Logged rather than raised, because killing the thread
+        is the failure this is contained against; the class docstring names it as the fourth
+        collaborator and it was the one left None."""
+        _log.warning("standing-watch scheduler tick failed: %s: %s",
+                     type(exc).__name__, exc, exc_info=True)
 
     _watch_service = WatchService(
         _watches, observe_run=_watch_observe_run, run_turn_fn=_watch_run_turn,
-        append_turn=_watch_append, session_exists=_watch_session_exists)
+        append_turn=_watch_append, session_exists=_watch_session_exists,
+        on_error=_watch_scheduler_error)
     # Settle whatever the previous process left mid-wake, and start the scheduler only if this
     # server actually has standing watches — see `WatchService.bootstrap`.
     _watch_service.bootstrap()

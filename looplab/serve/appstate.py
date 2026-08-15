@@ -267,6 +267,20 @@ class AppState:
         on the corpus: 62 ms for the 12 MB rubertlite log and 33 ms for the 5.2 MB `rubert-dr-0807` —
         at or below the `iter_event_jsonl` + `Event(**o)` pass this sits beside (3.5 ms / 44 ms), and
         a divergent log stops the scan at its boundary rather than reading on.
+
+        **IT IS A SECOND PASS OVER THE SAME FILE, AND THAT IS NOT REMOVABLE FROM HERE** (checked
+        2026-08-15, because it reads like an obvious duplicate of the fold's own read and will again
+        to the next person). The two passes answer different questions: `events()` reads through
+        `iter_event_jsonl`, which STOPS at the first corrupt or non-dense record, while this receipt
+        is precisely a statement about the bytes BEHIND that stop — `corrupt_line` and
+        `dropped_lines` count complete records the reader by construction never looks at, which is
+        why `log_divergence` continues past the boundary on purpose. Nor is the healthy answer
+        derivable from the returned list: a stopping reader cannot tell "reached EOF" from "stopped
+        at line 21", and an `append_many` envelope carries several events on one physical line, so no
+        arithmetic over the folded events recovers the file's own record count. The way to pay ONCE
+        is one walk that produces both — which belongs beside `iter_event_jsonl` and `log_divergence`
+        in `events/eventstore.py`, where the line RULE already lives; re-deriving that rule here to
+        save a read is the drift `core/jsonlio.py` exists to prevent.
         """
         log = rd / "events.jsonl"
         try:
