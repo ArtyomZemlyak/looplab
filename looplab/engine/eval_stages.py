@@ -245,6 +245,17 @@ class EvalStagesMixin:
             # never re-validated, and a non-string entry reaches `_confined` -> `Path(wd) / 123` ->
             # an uncaught TypeError out of the eval worker (no node terminal, re-dying on every
             # resume — the failure class `READER_PATH_KEYS` exists to prevent).
+            #
+            # A `subject_glob` DELIBERATELY DERIVES NO `needs`, and the omission is the design rather
+            # than a gap left for later. `verify_stage_inputs` takes literal paths and stats them; a
+            # pattern has no literal until something walks the workdir, so wiring it here would mean
+            # resolving it a SECOND time, at a second instant (before the score stage rather than at
+            # the bind), against a workdir a stage may still be writing. Two resolutions of one
+            # declaration can disagree — one binding `final/model.safetensors` while the other
+            # refused the stage for `ambiguous`, or worse, passing a contract about a path the record
+            # then does not name. What is given up is exactly what this whole entry says `needs`
+            # buys, which is LATENCY: a pattern that resolves to nothing is `missing` at bind time
+            # and the node is unselectable under `require` either way, one scorer run later.
             if str(getattr(self, "metric_subject", "audit") or "audit") == "require":
                 _subject = (es.get("metric") or {}).get("subject") if isinstance(es.get("metric"), dict) else None
                 _needs = [s for s in (_subject or []) if isinstance(s, str) and s.strip()]

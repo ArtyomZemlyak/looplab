@@ -217,6 +217,44 @@ stage whose `expect` promised the path. It is the operator's field, on the opera
 for the same reason scoring is: the agent writes the training script and therefore writes the very text
 an extractor would read.
 
+**When the pipeline names its own output directory — `eval.metric.subject_glob`.** A literal `subject`
+requires the operator to know the output path at *submit* time, and on the task family this whole
+mechanism was built for, they cannot. Measured over `runs/` (2026-08-15): all four repo runs that train
+anything write to `vectorsearch/experiments/<a name the AGENT chose>/final/model.safetensors` — 17 nodes,
+**10 distinct spellings** of that one segment, because it is derived from a value the agent picks per
+experiment. A single literal would have bound 5 of 7 nodes on `rubertlite-dr-unified-v6` and **0 of 5**
+on `rubertlite-dr-unified-v8`, which is why every evaluated node of the flagship run records
+`not_declared` under the shipped `audit` default. Declare the *shape* instead:
+
+```jsonc
+"metric": { "kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)",
+            "subject_glob": ["vectorsearch/experiments/*/final/model.safetensors"] }
+```
+
+The **engine** resolves it, by walking the node's real workdir at the score stage's start. Nothing the
+candidate wrote about itself is read to resolve it — not its `looplab_stages.json`, not its stdout — so
+the trust boundary does not move: the operator still says what the number is about and the engine still
+establishes what is there. A resolved match then goes through exactly the same binding as a literal
+(identity, digest, producer, freshness), and the record carries both the pattern and the resolved path.
+
+**A pattern binds only when it matches exactly one artifact.** Zero matches is `missing`; two or more is
+`ambiguous`, which is a *refusal* and never a choice. That rule is the whole safety argument, not a
+convenience: each v8 node holds four `model.safetensors` of 92,174,712 bytes each — `final/` plus three
+`checkpoint-NNNN/` — so a careless `experiments/*/*/model.safetensors` matches all four, and binding any
+one of them would record `subject_bound: true` about bytes nobody chose. That is strictly **worse** than
+`not_declared`, because it manufactures confidence. Two tie-breaks that look helpful are deliberately
+absent for the same reason: mtime never disambiguates (it is a value the candidate can set on its own
+files, and what the candidate controls may refuse a binding but never elect one), and the agent's own
+`expect.files` is never consulted (it would always pick correctly, and it is authored by the candidate).
+`**` is allowed and is a cost rather than a hazard — recursion is exactly what produces the ambiguous
+match set, which is already a refusal.
+
+Both shapes may be declared together; `subject_bound` is an AND over everything declared. A `subject_glob`
+does **not** derive a `needs` on the protected `score` stage under `require`, because `verify_stage_inputs`
+stats literal paths — resolving the pattern a second time, at a second instant, is how two resolutions of
+one declaration come to disagree. What that gives up is the latency the derived contract buys and nothing
+else.
+
 Why it exists, in numbers: across the six repo runs that have an event log, **82 of 83 recorded metrics
 carry no provenance at all** — the one exception is the salvage path, i.e. provenance is written only
 once something has already failed — and **2 of 83 are provably about bytes the node did not produce**.

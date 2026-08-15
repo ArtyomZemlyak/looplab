@@ -107,8 +107,13 @@ export const salvagedProvenance = node =>
 // a second hand-written copy is how they come to name different ones. `not_declared` is the state 82
 // of 83 corpus metrics are in, so it gets the sentence that tells the operator what to write; every
 // other slug is a fact about a subject that WAS declared and reads as such.
+// `ambiguous` gets its own clause because it is the one slug whose fix is neither "declare one" nor
+// "produce the file": the declaration matched SEVERAL artifacts and the engine refused to pick, which
+// is the property that keeps a declared pattern from manufacturing a referent nobody chose.
 const unboundBecause = (why) =>
   why === 'not_declared' ? ', because the task declares no eval.metric.subject'
+    : why === 'ambiguous' ? ': the declared eval.metric.subject_glob matched more than one artifact, '
+        + 'so the engine refused to pick one'
     : why ? `: the declared subject is ${why}` : ''
 
 export function nodeFeasibilityStatus(node) {

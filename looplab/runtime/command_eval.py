@@ -2016,7 +2016,8 @@ def attempt_freshness_floor(eval_started: float, stages=None,
 
 
 def bind_metric_subject(subject, workdir, *, since: Optional[float], stages=None,
-                        upto: Optional[int] = None, stage: str = "") -> dict:
+                        upto: Optional[int] = None, stage: str = "",
+                        subject_glob=None) -> dict:
     """The `metric_provenance` subject record for this eval — `runtime/metric_subject.bind`, called
     with THIS module's containment rule and THIS module's producer map.
 
@@ -2027,11 +2028,18 @@ def bind_metric_subject(subject, workdir, *, since: Optional[float], stages=None
     `needs` stop being two unrelated lints and become two projections of one relation — this stage
     produced / that stage consumed THIS artifact — which is the asymmetry doc 35 §1 names as the
     actual defect behind "the contract is write-only".
+
+    `subject_glob` rides the SAME wrapper for the same reason: a pattern's unique match is bound
+    through the same `bind_one`, so it reaches the same `_confined`, the same identity and digest, the
+    same producer lookup and the same freshness floor a literal does. That matters here rather than
+    being a tidiness point — `Path.glob` FOLLOWS a symlinked directory, so a match can land outside
+    the workdir, and it is `_confined` at the bind (not a filter inside the resolver) that refuses
+    it.
     """
     from looplab.runtime import metric_subject as _ms
     producers = stage_output_producers(stages, upto if upto is not None else len(stages or []))
     return _ms.bind(subject, workdir, since=since, producers=producers, confine=_confined,
-                    stage=stage)
+                    stage=stage, globs=subject_glob)
 
 
 def absent_metric_subject() -> dict:
@@ -2045,7 +2053,8 @@ def absent_metric_subject() -> dict:
 
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
-                subject: Optional[list] = None) -> _EvalRun:
+                subject: Optional[list] = None,
+                subject_glob: Optional[list] = None) -> _EvalRun:
     """Run the declared stage pipeline in order; the LAST stage's output feeds the metric read.
 
     Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
@@ -2123,9 +2132,10 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         # the wrong slug also rides into the `metric_salvaged` violation row the operator reads.
         # Nothing else moves with it: the bind is a stat plus a bounded digest of the SAME artifact
         # `verify_stage_inputs` is about to stat, one iteration of one loop earlier.
-        if subject and _i == len(stages) - 1:
+        if (subject or subject_glob) and _i == len(stages) - 1:
             run.metric_subject = bind_metric_subject(subject, str(ex.wd), since=_fresh_since,
-                                                     stages=stages, upto=_i, stage=_sname)
+                                                     stages=stages, upto=_i, stage=_sname,
+                                                     subject_glob=subject_glob)
         # THE INPUT CONTRACT, before anything is spent. A stage whose declared input is not there
         # cannot succeed, and every second it runs before discovering that is a second bought at GPU
         # prices — v5 node 0 spent 76 minutes on a pipeline whose scorer read a directory the trainer
@@ -2369,7 +2379,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      check_fn=None,
                      on_deadline=None,
                      deadline_grace_max_s: Optional[float] = None,
-                     subject: Optional[list] = None) -> RunResult:
+                     subject: Optional[list] = None,
+                     subject_glob: Optional[list] = None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -2388,6 +2399,11 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     have. `None`/`[]` records nothing here; whether an unbound metric is then a VIOLATION is the
     engine's rung (`Settings.metric_subject`), never this function's, because this is also the
     library entry point tests and a future non-engine caller use.
+
+    `subject_glob` (`EvalSpec.metric["subject_glob"]`) is the same declaration for a pipeline that
+    names its OWN output directory — the shape of the path rather than the path, resolved here
+    against the real workdir and bound only when it matches exactly one artifact. Either argument
+    alone is a declaration; only both absent is `not_declared`.
 
     `wrap` (untrusted tier): a `wrap(argv, host_cwd) -> argv` from `make_docker_wrap` that
     runs each command inside a container. The host cwd is still passed to the subprocess (the
@@ -2459,7 +2475,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # ONE object carries what either path produced into the metric read below, so the tail can never
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,
-                        eval_started=_eval_started, check_fn=check_fn, subject=subject)
+                        eval_started=_eval_started, check_fn=check_fn, subject=subject,
+                        subject_glob=subject_glob)
             if stages else _run_single(command, _ex, timeout=timeout))
     if _run.early is not None:
         return _run.early
@@ -2471,10 +2488,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # predates this attempt cannot be what this attempt's number is about — unless this attempt is a
     # stage-scoped re-run, where the earlier attempt's artifact IS the subject by construction. A
     # single command reuses nothing (no stages), so that floor is `_eval_started`, unchanged.
-    if subject and _run.metric_subject is None:
+    if (subject or subject_glob) and _run.metric_subject is None:
         _run.metric_subject = bind_metric_subject(
             subject, str(wd), since=attempt_freshness_floor(_eval_started, stages, start_stage),
-            stages=stages, stage="")
+            stages=stages, stage="", subject_glob=subject_glob)
     rc, out, err, to, _sig = _run.rc, _run.out, _run.err, _run.timed_out, _run.signals
     stage_results = _run.stage_results
     with _sp("read_metric", kind=metric.get("kind", "stdout_json")):
