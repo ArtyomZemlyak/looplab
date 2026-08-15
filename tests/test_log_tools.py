@@ -383,20 +383,57 @@ def test_the_sweep_finds_every_match_across_its_chunk_boundaries(tmp_path, monke
         assert "�" not in row                           # never half a UTF-8 sequence
 
 
-def test_a_search_that_has_all_it_can_show_stops_and_says_where_it_stopped(tmp_path):
-    """Cost. Reaching the whole log is what the sweep is FOR, but it must not pay for the whole log
-    when it already has its answer: it stops at the first chunk boundary past its last showable match
-    and names the byte that continues it, which is also what keeps a search for a common word about as
-    cheap as the old windowed one."""
+def test_more_hits_than_fit_are_counted_exactly_and_shown_from_BOTH_ends(tmp_path, monkeypatch):
+    """The sweep runs to the END even once it has all it can show, and that buys three things this
+    test asserts together, because they are one decision.
+
+    (1) The count is a TOTAL, not a floor — "N match(es)" is the number a judge acts on, and the
+    pre-fix "1 match" on a log holding four is what this whole change is about. (2) BOTH ends are
+    shown, because either alone is a trap: shown only the first `Traceback`, a watchdog on a timer
+    kills a healthy node over a crash a repair already fixed; shown only the last, it cannot tell a
+    run that has always been broken from one that just broke. (3) What is dropped BETWEEN them is
+    stated as an exact count — reduce, never drop, which is `bucket_series`'s rule applied to hits.
+
+    `_SEARCH_CHUNK` is shrunk so the log spans ~250 chunks and both budgets are FULL inside the first
+    one. Without that this test is vacuous about the property it is named for: a 1 MB fixture is one
+    chunk, so a sweep that stopped the moment it had enough to show would stop at EOF anyway and
+    every assertion below would still pass. Verified by mutation — an early stop is green until the
+    fixture crosses a chunk boundary.
+    """
+    import looplab.tools.log_tools as lt
+    monkeypatch.setattr(lt, "_SEARCH_CHUNK", 4_096)
     body = "".join(f"loss: {1.0 / (i + 1):.6f} step {i} padding padding padding\n"
-                   for i in range(200_000))
-    path = tmp_path / "train.log"
-    path.write_bytes(body.encode("utf-8"))
-    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log")
-    out = tools.execute("read_log", {"mode": "search", "pattern": "loss", "lines": 5, "context": 0})
-    assert "stopped at the match limit" in out
-    assert _resume_byte(out) < os.path.getsize(path)
-    assert "reached the END of the log" not in out
+                   for i in range(20_000))
+    tools = _tools(tmp_path, body)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "loss", "lines": 8, "context": 0})
+    assert "20000 match(es)" in out                       # the FILE's count, not the render's
+    assert "reached the END of the log" in out and "a TOTAL" in out
+    hits = [int(row.split(":")[0][1:]) for row in out.splitlines() if row.startswith(">")]
+    assert hits == sorted(hits)                           # rows never printed out of order
+    assert hits[0] == 1                                   # ...the first match in the file
+    assert hits[-1] == 20_000                             # ...and the LAST one, which is the point
+    # The elided middle is stated, and its count is exactly what is missing from the render.
+    elision = next(row for row in out.splitlines() if "further match(es)" in row)
+    assert int(elision.split("... ")[1].split(" further")[0].replace(",", "")) == 20_000 - len(hits)
+    assert f"between record {hits[len(hits) // 2 - 1]:,} and record" in elision
+
+
+def test_the_elision_survives_the_result_cap_by_closing_the_MIDDLE(tmp_path):
+    """`fit_rows` drops rows from the END, so letting the cap decide would drop the newest matches and
+    put the answer back at one-end-only by a different route — while the count above still claimed
+    they were shown. The middle is closed instead, one hit group at a time, and every match that
+    closing removes is added to the stated elision. Driven at the DEFAULT `lines`, where 60 matches
+    with context do not fit the cap: the property has to hold on the call a judge actually makes."""
+    from looplab.tools._base import RESULT_CAP
+    body = "".join(f"record {i:05d} BOOM some quite long trailing text to make this row wide\n"
+                   for i in range(5_000))
+    out = _tools(tmp_path, body).execute("read_log", {"mode": "search", "pattern": "BOOM"})
+    assert len(out) <= RESULT_CAP
+    assert "5000 match(es)" in out
+    hits = [int(row.split(":")[0][1:]) for row in out.splitlines() if row.startswith(">")]
+    assert hits[0] == 1 and hits[-1] == 5_000            # both ends survived the cap
+    elision = next(row for row in out.splitlines() if "further match(es)" in row)
+    assert int(elision.split("... ")[1].split(" further")[0].replace(",", "")) == 5_000 - len(hits)
 
 
 def test_a_search_hit_number_is_a_record_number_mode_range_can_re_read(tmp_path):
