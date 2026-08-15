@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 import random
 import re
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
@@ -177,13 +177,155 @@ def eval_workspace_conflicts(task_or_spec, workspace_root) -> list[str]:
     return out
 
 
+# Options every one of these programs answers by PRINTING and running no command at all. Shared
+# because the answer is the same for all of them — [] — and because failing closed on a token we do
+# not recognize is the rule below, so a per-launcher omission here costs protection, never accuracy.
+_LAUNCHER_NO_COMMAND = frozenset({"h", "V", "--help", "--version"})
+
+
+class _Launcher(NamedTuple):
+    """Where a transparent launcher's OWN tokens end and the command it execs BEGINS.
+
+    Not a flag grammar in the sense `entrypoint_candidates` refuses to guess at — see that
+    docstring's "WHY AN ARITY TABLE IS NOT THE THING THE REGISTRY REFUSES". Four facts per program,
+    each transcribed from the program's own `--help` on 2026-08-15 rather than remembered:
+
+      * `val`   — options that consume the NEXT token as a value (`nice -n 10`, `env -u NAME`).
+                  Short options are single letters, long options carry their `--`.
+      * `flag`  — options that consume nothing (`chrt -f`, `taskset -c`, `time -p`).
+      * `none`  — options after which the launcher runs NO command at all (`ionice -p PID`,
+                  `chrt --pid`, `env -S` which rewrites the whole command into one token). ->  [].
+      * `pos`   — the launcher's OWN positional arguments before the command. This is the field a
+                  pure flag-arity table does not have and cannot express: `chrt [options]
+                  <priority> <command>` and `taskset [options] <mask> <command>` both put a bare,
+                  non-option token of their own in front of the command, so `chrt -f 99 python
+                  score.py` is unreadable without it — and `-c` in `taskset -c 0-7` is a FORMAT
+                  flag for that positional, not an option that takes a value.
+
+    Two spellings are handled generically for every launcher, because they are self-contained by
+    construction and need no table entry: a long option carrying `=` (`srun --gres=gpu:1`) and a
+    short option with its value attached (`stdbuf -oL`, `ionice -c3`). `--` ends the options.
+    `assign` is `env`'s `NAME=VALUE` prefix and `numeric` is `nice`'s obsolete `-10` adjustment.
+
+    ANY token this table does not recognize FAILS CLOSED to [] plus the
+    `eval_entrypoint_unprotected` warning. That is the whole safety argument for the table being
+    allowed to be incomplete, and it is why `srun` can carry an EMPTY option set and still be here:
+    Slurm's ~100 options are large and version-dependent (srun is not even installed on this box, so
+    nothing here could be verified against it), so it is read through only where its options are
+    written self-contained — `srun --gres=gpu:1 python score.py` resolves, `srun --gres gpu:1 python
+    score.py` says nothing and warns. A registry entry that states its own limit is not a registry
+    that claims coverage it does not have.
+    """
+    val: frozenset = frozenset()
+    flag: frozenset = frozenset()
+    none: frozenset = frozenset()
+    pos: int = 0
+    assign: bool = False        # `env`'s `NAME=VALUE` assignments precede the command
+    numeric: bool = False       # `nice -10`, the obsolete adjustment spelling
+
+
 # Wrappers that run the REST of their argv as a command, so the interpreter search may read through
 # them. Closed on purpose: each entry is a program whose contract is "exec what follows", which is
 # what makes `<wrapper> python score.py` still a readable `<interpreter> [flags] <target>` argv.
-# A launcher with its own flag grammar (`torchrun`, `deepspeed`, `accelerate`) is NOT here — see
-# `entrypoint_candidates`.
-_TRANSPARENT_LAUNCHERS = frozenset({"env", "nohup", "srun", "stdbuf", "setsid", "time", "ionice",
-                                    "nice", "chrt", "taskset"})
+# A launcher whose own grammar decides WHICH TOKEN IS THE SCRIPT (`torchrun`, `deepspeed`,
+# `accelerate`) is NOT here and cannot be — see `entrypoint_candidates`.
+_TRANSPARENT_LAUNCHERS: dict[str, _Launcher] = {
+    # coreutils. `nohup COMMAND [ARG]...` has no options at all besides --help/--version.
+    "nohup": _Launcher(),
+    "env": _Launcher(val=frozenset({"u", "C", "--unset", "--chdir"}),
+                     flag=frozenset({"i", "0", "v", "--ignore-environment", "--null", "--debug",
+                                     # optional-argument long options: GNU getopt requires `=` for
+                                     # those, so the separated form never consumes the next token.
+                                     "--block-signal", "--default-signal", "--ignore-signal",
+                                     "--list-signal-handling"}),
+                     # `-S STR` splits STR into the argv itself: the command exists but is INSIDE
+                     # one token, so there is no index at which it begins.
+                     none=frozenset({"S", "--split-string"}),
+                     assign=True),
+    "nice": _Launcher(val=frozenset({"n", "--adjustment"}), numeric=True),
+    "stdbuf": _Launcher(val=frozenset({"i", "o", "e", "--input", "--output", "--error"})),
+    # `/usr/bin/time`, the standalone GNU binary — the shell KEYWORD cannot be argv[0] of an argv
+    # that is exec'd without a shell, which is how every eval command runs (no `shell=True` in
+    # `looplab/`). Absent from this box, so an argv naming it fails to exec long before this matters.
+    "time": _Launcher(val=frozenset({"f", "o", "--format", "--output"}),
+                      flag=frozenset({"a", "p", "q", "v", "--append", "--portability", "--quiet",
+                                      "--verbose"})),
+    # util-linux. `chrt [options] <priority> <command>` / `taskset [options] <mask> <command>`.
+    "chrt": _Launcher(val=frozenset({"T", "P", "D", "--sched-runtime", "--sched-period",
+                                     "--sched-deadline"}),
+                      flag=frozenset({"b", "d", "f", "i", "o", "r", "R", "v", "--batch",
+                                      "--deadline", "--fifo", "--idle", "--other", "--rr",
+                                      "--reset-on-fork", "--verbose"}),
+                      none=frozenset({"a", "m", "p", "--all-tasks", "--max", "--pid"}),
+                      pos=1),
+    "taskset": _Launcher(flag=frozenset({"c", "--cpu-list"}),
+                         none=frozenset({"a", "p", "--all-tasks", "--pid"}),
+                         pos=1),
+    "ionice": _Launcher(val=frozenset({"c", "n", "--class", "--classdata"}),
+                        flag=frozenset({"t", "--ignore"}),
+                        none=frozenset({"p", "P", "u", "--pid", "--pgid", "--uid"})),
+    "setsid": _Launcher(flag=frozenset({"c", "f", "w", "--ctty", "--fork", "--wait"})),
+    # Slurm. Deliberately no option table — see `_Launcher`'s docstring.
+    "srun": _Launcher(),
+}
+
+
+def _launcher_command_start(argv: list[str], i: int, spec: _Launcher) -> int:
+    """Index of the first token of the COMMAND a transparent launcher execs, or -1 for "cannot say".
+
+    `i` is the index just past the launcher's own name. -1 covers all three ways this can end
+    without a readable command: an option the table does not know (fail closed), an option that
+    means the launcher runs no command at all, and an argv that ends inside the launcher's own
+    tokens. Never raises and never touches the filesystem.
+    """
+    n = len(argv)
+    while i < n:
+        tok = argv[i]
+        if spec.assign and "=" in tok and not tok.startswith("-"):
+            i += 1                        # `env`'s `NAME=VALUE`, which precedes the command
+            continue
+        if tok == "--":
+            i += 1                        # end of options; the launcher's positionals follow
+            break
+        if not tok.startswith("-") or tok == "-":
+            break                         # options are over
+        if spec.numeric and re.fullmatch(r"-\d+", tok):
+            i += 1
+            continue
+        step = _long_opt_step(tok, spec) if tok.startswith("--") else _short_opt_step(tok, spec)
+        if step < 0:
+            return -1
+        i += step
+    i += spec.pos                         # `chrt`'s <priority>, `taskset`'s <mask>
+    return i if i < n else -1
+
+
+def _long_opt_step(tok: str, spec: _Launcher) -> int:
+    """Tokens a `--long` option consumes: 1, 2, or -1 for "cannot say"."""
+    name = tok.split("=", 1)[0]
+    if name in _LAUNCHER_NO_COMMAND or name in spec.none:
+        return -1
+    if "=" in tok:
+        return 1                          # `--gres=gpu:1`: self-contained whatever the option is
+    if name in spec.flag:
+        return 1
+    if name in spec.val:
+        return 2
+    return -1                             # unknown long option: say nothing rather than guess
+
+
+def _short_opt_step(tok: str, spec: _Launcher) -> int:
+    """Tokens a `-x` option (or a `-abc` cluster) consumes: 1, 2, or -1 for "cannot say"."""
+    body = tok[1:]
+    for j, ch in enumerate(body):
+        if ch in _LAUNCHER_NO_COMMAND or ch in spec.none:
+            return -1
+        if ch in spec.val:
+            # `-oL` carries its value attached; a bare `-o` takes the next token.
+            return 1 if j + 1 < len(body) else 2
+        if ch not in spec.flag:
+            return -1                     # unknown short option: say nothing rather than guess
+    return 1                              # a cluster of valueless flags
 
 
 def entrypoint_candidates(command) -> list[str]:
@@ -199,8 +341,30 @@ def entrypoint_candidates(command) -> list[str]:
     script's own argument (`python train.py -m eval` executes `train.py`, not `eval.py`).
 
     A transparent prefix that names the interpreter VERBATIM is read through — `srun python
-    score.py`, `env FOO=1 python -m pkg.mod`, `nohup python score.py` — because from that token on
-    the argv is the same `<interpreter> [flags] <target>` grammar.
+    score.py`, `env FOO=1 python -m pkg.mod`, `nohup python score.py`, and equally `chrt -f 99
+    python score.py` or `nice -n 10 python -m pkg.mod` — because from the interpreter token on the
+    argv is the same `<interpreter> [flags] <target>` grammar. Where each launcher's own tokens end
+    is `_TRANSPARENT_LAUNCHERS`, one `_Launcher` record per program.
+
+    **WHY AN ARITY TABLE IS NOT THE THING THE REGISTRY REFUSES.** This function's rule against
+    `torchrun … score.py` / `accelerate launch …` / `deepspeed …` is NOT "that program has flags".
+    It is that their grammar decides WHICH TOKEN IS THE SCRIPT: get `--nproc_per_node`'s arity wrong
+    and `--nproc_per_node 2 score.py` still yields a confident, non-empty, WRONG file, because every
+    candidate is a plausible script and nothing downstream can tell them apart. A transparent
+    launcher does not choose the script at all — it execs what follows — so its table decides only
+    where to START looking, and a wrong entry is caught by two independent filters that a wrong
+    torchrun guess is not: the token at the computed start must match the interpreter regex, and the
+    first non-flag token after it must end in `.py`. A launcher argv's first non-flag token after a
+    genuine command start IS the program name, so a mis-computed start lands on an option value
+    (`99`, `0-7`, `PYTHONPATH`, `L`) and answers [] — never a different file. The table therefore
+    costs PROTECTION when it is wrong or incomplete, never CORRECTNESS, which is exactly the
+    asymmetry the closed registry exists to preserve.
+
+    The registry was tightened rather than widened in one place, for the same honesty reason: an
+    option token no `_Launcher` recognizes returns [] instead of being assumed valueless. Skipping
+    `-`-prefixed tokens without their arguments would have read `chrt -f 99 python score.py` as a
+    command starting at `99` and `env -u python3 …` as one starting at a variable NAME — half a
+    registry, answering for the other half.
 
     Deliberately narrow and purely syntactic — it never touches the filesystem, so its truth table
     can be stated. Anything else returns []: a shell wrapper (`bash run.sh`), a bare binary, an
@@ -230,14 +394,19 @@ def entrypoint_candidates(command) -> list[str]:
     # makes that true. Say nothing rather than guess.
     # Find the interpreter, ANCHORED AT argv[0] and walked forward only through a CLOSED set of
     # transparent wrappers — `srun python score.py`, `env FOO=1 python score.py`,
-    # `nohup python -m pkg.mod`. Each of those runs the rest of the argv as a command, so from the
-    # interpreter token on it really is `<interpreter> [flags] <target>`.
+    # `nohup python -m pkg.mod`, `chrt -f 99 python score.py`. Each of those runs the rest of the
+    # argv as a command, so from the interpreter token on it really is
+    # `<interpreter> [flags] <target>`. The step from one launcher to its command is
+    # `_launcher_command_start`, which reads THAT program's own tokens and nothing else.
     #
     # An unbounded scan for a python-looking token anywhere re-opens the wrapper hole the head-only
     # check exists to close: `bash run_eval.sh --interpreter python3 --cfg configs/base.py` would
     # find `python3` at index 3 and return `configs/base.py`, freezing a config the operator never
     # named while the real scorer inside the shell script stays editable — and returning non-empty
-    # suppresses `eval_entrypoint_unprotected`, so nothing says so. All three costs at once.
+    # suppresses `eval_entrypoint_unprotected`, so nothing says so. All three costs at once. The
+    # per-launcher walk is what makes `nohup bash run_eval.sh --interpreter python3 --cfg base.py`
+    # answer [] as well: `nohup`'s command starts at `bash`, which is not an interpreter and not a
+    # launcher, and the walk stops there rather than scanning on.
     #
     # Deliberately NOT extended to launchers that do not name an interpreter (`torchrun … score.py`,
     # `accelerate launch …`, `deepspeed …`): their own flag grammar decides which of
@@ -245,23 +414,29 @@ def entrypoint_candidates(command) -> list[str]:
     # file the operator never named. Those return [] and `eval_entrypoint_unprotected` names them at
     # submit time, which is the honest outcome rather than a confident wrong one.
     start = -1
-    for i, tok in enumerate(argv):
-        # THE ASSIGNMENT SHAPE IS TESTED FIRST, before the interpreter regex. `head` is the
-        # BASENAME, so `VIRTUAL_ENV=/opt/venvs/python3` has head `python3` and matched the
-        # interpreter pattern — anchoring `start` on an env assignment and losing the real
-        # entrypoint entirely (measured: `env VIRTUAL_ENV=/opt/venvs/python3 python train.py`
-        # returned []). `VIRTUAL_ENV`/`PYTHONHOME`/`CONDA_PREFIX` values ending in a `pythonN`
-        # component are ordinary in an ML environment, and the result is a silently unprotected
-        # scorer — the failure this whole function exists to prevent.
-        if i and "=" in tok and not tok.startswith("-"):
-            continue                      # `env`'s `VAR=value` assignments precede the command
+    i = 0
+    while 0 <= i < len(argv):
+        tok = argv[i]
+        # A bare `VAR=value` at argv[0] is not a program: an eval command is exec'd as an argv with
+        # no shell (there is no `shell=True` in `looplab/`), so nothing would run. Saying nothing is
+        # the honest answer — and it must be said BEFORE the interpreter regex, because `head` is
+        # the BASENAME and `VIRTUAL_ENV=/opt/venvs/python3` has head `python3`. The same trap inside
+        # a launcher prefix is why `env`'s assignments are structurally skipped by
+        # `_launcher_command_start` and never tested against the pattern at all (measured, pre-fix:
+        # `env VIRTUAL_ENV=/opt/venvs/python3 python train.py` returned []). `VIRTUAL_ENV`/
+        # `PYTHONHOME`/`CONDA_PREFIX` values ending in a `pythonN` component are ordinary in an ML
+        # environment, and the result is a silently unprotected scorer — the failure this whole
+        # function exists to prevent.
+        if "=" in tok and not tok.startswith("-"):
+            return []
         head = tok.replace("\\", "/").rsplit("/", 1)[-1].lower()
         if re.match(r"^(?:python|pypy)\d*(?:\.\d+)?(?:\.exe)?$", head):
             start = i
             break
-        if head in _TRANSPARENT_LAUNCHERS:
-            continue                      # `srun`/`env`/`nohup`: the command follows
-        return []                         # anything else owns the argv; we cannot read through it
+        spec = _TRANSPARENT_LAUNCHERS.get(head)
+        if spec is None:
+            return []                     # anything else owns the argv; we cannot read through it
+        i = _launcher_command_start(argv, i + 1, spec)
     if start < 0:
         return []
     # Read the interpreter's OWN flags, and stop at the first token that is neither a flag nor a

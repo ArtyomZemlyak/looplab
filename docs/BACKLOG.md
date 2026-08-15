@@ -362,6 +362,55 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15, same day — a REGRESSION shipped that morning] The transparent-launcher
+  registry was inert for 8 of its 10 members** (found by the merge-day review, re-derived against the
+  base commit). `adapters/repo_task.py::_TRANSPARENT_LAUNCHERS` was a `frozenset` and the walk
+  `return []`d on the first token that was neither `python*` nor a bare launcher name — i.e. on the
+  launcher's **own flag**, which is how eight of the ten are normally invoked. Introduced by
+  `cd0b11df` ("the re-review of my own fixes found ten defects"), which correctly replaced an
+  unbounded scan for a python-looking token — the `bash run_eval.sh --interpreter python3 --cfg
+  configs/base.py` hole — with a head anchor, and overcorrected. **Reproduced by driving it:**
+  `chrt -f 99 python score.py`, `env -u PYTHONPATH python score.py`, `nice`/`srun`/`stdbuf`/
+  `taskset`/`time`/`ionice` all went `['score.py']` -> `[]`; only the flagless `nohup`/`setsid`
+  still resolved. `[]` means `_entrypoint_protect` returns `{}`, so the scorer was in neither
+  `protected_names` nor the seeded set and `write_file(<scorer>)` SUCCEEDED — the
+  `rubertlite-dr-unified-v6` node 4 incident that function exists to prevent. Green because
+  `tests/test_eval_entrypoint_protection.py` exercised only the three flagless spellings.
+  **Exposure was LATENT, not live, and that measurement is what shaped the fix:** all 21
+  argv-shaped values across the 46 `runs/*/task.snapshot.json` and every `examples/` task are headed
+  by a bare `python` — zero launcher use, zero corpus tasks affected in either direction.
+  **THE FIX is a per-launcher prefix table** (`_Launcher`, one record per program, each field
+  transcribed from that program's own `--help` on this box), and the argument for why that is *not*
+  the "own flag grammar" the docstring refuses is stated there and DRIVEN: the registry refuses
+  `torchrun`/`accelerate`/`deepspeed` because THEIR grammar decides *which token is the script*, so
+  a wrong arity yields a confident non-empty WRONG file; a transparent launcher never chooses the
+  script, so its table decides only where to start looking and two independent filters catch a wrong
+  entry (the token at the computed start must match the interpreter regex; the first non-flag token
+  after it must end in `.py`). 392 single-field corruptions of the table over 19 argvs: 67 lost
+  protection, **0 named a different file**. Unknown option tokens FAIL CLOSED to `[]` + the existing
+  warning, which is what lets `srun` carry an empty option set honestly (Slurm's is large,
+  version-dependent, and srun is not installed here, so only self-contained `--opt=value` spellings
+  are read through). **Three alternatives were weighed and rejected.** A `-`-flag-only skip fixes 4
+  of 8 and cannot fix the other 4 at all: `chrt <priority>`, `taskset <mask>` and `nice -10` are
+  POSITIONAL/obsolete-form grammars, not flag arities, so "skip the flag" lands on `99`/`0-7`. A
+  registry SHRUNK to the members handled without any table is `nohup`/`setsid`/`env`-with-assignments
+  only — it satisfies the honesty bar but drops `srun`, the launcher with the strongest real case,
+  since a cluster eval is exactly where re-running a scorer is expensive. Making
+  `eval_entrypoint_unprotected` a REFUSAL would refuse **0** of the 14 corpus eval commands, which is
+  not evidence it is safe — it is evidence the corpus (one operator, one project, all bare `python`)
+  cannot calibrate it — while banning `torchrun`/`accelerate`/`deepspeed` and console-script evals
+  outright, the majority shape of real distributed ML eval, for a defect with zero live instances.
+  Driven in `tests/test_eval_entrypoint_protection.py`: all ten launchers through the REAL write
+  gate (a `write_file`/`edit_file` on the scorer is refused), a `python score.py` negative control,
+  the hole re-tested behind each launcher most likely to front a shell script
+  (`nohup bash run_eval.sh --interpreter python3 …` still answers `[]`), the fail-closed spellings,
+  a registry-vs-coverage guard so a member cannot be named without being driven, and the mutation
+  proof above. Verified as a negative control against a throwaway copy of the pre-fix tree: 28
+  failures, exactly the 8 launchers reported. Docs moved in the same change
+  (`docs/guide/tasks.md`, `docs/guide/generating-code.md`). **Residue, stated not patched:** the
+  table is per-program and this box's coreutils/util-linux; a busybox or BSD spelling of the same
+  option falls to `[]` + warning rather than to a wrong file, which is the designed direction.
+
 - **The repair critic's VERDICT is not recorded — only that it was asked** (observed on
   `rubertlite-dr-unified-v8`, 2026-08-15). `engine/evaluate.py:2127`'s `repair_critic` span carries
   `{attempt, node_id, generation}` and nothing else, and a `continue` verdict appends no event at all;

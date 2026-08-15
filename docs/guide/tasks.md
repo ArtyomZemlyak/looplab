@@ -397,6 +397,19 @@ Three things follow, and each is deliberate:
 * **A `cmd` that names no in-repo file warns at submit** — `["bash","run.sh"]`, a console script,
   `python -c`. Nothing there can be protected, so `looplab run` and `/api/start` say so while you can
   still add the real files to `protect`. It is a warning, not a refusal: such a command is legitimate.
+* **A transparent launcher in front of the interpreter is read through**, with its own options:
+  `chrt -f 99 python score.py`, `nice -n 10 python -m pkg.mod`, `env -u PYTHONPATH python …`,
+  `srun --gres=gpu:1 python …`, and the same for `taskset`, `stdbuf`, `ionice`, `time`, `nohup`,
+  `setsid`. Those ten programs exec what follows them, so the argv is still
+  `<interpreter> [flags] <target>` from the interpreter token on. A launcher whose *own* grammar
+  decides which token is the script — `torchrun`, `accelerate launch`, `deepspeed` — is **not** read
+  through and warns at submit instead, because a wrong guess would freeze a file you never named.
+  The same warning covers a launcher spelling LoopLab cannot resolve rather than assuming an arity
+  nobody verified: `srun --gres gpu:1 …` (the *separated* form — Slurm's option set is large and
+  version-dependent, so only the self-contained `--opt=value` spelling is read through),
+  `ionice -p PID` and `chrt -p PID` (which run no command at all), and `env -S "…"` (which hides the
+  whole command inside one token). If your `cmd` is warned about and the scorer must be frozen, name
+  it in `protect`.
 
 **What is protected is the entrypoint file, not what it imports.** A scorer's import closure is the
 repo (its model, config and data modules), so freezing it would freeze everything and leave the agent
@@ -756,7 +769,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint). Also copied into every node workdir regardless of `seed_mode` — see the note above |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
-| `eval.protect_entrypoint` | Freeze the file `eval.command` executes, when the argv names one (`python -m pkg.mod`, `python score.py`) **and the editable source already ships it**. Default `true`. Set `false` to hand a shipped scorer back to the Developer. A command naming no in-repo file (a shell wrapper, a console script, `python -c`) is warned about at submit instead — see the edit-surface section above |
+| `eval.protect_entrypoint` | Freeze the file `eval.command` executes, when the argv names one (`python -m pkg.mod`, `python score.py`, optionally behind a transparent launcher such as `chrt -f 99 …` / `nice -n 10 …` / `srun --gres=gpu:1 …`) **and the editable source already ships it**. Default `true`. Set `false` to hand a shipped scorer back to the Developer. A command naming no in-repo file (a shell wrapper, a console script, `python -c`, `torchrun`/`accelerate`/`deepspeed`) is warned about at submit instead — see the edit-surface section above |
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |
 | `eval.metric.reader` | How to read the metric: `stdout_json` / `stdout_regex` / `file_json` / `file_regex` / `auto`. Legacy `eval.metric.kind` still works **for the four concrete readers only** — `"auto"` must be spelled `{"reader": "auto"}`, because only that spelling folds to the onboarding path (`adapters/tasks.py:241`); `{"kind": "auto"}` is not a known reader and raises. |
 | `eval.metric.key` | The **JSON key** to read (`stdout_json`, `file_json` — dotted keys supported) or the **regex** (`stdout_regex`, `file_regex`). For the two `file_*` readers this is the key/pattern *inside* the file, **not** the file itself — the file is `eval.metric.path`. |

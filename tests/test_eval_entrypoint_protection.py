@@ -300,6 +300,58 @@ def test_the_note_follows_the_edit_path_and_only_reports_what_the_hunk_introduce
     (["srun", "python", "score.py"], ["score.py"]),
     (["env", "FOO=1", "python", "-m", "pkg.mod"], ["pkg/mod.py", "pkg/mod/__main__.py"]),
     (["nohup", "python", "eval/score.py"], ["eval/score.py"]),
+    # …INCLUDING when the launcher carries its own options, which is how eight of the ten are
+    # normally invoked. Only the three FLAGLESS spellings above were ever covered here, and under
+    # that gap the walk returned [] on the launcher's own first flag — a silently unprotected
+    # scorer for `chrt`/`env -u`/`nice`/`srun`/`stdbuf`/`taskset`/`time`/`ionice`. See
+    # `test_every_declared_launcher_freezes_the_scorer_it_runs` for the same ten driven through the
+    # real write gate; these rows pin the ARGV rule, including the spellings that discriminate
+    # between an option's VALUE and a positional of the launcher's own.
+    (["chrt", "-f", "99", "python", "score.py"], ["score.py"]),          # `99` is chrt's positional
+    (["taskset", "-c", "0-7", "python", "score.py"], ["score.py"]),      # `-c` is a FORMAT flag…
+    (["taskset", "0x3", "python", "score.py"], ["score.py"]),            # …the mask is positional
+    (["nice", "-n", "10", "python", "score.py"], ["score.py"]),          # `-n` takes a value
+    (["nice", "-10", "python", "score.py"], ["score.py"]),               # the obsolete spelling
+    (["nice", "python", "score.py"], ["score.py"]),
+    (["env", "-u", "PYTHONPATH", "python", "score.py"], ["score.py"]),
+    (["env", "--unset=PYTHONPATH", "python", "score.py"], ["score.py"]),
+    (["env", "-i", "FOO=1", "python", "score.py"], ["score.py"]),
+    (["ionice", "-c", "3", "python", "score.py"], ["score.py"]),
+    (["ionice", "-c3", "python", "-m", "pkg.mod"], ["pkg/mod.py", "pkg/mod/__main__.py"]),
+    (["stdbuf", "-oL", "python", "score.py"], ["score.py"]),             # attached value
+    (["stdbuf", "-o", "L", "python", "score.py"], ["score.py"]),         # separated value
+    (["time", "-p", "python", "score.py"], ["score.py"]),
+    (["time", "-o", "t.txt", "python", "score.py"], ["score.py"]),
+    (["setsid", "-f", "python", "eval/score.py"], ["eval/score.py"]),
+    (["srun", "--gres=gpu:1", "python", "score.py"], ["score.py"]),
+    (["srun", "--", "python", "score.py"], ["score.py"]),
+    (["chrt", "--fifo", "99", "python3", "-m", "vectorsearch.test"],
+     ["vectorsearch/test.py", "vectorsearch/test/__main__.py"]),
+    # A launcher in front of a launcher is still a launcher.
+    (["nohup", "nice", "-n", "10", "chrt", "-f", "99", "python", "score.py"], ["score.py"]),
+    # FAIL CLOSED, and each of these is a fact about a program rather than a limit of the walk.
+    # `srun` carries no option table at all (Slurm's is large and version-dependent, and srun is not
+    # installed on this box), so only its self-contained spellings are read through — the separated
+    # form says nothing and warns rather than assuming an arity nobody verified.
+    (["srun", "--gres", "gpu:1", "python", "score.py"], []),
+    (["srun", "-N", "2", "python", "score.py"], []),
+    (["ionice", "-p", "1234"], []),        # `-p` operates on a live PID: no command is run
+    (["chrt", "-p", "1234"], []),
+    (["taskset", "-p", "0x3", "700"], []),
+    (["env", "-S", "python score.py"], []),   # `-S` puts the whole command INSIDE one token
+    (["chrt", "-f", "99"], []),               # the argv ends inside the launcher's own tokens
+    (["nohup"], []),
+    # THE HOLE THE HEAD ANCHOR EXISTS TO CLOSE, now behind each launcher that is most likely to be
+    # put in front of a shell script. The launcher's command starts at `bash`, which is neither an
+    # interpreter nor a launcher, and the walk stops there rather than scanning on to `python3` —
+    # which would freeze a config the operator never named, leave the real scorer inside the shell
+    # script editable, and suppress the warning by answering non-empty. All three costs at once.
+    (["nohup", "bash", "run_eval.sh", "--interpreter", "python3", "--cfg", "configs/base.py"], []),
+    (["srun", "bash", "run_eval.sh", "--interpreter", "python3", "--cfg", "base.py"], []),
+    (["setsid", "./run.sh", "--metrics-out", "metrics.py"], []),
+    (["nice", "-n", "10", "bash", "run.sh", "--cfg", "base.py"], []),
+    (["env", "-u", "python3", "bash", "run.sh", "--cfg", "base.py"], []),
+    (["srun", "torchrun", "--nproc_per_node", "2", "score.py"], []),
     # …and the assignment's VALUE may itself end in an interpreter-looking component, which is
     # ordinary in an ML environment. `head` is the BASENAME, so testing the interpreter regex before
     # the assignment shape anchored `start` on the assignment and lost the real entrypoint: both
@@ -332,6 +384,190 @@ def test_the_note_follows_the_edit_path_and_only_reports_what_the_hunk_introduce
 ])
 def test_entrypoint_candidates_truth_table(argv, expected):
     assert entrypoint_candidates(argv) == expected
+
+
+# ------------------------------------------------- the registry must deliver what it names: all
+#                                                    TEN launchers, through the real write gate
+
+# Each launcher in the invocation an operator actually writes — i.e. WITH its own options, which is
+# the case the registry silently stopped handling for eight of its ten members. `_TRANSPARENT_
+# LAUNCHERS` is read from the module so a member added or dropped without a row here goes red.
+_LAUNCHER_INVOCATIONS = {
+    "chrt":    ["chrt", "-f", "99", "python", "-m", "vectorsearch.test"],
+    "env":     ["env", "-u", "PYTHONPATH", "python", "-m", "vectorsearch.test"],
+    "nice":    ["nice", "-n", "10", "python", "-m", "vectorsearch.test"],
+    "srun":    ["srun", "--gres=gpu:1", "python", "-m", "vectorsearch.test"],
+    "stdbuf":  ["stdbuf", "-oL", "python", "-m", "vectorsearch.test"],
+    "taskset": ["taskset", "-c", "0-7", "python", "-m", "vectorsearch.test"],
+    "time":    ["time", "-p", "python", "-m", "vectorsearch.test"],
+    "ionice":  ["ionice", "-c", "3", "python", "-m", "vectorsearch.test"],
+    "nohup":   ["nohup", "python", "-m", "vectorsearch.test"],
+    "setsid":  ["setsid", "python", "-m", "vectorsearch.test"],
+}
+
+
+def test_the_launcher_registry_names_exactly_what_this_file_drives():
+    """A registry that names ten and handles four is worse than one that names four.
+
+    The whole defect was the registry ASSERTING protection it did not provide, so membership and
+    coverage have to be the same list. A member added without a driven invocation here — or one
+    dropped while its row stays — is a red test rather than a silent claim.
+    """
+    from looplab.adapters.repo_task import _TRANSPARENT_LAUNCHERS
+    assert set(_TRANSPARENT_LAUNCHERS) == set(_LAUNCHER_INVOCATIONS)
+
+
+@pytest.mark.parametrize("launcher", sorted(_LAUNCHER_INVOCATIONS))
+def test_every_declared_launcher_freezes_the_scorer_it_runs(launcher, tmp_path):
+    """`<launcher> [its own options] python -m vectorsearch.test` freezes `vectorsearch/test.py`.
+
+    THIS IS THE TEST THAT FAILS WITHOUT THE CHANGE, for eight of the ten. The walk returned [] on
+    the launcher's own first flag — the token every one of these programs is normally invoked with —
+    so `_entrypoint_protect` returned `{}`, the scorer was in neither `protected_names` nor the
+    seeded set, and `write_file(<scorer>)` SUCCEEDED. That is the `rubertlite-dr-unified-v6` node 4
+    incident this function exists to prevent: a node trained a good model (train.log RECALL@100
+    0.726) and then scored a HUMAN's checkpoint an absolute path named, and the run recorded 0.225
+    with the artifact contract PASSED and no violation. The freeze on the scorer is what stops a
+    candidate rewriting the thing that measures it.
+
+    Driven through the write tools the Developer actually calls, over a real repo — the property is
+    "the write is refused", not "a helper returns a list".
+    """
+    repo = _vectorsearch(tmp_path)
+    task = _task(repo, list(_LAUNCHER_INVOCATIONS[launcher]))
+
+    assert "vectorsearch/test.py" in task.repo_spec()["protected_names"]
+    assert task._editable_mounts()[0]["protect"] == ["vectorsearch/test.py"]   # reaches the seeder
+    assert eval_entrypoint_unprotected(task) == []      # resolvable: no warning to leave behind
+
+    w = _write_tools(task)
+    got = w.execute("write_file", {"path": "vectorsearch/test.py", "content": "print(1)\n"})
+    assert got.startswith("(refused:") and "protected" in got
+    # The live edit arrived as an `edit_file` hunk; the same gate has to hold on that path.
+    assert w.execute("edit_file", {
+        "path": "vectorsearch/test.py", "search": 'print("RECALL@100: 0.708708")',
+        "replace": "subprocess.run([sys.executable, '-m', 'vectorsearch.train'])"}
+    ).startswith("(refused:")
+    assert w.files == {}                               # nothing staged by either attempt
+    # Narrow on purpose: the training entrypoint stays the Developer's under every launcher too.
+    assert w.execute("write_file", {"path": "vectorsearch/train.py",
+                                    "content": "print('t')\n"}).startswith("wrote ")
+
+
+def test_a_plain_python_command_is_unchanged_by_the_launcher_walk(tmp_path):
+    """The negative control. Nothing about reading through a launcher may touch the argv shape that
+    every real task in `runs/` actually uses — all 14 recorded eval commands are bare `python`."""
+    repo = _vectorsearch(tmp_path)
+    for argv in (["python", "-m", "vectorsearch.test"], ["python", "vectorsearch/test.py"]):
+        task = _task(repo, argv)
+        assert task.repo_spec()["protected_names"] == ["vectorsearch/test.py"]
+        assert eval_entrypoint_unprotected(task) == []
+        assert _write_tools(task).execute(
+            "write_file", {"path": "vectorsearch/test.py", "content": "x=1\n"}).startswith("(refused:")
+
+
+def test_a_launcher_in_front_of_a_shell_wrapper_still_says_nothing(tmp_path):
+    """The hole the head anchor exists to close, one `nohup` away.
+
+    `nohup bash run_eval.sh --interpreter python3 --cfg configs/base.py` must NOT resolve: reading
+    on to `python3` would freeze `configs/base.py`, leave the real scorer inside the shell script
+    editable, and — because the result is non-empty — suppress the very warning that names it. The
+    per-launcher walk stops at `bash`, which is neither an interpreter nor a launcher.
+    """
+    repo = _repo(tmp_path / "repo", {"run_eval.sh": "python -m vectorsearch.test\n",
+                                     "configs/base.py": "LR = 1e-4\n"})
+    task = _task(repo, ["nohup", "bash", "run_eval.sh", "--interpreter", "python3",
+                        "--cfg", "configs/base.py"])
+    assert task.repo_spec()["protected_names"] == []          # nothing frozen…
+    warn = eval_entrypoint_unprotected(task)                  # …and it SAYS so at submit
+    assert len(warn) == 1 and "nohup bash run_eval.sh" in warn[0]
+    assert _write_tools(task).execute(
+        "write_file", {"path": "configs/base.py", "content": "LR = 1\n"}).startswith("wrote ")
+
+
+def test_an_unreadable_launcher_prefix_warns_instead_of_guessing(tmp_path):
+    """Fail closed, and never silently: an option no `_Launcher` recognizes, or one that means the
+    launcher runs no command at all, resolves to nothing AND reaches the operator at submit.
+
+    `srun` is the load-bearing case. It carries no option table (Slurm's is large and
+    version-dependent), so its separated `--gres gpu:1` spelling is unreadable — and the honest
+    outcome is the warning naming the command, not an assumed arity.
+    """
+    repo = _vectorsearch(tmp_path)
+    for argv in (["srun", "--gres", "gpu:1", "python", "-m", "vectorsearch.test"],
+                 ["env", "-S", "python -m vectorsearch.test"],
+                 ["ionice", "-p", "1234"]):
+        task = _task(repo, argv)
+        assert task.repo_spec()["protected_names"] == []
+        warn = eval_entrypoint_unprotected(task)
+        assert len(warn) == 1 and " ".join(argv) in warn[0] and "protect" in warn[0]
+
+
+def test_a_wrong_launcher_table_entry_costs_protection_and_never_correctness():
+    """The safety argument for letting a per-launcher table exist at all, DRIVEN rather than argued.
+
+    The registry refuses `torchrun`/`accelerate`/`deepspeed` because THEIR grammar decides which
+    token is the script: a wrong arity there yields a confident non-empty WRONG file, and nothing
+    downstream can tell the candidates apart. A transparent launcher never chooses the script — it
+    execs what follows — so its table decides only where to start looking, and two independent
+    filters catch a wrong entry: the token at the computed start must match the interpreter regex,
+    and the first non-flag token after it must end in `.py`. A command's argv[0] is a program name,
+    so a mis-computed start lands on an option value and answers [].
+
+    So: corrupt every field of every spec, one at a time, and assert no corruption ever names a
+    DIFFERENT file. Losing protection is the accepted cost (and warns at submit); naming the wrong
+    file is the failure the closed registry exists to prevent.
+    """
+    from looplab.adapters import repo_task as rt
+
+    argvs = [*(list(v) for v in _LAUNCHER_INVOCATIONS.values()),
+             ["chrt", "-T", "100", "-f", "99", "python", "score.py"],
+             ["stdbuf", "-o", "L", "python", "score.py"],
+             ["taskset", "0x3", "python", "score.py"],
+             ["nice", "-10", "python", "score.py"],
+             ["env", "-i", "FOO=1", "python", "-m", "pkg.mod"],
+             ["time", "-o", "t.txt", "python", "score.py"],
+             # The prefixes whose correct answer is [] must not become non-empty either.
+             ["nohup", "bash", "run.sh", "--interpreter", "python3", "--cfg", "base.py"],
+             ["nice", "-n", "10", "bash", "run.sh", "--cfg", "base.py"],
+             ["env", "-u", "python3", "bash", "run.sh", "--cfg", "base.py"],
+             ["srun", "--job-name", "python3", "bash", "run.sh", "--cfg", "base.py"],
+             ["chrt", "-f", "99", "./run.sh", "--out", "x.py"]]
+    truth = {tuple(a): entrypoint_candidates(a) for a in argvs}
+    assert sum(bool(v) for v in truth.values()) >= len(_LAUNCHER_INVOCATIONS)   # non-vacuous
+
+    def corruptions(spec):
+        """Every single-field corruption of one launcher spec."""
+        for opt in sorted(spec.val | spec.flag | spec.none):
+            dropped = spec._replace(val=spec.val - {opt}, flag=spec.flag - {opt},
+                                    none=spec.none - {opt})
+            yield dropped                                          # the table forgot it
+            yield dropped._replace(val=dropped.val | {opt})        # …or misfiled it, three ways
+            yield dropped._replace(flag=dropped.flag | {opt})
+            yield dropped._replace(none=dropped.none | {opt})
+        for pos in (0, 1, 2):
+            if pos != spec.pos:
+                yield spec._replace(pos=pos)
+        yield spec._replace(assign=not spec.assign)
+        yield spec._replace(numeric=not spec.numeric)
+
+    driven = lost = 0
+    for name, spec in list(rt._TRANSPARENT_LAUNCHERS.items()):
+        for mutant in corruptions(spec):
+            driven += 1
+            rt._TRANSPARENT_LAUNCHERS[name] = mutant
+            try:
+                for argv in argvs:
+                    got = entrypoint_candidates(argv)
+                    if got == truth[tuple(argv)]:
+                        continue
+                    assert got == [], (
+                        f"corrupting {name} named a DIFFERENT file for {' '.join(argv)!r}: "
+                        f"{got} instead of {truth[tuple(argv)]}")
+                    lost += 1
+            finally:
+                rt._TRANSPARENT_LAUNCHERS[name] = spec
+    assert driven > 300 and lost > 0        # the mutations really do reach the walk
 
 
 # ------------------------------------------------------------------------- the submit-time warning
