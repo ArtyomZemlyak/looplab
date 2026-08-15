@@ -1004,6 +1004,17 @@ class Card(BaseModel):
     # going looking for `card.node_ids` gets `None` on every card in every run. See `status_nodes`
     # above for the lane's own subject, which is a different (and sometimes disjoint) question.
     evidence: list[int] = Field(default_factory=list)
+    # The node ids this Card OWNS that `core/models.py::is_unevaluated_speculative_discard` PROVES
+    # never reached a sandbox — a speculative build the Card freshness gate discarded before dispatch.
+    # DERIVED in `events/card_ledger.py::_apply_unexecuted_discards`, always stamped, and it is the
+    # RECORD of a loss the board would otherwise launder: an idea that was never executed is not
+    # evidence of anything, so those ids are removed from `evidence` (see that function for the
+    # once-per-card bound and why `gated` stays unreachable), and this is where they go instead.
+    # NOT a second `evidence` list and never a superset of one — the two are disjoint by construction,
+    # and an operator auditing "what did this run pay a Developer call for and throw away" reads THIS.
+    # The same predicate already refunds the node-budget slot (`node_counts_toward_card_budget`); the
+    # slot and the hypothesis are now returned by one fact instead of the slot alone.
+    discarded_nodes: list[int] = Field(default_factory=list)
     best_delta: Optional[float] = None                  # best improvement-over-parent among evidence (audit)
     # --- The RESEARCH-DIRECTION facet's own identity (DERIVED; `events/card_ledger.py`).
     # `id` is the WORK-ITEM identity and `identity.action_digest` binds the executable action; neither

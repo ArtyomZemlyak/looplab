@@ -39,7 +39,8 @@ _FIELDS = (
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
-    "created_at_node", "rationale", "evidence", "best_delta", "merged_into", "aliases",
+    "created_at_node", "rationale", "evidence", "discarded_nodes", "best_delta", "merged_into",
+    "aliases",
     "belief_aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
@@ -76,7 +77,11 @@ _REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", 
 # from. It is published because the board's own claim has to be checkable — an operator reading
 # "Running" must be able to name the node that is running, and until it existed a `building` card
 # named no node anywhere on the wire (a reservation is deliberately not evidence).
-_INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes"}
+# `discarded_nodes` rides it too, and it is the VISIBILITY half of the 2026-08-15 return: the node
+# ids a Developer call built for this card and the freshness gate threw away before dispatch. Without
+# it on the wire a returned card reads `proposed` with no evidence — i.e. indistinguishable from one
+# that was never built at all — and the operator loses the only record that the run paid for it.
+_INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes"}
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}
 _PRIOR_RUN_KEYS = {

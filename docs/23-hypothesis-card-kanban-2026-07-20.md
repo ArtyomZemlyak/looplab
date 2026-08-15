@@ -364,6 +364,7 @@ Layer 3 must remain disabled until the native mint/link lifecycle removes that a
 | `footprint` (`gpus`, `mem?`, `timeout`; `proposed_by`, `finalized_by`) | Researcher proposes → Developer finalizes | new field (value used only in Layer 4) |
 | `evidence` | nodes whose `idea.card_id == id` (or whose statement hash-joins) | derived |
 | `status_nodes` | the node ids the lifecycle `status` was derived from — for `building`, the reserved `node_building` node, which `evidence` deliberately never carries | derived (2026-08-14) |
+| `discarded_nodes` | the node ids `is_unevaluated_speculative_discard` PROVES never reached a sandbox (a prefetch the Card freshness gate superseded before dispatch). Disjoint from `evidence` by construction — see §3.1 | derived (2026-08-15) |
 | `research_origin`, `lesson_refs`, `claim_refs` | `Node.research_origin`, memo, lessons/claims stores | link |
 | `steering_context` (why proposed: cues + strategist stance + memo id) | proposal-cue hints + `active_strategy` — **homeless today** | new field |
 | `status` (derived maturity/lifecycle) | `_derive_cards` from fields + `st.nodes` | derived |
@@ -378,6 +379,55 @@ field** — only `evidence` ever shipped — and the double spelling is why a re
 reported `node_ids: None` on every card and took it for a defect. Nothing is renamed: `evidence` is,
 and remains, the audit set the verdict/`best_delta` roll-ups read. The genuinely missing thing was a
 different question — *which* nodes make the lane say what it says — and that is `status_nodes`.
+
+### 3.1 An idea that was never executed is not evidence (2026-08-15)
+
+A speculative prefetch superseded by the Card freshness gate is terminalized before it ever reaches a
+sandbox. The Layer-5 refund gave the run back its node SLOT
+(`core/models.py::is_unevaluated_speculative_discard`) and nothing gave back the HYPOTHESIS: the
+discarded node stayed in `Card.evidence`, and **three** readers key on that one list, so a single
+never-executed build retired the question three ways.
+
+* `search/card_selection.py::_strictly_selection_ready` wants `not card.evidence`, and the fold's own
+  readiness pass derives `owner_state="terminal"` from the same list and stamps `work_terminal` — the
+  Card lane can never elect it again;
+* `RunState.open_research_beliefs` filters on `if c.evidence`, so it leaves the CLAIMABLE untested feed;
+* `agents/roles.py::attempted_board_prompt_cards` admits it and renders it under *"each already has an
+  experiment — do NOT propose one of these again as if it were new"*, closed by *"A failed experiment
+  is re-attempted by the engine itself, under the same card, without being asked."* Both sentences are
+  FALSE about this card. So the board did not merely forget the idea, it instructed the one role that
+  could have re-proposed it not to.
+
+Measured cost: `runs/rubertlite-dr-unified-v7` permanently lost five directions — including
+"hard-negative mining" (card-3, deep-research memo `memo:sha256:10f4085b…`) and "label smoothing" —
+to builds that never ran.
+
+**The fix is at the one place the false statement is minted**, `events/card_ledger.py::
+_apply_unexecuted_discards`: the proven-never-run ids leave `evidence` and land in `discarded_nodes`,
+so all three readers become correct at once with no second vocabulary for "evidence that is not
+evidence". Nothing is un-written — the ids are still published, and enrichment attribution
+(`node_to_card`, footprint/`research_origin`) walks `evidence + discarded_nodes`, because attribution
+is not evidence and a returned card must keep the memo it was proposed from.
+
+**The bound is ONCE per card**, and it is the design content: a returned idea that is re-elected and
+re-superseded burns a Developer build each time. One supersede is a statement about FRESHNESS AT A
+MOMENT and says nothing about the idea; a second is a durable, twice-repeated fact that this card
+cannot be built inside this board's rate of change, which IS information about the card. So at two
+discards NONE is forgiven — a COUNT, never a choice of which one, which is what keeps the phase
+order-tolerant — the card reads `failed` and retires for good. Worst case: two Developer builds per
+card, with `refunded_node_reservations`' one-budget cap still underneath it.
+
+SUBSUMPTION needs no special case: if something better subsumed the idea, the returned card loses the
+next election to the thing that subsumed it and sits on the board costing nothing.
+
+`gated` stays unreachable, and that is why the filter requires the discards to be the card's WHOLE
+evidence set: `_apply_card_status`'s `gated` branch fires when EVERY evidence node is
+gated/excluded/infeasible, so filtering a MIXED set could mint one. Requiring the whole set makes the
+only reachable transition `failed` → `proposed`. Re-derived over all 46 preserved runs (270 cards,
+212 nodes): **9 cards in 4 runs change, every one of them `failed` → `proposed`; zero `gated` cards
+move and zero champions move.** Six of the nine become selection-ready; the other three come back
+carrying the pre-existing `freshness_stale` blocker, so the board really had moved past them and no
+new rule was needed to say so.
 
 ## 4. Card identity + migration off the statement hash
 
@@ -797,6 +847,14 @@ The three hardest layers form ONE story, and the sole-writer log is what makes i
     the branch that chose it so the two cannot drift. A status is a RECORD-side statement (docs/36):
     it is what an operator reads to decide whether to intervene, so it owes them the subject it is
     about. See §3's field table for what this is NOT (`evidence`, and the `node_ids` that never was).
+    **Amended 2026-08-15 (§3.1):** the `failed` lane no longer takes a card whose ONLY work item was
+    a prefetch proven never to have run. Those ids leave `evidence` for `discarded_nodes`, and the
+    card reads `proposed` again — because an idea that was never executed is not evidence of
+    anything, and calling it evidence retired the hypothesis from the election AND from the
+    proposal board. The `gated`-is-decided-first property is untouched and is now provable rather
+    than argued: the filter only fires when the discards are the WHOLE evidence set, so its only
+    reachable transition is `failed` -> `proposed`. Re-derived over 46 runs: 9 cards move, all that
+    way; zero `gated` cards and zero champions move.
 29. **Every new `EV_*` lands in exactly one bucket** (`test_event_types.py` guard). **Folded `_HANDLERS`**
     (main-task, additive): `card_added`, `card_merged`, `card_auto_dropped`, `card_enriched`, `card_ranked`,
     `card_build_requested`, `card_build_done`, and the L6 operator events (`card_reprioritized`,
@@ -844,7 +902,9 @@ if omitted, force a fold-semantics rewrite. Land these in 1a/1b:
 - `Card.status` — derived open string; current replay emits
   proposed/building/coded/running/evaluated/failed/gated/dropped (`coded` and `failed` since
   2026-08-14 — see decision 28) and leaves additional future vocabulary visible rather than
-  rejecting it. `Card.status_nodes` rides beside it: the node ids that lane was derived from.
+  rejecting it. `Card.status_nodes` rides beside it: the node ids that lane was derived from, and
+  since 2026-08-15 `Card.discarded_nodes` beside THAT: the node ids proven never to have run, which
+  `evidence` no longer carries (§3.1).
 - `Card.evidence`/`best_delta`/`verdict` — computed by the **extracted pure helper** (values,
   never stamped onto Node/Hypothesis).
 - **Immutable seed statement** captured on `card_added`, held separate from any editable display

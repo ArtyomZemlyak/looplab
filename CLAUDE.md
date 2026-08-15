@@ -107,7 +107,12 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    (`events/card_ledger.py::_card_debug_leaf_children`) read — and, since 2026-08-14, the Card
    LIFECYCLE LANE too (`_apply_card_status` splits its pending branch on the same
    `eval_start_boundary`/`eval_started` pair, so a dropped row silently republishes a pre-built node
-   as "experiment running"). So splicing it before rather than after its own
+   as "experiment running") — and, since 2026-08-15, the Card's EVIDENCE set
+   (`events/card_ledger.py::_apply_unexecuted_discards`: a node the pair proves never ran is not
+   evidence of anything, so it moves to `Card.discarded_nodes` and the idea returns to the election
+   AND to the claimable proposal board instead of being retired unexecuted — bounded to ONCE per
+   card, because a second such discard is a fact about the card rather than about a moment). A
+   dropped row therefore now also silently retires a hypothesis. So splicing it before rather than after its own
    `node_created` measurably flips a DIFFERENT Card's `selection_ready`: measured
    `{budget 2, leafs [2,3], later Card ready}` vs `{budget 3, leafs [3], not ready}`. Not reachable
    today (both writes are main-task and node-created-first), which is exactly why it has to be written
