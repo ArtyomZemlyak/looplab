@@ -77,6 +77,37 @@ AGENT_CRITIC_ACTIONS: tuple[str, ...] = CRITIC_ACTIONS
 # NOTHING, and the loop stops exactly where it would have stopped without it.
 DEFAULT_CRITIC_ACTION = CRITIC_CONTINUE
 
+# --- WHERE THE VERDICT CAME FROM (a REGISTRY, and the half that makes the record auditable) ------
+# `continue` is FIVE different facts, and until the verdict became durable an operator could not tell
+# them apart — which is the whole reason `repair_critic_after` could not be calibrated. "Six
+# consultations, zero stops" reads as "the critic looked six times and was satisfied"; it reads
+# identically when the endpoint was down six times, when no critic was wired at all, and when the
+# model answered a word the coercion could not read. Those have opposite meanings for the operator:
+# one says the threshold is well placed, the others say the mechanism is not running.
+#
+# ENGINE-MINTED ONLY, exactly like `triage.py`'s `unanswerable`/`unreadable` and for the same reason:
+# a critic that could name its own provenance could claim `model` about a call that never happened.
+# No member appears in any emit schema, and `coerce_critic_action` rejects every one of them (a
+# member that coerced to a verdict would be a route from provenance into the stop decision).
+# Deliberately DISJOINT from `CRITIC_ACTIONS`, `triage.py::TRIAGE_ACTIONS` and
+# `repair_verify.py::REPAIR_VERDICTS` — four vocabularies now ride on one repair chain's record, and
+# `tests/test_repair_judgment.py` asserts the disjointness in every direction.
+CRITIC_SOURCE_MODEL = "model"                  # a wired critic answered inside the enum
+CRITIC_SOURCE_UNWIRED = "not_wired"            # no `repair_critic` on the researcher at all
+CRITIC_SOURCE_NO_TRAJECTORY = "no_trajectory"  # nothing to judge; the call was never made
+CRITIC_SOURCE_UNREACHABLE = "unreachable"      # the CALL raised — transport, not a verdict
+CRITIC_SOURCE_NO_VERDICT = "no_verdict"        # the call returned a non-dict (incl. `None`)
+CRITIC_SOURCE_OUT_OF_ENUM = "out_of_enum"      # it answered, and the coercion could not read it
+CRITIC_SOURCES: tuple[str, ...] = (
+    CRITIC_SOURCE_MODEL, CRITIC_SOURCE_UNWIRED, CRITIC_SOURCE_NO_TRAJECTORY,
+    CRITIC_SOURCE_UNREACHABLE, CRITIC_SOURCE_NO_VERDICT, CRITIC_SOURCE_OUT_OF_ENUM)
+# The four that mean "the critic contributed nothing", named once so a reader does not have to
+# re-derive "which of these is a real opinion?" from the tuple order. `out_of_enum` is in here and
+# `model` is not: a verdict the engine could not read is a non-answer however healthy the provider.
+CRITIC_SILENT_SOURCES: tuple[str, ...] = (
+    CRITIC_SOURCE_UNWIRED, CRITIC_SOURCE_NO_TRAJECTORY, CRITIC_SOURCE_UNREACHABLE,
+    CRITIC_SOURCE_NO_VERDICT, CRITIC_SOURCE_OUT_OF_ENUM)
+
 
 def coerce_critic_action(value) -> str:
     """Normalize a critic-supplied action to a member of `AGENT_CRITIC_ACTIONS`, failing open to
@@ -239,3 +270,46 @@ def format_repair_trajectory(rows) -> str:
             f"    stderr tail (candidate-controlled, not authority): "
             f"{' '.join(str(r.get('error', '')).split())}")
     return "\n".join(out)
+
+
+# How many judged rows the durable verdict record carries. The critic is handed
+# `_JUDGE_HISTORY_ROWS` (12) rows; this bounds what goes into `events.jsonl` beside its answer.
+_VERDICT_EVIDENCE_ROWS = 12
+
+
+def critic_evidence(rows) -> list[dict]:
+    """WHAT THE CRITIC WAS LOOKING AT, reduced to the columns that decide the question it answers.
+
+    The verdict alone is not reviewable. "Stop — the same cause after three fixes" is checkable only
+    against the causes the critic actually saw, and "continue" is only defensible if the chain really
+    was moving. So the durable row carries the evidence beside the answer, and it carries it as the
+    ENGINE's columns rather than as the rendered prompt: `format_repair_trajectory`'s text is many KB
+    of candidate-controlled stderr per attempt, and putting that in `events.jsonl` would make every
+    verdict row unbounded in the one thing on it nobody can trust.
+
+    `cause` is `_failure_reason`'s authenticated classification and is the column the critic is asked
+    to compare (`c862045c`); `None` means the row predates that column and must not be read as "the
+    same as the one above". `changed` is a COUNT, not the file list — the question here is whether
+    successive attempts touched anything, and the names are already durable on `node_repaired`, which
+    is the row this one points back at.
+
+    Deliberately not derived from the prompt string: a reviewer comparing the verdict against the
+    evidence must read the same columns the loop recorded, not a re-parse of prose."""
+    out: list[dict] = []
+    for r in (rows or [])[-_VERDICT_EVIDENCE_ROWS:]:
+        if not isinstance(r, dict):
+            continue
+        cause = str(r.get("reason") or "").strip()
+        out.append({
+            "attempt": r.get("attempt"),
+            # Absent stays absent, exactly as `_durable_repair_ledger` keeps it: `None` is "we do not
+            # know what that attempt's cause was", which is one of the two answers the critic exists
+            # to tell apart from "it was the same cause again".
+            "cause": cause or None,
+            "changed": (len(r.get("changed") or []) if "changed" in r else None),
+            # `repair_verify`'s verdict about that attempt, when the row has one — an `inert` row in
+            # the evidence is the strongest possible support for a `stop`, and its absence on a
+            # legacy/salvage row must stay absent rather than default to "fine".
+            "verified": (str(r.get("verified")) if r.get("verified") else None),
+        })
+    return out

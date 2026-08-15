@@ -56,7 +56,7 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
                                            salvage as salvage_metric,
                                            unbound_subject_violation_rows)
 from looplab.engine.options import _UNSET
-from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due,
+from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
                                             developer_stuck_contract, repair_floor_stop)
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
 
@@ -410,10 +410,12 @@ from looplab.events.replay import fold
 # reader plus its `_MISSING` sentinel across the package boundary.
 from looplab.events.replay import event_generation_binds
 from looplab.runtime.sandbox import GpuPinUnenforceable
-from looplab.events.types import (EV_CARD_DROPPED, EV_DEPS_INSTALLED, EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
+                                  EV_FULL_RETRAIN_CHARGED, EV_NODE_ABORT,
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
+                                  EV_REPAIR_CRITIC_VERDICT,
                                   EV_REWARD_HACK_SUSPECTED,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
 
@@ -2130,8 +2132,45 @@ class EvaluateMixin:
                     # whose lane admission is selected through a ContextVar, and the two that already
                     # exist establish the convention. A third call shape here would make this the one
                     # place in the loop where the lane's propagation has to be reasoned about.
-                    critic = self._repair_critic(
-                        state, node, repair_log[-_JUDGE_HISTORY_ROWS:], attempt + 1)
+                    _judged = repair_log[-_JUDGE_HISTORY_ROWS:]
+                    critic = self._repair_critic(state, node, _judged, attempt + 1)
+                    # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
+                    # critic left no trace of what it ANSWERED: its span carried
+                    # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a
+                    # stop was visible only indirectly as the `abandon` prose below. Measured on
+                    # `rubertlite-dr-unified-v8`, whose chains were genuinely progressing: 0
+                    # occurrences of the word "critic" in `events.jsonl` against several
+                    # consultations — i.e. exactly the case where a missing record goes unnoticed,
+                    # because the verdicts happened to be right.
+                    #
+                    # WHY THE ROW EXISTS AT ALL, given that `continue` moves nothing: F8's premise is
+                    # that a JUDGEMENT replaces a counter as the stop rule, and a judgement that
+                    # leaves no trace cannot be reviewed, tuned or trusted — `repair_critic_after`
+                    # cannot be calibrated by anyone who cannot see what the critic has been saying.
+                    # `after` and `durable_repairs` ride on the row for exactly that: the cadence
+                    # question is "was this consultation worth paying for?", and answering it needs
+                    # the threshold that fired beside the chain it fired on.
+                    #
+                    # DIAGNOSTIC, and the membership assertion below is the enforcement of that
+                    # (invariant #1's shape, the same one `deps_installed` above and
+                    # `full_retrain_charged` below are appended under). The fold never reads it, so
+                    # no metric, champion, selectability or violation can move on a critic verdict
+                    # even by accident — the row is evidence about a decision, never an input to one.
+                    # It is written BEFORE the stop is acted on so a chain that ends here still has
+                    # its reason durable, and on EVERY consultation so the negative case ("the critic
+                    # looked and said keep going") is a fact in the log rather than an absence.
+                    assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS
+                    async with self._write_lock:
+                        self.store.append(EV_REPAIR_CRITIC_VERDICT, {
+                            "node_id": node_id, "generation": generation,
+                            # The repair this verdict GATED (1-based, matching `node_repaired.attempt`
+                            # and the span), beside the count of durable repairs it judged.
+                            "attempt": attempt + 1, "durable_repairs": attempt,
+                            "after": self._repair_critic_after,
+                            "verdict": critic.get("action"),
+                            "source": critic.get("source"),
+                            "rationale": str(critic.get("rationale", ""))[:300],
+                            "judged": critic_evidence(_judged)})
                     if critic.get("action") == CRITIC_STOP:
                         triage_outcome = ("abandon", (
                             "the repair critic stopped this chain — "
