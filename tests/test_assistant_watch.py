@@ -14,17 +14,17 @@ import pytest
 
 from looplab.serve.assistant_watch import (
     WATCH_MAX_ACTIVE_PER_SESSION, WATCH_MIN_INTERVAL_S, WATCH_POLL_BASE_S, WATCH_POLL_CEILING_S,
-    WATCH_RUN_STATES, WATCH_TERMINAL_STATUSES, SessionWatches, WatchDeferred, WatchRefusal,
-    WatchService, WatchStore, describe_trigger, next_poll_delay, observed_run_states,
-    wakeup_instruction)
+    WATCH_RUN_APPEARANCE_GRACE_S, WATCH_RUN_STATES, WATCH_TERMINAL_STATUSES, SessionWatches,
+    WatchDeferred, WatchRefusal, WatchService, WatchStore, describe_trigger, next_poll_delay,
+    observed_run_states, wakeup_instruction)
 
 
 def _store(tmp_path) -> WatchStore:
     return WatchStore(tmp_path)
 
 
-def _service(store, *, rows=None, turns=None, appended=None, observe=None):
-    """A service whose four collaborators are plain callables — the point of injecting them."""
+def _service(store, *, rows=None, turns=None, appended=None, observe=None, sessions=None):
+    """A service whose collaborators are plain callables — the point of injecting them."""
     rows = rows if rows is not None else {}
     turns = turns if turns is not None else []
     appended = appended if appended is not None else []
@@ -40,7 +40,14 @@ def _service(store, *, rows=None, turns=None, appended=None, observe=None):
         appended.append((session, turn))
 
     return WatchService(store, observe_run=observe or _observe, run_turn_fn=_run_turn,
-                        append_turn=_append)
+                        append_turn=_append,
+                        session_exists=(None if sessions is None
+                                        else (lambda sid: sid in sessions)))
+
+
+def _notices(appended):
+    """The turns a watch left in the chat BECAUSE it stopped, as opposed to its wake-ups."""
+    return [turn for _session, turn in appended if (turn.get("watch") or {}).get("notice")]
 
 
 # ------------------------------------------------------------------ it survives the browser
@@ -177,15 +184,131 @@ def test_a_condition_that_already_holds_fires_immediately(tmp_path):
     assert len(turns) == 1
 
 
-def test_a_run_that_no_longer_exists_is_a_stated_terminal_not_an_eternal_poll(tmp_path):
+def test_a_run_the_watch_HAS_SEEN_and_can_no_longer_see_is_a_stated_terminal(tmp_path):
+    """The GONE half of "the run is not there". `run_seen` is what makes this a fact rather than a
+    guess: this watch observed the run, so its disappearance is a deletion and the condition really
+    can never be met — an eternal poll would be the wrong answer here."""
     store = _store(tmp_path)
-    svc = _service(store, rows={})            # observe_run returns None -> the run is gone
+    rows = {"vanished": {"phase": "search", "engine_running": True}}
+    appended = []
+    svc = _service(store, rows=rows, appended=appended)
     rec = store.arm(session="s1", instruction="report",
                     trigger={"kind": "run_state", "run": "vanished", "until": ["finished"]})
-    svc.tick(now=time.time())
+    svc.tick(now=time.time())                        # sees it -> run_seen
+    assert store.get(rec["id"])["run_seen"] is True
+
+    rows.clear()                                     # the run is deleted under the watch
+    svc.tick(now=store.get(rec["id"])["next_due"])
     settled = store.get(rec["id"])
     assert settled["status"] == "failed"
     assert "can never be met" in settled["last_error"]
+    assert [t["watch"]["id"] for t in _notices(appended)] == [rec["id"]], (
+        "a terminal whose only account of itself is a JSON file under a dot-directory has stopped "
+        "exactly as silently as the monitoring this module replaced")
+
+
+def test_a_watch_armed_BEFORE_its_run_exists_waits_and_says_it_is_waiting(tmp_path):
+    """THE fix. Arming just before a launch is the natural gesture — and the run directory is not a
+    run until `events.jsonl` is written, so the launch window looks identical to a deleted run from
+    the observation alone. It must survive to see the run appear."""
+    store = _store(tmp_path)
+    rows = {}
+    turns, appended = [], []
+    svc = _service(store, rows=rows, turns=turns, appended=appended)
+    rec = store.arm(session="s1", instruction="tell me the champion when it finishes",
+                    trigger={"kind": "run_state", "run": "about-to-launch", "until": ["finished"]})
+
+    now = rec["created"]
+    svc.tick(now=now)
+    waiting = store.get(rec["id"])
+    assert waiting["status"] == "armed", "a run that has never been seen is NOT YET, not gone"
+    assert "does not exist yet" in waiting["last_error"], (
+        "and the record has to SAY it is waiting on nothing — `ui/src/assistantWatchModel.js` "
+        "prints `last_error` as the row's note")
+    assert waiting["last_observation"]["present"] is False
+    assert waiting["last_observation"]["give_up_at"] == pytest.approx(
+        rec["created"] + WATCH_RUN_APPEARANCE_GRACE_S)
+    assert not turns and not appended, "waiting costs no model call and reports no conclusion"
+
+    # …the launch lands, and the watch is still there to see it.
+    rows["about-to-launch"] = {"phase": "search", "engine_running": True, "finished": False}
+    svc.tick(now=waiting["next_due"])
+    seen = store.get(rec["id"])
+    assert seen["status"] == "armed" and seen["run_seen"] is True
+    assert seen["last_observation"]["phase"] == "search" and seen["last_error"] == ""
+
+    rows["about-to-launch"] = {"phase": "finished", "engine_running": False, "finished": True}
+    svc.tick(now=seen["next_due"])
+    assert len(turns) == 1, "and it fires on the state it was armed for"
+    assert store.get(rec["id"])["status"] == "done"
+
+
+def test_a_run_that_never_appears_stops_at_a_stated_bound_with_something_to_read(tmp_path):
+    """The negative control, and the reason the wait is bounded: a watch on a typo'd run id that
+    sits "waiting" until its 24 h lifetime runs out is its own silent failure."""
+    store = _store(tmp_path)
+    appended = []
+    svc = _service(store, rows={}, appended=appended)
+    rec = store.arm(session="s1", instruction="report on the run",
+                    trigger={"kind": "run_state", "run": "tyop-run", "until": ["finished"]})
+
+    svc.tick(now=rec["created"])
+    assert store.get(rec["id"])["status"] == "armed"
+    # It never polls PAST its own deadline, so the give-up lands when the record promised it.
+    assert store.get(rec["id"])["next_due"] <= rec["created"] + WATCH_RUN_APPEARANCE_GRACE_S
+
+    svc.tick(now=rec["created"] + WATCH_RUN_APPEARANCE_GRACE_S + 1)
+    settled = store.get(rec["id"])
+    assert settled["status"] == "failed"
+    assert "never appeared" in settled["last_error"] and "tyop-run" in settled["last_error"]
+    notice = _notices(appended)[0]
+    assert "never appeared" in notice["content"]
+    assert "report on the run" in notice["content"], (
+        "the notice carries the standing instruction, so the operator knows WHICH ask stopped")
+
+
+def test_every_terminal_the_scheduler_decides_leaves_a_line_in_the_chat(tmp_path):
+    """The silence is the defect, not the terminal. A watch that retires with nothing in the chat
+    the operator opened is indistinguishable from one that is still monitoring."""
+    store = _store(tmp_path)
+    appended = []
+
+    def _explodes(_record, _instruction):
+        raise RuntimeError("the model went away")
+
+    svc = WatchService(store, observe_run=lambda r: None, run_turn_fn=_explodes,
+                       append_turn=lambda s, t: appended.append((s, t)))
+    lifetime = store.arm(session="s1", instruction="watch overnight",
+                         trigger={"kind": "schedule", "every_s": 60},
+                         lifetime_s=WATCH_MIN_INTERVAL_S)
+    svc.tick(now=lifetime["created"] + 10_000)                       # expired by lifetime
+    assert store.get(lifetime["id"])["status"] == "expired"
+
+    broke = store.arm(session="s2", instruction="check", trigger={"kind": "schedule",
+                                                                  "every_s": 60})
+    svc.tick(now=store.get(broke["id"])["next_due"])                 # failed wake-up turn
+    assert store.get(broke["id"])["status"] == "failed"
+
+    reasons = [t["content"] for t in _notices(appended)]
+    assert len(reasons) == 2, "both terminals, both announced"
+    assert any("lifetime" in r for r in reasons) and any("RuntimeError" in r for r in reasons)
+    assert all(r.startswith("[standing watch stopped]") for r in reasons)
+
+
+def test_a_stop_that_wins_the_race_is_not_re_reported_as_a_failure(tmp_path):
+    """`cancelled` is the one terminal the operator already holds the receipt for — and the stop
+    that arrives while the scheduler is retiring the same watch is an ORDINARY race here. `update`
+    refuses to move a terminal record, so the notice has to be conditional on having actually
+    written the one it is about, or the chat gets a line saying the watch failed when it was
+    stopped."""
+    store = _store(tmp_path)
+    appended = []
+    svc = _service(store, rows={}, appended=appended)
+    rec = store.arm(session="s1", instruction="x", trigger={"kind": "schedule", "every_s": 60})
+    store.cancel(rec["id"])                    # the operator's stop lands first
+    settled = svc._retire(rec, status="expired", reason="the watch reached its lifetime")
+    assert settled["status"] == "cancelled", "nothing transitions out of a terminal"
+    assert _notices(appended) == []
 
 
 def test_a_transient_read_failure_retries_rather_than_giving_up(tmp_path):
@@ -389,6 +512,83 @@ def test_a_watch_belongs_to_its_chat_and_no_other(tmp_path):
     assert [r["id"] for r in mine.list()] == []
 
 
+# ------------------------------------------------------------------ a watch is owned by its chat
+def test_deleting_a_chat_removes_its_watches_and_returns_the_receipt(tmp_path):
+    """The cascade. A watch is owned by the chat that armed it: it cannot run without that chat's
+    history, cannot report without its transcript and cannot be found without its id. What matters
+    most is what it REMOVES — the instruction is the operator's own sentence, and a chat they
+    deleted must not go on holding it."""
+    store = _store(tmp_path)
+    mine = store.arm(session="s1", trigger={"kind": "schedule", "every_s": 60},
+                     instruction="email the numbers to my supervisor at alice@example.com")
+    theirs = store.arm(session="s2", instruction="not yours",
+                       trigger={"kind": "schedule", "every_s": 60})
+
+    receipt = store.delete_for_session("s1")
+    assert [r["id"] for r in receipt] == [mine["id"]]
+    assert receipt[0]["removed"] is True and receipt[0]["status"] == "cancelled"
+    assert receipt[0]["waiting_for"] == "every 1 min"
+    assert not any("instruction" in r for r in receipt), (
+        "echoing the sentence back in the answer to 'delete this' is the same failure one layer up")
+
+    assert store.get(mine["id"]) is None and [r["id"] for r in store.list()] == [theirs["id"]]
+    watch_dir = tmp_path / "assistant" / ".watches"
+    assert not any("alice@example.com" in p.read_text(encoding="utf-8")
+                   for p in watch_dir.glob("*.json"))
+    assert store.delete_for_session("s1") == [], "…and it is idempotent"
+
+
+def test_a_cascade_marks_a_watch_stopped_before_it_unlinks_it(tmp_path):
+    """Order matters: a scheduler tick may already be inside `_wake` for one of these, and `claim`
+    /`update` both re-read the record. A terminal is the one thing they will not act on, so the
+    cancel closes the window the unlink alone would leave open."""
+    store = _store(tmp_path)
+    rec = store.arm(session="s1", instruction="x", trigger={"kind": "schedule", "every_s": 60})
+    seen = []
+    original = store._write
+
+    def _spy(record):
+        seen.append((record["status"], (tmp_path / "assistant" / ".watches" /
+                                        f"{record['id']}.json").exists()))
+        return original(record)
+
+    store._write = _spy
+    store.delete_for_session("s1")
+    assert seen == [("cancelled", True)], "cancelled while the record still existed, then unlinked"
+    assert store.claim(rec["id"]) is None
+
+
+def test_a_watch_whose_chat_is_gone_is_swept_at_startup(tmp_path):
+    """The same ownership rule over records the cascade never saw — an out-of-band removal, or a
+    server that predates it. Startup is the one moment every record is looked at anyway."""
+    store = _store(tmp_path)
+    live = store.arm(session="alive", instruction="keep me",
+                     trigger={"kind": "schedule", "every_s": 60})
+    orphan = store.arm(session="deleted", instruction="my private standing instruction",
+                       trigger={"kind": "schedule", "every_s": 60})
+
+    _service(store, sessions={"alive"}).bootstrap()
+    assert [r["id"] for r in store.list()] == [live["id"]]
+    assert store.get(orphan["id"]) is None
+
+
+def test_a_sweep_that_cannot_tell_never_deletes(tmp_path):
+    """A deletion sweep has exactly one safe direction to fail in. An unreadable chat is not a
+    deleted one, and neither is a server that was given no way to ask."""
+    store = _store(tmp_path)
+    rec = store.arm(session="s1", instruction="x", trigger={"kind": "schedule", "every_s": 60})
+
+    def _raises(_sid):
+        raise OSError("the session store is unreadable right now")
+
+    svc = WatchService(store, observe_run=lambda r: None, run_turn_fn=lambda *a: {},
+                       append_turn=lambda *a: None, session_exists=_raises)
+    svc.bootstrap()
+    assert store.get(rec["id"])["status"] == "armed"
+    _service(store).bootstrap()          # no `session_exists` injected at all -> no sweep
+    assert store.get(rec["id"])["status"] == "armed"
+
+
 def test_this_module_appends_no_events_and_names_no_control_intent():
     """Engine invariant #1, held by construction. A more autonomous assistant getting a private door
     into the event log is exactly what doc 36's second corollary forbids, and the cheapest way for
@@ -526,6 +726,77 @@ def test_the_watch_routes_arm_list_and_stop(tmp_path):
     assert stopped.status_code == 200 and stopped.json()["watch"]["status"] == "cancelled"
     assert client.get("/api/assistant/watches",
                       params={"session": sid, "active": True}).json()["watches"] == []
+
+
+def _poll_watch(client, watch_id, predicate, timeout=25.0):
+    """Drive the REAL scheduler thread — the one the route's `on_arm` hook starts — and read the
+    record back through the HTTP surface an operator would."""
+    deadline = time.time() + timeout
+    row = None
+    while time.time() < deadline:
+        rows = client.get("/api/assistant/watches").json()["watches"]
+        row = next((r for r in rows if r["id"] == watch_id), None)
+        if row is not None and predicate(row):
+            return row
+        time.sleep(0.2)
+    return row
+
+
+def test_a_watch_armed_before_a_launch_survives_to_see_the_run_appear_over_http(tmp_path):
+    """Driven end to end, because this is the shape that failed: through the real routes, with the
+    real scheduler thread and the real `run_dir` observation, a watch armed two seconds before the
+    launch used to read `failed` — "run … no longer exists, so this condition can never be met" —
+    with nothing whatsoever in the chat."""
+    client = _app_client(tmp_path)
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    armed = client.post("/api/assistant/watches", json={
+        "session": sid, "kind": "run_state", "run": "about-to-launch", "until": ["finished"],
+        "instruction": "tell me the champion"}).json()["watch"]
+
+    waiting = _poll_watch(client, armed["id"], lambda r: bool(r["last_error"]))
+    assert waiting["status"] == "armed", waiting
+    assert "does not exist yet" in waiting["last_error"]
+    assert waiting["last_observation"]["present"] is False
+    assert client.get(f"/api/assistant/sessions/{sid}").json()["messages"] == [], (
+        "nothing has happened yet, so nothing is reported yet")
+
+    # The launch lands. A run directory is not a run until `events.jsonl` exists — that gap is the
+    # launch window, and `run_dir` 404s across it exactly as it does for a typo.
+    rd = tmp_path / "about-to-launch"
+    rd.mkdir()
+    (rd / "events.jsonl").write_text(json.dumps(
+        {"v": 1, "seq": 0, "ts": time.time(), "type": "run_started", "data": {"settings": {}},
+         "trace_id": None, "span_id": None}) + "\n")
+
+    seen = _poll_watch(client, armed["id"],
+                       lambda r: (r["last_observation"] or {}).get("present") is not False)
+    assert seen["status"] == "armed", seen
+    assert seen["last_observation"]["phase"], "the watch is now observing a real run"
+    assert seen["last_error"] == ""
+
+
+def test_deleting_a_chat_over_http_takes_its_watches_with_it(tmp_path):
+    """The ownership model, driven: DELETE -> 200 with a receipt, GET session -> 404, and the watch
+    is gone from the listing and from the disk instead of polling on with the operator's own
+    sentence inside it."""
+    client = _app_client(tmp_path)
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+    watch = client.post("/api/assistant/watches", json={
+        "session": sid, "kind": "schedule", "every_s": 3600,
+        "instruction": "email the numbers to my supervisor at alice@example.com"}).json()["watch"]
+
+    deleted = client.delete(f"/api/assistant/sessions/{sid}")
+    assert deleted.status_code == 200
+    body = deleted.json()
+    assert body["ok"] is True and body["watches_removed"] == 1
+    assert [w["id"] for w in body["watches"]] == [watch["id"]]
+    assert body["watches"][0]["waiting_for"] == "every 1 h"
+    assert "alice@example.com" not in deleted.text, (
+        "the receipt names what it removed and does not repeat the instruction back")
+
+    assert client.get(f"/api/assistant/sessions/{sid}").status_code == 404
+    assert client.get("/api/assistant/watches").json()["watches"] == []
+    assert list((tmp_path / "assistant" / ".watches").glob("*.json")) == []
 
 
 def test_a_refused_watch_is_a_400_that_says_why(tmp_path):

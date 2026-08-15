@@ -217,7 +217,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   verbs are `watch_run` / `watch_every` / `list_watches` / `stop_watch`. After a server restart a
   read-only watch is re-armed automatically; one that could have MUTATED is left `interrupted` with
   the reason, because its turn may have applied half a change and re-entering it would apply the
-  other half twice.
+  other half twice. **Deleting a chat deletes its standing watches**, and the DELETE answers with a
+  receipt naming them (`watches_removed`, and each watch's id, status and condition — never its
+  instruction): a watch is owned by the chat that armed it, and a chat you deleted must not go on
+  holding your own sentence, nor go on polling for a conversation that is not there.
 
     **What you actually do.** You arm a watch by *typing* — there is no "new watch" button, and the
     UI has no client binding for the POST route; your sentence becomes a `watch_run` / `watch_every`
@@ -234,11 +237,29 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
     "watch it again" is a new watch. A **schedule** repeats every N seconds (15 s to 24 h; 300 s if
     you do not say) until it exhausts its wake-up budget or its lifetime, and only a schedule shows a
     budget in the strip. The other statuses are `armed`, `waking`, `cancelled`, `expired` (budget or
-    lifetime reached) and `failed` (the run vanished, or the wake-up turn raised). Every bound is
+    lifetime reached) and `failed` (the run vanished, the run never turned up, or the wake-up turn
+    raised). Every bound is
     **refused rather than clamped** — a 2-second interval, a ninth active watch on one chat, an
     unknown run state — and the refusal is one sentence naming the fix, both in chat and as an HTTP
     `400 {"code": "watch_refused"}`. A wake-up may not arm further watches, so a watch population
     cannot grow itself.
+
+    **"That run is not there" is two different facts, and the watch tells them apart.** Arming a
+    run-state watch *just before* you launch the run is the natural gesture, and a run directory is
+    not a run until its `events.jsonl` exists — so during the launch window the server sees exactly
+    what it sees for a typo. A watch that has **already seen** the run and can no longer see it
+    treats that as a deletion and stops at once; one that has **never** seen it treats it as *not
+    yet*, keeps waiting, and says so in its own row ("run X does not exist yet — waiting for it to
+    appear, giving up in N min"). That wait is bounded — **15 minutes from when you armed it** — so a
+    mistyped run id is answered in the same sitting instead of reading "waiting" until the lifetime
+    runs out.
+
+    **A watch that stops always leaves you a line to read.** Every terminal the scheduler decides —
+    the lifetime, the run that vanished, the run that never appeared, a wake-up turn that raised, an
+    exhausted budget, and the restart refusal — appends a short `[standing watch stopped]` note to
+    the chat beside the wake-ups, saying why, what it was waiting for and what its standing
+    instruction was. A note is not a wake-up: it calls no model, holds no turn slot and spends
+    nothing. The one terminal that gets no note is the one *you* pressed Stop on.
 
     The implementation is `looplab/serve/assistant_watch.py`, and it deliberately holds no domain
     authority: it appends no event and names no control intent, its only import above `core` is the
