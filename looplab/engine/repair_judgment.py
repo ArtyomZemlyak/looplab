@@ -26,7 +26,10 @@ So the bound becomes three things with different jobs:
   2. **A critic**, here. It reads the trajectory and answers one question: are successive attempts
      addressing DIFFERENT causes, or circling one? It stops the loop. It does not decide what the
      failure was and it never touches the result.
-  3. **Floors**, which no judgment may cross: `repair_floor_stop` below.
+  3. **Floors**, which no judgment may cross: `repair_floor_stop` below, and beside it
+     `repair_redone_work_stop` — the COST floor added 2026-08-15 for the chains
+     `inline_repair_retrain_cap` structurally cannot charge, because they redo work without
+     discarding a completed stage.
 
 THE LINE (doc 36 §"The line"), which this module is on the safe side of and must stay on. The
 critic's entire output is "keep going / stop" plus prose for the terminal event. It never sets
@@ -193,6 +196,116 @@ def repair_floor_stop(*, attempt: int, operator_cap: int, ceiling: int) -> Optio
         return (f"inline repair has spent the engine's absolute ceiling of {int(ceiling)} attempt(s) "
                 f"on this node — {why}")
     return None
+
+
+# --- The floor the retrain cap structurally cannot reach ----------------------------------------
+# WHY THERE IS A SECOND FLOOR, and why it is measured in SECONDS rather than in repairs.
+#
+# `engine/evaluate.py::_repair_forces_full_retrain` charges `inline_repair_retrain_cap` only when a
+# repair DISCARDS COMPLETED EARLIER-STAGE WORK. That rule is right and is not what changed here: a
+# first-stage failure has no completed stage to discard, so nothing is re-trained, and its own
+# comment says so — such a repair is "an ordinary retry, bounded by the attempt budget like any
+# other". THE THING IT DELEGATES TO IS WHAT MOVED. When that sentence was written the attempt budget
+# was `inline_repair_attempts: 12` and it was the TRANSITION; since 2026-08-13 the default is `0`,
+# which `_effective_repair_cap` reads as the engine ceiling of 50, and the transition belongs to a
+# judgment. So the delegation now reads "bounded by 50, or by a judge" — and in the configuration
+# where no triage model is wired (`crash_repair.py`'s rule path, a supported configuration) there is
+# no judge AND no critic: `_repair_critic` reads `researcher.repair_critic`, the same object that
+# would have carried `triage_crash`, so a run without one has neither. Driven on that configuration,
+# a first-stage `RuntimeError` buys **51 full pipeline evaluations, 50 repairs and 0 charges**.
+#
+# WHY NOT SIMPLY CHARGE THE RETRAIN CAP FOR A FIRST-STAGE REPAIR. Measured against the live record,
+# that kills legitimate work: `runs/rubertlite-dr-unified-v8` node 3 failed its FIRST stage (`mine`)
+# three times and passed it on the fourth attempt — under a per-repair charge at the default cap of
+# 2 the node would have been abandoned at attempt 3, one repair before the stage it was fixing
+# worked. The cap's number is calibrated for a re-TRAIN (that manifest declares `train` at 22000 s);
+# spending it one-per-repair on a 5400 s `mine` charges a cheap thing at an expensive thing's rate.
+# So the ledger stays a COUNT of discarded full re-trains, and this floor spends the SAME operator
+# number in the unit the first-stage case actually costs: wall-clock.
+#
+# WHAT IT LICENSES. `inline_repair_retrain_cap` says how many FULL pipeline re-runs an operator will
+# pay for. One full pipeline's cost is the operator's own declared ceiling for it — the sum of the
+# declared stage timeouts (or the single-command eval's timeout), which is a number the operator
+# WROTE rather than one this module invented. So a repair chain may spend `(cap + 1)` of those: the
+# node's own first run plus the re-runs the cap licenses. On v8 node 3 that is 2+1 pipelines of
+# its declared 9000 + 22000 s (plus whatever the engine-appended score stage declares), i.e. at
+# least 93000 s against the 9567 s its four repairs actually spent — it does not fire. On the driven
+# first-stage runaway (`tests/test_first_stage_repair_cost.py`, a 31600 s declared pipeline and
+# 6200 s per eval) it binds at 15 repairs where the pre-fix tree runs 50.
+#
+# IT FAILS OPEN, DELIBERATELY, IN BOTH DIRECTIONS. `cap = 0` is the field's documented "unlimited
+# (legacy behavior)" and stays unlimited here. An eval with NO declared timeout anywhere yields no
+# licensed number and therefore no bound — a floor that guesses a pipeline's cost would abandon
+# nodes on a number nobody wrote, which is the expensive direction. Both are stated by returning
+# None rather than by a caller's `if`, so the rule has one truth table.
+
+
+def declared_pipeline_seconds(stages, command_timeout=None) -> float:
+    """What ONE full run of this node's eval is DECLARED to cost, at most. 0.0 = nobody said.
+
+    The operator's own number, never a measurement: a stage's `timeout` is what `declare_stages`
+    validated against the per-eval budget, and for a single-command eval it is `_eval_pipeline`'s
+    resolved timeout. A measurement could not answer this question at all in the case that needs it
+    — a chain whose FIRST stage keeps failing has never completed a pipeline, so there is nothing to
+    measure and the only honest ceiling is the declared one.
+
+    A stage with no declared timeout contributes 0 rather than a guess, which makes the sum a lower
+    bound on the declared cost and therefore the CONSERVATIVE direction for a floor: it can only
+    make the licensed allowance smaller than the operator's declaration, never larger... which would
+    be the wrong direction, so a pipeline in which NO stage declares anything falls back to the
+    command timeout and then to 0.0 = no bound at all."""
+    total = 0.0
+    for stage in (stages or []):
+        if not isinstance(stage, dict):
+            continue
+        try:
+            seconds = float(stage.get("timeout") or 0.0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if seconds > 0:
+            total += seconds
+    if total > 0:
+        return total
+    try:
+        return max(0.0, float(command_timeout or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def repair_redone_work_stop(*, chain_seconds: float, pipeline_seconds: float,
+                            retrain_cap: int) -> Optional[str]:
+    """Has this repair chain spent more eval wall-clock than the retrain cap licenses? The
+    operator-facing reason, or None.
+
+    `chain_seconds` is every eval second this node's lifecycle has spent under inline repair,
+    durable across a resume (`evaluate.py::_durable_repair_seconds` + this process's `total_eval`) —
+    a bound a resume refunds is not a bound. `pipeline_seconds` is `declared_pipeline_seconds`.
+    `retrain_cap` is the raw `inline_repair_retrain_cap`.
+
+    The allowance is `(retrain_cap + 1) * pipeline_seconds` — the node's own first run plus the
+    re-runs the cap pays for — because `chain_seconds` includes the original eval. The message names
+    BOTH inputs, because an operator reading it has two different remedies (raise the cap, or fix a
+    pipeline whose declared cost is wrong) and a terminal quoting only one sends them to the other.
+    It is kept under 300 characters on purpose: `evaluate.py` cuts a terminal's `triage_rationale`
+    there, and a sentence whose second half explains WHY the cap applied to a chain that re-trained
+    nothing must not be the half that gets truncated away."""
+    cap = int(retrain_cap) if isinstance(retrain_cap, int) and not isinstance(retrain_cap, bool) else 0
+    if cap <= 0:                      # the field's documented "0 = unlimited (legacy behavior)"
+        return None
+    try:
+        declared = float(pipeline_seconds)
+        spent = float(chain_seconds)
+    except (TypeError, ValueError):
+        return None
+    if not (declared > 0):            # nothing declared -> no licensed number -> no bound
+        return None
+    licensed = declared * (cap + 1)
+    if spent < licensed:
+        return None
+    return (f"inline repair has spent {spent:.0f}s of evaluation here — the {licensed:.0f}s that "
+            f"inline_repair_retrain_cap={cap} licenses ({cap} re-run(s) plus the original) against "
+            f"a pipeline this task declares at {declared:.0f}s. That cap counts DISCARDED "
+            "re-trains; this chain redid work without discarding any, so it is charged in seconds")
 
 
 # --- What the Developer is told it may say ------------------------------------------------------

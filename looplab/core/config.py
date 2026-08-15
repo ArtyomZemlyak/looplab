@@ -843,8 +843,23 @@ class Settings(BaseSettings):
     # CHEAP and NOT counted here; only a repair that changes an EARLIER stage's code (train.py/loss.py/…)
     # forces a full re-train, which each costs the whole training time. Without this bound, a repair that
     # keeps changing training code could burn many full trains (`inline_repair_attempts` bounds the
-    # COUNT of repairs, not what each one costs). 0 = unlimited (legacy behavior). Single-command
-    # evals ignore it.
+    # COUNT of repairs, not what each one costs). 0 = unlimited (legacy behavior).
+    #
+    # IT IS SPENT TWO WAYS, and the second exists because the first structurally cannot reach the
+    # case that costs the most (2026-08-15, backlog §0.2). As a COUNT it charges only a repair that
+    # DISCARDS COMPLETED EARLIER-STAGE WORK (`evaluate.py::_repair_forces_full_retrain`) — a
+    # FIRST-stage failure and a single-command eval discard nothing, so they were charged nothing and
+    # left to "the attempt budget", which since 2026-08-13 means 50-or-a-judgement. Driven on the
+    # no-judge configuration that has neither: a first-stage `RuntimeError` bought 51 full pipeline
+    # evaluations, 50 repairs, 0 charges. So the SAME number is also spent in SECONDS
+    # (`repair_judgment.repair_redone_work_stop`): a repair chain may spend `(cap + 1)` times what
+    # the task DECLARES one full pipeline costs (the sum of the declared stage timeouts, or the
+    # single-command timeout), so single-command evals no longer ignore it entirely.
+    # NOT "charge the count for a first-stage repair too": measured against
+    # `runs/rubertlite-dr-unified-v8` node 3, which failed its first stage three times and PASSED it
+    # on the fourth attempt, a per-repair charge at this default abandons that node one repair
+    # before the stage it was fixing worked. The count is calibrated for a re-TRAIN (that manifest
+    # declares `train` at 22000 s) and a `mine` at 5400 s is not the same unit.
     inline_repair_retrain_cap: int = Field(default=2, ge=0)
     # Environment self-prep: when a solution crashes purely because a KNOWN library isn't installed
     # (ModuleNotFoundError), the engine pip-installs it into the eval interpreter and re-runs — so a

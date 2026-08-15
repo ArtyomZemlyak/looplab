@@ -57,7 +57,8 @@ from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE
                                            unbound_subject_violation_rows)
 from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
-                                            developer_stuck_contract, repair_floor_stop)
+                                            declared_pipeline_seconds, developer_stuck_contract,
+                                            repair_floor_stop, repair_redone_work_stop)
 from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
 
 # Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
@@ -290,6 +291,44 @@ def _durable_full_retrains(events, node_id: int, generation: int) -> int:
             continue
         n = _durable_int(d.get("spent"), default=None)
         spent = max(spent, n) if n is not None else spent + 1
+    return spent
+
+
+def _durable_repair_seconds(events, node_id: int, generation: int) -> float:
+    """Evaluation wall-clock this node's repair chain has already spent, from the log.
+
+    The FIFTH of the family and the one whose bound is neither a count nor a set but a COST.
+    `repair_judgment.repair_redone_work_stop` is the reader; see that rule for why a floor measured
+    in seconds is what a first-stage repair chain needs and why the retrain cap's COUNT cannot serve
+    there. Like every other member: process-local, a resume would refund the whole allowance, and a
+    bound a resume refunds is not a bound.
+
+    It rides on `node_repaired.eval_seconds` and does NOT need its own event, which is the
+    difference from `_durable_full_retrains` one function up — and the reason is exactly the one
+    stated there. That charge could not ride on `node_repaired` because the row is appended BEFORE
+    the loop asks `_repair_forces_full_retrain`, so the field would have carried the PREVIOUS
+    attempt's answer. This number is not a later decision: it is the wall-clock of the eval that has
+    ALREADY happened by the time the row is written, so the row is the natural place for it.
+
+    Each row carries its own attempt's seconds and they are SUMMED (not `max`ed like the cumulative
+    `full_retrain_charged.spent`), because a resume restarts the process-local accumulator at zero,
+    so no single row ever holds the chain's total. A row written before this field existed
+    contributes 0.0, which is the honest reading and the safe direction: an old log's chain is
+    UNDER-charged rather than abandoned on seconds nobody recorded.
+    """
+    spent = 0.0
+    for e in events or []:
+        if e.type != EV_NODE_REPAIRED:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        try:
+            seconds = float(d.get("eval_seconds") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if seconds > 0:
+            spent += seconds
     return spent
 
 
@@ -1600,6 +1639,11 @@ class EvaluateMixin:
             # not a bound. `_MAX_DEP_ROUNDS` exists so an offline or misnamed package cannot loop,
             # and `inline_repair_retrain_cap` is a guard on GPU hours — both were process-local.
             dep_rounds = _durable_dep_rounds(events_at_start, node_id, generation)
+            # …and the COST floor's own seed, for the same reason and from the same log. See
+            # `_durable_repair_seconds` / `repair_judgment.repair_redone_work_stop`: this is the
+            # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
+            # charge — the ones that re-run a stage without discarding a completed one.
+            prior_repair_seconds = _durable_repair_seconds(events_at_start, node_id, generation)
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
             async def _record_superseded() -> None:
                 async with self._write_lock:
@@ -1772,6 +1816,13 @@ class EvaluateMixin:
                 superseded = _intervention == "reset"
                 operator_card_dropped = _intervention == "card_drop"
                 aborted = _intervention in {"abort", "card_drop"}
+                # THIS attempt's own eval wall-clock, captured beside the cumulative one because the
+                # durable cost ledger needs the per-attempt number: `total_eval` restarts at 0 in a
+                # resumed process, so no single `node_repaired` row could carry a running total that
+                # survives re-entry (`_durable_repair_seconds` sums the rows for exactly that
+                # reason). Read here rather than at the append below, where `time.time() - _t0` has
+                # since accumulated the triage and repair LLM calls, which are not eval seconds.
+                attempt_eval_seconds = round(time.time() - _t0, 3)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
                 # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
                 # metric (a completed train+eval that only hung on teardown — a distributed finalize
@@ -2002,6 +2053,31 @@ class EvaluateMixin:
                 floor_stop = repair_floor_stop(
                     attempt=attempt, operator_cap=int(self._inline_repair_attempts or 0),
                     ceiling=_UNLIMITED_REPAIR_CEILING)
+                # THE COST FLOOR, and it is the one that reaches the chains the retrain cap cannot.
+                # `_repair_forces_full_retrain` charges `inline_repair_retrain_cap` only for a
+                # repair that DISCARDS completed earlier-stage work, which is correct and is why a
+                # first-stage chain — v8 node 3 re-running an 82-minute `mine`, driven to 51 full
+                # evaluations and 0 charges with no judge wired — is charged nothing at all. So the
+                # same operator number is also spent in SECONDS, against what the task DECLARES one
+                # full pipeline costs. Read `repair_judgment.repair_redone_work_stop` for why this
+                # is not simply "charge the cap for a first-stage repair too" (measured: that
+                # abandons v8 node 3 one attempt before its `mine` stage passed).
+                #
+                # Checked SECOND so the message order matches `repair_floor_stop`'s own rule — an
+                # operator who spelled a count cap must read about the bound they set — and computed
+                # only when a cap is actually in force, so the `cap = 0` legacy path pays no stage
+                # resolution. The pipeline is re-resolved per attempt rather than hoisted: a repair
+                # may rewrite `looplab_stages.json`, so a hoisted number would license the chain
+                # against a pipeline the node no longer has.
+                if floor_stop is None and self._inline_repair and self._inline_repair_retrain_cap:
+                    _pipeline_s = declared_pipeline_seconds(
+                        self._resolved_stages(node, workdir),
+                        (self._eval_spec or {}).get("timeout")
+                        if isinstance(self._eval_spec, dict) else None)
+                    floor_stop = repair_redone_work_stop(
+                        chain_seconds=prior_repair_seconds + total_eval,
+                        pipeline_seconds=_pipeline_s,
+                        retrain_cap=int(self._inline_repair_retrain_cap or 0))
                 # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
                 # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
                 if (not self._inline_repair
@@ -2348,6 +2424,13 @@ class EvaluateMixin:
                         # kind of failure was that" is `_failure_reason` over the sandbox's
                         # out-of-band signals. Additive (invariant #5); the fold ignores it.
                         "reason": reason,
+                        # The wall-clock of the eval this repair answers. Additive (invariant #5);
+                        # the fold ignores it. It is what makes the COST floor durable across a
+                        # resume — see `_durable_repair_seconds`, which sums these rows, and
+                        # `repair_judgment.repair_redone_work_stop`, which spends the operator's
+                        # `inline_repair_retrain_cap` in seconds on the chains that cap cannot
+                        # charge in counts.
+                        "eval_seconds": attempt_eval_seconds,
                         "unparseable_repairs": unparseable_repairs}
                     if repaired_footprint is not None:
                         repair_payload.update({

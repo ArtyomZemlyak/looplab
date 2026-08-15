@@ -246,6 +246,12 @@ may burn before abandoning the node. (It used to abandon *to* the inter-node deb
 operator was removed on 2026-08-13 — a failure is repaired inside the node that failed, for as long
 as the repair judgment allows.)
 
+**A chain whose FIRST stage keeps failing discards nothing, so it spends none of that count** — and
+since 2026-08-15 it spends the same cap in **seconds** instead. Declare a `timeout` on every stage:
+that is the number the engine multiplies by `cap + 1` to decide how much evaluation wall-clock one
+node's repair chain may redo. Without a declared timeout there is no licensed number and no bound —
+the engine will not invent a pipeline cost in order to abandon your node.
+
 **When the stage that broke is not the stage that is wrong**, the repair can say so. An earlier stage
 that exited 0 was counted successful, but exit 0 only means it did not crash — a data/mining stage can
 "succeed" having produced a fraction of what it should have, and the failure then surfaces one stage
