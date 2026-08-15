@@ -16,7 +16,8 @@ import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
-import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
+import { driftStatus, leakageStatus, rewardHackStatus, OBJECTIVE_SOURCE_LABEL,
+  objectiveMetricSource, objectiveSourceCaveated, objectiveSourceHelp } from './trustSemantics.js'
 import { metricComparable, sortRuns } from './runIndex.js'
 import { crossRunGroups, groupClaim, rankCoverage } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
@@ -720,7 +721,9 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
 // at-least-as-good on all objectives and strictly better on one.
 const paretoMetric = node => node.confirmed_mean ?? node.metric
 
-function paretoFront(nodes, direction) {
+// Exported for the same reason `Inspector.jsx::Metrics` is: nothing in the suite MOUNTS a panel, and
+// which nodes reach the front is a claim about a RECORD that has to be driven, not read off source.
+export function paretoFront(nodes, direction) {
   const keys = [...new Set(nodes.flatMap(n => Object.keys(n.extra_metrics || {})))]
   const vec = (n) => [direction === 'min' ? paretoMetric(n) : -paretoMetric(n),
     ...keys.map(k => { const v = n.extra_metrics?.[k]; return v == null ? Infinity : v })]
@@ -728,6 +731,35 @@ function paretoFront(nodes, direction) {
   const pts = nodes.map(n => ({ n, v: vec(n) }))
   return { keys, front: pts.filter(p => !pts.some(q => q !== p && dominates(q.v, p.v))).map(p => p.n) }
 }
+// THE FRONT IS A SELECTION DISPLAY, and until 2026-08-15 it ranked a SALVAGED objective with no
+// caveat at all — while `Inspector.jsx::Metrics`, one tab over, already labelled the same number
+// `salvaged` from `trustSemantics.js`. Two surfaces, one record, opposite stories; the reading
+// surface got the caveat and the DECIDING surface did not.
+//
+// DRIVEN, PRE-FIX, and it is worse than a missing word. A run with a measured 0.51 and a
+// `metric_salvage: "select"` node at 0.81 rendered ONE row — `#4 👑 0.81` — because a Pareto front
+// does not merely rank: a caveated point DOMINATES measured ones off the table entirely. The
+// operator opens this panel to decide which configuration to reuse and is shown a single winner
+// whose number the run recovered from an eval that failed its contract, with the measured result
+// nowhere on screen. That is `runs/rubertlite-dr-unified-v6` node 4's defect drawn as a chart.
+//
+// CAVEAT, AND DELIBERATELY NOT UNRANK — the cross-run overlay's "shown, valued, NO rank" precedent
+// (`crossRunRank.js::buildGroup`, for a prefix-folded run) does not transfer, for three reasons the
+// record settles rather than taste:
+//   1. A competition RANK is a per-row fact: drop one run from `crossRunRank`'s eligible set and
+//      every other run's rank is exactly what it was. Pareto membership is a RELATION over a SET —
+//      remove a point from the domination test and OTHER nodes join the front. So "unranked" here
+//      is not a statement about the excluded row; it publishes a front the record does not support.
+//   2. Under `select` the ENGINE ranks this node: it is in `feasible_nodes` and may be — in the
+//      case driven above, IS — `best_node_id`. A front that dropped it would omit the run's own
+//      champion while still drawing the crown, i.e. re-create the two-surfaces-one-record defect
+//      this change exists to close. The rung where the engine DOES exclude it (`audit`, which mints
+//      the violation row) is already excluded below by `feasible !== false`.
+//   3. `select` is the OPERATOR's own recorded decision that this number competes. The panel's job
+//      is to make sure they can see what they admitted, not to quietly overrule it.
+// What the precedent DOES give is its other half — a fact that would otherwise be invisible stays on
+// screen. Here the invisible fact is the measured node the caveated point displaced, so the panel
+// names the front restricted to measured objectives whenever a caveated node is on this one.
 export function ParetoPanel({ state, onClose, onSelect }) {
   const nodes = Object.values(state.nodes).filter(n => paretoMetric(n) != null && n.feasible !== false)
   // first constraint dimension, if any
@@ -752,6 +784,21 @@ export function ParetoPanel({ state, onClose, onSelect }) {
         const unverified = unverifiedExtraMetricKeys(nodes, keys)
         const sortedFront = [...front].sort((a, b) => (state.direction === 'min'
           ? paretoMetric(a) - paretoMetric(b) : paretoMetric(b) - paretoMetric(a)))
+        // ONE read of the shared vocabulary per node — the same call the Metrics tab makes, over the
+        // same three record facts (the violation ROWS, their `salvage.condition`, the folded
+        // `metric_provenance`). Derived from the record, never inferred from `feasible`: a node
+        // excluded for a breached BOUND is not salvaged, and a salvaged node admitted under `select`
+        // is feasible.
+        const sources = new Map(sortedFront.map(n => [n.id, objectiveMetricSource(n)]))
+        const caveated = sortedFront.filter(n => objectiveSourceCaveated(sources.get(n.id)))
+        // The front the operator would read if only measured objectives counted. Computed ONLY when
+        // something is caveated, and reported only for the nodes it ADDS — a node already on the
+        // real front needs no second mention, and a front that is unchanged is not a finding.
+        const measuredFront = caveated.length
+          ? paretoFront(nodes.filter(n => !objectiveSourceCaveated(objectiveMetricSource(n))),
+            state.direction).front
+          : []
+        const displaced = measuredFront.filter(m => !front.some(f => f.id === m.id))
         return <>
           <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
           {sortedFront.length
@@ -764,10 +811,33 @@ export function ParetoPanel({ state, onClose, onSelect }) {
                 {keys.map(k => <th key={k}>{k}{unverified.has(k)
                   ? <span className="warn" title={EXTRA_METRIC_CHANNEL_HELP.auto}> ⚠</span> : ''}</th>)}</tr></thead><tbody>
                 {sortedFront.map(n =>
-                  <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
+                  <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td>
+                    {/* The caveat rides ON the number, not in a column of its own: this table's
+                        columns are the OBJECTIVES, and an operator comparing two rows compares the
+                        cells side by side. Same word and same sentence as the Metrics tab, from the
+                        same call, so the two cannot drift. */}
+                    <td>{fmt(n.confirmed_mean ?? n.metric)}{objectiveSourceCaveated(sources.get(n.id))
+                      ? <span className="warn" title={objectiveSourceHelp(sources.get(n.id))}>
+                        {' · '}{OBJECTIVE_SOURCE_LABEL[sources.get(n.id).channel]}</span>
+                      : ''}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
               </tbody></table></DataTable>
             : <div className="muted">No feasible evaluated nodes yet.</div>}
+          {/* PRINTED, not only hovered — the same argument the extras' footnote below already makes,
+              and stronger here because this table is what an operator reads to pick a configuration
+              to reuse. It renders the SAME sentence the cell's tooltip carries, from the same call. */}
+          {caveated.length > 0 && <div className="muted" style={{ marginTop: 8 }}>
+            {caveated.map(n => <div key={n.id}>
+              ⚠ #{n.id}&rsquo;s objective is <b>{OBJECTIVE_SOURCE_LABEL[sources.get(n.id).channel]}</b>.{' '}
+              {objectiveSourceHelp(sources.get(n.id))}
+            </div>)}
+            <div>It is ranked here because the run ranks it — this front shows the selection the
+              engine is actually making, not a corrected one.
+              {displaced.length > 0 && <> Set {caveated.length === 1 ? 'it' : 'those'} aside and{' '}
+                {displaced.map(n => `#${n.id} (${fmt(n.confirmed_mean ?? n.metric)})`).join(', ')}{' '}
+                {displaced.length === 1 ? 'is' : 'are'} non-dominated on measured objectives alone.</>}
+            </div>
+          </div>}
           {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
             ⚠ {[...unverified].join(', ')} {unverified.size === 1 ? 'is' : 'are'} not a declared
             measurement: the value was taken from the experiment's own stdout, or the run predates
@@ -786,7 +856,17 @@ export function ParetoPanel({ state, onClose, onSelect }) {
       <div className="section-h">Diversity archive {archive && <span className="pill">{archive.niches} niches</span>}</div>
       {archive?.elites?.length
         ? <DataTable caption="Diversity archive elite nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {archive.elites.map((e, i) => <tr key={i}><td>#{e.node_id}</td><td>{fmt(e.metric)}</td><td className="muted">{JSON.stringify(e.params)}</td></tr>)}</tbody></table></DataTable>
+          {/* The elites are the other "reuse this configuration" table on this panel, so they read
+              the same vocabulary off the same node record. An elite naming a node this state does
+              not hold answers `measured` by the model's own totality — no record, no caveat. */}
+          {archive.elites.map((e, i) => {
+            const source = objectiveMetricSource(state.nodes?.[e.node_id])
+            return <tr key={i}><td>#{e.node_id}</td>
+              <td>{fmt(e.metric)}{objectiveSourceCaveated(source)
+                ? <span className="warn" title={objectiveSourceHelp(source)}>
+                  {' · '}{OBJECTIVE_SOURCE_LABEL[source.channel]}</span> : ''}</td>
+              <td className="muted">{JSON.stringify(e.params)}</td></tr>
+          })}</tbody></table></DataTable>
         : <div className="muted">No archive (run not finished).</div>}
       <div className="section-h">Operator productivity</div>
       <DataTable caption="Operator productivity summary" card={false}><table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>evaluated</th></tr></thead><tbody>
@@ -2215,11 +2295,24 @@ export function RegistryPanel({ state, onClose }) {
   const rankable = metricComparable(runs)
   const rankedRuns = rankable ? sortRuns(runs, 'metric', 'asc') : runs   // 'asc' = best first
   const champ = state.champion != null ? state.nodes[state.champion] : (state.best_node_id != null ? state.nodes[state.best_node_id] : null)
+  // THE CHAMPION IS THE SELECTION CLAIM, and this row printed its number bare. Under
+  // `metric_salvage: "select"` the champion is precisely the node whose metric can be salvaged —
+  // that rung mints NO violation row, so nothing else on this panel could have said so. Same
+  // vocabulary, same call, same sentence as the Metrics tab and the Pareto front.
+  const champSource = champ ? objectiveMetricSource(champ) : null
+  const champCaveated = objectiveSourceCaveated(champSource)
   return (
     <Panel title="Solution registry & cross-run" onClose={onClose} wide>
       <div className="section-h">Champion (this run)</div>
       {champ ? <div className="kv"><div className="k">node</div><div className="v">#{champ.id} {state.champion != null ? '(promoted)' : '(auto-best)'}</div>
-        <div className="k">metric</div><div className="v">{fmt(champ.confirmed_mean ?? champ.metric)}</div></div> : <div className="muted">no champion yet</div>}
+        <div className="k">metric</div><div className="v">{fmt(champ.confirmed_mean ?? champ.metric)}
+          {champCaveated && <span className="warn" title={objectiveSourceHelp(champSource)}>
+            {' · '}{OBJECTIVE_SOURCE_LABEL[champSource.channel]}</span>}</div></div>
+        : <div className="muted">no champion yet</div>}
+      {champCaveated && <div className="muted">
+        This run&rsquo;s champion was selected on a number marked{' '}
+        <b>{OBJECTIVE_SOURCE_LABEL[champSource.channel]}</b>. {objectiveSourceHelp(champSource)}
+      </div>}
       <div className="toolbar" style={{ marginTop: 6 }}>
         <button className="btn sm" onClick={async () => {
           const p = await get(runApiPath(state.run_id, '/prov'))

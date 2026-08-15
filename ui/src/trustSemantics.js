@@ -304,6 +304,16 @@ export function objectiveSourceHelp(source) {
     : '')
 }
 
+// IS THIS OBJECTIVE MARKED? ONE predicate, hoisted out of `Inspector.jsx::Metrics` where it was the
+// inline expression `objective.channel !== OBJECTIVE_MEASURED`. A second surface copying that
+// expression is precisely how the two homes this file exists to prevent get rebuilt one boolean at a
+// time — and the second surface is a SELECTION display (`panels.jsx::ParetoPanel`), so the two must
+// mark the SAME nodes or the run's champion is caveated on the tab that reads numbers and unmarked
+// on the chart that picks them. Absent or unrecognised input answers FALSE, the same rule
+// `objectiveMetricSource` is total under: a caveat nobody recorded must not be invented.
+export const objectiveSourceCaveated = source =>
+  !!source && !!source.channel && source.channel !== OBJECTIVE_MEASURED
+
 export function reportStepIdentity(operator, theme) {
   const op = String(operator || 'unknown operator').trim()
   const th = String(theme || '').trim()

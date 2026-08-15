@@ -11,8 +11,9 @@ import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
-import { nodeFeasibilityStatus, isSalvagedMetricViolation, OBJECTIVE_MEASURED,
-  OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceHelp } from './trustSemantics.js'
+import { nodeFeasibilityStatus, isSalvagedMetricViolation,
+  OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
+  objectiveSourceHelp } from './trustSemantics.js'
 import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
@@ -2545,7 +2546,10 @@ export function Metrics({ n, detail, state, runId }) {
   const champ = state?.best_node_id != null ? nodes.find(x => x.id === state.best_node_id) : null
   const showChamp = champ && champ.id !== n.id
   const objective = objectiveMetricSource(n)
-  const objectiveCaveated = objective.channel !== OBJECTIVE_MEASURED
+  // Through the shared predicate, not the inline compare this line used to be: `ParetoPanel` asks
+  // the same question about the same nodes, and two spellings of it is how the front and this tab
+  // would come to mark different ones.
+  const objectiveCaveated = objectiveSourceCaveated(objective)
   // The ★ row prints TWO numbers and the source column can only label one of them. The `best #N`
   // cell is a DIFFERENT node's record, so it gets its own read rather than inheriting this one —
   // under `metric_salvage: "select"` the champion is precisely the node that can be salvaged, and a
@@ -2571,7 +2575,7 @@ export function Metrics({ n, detail, state, runId }) {
           : <span className={r.channel === 'declared' ? '' : 'warn'}
             title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>}</td>
         <td>{fmt(r.mine)}</td>
-        {showChamp && <td>{r.star && champObjective.channel !== OBJECTIVE_MEASURED
+        {showChamp && <td>{r.star && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
             {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
           : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>

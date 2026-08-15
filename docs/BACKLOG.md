@@ -664,6 +664,75 @@ site that proves it is open.
   `n.feasible !== false`, so a `select`-admitted salvaged node's metric is ranked there with no
   caveat at all — the same defect one surface over, now one `objectiveMetricSource` call from fixed.
 
+- **[FIXED 2026-08-15, same day] The Pareto front ranked a salvaged number beside a measured one,
+  and the salvaged one deleted the measured one from the table.** `panels.jsx::ParetoPanel` populated
+  its front with `paretoMetric(n) != null && n.feasible !== false`. That filter is right about the
+  `audit` rung — a salvage ROW makes the node infeasible and it never reaches the panel — and blind to
+  the one that matters: `metric_salvage: "select"` mints NO violation row, so the node arrives
+  `feasible: true`, competes for champion, and was rendered exactly like a measurement while the
+  Metrics tab one tab over already called it `salvaged`. **DRIVEN, PRE-FIX, and it is worse than a
+  missing word:** a run with a measured 0.51 and a salvage-admitted 0.81 rendered ONE row —
+  `#4 👑 0.81` — because a Pareto front does not merely rank, it DOMINATES; the measured result was
+  nowhere on screen. The operator opens this panel to decide which configuration to REUSE.
+  **CAVEAT, and deliberately NOT unrank.** `crossRunRank.js`'s "shown, valued, NO rank" precedent (a
+  prefix-folded run) does not transfer, on three grounds the record settles: (1) a competition rank is
+  a per-ROW fact — drop one run and every other rank is unchanged — while Pareto membership is a
+  RELATION over a SET, so removing a point from the domination test puts OTHER nodes on the front and
+  publishes a front the record does not support; (2) under `select` the ENGINE ranks this node (it is
+  in `feasible_nodes` and may be `best_node_id`), so a front that dropped it would omit the run's own
+  champion while still drawing its crown — the two-surfaces-one-record defect rebuilt; (3) `select` is
+  the operator's own recorded decision that this number competes, and the panel's job is to show what
+  they admitted, not to overrule it. What the precedent DOES give is its other half — a fact that
+  would otherwise be invisible stays on screen — so the panel now names the front restricted to
+  MEASURED objectives whenever a caveated node is on this one (`#3 (0.51) is non-dominated on measured
+  objectives alone`). The label is PRINTED as well as hovered, for the reason the extras' footnote
+  already exists. Same call, same sentences, same vocabulary: `trustSemantics.js` gains only
+  `objectiveSourceCaveated(source)`, hoisted out of `Inspector.jsx`'s inline
+  `channel !== OBJECTIVE_MEASURED` so the reading surface and the DECIDING surface cannot come to mark
+  different nodes; it answers FALSE on junk, because a caveat nobody recorded must not be invented.
+  Two more surfaces in the same file were fixed with the same call: `RegistryPanel`'s **Champion (this
+  run)** metric (under `select` the champion is precisely the node that can be salvaged, and that rung
+  mints no row, so nothing on that panel could have said so) and the diversity-archive elites, the
+  panel's other reuse-this-configuration table. Driven in
+  `ui/test/paretoFrontObjectiveSource.test.js`: the predicate's truth table + totality, the front
+  ARITHMETIC (that the caveated point really does displace #3), and four records rendered through
+  `renderToStaticMarkup` — including the negative control (two measured nodes: no label, no `warn`, no
+  footnote, number unchanged), the `audit` rung (still absent from the front, as the engine intends), a
+  LEGACY row carrying the salvage violation with no `feasible` field at all (marked, because the label
+  comes from the record and not from the flag), and a breached BOUND (unmarked, because feasibility and
+  "what is this number" are different questions). The render half fails on a mutated copy of the tree
+  carrying the pre-fix panel (4 of 7 red); the staged `vite build` is clean.
+
+- **The objective-metric census: 40+ surfaces render a run's primary metric and, as of 2026-08-15,
+  four consult the vocabulary** (swept while fixing the Pareto front). Only `Inspector.jsx`
+  (Metrics ★ row, Trust tab), `panels.jsx` (`ParetoPanel`, `RegistryPanel` champion, archive elites)
+  do. The rest split into two populations and the split is what matters, because one is fixable in the
+  browser and one is not:
+  * **The record IS on the payload** (live `/state` nodes and `/nodes/{id}` keep `violations` and
+    `metric_provenance` through `model_dump`), so these are one call from correct and are NOT fixed
+    here: **`Dag.jsx`** is the worst of them — `dagFeasibilityLabel` has three answers and none is
+    "salvaged", so a `select`-admitted node's accessible name literally reads *"feasible"*, its card
+    prints the number unmarked, and the only caveat rung (`infeasible`) is keyed on the exact
+    condition `select` removes; **`Report.jsx::ChampionCard`** prints `feasible: yes` for a salvaged
+    champion; **`report.js`** writes the champion's number into `buildModelCard`'s JSON artifact and
+    the Markdown export with no channel, and its `trustCaveats` — the designed home, which already
+    enumerates reward-hack / leakage / drift / infeasible / single-seed — has no salvage caveat at
+    all, so the deterministic verdict both exports embed is silent; **`charts.jsx`**'s running-best
+    frontier states the false invariant in a comment (*"mirroring engine selection … so the line never
+    claims a best the engine rejected"*), true under `audit` and false under `select`;
+    `panels.jsx::OverviewPanel`'s best-metric Stat, `TrustPanel`'s seed-luck leader,
+    `HyperImportancePanel`'s population, `CardBoard`'s attempt chips, `grouping.js`'s terciles and
+    `util.js::parentMetric`'s delta are the same class-(b) gate.
+  * **The record is NOT on the payload, so no client fix is possible**: `/api/runs` rows
+    (`run_projections.py`) carry `best_metric`/`best_confirmed` and no `feasible`, no violations, no
+    provenance — which is `RunList`, `runIndex.js::sortRuns`, `portfolioModel.js`, `RunCompare`,
+    `MapView`, `conceptForest.js::nodeBest`, `crossRunRank.js` and `CrossRunPanel`; and ConceptFrame
+    `refs` (`concept_frame.py`) stop at `feasible`, which is `ConceptView`'s whole rollup. **And
+    `st.best()` selects from `feasible_nodes()`, which a `select`-admitted salvaged node is a member
+    of** — so `best_metric` can already BE a salvaged number, portfolio-wide, unlabelled and
+    underivable. Both need a server-side field first; that is the next unit of work, and it is one
+    field, not thirteen client fixes.
+
 - **[FIXED 2026-08-15, same day — and the fix cost nothing, which is the part worth keeping]
   `metric_series(whole_run=true)` could not reach the head of any log over 33.5 MB, and said the
   opposite** (found 2026-08-15 auditing the merge day's `tools/log_tools.py`). `_MAX_SCAN_BYTES`
