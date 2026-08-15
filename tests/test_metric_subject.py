@@ -122,6 +122,321 @@ def test_the_staged_path_binds_at_the_score_stage_and_names_the_producing_stage(
 
 
 # --------------------------------------------------------------------------------------------
+# THE PATTERN DECLARATION — for the task family whose output path the AGENT names
+#
+# Measured 2026-08-15 over every `looplab_stages.json` in `runs/`: the four repo runs that train
+# anything (v2, v6, v7, v8) declare 18 node outputs, ALL of them at
+# `vectorsearch/experiments/<agent-chosen name>_rubert-tiny-lite/final/model.safetensors`, with TEN
+# distinct spellings of that one segment. A literal `subject` written at submit binds 5 of 7 on v6
+# and 0 of 5 on the live v8 — which is why all three of v8's evaluated nodes record
+# `not_declared` under the shipped `audit` default.
+
+
+def _experiments(wd: Path, name: str, ckpts=(), payload: bytes = b"final-weights") -> Path:
+    """A node's own experiment directory, shaped like the live v8 ones: a `final/` checkpoint plus
+    several `checkpoint-NNNN/` siblings that are byte-identical in SIZE to it and to each other."""
+    exp = wd / "experiments" / name
+    (exp / "final").mkdir(parents=True, exist_ok=True)
+    (exp / "final" / "model.safetensors").write_bytes(payload)
+    for step in ckpts:
+        (exp / f"checkpoint-{step}").mkdir(parents=True, exist_ok=True)
+        (exp / f"checkpoint-{step}" / "model.safetensors").write_bytes(b"x" * len(payload))
+    return exp
+
+
+def test_a_pattern_binds_the_one_artifact_an_agent_named_directory_holds(tmp_path):
+    """THE GAP, closed and driven. The operator cannot write
+    `experiments/dcl-unified_rubert-tiny-lite/final/model.safetensors` at submit — the middle segment
+    is `vectorsearch/config.py::run_name`, i.e. a value the agent picks per experiment — so it
+    declares the SHAPE and the engine resolves it against the real workdir."""
+    import hashlib
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.72}))\n",
+                                   encoding="utf-8")
+    _experiments(tmp_path, "dcl-unified_rubert-tiny-lite", ckpts=(2709, 3612, 4515))
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    assert res.metric == 0.72
+    prov = res.metric_subject
+    assert prov["subject_bound"] is True, prov
+    row = prov["subjects"][0]
+    # The RESOLVED path is on the record, not just the pattern — a reader has to be able to check
+    # WHICH artifact the number was bound to, since a pattern is a claim about a shape.
+    assert row["path"] == "experiments/dcl-unified_rubert-tiny-lite/final/model.safetensors"
+    assert row["glob"] == "experiments/*/final/model.safetensors"
+    # …and it is bound to the BYTES, exactly as a literal is: `final/` and the three checkpoints are
+    # the same size, so only content or inode identity tells them apart (the incident's property).
+    assert row["digest"] == hashlib.sha256(b"final-weights").hexdigest()
+    assert row["digest_mode"] == ms.DIGEST_FULL
+    assert unbound_subject_violation_rows(prov, res.metric, "require") == []
+
+
+def test_a_pattern_that_matches_several_same_sized_checkpoints_refuses_instead_of_picking(tmp_path):
+    """THE INCIDENT SHAPE, one level in. Each live v8 node holds FOUR `model.safetensors` of
+    92,174,712 bytes — `final/` plus `checkpoint-2709/3612/4515` — so a careless
+    `experiments/*/*/model.safetensors` matches all four. Binding any one of them would record
+    `subject_bound: True` about bytes nobody chose, which is strictly WORSE than the `not_declared`
+    it replaced: it manufactures confidence. The refusal is the mechanism."""
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.72}))\n",
+                                   encoding="utf-8")
+    _experiments(tmp_path, "dcl-unified_rubert-tiny-lite", ckpts=(2709, 3612, 4515))
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC,
+                           subject_glob=["experiments/*/*/model.safetensors"])
+    assert res.metric == 0.72                          # the number is still read — this is not a gate
+    prov = res.metric_subject
+    assert prov["subject_bound"] is False
+    assert prov["unbound_reason"] == "ambiguous"
+    row = prov["subjects"][0]
+    assert row.get("path") in ("", None)               # nothing was bound, so nothing is named bound
+    assert "digest" not in row                          # …and no identity was recorded for a pick
+    assert len(row["matched"]) == 4                     # the four the operator has to choose between
+    # The message names the FIX for this reason and shows what it matched, because on a finished run
+    # the workdir the operator would go and look at may not exist any more.
+    msg = ms.unbound_message(prov)
+    assert "MORE THAN ONE" in msg and "final/model.safetensors" in msg
+    # …and under the rung that gates, this is an excluded node rather than a blessed one.
+    rows = unbound_subject_violation_rows(prov, res.metric, "require")
+    assert [r["name"] for r in rows] == [SALVAGE_VIOLATION]
+    assert rows[0]["salvage"]["unbound_reason"] == "ambiguous"
+
+
+def test_two_experiment_directories_are_ambiguous_and_mtime_never_breaks_the_tie(tmp_path):
+    """The rule that must not bend. Dropping the STALE matches and requiring uniqueness of the rest
+    would resolve this beautifully — and it would promote mtime from a predicate that can only ever
+    REFUSE into the thing that ELECTS which bytes the number is bound to. The candidate owns its
+    workdir and nothing fences `os.utime` on its own files, so it would be choosing its own subject.
+
+    Driven with the tie-break's own best case: one match is hours old and the other is this attempt's,
+    which is exactly the shape a tie-break would be written for."""
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    old = _experiments(tmp_path, "seeded-baseline_rubert-tiny-lite", payload=b"someone-elses")
+    _experiments(tmp_path, "mine_rubert-tiny-lite", payload=b"mine-this-attempt")
+    stale = time.time() - 7200
+    os.utime(old / "final" / "model.safetensors", (stale, stale))
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    prov = res.metric_subject
+    assert prov["subject_bound"] is False
+    assert prov["unbound_reason"] == "ambiguous", prov      # NOT "the fresh one, obviously"
+    assert len(prov["subjects"][0]["matched"]) == 2
+
+
+def test_a_pattern_that_matches_nothing_is_missing_and_not_an_absent_declaration(tmp_path):
+    """The two states `UNBOUND_REASONS` is a closed vocabulary to keep apart: "the operator declared
+    nothing" and "the operator declared something the pipeline did not produce" need opposite fixes,
+    and a pattern is a DECLARATION even when it resolves to nothing."""
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    assert res.metric == 0.5
+    assert res.metric_subject["unbound_reason"] == "missing"     # …and NOT "not_declared"
+    assert "not produced" in ms.unbound_message(res.metric_subject)
+
+
+def test_a_pattern_is_held_to_the_same_freshness_rule_as_a_literal(tmp_path):
+    """A resolved match is not a different kind of subject: the unique match goes through the SAME
+    `bind_one`, so this attempt's number still cannot be about an earlier attempt's checkpoint."""
+    exp = _experiments(tmp_path, "mine_rubert-tiny-lite")
+    stale = time.time() - 3600
+    os.utime(exp / "final" / "model.safetensors", (stale, stale))
+    res = run_command_eval([sys.executable, "-c", "print('{\"metric\": 0.9}')"], str(tmp_path), 60,
+                           _METRIC, subject_glob=["experiments/*/final/model.safetensors"])
+    assert res.metric == 0.9
+    assert res.metric_subject["subject_bound"] is False
+    assert res.metric_subject["unbound_reason"] == "stale"
+    assert res.metric_subject["subjects"][0]["digest"]        # the identity is still recorded
+
+
+def test_a_match_reached_through_a_symlink_out_of_the_workdir_escapes(tmp_path):
+    """`Path.glob` FOLLOWS a symlinked directory, so a match CAN land outside the workdir — the
+    v6-node-4 shape one door over, a candidate that plants `experiments -> <the human's tree>` and
+    lets the operator's own pattern name somebody else's checkpoint. Containment is decided by the
+    SAME `_confined` a literal goes through, because the resolved match is bound through the same
+    `bind_one`; there is deliberately no second containment rule inside the resolver, and no
+    pre-filter that would drop an escaping match from the count (that would let a candidate
+    de-ambiguate its own subject by making the other matches escape)."""
+    outside = tmp_path / "someone-else"
+    (outside / "runA" / "final").mkdir(parents=True)
+    (outside / "runA" / "final" / "model.safetensors").write_bytes(b"the human's checkpoint")
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n", encoding="utf-8")
+    os.symlink(str(outside), str(wd / "experiments"))
+    res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    assert res.metric == 0.5
+    assert res.metric_subject["subject_bound"] is False
+    assert res.metric_subject["unbound_reason"] == "escapes"
+
+
+def test_an_escaping_match_beside_a_legitimate_one_is_ambiguous_and_not_quietly_dropped(tmp_path):
+    """The NO-PRE-FILTER rule, which is the same rule as the mtime one: a fact the candidate controls
+    may refuse a binding and may never elect one. Dropping the escaping match before counting reads
+    like a kindness — it would let the node's own checkpoint bind — and it hands the candidate a
+    primitive: plant a symlink out of the workdir over every experiment directory but the one whose
+    bytes it wants the number attributed to, and the operator's own pattern names it uniquely."""
+    outside = tmp_path / "someone-else"
+    (outside / "final").mkdir(parents=True)
+    (outside / "final" / "model.safetensors").write_bytes(b"the human's checkpoint")
+    wd = tmp_path / "wd"
+    (wd / "experiments").mkdir(parents=True)
+    (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n", encoding="utf-8")
+    (wd / "experiments" / "mine_rubert-tiny-lite" / "final").mkdir(parents=True)
+    (wd / "experiments" / "mine_rubert-tiny-lite" / "final" / "model.safetensors").write_bytes(b"m")
+    os.symlink(str(outside), str(wd / "experiments" / "theirs_rubert-tiny-lite"))
+    res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    prov = res.metric_subject
+    assert prov["subject_bound"] is False
+    assert prov["unbound_reason"] == "ambiguous", prov
+    assert len(prov["subjects"][0]["matched"]) == 2
+
+
+def test_the_two_declaration_shapes_compose_and_both_must_bind(tmp_path):
+    """`subject_bound` is an AND over everything declared, whichever shape declared it — a metric
+    that is a claim about two artifacts is not half-true when one of them is missing."""
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.5}))\n",
+                                   encoding="utf-8")
+    _experiments(tmp_path, "mine_rubert-tiny-lite")
+    (tmp_path / "preds.jsonl").write_bytes(b'{"id": 1}\n')
+    both = dict(subject=["preds.jsonl"], subject_glob=["experiments/*/final/model.safetensors"])
+    res = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC, **both)
+    prov = res.metric_subject
+    assert prov["subject_bound"] is True
+    assert [r["path"] for r in prov["subjects"]] == [
+        "preds.jsonl", "experiments/mine_rubert-tiny-lite/final/model.safetensors"]
+    # NEGATIVE CONTROL: the literal half alone failing takes the whole record down, and the reason
+    # reported is that failure's and not the pattern's.
+    res2 = run_command_eval([sys.executable, "s.py"], str(tmp_path), 60, _METRIC,
+                            subject=["never-written.jsonl"],
+                            subject_glob=["experiments/*/final/model.safetensors"])
+    assert res2.metric_subject["subject_bound"] is False
+    assert res2.metric_subject["unbound_reason"] == "missing"
+    assert res2.metric_subject["subjects"][1]["bound"] is True   # the pattern half still bound
+
+
+def test_declaring_nothing_at_all_is_still_the_only_not_declared(tmp_path):
+    """The `not_declared` path UNCHANGED where it is correct — the state 82 of 83 corpus metrics are
+    in, and the one this change must not disturb. Both shapes absent, both empty, both whitespace."""
+    for kw in ({}, {"subject": [], "subject_glob": []},
+               {"subject": ["  "], "subject_glob": ["  "]}):
+        res = run_command_eval([sys.executable, "-c", "print('{\"metric\": 0.5}')"], str(tmp_path),
+                               60, _METRIC, **kw)
+        assert res.metric == 0.5
+        # Either spelling of "the operator said nothing", and no third one: the library records
+        # NOTHING for an absent declaration (the engine stamps `absent_metric_subject()` there) and
+        # `not_declared` for a whitespace-only one, which is the pre-existing behaviour for a literal
+        # `subject` and must stay identical for a pattern.
+        prov = res.metric_subject
+        assert prov is None or prov["unbound_reason"] == "not_declared", (kw, prov)
+    assert ms.bind([], str(tmp_path), since=None, globs=[])["unbound_reason"] == "not_declared"
+    assert ms.absent_declaration()["unbound_reason"] == "not_declared"
+
+
+def test_the_resolution_reads_the_filesystem_and_never_what_the_candidate_wrote_about_itself(tmp_path):
+    """docs/36 — a wider action space must not widen the trusted set. The one list that would ALWAYS
+    disambiguate correctly is the agent's own `expect.files`, and it is exactly the list this may not
+    consult: the candidate authors that manifest, so resolving through it would let it choose which
+    of its four same-sized checkpoints the recorded number is a claim about.
+
+    Driven, not pinned: the manifest names ONE of the ambiguous matches, and the binding must still
+    refuse. `producer` is still recorded from that manifest for the match a pattern resolves on its
+    own — descriptive, and it decides nothing, which is what this shows."""
+    (tmp_path / "t.py").write_text("print('trained')\n", encoding="utf-8")
+    (tmp_path / "s.py").write_text("import json; print(json.dumps({'metric': 0.7}))\n",
+                                   encoding="utf-8")
+    _experiments(tmp_path, "mine_rubert-tiny-lite", ckpts=(4515,))
+    picked = "experiments/mine_rubert-tiny-lite/final/model.safetensors"
+    stages = [{"name": "train", "command": [sys.executable, "t.py"],
+               "expect": {"files": [picked]}},
+              {"name": "score", "command": [sys.executable, "s.py"]}]
+    res = run_command_eval([], str(tmp_path), 60, _METRIC, stages=stages,
+                           subject_glob=["experiments/*/*/model.safetensors"])
+    assert res.metric == 0.7
+    assert res.metric_subject["unbound_reason"] == "ambiguous", res.metric_subject
+    # …while an UNAMBIGUOUS pattern still records the producer link `expect`/`needs` become two
+    # projections of, so nothing was lost by refusing to let that map break a tie.
+    ok = run_command_eval([], str(tmp_path), 60, _METRIC, stages=stages,
+                          subject_glob=["experiments/*/final/model.safetensors"])
+    assert ok.metric_subject["subject_bound"] is True
+    assert ok.metric_subject["subjects"][0]["producer"] == "train"
+    assert ok.metric_subject["subject_stage"] == "score"
+
+
+def test_a_pattern_declares_no_needs_on_the_protected_score_stage_at_any_rung(tmp_path):
+    """`verify_stage_inputs` stats LITERAL paths, so a pattern could only become a `needs` by being
+    resolved a SECOND time, at a second instant, against a workdir a stage may still be writing —
+    two resolutions of one declaration that can disagree. What is given up is the LATENCY the derived
+    contract buys and nothing else: an unresolvable pattern is `missing` at bind time and the node is
+    unselectable under `require` either way."""
+    (tmp_path / "looplab_stages.json").write_text(
+        json.dumps({"stages": [{"name": "train", "command": ["python", "t.py"]}]}), encoding="utf-8")
+    es = {"command": ["python", "score.py"],
+          "metric": {"kind": "stdout_json", "key": "m",
+                     "subject_glob": ["experiments/*/final/model.safetensors"]}}
+    for mode in ("off", "audit", "require"):
+        assert "needs" not in _stage_mixin(mode)._resolve_stages(str(tmp_path), es)[-1], mode
+    # The LITERAL half is untouched — it still derives one under `require` and only there.
+    es2 = dict(es, metric=dict(es["metric"], subject=["out/model.bin"]))
+    assert _stage_mixin("require")._resolve_stages(str(tmp_path), es2)[-1]["needs"] == ["out/model.bin"]
+
+
+def test_the_operator_may_declare_a_pattern_and_a_bad_shape_is_refused_at_submit():
+    from pydantic import ValidationError
+
+    from looplab.adapters.repo_task import EvalSpec
+    ok = EvalSpec(command=["python", "s.py"],
+                  metric={"kind": "stdout_json", "key": "m",
+                          "subject_glob": ["./experiments/*/final/model.safetensors"]})
+    assert ok.metric["subject_glob"] == ["experiments/*/final/model.safetensors"]   # same path rule
+    for bad in (["/abs/*/model.bin"], ["../*/escape.bin"], "not-a-list", [7]):
+        with pytest.raises(ValidationError):
+            EvalSpec(command=["python", "s.py"],
+                     metric={"kind": "stdout_json", "key": "m", "subject_glob": bad})
+    # `**` is NOT refused: recursion is what makes a pattern match the several same-sized
+    # `checkpoint-*/` beside `final/`, and that case is already a refusal at BIND time. A second,
+    # weaker submit-time guard against a case the first one covers is how two rules come to disagree.
+    assert EvalSpec(command=["python", "s.py"],
+                    metric={"kind": "stdout_json", "key": "m",
+                            "subject_glob": ["**/final/model.safetensors"]}
+                    ).metric["subject_glob"] == ["**/final/model.safetensors"]
+
+
+def test_the_unbound_vocabulary_stays_closed_and_the_new_slug_is_in_it():
+    assert "ambiguous" in ms.UNBOUND_REASONS
+    # Every slug a record can carry must have a message naming ITS fix — a reason that fell back to
+    # the `unreadable` sentence would send the operator hunting the wrong failure.
+    assert set(ms.UNBOUND_MESSAGES) == set(ms.UNBOUND_REASONS)
+
+
+def test_a_pattern_bound_node_stays_selectable_through_a_real_fold(tmp_path):
+    """The property that matters, driven end to end rather than asserted about a dict: a node whose
+    subject was declared as a PATTERN and bound must be in `feasible_nodes()` under the rung that
+    gates. Nothing on the selection path reads `metric_provenance`, so the only thing that could go
+    wrong is the violation row, and that is what this observes."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import EV_NODE_CREATED, EV_NODE_EVALUATED, EV_RUN_STARTED
+    wd = tmp_path / "node0"
+    wd.mkdir()
+    (wd / "s.py").write_text("import json; print(json.dumps({'metric': 0.72}))\n", encoding="utf-8")
+    _experiments(wd, "dcl-unified_rubert-tiny-lite", ckpts=(2709, 3612, 4515))
+    res = run_command_eval([sys.executable, "s.py"], str(wd), 60, _METRIC,
+                           subject_glob=["experiments/*/final/model.safetensors"])
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append(EV_RUN_STARTED, {"run_id": "r1", "task_id": "t", "goal": "g", "direction": "max"})
+    store.append(EV_NODE_CREATED, {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}}, "code": ""})
+    store.append(EV_NODE_EVALUATED, {
+        "node_id": 0, "metric": res.metric, "metric_provenance": res.metric_subject,
+        "violations": unbound_subject_violation_rows(res.metric_subject, res.metric, "require")})
+    st = fold(store.read_all())
+    assert [n.id for n in st.feasible_nodes()] == [0]
+    assert st.nodes[0].metric_provenance["subject_bound"] is True
+    assert st.nodes[0].metric_provenance["subjects"][0]["glob"]
+
+
+# --------------------------------------------------------------------------------------------
 # The one attempt shape where an OLDER artifact is the subject on purpose
 
 

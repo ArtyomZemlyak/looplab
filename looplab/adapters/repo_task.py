@@ -837,21 +837,43 @@ class EvalSpec(BaseModel):
         file written before this shipped unloadable — including the `task.snapshot.json` of a run
         being RESUMED, which `_grandfathered` reloads without re-validating precisely because a
         recorded run must keep reaching the treatment it had.
+
+        `subject_glob` IS THE SAME DECLARATION FOR A PATH THE OPERATOR CANNOT WRITE DOWN, and it goes
+        through the identical shape rule. Measured over `runs/` (2026-08-15): every one of the 17
+        nodes with a declared output in the four repo runs that train anything writes to
+        `vectorsearch/experiments/<a name the AGENT chose>/final/model.safetensors`, 10 distinct
+        names — so on the flagship task a literal is unwritable at submit and the mechanism recorded
+        `not_declared` on 3 of 3 evaluated nodes. A pattern is resolved by the ENGINE against the
+        real workdir (`runtime/metric_subject.bind_glob`) and binds only on a UNIQUE match; nothing
+        the candidate authored is read to resolve it, so the trust boundary this validator's own
+        docstring states is unchanged.
+
+        Two shapes are NOT refused here and both are deliberate. A pattern with no magic character is
+        just a literal spelled the long way and behaves identically. And `**` is allowed: recursion
+        is what makes a pattern match the several same-sized `checkpoint-*/model.safetensors` beside
+        `final/`, and that case is already a refusal (`ambiguous`) at bind time — a second, weaker
+        submit-time guard against a case the first one covers is how two rules come to disagree.
         """
         # The cap became a REQUIRED argument upstream on 2026-08-14. A subject is an
         # output-side declaration, so it takes `expect.files`' cap rather than `needs`'.
         from looplab.runtime.command_eval import (MAX_STAGE_EXPECT_FILES,
                                                   _validate_rel_paths)
-        if isinstance(v, dict) and v.get("subject") is not None:
-            clean, err = _validate_rel_paths("score", "subject", v["subject"],
-                                                MAX_STAGE_EXPECT_FILES)
+        _WHAT = {
+            "subject": (" `subject` names the artifact the metric is a CLAIM ABOUT (the checkpoint, "
+                        "the predictions file), relative to the node's eval workdir."),
+            "subject_glob": (" `subject_glob` names the SHAPE of that artifact's path, for a pipeline "
+                             "that chooses its own output directory (e.g. "
+                             "\"experiments/*/final/model.safetensors\"), relative to the node's eval "
+                             "workdir. It binds only when it matches exactly ONE artifact."),
+        }
+        for field in ("subject", "subject_glob"):
+            if not isinstance(v, dict) or v.get(field) is None:
+                continue
+            clean, err = _validate_rel_paths("score", field, v[field], MAX_STAGE_EXPECT_FILES)
             if err is not None:
-                raise ValueError(
-                    err.replace("stage 'score'", "eval.metric")
-                    + " `subject` names the artifact the metric is a CLAIM ABOUT (the checkpoint, "
-                      "the predictions file), relative to the node's eval workdir.")
+                raise ValueError(err.replace("stage 'score'", "eval.metric") + _WHAT[field])
             v = dict(v)
-            v["subject"] = clean
+            v[field] = clean
         return v
 
     @field_validator("cross_check")

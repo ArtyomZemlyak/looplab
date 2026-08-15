@@ -481,8 +481,11 @@ class RunResult:
     # the exit code the engine itself caused.
     diverged: bool = False
     # METRIC SUBJECT (`runtime/metric_subject.py`): the identity of the artifact this number is a
-    # claim ABOUT — `{subject_bound, subjects:[{path, identity, digest, digest_mode, producer}],
-    # unbound_reason?, subject_stage?}` — captured at the SCORE stage's start.
+    # claim ABOUT — `{subject_bound, subjects:[{path, identity, digest, digest_mode, producer,
+    # glob?, matched?}], unbound_reason?, subject_stage?}` — captured at the SCORE stage's start. A
+    # `glob` row came from `eval.metric.subject_glob`, the pattern form the operator declares when
+    # the pipeline names its own output directory; it carries the RESOLVED path in `path` like any
+    # other subject, and binds only when the pattern matched exactly one artifact.
     #
     # It exists because a `float` has no referent: measured across the six repo runs with an event
     # log, 82 of 83 recorded metrics carry NO provenance at all, and 2 of 83 are provably about bytes

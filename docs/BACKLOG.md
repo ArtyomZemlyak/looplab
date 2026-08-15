@@ -373,6 +373,99 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15] `metric_subject` was INERT on exactly the task family it was built for: the
+  subject had to be a LITERAL path, and on that family the output path is chosen by the AGENT.**
+  `eval.metric.subject` shipped as a list of literal workdir-relative paths, so declaring one requires
+  the operator to know the output path at submit time. **Measured over `runs/` (2026-08-15, from the
+  agents' own `looplab_stages.json`):** the four repo runs that train anything (v2, v6, v7, v8)
+  declare **17** node outputs and **all 17** land at
+  `vectorsearch/experiments/<AGENT-CHOSEN NAME>_rubert-tiny-lite/final/model.safetensors`, with **10
+  distinct spellings** of that one segment (`unified-baseline`, `nllcos_hn`, `dcl-unified`, `catdw`,
+  `rdrop-dcl`, `qwen3_hn_v1`, `meanmerge_nllcos_rubert-tiny-lite`, …). The segment is
+  `vectorizer-unified/vectorsearch/config.py::run_name`
+  (`f"{metadata.run_name}_{base_model.split('/')[-1]}"`) and `metadata.run_name` is a value the agent
+  picks per experiment. So a single literal declared at submit binds **5 of 7** nodes on v6 and **0 of
+  5** on the live `rubertlite-dr-unified-v8` — which is why all three of v8's evaluated nodes record
+  `{'subject_bound': False, 'unbound_reason': 'not_declared'}` under the shipped `audit` default,
+  with the engine setting ON. Over the whole corpus: **46 runs with an event log, 253
+  `node_evaluated` all carrying a metric, 4 with any `metric_provenance` at all (3 of them the v8
+  `not_declared` rows, 1 the v6 salvage row), 0 tasks declaring a subject in any form.** The
+  mechanism built to close the v6-node-4 incident could not be pointed at the run that reproduced it.
+  **THE FIX is a second declaration SHAPE, not a second trust boundary:** `eval.metric.subject_glob`
+  is a list of workdir-relative GLOB patterns the operator declares and the ENGINE resolves, by
+  walking the node's real workdir at the score stage's start (`runtime/metric_subject.py::bind_glob`
+  / `resolve_glob`). Nothing the candidate wrote about itself is read to resolve it, so the operator
+  still says what the number is about and the filesystem still says what is there — the same two
+  authorities a literal already had. A resolved match goes through the SAME `bind_one` as a literal
+  (containment, identity, digest, producer, freshness) and the record carries both the pattern and
+  the resolved path. **The load-bearing rule is UNIQUENESS: 0 matches is `missing`, ≥2 is the new
+  `ambiguous` slug and is a REFUSAL.** That is not a convenience — each v8 node holds **four**
+  `model.safetensors` of **92,174,712 bytes** each (`final/` plus `checkpoint-2709/3612/4515`), the
+  incident's own byte-identical-in-SIZE property now WITHIN one node, so a careless
+  `experiments/*/*/model.safetensors` matches all four and binding one would record
+  `subject_bound: true` about bytes nobody chose — **strictly worse than the `not_declared` it
+  replaced, because it manufactures confidence.** Additive only: no default moved, no `run_started`
+  key was added, and replayed over all 46 preserved logs the folded state is byte-identical
+  (champion, `feasible_nodes`, every metric, every provenance row) — 0 recorded metrics change
+  provenance, because no preserved task declares either shape.
+  **ALTERNATIVES REJECTED, each on a stated reason:**
+  (a) *bind to what the score stage ACTUALLY OPENED, observed at the audit boundary.* This is the
+  half `metric_subject.py`'s own docstring leaves open ("does not prove the score stage READ it"),
+  and `runtime/read_fence.py`'s hook already sees every `open` under a fenced eval. **Re-measured on
+  this box, 2026-08-15:** `safetensors.torch.load_file` on v8 node 1's own 92 MB checkpoint loads
+  **55 tensors and raises ZERO audit events** — not zero `open` events, zero events of any kind. The
+  observation channel is blind to precisely the read that matters for this task family, so the record
+  it produced would be "the scorer read nothing" on a correct eval. Landlock is a kernel ENFORCEMENT
+  boundary and reports no accesses, so it is not the fallback either; a real observation channel
+  needs fanotify/eBPF, i.e. privileges this box does not have and a surface far past this fix.
+  (b) *resolve the ambiguity from the agent's `looplab_stages.json` `expect.files`.* It is the one
+  list that would always pick correctly, and it is authored by the candidate — docs/36, a wider
+  action space must not widen the trusted set. Driven as a test: the manifest names one of the
+  ambiguous matches and the binding still refuses. (`producer` is still RECORDED from that manifest;
+  it is descriptive and decides nothing, which is exactly the distinction.)
+  (c) *break the tie by mtime — drop the stale matches, then require uniqueness of the rest.* The
+  most tempting one, because it resolves the "a seeded human checkpoint sits beside my own" case
+  perfectly. It would promote mtime from a predicate that can only ever REFUSE (`stale`) into the
+  thing that ELECTS which bytes the number is bound to, and the candidate owns its workdir —
+  `os.utime` on its own files is fenced by nothing. Same rule, same reason, for the symlink case: an
+  escaping match is a refusal and is never pre-filtered out of the count, or a candidate could
+  de-ambiguate its own subject by making the other matches escape.
+  (d) *refuse `**` at submit.* Rejected as a second, weaker guard against a case the first one
+  already covers: recursion is exactly what produces the ambiguous match set, which is a refusal.
+  Two rules for one property is how they come to disagree.
+  (e) *narrow the claim and leave the mechanism literal-only.* The claim IS narrowed (the module
+  docstring and `docs/guide/tasks.md` now state what a bound pattern does and does not prove), but on
+  its own it would have left the flagship task family with no declarable subject at all, i.e. the
+  measurement above unchanged.
+  **Proved by driving the property** (tier 1), 14 new tests in `tests/test_metric_subject.py`:
+  the incident shape (four same-sized checkpoints → `ambiguous`, no digest recorded, `metric_salvaged`
+  row under `require`), a symlinked escape and a mixed escaping/legitimate match set, the mtime
+  non-tie-break with the tie-break's own best case on disk, freshness and composition with a literal,
+  the `not_declared` path unchanged in all three spellings, and a real `fold` proving a
+  pattern-bound node stays in `feasible_nodes()`. Non-vacuity checked by MUTATING a throwaway copy
+  (`/tmp`): removing the uniqueness rule, adding the mtime tie-break, adding the escaping-match
+  pre-filter, and making a pattern-only declaration read as `not_declared` each go red on the
+  test that names them.
+  **RESIDUE, stated not patched.** (1) A `subject_glob` derives **no** `needs` on the protected
+  `score` stage under `require`: `verify_stage_inputs` stats literal paths, and resolving the pattern
+  a second time at a second instant is how two resolutions of one declaration come to disagree. What
+  is given up is the LATENCY that entry buys, which its own comment says is all it buys. (2) An
+  unbound subject under `audit` still mints no row and is not surfaced anywhere the operator looks —
+  the same residue §0.2's Metrics-tab entry already records, and it is what made this defect
+  invisible on a live run for two weeks. (3) A pattern proves less than a literal and the docstring
+  now says so: it does not prove the operator meant THIS match rather than another the same pattern
+  could resolve to on a different node. (4) a pattern costs one bounded walk per eval, measured on the real v8
+  node-1 workdir (median of 5): `experiments/*/final/model.safetensors` **2.0 ms**,
+  `experiments/*/*/model.safetensors` 5.6 ms, and a recursive `**/final/model.safetensors`
+  **32.8 ms** — against the 338 ms the 92 MB sha256 beside it already costs, i.e. the walk is
+  never the bill. The resolver stops at `MAX_GLOB_MATCHES + 1` matches; what is NOT bounded is
+  the scan a `**` over a workdir with a large mounted dataset would pay, which nobody has measured. (5) **The evidence for flipping
+  `require` is now within reach and was deliberately not acted on:** re-derived against the three
+  preserved v8 workdirs, `vectorsearch/experiments/*/final/model.safetensors` binds **3 of 3**
+  evaluated nodes uniquely with three DISTINCT digests (nodes 1 and 4 chose the same experiment name
+  and produced different bytes) — but that is a re-derivation over preserved directories, not a run
+  that recorded it live, so `Settings.metric_subject` keeps its `audit` default.
+
 - **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
   re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card
   freshness gate discards before dispatch; nothing returned the HYPOTHESIS. The discarded node stayed

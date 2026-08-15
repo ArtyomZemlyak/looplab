@@ -63,11 +63,77 @@ accuracy but that the subject is what the metric MEANS, and the trust boundary
 therefore writes the very text an extractor would read. The subject has to come from the side that
 owns scoring.
 
+AND FOR A YEAR THAT MADE THE MECHANISM UNUSABLE ON THE TASK FAMILY IT WAS BUILT FOR
+------------------------------------------------------------------------------------
+`subject` was a list of LITERAL workdir-relative paths, so declaring one requires the operator to
+know the output path at SUBMIT time. Re-measured 2026-08-15 over every `looplab_stages.json` in
+`runs/` — the agents' own record of where their pipelines write:
+
+    4    repo runs whose pipeline produces a checkpoint at all (v2, v6, v7, v8)
+    17   nodes across them with a declared output
+    17   of those land at `vectorsearch/experiments/<AGENT-CHOSEN NAME>_<base-model leaf>/final/…`
+    10   DISTINCT names for that one segment (`unified-baseline`, `nllcos_hn`, `dcl-unified`,
+         `catdw`, `rdrop-dcl`, `qwen3_hn_v1`, `meanmerge_nllcos_rubert-tiny-lite`, …)
+
+The directory name is `vectorizer-unified/vectorsearch/config.py::run_name`, i.e.
+`f"{metadata.run_name}_{train.base_model.split('/')[-1]}"`, and `metadata.run_name` is a value the
+AGENT picks per experiment. A single literal declared on v6 would have bound 5 of its 7 nodes and
+reported `missing` on the other two; on the live v8 it would have bound **0 of 5**. So the operator
+could not have declared a subject on the flagship run, and did not: all three evaluated v8 nodes
+record `{'subject_bound': False, 'unbound_reason': 'not_declared'}` under `metric_subject="audit"`.
+The mechanism built for the v6-node-4 incident was INERT on exactly the task family that produced it.
+
+THE FIX IS A DECLARED PATTERN THE ENGINE RESOLVES, AND THE WHOLE SAFETY IS UNIQUENESS
+--------------------------------------------------------------------------------------
+`eval.metric.subject_glob` is a list of workdir-relative GLOB patterns. The operator declares the
+SHAPE of the path (`vectorsearch/experiments/*/final/model.safetensors`); the ENGINE walks the real
+workdir at the score stage's start and resolves it. Nothing the candidate ASSERTS is consulted — not
+its `looplab_stages.json`, not its stdout, not a manifest — only what is on the filesystem, which is
+the same authority the literal path already had. So the trust boundary does not move: the operator
+still says what the number is about, and the engine still establishes what is there.
+
+**A pattern binds only when it matches EXACTLY ONE path, and this is not a convenience rule.** A
+careless glob is strictly WORSE than `not_declared`, because `subject_bound: True` about the wrong
+artifact manufactures confidence the record did not have before. It is not hypothetical: each live
+v8 node holds FOUR `model.safetensors` of 92,174,712 bytes each — `final/` plus
+`checkpoint-2709/`, `checkpoint-3612/`, `checkpoint-4515/` — the incident's own "byte-identical in
+SIZE" property, now WITHIN one node. `experiments/*/*/model.safetensors` matches all four. Under the
+uniqueness rule that is `ambiguous` and UNBOUND; under any rule that picks one it is a lie. Zero
+matches is `missing`; two or more is `ambiguous`, which is a REFUSAL and never a choice.
+
+WHAT IS DELIBERATELY NOT DONE, because each would move the trust boundary:
+
+  * **mtime is never a tie-breaker.** Dropping the stale matches and requiring uniqueness of the
+    REST would resolve the "a leftover from a seeded human checkpoint is beside my own" case
+    beautifully — and it would promote mtime from a predicate that can only ever REFUSE (`stale`,
+    below) into the thing that ELECTS which bytes the number is bound to. The candidate owns its
+    workdir and `os.utime` on its own files is fenced by nothing, so an mtime it can set must never
+    decide a binding. Freshness stays a refusal, applied to the unique match, exactly as for a
+    literal.
+  * **the agent's `expect.files` is never consulted** to disambiguate. It is the ONE list that would
+    always pick correctly, and it is authored by the candidate: docs/36, a wider action space must
+    not widen the trusted set. (`producer` below is still recorded FROM that manifest — it is a
+    descriptive note about which stage promised a path, it decides nothing, and it has been on the
+    record since this module shipped.)
+  * **`**` is not refused at submit.** It is a cost, not a hazard: recursion is exactly what makes a
+    pattern match the four same-sized checkpoints, and the uniqueness rule already refuses that.
+    Adding a second, weaker guard against a case the first one covers is how two rules come to
+    disagree.
+
+WHAT A BOUND PATTERN THEREFORE PROVES, stated narrowly: an artifact with this content identity was
+the ONLY thing under the operator's declared shape when the scorer started. It does not prove the
+scorer read it (that is the read fence's half, below), and it does not prove the operator meant this
+one rather than another the pattern could have matched on a different node — a pattern is a claim
+about a SHAPE, and the record carries the resolved path so a reader can check which one it got.
+
 COST (measured on the 92 MB checkpoint, doc 35 §8)
 ---------------------------------------------------
     os.stat identity                                  ~1 syscall
     sampled digest (size + 1 MiB head + 1 MiB tail)    29.7 ms
     full sha256                                       336.2 ms
+Pattern resolution is never the bill, re-measured 2026-08-15 on the real v8 node-1 workdir (median
+of 5): `experiments/*/final/model.safetensors` 2.0 ms, `experiments/*/*/model.safetensors` 5.6 ms,
+a recursive `**/final/model.safetensors` 32.8 ms — against 338 ms for the bind that follows it.
 On the 5,303 s eval that produced the incident, the full digest is 0.006 % of the run. `SAMPLE_ABOVE`
 picks between them, and the mode is RECORDED — a sampled digest must never be mistaken for a full
 one by a later reader comparing two runs.
@@ -125,7 +191,22 @@ DIGEST_SAMPLED = "sha256-sampled"
 #                   (`command_eval.attempt_freshness_floor`). This slug is a claim about an artifact
 #                   nobody chose to reuse.
 #   unreadable    — it exists and could not be stat'ed/digested (a FUSE error, a permission).
-UNBOUND_REASONS = ("not_declared", "escapes", "missing", "empty", "stale", "unreadable")
+#   ambiguous     — a declared `subject_glob` matched MORE THAN ONE artifact, so nothing here can say
+#                   which of them the number is about. It is its own slug and not `missing`, because
+#                   the fixes are opposite: `missing` means produce the file, `ambiguous` means
+#                   narrow the pattern (or the pipeline wrote two candidates and the operator has to
+#                   decide which is the result). It is also the slug that keeps this mechanism honest
+#                   — a pattern that resolved to one of four same-sized checkpoints by picking would
+#                   record `subject_bound: True` about the wrong bytes, which is worse than the
+#                   `not_declared` it replaced.
+UNBOUND_REASONS = ("not_declared", "escapes", "missing", "empty", "stale", "unreadable", "ambiguous")
+
+# How many matches a pattern's resolution enumerates before it stops. Two is enough for the DECISION
+# (one binds, more than one refuses); the rest are collected only so the refusal can SHOW the
+# operator what it matched, which is the difference between "narrow your pattern" and a slug they
+# have to go and reproduce by hand. The walk stops here, so a `**` over a materialized repo pays a
+# bounded number of matches rather than the whole tree's worth.
+MAX_GLOB_MATCHES = 8
 
 # The rungs, in increasing strictness. See `Settings.metric_subject` for which is the default and for
 # the evidence that would move it.
@@ -272,6 +353,74 @@ def bind_one(workdir, rel: str, *, since: Optional[float] = None,
     return row
 
 
+def resolve_glob(workdir, pattern: str) -> Optional[list]:
+    """The workdir-relative paths a declared `subject_glob` matches, sorted, at most
+    `MAX_GLOB_MATCHES` + 1 of them — or None when the pattern could not be walked at all.
+
+    ONE match is a subject; anything else is a refusal, so the caller only needs to tell "0", "1" and
+    "more than 1" apart. The extra entry past the cap is what lets it say "more than 1" without
+    claiming a total it never counted.
+
+    Resolution is a plain filesystem walk and reads NOTHING the candidate wrote about itself. That is
+    the property that keeps a pattern exactly as trustworthy as the literal path it replaces: the
+    operator declares the shape, the engine establishes what is there.
+
+    `Path.glob` and not `fnmatch` over a `os.walk`: the pattern is matched SEGMENT by segment against
+    real directory entries, so `experiments/*/final/model.safetensors` never descends into
+    `checkpoint-4410/`, and a pattern naming a directory that does not exist costs one failed
+    `scandir` rather than a walk of everything that does.
+    """
+    root = Path(workdir)
+    out: list = []
+    try:
+        it = root.glob(str(pattern))
+        for p in it:
+            try:
+                rel = p.relative_to(root).as_posix()
+            except ValueError:                       # pragma: no cover — glob yields under root
+                continue
+            out.append(rel)
+            if len(out) > MAX_GLOB_MATCHES:
+                break
+    except (OSError, ValueError, IndexError, NotImplementedError, RuntimeError):
+        # Total over a malformed pattern for `_confined`'s reason: a bad declaration must fail the
+        # NODE's binding, never take down the run. `ValueError` is what pathlib raises for an
+        # absolute or empty pattern — both already refused at submit, but a `_grandfathered`
+        # snapshot reload never re-validates, so this path is reachable from a resumed run.
+        return None
+    return sorted(out)
+
+
+def bind_glob(workdir, pattern: str, *, since: Optional[float] = None,
+              producers: Optional[dict] = None, confine=None) -> dict:
+    """The identity record for ONE declared `subject_glob`, or `{"bound": False, "reason": …}`.
+
+    THE UNIQUENESS RULE IS HERE and it is the whole safety argument for patterns (see the module
+    docstring). Exactly one match is bound, THROUGH `bind_one`, so a resolved pattern and a literal
+    path get the SAME containment, identity, digest, producer and freshness treatment — a pattern
+    changes only HOW the path is named, never what is recorded about it or which predicates it must
+    pass. That is also why nothing here pre-filters the match set: `Path.glob` follows a symlinked
+    directory, so a match CAN land outside the workdir, and dropping those before counting would let
+    a candidate de-ambiguate its own subject by making the other matches escape. A match that is not
+    confined is a REFUSAL (`bind_one` returns `escapes`), never a quiet exclusion — the same shape as
+    the mtime rule one predicate over: what the candidate controls may only ever refuse a binding,
+    and may never elect one.
+    """
+    matches = resolve_glob(workdir, pattern)
+    if matches is None:
+        return {"glob": pattern, "path": "", "bound": False, "reason": "unreadable", "matched": []}
+    if not matches:
+        return {"glob": pattern, "path": "", "bound": False, "reason": "missing", "matched": []}
+    if len(matches) > 1:
+        return {"glob": pattern, "path": "", "bound": False, "reason": "ambiguous",
+                "matched": matches[:MAX_GLOB_MATCHES],
+                "matched_truncated": len(matches) > MAX_GLOB_MATCHES}
+    row = bind_one(workdir, matches[0], since=since, producer=(producers or {}).get(matches[0]),
+                   confine=confine)
+    row["glob"] = pattern
+    return row
+
+
 def _fallback_confine(workdir, rel):
     try:
         path = (Path(workdir) / rel).resolve()
@@ -282,7 +431,8 @@ def _fallback_confine(workdir, rel):
 
 
 def bind(subject, workdir, *, since: Optional[float] = None,
-         producers: Optional[dict] = None, confine=None, stage: str = "") -> dict:
+         producers: Optional[dict] = None, confine=None, stage: str = "",
+         globs=None) -> dict:
     """The `metric_provenance` SUBJECT record for one eval — always a dict, never None.
 
     Shape (additive to whatever else `metric_provenance` carries; every key is optional to a reader
@@ -290,7 +440,7 @@ def bind(subject, workdir, *, since: Optional[float] = None,
 
         {"subject_bound": bool,
          "subjects": [ {path, bound, identity, size, mtime_ns, kind, digest, digest_mode,
-                        producer?, reason?} … ],
+                        producer?, reason?, glob?, matched?, matched_truncated?} … ],
          "unbound_reason": <UNBOUND_REASONS slug>   # only when subject_bound is False
          "subject_stage": "score"}                  # which stage the identity was captured at
 
@@ -298,16 +448,30 @@ def bind(subject, workdir, *, since: Optional[float] = None,
     two artifacts is not half-true when one of them is missing, and `unbound_reason` reports the
     first failure so the record names one fix rather than a set.
 
+    `globs` is `EvalSpec.metric["subject_glob"]` — the operator's PATTERN declaration, for the task
+    family whose output path the agent names (the module docstring measures it: 17 of 17 nodes with a
+    declared output, 10 distinct agent-chosen directory names, so no literal could be written at
+    submit). Each pattern is resolved by `bind_glob` against the real workdir and binds only when it
+    matches exactly one artifact. A resolved match then goes through the SAME `bind_one` as a literal
+    — identity, digest, producer, freshness — so the two declaration shapes differ in how the path is
+    NAMED and in nothing else. Literals are bound first so a record listing both reads in the order
+    the task file writes them.
+
     `producers` is `command_eval.stage_output_producers(...)` — {declared output path -> the stage
     that promised it}. Recording it is what closes the loop doc 35 §1 describes: given identity,
     `expect` and `needs` become two projections of one relation ("this stage produced/consumed THIS
-    artifact") and the write-only asymmetry disappears.
+    artifact") and the write-only asymmetry disappears. It is DESCRIPTIVE and never a tie-breaker:
+    that map comes from the agent's own manifest, and `bind_glob` resolving an ambiguity through it
+    would let the candidate choose which of its checkpoints the number is bound to.
     """
     rels = [r for r in (subject or []) if isinstance(r, str) and r.strip()][:MAX_SUBJECTS]
-    if not rels:
+    pats = [g for g in (globs or []) if isinstance(g, str) and g.strip()][:MAX_SUBJECTS]
+    if not rels and not pats:
         return {"subject_bound": False, "unbound_reason": "not_declared", "subjects": []}
     rows = [bind_one(workdir, rel, since=since, producer=(producers or {}).get(rel), confine=confine)
             for rel in rels]
+    rows += [bind_glob(workdir, pat, since=since, producers=producers, confine=confine)
+             for pat in pats[:max(0, MAX_SUBJECTS - len(rows))]]
     bad = next((r for r in rows if not r.get("bound")), None)
     out: dict = {"subject_bound": bad is None, "subjects": rows}
     if bad is not None:
@@ -327,9 +491,11 @@ def absent_declaration() -> dict:
     2), and this one is otherwise reachable only through a whole simulated eval.
 
     It is deliberately identical in shape to what `bind([])` returns — the engine and the runtime
-    must not have two spellings of "no subject" for a reader to have to recognise.
+    must not have two spellings of "no subject" for a reader to have to recognise. "No subject" now
+    means neither declaration shape: a task with only a `subject_glob` is DECLARED, and reaching this
+    record for it would report the operator's own pattern as an absent declaration.
     """
-    return bind([], "", since=None)
+    return bind([], "", since=None, globs=[])
 
 
 # What an operator is told when a metric could not be bound. Per-reason, because the fixes are
@@ -339,7 +505,9 @@ UNBOUND_MESSAGES = {
     "not_declared": ("this metric names no SUBJECT: `eval.metric.subject` is empty, so the number "
                      "has no recorded referent and nothing can check what it is about. Declare the "
                      "workdir-relative artifact the metric is a claim about, e.g. "
-                     "\"subject\": [\"outputs/final/model.safetensors\"]."),
+                     "\"subject\": [\"outputs/final/model.safetensors\"] — or, when the pipeline "
+                     "names its own output directory, the SHAPE of it with "
+                     "\"subject_glob\": [\"outputs/*/final/model.safetensors\"]."),
     "escapes": ("the declared subject {path!r} does not resolve inside the node's own workdir. A "
                 "metric's subject is by definition something THIS node produced; an absolute path "
                 "or a `..` names somebody else's artifact."),
@@ -350,6 +518,16 @@ UNBOUND_MESSAGES = {
     "stale": ("the declared subject {path!r} predates this eval attempt, so this attempt's number "
               "cannot be about it — it is a leftover from an earlier attempt in the reused workdir."),
     "unreadable": "the declared subject {path!r} could not be read to establish its identity.",
+    # The ONE message that must name what it matched. "Ambiguous" alone sends the operator to look at
+    # a workdir that no longer exists on a finished run; the paths are the whole content of the fix,
+    # and they are also the evidence for the refusal — an operator who sees `final/` beside three
+    # `checkpoint-*/` of identical size can tell at a glance that binding either would have been a
+    # coin toss dressed up as provenance.
+    "ambiguous": ("the declared subject pattern {path!r} matched MORE THAN ONE artifact ({matched}), "
+                  "so nothing records which of them the number is about — the pattern was NOT bound "
+                  "to any of them, because picking one would record a referent nobody chose. Narrow "
+                  "it (e.g. name the `final/` directory rather than every `checkpoint-*/`), or "
+                  "declare a literal `subject` if the pipeline's output path is fixed."),
 }
 
 
@@ -359,5 +537,12 @@ def unbound_message(prov: Optional[dict]) -> str:
         return ""
     reason = str(prov.get("unbound_reason") or "unreadable")
     template = UNBOUND_MESSAGES.get(reason, UNBOUND_MESSAGES["unreadable"])
-    path = next((r.get("path") for r in (prov.get("subjects") or []) if not r.get("bound")), "")
-    return template.format(path=path) if "{path" in template else template
+    row = next((r for r in (prov.get("subjects") or []) if not r.get("bound")), {})
+    # The DECLARATION is what the operator has to edit, so a failed pattern names the pattern and not
+    # the empty `path` slot a glob row carries — the two shapes share one message table and a `{path}`
+    # that rendered `''` would name nothing at all.
+    path = row.get("glob") or row.get("path") or ""
+    matched = ", ".join(str(m) for m in (row.get("matched") or []))
+    if row.get("matched_truncated"):
+        matched += ", …"
+    return template.format(path=path, matched=matched) if "{path" in template else template

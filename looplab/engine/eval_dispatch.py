@@ -658,6 +658,10 @@ class EvalDispatchMixin:
             # worker (no node terminal, re-dying on every resume).
             _mspec = es.get("metric") if isinstance(es.get("metric"), dict) else {}
             _subject = [s for s in (_mspec.get("subject") or []) if isinstance(s, str) and s.strip()]
+            # …and the PATTERN half, filtered by the same rule for the same reason. A `subject_glob`
+            # reaches `Path.glob(pattern)`, which raises `TypeError` on a non-string just as readily.
+            _subject_glob = [g for g in (_mspec.get("subject_glob") or [])
+                             if isinstance(g, str) and g.strip()]
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
@@ -688,7 +692,10 @@ class EvalDispatchMixin:
                 # different record mid-log. The binding is a READ; whether an unbound metric is a
                 # violation is decided at the terminal, in `engine/evaluate.py`.
                 subject=(_subject if str(getattr(self, "metric_subject", "audit") or "audit") != "off"
-                         else None))
+                         else None),
+                subject_glob=(_subject_glob
+                              if str(getattr(self, "metric_subject", "audit") or "audit") != "off"
+                              else None))
             # AN ABSENT DECLARATION IS ITSELF THE FINDING, and it has to be recorded HERE.
             #
             # `run_command_eval` records nothing when no subject is declared, deliberately: it is the
