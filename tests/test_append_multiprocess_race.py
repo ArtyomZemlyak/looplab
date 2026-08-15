@@ -222,20 +222,37 @@ def test_concurrent_processes_never_tear_or_collide_in_one_event_log(tmp_path, r
         "every appended event must appear exactly once — no loss, no duplication")
     assert all(len(e.data["pad"]) == PAYLOAD_BYTES for e in events), "a payload was truncated"
 
-    # --- and they genuinely interleaved on disk ------------------------------------------------
-    # A log that is block-partitioned by worker — each process taking the lock once and keeping it
-    # for its whole loop — has exactly WORKERS-1 handovers. Anything more means the lock really did
-    # change hands mid-flight. The bar is deliberately the FLOOR rather than a comfortable margin:
-    # measured over a dozen local runs the count ranges 4..20 for four workers (`flock` is not FIFO,
-    # so a process that releases and immediately re-requests usually wins its own barge), while the
-    # same race on the slower geesefs mount gives 71 of a possible 71. A threshold tuned to the
-    # typical value would be a flaky test, and a flaky non-vacuity check is worse than a modest one.
-    # The load-bearing evidence that this raced is the overlap window asserted above.
+    # --- what the ORDER of the records does and does not tell us --------------------------------
+    # This block used to `assert handovers > WORKERS - 1`, on the reasoning that a log which is
+    # block-partitioned by worker means each process took the lock once and kept it for its whole
+    # loop. That assertion FAILED in the full suite on 2026-08-15 at exactly the floor (3 handovers
+    # of a possible 95) while every substantive assertion above it passed — including the overlap
+    # window, i.e. all four children provably WERE inside their append loops at the same time. It is
+    # not reproducible in isolation: 16 consecutive runs on the same box, both arms, at load average
+    # 22, gave 12..26. So the count is not a property of the lock, it is a property of the scheduler
+    # on the day, and a floor that the suite can reach is a flaky test — which is the failure the
+    # comment here used to say it was avoiding.
+    #
+    # THE DEEPER REASON TO DROP THE ASSERTION rather than lower the bar: the count cannot separate
+    # the two states it is supposed to. `flock` is not FIFO, so a process that releases and instantly
+    # re-requests usually wins its own barge; total barging under real contention and a lock held
+    # coarsely for a whole loop produce the SAME record order, and both satisfy the overlap window.
+    # No threshold on this number is sound. The count stays as a reported observation because it is
+    # genuinely informative when read by a human (on the geesefs mount the same race gives 71 of 71),
+    # and the property it was reaching for — the lock is per-APPEND, released before the next one —
+    # is asserted deterministically below instead.
     owners = [e.data["w"] for e in events]
     handovers = sum(1 for a, b in zip(owners, owners[1:]) if a != b)
-    assert handovers > WORKERS - 1, (
-        f"only {handovers} worker handovers in {total} records: the log is partitioned by worker, so "
-        "each process held the lock for its entire loop and nothing was ever actually contended")
+    print(f"[append race] {handovers} worker handovers in {total} records "
+          f"(require_lock={require_lock}); order is scheduler-dependent and is not asserted")
+
+    # The lock is not held across the store's lifetime: after an append returns, a non-blocking
+    # acquisition of that same lock file must succeed. This is the "it really did change hands"
+    # claim, and unlike a handover count it is deterministic — a store that acquired once and kept
+    # the lock would raise here on every box, under every load.
+    store.append("after-the-race", {}, require_lock=True)
+    with _interprocess_lock(Path(str(store.path) + ".lock"), required=True, blocking=False):
+        pass
 
 
 def test_a_lock_held_by_another_process_excludes_us_and_a_killed_holder_does_not_wedge_the_next_writer(
