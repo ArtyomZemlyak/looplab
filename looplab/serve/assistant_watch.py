@@ -61,6 +61,61 @@ mid-turn, and what happens next depends on what that turn could have done:
   operator's action twice; this is the same "outcome unknown, verify this same operation" refusal
   the destructive UI paths already make, and it is a terminal state the operator resolves, not a
   state the scheduler resolves for them.
+
+## "The run is not there" is TWO facts, and they take opposite answers
+
+A `run_state` watch names a run by id, and absence is genuinely ambiguous: it can mean *not yet* —
+armed just before a launch, which is the natural gesture and the one `watch_run`'s own description
+invites ("your turn ends now and a fresh turn wakes when the state is observed") — or *never* (a
+typo) / *gone* (a deleted run). Answering both with the same immediate terminal is how the natural
+gesture failed SILENTLY: within two seconds the record read `failed`, *"run … no longer exists, so
+this condition can never be met"*, and the chat that had just been told the watch survives a restart
+held nothing at all. The same shape covers the LAUNCH WINDOW, because `run_dir` 404s until
+`events.jsonl` exists — the directory alone is not yet a run.
+
+They are told apart by EVIDENCE the record carries, in the same shape `reconcile_on_start` uses one
+section up (ask what this record can PROVE, then say which branch it took), never by guessing:
+
+* a run this watch has **already seen** and can no longer see is GONE. `run_seen` is stamped on the
+  first observation and is durable, so this is a fact and not an inference — terminal at once, with
+  the sentence it always had.
+* a run it has **never seen** is NOT YET. Waiting is the right answer and an unbounded wait is not:
+  a watch on a typo'd id would sit "waiting" until its lifetime ran out, which is its own silent
+  failure. So the wait is bounded by `WATCH_RUN_APPEARANCE_GRACE_S` from the moment the operator
+  armed it, and the bound is stated in the record rather than implied.
+* and **while it waits it says so**. `last_error` carries a sentence naming the run that is not
+  there and when this stops waiting for it, and `last_observation` records the absence as an
+  observation (`present: false`) — the "reports progress instead of going dark" property applied to
+  the one state where there is nothing to report. `ui/src/assistantWatchModel.js` already prints
+  `last_error` as the row's note, so this reaches the strip with no client change.
+
+**Whatever retires a watch, the operator gets a line to read.** Every terminal this scheduler
+DECIDES — the lifetime, both absent-run branches, a wake-up turn that raised, an exhausted budget,
+and the restart refusal above — appends a notice turn to the session transcript beside the wake-ups,
+because a watch that stops with its only account of itself inside a JSON file under a dot-directory
+has stopped exactly as silently as the monitoring this module exists to replace. A notice is not a
+wake-up: it calls no model, holds no turn slot, spends nothing and counts against no budget. The one
+terminal that gets no notice is `cancelled` by the operator, who is holding its receipt already.
+
+## A watch is owned by the CHAT that armed it
+
+`WatchStore` being portfolio-wide is a STORAGE decision (one directory beside the sessions, one file
+per watch, no shared ledger behind a lock) and never an ownership one. Every load-bearing property
+of a watch is its session's: `session` is required by `_valid`, `SessionWatches` filters on it so an
+id from anywhere reaches nothing, the active cap is per session, the wake-up turn is built from that
+session's history and refuses without it, and the report lands in that session's transcript. A watch
+whose chat is gone cannot run, cannot be found, and cannot report — it is not free-standing, it is
+orphaned.
+
+So deletion CASCADES: `delete_for_session` is the irreversible half a session deletion calls, and it
+matters most for what it removes rather than for what it stops — a watch instruction is the
+operator's OWN sentence ("email the numbers to my supervisor at …"), and their own words must not
+survive a deletion they asked for. It is a receipt-returning operation because it is irreversible
+(the precedent is `serve/deletion_service.py` / `serve/memory_cascade.py`): it returns what it
+removed, by id, status and condition — and deliberately NOT the instruction it just deleted.
+`bootstrap` sweeps the same rule over records left by an out-of-band deletion or by a server that
+predates the cascade, through the injected `session_exists`; an unprovable answer leaves the watch
+alone, because "cannot tell" must never delete.
 """
 from __future__ import annotations
 
@@ -103,6 +158,14 @@ WATCH_MAX_INTERVAL_S = 24 * 60 * 60.0
 WATCH_POLL_BASE_S = 5.0              # first re-check of an unmet run-state condition
 WATCH_POLL_CEILING_S = 60.0          # …ramping to here, and no further
 WATCH_POLL_RAMP = 1.6
+# How long a `run_state` watch waits for a run it has NEVER seen to appear before giving up on it
+# (see the docstring's "TWO facts" section). Sized for the gesture it exists to protect — arm the
+# watch, then launch the run: the operator still has to pick a task, fill in a config and clear
+# preflight, and a run directory is not a run until `events.jsonl` exists. Long enough that a
+# deliberate launch is never refused; short enough that a typo is answered inside the same sitting,
+# rather than reading "waiting" until the 24 h lifetime runs out. Whichever of this and `expires_at`
+# comes first, wins.
+WATCH_RUN_APPEARANCE_GRACE_S = 15 * 60.0
 WATCH_MAX_WAKEUPS_CEILING = 500
 WATCH_DEFAULT_MAX_WAKEUPS = 24
 WATCH_DEFAULT_LIFETIME_S = 24 * 60 * 60.0
@@ -183,9 +246,10 @@ def observed_run_states(row: Optional[dict], *, engine_running: Optional[bool] =
 
     The trigger's whole evidentiary basis, and deliberately a projection of `run_summaries`' folded
     row rather than anything the assistant produced — see the module docstring's first property.
-    An absent row (deleted run, unreadable log) is the empty set, which is not the same as "not yet":
-    `WatchService` treats a run that has vanished as a reason to stop watching, with a stated cause,
-    rather than as a condition that will eventually be met.
+    An absent row is the empty set, and this function deliberately does not say what that MEANS:
+    "gone" and "not yet" are the same empty set here and are told apart by `WatchService` from the
+    record's own `run_seen` (see the docstring's "TWO facts" section), which is evidence this
+    projection does not have.
     """
     if not isinstance(row, dict):
         return frozenset()
@@ -303,6 +367,12 @@ class WatchStore:
             "last_observation": None,
             "last_error": "",
         }
+        if trigger["kind"] == "run_state":
+            # Has this watch ever SEEN the run it names? Written here as an explicit `false` rather
+            # than left absent, because it is the fact that decides whether a run that is not there
+            # is gone or not yet, and a record an operator reads should show it. A pre-existing
+            # record without the key reads the same way — absent is "never seen".
+            record["run_seen"] = False
         with self._lock:
             return self._write(record)
 
@@ -399,6 +469,46 @@ class WatchStore:
             if record["status"] in WATCH_TERMINAL_STATUSES:
                 return record
             return self._write({**record, "status": "cancelled", "last_error": str(reason)[:300]})
+
+    def delete_for_session(self, session: str) -> list[dict]:
+        """Remove every watch this chat owns, and RETURN the receipt of what was removed.
+
+        The cascade half of the ownership model (module docstring). IRREVERSIBLE, and the thing it
+        removes is the point: a watch instruction is the operator's own sentence, and a chat they
+        deleted must not go on holding it — the standing monitoring stopping is the smaller half.
+
+        Cancel-then-unlink under one lock, in that order, because a scheduler tick may already be
+        inside `_wake` for one of these: `claim`/`update` re-read the record, and a terminal is the
+        one thing they will not act on, so the cancel closes the window that the unlink alone would
+        leave open. A record whose file cannot be removed is reported with `removed: false` and
+        stays CANCELLED — it can never wake again, which is the property that must not depend on the
+        filesystem cooperating.
+
+        The receipt names the id, the condition and the status. It deliberately does NOT echo the
+        instruction: repeating the sentence back in the response to the request to delete it would
+        be the same failure one layer up.
+        """
+        session = str(session)
+        receipt = []
+        for known in self.list(session=session):
+            with self._lock:
+                record = self._read(known["id"])
+                if record is None:
+                    continue
+                if record["status"] not in WATCH_TERMINAL_STATUSES:
+                    record = self._write({
+                        **record, "status": "cancelled",
+                        "last_error": "the chat that armed this watch was deleted"})
+                row = {"id": record["id"], "status": record["status"],
+                       "waiting_for": record.get("waiting_for"), "removed": True}
+                try:
+                    self._path(record["id"]).unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    row["removed"] = False
+            receipt.append(row)
+        return receipt
 
     def reconcile_on_start(self) -> list[dict]:
         """Settle every record a dead process left mid-wake. See the module docstring's last section.
@@ -530,11 +640,13 @@ class WatchService:
     """
 
     def __init__(self, store: WatchStore, *, observe_run: Callable, run_turn_fn: Callable,
-                 append_turn: Callable, interval_s: float = 2.0, on_error: Optional[Callable] = None):
+                 append_turn: Callable, interval_s: float = 2.0, on_error: Optional[Callable] = None,
+                 session_exists: Optional[Callable] = None):
         self.store = store
         self.observe_run = observe_run          # run_id -> the read model's row (or None)
         self.run_turn_fn = run_turn_fn          # (record, instruction) -> the turn result dict
         self.append_turn = append_turn          # (session, turn dict) -> None
+        self.session_exists = session_exists    # session id -> does that chat still exist?
         self.interval_s = float(interval_s)
         self.on_error = on_error
         self._thread: Optional[threading.Thread] = None
@@ -550,11 +662,45 @@ class WatchService:
         scheduler running in a thousand test processes is how a background feature becomes a
         flake nobody can attribute. A server with no armed watches has nothing to schedule, and the
         moment one is armed `ensure_started` starts it.
+
+        It also sweeps ORPHANS — records whose chat is gone — because the cascade on the deletion
+        route only covers deletions this build made. Records left by an earlier server, or by any
+        removal that did not go through that route, would otherwise poll and hold their operator's
+        instruction forever, and startup is the one moment every record is looked at anyway.
         """
         changed = self.store.reconcile_on_start()
+        for record in changed:
+            # A restart refusal nobody is told about is exactly as invisible as the dropped
+            # monitoring this module exists to fix — so the terminal it leaves gets a line in the
+            # chat, the same as every other terminal the scheduler decides.
+            if record.get("status") in WATCH_TERMINAL_STATUSES:
+                self._notice(record, record.get("last_error") or "this watch was settled at startup")
+        removed = self._sweep_orphaned_watches()
         if self.store.list(active_only=True):
             self.ensure_started()
-        return changed
+        return changed + removed
+
+    def _sweep_orphaned_watches(self) -> list[dict]:
+        """Delete the watches of chats that no longer exist. See `WatchStore.delete_for_session`.
+
+        `session_exists` is INJECTED like the other three collaborators, so this module still knows
+        nothing about how a chat is stored. An exception from it means "cannot tell", and cannot
+        tell must never delete: the watch is left exactly as it was.
+        """
+        if self.session_exists is None:
+            return []
+        removed, answered = [], {}
+        for record in self.store.list():
+            sid = record.get("session")
+            if sid not in answered:
+                try:
+                    answered[sid] = bool(self.session_exists(sid))
+                except Exception:  # noqa: BLE001 - an unreadable chat is not a deleted one
+                    answered[sid] = True
+                if not answered[sid]:
+                    removed.extend(self.store.delete_for_session(sid))
+                    answered[sid] = True      # handled; do not sweep the same chat twice
+        return removed
 
     def ensure_started(self) -> None:
         with self._start_lock:
@@ -601,9 +747,9 @@ class WatchService:
             # Expiry is checked HERE rather than by a sweeper, so the record that expires is the one
             # about to spend money, and the expiry is observed at the moment it would have.
             if ts >= float(record.get("expires_at", 0) or 0):
-                touched.append(self.store.update(
-                    record["id"], status="expired",
-                    last_error="the watch reached its lifetime without being resolved") or record)
+                touched.append(self._retire(
+                    record, status="expired",
+                    reason="the watch reached its lifetime without being resolved"))
                 continue
             touched.append(self._service(record, now=ts))
         return [r for r in touched if r is not None]
@@ -627,12 +773,12 @@ class WatchService:
                 next_due=now + next_poll_delay(int(record.get("attempts", 0)) + 1),
                 last_error=f"could not read run {run_id}: {type(exc).__name__}")
         if row is None:
-            # The run is GONE (deleted, or never existed). A condition that can never be met is a
-            # terminal with a stated cause, not an eternal poll — and saying so is the difference
-            # between a watch the operator can act on and one they find still "waiting" next week.
-            return self.store.update(
-                record["id"], status="failed",
-                last_error=f"run {run_id} no longer exists, so this condition can never be met")
+            return self._service_absent_run(record, run_id, now=now)
+        if not record.get("run_seen"):
+            # First sight. Durable, and it is what makes a LATER absence provably "gone" rather than
+            # "not yet" — one extra write per watch, once, for a fact no re-derivation can recover
+            # (the run's own directory is the thing that disappears).
+            record = self.store.update(record["id"], run_seen=True) or record
         states = observed_run_states(row)
         observation = {"run": run_id, "phase": row.get("phase"),
                        "finished": bool(row.get("finished")),
@@ -645,6 +791,78 @@ class WatchService:
                 record["id"], attempts=attempts, last_observation=observation,
                 next_due=now + next_poll_delay(attempts), last_error="")
         return self._wake(record, observation=observation, now=now)
+
+    def _service_absent_run(self, record: dict, run_id, *, now: float):
+        """The run is not there — which is TWO facts (module docstring), told apart by `run_seen`."""
+        if record.get("run_seen"):
+            # GONE: this watch saw the run and now cannot. A condition that can never be met is a
+            # terminal with a stated cause, not an eternal poll — and saying so is the difference
+            # between a watch the operator can act on and one they find still "waiting" next week.
+            return self._retire(
+                record, status="failed",
+                reason=f"run {run_id} no longer exists, so this condition can never be met")
+        # NOT YET: a watch armed just before a launch, which is the natural gesture. Waiting is the
+        # right answer and an unbounded wait is not, so the wait carries its own bound and the
+        # record states it — an operator reading the strip sees that it is waiting on nothing yet,
+        # and when it will stop doing so.
+        deadline = float(record.get("created", now) or now) + WATCH_RUN_APPEARANCE_GRACE_S
+        if now >= deadline:
+            return self._retire(
+                record, status="failed",
+                reason=(f"run {run_id} never appeared in the "
+                        f"{WATCH_RUN_APPEARANCE_GRACE_S / 60:g} minutes after this watch was armed, "
+                        f"so it was stopped — check the run id, and re-arm it once the run exists"))
+        attempts = int(record.get("attempts", 0)) + 1
+        return self.store.update(
+            record["id"], attempts=attempts,
+            last_observation={"run": run_id, "present": False, "awaiting_first_sight": True,
+                              "give_up_at": deadline},
+            # Never poll PAST the deadline: the give-up must land when it was promised, not up to a
+            # full backoff ceiling later.
+            next_due=min(now + next_poll_delay(attempts), deadline),
+            last_error=(f"run {run_id} does not exist yet — waiting for it to appear "
+                        f"(giving up in {max(0.0, deadline - now) / 60:.0f} min if it does not)"))
+
+    def _retire(self, record: dict, *, status: str, reason: str, observation=None) -> dict:
+        """Settle a watch AND leave the operator a line about it. One helper because the two must
+        not come apart: every terminal this scheduler decides was silent before, and the silence is
+        the defect, not the terminal."""
+        fields = {"status": status, "last_error": reason}
+        if observation is not None:
+            fields["last_observation"] = observation
+        settled = self.store.update(record["id"], **fields)
+        # `update` refuses to move an ALREADY-terminal record and returns it unchanged, so this is
+        # what distinguishes "we retired it" from "the operator's stop got here first" — and only
+        # the first of those owes the chat a notice.
+        if (settled is not None and settled.get("status") == status
+                and settled.get("last_error") == reason):
+            self._notice(settled, reason)
+        return settled if settled is not None else record
+
+    def _notice(self, record: dict, reason: str) -> None:
+        """Say IN THE CHAT that a standing watch stopped, and why.
+
+        The counterpart of `_record_turn`, and deliberately the same surface: monitoring that ends
+        somewhere the operator has to go looking for has ended silently. It is NOT a wake-up — no
+        model call, no toolset, no turn slot, nothing counted against a budget — so it neither
+        touches the wake-up ladder nor gives this module any new authority. `notice: true` on the
+        turn is what lets a renderer tell the two apart.
+        """
+        turn = {
+            "role": "assistant",
+            "content": (
+                f"[standing watch stopped] {reason}\n\n"
+                f"It was waiting for: "
+                f"{record.get('waiting_for') or describe_trigger(record.get('trigger') or {})}\n"
+                f"Its standing instruction was: {str(record.get('instruction') or '')[:400]}"),
+            "watch": {"id": record.get("id"), "waiting_for": record.get("waiting_for"),
+                      "status": record.get("status"), "notice": True},
+            "steps": [], "applied": [], "todos": [],
+        }
+        try:
+            self.append_turn(record.get("session"), turn)
+        except Exception:  # noqa: BLE001 - a transcript failure must not lose the watch's state
+            pass
 
     def _wake(self, record: dict, *, observation, now: float):
         """Run ONE turn for this watch, then either re-arm it or retire it.
@@ -667,9 +885,9 @@ class WatchService:
                                      next_due=now + WATCH_POLL_BASE_S,
                                      last_error="deferred: the chat was busy with a live turn")
         except Exception as exc:  # noqa: BLE001 - a failed wake-up is reported, never crashed on
-            return self.store.update(
-                claimed["id"], status="failed", last_observation=observation,
-                last_error=f"the wake-up turn failed: {type(exc).__name__}")
+            return self._retire(
+                claimed, status="failed", observation=observation,
+                reason=f"the wake-up turn failed: {type(exc).__name__}")
         self._record_turn(claimed, result, observation)
         wakeups = int(claimed.get("wakeups", 0)) + 1
         trigger = claimed.get("trigger") or {}
@@ -681,9 +899,11 @@ class WatchService:
                 claimed["id"], status="done", wakeups=wakeups, last_observation=observation,
                 last_error="")
         if wakeups >= int(claimed.get("max_wakeups", WATCH_DEFAULT_MAX_WAKEUPS)):
-            return self.store.update(
-                claimed["id"], status="expired", wakeups=wakeups, last_observation=observation,
-                last_error=f"reached its {wakeups}-wake-up budget")
+            # `wakeups` first, so the record that gets the notice carries the count it retired on.
+            counted = self.store.update(claimed["id"], wakeups=wakeups) or claimed
+            return self._retire(
+                counted, status="expired", observation=observation,
+                reason=f"reached its {wakeups}-wake-up budget")
         return self.store.update(
             claimed["id"], status="armed", wakeups=wakeups, last_observation=observation,
             next_due=now + float(trigger.get("every_s") or 300.0), last_error="")

@@ -847,6 +847,13 @@ def build_router(srv) -> APIRouter:
                         "code": "assistant_delete_incomplete",
                         "message": "The chat could not be completely removed. Close anything using its files and try again.",
                     })
+                # The chat's material is gone, so its standing watches go with it: a watch is owned
+                # by the chat that armed it (see `assistant_watch.py`'s ownership section), and one
+                # left behind would poll a run for a chat that no longer exists, wake into nothing,
+                # stay listed by `GET /api/assistant/watches` — and go on holding the operator's own
+                # sentence ("email the numbers to …") after they asked for it to be deleted. It runs
+                # AFTER the rmtree succeeded, so a refused deletion never costs the operator a watch.
+                watch_receipt = _watches.delete_for_session(sid)
                 if fork_deletion is not None:
                     try:
                         _asst.finish_fork_deletion(fork_deletion)
@@ -866,7 +873,12 @@ def build_router(srv) -> APIRouter:
         finally:
             with _perm_lock:
                 _deleting_sessions.discard(sid)
-        return {"ok": True}
+        # The receipt for the irreversible half, in the shape the destructive paths here already use
+        # (`serve/deletion_service.py`, `serve/memory_cascade.py`): what was removed, named. It
+        # carries each watch's id, status and condition and NOT its instruction — echoing the
+        # sentence back in the answer to "delete this" is the same failure one layer up.
+        return {"ok": True, "watches_removed": sum(1 for w in watch_receipt if w["removed"]),
+                "watches": watch_receipt}
 
     @router.post("/api/assistant/sessions/{sid}/share")
     async def assistant_share(sid: str, request: Request):
@@ -1499,10 +1511,15 @@ def build_router(srv) -> APIRouter:
     def _watch_observe_run(run_id: str):
         """What the server SEES of a run — the trigger's whole evidentiary basis (doc 36).
 
-        Returns the read model's folded state row, or None when the run can never satisfy any
-        condition again. The three outcomes are deliberately distinct:
-          * 404 / 410 -> None: deleted or being deleted. `WatchService` retires the watch with a
-            stated cause instead of polling a name that will never come back.
+        Returns the read model's folded state row, or None when there is no run here RIGHT NOW. The
+        three outcomes are deliberately distinct:
+          * 404 / 410 -> None: not there. This says nothing about WHY, on purpose — `run_dir` 404s
+            alike for a deleted run, a typo and a run whose directory exists but whose
+            `events.jsonl` has not been written yet (the launch window), and only the watch record
+            knows whether it has ever seen this run. `WatchService` owns that distinction; it is not
+            one an observation can make. (A 410 does prove the run existed once, but it arrives as
+            the same None; a never-seen run under deletion therefore waits out the appearance grace
+            instead of retiring at once, which is bounded and costs a few cached `stat`s.)
           * 503 -> RAISE: the deletion fence itself is unreadable, which is a transient storage
             fault on the mounts a run root lives on. A watch must not give up on one of those.
           * anything else -> the row, phase and liveness included.
@@ -1568,9 +1585,19 @@ def build_router(srv) -> APIRouter:
         # conditional append exists to drop a cancelled turn's stale reply; a watch has no such twin.
         _asst.append(session, turn)
 
+    def _watch_session_exists(sid) -> bool:
+        """Does the chat that owns a watch still exist? — the ownership model's read side.
+
+        `validated_meta` rather than `get`: this is asked once per record at startup and must not
+        materialize a transcript to answer. A malformed id raises, and `_sweep_orphaned_watches`
+        reads a raise as "cannot tell" and leaves the record alone, which is the direction a
+        deletion sweep has to fail in.
+        """
+        return _asst.validated_meta(str(sid)) is not None
+
     _watch_service = WatchService(
         _watches, observe_run=_watch_observe_run, run_turn_fn=_watch_run_turn,
-        append_turn=_watch_append)
+        append_turn=_watch_append, session_exists=_watch_session_exists)
     # Settle whatever the previous process left mid-wake, and start the scheduler only if this
     # server actually has standing watches — see `WatchService.bootstrap`.
     _watch_service.bootstrap()
