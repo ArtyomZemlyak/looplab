@@ -494,11 +494,31 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
     `LOOPLAB_LANDLOCK=enforce` and check it completed. The evidence that justifies the flip is that
     eval, not this command — this command only tells you the ruleset is well-formed and applies.
 
+    **IT FAILS CLOSED WHEN IT CANNOT SEE WHAT IT IS SUPPOSED TO VERIFY.** A gate whose whole job is
+    "the operator's declared mounts are in the kernel allow-list" must never print a green
+    `skipped: 0` about a list it built without them: what follows a green light here is
+    `LOOPLAB_LANDLOCK=enforce` on a real GPU eval, and a missing mount does not degrade — the eval
+    dies mid-training on a `PermissionError` reading the dataset. It read `task.get("repo")` until
+    2026-08-15, which is the repo ROOT PATH and not a spec: censused over all 46 preserved
+    `runs/*/task.snapshot.json`, that key is `None` 45 times and a `str` once, and never a dict. So
+    every run either had its mounts silently dropped (`rubert-dr-0807` declares two real ones —
+    `/home/jovyan/data/datasets/dense-retrieval/rubertlite` and the base model — and the command
+    printed 16 rules holding neither, then `skipped: 0`), or, for the `str` shape that ships in
+    `examples/repo_composable_task.json`, crashed in `read_allowlist.mount_sources`.
+
+    The spec now comes from where the ENGINE gets it — `TaskAdapter.repo_spec()`, over the same
+    re-validated snapshot `resume`/`finalize` rebuild from (`existing_run=True`, so a validation rule
+    added since the run started cannot refuse it) — because `engine/resources.py::_landlock_allow`
+    passes exactly `self._repo_spec` and a gate that derives its input differently from the thing it
+    gates is not a gate. A snapshot that is missing, unreadable or no longer a valid task is a
+    `ConfigRefusal`: the answer "no mounts" and the answer "I could not look" must not print the same.
+
     Read-only: it derives the list from the run's own `task.snapshot.json` and touches nothing.
     """
-    import json
     import os
 
+    from looplab.adapters.tasks import load_task
+    from looplab.core.errors import ConfigRefusal
     from looplab.runtime import landlock, read_allowlist
 
     abi = landlock.abi_version()
@@ -508,17 +528,39 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
         typer.echo(f"unavailable: {reason}")
         raise typer.Exit(2)
     snap = run_dir / "task.snapshot.json"
-    spec = None
-    if snap.exists():
-        try:
-            task = json.loads(snap.read_text(encoding="utf-8"))
-            spec = task.get("repo") if isinstance(task, dict) else None
-        except (OSError, ValueError):
-            spec = None
+    if not snap.exists():
+        raise ConfigRefusal(
+            f"{snap} does not exist, so this command cannot see the mounts it exists to verify. "
+            "Point it at a run directory created by `looplab run --out <dir>`; do NOT set "
+            "LOOPLAB_LANDLOCK=enforce on the strength of a list derived without the task.")
+    try:
+        # `existing_run=True` for the same reason `resume` uses it: a rule added after this run
+        # started must not make its own snapshot unreadable to a read-only diagnostic.
+        task = load_task(snap, existing_run=True)
+    except Exception as exc:            # noqa: BLE001 — every load failure is the same refusal here
+        raise ConfigRefusal(
+            f"cannot rebuild the task from {snap} ({type(exc).__name__}: {exc}), so this command "
+            "cannot see the mounts it exists to verify. Fix the snapshot (or the task file it came "
+            "from) before trusting any allow-list — a ruleset built without a declared mount does "
+            "not degrade, it refuses the read mid-eval.") from exc
+    spec_fn = getattr(task, "repo_spec", None)
+    spec = spec_fn() if callable(spec_fn) else None
+    mounts = read_allowlist.mount_sources(spec)
     if spec is None:
-        # Not an error: a toy/dataset run has no repo spec and therefore no declared mounts, and the
-        # default tiers are still worth printing — that IS the allow-list such a run would get.
-        typer.echo("no repo spec in task.snapshot.json — showing the default tiers only")
+        # A SEEN answer, not a blind one: a toy/dataset task has no repo spec and therefore declares
+        # no mount, and the default tiers ARE the allow-list such a run would get. It says which kind
+        # it read, so this line can never be mistaken for the "I could not look" case above.
+        typer.echo(f"task kind {getattr(task, 'kind', '?')!r} declares no repo spec, so it declares "
+                   "no mounts — showing the default tiers only")
+    else:
+        # Printed BEFORE the allow-list and counted, because `mounts: 0` on a repo task is the fact
+        # the operator has to check against their own `data:`/`references:` block. An omission that
+        # is not printed is exactly how the previous version read as a pass.
+        typer.echo(f"declared mounts from task.snapshot.json ({len(mounts)}):"
+                   + ("" if mounts else "  (none — this task declares no data:/references: mount)"))
+        for path, mode in mounts:
+            here = "" if os.path.exists(os.path.expanduser(str(path))) else "   <- NOT on this box"
+            typer.echo(f"  {mode:<9} {path}{here}")
     allow = read_allowlist.derive(workdir=None, run_dir=str(run_dir), repo_spec=spec)
     typer.echo(f"allow-list ({len(allow)} rules; the node workdir is added per launch):")
     for path, mode in allow:

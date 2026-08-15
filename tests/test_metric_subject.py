@@ -679,3 +679,118 @@ def test_the_eval_dispatch_branch_records_the_absent_declaration_itself():
     inner = {n.func.attr for b in guarded for n in ast.walk(b)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
     assert "absent_metric_subject" in inner
+
+
+# --------------------------------------------------------------------------------------------
+# `looplab landlock-check` — the GATE over that derivation
+#
+# It is the documented procedure for flipping `Settings.landlock` to enforce, and nothing drove its
+# body until 2026-08-15. It read `task.get("repo")` — the repo ROOT PATH, censused `None` 45 times and
+# `str` once across the 46 preserved `runs/*/task.snapshot.json`, never a dict — so `spec` was always
+# None and the operator's mounts were dropped from a list it then reported `skipped: 0` about, or the
+# `str` shape (which ships in `examples/repo_composable_task.json`) raised `AttributeError` out of
+# `mount_sources`. These drive the COMMAND, not the derivation under it.
+
+
+def _snapshot_run(tmp_path, name: str, task: dict) -> Path:
+    run_dir = tmp_path / name
+    run_dir.mkdir(parents=True)
+    (run_dir / "task.snapshot.json").write_text(json.dumps(task), encoding="utf-8")
+    return run_dir
+
+
+def _repo_task(tmp_path, **extra) -> dict:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / "ttrain.py").write_text("print('{\"metric\": 1.0}')\n", encoding="utf-8")
+    task = {"id": "t", "goal": "g", "direction": "max", "repo": str(repo),
+            "cmd": {"command": ["python", "ttrain.py"],
+                    "metric": {"reader": "stdout_json", "key": "metric"}, "timeout": 60}}
+    task.update(extra)
+    return task
+
+
+def _landlock_check(run_dir: Path):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    return CliRunner().invoke(app, ["landlock-check", str(run_dir), "--no-probe"])
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_verifies_the_operators_own_declared_mounts(tmp_path):
+    """The whole point of the gate: what it prints has to CONTAIN the mounts the task declares, and
+    say how many it found — `mounts: 0` on a repo task is the fact the operator checks against their
+    own `data:` block, and an omission that is not printed is how the old version read as a pass."""
+    corpus, papers = tmp_path / "corpus", tmp_path / "papers"
+    corpus.mkdir()
+    papers.mkdir()
+    run_dir = _snapshot_run(tmp_path, "run", _repo_task(
+        tmp_path,
+        data={"corpus": {"path": str(corpus), "mount": True, "edit": False}},
+        references=[{"name": "papers", "path": str(papers)}]))
+    result = _landlock_check(run_dir)
+    assert result.exit_code == 0, result.output
+    assert "declared mounts from task.snapshot.json (2)" in result.output
+    assert str(corpus) in result.output and str(papers) in result.output
+    assert "skipped: 0" in result.output
+    # ...and they are in the RULESET, not merely echoed above it.
+    rules = result.output.split("allow-list (", 1)[1]
+    assert f"read      {os.path.realpath(corpus)}" in rules
+    assert f"read      {os.path.realpath(papers)}" in rules
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_survives_the_shipped_string_repo_shape(tmp_path):
+    """`repo` is a PATH. Handing it to `mount_sources` raised `AttributeError: 'str' object has no
+    attribute 'get'` — the shape `examples/repo_composable_task.json` ships and one preserved run
+    carries."""
+    result = _landlock_check(_snapshot_run(tmp_path, "run", _repo_task(tmp_path)))
+    assert result.exit_code == 0, result.output
+    assert "AttributeError" not in result.output
+    assert "declared mounts from task.snapshot.json (0)" in result.output
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_refuses_rather_than_passing_when_it_cannot_see_the_task(tmp_path):
+    """A gate that cannot see the thing it gates must fail closed. "This task declares no mounts" and
+    "I could not look" must not print the same, because what follows a green light is
+    `LOOPLAB_LANDLOCK=enforce` on a real GPU eval and a missing mount refuses mid-training."""
+    from looplab.cli import REFUSAL_EXIT_CODE
+
+    empty = tmp_path / "no-snapshot"
+    empty.mkdir()
+    missing = _landlock_check(empty)
+    assert missing.exit_code == REFUSAL_EXIT_CODE
+    assert "cannot see the mounts it exists to verify" in missing.output
+    assert "skipped: 0" not in missing.output and "allow-list (" not in missing.output
+
+    broken = tmp_path / "corrupt"
+    broken.mkdir()
+    (broken / "task.snapshot.json").write_text("{not json", encoding="utf-8")
+    result = _landlock_check(broken)
+    assert result.exit_code == REFUSAL_EXIT_CODE
+    assert "cannot rebuild the task" in result.output and "allow-list (" not in result.output
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_still_exits_nonzero_when_a_declared_mount_is_not_on_this_box(tmp_path):
+    """The fail-closed half that already worked, now reachable because the mount survives to the
+    ruleset at all: a declared path this box does not have is a rule Landlock cannot add, i.e. a
+    DENIAL, and a green `skipped: 0` about it would be the same lie one rung later."""
+    run_dir = _snapshot_run(tmp_path, "run", _repo_task(
+        tmp_path, data={"corpus": {"path": str(tmp_path / "absent"), "mount": True}}))
+    result = _landlock_check(run_dir)
+    assert result.exit_code == 1
+    assert "NOT on this box" in result.output
+    assert "would be DENIED" in result.output
+
+
+@pytest.mark.skipif(_NO_LANDLOCK is not None, reason=str(_NO_LANDLOCK))
+def test_landlock_check_names_the_kind_when_a_task_genuinely_declares_nothing(tmp_path):
+    """A toy/dataset run has no repo spec at all. That is an ANSWER and prints as one — naming the
+    kind it read, so the line can never be confused with the refusal above."""
+    result = _landlock_check(_snapshot_run(tmp_path, "run", {
+        "kind": "quadratic", "id": "q", "goal": "min", "direction": "min"}))
+    assert result.exit_code == 0, result.output
+    assert "declares no repo spec" in result.output and "'quadratic'" in result.output

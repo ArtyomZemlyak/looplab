@@ -71,10 +71,54 @@ COST, measured on the real logs (2026-08-14, page-cache warm, mean of 5)
 
 The DEFAULT is a tail, so the common call is the cheap one, and it costs about what one `train_monitor`
 tick already pays to build its digest. A whole-run scan is what the caller explicitly asked for
-(`whole_run=true`, or a window wide enough to need it) and its receipt states the bytes it cost. The
-ceiling (`_MAX_SCAN_BYTES`) is above the largest log in `runs/`, so "the whole run" is answerable
-rather than quietly clipped. Scan time is dominated by the record split + regex over the tqdm fill,
-not by I/O — which is why `read_log` is ~5x cheaper than `metric_series` over the same bytes.
+(`whole_run=true`, or a window wide enough to need it) and its receipt states the bytes it cost.
+Scan time is dominated by the record split + regex over the tqdm fill, not by I/O — which is why
+`read_log` is ~5x cheaper than `metric_series` over the same bytes.
+
+WHAT THAT TABLE DID NOT SAY, and what a whole-run scan really costs (2026-08-15)
+--------------------------------------------------------------------------------
+The paragraph above used to end "the ceiling (`_MAX_SCAN_BYTES`) is above the largest log in `runs/`,
+so 'the whole run' is answerable rather than quietly clipped". `_MAX_SCAN_BYTES` was above it; the
+answer was clipped anyway, because `_read_window` clamped EVERY read by `_MAX_READ_BYTES` — the
+READER's ceiling, a different bound answering a different question. So the escalation ladder walked
+up to a ceiling it could not spend, re-read the same 33.5 MB twice, and no byte below
+`size - _MAX_READ_BYTES` was reachable at any parameter. Measured on the corpus:
+`rubertlite-dr-unified-v2` node 3 (88 MB) — the head **61.8 %** unreadable, so `whole_run=true`
+answered with a series that began 4 hours into a 4h17m run and called it the whole run;
+`rubert-dr-0807` node 1 (45 MB) — the first 11.4 MB. That is the exact failure this module exists to
+end, one layer down from the digest that produced it: a series which silently starts most of the way
+in shows the wrong trend, and the watchdog's question is "is this run learning?".
+
+The two bounds are now what their names say — `_read_window` takes the CALLER's ceiling — and the
+real numbers, measured on the 88 MB log (`runs/rubertlite-dr-unified-v2/nodes/node_3/train.log`) with
+`runs/` on its geesefs/S3 mount:
+
+| | |
+|---|---|
+| geesefs sequential read, cold | 101 MB/s (88 MB in 0.87 s) |
+| geesefs sequential read, warm | ~300 MB/s (88 MB in 0.25-0.28 s) |
+| the record split + regex, per MB | **51 ms** (88 MB in 4.5 s) |
+| whole-run hourly scan of that log, AFTER this fix | 1 read, ~5.4 s cold, and it covers 100 % |
+| the same call BEFORE this fix | 6 reads, 88 MB read and parsed, 4.7 s, and it covered 38 % |
+
+So the head was not expensive — it was free. The broken ladder already paid for the whole file; it
+just spent the bytes re-reading a tail. **I/O is 5-16 % of a scan**; what a scan costs is the regex
+over the tqdm fill, and that is why the ceiling is a bound on BYTES PARSED and not on bytes fetched.
+
+WHY `_MAX_SCAN_BYTES` STAYS AT 128 MiB, and what happens above it
+------------------------------------------------------------------
+It is not "the largest log plus room" — that number moves every time a run gets longer, and the
+88 MB log is 1.6x the previous largest. It is a bound on the JUDGE'S REQUEST PATH: this judge fires
+on a timer up to `_MAX_MONITOR_LLM_CALLS` times per node with `_MONITOR_LOOK_TURNS=6` tool turns
+each, so the number that matters is the worst case one call can cost. At the measured 51 ms/MB,
+128 MiB is ~6.9 s of CPU — ~1 % of the `train_monitor_interval_s=600` cadence it fires on, and it
+covers every log in `runs/` (largest 88 MB) with 1.5x of headroom.
+
+Above it the head IS unreachable, and the receipt SAYS SO in the words that matter to the reader —
+"this series does not start at the run's start; N bytes (P %) are below it, so the first bucket is a
+mid-run value" — rather than the old text, which told a caller who had just passed `whole_run=true`
+to pass `whole_run=true`. An answer that announces its own truncation is a different object from one
+that silently misleads a judge, and that is the property to keep if this ceiling ever moves again.
 
 THE CLOCK, and why it is derived rather than assumed
 -----------------------------------------------------
@@ -119,15 +163,29 @@ from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 # in the answer alongside the exact call that continues past it (rule 3).
 
 # What one `read_log` reads by default, and the most it may ever read. The default is twice the
-# training monitor's own 128 KiB tail so a first look already sees more than the digest ever did; the
-# ceiling covers the largest single stage log in `runs/` (14.7 MB) with room to spare.
+# training monitor's own 128 KiB tail so a first look already sees more than the digest ever did.
+#
+# The ceiling bounds ONE ANSWER's read, and that is the whole of its job: a `read_log` answer is at
+# most `_MAX_LINES` records under `_CAP`, so bytes past what fills that budget buy the reader nothing
+# and cost the judge parse time. It is anchored at the END the mode asks for — `head`/`range` read up
+# from the floor, `tail`/`search` down from the newest — so no mode is reaching for the far end of a
+# large file through this number. (Its original comment said the ceiling "covers the largest single
+# stage log in `runs/` (14.7 MB) with room to spare"; the corpus now holds an 88 MB and a 45 MB log,
+# which is a fact about the corpus and not a reason to raise a per-answer bound. What it DID break
+# was the scan below, because that clamp was applied to both — see the module docstring.)
 _DEFAULT_READ_BYTES = 262_144
 _MAX_READ_BYTES = 33_554_432
 
-# The same pair for `metric_series`. A metric query over "the whole run" must be able to REACH the
-# whole run — that is the point — so its ceiling is higher than the reader's and sits above the
-# largest log on disk. `_DEFAULT_SCAN_BYTES` is only the STARTING window: `_scan_for_window` escalates
-# a tail read until the requested window is covered or the ceiling is hit.
+# The same pair for `metric_series`, and DELIBERATELY A DIFFERENT NUMBER — a metric query over "the
+# whole run" must be able to REACH the whole run, which is the point of the tool, so this bounds a
+# whole-file SCAN and not one answer's read. `_DEFAULT_SCAN_BYTES` is only the STARTING window:
+# `_scan_for_window` escalates a tail read until the requested window is covered or the ceiling is
+# hit (and an UNBOUNDED window skips the ladder entirely — it is one read of the ceiling).
+#
+# 128 MiB is a bound on the judge's REQUEST PATH, derived rather than picked: at the measured
+# 51 ms/MB of record-split + regex it is ~6.9 s of CPU for the worst case one call can cost, against
+# a `train_monitor_interval_s=600` cadence, and it covers the largest log in `runs/` (88 MB) 1.5x
+# over. Above it the head is genuinely unreachable and `_scan_reach` says so in the answer.
 _DEFAULT_SCAN_BYTES = 262_144
 _MAX_SCAN_BYTES = 134_217_728
 
@@ -440,16 +498,24 @@ def bucket_series(samples, *, start: float, end: float, width: float) -> list:
 
 
 # ------------------------------------------------------------------------------------- the file reads
-def _read_window(source: LogSource, *, want: int, where: str, start: Optional[int]) -> tuple:
+def _read_window(source: LogSource, *, want: int, where: str, start: Optional[int],
+                 ceiling: int) -> tuple:
     """Read a bounded byte window of `source`. Returns `(text, lo, hi, size)`.
 
     Seek-and-read only, and never below `source.floor` — the previous attempt's bytes are not this
     node's evidence (rule 1's `floor`). `where` is `"tail"`, `"head"` or `"at"` (from `start`).
+
+    `ceiling` is REQUIRED and belongs to the CALLER, because the two callers bound different things:
+    `read_log` bounds one answer's read (`_MAX_READ_BYTES`) and `metric_series` bounds a whole-run
+    SCAN (`_MAX_SCAN_BYTES`). This function clamped both by the reader's ceiling until 2026-08-15,
+    which silently made every byte below `size - _MAX_READ_BYTES` unreachable at any parameter — the
+    head 61.8 % of the corpus's largest log, answered as if it were the whole run. A default here
+    would restore exactly that: the bound a read is subject to is never this function's to assume.
     """
     path = Path(source.path)
     size = os.path.getsize(path)
     floor = max(0, min(int(source.floor or 0), size))
-    want = max(1, min(int(want), _MAX_READ_BYTES))
+    want = max(1, min(int(want), max(1, int(ceiling))))
     if where == "head":
         lo = floor
     elif where == "at":
@@ -471,13 +537,21 @@ def _scan_for_window(source: LogSource, key: str, *, need_s: Optional[float],
     receipt states what that cost. A doubling ladder rather than a stat-and-guess because the
     relationship between bytes and seconds is entirely up to what the candidate's script prints.
 
+    An UNBOUNDED window (`whole_run=true`, i.e. `need_s=inf`) is the one case the ladder has nothing
+    to discover — the answer is every byte the ceiling allows — so it is ONE read. Escalating to it
+    re-READ and, far more expensively, re-PARSED the same prefix at every rung: measured on the 88 MB
+    log, six reads parsing 88 MB to cover 33.5 MB of it, where one read parses 88 MB and covers all
+    of it. The parse is 51 ms/MB against 10 ms/MB of cold geesefs I/O, so a rung is not cheap.
+
     Returns `(samples, clock, lo, hi, size, reads)`.
     """
     ceiling = max(1, min(int(ceiling), _MAX_SCAN_BYTES))
-    want = min(ceiling, _DEFAULT_SCAN_BYTES)
+    want = ceiling if (need_s is not None and need_s == float("inf")) else min(ceiling,
+                                                                              _DEFAULT_SCAN_BYTES)
     reads = 0
     while True:
-        text, lo, hi, size = _read_window(source, want=want, where="tail", start=None)
+        text, lo, hi, size = _read_window(source, want=want, where="tail", start=None,
+                                          ceiling=ceiling)
         samples, clock = scan_series(text, key)
         reads += 1
         covered = (samples[-1].t - samples[0].t) if len(samples) > 1 else 0.0
@@ -487,6 +561,35 @@ def _scan_for_window(source: LogSource, key: str, *, need_s: Optional[float],
                 or want >= ceiling):
             return samples, clock, lo, hi, size, reads
         want = min(ceiling, want * 4)
+
+
+def _scan_reach(source: LogSource, lo: int, size: int, *, whole: bool, ceiling: int) -> str:
+    """What a series does NOT cover, in the words its READER needs (rule 3).
+
+    Three cases, and the third is the one this helper exists for. When the scan reached the floor
+    there is nothing unread, and a non-zero floor is stated as what it is rather than as bytes
+    somebody could go and fetch. When it did not and the caller asked for a TAIL, the fix is the
+    parameter they did not pass. When it did not and the caller ALREADY passed `whole_run=true`, the
+    ceiling is the binding constraint and the answer has to say the thing that changes how the series
+    is read — that its first bucket is a MID-RUN value and not the run's opening one. The text this
+    replaced said "earlier bytes not scanned — whole_run=true reads from the start" to a caller who
+    had just passed `whole_run=true`: it named a remedy that was already spent, which reads as "you
+    are seeing the start" to anything that believes its receipts.
+    """
+    floor = max(0, min(int(source.floor or 0), size))
+    if lo <= floor:
+        if floor > 0:
+            return (f". The {floor:,} bytes below this belong to a PREVIOUS attempt of this node and "
+                    "are never read.")
+        return "."
+    unread = lo - floor
+    body = max(1, size - floor)
+    if not whole:
+        return f"; {unread:,} earlier bytes not scanned — whole_run=true reads from the start."
+    return (f"; **this series does NOT start at the run's start** — {unread:,} of {body:,} bytes "
+            f"({100.0 * unread / body:.0f} %) are below it, above this tool's {ceiling:,}-byte scan "
+            "ceiling, so the first bucket is a MID-RUN value and the net change is only over the part "
+            "read. Narrow the question (last_s) rather than reading this as the whole run.")
 
 
 # ------------------------------------------------------------------------------------- the provider
@@ -636,7 +739,8 @@ class LogQueryTools:
         want = max(1, min(_int_arg(args, "max_bytes", _DEFAULT_READ_BYTES), self.max_read_bytes))
         raw_mode = bool(args.get("raw"))
         where = "head" if mode in ("head", "range") else "tail"
-        text, lo, hi, size = _read_window(source, want=want, where=where, start=None)
+        text, lo, hi, size = _read_window(source, want=want, where=where, start=None,
+                                          ceiling=self.max_read_bytes)
         records = _records(text)
         # A tail that does not start at the floor has a torn leading record; drop it rather than
         # showing half a line as if it were a line. Same rule the monitor's own tail read applies.
@@ -661,7 +765,8 @@ class LogQueryTools:
             chosen = records[-lines:]
             first_index = len(records) - len(chosen) + 1
         body = [self._render(r, raw_mode) for r in chosen]
-        receipt = self._reach_receipt(mode, lo, hi, size, len(records), first_index, truncated_head)
+        receipt = self._reach_receipt(mode, lo, hi, size, len(records), first_index, truncated_head,
+                                      floor=max(0, min(int(source.floor or 0), size)))
         return fit_rows([header, f"records {first_index}-{first_index + len(chosen) - 1} "
                                  f"of {len(records)} in this window:"], body, receipt=receipt,
                         cap=_CAP, omitted="... ({receipt}{n} record(s) dropped to fit the result "
@@ -672,12 +777,23 @@ class LogQueryTools:
                     keep="head", note="…({n} more chars in this record; raw=true keeps them)")
 
     def _reach_receipt(self, mode: str, lo: int, hi: int, size: int, records: int,
-                       first_index: int, truncated_head: bool) -> str:
-        """What this answer did NOT cover, and the exact call that covers it (rule 3)."""
+                       first_index: int, truncated_head: bool, *, floor: int) -> str:
+        """What this answer did NOT cover, and the exact call that covers it (rule 3).
+
+        The unread head is counted from the FLOOR, not from byte 0. Bytes below `LogSource.floor`
+        belong to a previous attempt of this node and no parameter reaches them by design (rule 1), so
+        counting them as "not read — mode=head for the run's start" both overstates the loss and names
+        a call that cannot deliver it. A resumed node's floor is the whole of its predecessor's log,
+        which is exactly when that number is largest and the advice most wrong.
+        """
         parts = []
-        if lo > 0:
-            parts.append(f"{lo:,} earlier bytes not read — mode=\"head\" for the run's start, or "
-                         "raise max_bytes")
+        floor = max(0, min(int(floor or 0), size))
+        if lo > floor:
+            parts.append(f"{lo - floor:,} earlier bytes not read — mode=\"head\" for the run's start, "
+                         "or raise max_bytes")
+        elif floor > 0:
+            parts.append(f"this answer starts at the current attempt's boundary; the {floor:,} bytes "
+                         "below it are a previous attempt's and are never read")
         if hi < size:
             parts.append(f"{size - hi:,} later bytes not read — mode=\"tail\" for the newest")
         if truncated_head:
@@ -710,7 +826,8 @@ class LogQueryTools:
                 body.append(f"{mark}{j + 1}: {self._render(records[j], raw_mode)}")
         receipt = f"{len(hits)} match(es)" + (f", showing the first {len(capped)}"
                                               if len(capped) < len(hits) else "")
-        reach = self._reach_receipt("search", lo, hi, size, len(records), 1, False)
+        reach = self._reach_receipt("search", lo, hi, size, len(records), 1, False,
+                                    floor=max(0, min(int(source.floor or 0), size)))
         return fit_rows([header, f"search {pattern!r} — {receipt}" + (f"; {reach}" if reach else "")],
                         body, cap=_CAP,
                         omitted="... ({receipt}{n} context line(s) dropped to fit the result cap — "
@@ -736,9 +853,18 @@ class LogQueryTools:
         samples, clock, lo, hi, size, reads = _scan_for_window(
             source, metric, need_s=(None if need is None else need), ceiling=ceiling)
         if not samples:
+            # The remedy has to be one the caller has not already spent: `whole_run=true` is not
+            # advice to give somebody who passed `whole_run=true` and got nothing back.
+            more = ("Try whole_run=true, or read_log with mode=\"search\" to find what this log "
+                    "actually names." if not whole else
+                    "This was already a whole-run scan"
+                    + (f" (it covered {hi - lo:,} of {size:,} bytes — the rest is above this tool's "
+                       f"{ceiling:,}-byte ceiling)" if lo > max(0, int(source.floor or 0)) else
+                       " over every byte of the log")
+                    + ", so this log does not print that key. Use read_log with mode=\"search\" to "
+                      "find what it actually names.")
             return (self._header(source, lo, hi, size)
-                    + f"\n(no `{metric}` reading in the {hi - lo:,} bytes read. Try whole_run=true, "
-                      "or read_log with mode=\"search\" to find what this log actually names.)")
+                    + f"\n(no `{metric}` reading in the {hi - lo:,} bytes read. {more})")
 
         end = samples[-1].t
         begin = samples[0].t
@@ -762,10 +888,11 @@ class LogQueryTools:
                        "step": s.step, "total": s.total} for s in inside[-_MAX_BUCKETS:]])
         return self._render_series(source, metric, rows, inside, clock,
                                    start=start, end=end, begin=begin, width=width,
-                                   lo=lo, hi=hi, size=size, reads=reads, last_s=last_s)
+                                   lo=lo, hi=hi, size=size, reads=reads, last_s=last_s,
+                                   whole=whole, ceiling=ceiling)
 
     def _render_series(self, source, metric, rows, inside, clock, *, start, end, begin, width,
-                       lo, hi, size, reads, last_s) -> str:
+                       lo, hi, size, reads, last_s, whole, ceiling) -> str:
         finite = [s.value for s in inside if s.finite]
         nonfinite = sum(1 for s in inside if not s.finite)
         head = [
@@ -777,7 +904,7 @@ class LogQueryTools:
             + (f", wall {clock.wall(0.0)}" if clock.wall(0.0) else "")
             + f". Read {hi - lo:,} of {size:,} bytes"
             + (f" in {reads} reads" if reads > 1 else "")
-            + ("." if lo <= 0 else "; earlier bytes not scanned — whole_run=true reads from the start."),
+            + _scan_reach(source, lo, size, whole=whole, ceiling=ceiling),
         ]
         if finite:
             head.append(f"window: first={_fmt_num(finite[0])} last={_fmt_num(finite[-1])} "
