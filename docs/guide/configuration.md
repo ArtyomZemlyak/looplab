@@ -315,7 +315,55 @@ Who is told, and what else they are told:
 | role | where | the extra fact it needs |
 |---|---|---|
 | Researcher (both prompts) | the `TIME BUDGET` cue, stamped per proposal | whether its own `eval_timeout` is honoured at all (`agent_control.timeout`) and how far it may raise the budget (`max_eval_timeout` clamps it) |
-| Developer (repo) | the stages + implement prompts | that a stage `timeout` longer than the budget is not more budget — nothing clamps it at the wall, so it runs, spending GPU-hours the run was not planned around, and `declare_stages` therefore refuses to declare one |
+| Developer (repo) | the stages + implement prompts (and, on a repair, the implement prompt is the only one it gets) | that a stage `timeout` longer than the budget is not more budget — nothing clamps it at the wall, so it runs, spending GPU-hours the run was not planned around, and `declare_stages` therefore refuses to declare one |
+
+#### The budget is PER STAGE, and both prompts used to say otherwise
+
+**Fixed 2026-08-15.** All three role-facing statements announced the number as an *end-to-end pool* —
+the Developer's note said "one evaluation of this node gets *N*s, end to end: every stage you declare
+plus the protected scoring step"; the Researcher's per-proposal cue said "each experiment
+(train+eval) must finish within ~*N*s" and told it to "leave room for data prep + eval"; and the F1h
+hint beside it asked for an estimate of "total_steps × per-step time, **plus data prep and scoring**",
+i.e. it named the wrong quantity inside the very sentence that asks for the arithmetic. Nothing in the
+engine implements that.
+`runtime/command_eval.py::_run_stages` takes each stage's own ceiling with no accumulator and no
+cross-stage deadline, and `_resolve_stages` appends `score` with the operator's own timeout — a fresh
+copy of the budget, on top of everything preceding. The gate the same Developer is refused by says so
+explicitly (the per-stage rule above), and so did this page; only the prompts disagreed.
+
+Measured over every `stage_finished` in `runs/` (2026-08-15): **51 stage rows ran longer than their
+own run's entire per-eval budget and not one was killed for it** — 45 nodes of
+`rubertlite-dense-retrieval` each spent a single `train` stage at 1.1×–6.0× a 3600 s budget and were
+*scored*; `rubertlite-dr-unified-v7` nodes 0 and 1 ran 29,389 s and 29,184 s against 21,600 s.
+
+What the fiction cost is visible on `rubertlite-dr-unified-v8`, the first run to evaluate under the
+authoring gate (merged 2026-08-14 12:06 UTC, v8 launched 16:25). It is also the only run in the corpus
+whose manifests all sit *below* the budget — sum-of-declared / budget of 0.60, 0.70, 0.83, 0.86, 0.89,
+0.90, 0.90, 0.95 — because the role was **partitioning a pool**, not under-estimating. Node 9 gave
+`mine` 7,200 s (it used 2,349.6) and `train` 14,400 s, holding 14,400 s back for a `score` stage that
+takes ~3,100 s on this task and is charged to none of it; its `train` was killed at 14,402.67 s, 73 %
+through, with 21,600 s of ceiling it was entitled to declare and never claimed.
+
+**And the cost lands on the experiment, not on the clock.** All five `stage_finished.status="timeout"`
+rows in `runs/` were answered by a repair that made the experiment *smaller* — `n_epochs` 10→5, 15→8,
+10→6, fewer epochs / a validation subset, fewer ANCE negatives — and **none of the five raised the
+stage's own ceiling**, though two of them had 14,000 s and 21,600 s of budget left to raise it into.
+Across all 87 `node_repaired` rows carrying a change set, a stage `timeout` was raised exactly once,
+and that raise went *above* the budget, i.e. the gate refuses it today. All three prompts now state
+the per-stage semantics, tell the role not to hold time back for the scorer, and name the move nobody
+was taking: when a stage is killed purely by wall clock and its declared `timeout` was below the
+budget, the first fix is the ceiling and not the science.
+
+**What this does not reach.** Only two of those five timeouts had headroom to raise into; the other
+three declared a ceiling equal to the budget or already above it, where the budget itself was the
+bound. And the ceiling is not the only pressure that shrinks an experiment — measured 2026-08-15 22:26
+with v8 live, the four `declared_param_overrides` rows in `runs/` split evenly between time pressure
+(v8 nodes 3 and 9) and *memory* pressure (v8 nodes 3 and 8), with one science-altering instance each,
+so this reaches node 9 and not node 8. The backstop for the rest is the stage's own
+[`expect.assert`](tasks.md#cmd-is-a-contract-edit-scope-is-separate), which already caught node 8
+(`check_failed — training stopped at epoch 7.99, not the declared 15 epochs`) after 14,105 s of
+training; 23 of the 143 declared stages in `runs/` name a quantity a shrink would falsify, 16 of them
+on v8. These prompts are the rung above that — where the choice is made and costs nothing.
 
 #### A declared stage `timeout` may not exceed the budget
 

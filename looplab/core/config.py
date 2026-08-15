@@ -602,9 +602,15 @@ class Settings(BaseSettings):
     # that has reached its time budget, ONCE per command. `0` (the default) keeps the unconditional
     # tree-kill this always was, byte-for-byte.
     #
-    # It exists because a deadline is a number that cannot see a progress bar. All four
-    # `stage_finished.status == "timeout"` rows in the shipped corpus land EXACTLY on their 4 h / 6 h
-    # / 8 h wall and together discarded 22.0 GPU-hours, and the entire captured record of
+    # It exists because a deadline is a number that cannot see a progress bar. All FIVE
+    # `stage_finished.status == "timeout"` rows in `runs/` land within 3.2 s of their own declared
+    # ceiling (14400 s x3, 21600 s, 22000 s) and together discarded 24.1 GPU-hours — re-derived
+    # 2026-08-15, when v8 added two; the older count of four / 22.0 h included a row whose run
+    # directory is no longer on this box. TWO of the five are the shape this rescue does NOT reach
+    # and that is worth stating beside the default: v8 nodes 3 and 9 died at ceilings their own
+    # manifests set 14000 s and 21600 s BELOW the operator's budget, and node 9 was 73 % done with
+    # ~5160 s to go, so a one-shot grace correctly answers NOT_FINISHING and the fix is upstream at
+    # the declaration (`adapters/repo_developer.py::_time_budget_note`). And the entire captured record of
     # `rubertlite-dense-retrieval` node 72 — a 12.45-hour node, five repairs, 6 h on its final
     # attempt — ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, a stage two
     # seconds from writing its checkpoint and a stage that will never finish present the identical

@@ -137,14 +137,28 @@ class ProposalCuesMixin:
 
         calib = "; ".join(f"node {n.id}: {n.eval_seconds / 60:.0f} min" + _outcome(n) for n in timed)
         limit = self._experiment_time_budget()
-        limit_txt = (f"each experiment (train+eval) must finish within ~{limit:.0f}s "
-                     f"(~{limit / 3600.0:.1f}h)" if limit else
-                     "each experiment runs under a fixed wall-clock budget")
+        # `(train+eval)` said the budget was a POOL the two spent between them, and it is not:
+        # `_run_stages` gives EACH declared stage its own copy of the number and the protected
+        # scoring stage runs under the operator's own timeout on top (`_time_budget_hint_text`
+        # carried the same fiction and its comment holds the measurement — 51 stage rows in `runs/`
+        # outran their run's whole budget and none was killed for it). The number is unchanged and
+        # so is its spelling; only the SCOPE claim is corrected, and it is corrected in the
+        # direction that matters here, because a Researcher who believes training and scoring share
+        # one wall proposes a shorter schedule than the run can afford.
+        limit_txt = (f"each STAGE of an experiment must finish within ~{limit:.0f}s "
+                     f"(~{limit / 3600.0:.1f}h) — training gets that whole ceiling on its own, and "
+                     f"the scoring step gets its own on top" if limit else
+                     "each stage of an experiment runs under a fixed wall-clock budget")
         hint = (
             f"\nExperiment TIME BUDGET — {limit_txt}. A training that exceeds it is KILLED and yields "
             f"NO metric (pure waste). BEFORE fixing epochs/steps, ESTIMATE the wall-clock: "
             f"total_steps = epochs × ceil(train_rows / batch_size); total_steps × per-step-time must "
-            f"stay WELL under the budget (leave room for data prep + eval). If per-step time on THIS "
+            # "leave room for data prep + eval" was the partition instruction itself: data prep and
+            # scoring have their OWN ceilings and are charged to none of training's, so room left
+            # for them is training time thrown away — measured on v8 node 9, which held back 14400 s
+            # for a ~3100 s scorer and then died 73 % through its own 14400 s train stage.
+            f"stay WELL under the budget — but do NOT leave room in it for data prep or scoring, "
+            f"which run on their own ceilings. If per-step time on THIS "
             f"data/hardware is unknown, run a SHORT probe (a few hundred steps or a subsample) to "
             f"measure it FIRST, then size epochs to fit — a smaller experiment that COMPLETES beats a "
             f"bigger one that gets killed."
@@ -500,11 +514,19 @@ class ProposalCuesMixin:
         # be inline here. Two roles told one budget in two formats is the same defect one layer down.
         from looplab.runtime.command_eval import format_time_budget
         span = format_time_budget(budget)
-        # The SCOPE clause differs because the two paths kill at different places: a repo pipeline spends
-        # the budget across every stage it declares plus the protected `score` stage, while a sandbox
-        # solution is one process.
+        # The SCOPE clause differs because the two paths kill at different places, and until
+        # 2026-08-15 it said the wrong thing about the repo one. It read "covering every pipeline
+        # stage plus the protected scoring step, end to end" — a POOL — while `_run_stages` gives
+        # each stage its own copy of the number and `_resolve_stages` appends `score` under the
+        # operator's own timeout on top. Measured over `runs/`: 51 stage rows outran their run's
+        # whole budget and none was killed for it. The Developer's `_time_budget_note` carried the
+        # identical fiction and its docstring holds the full measurement; the two must not diverge
+        # again, since they are the two halves of one schedule. A sandbox solution really is one
+        # process, so that branch keeps its silence.
         if getattr(self, "_eval_spec", None):
-            scope = ", covering every pipeline stage plus the protected scoring step, end to end"
+            scope = (" — PER STAGE, not a pool: every stage the Developer declares runs on its own "
+                     "clock at that ceiling, and the protected scoring step runs under the operator's "
+                     "own copy of it on top, charged to none of them")
             lever = (" A longer `timeout` on a stage is not more budget: it only removes the guard, and a "
                      "stage that outlives the budget is spending GPU-hours the run was never planned "
                      "around. If the schedule does not fit, propose the smaller schedule.")
@@ -518,7 +540,11 @@ class ProposalCuesMixin:
             "learns nothing from it: a shorter experiment that REPORTS A NUMBER beats a longer one that "
             "reports nothing. Size the SCHEDULE to finish inside the budget — fewer epochs or steps, a "
             "subsample, or a larger batch if the memory allows — and estimate before you commit "
-            "(total_steps x per-step time, plus data prep and scoring). That is not licence to propose "
+            # "plus data prep and scoring" was the third spelling of the pool, in the same sentence
+            # that asks for the estimate — so the estimate it asked for was of the wrong quantity.
+            # Data prep and scoring have their own ceilings and are charged to none of training's.
+            "(total_steps x per-step time; data prep and scoring have their OWN ceilings and are not "
+            "charged to training's, so do not budget for them here). That is not licence to propose "
             "something too small to answer the question: an experiment that finishes and measures "
             "nothing is the same waste in the other direction, so cut the SCHEDULE, never the "
             "comparison." + lever + self._deadline_grace_text())
