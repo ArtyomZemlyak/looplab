@@ -386,8 +386,14 @@ committed `.py` code assigns a different value to a parameter its `Idea` declare
 a result at coordinates it never occupied, and `idea.params` is not decoration: it is what
 `core/numeric.py::numeric_params` hands the surrogate, the panel, the proxy, the diversity archive's
 niches and the novelty distance, and what `search/operators.py::merge_idea` does arithmetic on when it
-breeds two parents. Measured over the same 46 logs: exactly ONE of 297 nodes answers, and it is a
-champion — `rubertlite-dr-unified-v8` node 3 (0.762048, +0.0236 clear of the field) declared
+breeds two parents. Measured over the same 46 logs at 2026-08-15 23:41 UTC: **four of the 218 folded
+nodes answer** (all on `rubertlite-dr-unified-v8`) and exactly one of the 46 RUNS is caveated, the
+member being per-champion. Quote the instant — this population moves while a run is live, in both
+directions: node 9 carried an override at 23:34 and not at 23:41, its second repair having deleted
+the assignment. (An earlier reading here said "exactly ONE of 297 nodes"; 297 was the `node_created`
+count rather than the folded population, and the node figure missed two nodes the same change had
+already named from the repair side.) The caveated champion is
+`rubertlite-dr-unified-v8` node 3 (0.762048, +0.0236 clear of the field), which declared
 `batch_size 8192` / `gradient_accumulation_steps 2` in both its `idea.params` and its `config.yaml`
 while `vectorsearch/train.py:31-32` set 4096 / 4. The effective batch was identical and the change was
 sound; what was missing was any record of it, and the run's next node — a mean-merge of that champion

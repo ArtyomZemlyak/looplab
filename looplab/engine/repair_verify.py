@@ -183,6 +183,49 @@ useful thing to flag but is a diagnosis rather than a promise. They are left `un
 claim-clause whitelist would demote all four, and turning a repair that touched the wrong file into
 "nothing to check" is the trade this module refuses.
 
+WHAT IS OPEN ON THE `verified` SIDE, WHICH THE PARAGRAPH ABOVE NEVER SAID, and it is the more
+expensive direction because `verified` is the record affirming a repair ON THE AGENT'S BEHALF.
+**`verified` means AT LEAST ONE claimed token was found somewhere in the diff — not that every claim
+was kept, and not that the diff does what the claim asked.** Two facts about the region make that
+weaker than the word sounds, and both are deliberate elsewhere: the region is searched as FLAT TEXT,
+and it is a DIFF, so it contains the lines a repair DELETED, three lines of unchanged CONTEXT either
+side (`changed_region`'s docstring holds the measurement that bought the context — seven real
+`--gpus` repairs scored `unmet` without it) and whatever COMMENTS the agent wrote.
+
+THE ROW THAT SHOWS IT, on the live run. `rubertlite-dr-unified-v8` node 9 attempt 2 promises *"reduce
+n_epochs to ~6 … so the declared epoch count matches the actual training end"* and does the OPPOSITE:
+it DELETES the `config.train.training.n_epochs = 6` its own previous attempt added, raises the stage
+`timeout` 14400 -> 22000 instead, and leaves the manifest passing `--train.training.n_epochs 10`.
+The row is stamped `verified`, and the two things that met its claims are `- config.train.training.
+n_epochs = 6` — the deleted line — and an added COMMENT reading *"n_epochs comes from the CLI … and
+is NOT overridden here"*. So the verifier is satisfied by a comment DENYING the action it certifies,
+which is CLAUDE.md's own guard-test rule turned on the guard. (The repair's OUTCOME was right —
+spending unclaimed ceiling instead of shrinking the experiment is exactly what
+`adapters/repo_developer.py::_time_budget_note` now asks for. It is the VERDICT that is wrong.)
+
+MEASURED, 2026-08-15 23:40 UTC, by replaying all 2,487 `node_repaired` rows in `runs/` through this
+function on regions rebuilt from each attempt's own predecessor: 76 `verified`, 12 `unmet`, 46
+`inert`, 2,353 `unstated`. Of 75 `verified` rows carrying both a rationale and a change set, **48
+have at least one claimed token with NO occurrence on an ADDED CODE line** — 26 tokens on 18 rows
+whose only added occurrence is inside a comment, 20 on 14 rows met only by a deleted line, 32 on 21
+rows met only by unchanged context. So this is not one row; it is most of the population.
+
+IT IS STATED AND NOT PATCHED, and the reason is that the obvious patches were driven and are wrong.
+Making a comment not count moves exactly FOUR of the 2,487 rows (all `verified` -> `unmet`) and does
+NOT move the row above, because the deletion still matches. Making a DELETED line not count is
+provably wrong: `rubert-dr-0807` node 12 attempt 2 claims *"replace_sampler_ddp was removed from
+Trainer.__init__; drop the arg"* and is correctly `verified` by a `-` line alone. Requiring EVERY
+claim instead of one would convict at the scale above on evidence nobody has audited row by row, and
+this rung's stated principle is that a weak signal may ACQUIT and may not CONVICT. **And direction is
+not recoverable here at all**: "reduce n_epochs to 6" and "drop the n_epochs override" are the same
+token in the same file, and telling them apart needs the VALUE out of the prose — model-authored text
+this rung's trust tier is defined by not reading. `declared_param_overrides` below is the shape that
+CAN see a value, and it can only do so because it compares committed BYTES against a DECLARATION the
+Researcher minted, with no rationale in the loop; there is no such second artifact for a repair's
+free-text promise. The honest bound is therefore on the WORD: `verified` means "the repair's
+vocabulary appears in what it changed", never "the repair did what it said", and `tests/
+test_repair_verification.py` pins that row so the residue cannot be quietly forgotten.
+
 WHY THESE ARE NOT TRIAGE VERDICTS. `engine/triage.py::TRIAGE_ACTIONS` answers "keep repairing this
 node?" and is a JUDGEMENT, three-fifths of which a model may emit. These four answer "what did the
 repair just do?" and are FACTS the engine derives from bytes it holds — no model may emit one, no
@@ -695,6 +738,22 @@ def _assigned_numeric_paths(source: str) -> dict:
     the docstring states rather than guesses at. Unparseable source answers `{}`: an agent may commit
     anything, and a `SyntaxError` is not evidence about a parameter.
 
+    **SOURCE ORDER IS RESOLVED EXPLICITLY, and it is not a tidy-up.** `ast.walk` is BREADTH-FIRST, so
+    it yields every module-level statement before anything nested inside one, and "last write" under
+    it means DEEPEST-then-latest rather than last-in-the-file. That inverts the rule this docstring
+    states, in the direction the whole rung is not allowed to fail in: a node whose module-level
+    `cfg.train.training.batch_size = 8192` AGREES with its declaration is convicted anyway when a
+    helper `def` earlier in the file carries a different default, because the nested assignment is
+    visited last and overwrites the agreeing one. That row reaches `champion_caveats` as
+    `params_overridden` on the run's best number. It also hands an adversarial candidate both
+    directions for free — a one-line decoy `def _unused(): cfg.a.b = <the declared value>` after a
+    real divergence answers "agrees" — and it breaks `declared_param_overrides`' baseline
+    attribution, which acquits only on an EQUAL prior value and therefore charges a repair with a
+    literal no attempt ever made effective. So the nodes are sorted by `(lineno, col_offset)` before
+    the dict is written, and the dict then means what it says. (Textual order still is not execution
+    order — a nested `def` may run after the module body — which is exactly why the module docstring
+    says this is a statement about two artifacts and never "this is what ran".)
+
     Walks `Assign` and `AnnAssign` (`config.train.batch_size: int = 4096`) and deliberately NOT
     `AugAssign`: `x += 1` carries no absolute value to compare a declaration against.
     """
@@ -702,7 +761,7 @@ def _assigned_numeric_paths(source: str) -> dict:
         tree = ast.parse(source or "")
     except (SyntaxError, ValueError, RecursionError, MemoryError):  # noqa: BLE001 — not evidence
         return {}
-    out: dict = {}
+    found: list = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -713,10 +772,15 @@ def _assigned_numeric_paths(source: str) -> dict:
         val = _numeric_literal(value)
         if val is None:
             continue
+        found.append((getattr(node, "lineno", 0), getattr(node, "col_offset", 0), targets, val))
+    out: dict = {}
+    # A stable sort on the position the source really has; `ast.walk`'s own order is BFS and is the
+    # one thing this dict may not inherit (see the docstring).
+    for lineno, _col, targets, val in sorted(found, key=lambda f: (f[0], f[1])):
         for tgt in targets:
             parts = _assignment_target_parts(tgt)
             if parts:
-                out[tuple(parts)] = (val, getattr(node, "lineno", 0))
+                out[tuple(parts)] = (val, lineno)
     return out
 
 
