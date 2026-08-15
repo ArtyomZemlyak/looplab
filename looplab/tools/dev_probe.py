@@ -44,22 +44,68 @@ Each is universal (no path list, no command list), and each closes a recorded in
    against cost/compatibility on a training process, and a probe has no training to do. `off` there
    must not silently open a second door here.
 2. **It cannot write. Anywhere.** Not site-packages, not the run directory, not the event log, not
-   even its own scratch. Two mechanisms that cover DIFFERENT things, and neither is redundant —
-   measured by mutating each one out and watching which tests survive:
+   even its own scratch. THREE mechanisms, and what each is for is stated exactly — measured by
+   mutating each one out of a throwaway tree and watching which tests survive:
      * the audit hook refuses `open` for write and the filesystem-mutating `os.*`/`shutil.*` events.
-       This is the rung that covers a file's EXISTENCE — creation, truncation, unlink, rename — and
-       it is the one that produces an ACTIONABLE message.
-     * `RLIMIT_FSIZE = 0` makes the KERNEL refuse file CONTENT, to anything the hook cannot see: a C
-       extension going straight to the syscall, or any audit event CPython adds after this was
-       written. Its limit is on bytes, NOT on existence — with the hook removed, a raw `open` still
-       creates an EMPTY file and still truncates an existing one to zero. So the rlimit is not a
-       superset of the hook and must not be described as one; it is what stops anything of
-       consequence being PUT anywhere, and the hook is what stops something being destroyed.
+       This is the rung that produces an ACTIONABLE message, in the one exception type
+       `except OSError:` does not swallow. It sees only what CPython AUDITS, which is much less than
+       "the ways a file can come into existence" — see the residual below. It is ALSO the only rung
+       covering METADATA and truncation: Landlock ABI 2 has no ownership or mode right and
+       `FS_TRUNCATE` is ABI 3, so `os.truncate`/`chmod`/`chown`/`utime` go through the kernel rung
+       and are refused here (driven, all three, with the victim file unchanged).
+     * a Landlock ruleset that HANDLES every filesystem-mutating access right and GRANTS NOTHING
+       (`runtime/landlock.py::NO_MUTATION_HANDLED`, applied by the generated launcher before the
+       program runs). This is the rung that covers a file's EXISTENCE for EVERY caller — a native
+       extension, a `ctypes` call into libc, a syscall CPython does not audit and one it has not
+       been taught to audit yet — because the check is the kernel's own path walk. It is the inverse
+       of the eval tier's read allow-list and therefore has none of its risk: no read bit is
+       handled, so it cannot refuse a read, and it grants nothing, so there is no list to enumerate
+       and no rule that can go missing. It is also the only one of the three that can be
+       UNAVAILABLE (a kernel without Landlock), and it says so on stderr rather than silently
+       reducing the guarantee.
+     * `RLIMIT_FSIZE = 0` makes the KERNEL refuse file CONTENT. Its limit is on bytes, NOT on
+       existence — with the hook removed, a raw `open` still creates an EMPTY file and still
+       truncates an existing one to zero — which is the measurement that says it never was a
+       superset of the hook and is why the hole above existed at all.
+       **Be honest about what it adds NOW.** With the Landlock rung applied, no route was found by
+       which this surface could put bytes in a file that the ruleset would have permitted: every
+       byte-write needs a writable descriptor, every writable descriptor needs a path open, and
+       `FS_WRITE_FILE` is handled and ungranted. So its independent contribution under an APPLIED
+       ruleset is unmeasured rather than demonstrated, and the honest reason it stays is the one
+       case that IS demonstrable — it is what holds the CONTENT half on a kernel where Landlock is
+       unavailable, i.e. exactly where the third rung is missing. It costs one `setrlimit`.
    Together they close the 2026-08-11 cautionary case, where a mid-run `pip install` corrupted a
    RUNNING node's site-packages (`AttributeError: partially initialized module 'pandas'`) and cost a
    whole repair generation because it read as a code defect. Note WHAT closes it: not a check for
    the word "pip", but the fact that no process on this surface can put bytes in a file — and, one
    rung earlier, that it cannot start pip at all (rule 3).
+
+   **WHY THE KERNEL RUNG IS HERE AT ALL, and why a list of function names was not the fix.**
+   Until 2026-08-15 rule 2 was the first and third bullets only, and it was OVERCLAIMED: measured on
+   this interpreter (CPython 3.12.11) by re-deriving the audited-event table from a recording audit
+   hook — the method `read_fence.MUTATION_EVENTS` is built by, for its reason —
+   **`os.mknod` and `os.mkfifo` raise no audit event at all**, and `RLIMIT_FSIZE 0` bounds bytes and
+   not existence, so both went straight through a real probe and left a file on disk outside the
+   replica. `os.mknod` yields a REGULAR ZERO-BYTE FILE, which satisfies a `needs`/`expect` PRESENCE
+   check and, dropped into an editable root as an empty `.py`, shadows a real module for every later
+   node in the run — and because rules 2-4 are exactly the reason a probe emits no domain event, a
+   write through that hole is invisible to the record.
+   Those two are not the class, they are the two spellings inside `os`. The same sweep found the
+   hole is wider and its wide part cannot be named: **`pyarrow.parquet.write_table` raises ZERO
+   audit events** and `h5py.File(path, "w")` raises no `open`, both creating the file natively; a
+   `sqlite3.connect` raises an event nothing was checking; a `socket.bind` on an `AF_UNIX` path
+   creates a socket file. Each leaves a 0-byte entry at an attacker-chosen path, i.e. the identical
+   consequence with a different name on the front. So binding `os.mknod`/`os.mkfifo` at the
+   `sitecustomize` seam and stopping is the shape this module's own docstring rejects one paragraph
+   up: a denylist that rots, and one already known to be incomplete on the day it ships. The
+   boundary has to be where the syscall is, which is the kernel — the recommendation
+   `read_fence.py`'s residual list has carried since 2026-08-13, applied to the WRITE half.
+   The seam binding is kept anyway, and only for the MESSAGE (see `_UNAUDITED_MUTATORS` in the
+   launcher): the kernel's refusal is an `EACCES` -> `PermissionError` -> an `OSError`, the silent-
+   skip shape this surface's refusal type deliberately is not, so where a Python-level name exists
+   the probe still answers with `LoopLabProbeRefused`. That is the same division of labour the hook
+   already had with `RLIMIT_FSIZE`, and it is not the guarantee — remove the kernel rung and the
+   guarantee is gone whatever the seam says.
 3. **It cannot start another program.** `subprocess`/`os.exec*`/`os.system`/`posix_spawn` are
    refused. A fork is NOT — a forked child inherits the audit hook, an exec REPLACES it. The rule is
    "no new program", and it is what makes rule 1 total: without it, the fence stops at the first
@@ -99,7 +145,23 @@ RESIDUALS, stated rather than papered over
 ------------------------------------------
 * `ctypes.dlopen` reaches libc, and libc reaches `execve`. Nothing in an audit hook can stop that;
   the same honesty applies to the read fence's own symlink residual. A probe that does it is not
-  improvising around a missing tool, it is defeating a stated boundary.
+  improvising around a missing tool, it is defeating a stated boundary. Note the WRITE half of that
+  residual is closed as of 2026-08-15 and rule 3's half is not: driven, `libc.open(path, O_CREAT)`
+  now returns -1 and creates nothing, because the kernel rung does not care which language asked;
+  `execve` is not a filesystem mutation and Landlock ABI 2 does not mediate it.
+* **RULE 2 IS A KERNEL GUARANTEE, so it is exactly as available as the kernel.** On a box without
+  Landlock (Linux < 5.13, or `CONFIG_SECURITY_LANDLOCK=n`) the third bullet of rule 2 does not
+  apply and its EXISTENCE half falls back to what CPython audits — which is not the whole set, and
+  `os.mknod`/`os.mkfifo` are then refused by the seam binding while a native writer
+  (`pyarrow`, `h5py`) is not. The launcher prints ONE line naming that when it happens, rather than
+  running under a quieter version of the same sentence. Verified present here: Landlock ABI 2,
+  kernel 6.1.0-22.
+* Landlock ABI 2 does not mediate `chmod`/`chown`/`utime`/`ftruncate`-on-an-open-fd — there are no
+  access bits for ownership or mode, and `FS_TRUNCATE` arrived in ABI 3. All four raise their own
+  audit event and are refused by the hook with the actionable message; the point is only that the
+  two rungs are complementary in BOTH directions, and neither is a superset.
+* A read is not policed by any of this. That is deliberate — the whole value of a probe is that it
+  reads the real environment — and rule 1 is what bounds it.
 * Network is not cut. An eval stage on the trusted tier has network today, so cutting it here would
   be a rule the surface it mirrors does not honour; the untrusted tiers get `--network none` from the
   Docker wrap as they always did.
@@ -120,7 +182,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime import read_fence
+from looplab.runtime import landlock, read_fence
 from looplab.tools._base import RESULT_CAP, clip, fn_spec, stream_tails
 
 # A probe is a QUESTION, not a job. The hard ceiling is well under a training stage's: anything that
@@ -155,6 +217,18 @@ PROBE_REFUSAL = (
 # `run_argv` returns a negative return code for a signal, so this is what a write the audit hook
 # could not see looks like from the host.
 _SIGXFSZ_RC = -25
+
+# The `os` functions that MUTATE the filesystem and raise NO CPython audit event — measured on this
+# interpreter (3.12.11) with a recording hook, not remembered, and RE-DERIVED the same way by
+# `tests/test_dev_probe.py::test_the_unaudited_mutator_set_is_re_derived_from_the_interpreter`, so a
+# release that stops auditing a third call goes red here instead of leaving the launcher one name
+# short. Module level rather than buried in the template because a rule nobody can state is a rule
+# nobody reviews.
+#
+# It is the MESSAGE rung and NOT the boundary — the module docstring's rule 2 says which is which,
+# and the launcher comment beside its use says it again where the temptation is. `os.mknod` is first
+# because it is the sharp one: it yields a regular ZERO-BYTE file.
+_UNAUDITED_MUTATORS = ("mknod", "mkfifo")
 
 
 class ProbeRefusal(Exception):
@@ -244,6 +318,50 @@ def _hook(event, args):
 
 
 sys.addaudithook(_hook)
+# The two filesystem-mutating calls in `os` that CPython 3.12 does NOT audit — re-derived from a
+# recording hook on this interpreter, not remembered; `tests/test_dev_probe.py` re-derives the whole
+# set the same way, so a third one CPython leaves unaudited goes red rather than quietly through.
+# `os.mknod` creates a REGULAR ZERO-BYTE FILE, which passes a `needs`/`expect` presence check and
+# shadows a real module as an empty `.py`.
+#
+# THIS IS THE MESSAGE, NOT THE BOUNDARY, and the distinction is load-bearing. The boundary is the
+# Landlock rung below, which refuses these — and `pyarrow`/`h5py`/`sqlite3`/`libc`, which have no
+# Python-level name to rebind and are the reason a list of names could never be the boundary. What
+# rebinding buys is the refusal TYPE: the kernel answers `PermissionError`, an `OSError`, i.e. the
+# shape `except OSError: <fall back>` swallows into a silent skip, and where a Python name exists we
+# can still answer with `LoopLabProbeRefused`. Delete the Landlock rung and this list guarantees
+# nothing; delete this list and the boundary holds with a worse message.
+_UNAUDITED_MUTATORS = %(unaudited)r
+
+
+def _refuse_unaudited(_name):
+    def _blocked(*_a, **_k):
+        _refuse("create, move or delete files")
+    _blocked.__name__ = _name
+    return _blocked
+
+
+for _fname in _UNAUDITED_MUTATORS:
+    if hasattr(os, _fname):
+        setattr(os, _fname, _refuse_unaudited(_fname))
+%(landlock)s
+# The kernel EXISTENCE rung. Handles every filesystem-mutating access right and grants nothing, so
+# no path on the box can gain, lose or change a file — checked in the kernel's own path walk, which
+# is why it covers a native writer (`pyarrow.parquet.write_table` raises ZERO audit events and
+# `h5py` raises no `open`), a `ctypes` call into libc, and any syscall CPython has not been taught to
+# audit. Applied AFTER the hook so the hook owns every case it can explain with a non-`OSError`
+# message, and it handles no READ bit, so it cannot refuse a read the probe exists to make.
+#
+# Best-effort with a STATED limit rather than a refusal to run: this is one of three rungs and the
+# only one that can be missing, and refusing would break the probe surface on a kernel without
+# Landlock instead of narrowing what it claims. One line, on the probe's own stderr, which is where
+# both the model and the operator read it.
+_LL_REASON = %(landlock_fn)s()
+if _LL_REASON:
+    sys.stderr.write(
+        "LOOPLAB probe: the kernel no-write rung could not be applied (%%s). The audit hook and "
+        "RLIMIT_FSIZE 0 still hold, so nothing can put BYTES in a file, but a native writer "
+        "(pyarrow/h5py/ctypes) can still CREATE an empty one.\\n" %% (_LL_REASON,))
 # The probe's cwd is its disposable workspace replica, so a staged module must be importable by the
 # name the Developer knows it by. `python <launcher>` puts the LAUNCHER's directory on sys.path, not
 # the cwd, and without this `import train` fails for a file the model can see with os.listdir().
@@ -289,8 +407,15 @@ except BaseException:
 
 def render_launcher(program_path: str) -> str:
     """The generated launcher source for one probe. Split out so the boundary can be read, diffed
-    and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess."""
-    return _LAUNCHER % {"refusal": PROBE_REFUSAL, "program": str(program_path)}
+    and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess.
+
+    `landlock` is spliced as a VALUE of this one `%`-format, not concatenated afterwards, which is
+    what keeps `landlock.no_mutation_source()`'s own `%` spellings out of this template's escaping
+    rules — `%`-formatting does not re-scan what it substitutes."""
+    return _LAUNCHER % {"refusal": PROBE_REFUSAL, "program": str(program_path),
+                        "unaudited": tuple(_UNAUDITED_MUTATORS),
+                        "landlock": landlock.no_mutation_source(),
+                        "landlock_fn": landlock.NO_MUTATION_FUNCTION}
 
 
 class DevProbeTools:

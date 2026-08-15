@@ -131,6 +131,33 @@ _WRITE = (_READ | FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR 
 # union above, so `handled \ granted` is what a rule refuses and nothing else is policed.
 _HANDLED = _WRITE
 
+# THE SECOND RULESET SHAPE, and it is the INVERSE of the allow-list above: handle only the bits that
+# CHANGE the filesystem, and grant NOTHING. `handled \ granted` is then the whole mutation set over
+# every path on the box, and the read bits are not in `handled` at all — so the kernel does not
+# police reads, and this ruleset cannot refuse one.
+#
+# That inversion is what makes an EMPTY ruleset correct here and catastrophic there. `_LAUNCHER`
+# `_die`s on an empty allow-list because an allow-list with no rules denies reads too, i.e. denies
+# the eval's own interpreter; a ruleset with no rules and no read bit handled denies exactly
+# "create/remove/write anything, anywhere" and nothing else. There is no list to enumerate, nothing
+# to keep in sync with a mount table, and therefore none of `build_ruleset`'s "a path that will not
+# `open(O_PATH)` is a silent denial" hazard — the count of rules is zero by construction.
+#
+# Its ONE consumer is `tools/dev_probe.py`, whose rule 2 is "no write ANYWHERE" — the same sentence
+# this ruleset is. It is deliberately not reachable from `Settings.landlock`: that knob chooses a
+# read allow-list for an EVAL, whose unretired unknown is whether a ruleset survives a real GPU
+# training run, and this shape has no such unknown because it grants nothing and forbids nothing a
+# probe is allowed to do.
+#
+# `FS_TRUNCATE` (ABI 3) is absent because this box is ABI 2 and an unsupported bit in
+# `handled_access_fs` is EINVAL for the whole ruleset. It costs nothing here: truncating a file
+# through a path needs `FS_WRITE_FILE`, which IS handled, and `os.truncate`/`os.ftruncate` raise
+# their own audit event, which `dev_probe`'s hook refuses with the actionable message. `FS_REFER`
+# is absent for the same reason it is absent above, and needs no second argument here: a rename
+# needs REMOVE on the source directory and MAKE on the destination, and neither is granted.
+NO_MUTATION_HANDLED = (FS_WRITE_FILE | FS_REMOVE_DIR | FS_REMOVE_FILE | FS_MAKE_CHAR | FS_MAKE_DIR
+                       | FS_MAKE_REG | FS_MAKE_SOCK | FS_MAKE_FIFO | FS_MAKE_BLOCK | FS_MAKE_SYM)
+
 MODES = ("read", "readwrite")
 
 # The policy rungs. `off` is the default (see the module docstring); `enforce` applies the ruleset in
@@ -424,6 +451,78 @@ except OSError as exc:
     sys.stderr.write("failed to launch: %%s\\n" %% (exc,))
     sys.exit(127)
 """
+
+
+# The NO-MUTATION rung, as source to be spliced INTO a caller's own generated launcher rather than
+# wrapped around its argv. Two differences from `_LAUNCHER` above, and both follow from the ruleset
+# shape rather than from taste:
+#
+#   * it applies IN PROCESS instead of exec'ing. `_LAUNCHER` has to be a separate `python -c` because
+#     its caller is `run_argv`, a universal choke point running under `anyio.to_thread` workers where
+#     a `preexec_fn` is the recorded deadlock shape. `dev_probe` already generates and runs its OWN
+#     launcher — a fresh, single-threaded interpreter that runs before one byte of the probe program
+#     — so there is a seam here that costs no extra process. `landlock_restrict_self` is per-thread
+#     and irreversible, which is exactly what a boundary wants;
+#   * it does NOT fail closed by refusing to run. `_LAUNCHER` refuses because an operator who asked
+#     for `landlock="enforce"` and silently got nothing has lost the whole content of that rung. Here
+#     the rung is one of THREE (the audit hook and `RLIMIT_FSIZE 0` are the other two) and it is the
+#     only one that can be unavailable, so refusing would take a probe surface that works on this
+#     kernel and break it on the next box. It reports instead: one line naming what is no longer
+#     covered, on the probe's own stderr, where the model and the operator both read it. An
+#     overclaimed guarantee is worse than a stated limit — and a SILENT reduced guarantee is worse
+#     than both.
+_NO_MUTATION_SOURCE = '''\
+def _looplab_no_mutation_ruleset():
+    """Kernel rung: deny every filesystem MUTATION, for this process and anything it starts.
+
+    Returns None on success, or a one-line reason it could not be applied. Grants nothing and
+    handles no read bit, so it cannot refuse a read — see `runtime/landlock.py::NO_MUTATION_HANDLED`.
+    """
+    import ctypes
+    import os
+
+    class _Attr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    try:
+        lib = ctypes.CDLL(None, use_errno=True)
+    except Exception as exc:                       # noqa: BLE001 — no libc reachable (rare, stated)
+        return "libc unavailable: %%s" %% (exc,)
+    attr = _Attr(handled_access_fs=%(handled)d)
+    ctypes.set_errno(0)
+    fd = lib.syscall(ctypes.c_long(%(create)d), ctypes.byref(attr),
+                     ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
+    if fd < 0:
+        return ("landlock_create_ruleset failed: %%s (Landlock needs Linux 5.13+ with "
+                "CONFIG_SECURITY_LANDLOCK=y)" %% os.strerror(ctypes.get_errno()))
+    try:
+        ctypes.set_errno(0)
+        if lib.prctl(ctypes.c_int(38), ctypes.c_ulong(1), ctypes.c_ulong(0),
+                     ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:   # PR_SET_NO_NEW_PRIVS
+            return "prctl(PR_SET_NO_NEW_PRIVS) failed: %%s" %% os.strerror(ctypes.get_errno())
+        ctypes.set_errno(0)
+        if lib.syscall(ctypes.c_long(%(restrict)d), ctypes.c_int(fd), ctypes.c_uint32(0)) != 0:
+            return "landlock_restrict_self failed: %%s" %% os.strerror(ctypes.get_errno())
+    finally:
+        os.close(fd)
+    return None
+'''
+
+# The NAME the spliced source defines, so a caller calls it without hard-coding a spelling this
+# module owns.
+NO_MUTATION_FUNCTION = "_looplab_no_mutation_ruleset"
+
+
+def no_mutation_source() -> str:
+    """Source defining `NO_MUTATION_FUNCTION` — the deny-every-mutation kernel rung, self-contained.
+
+    For a caller that generates its OWN child launcher and needs the rung inside it (`dev_probe`).
+    The syscall numbers and the handled-bit mask are TEMPLATED IN from this module's constants for
+    the reason `_LAUNCHER` states: a hand-copied bit here does not crash, it silently produces a
+    ruleset that polices something other than what was asked for."""
+    return _NO_MUTATION_SOURCE % {"handled": NO_MUTATION_HANDLED,
+                                  "create": _SYS_LANDLOCK_CREATE_RULESET,
+                                  "restrict": _SYS_LANDLOCK_RESTRICT_SELF}
 
 
 def launcher_source() -> str:

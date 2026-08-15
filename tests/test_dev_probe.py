@@ -9,13 +9,18 @@ These run a real interpreter per case (~100 ms each). That is deliberate: the bo
 a CPython audit hook, an `RLIMIT_FSIZE`, an inherited env var and a generated `sitecustomize`, and
 none of those four is observable in-process.
 """
+import json
 import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 from pathlib import Path
 
 import pytest
 
+from looplab.runtime import landlock
+from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
 from looplab.tools.dev_probe import _MAX_TIMEOUT, DevProbeTools
 
@@ -112,6 +117,225 @@ def test_the_kernel_backstop_is_armed_independently_of_the_audit_hook():
     bounds EXISTENCE. Both, or neither claim holds."""
     out = _probe("import resource; print('FSIZE', resource.getrlimit(resource.RLIMIT_FSIZE))")
     assert "FSIZE (0, 0)" in out
+
+
+# ------------- rule 2, the EXISTENCE half: what neither the audit hook nor RLIMIT_FSIZE can see
+#
+# Found 2026-08-15. `os.mknod` and `os.mkfifo` raise NO CPython audit event, and `RLIMIT_FSIZE 0`
+# bounds bytes and not existence — so both went straight through and left a file on disk. `os.mknod`
+# yields a REGULAR ZERO-BYTE file, which satisfies a `needs`/`expect` PRESENCE check and, as an empty
+# `.py` in an editable root, shadows a real module for every later node in the run.
+#
+# The two names are not the class. The sweep below found the class is "anything that creates a
+# filesystem entry without going through CPython's `open`", whose wide part has no Python-level name
+# at all: `pyarrow.parquet.write_table` raises ZERO audit events and `h5py.File(p, "w")` raises no
+# `open`. That is why the fix is a KERNEL rung and not a list — and every test in this block aims
+# OUTSIDE the replica and then checks the disk, never the message.
+
+# The path-based filesystem-mutating surface of `os`, one call each. Every entry mutates for real
+# when it runs, which is what makes the derivation below a measurement rather than a table.
+_OS_MUTATORS = {
+    "mkdir": "os.mkdir(P('d'))",
+    "rmdir": "os.mkdir(P('rd')); RECORD(); os.rmdir(P('rd'))",
+    "remove": "mk('rm'); RECORD(); os.remove(P('rm'))",
+    "unlink": "mk('ul'); RECORD(); os.unlink(P('ul'))",
+    "rename": "mk('mv'); RECORD(); os.rename(P('mv'), P('mv2'))",
+    "replace": "mk('rp'); mk('rp2'); RECORD(); os.replace(P('rp'), P('rp2'))",
+    "link": "mk('ln'); RECORD(); os.link(P('ln'), P('ln2'))",
+    "symlink": "mk('sl'); RECORD(); os.symlink(P('sl'), P('sl2'))",
+    "truncate": "mk('tr'); RECORD(); os.truncate(P('tr'), 0)",
+    "chmod": "mk('cm'); RECORD(); os.chmod(P('cm'), 0o600)",
+    "chown": "mk('co'); RECORD(); os.chown(P('co'), -1, -1)",
+    "utime": "mk('ut'); RECORD(); os.utime(P('ut'), (0, 0))",
+    "setxattr": "mk('sx'); RECORD(); os.setxattr(P('sx'), 'user.k', b'1')",
+    "removexattr": ("mk('rx'); os.setxattr(P('rx'), 'user.k', b'1'); RECORD(); "
+                    "os.removexattr(P('rx'), 'user.k')"),
+    "open": "os.close(os.open(P('oc'), os.O_WRONLY | os.O_CREAT, 0o644))",
+    "mknod": "os.mknod(P('nod'))",
+    "mkfifo": "os.mkfifo(P('fifo'))",
+}
+
+
+def test_the_unaudited_mutator_set_is_re_derived_from_the_interpreter(tmp_path):
+    """WHICH filesystem-mutating calls raise no audit event is a fact about CPython, so measure it.
+
+    This is `test_read_fence.py::test_mutation_arg_shapes_match_the_interpreter`'s method for the
+    same reason: `_UNAUDITED_MUTATORS` names what the hook CANNOT see, and a release that stops
+    auditing a third call would leave the launcher's message rung silently one name short. Run in a
+    SUBPROCESS because `sys.addaudithook` is irreversible.
+
+    It does not prove the boundary — the kernel rung does that, and the tests below drive it. It
+    proves the two names in the launcher are the two the interpreter actually leaves unaudited."""
+    probe = tmp_path / "unaudited.py"
+    probe.write_text(textwrap.dedent("""
+        import json, os, sys
+        D = sys.argv[1]
+        CASE = sys.argv[2]
+        SEEN = []
+
+        def RECORD():
+            # Everything before this point is HARNESS noise — the `exec` of the case itself, and any
+            # setup the case does to have something to mutate. Clearing rather than name-filtering
+            # keeps the measurement total: an event under ANY name still counts as "audited".
+            del SEEN[:]
+
+        def hook(event, args):
+            SEEN.append(event)
+
+        sys.addaudithook(hook)
+
+        def P(rel):
+            return os.path.join(D, rel)
+
+        def mk(rel):
+            with open(P(rel), "wb") as fh:
+                fh.write(b"x")
+
+        try:
+            exec("RECORD(); " + CASE)
+        except BaseException as exc:
+            print("@@" + json.dumps({"err": "%s: %s" % (type(exc).__name__, exc)}))
+        else:
+            print("@@" + json.dumps({"events": SEEN}))
+        """), encoding="utf-8")
+    unaudited = []
+    for name, case in sorted(_OS_MUTATORS.items()):
+        work = tmp_path / ("w_" + name)
+        work.mkdir()
+        res = subprocess.run([sys.executable, str(probe), str(work), case],
+                             capture_output=True, text=True)
+        assert res.returncode == 0, f"{name}: {res.stderr}"
+        row = json.loads([ln for ln in res.stdout.splitlines() if ln.startswith("@@")][-1][2:])
+        assert "err" not in row, f"{name} did not run: {row['err']}"
+        if not row["events"]:
+            unaudited.append(name)
+    assert sorted(unaudited) == sorted(dev_probe._UNAUDITED_MUTATORS), (
+        "this interpreter's unaudited filesystem mutators are "
+        f"{sorted(unaudited)}, the launcher pre-empts {sorted(dev_probe._UNAUDITED_MUTATORS)}")
+
+
+@pytest.mark.parametrize("call,kind", [
+    ("os.mknod(T)", "a regular zero-byte file"),
+    ("os.mknod(T, 0o600 | __import__('stat').S_IFIFO)", "a fifo"),
+    ("os.mknod(T, 0o600 | __import__('stat').S_IFSOCK)", "a socket"),
+    ("os.mkfifo(T)", "a fifo"),
+    ("os.mknod(os.path.basename(T), dir_fd=os.open(os.path.dirname(T), os.O_RDONLY))", "via dir_fd"),
+    ("os.mkfifo(os.path.basename(T), dir_fd=os.open(os.path.dirname(T), os.O_RDONLY))", "via dir_fd"),
+])
+def test_a_probe_cannot_create_a_filesystem_entry_cpython_does_not_audit(outside, call, kind):
+    target = outside / "shadow.py"
+    out = _probe(f"import os\nT = {str(target)!r}\n{call}\nprint('THROUGH')")
+    assert not target.exists() and not target.is_symlink(), (
+        f"the probe created {kind} — rule 2's existence half is not holding")
+    assert "THROUGH" not in out and "exit=0" not in out
+
+
+def test_the_refusal_for_an_unaudited_mutator_is_not_an_oserror(outside):
+    """The type is the whole reason the seam binding is kept beside the kernel rung.
+
+    Landlock answers `EACCES` -> `PermissionError` -> an `OSError`, and `except OSError: <fall back>`
+    is THE shape around a file operation — a probe wrapped in one would report success having
+    silently done nothing. Where a Python-level name exists, `LoopLabProbeRefused` (not an
+    `OSError`) is what the program sees."""
+    target = outside / "typed.txt"
+    out = _probe("import os\n"
+                 f"try:\n    os.mknod({str(target)!r})\n"
+                 "except OSError:\n    print('SWALLOWED BY except OSError')\n")
+    assert not target.exists()
+    assert "SWALLOWED" not in out, "the refusal was caught by `except OSError` — a silent skip"
+
+
+@pytest.mark.parametrize("mod,code", [
+    ("sqlite3", "import sqlite3; c = sqlite3.connect(T); c.execute('create table t(a)')"),
+    ("h5py", "import h5py; h5py.File(T, 'w').close()"),
+    ("pyarrow", "import pyarrow as pa, pyarrow.parquet as pq; "
+                "pq.write_table(pa.table({'a': [1]}), T)"),
+])
+def test_a_native_writer_cannot_create_a_file_either(outside, mod, code):
+    """THE test that says why the fix is a kernel boundary and not a list of names.
+
+    Measured on this box: `pyarrow.parquet.write_table` raises ZERO audit events and `h5py.File(p,
+    "w")` raises no `open` — no audit hook can be taught to see them, and before the kernel rung
+    both left a 0-byte file at a path the model chose (`sqlite3` and `pyarrow` did; the process then
+    died on SIGXFSZ, which is exactly the "bytes, not existence" gap). A `torch.py` created this way
+    shadows a real module just as well as one from `os.mknod`."""
+    pytest.importorskip(mod)
+    target = outside / "native.py"
+    out = _probe(f"T = {str(target)!r}\n{code}\nprint('THROUGH')")
+    assert not target.exists(), f"{mod} created a file — a name list could never have stopped it"
+    assert "THROUGH" not in out
+
+
+def test_a_unix_socket_cannot_be_bound_into_the_filesystem(outside):
+    """`socket.bind` on an AF_UNIX path creates a filesystem entry and raises `socket.bind`, an event
+    the probe's `_MUTATE` list never held — audited, and unchecked, which is the same hole from the
+    other side."""
+    target = outside / "sock"
+    out = _probe("import socket\n"
+                 f"socket.socket(socket.AF_UNIX).bind({str(target)!r})\nprint('THROUGH')")
+    assert not target.exists()
+    assert "THROUGH" not in out
+
+
+def test_ctypes_straight_into_libc_creates_nothing(outside):
+    """The WRITE half of this module's `ctypes.dlopen` residual, closed by the kernel rung.
+
+    `libc.open(path, O_CREAT)` bypasses every audit event there is. It now returns -1 with the file
+    absent — the C call FAILS rather than raising, which is C semantics and not a refusal, so the
+    assertion is about the disk. Rule 3's half of that residual (`execve` through libc) stays open
+    and is stated in the module docstring: Landlock ABI 2 does not mediate exec."""
+    target = outside / "by_libc.txt"
+    _probe("import ctypes, os\n"
+           "l = ctypes.CDLL('libc.so.6', use_errno=True)\n"
+           f"fd = l.open({str(target)!r}.encode(), os.O_WRONLY | os.O_CREAT, 0o644)\n"
+           "print('libc.open ->', fd)\n")
+    assert not target.exists(), "libc created a file the kernel rung was supposed to refuse"
+
+
+def test_the_kernel_no_write_rung_is_applied_and_says_so_when_it_is_not():
+    """The rung is best-effort by design (one of three, and the only one that can be missing), so
+    what must never happen is a SILENTLY reduced guarantee.
+
+    On this box Landlock is available (ABI 2, kernel 6.1.0-22), so a probe's stderr must be clean.
+    Where it is not available the launcher prints one line naming what is no longer covered — that
+    branch is what keeps the stated rule and the enforced rule the same sentence."""
+    out = _probe("print('ok')")
+    assert "exit=0" in out and "ok" in out
+    if landlock.unavailable_reason() is None:
+        assert "kernel no-write rung could not be applied" not in out
+    else:                                     # pragma: no cover — depends on the host kernel
+        assert "kernel no-write rung could not be applied" in out
+
+
+def test_the_audit_hook_is_still_the_only_rung_covering_metadata_and_truncation(outside):
+    """The complementarity runs in BOTH directions, which is why the kernel rung is added beside the
+    hook and not instead of it.
+
+    Landlock ABI 2 has no ownership or mode access right and `FS_TRUNCATE` arrived in ABI 3, so
+    `os.truncate`/`chmod`/`utime` pass the ruleset untouched — measured directly against a bare
+    ruleset. All three raise their own audit event, so the hook refuses them with the actionable
+    message, and this is the assertion that the file really is unchanged."""
+    victim = outside / "existing.txt"
+    for code in (f"import os; os.truncate({str(victim)!r}, 0)",
+                 f"import os; os.chmod({str(victim)!r}, 0o600)",
+                 f"import os; os.utime({str(victim)!r}, (0, 0))"):
+        before = (victim.read_text(encoding="utf-8"), victim.stat().st_mode,
+                  int(victim.stat().st_mtime))
+        out = _probe(code)
+        assert "exit=0" not in out, f"{code} was not refused"
+        assert (victim.read_text(encoding="utf-8"), victim.stat().st_mode,
+                int(victim.stat().st_mtime)) == before
+
+
+def test_the_kernel_rung_polices_no_read_bit_so_it_cannot_refuse_a_read():
+    """The ruleset is the INVERSE of the eval tier's allow-list and that is what makes an EMPTY one
+    correct: it handles only mutation rights, so the kernel does not police reads at all. An
+    allow-list with zero rules would have denied the probe its own interpreter."""
+    assert landlock.NO_MUTATION_HANDLED & (landlock.FS_READ_FILE | landlock.FS_READ_DIR
+                                           | landlock.FS_EXECUTE) == 0
+    out = _probe("import json, os, sys; print('reads', bool(os.listdir(sys.prefix)), "
+                 "json.dumps({'v': 1}))")
+    assert "exit=0" in out and "reads True" in out
 
 
 # ------------------------------------------------------- rule 3: it cannot start another program...
