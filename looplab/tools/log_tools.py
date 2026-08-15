@@ -53,7 +53,8 @@ THE TWO SURFACES
 ----------------
 * ``read_log`` — the log as a FILE: tail, head, a line range, or a search with context. Records are
   split on ``\\n`` **and** ``\\r``, because a tqdm bar writes its whole multi-hour life into ONE
-  newline-delimited line and a line-oriented reader is useless on it.
+  newline-delimited line and a line-oriented reader is useless on it. A search is not a window over
+  the file, it is a SWEEP of it — see the section on the search reach below.
 * ``metric_series`` — the numeric series the log emits (`loss`, `grad_norm`, `learning_rate`,
   `epoch`, the step counter, `it/s`), answered over a TIME OR STEP WINDOW AT A GRANULARITY: the last
   10 seconds, the whole run bucketed hourly, first-vs-last, min/max. **Downsampling is by
@@ -74,6 +75,9 @@ tick already pays to build its digest. A whole-run scan is what the caller expli
 (`whole_run=true`, or a window wide enough to need it) and its receipt states the bytes it cost.
 Scan time is dominated by the record split + regex over the tqdm fill, not by I/O — which is why
 `read_log` is ~5x cheaper than `metric_series` over the same bytes.
+
+(That table's `read_log search` row is superseded: a search is no longer a window read. See the
+search section and its own table below.)
 
 WHAT THAT TABLE DID NOT SAY, and what a whole-run scan really costs (2026-08-15)
 --------------------------------------------------------------------------------
@@ -120,6 +124,73 @@ mid-run value" — rather than the old text, which told a caller who had just pa
 to pass `whole_run=true`. An answer that announces its own truncation is a different object from one
 that silently misleads a judge, and that is the property to keep if this ceiling ever moves again.
 
+`_MAX_SEARCH_BYTES` starts at the same number for the same derivation, and is a SEPARATE name because
+it bounds a different call: a sweep is 9.8 ms/MB, so 128 MiB is ~1.3 s there rather than ~6.9 s. A
+search above it does better than announce its truncation — it names the byte to resume at.
+
+A SEARCH IS A SWEEP OF THE LOG, NOT A WINDOW OF IT (2026-08-15)
+----------------------------------------------------------------
+The same defect as the one above, one surface over, and it survived that fix because it was hiding
+behind a different bound. `mode="search"` was `_read_window(where="tail")` plus a regex over the
+records that came back — a search of the LAST `max_bytes`, ceilinged by `_MAX_READ_BYTES`. So on a
+log larger than that ceiling the head was unsearchable at every parameter. Re-derived on the corpus
+before it was touched:
+
+| log | size | searchable region | head unsearchable |
+|---|---|---|---|
+| `rubertlite-dr-unified-v2` node 3 | 87,949,008 | bytes 54,394,576-end | **61.8 %** |
+| `rubert-dr-0807` node 1 | 44,976,734 | bytes 11,422,302-end | 25.4 % |
+| `rubertlite-dr-unified-v7` node 0 | 31,386,860 | all of it | 0 % |
+
+`mode="head"` was not the rescue the receipt said it was: head is not a search, it returns the first
+N records — 33.5 MB is ~120,000 of them at 60 per call — and it reads UP from the floor by the same
+32 MiB, so on the 88 MB log there was a **20.8 MB band (23.7 %) no mode reached at all**.
+
+What that cost is one number on that log. `CUDA-enabled jaxlib` is printed once per process start, so
+a count of it is a count of this node's RESTARTS; it is at bytes 109 / 18.8 M / 48.7 M / 78.5 M. The
+windowed search reported **1 match** — "this node started once" — to a judge asking whether the run is
+healthy. On `rubert-dr-0807` node 1 the equivalent count was 2 of 3. And the DEFAULT search window is
+256 KiB, which on `rubertlite-dr-unified-v7` node 0 answers "no record matches 'Traceback' in the
+262,144 bytes read" about a log whose byte 0 IS a traceback.
+
+**The answer was not silent about this** — it printed the byte range and "54,394,576 earlier bytes not
+read" — and that is exactly why it took a second look to see. What it got wrong was the REMEDY: it
+offered `raise max_bytes` to a caller already at the cap and `mode="head"` for a mode that cannot
+search. A remedy that cannot be spent reads, to anything that believes its receipts, as "you have seen
+it all" — the identical failure `_scan_reach` was rewritten for on the metric side the same week.
+
+So a search now SWEEPS: `_search_scan` streams forward from the attempt floor (or `from_byte`),
+matching record by record, stopping at a chunk boundary when it has all the matches it can show or
+when it has spent `_MAX_SEARCH_BYTES`. Three things make that affordable and honest:
+
+* the answer's size is bounded by the ANSWER (`_MAX_HITS` groups under `_CAP`), never by how far it
+  looked, so reaching further costs CPU and not context;
+* it STOPS once it has its matches, so the common search is still about one chunk; and
+* every stop names a byte — `from_byte=<n>` — that the sweep really examined up to, so paging past
+  the ceiling is a call the caller can actually make. `tests/test_log_tools.py` spends that remedy
+  rather than asserting its wording.
+
+The ceiling is deliberately `_MAX_SCAN_BYTES`'s number and NOT `_MAX_READ_BYTES` — a sweep and a
+whole-run scan are the same kind of thing (a bound on bytes PARSED on the judge's request path) and a
+window bound is not. Raising the window bound instead would have been the same defect further out.
+
+COST of the sweep, measured 2026-08-15 (page-cache warm, mean of 5, `runs/` on its geesefs/S3 mount)
+----------------------------------------------------------------------------------------------------
+| call | v7 node 1 (15.0 MB) | 0807 node 1 (45.0 MB) | v2 node 3 (87.9 MB) |
+|---|---|---|---|
+| `read_log` tail (default) — unchanged | 3.5 ms | 3.1 ms | 4.0 ms |
+| `read_log` search, match found early | 15.1 ms | 13.3 ms | 11.7 ms |
+| `read_log` search, NO match (full sweep) | 136 ms | 521 ms | 860 ms |
+| ...of which is fetching the bytes | 35 ms | 82 ms | 239 ms |
+| `metric_series` whole run, hourly | 775 ms | 3,090 ms | 4,746 ms |
+
+A sweep is **9.8 ms/MB** against the metric scan's ~54 ms/MB over the same bytes (one regex per record
+instead of four), and I/O is 16-28 % of it. The worst case one search can cost is therefore
+`_MAX_SEARCH_BYTES` x 9.8 ms/MB = **~1.3 s**, i.e. ~0.2 % of the `train_monitor_interval_s=600`
+cadence this judge fires on and a fifth of what the whole-run scan at the same ceiling already costs.
+A search that FINDS something is ~13 ms whatever the file's size, because it stops; the sweep price is
+paid by the search that has to prove a NEGATIVE, and proving that negative is the entire point.
+
 THE CLOCK, and why it is derived rather than assumed
 -----------------------------------------------------
 "The last 10 seconds" needs a time per sample, and the real logs do not carry one per line. Measured
@@ -151,6 +222,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence, Union
@@ -168,8 +240,10 @@ from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 # The ceiling bounds ONE ANSWER's read, and that is the whole of its job: a `read_log` answer is at
 # most `_MAX_LINES` records under `_CAP`, so bytes past what fills that budget buy the reader nothing
 # and cost the judge parse time. It is anchored at the END the mode asks for — `head`/`range` read up
-# from the floor, `tail`/`search` down from the newest — so no mode is reaching for the far end of a
-# large file through this number. (Its original comment said the ceiling "covers the largest single
+# from the floor, `tail` down from the newest — so no WINDOW mode is reaching for the far end of a
+# large file through this number. It stopped applying to `search` on 2026-08-15: a search is not a
+# window, and this number is why its reach used to end 54 MB into an 88 MB log (see the docstring).
+# (Its original comment said the ceiling "covers the largest single
 # stage log in `runs/` (14.7 MB) with room to spare"; the corpus now holds an 88 MB and a 45 MB log,
 # which is a fact about the corpus and not a reason to raise a per-answer bound. What it DID break
 # was the scan below, because that clamp was applied to both — see the module docstring.)
@@ -197,6 +271,24 @@ _MAX_LINES = 2_000
 # Search bounds. `context` is records either side of a hit.
 _MAX_HITS = 100
 _MAX_CONTEXT = 20
+
+# A search STREAMS, so this is its working-set unit and NOT a bound on its reach: `_search_scan` reads
+# the log a chunk at a time from the floor forward and stops at a chunk boundary, so what a search
+# holds in memory is one chunk plus at most `_MAX_HITS` hit groups — independent of the file's size.
+#
+# The chunk is also the granularity of "how much did an early stop overshoot": a sweep that has found
+# its last showable match finishes the chunk it is in rather than stopping mid-buffer, because the
+# byte it names in `from_byte=` has to be a byte it really examined up to. 1 MiB is ~12 ms of parse at
+# the measured rate — small enough that a search for a common word costs about one chunk, large enough
+# that a full sweep of the 88 MB log is 84 reads and not 21,000.
+_SEARCH_CHUNK = 1_048_576
+
+# The most bytes ONE search may parse. Deliberately the SCAN ceiling and not the reader's: a search is
+# a whole-file sweep, exactly like a `metric_series` scan, and `_MAX_READ_BYTES` bounds a different
+# thing (one answer's window, where bytes past what fills the answer buy the reader nothing). Binding
+# a sweep with the window bound is what made the head of a big log unsearchable — see the module
+# docstring. Above this ceiling a search STOPS and names the byte to resume at; it does not clip.
+_MAX_SEARCH_BYTES = _MAX_SCAN_BYTES
 
 # Buckets per `metric_series` answer. Above this the caller is asked for a coarser granularity rather
 # than being handed a silently thinned series — dropping buckets is exactly the sampling artifact this
@@ -528,6 +620,154 @@ def _read_window(source: LogSource, *, want: int, where: str, start: Optional[in
     return raw.decode("utf-8", "replace"), lo, lo + len(raw), size
 
 
+def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], ceiling: int,
+                 context: int, max_hits: int) -> tuple:
+    """Sweep the log FORWARD from `start` (default: the attempt floor), collecting the first
+    `max_hits` matching records with `context` records either side.
+
+    Returns `(rows, hits, records, lo, hi, size, torn, stopped)`, where `rows` is
+    `[(record_number, is_hit, record)]` in file order, `hits` counts EVERY match in `[lo, hi)` — not
+    just the shown ones — and `stopped` is `""` (reached the end), `"hits"` (has all it can show) or
+    `"ceiling"` (spent its byte budget).
+
+    WHY THIS IS A SWEEP AND NOT A WINDOW. Search used to be `_read_window(where="tail")` + a regex over
+    the records that came back, i.e. a search of the last `max_bytes` of the file, ceilinged by the
+    READER's `_MAX_READ_BYTES`. On a log bigger than that ceiling the head was unsearchable at every
+    parameter: measured on `runs/rubertlite-dr-unified-v2/nodes/node_3/train.log` (88 MB), 61.8 % of
+    it, and `CUDA-enabled jaxlib` — printed once per restart, so a count of it is a count of the
+    node's restarts — reported **1 match** where the file holds 4 (bytes 109, 18.8 M, 48.7 M, 78.5 M);
+    on `runs/rubert-dr-0807/nodes/node_1/train.log` (45 MB), 25.4 %, and 2 matches where there are 3.
+    `mode="head"` did not rescue it — head is not a search, it returns the first N records — and above
+    2x the ceiling there was a 20.8 MB band of that 88 MB log (23.7 %) no mode reached at all.
+
+    So the reach is the whole log, and the bound is BYTES PARSED with a stated resume point. Three
+    properties this shape has that a bigger window would not:
+
+    * the answer is bounded by the ANSWER's size (`max_hits` groups), never by how far it looked, so
+      reaching further costs CPU and not context;
+    * an early stop happens at a CHUNK boundary, so `hi` is a byte the sweep genuinely examined up to
+      and `from_byte=hi` is a call that resumes without a gap; and
+    * the floor is enforced here exactly as in `_read_window` — `start` below `source.floor` is raised
+      to it, so no `from_byte` a model can type reads a dead attempt's curve as the live one's.
+    """
+    path = Path(source.path)
+    size = os.path.getsize(path)
+    floor = max(0, min(int(source.floor or 0), size))
+    lo = floor if start is None else max(floor, min(int(start), size))
+    ceiling = max(1, int(ceiling))
+    rows: list = []
+    # The trailing `context` records, for the NEXT hit's leading context. A deque with a maxlen rather
+    # than a re-sliced list: this runs once per record over a whole file, and `maxlen=0` (context=0,
+    # "just the hits") is a legitimate ask that costs nothing here.
+    before: deque = deque(maxlen=max(0, context))
+    hits = 0                     # every match in [lo, hi), including ones past `max_hits`
+    index = 0                    # record number, 1-based from `lo`
+    emitted = 0                  # highest record number already in `rows` (dedupes overlapping context)
+    after = 0                    # trailing context still owed to the last shown hit
+    carry = b""                  # the bytes of a record straddling the chunk boundary
+    scanned = 0
+    pos = lo
+    torn = lo > floor            # the first record at a mid-file seek is half a record
+    first = True
+    stopped = ""
+    with open(path, "rb") as fh:
+        fh.seek(lo)
+        while pos < size and scanned < ceiling:
+            chunk = fh.read(min(_SEARCH_CHUNK, ceiling - scanned, size - pos))
+            if not chunk:
+                break
+            pos += len(chunk)
+            scanned += len(chunk)
+            buf = carry + chunk
+            # Cut at the last record delimiter so a record never straddles a chunk: the delimiters are
+            # ASCII, so this is also what keeps the decode from splitting a UTF-8 sequence and spending
+            # a replacement char per boundary. The backstop is for a log with no delimiter at all —
+            # 8 MiB of one record is not a record any more, and carrying it forever is a memory leak.
+            at_end = pos >= size
+            cut = len(buf) if at_end else max(buf.rfind(b"\n"), buf.rfind(b"\r")) + 1
+            if cut <= 0:
+                if len(buf) < _SEARCH_CHUNK * 8:
+                    carry = buf
+                    continue
+                cut = len(buf)
+            carry = buf[cut:]
+            for record in _RECORD_SPLIT.split(buf[:cut].decode("utf-8", "replace")):
+                record = record.rstrip()
+                if not record.strip():
+                    continue
+                if first:
+                    first = False
+                    if torn:
+                        continue     # never show half a record as if it were a record
+                index += 1
+                matched = bool(rx.search(record))
+                if matched:
+                    hits += 1
+                if matched and hits <= max_hits:
+                    for number, text in before:
+                        if number > emitted:
+                            rows.append((number, False, text))
+                            emitted = number
+                    rows.append((index, True, record))
+                    emitted = index
+                    after = context
+                elif after > 0:
+                    rows.append((index, False, record))
+                    emitted = index
+                    after -= 1
+                before.append((index, record))
+            if hits >= max_hits and after == 0:
+                stopped = "hits"
+                break
+            if scanned >= ceiling and pos < size:
+                stopped = "ceiling"
+                break
+    hi = lo + scanned - len(carry)
+    return rows, hits, index, lo, hi, size, torn, stopped
+
+
+def _search_reach(source: LogSource, lo: int, hi: int, size: int, *, ceiling: int, stopped: str,
+                  torn: bool) -> str:
+    """What a SEARCH did not look at, and the exact call that looks at it (rule 3).
+
+    The sibling of `_scan_reach`, and it exists for the same reason that one does: the receipt this
+    replaced offered a caller at the top of the ladder two remedies it could not spend. `raise
+    max_bytes` was already at its cap, and `mode="head" for the run's start` names a mode that does
+    not search — it returns the first N records, so on a 33 MB head it is 120,000 records the caller
+    would have to page through 60 at a time. A remedy that cannot be spent reads, to anything that
+    believes its receipts, as "you have seen it all".
+
+    Every remedy below is one call away and takes a byte this sweep really reached.
+    """
+    floor = max(0, min(int(source.floor or 0), size))
+    parts = []
+    if lo > floor:
+        parts.append(f"{lo - floor:,} earlier bytes were skipped by from_byte — omit it to sweep from "
+                     "this attempt's start")
+    elif floor > 0:
+        parts.append(f"the {floor:,} bytes below this belong to a PREVIOUS attempt of this node and "
+                     "are never searched")
+    if torn:
+        parts.append("the first record at from_byte was torn by the seek and was dropped")
+    if hi >= size:
+        parts.append("this sweep reached the END of the log")
+    elif stopped == "ceiling":
+        body = max(1, size - floor)
+        parts.append(f"**this sweep did NOT reach the end of the log** — {size - hi:,} of {body:,} "
+                     f"bytes ({100.0 * (size - hi) / body:.0f} %) are above this tool's {ceiling:,}-byte "
+                     f"search ceiling, so a match after byte {hi:,} is NOT ruled out. Continue with "
+                     f"from_byte={hi}")
+    elif stopped == "hits":
+        parts.append(f"stopped at the match limit with {size - hi:,} bytes still unsearched — "
+                     f"from_byte={hi} continues past them")
+    else:
+        # The read ended before EOF for neither reason — a short read on a file being appended to,
+        # or one rotated under us. Say the byte and nothing about why, rather than borrowing a reason.
+        parts.append(f"stopped at byte {hi:,} with {size - hi:,} bytes unsearched — "
+                     f"from_byte={hi} continues")
+    return "; " + "; ".join(parts) if parts else ""
+
+
 def _scan_for_window(source: LogSource, key: str, *, need_s: Optional[float],
                      ceiling: int) -> tuple:
     """Read the smallest TAIL that covers the requested time window, escalating up to `ceiling`.
@@ -606,11 +846,20 @@ class LogQueryTools:
     """
 
     def __init__(self, sources: SourceSpec, *, default: Optional[str] = None,
-                 max_read_bytes: int = _MAX_READ_BYTES, max_scan_bytes: int = _MAX_SCAN_BYTES):
+                 max_read_bytes: int = _MAX_READ_BYTES, max_scan_bytes: int = _MAX_SCAN_BYTES,
+                 max_search_bytes: int = _MAX_SEARCH_BYTES):
         self._sources = sources
         self.default = default
+        # THREE bounds because there are three questions, and this module's whole thesis is that
+        # answering one of them with another's number is a silent truncation: `max_read_bytes` is one
+        # ANSWER's window (tail/head/range), `max_scan_bytes` is one metric SCAN, `max_search_bytes`
+        # is how far one search SWEEP may look. The last two start at the same value because the
+        # derivation is the same (worst-case CPU on the judge's request path) and they are still two
+        # names, because `read_log` search was bounded by `max_read_bytes` — a fourth conflation of
+        # exactly this kind — until 2026-08-15.
         self.max_read_bytes = max(1, min(int(max_read_bytes), _MAX_READ_BYTES))
         self.max_scan_bytes = max(1, min(int(max_scan_bytes), _MAX_SCAN_BYTES))
+        self.max_search_bytes = max(1, min(int(max_search_bytes), _MAX_SEARCH_BYTES))
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -663,14 +912,19 @@ class LogQueryTools:
                     "A progress bar rewrites one line with carriage returns, so a 'line' here is a "
                     "record split on newline OR carriage return, and bar fill is collapsed (every "
                     "number kept) unless you pass raw=true. Every answer says which bytes it covered "
-                    "and how to read further.",
+                    "and how to read further.\n"
+                    "SEARCH SWEEPS THE WHOLE LOG from the run's start, not a window of it: it reports "
+                    "the first matches with context and then says either that it reached the END (so "
+                    "'no match' means nowhere in this log) or the exact from_byte= that continues it. "
+                    "tail/head/range read a bounded WINDOW instead — that is what max_bytes sizes for "
+                    "them.",
                     {"log": {"type": "string", "description": f"which log ({names}); omit for the "
                              "one being judged"},
                      "mode": {"type": "string", "enum": list(_MODES),
                               "description": "tail (default, newest records) | head (the run's "
                                              "START — setup, config, the first losses) | range "
-                                             "(records from `start`) | search (records matching "
-                                             "`pattern`, with context)"},
+                                             "(records from `start`) | search (sweep the WHOLE log "
+                                             "for `pattern`, with context)"},
                      "lines": {"type": "integer", "description": f"how many records "
                                f"(default {_DEFAULT_LINES}, max {_MAX_LINES})"},
                      "start": {"type": "integer", "description": "range mode: the 1-based record "
@@ -679,9 +933,13 @@ class LogQueryTools:
                                  "expression (plain text works too), matched case-insensitively"},
                      "context": {"type": "integer", "description": f"search mode: records to show "
                                  f"either side of a hit (default 1, max {_MAX_CONTEXT})"},
-                     "max_bytes": {"type": "integer", "description": f"how much of the file to read "
-                                   f"for this call (default {_DEFAULT_READ_BYTES}, max "
-                                   f"{self.max_read_bytes})"},
+                     "from_byte": {"type": "integer", "description": "search mode: resume the sweep "
+                                   "at this byte — the number a previous search's receipt gave you. "
+                                   "Omit to sweep from this attempt's start"},
+                     "max_bytes": {"type": "integer", "description": f"how many bytes this call may "
+                                   f"read: a WINDOW for tail/head/range (default "
+                                   f"{_DEFAULT_READ_BYTES}, max {self.max_read_bytes}), the SWEEP "
+                                   f"budget for search (default and max {self.max_search_bytes})"},
                      "raw": {"type": "boolean", "description": "keep progress-bar fill verbatim "
                              "instead of collapsing it"}},
                     []),
@@ -736,8 +994,13 @@ class LogQueryTools:
         if mode not in _MODES:
             return f"(mode must be one of {', '.join(_MODES)})"
         lines = max(1, min(_int_arg(args, "lines", _DEFAULT_LINES), _MAX_LINES))
-        want = max(1, min(_int_arg(args, "max_bytes", _DEFAULT_READ_BYTES), self.max_read_bytes))
         raw_mode = bool(args.get("raw"))
+        if mode == "search":
+            # A search does not go through `_read_window` at all: it is a SWEEP of the log, bounded by
+            # bytes PARSED with a stated resume point, not a window of it bounded by the reader's
+            # per-answer ceiling. See `_search_scan` for the measurement that made that the shape.
+            return self._search(source, args, raw_mode, lines)
+        want = max(1, min(_int_arg(args, "max_bytes", _DEFAULT_READ_BYTES), self.max_read_bytes))
         where = "head" if mode in ("head", "range") else "tail"
         text, lo, hi, size = _read_window(source, want=want, where=where, start=None,
                                           ceiling=self.max_read_bytes)
@@ -751,8 +1014,6 @@ class LogQueryTools:
         if not records:
             return header + "\n(nothing in this window yet)"
 
-        if mode == "search":
-            return self._search(source, records, args, header, lo, hi, size, raw_mode, lines)
         if mode == "head":
             chosen, first_index = records[:lines], 1
         elif mode == "range":
@@ -800,36 +1061,46 @@ class LogQueryTools:
             parts.append("the first record in this window was torn by the seek and was dropped")
         return "; ".join(parts)
 
-    def _search(self, source, records, args, header, lo, hi, size, raw_mode, lines) -> str:
+    def _search(self, source, args, raw_mode, lines) -> str:
+        """Search = sweep the log from this attempt's start (or `from_byte`) and report the first
+        matches with context, plus what the sweep did and did not reach.
+
+        Record numbers are the sweep's own, 1-based from `lo` — so with the default `from_byte` they
+        are the log's record numbers from the attempt floor, the same numbering `mode="range"` uses,
+        and a hit at record 412 can be re-read in full with `mode="range", start=412`.
+        """
         pattern = str(args.get("pattern") or "").strip()
         if not pattern:
-            return header + "\n(search needs a `pattern`)"
+            return "(search needs a `pattern`)"
         context = max(0, min(_int_arg(args, "context", 1), _MAX_CONTEXT))
         try:
             rx = re.compile(pattern, re.IGNORECASE)
         except re.error as e:
             return f"(pattern is not a valid regular expression: {e})"
-        hits = [i for i, rec in enumerate(records) if rx.search(rec)]
-        capped = hits[:min(lines, _MAX_HITS)]
+        # `max_bytes` on a search bounds the SWEEP, so its ceiling is the scan bound and not the
+        # reader's — the two are different questions and binding this one with the wrong number is the
+        # defect `_search_scan`'s docstring measures. Default: sweep as far as the ceiling allows.
+        ceiling = max(1, min(_int_arg(args, "max_bytes", self.max_search_bytes),
+                             self.max_search_bytes))
+        start = _int_arg(args, "from_byte", -1)
+        rows, hits, records, lo, hi, size, torn, stopped = _search_scan(
+            source, rx, start=(None if start < 0 else start), ceiling=ceiling, context=context,
+            max_hits=min(lines, _MAX_HITS))
+        header = self._header(source, lo, hi, size)
+        reach = _search_reach(source, lo, hi, size, ceiling=ceiling, stopped=stopped, torn=torn)
         if not hits:
-            return (header + f"\n(no record matches {pattern!r} in the {hi - lo:,} bytes read "
-                    f"({len(records)} records). Raise max_bytes, or mode=\"head\" to search the "
-                    "run's start.)")
-        body: list = []
-        shown: set = set()
-        for index in capped:
-            for j in range(max(0, index - context), min(len(records), index + context + 1)):
-                if j in shown:
-                    continue
-                shown.add(j)
-                mark = ">" if j == index else " "
-                body.append(f"{mark}{j + 1}: {self._render(records[j], raw_mode)}")
-        receipt = f"{len(hits)} match(es)" + (f", showing the first {len(capped)}"
-                                              if len(capped) < len(hits) else "")
-        reach = self._reach_receipt("search", lo, hi, size, len(records), 1, False,
-                                    floor=max(0, min(int(source.floor or 0), size)))
-        return fit_rows([header, f"search {pattern!r} — {receipt}" + (f"; {reach}" if reach else "")],
-                        body, cap=_CAP,
+            # The whole point of the sweep: when it reached the end, "no match" is a statement about
+            # the LOG and not about a window, and it is allowed to say so. When it did not, `reach`
+            # carries the byte that continues it.
+            whole = hi >= size and lo <= max(0, min(int(source.floor or 0), size))
+            scope = (f"ANYWHERE in this log — {records:,} record(s), all {hi - lo:,} bytes read"
+                     if whole else f"in the {hi - lo:,} bytes read ({records:,} record(s))")
+            return header + f"\n(no record matches {pattern!r} {scope}{reach})"
+        shown = sum(1 for _n, is_hit, _r in rows if is_hit)
+        receipt = f"{hits} match(es)" + (f", showing the first {shown}" if shown < hits else "")
+        body = [f"{'>' if is_hit else ' '}{number}: {self._render(record, raw_mode)}"
+                for number, is_hit, record in rows]
+        return fit_rows([header, f"search {pattern!r} — {receipt}{reach}"], body, cap=_CAP,
                         omitted="... ({receipt}{n} context line(s) dropped to fit the result cap — "
                                 "lower `context` or `lines`)")
 

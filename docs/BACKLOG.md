@@ -373,6 +373,71 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15] `read_log`'s SEARCH could not reach the head of a big log, and the receipt
+  that said so named two remedies neither of which could be spent.** `mode="search"` was
+  `_read_window(where="tail")` plus a regex over the records that came back — a search of the LAST
+  `max_bytes`, ceilinged by the READER's `_MAX_READ_BYTES` (32 MiB). So a log larger than that
+  ceiling had a head that matched nothing at any parameter. **Measured on the corpus before anything
+  was changed** (largest logs in `runs/`; there is no multi-GB one — the biggest is 88 MB):
+  `rubertlite-dr-unified-v2` node 3, 87,949,008 B — searchable region bytes 54,394,576-end, **head
+  61.8 % unreachable**; `rubert-dr-0807` node 1, 44,976,734 B — **25.4 %**; `rubertlite-dr-unified-v7`
+  node 0, 31,386,860 B — fully covered (the threshold really is 32 MiB, i.e. the filing's "about
+  32 MB" was right). `mode="head"` was not the escape the receipt claimed: head is not a search, it
+  returns the first N records (33.5 MB is ~120,000 of them at 60 per call), and it reads UP from the
+  floor by the same 32 MiB — so above 2x the ceiling there was a **20.8 MB band (23.7 %) of the 88 MB
+  log no mode reached at all**.
+  **What it cost, in one number off that log:** `CUDA-enabled jaxlib` is printed once per process
+  start, so counting it counts the node's RESTARTS. It is at bytes 109 / 18,833,765 / 48,697,416 /
+  78,537,354, and the windowed search at its maximum parameter reported **1 match** — "this node
+  started once". `rubert-dr-0807` node 1: 2 of 3. And at the DEFAULT 256 KiB window, `Traceback` on
+  v7 node 0 answers *"no record matches 'Traceback' in the 262,144 bytes read"* about a log whose
+  byte 0 IS a traceback.
+  **The claim as filed said the answer silently implied completeness; that half is WRONG and the
+  correction is the design content.** The answer always printed its byte range and the unread head —
+  which is why this survived the 2026-08-15 `_scan_reach` fix sitting next to it. What was wrong was
+  the REMEDY: `raise max_bytes` offered to a caller already at the cap, and `mode="head"` for a mode
+  that cannot search. A remedy that cannot be spent reads, to anything that believes its receipts, as
+  "you have seen it all" — the identical defect `_scan_reach` had ("pass `whole_run=true`" to a caller
+  who just had), one surface over. Rule 3 in `tools/log_tools.py`'s boundary now says so explicitly.
+  **THE FIX** is `_search_scan`: a search is a SWEEP, streaming forward from the attempt floor (or
+  `from_byte`) a `_SEARCH_CHUNK` at a time, stopping at a chunk boundary when it has all the matches
+  it can show or when it has spent `_MAX_SEARCH_BYTES`. Every stop names a `from_byte=<n>` the sweep
+  really examined up to, so paging past the ceiling is a call the caller can make; a sweep that
+  reaches EOF says so, which turns "no match in the bytes read" into "no match ANYWHERE in this log".
+  `LogSource.floor` is enforced at the seek, so no `from_byte` a model types reads a dead attempt.
+  **Cost, measured 2026-08-15 (warm, mean of 5):** `read_log` tail unchanged at 3.1-4.0 ms; a search
+  that FINDS something ~13 ms at any file size (it stops); a search that must prove a NEGATIVE
+  9.8 ms/MB — 136 ms / 521 ms / 860 ms on the 15 / 45 / 88 MB logs, of which I/O is 16-28 %. Against
+  ~54 ms/MB for a `metric_series` scan over the same bytes (one regex per record instead of four), so
+  the worst case one search can cost at the 128 MiB ceiling is ~1.3 s, ~0.2 % of the
+  `train_monitor_interval_s=600` cadence the judge fires on.
+  **ALTERNATIVES REJECTED.** (1) *Raise `_MAX_READ_BYTES`* — a bigger silent window is the same defect
+  further out, and this module already refuses that shape for `bucket_series`; the corpus's largest
+  log grew 1.6x in one week, so any "largest plus room" number is a fact about today. (2) *Bind the
+  sweep to `max_scan_bytes` and drop the third knob* — rejected because three questions want three
+  bounds, and this whole defect IS one bound answering another's question; the two start at the same
+  value and are two names. (3) *Keep the sweep TAIL-anchored (search backwards)* — rejected: the
+  questions this exists for are "did this ever work", "what did it say at the start", "is there a
+  traceback", and the FIRST traceback is the cause. A caller wanting the newest matches passes a
+  `from_byte` near the size the header always prints. (4) *Run the regex over raw chunk text and only
+  split records near a hit* (cheaper: the split is most of the 9.8 ms/MB) — rejected because it
+  silently changes the pattern's semantics: `.` does not cross `\n` but DOES cross `\r`, and this
+  module splits records on both, so `error.*fatal` would start matching across the tqdm re-renders it
+  exists to separate. (5) *Sweep by default at `metric_series`'s escalating-ladder shape* — rejected
+  for the reason that ladder itself was removed: an unbounded window has nothing to discover and the
+  rungs just re-parse the prefix.
+  **RESIDUE LEFT OPEN, deliberately.** (a) `mode="range"`/`"head"` are still bounded by the 32 MiB
+  window, so record 200,000 of an 88 MB log is still not addressable — that is a per-ANSWER bound
+  doing its job, and search now names record numbers that `range` can take, but a `from_byte` for the
+  window modes is unbuilt. (b) A sweep reports the number of matches it saw before it stopped, so on a
+  common pattern "N match(es)" is a floor and not a total; making it a total costs a full sweep on
+  every search. (c) `_read_window`'s `where="at"` branch is still dead code — the sweep does its own
+  seek. (d) The 8x`_SEARCH_CHUNK` no-delimiter backstop can split one pathological 8 MiB record, so a
+  match straddling that split would be missed; no log in `runs/` has a record within three orders of
+  magnitude of it. (e) The judges' prompts (`_LOOK_INVITATION`, `_ASHA_LOOK_INVITATION`) already say
+  "search for a traceback" and were left byte-identical — the sentence was aspirational and is now
+  true, and a prompt change is a behaviour change that deserves its own measurement.
+
 - **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
   re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card
   freshness gate discards before dispatch; nothing returned the HYPOTHESIS. The discarded node stayed

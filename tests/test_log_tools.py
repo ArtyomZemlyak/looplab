@@ -287,6 +287,131 @@ def test_a_search_that_matches_nothing_says_where_it_looked(tmp_path):
     assert "no record matches" in out and "bytes read" in out
 
 
+# ------------------------------------------------------- rule 3: a SEARCH reaches the log, not a tail
+def _resume_byte(answer: str) -> int:
+    """The byte a search's own receipt says continues it. A test parses it the way the model has to."""
+    return int(answer.split("from_byte=")[1].split()[0].rstrip(".,);"))
+
+
+def test_a_search_hit_in_the_logs_head_is_returned(tmp_path):
+    """THE regression. Search WAS `_read_window(where="tail")` + a regex over what came back, so it
+    covered the last `max_bytes` of the file, ceilinged by `_MAX_READ_BYTES` — the READER's bound. On
+    a log bigger than that ceiling nothing below `size - ceiling` matched at ANY parameter, and
+    `mode="head"` is not a rescue because head is not a search: it returns the first N records.
+
+    Driven at a small reader ceiling rather than with a 34 MB fixture, for the same reason
+    `test_the_scan_ceiling_is_not_the_reader_ceiling` is: the property is that a sweep is not subject
+    to the window bound, and the number they differ at is not what makes it true. The corpus test
+    below is the same property at the size that made it a defect.
+    """
+    body = "OPENING-BANNER torch 2.3.0 cuda 12.1\n" + "".join(f"quiet {i:05d}\n" for i in range(20_000))
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                          max_read_bytes=4_096)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "OPENING-BANNER"})
+    assert "1 match(es)" in out and "torch 2.3.0" in out
+    assert "this sweep reached the END of the log" in out
+    assert f"covers bytes 0-{len(body.encode()):,}" in out
+    # ...and the reader's own ceiling still binds a WINDOW read: separating the two did not merge them.
+    tail = tools.execute("read_log", {"mode": "tail", "lines": 2, "max_bytes": 10_000_000})
+    assert f"covers bytes {len(body.encode()) - 4_096:,}-" in tail
+
+
+def test_a_sweep_the_ceiling_stops_names_a_from_byte_that_really_continues_it(tmp_path):
+    """A bounded answer names the call that continues past it — and that call has to WORK, which is
+    the half the receipt this replaced got wrong. It offered `raise max_bytes` to a caller already at
+    the cap and `mode="head"` for a mode that does not search: two remedies that cannot be spent read,
+    to anything that believes its receipts, as "you have seen it all".
+
+    So this test does not assert a sentence, it SPENDS the remedy: page the sweep with the byte the
+    tool itself named, and the marker past the ceiling has to turn up with no gap where a page joined.
+    """
+    body = "".join(f"quiet {i:06d} padding padding\n" for i in range(3_000)) + "TAIL-MARK boom\n"
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log",
+                          max_search_bytes=8_192)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "TAIL-MARK"})
+    assert "no record matches" in out
+    assert "did NOT reach the end of the log" in out and "is NOT ruled out" in out
+    assert "8,192-byte search ceiling" in out
+    for _page in range(40):
+        out = tools.execute("read_log", {"mode": "search", "pattern": "TAIL-MARK",
+                                         "from_byte": _resume_byte(out)})
+        if "1 match(es)" in out:
+            break
+    assert "TAIL-MARK boom" in out                      # the receipt's own advice, executed
+    assert "this sweep reached the END of the log" in out
+
+
+def test_a_search_never_crosses_the_attempt_floor(tmp_path):
+    """`LogSource.floor` is the attempt boundary the digest respects, and a sweep is the widest reader
+    in this module — so it is the one that must not step over it. Not even with a `from_byte` a model
+    types: the floor is enforced where the seek happens, not by trusting the argument."""
+    old = "OLD-ATTEMPT loss: 99.0 dead curve\n" * 200
+    new = "".join(f"new step {i} loss: {10 - i * 0.1}\n" for i in range(40))
+    floor = len(old.encode())
+    tools = _tools(tmp_path, old + new, floor=floor)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "dead curve"})
+    assert "no record matches" in out and "99.0" not in out
+    assert "a PREVIOUS attempt of this node" in out
+    below = tools.execute("read_log", {"mode": "search", "pattern": "dead curve", "from_byte": 0})
+    assert "99.0" not in below
+    assert f"covers bytes {floor:,}-" in below         # the seek landed ON the floor, not below it
+
+
+def test_the_sweep_finds_every_match_across_its_chunk_boundaries(tmp_path, monkeypatch):
+    """The streaming machinery, driven rather than trusted: at a chunk size small enough that almost
+    every record straddles a boundary, the count must still be the file's true count, no record may be
+    shown torn in half, and the multi-byte fill must not be decoded across a cut into replacement
+    characters (which is why the cut is taken at a record delimiter, an ASCII byte, and not anywhere)."""
+    import looplab.tools.log_tools as lt
+    monkeypatch.setattr(lt, "_SEARCH_CHUNK", 64)
+    body = "".join(f"line {i:04d} {'MARK' if i % 37 == 0 else 'quiet'} " + "█" * 12 + "\n"
+                   for i in range(400))
+    truth = sum(1 for line in body.splitlines() if "MARK" in line)
+    assert truth > 5
+    out = _tools(tmp_path, body).execute(
+        "read_log", {"mode": "search", "pattern": "MARK", "context": 0, "lines": 100})
+    assert f"{truth} match(es)" in out
+    assert "this sweep reached the END of the log" in out
+    hits = [row for row in out.splitlines() if row.startswith(">")]
+    assert len(hits) == truth
+    for row in hits:
+        assert row.split(": ", 1)[1].startswith("line ")     # never half a record
+        assert "�" not in row                           # never half a UTF-8 sequence
+
+
+def test_a_search_that_has_all_it_can_show_stops_and_says_where_it_stopped(tmp_path):
+    """Cost. Reaching the whole log is what the sweep is FOR, but it must not pay for the whole log
+    when it already has its answer: it stops at the first chunk boundary past its last showable match
+    and names the byte that continues it, which is also what keeps a search for a common word about as
+    cheap as the old windowed one."""
+    body = "".join(f"loss: {1.0 / (i + 1):.6f} step {i} padding padding padding\n"
+                   for i in range(200_000))
+    path = tmp_path / "train.log"
+    path.write_bytes(body.encode("utf-8"))
+    tools = LogQueryTools([LogSource(name="train.log", path=path)], default="train.log")
+    out = tools.execute("read_log", {"mode": "search", "pattern": "loss", "lines": 5, "context": 0})
+    assert "stopped at the match limit" in out
+    assert _resume_byte(out) < os.path.getsize(path)
+    assert "reached the END of the log" not in out
+
+
+def test_a_search_hit_number_is_a_record_number_mode_range_can_re_read(tmp_path):
+    """The numbers beside a hit are the log's own record numbers from this attempt's start — the same
+    numbering `mode="range"` takes — not offsets into whatever window happened to be read. So a hit is
+    an address a following call can use, which a window-relative index never was."""
+    body = "".join(("BOOM traceback here\n" if i == 137 else f"quiet {i}\n") for i in range(300))
+    tools = _tools(tmp_path, body)
+    out = tools.execute("read_log", {"mode": "search", "pattern": "BOOM", "context": 0})
+    number = int(next(row for row in out.splitlines() if row.startswith(">")).split(":")[0][1:])
+    assert number == 138
+    assert "BOOM traceback here" in tools.execute("read_log", {"mode": "range", "start": number,
+                                                               "lines": 1})
+
+
 # ------------------------------------------------------------------------------------------ the clock
 def test_a_nested_concurrent_bar_does_not_advance_the_run_clock():
     """MEASURED failure #1: summing every bar restart reported `runs/rubertlite-dr-unified-v7` node 1
@@ -522,6 +647,47 @@ def test_the_whole_run_of_the_corpuss_largest_log_is_actually_the_whole_run():
                                               "bucket_s": 3600})
     assert _window(short)["net"] > -1.0
     assert "does NOT start at the run's start" in short and "62 %) are below it" in short
+
+
+@pytest.mark.skipif(not _V2_NODE3.exists(), reason="the runs/ corpus is not in this checkout")
+def test_a_search_reaches_the_head_of_the_corpuss_largest_log():
+    """The 88 MB log again, and the SAME shape of defect the whole-run scan had — one surface over.
+
+    `read_log` search was a tail window ceilinged by `_MAX_READ_BYTES` (32 MiB), so it covered bytes
+    54,394,576-87,949,008 of this file and the head 61.8 % matched nothing at any parameter; above
+    twice that ceiling there was a 20.8 MB band (23.7 %) no mode reached at all, since `mode="head"`
+    reads UP from the floor by the same 32 MiB and is not a search anyway.
+
+    What that cost is the point, and this log states it in one number. `CUDA-enabled jaxlib` is
+    printed by jax on every process start, so a count of it is a count of this node's RESTARTS — it
+    appears at bytes 109, 18,833,765, 48,697,416 and 78,537,354. The windowed search reported
+    **1 match**, i.e. "this node started once", to a judge whose question is whether the run is
+    healthy. The sweep reports all four, and the first one it shows is record 1 of the log.
+    """
+    size = os.path.getsize(_V2_NODE3)
+    assert size > 33_554_432, "this test is about a log larger than the READER's ceiling"
+    tools = LogQueryTools([LogSource(name="train.log", path=_V2_NODE3)], default="train.log")
+    out = tools.execute("read_log", {"mode": "search", "pattern": "CUDA-enabled jaxlib",
+                                     "context": 0, "lines": 20})
+    assert f"covers bytes 0-{size:,}" in out
+    assert "this sweep reached the END of the log" in out
+    hits = int(out.split("— ")[1].split(" match(es)")[0])
+    assert hits >= 4
+    # THE head hit, returned: the first match shown is the log's FIRST record, which lived 54 MB below
+    # anything the windowed search could see.
+    first = next(row for row in out.splitlines() if row.startswith(">"))
+    assert first.startswith(">1: ") and "jaxlib" in first
+    # The negative control, same file same call, only the sweep ceiling moved back to the reader's
+    # number: it stops, it says it stopped, and it names a byte rather than a spent remedy.
+    clipped = LogQueryTools([LogSource(name="train.log", path=_V2_NODE3)], default="train.log",
+                            max_search_bytes=33_554_432)
+    short = clipped.execute("read_log", {"mode": "search", "pattern": "CUDA-enabled jaxlib",
+                                         "context": 0, "lines": 20})
+    assert "did NOT reach the end of the log" in short and "is NOT ruled out" in short
+    assert int(short.split("— ")[1].split(" match(es)")[0]) < hits
+    assert _resume_byte(short) <= 33_554_432
+    for spent in ("raise max_bytes", 'mode="head" for the run\'s start'):
+        assert spent not in short
 
 
 @pytest.mark.skipif(not _V7_NODE1.exists(), reason="the runs/ corpus is not in this checkout")
