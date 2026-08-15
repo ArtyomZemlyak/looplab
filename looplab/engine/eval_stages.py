@@ -856,8 +856,10 @@ class EvalStagesMixin:
         actually bought are stamped on the stage row from the out-of-band `signals`, never read back
         out of the log.
 
-        WHY IT IS NOT A THRESHOLD. All four `stage_finished.status == "timeout"` rows in the corpus
-        sit exactly on their 4 h / 6 h / 8 h wall and discarded 22.0 GPU-hours between them, and the
+        WHY IT IS NOT A THRESHOLD. All five `stage_finished.status == "timeout"` rows in `runs/`
+        sit within 3.2 s of their own declared ceiling and discarded 24.1 GPU-hours between them
+        (re-derived 2026-08-15; the older four / 22.0 h counted a row whose run directory is gone),
+        and the
         whole captured record of `rubertlite-dense-retrieval` node 72 — 12.45 hours, five repairs —
         ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. At the wall, "two seconds from a
         checkpoint" and "will never finish" are the identical fact. Raising the budget instead does

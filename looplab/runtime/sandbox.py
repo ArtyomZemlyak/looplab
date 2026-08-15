@@ -1256,8 +1256,9 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 break
             if _time.monotonic() >= deadline:
                 # THE DEADLINE IS A NUMBER THAT CANNOT SEE A PROGRESS BAR AT 664/664. Measured on
-                # the shipped corpus: all four `stage_finished.status == "timeout"` rows land exactly
-                # on their 4 h / 6 h / 8 h wall and together discarded 22.0 GPU-hours, and
+                # `runs/` (re-derived 2026-08-15): all five `stage_finished.status == "timeout"` rows
+                # land within 3.2 s of their own declared ceiling and together discarded 24.1
+                # GPU-hours — the older four / 22.0 h counted a row whose run directory is gone — and
                 # `rubertlite-dense-retrieval` node 72's captured tail — the whole record of a
                 # 12.45-hour node — ends `100%|##########| 664/664 [00:17<00:00, 38.13it/s]`. A
                 # stage two seconds from writing its checkpoint and a stage that will never finish

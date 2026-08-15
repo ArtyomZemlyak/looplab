@@ -888,6 +888,75 @@ class LLMRepoDeveloper:
         Derived from `command_eval.eval_spec_time_budget`, the SAME rule the engine quotes to the
         Researcher, because two roles sizing one schedule between them must be given one number. Empty
         when the task declares no eval spec at all (an onboarding/toy dev has no budget to state).
+
+        THE NUMBER WAS SHARED AND THE SEMANTICS WERE NOT, which is the F1h defect one level in — and
+        it is what this note said wrong until 2026-08-15. It announced the budget as a POOL: "one
+        evaluation of this node gets {span}, END TO END: every stage you declare plus the protected
+        scoring step". Nothing in the engine implements that. `_run_stages` takes each stage's own
+        ceiling (`finite_timeout(_stg.get("timeout", timeout), timeout)`) with no accumulator and no
+        cross-stage deadline, and `engine/eval_stages.py::_resolve_stages` appends `score` with the
+        operator's OWN `score_timeout` — a fresh copy of the budget, on top of everything preceding.
+        The gate the same role is held to says so in as many words (`stages_over_time_budget`: the
+        rule is per STAGE and the sum rule is refused, because `score` runs at the operator's number
+        on top of whatever precedes it), and so does `docs/guide/configuration.md`. Only the two
+        prompts disagreed, and they disagreed in the direction that costs GPU time.
+
+        MEASURED, 2026-08-15, over every `stage_finished` in `runs/`: **51 stage rows ran LONGER than
+        their own run's entire per-eval budget** and not one was killed for it — 45 nodes of
+        `rubertlite-dense-retrieval` each spent a single `train` stage at 1.1x-6.0x a 3600 s budget
+        and were SCORED, and v7 nodes 0/1 ran 29389 s and 29184 s against 21600 s. A pool that 51
+        rows walk through is not a pool.
+
+        WHAT THE FICTION COST, measured on `rubertlite-dr-unified-v8` — the FIRST run to evaluate
+        under the authoring gate (merged 2026-08-14 12:06 UTC; v8's engine loaded its source at
+        16:25). It is also the only run in the corpus whose manifests all sit BELOW the budget:
+        sum-of-declared/budget of 0.60, 0.70, 0.83, 0.86, 0.89, 0.90, 0.90, 0.95. That is not
+        under-declaration, it is PARTITION — the role divided a pool it had been told existed, and
+        every second it reserved for the scorer or for a sibling stage is a second the one stage that
+        can overrun did not get. Node 9 gave `mine` 7200 s (it used 2349.6) and `train` 14400 s,
+        holding 14400 s back for a `score` stage that takes ~3100 s on this task and is charged to
+        none of it. Its `train` died at 14402.67 s, 73 % through, ~5160 s short, with 21600 s of
+        ceiling it was allowed to declare and did not.
+
+        AND THE COST IS NOT GPU-HOURS, IT IS THE EXPERIMENT. All five `stage_finished.status
+        ="timeout"` rows in `runs/` were answered by a repair that made the EXPERIMENT smaller —
+        `n_epochs` 10->5 (v6 n5), 15->8 (v8 n3), 10->6 (v8 n9), fewer epochs / a val subset (v2 n3),
+        fewer ANCE negatives (dense-retrieval n72) — and **zero of the five raised the stage's own
+        ceiling**. Across all 87 `node_repaired` rows carrying a change set, a stage `timeout` was
+        raised exactly ONCE (v2 node 0, 14400 -> 21600) and that raise went ABOVE the operator's
+        budget, i.e. the gate would refuse it today. The role has never once spent ceiling it was
+        entitled to, because the note told it the ceiling was already spoken for.
+
+        WHAT THIS NOTE DOES **NOT** REACH, stated because the brief that asked for it overstated the
+        scope. Only TWO of those five timeouts had headroom to raise into (v8 n3 at 22000 and v8 n9
+        at 14400, against 36000); the other three declared a ceiling EQUAL to the budget (v2 n3, v6
+        n5, both 14400) or ALREADY ABOVE it (dense-retrieval n72, 21600 against 3600), so no wording
+        here could have saved them — for those the budget itself was the bound. And an under-declared
+        ceiling is not the only pressure that shrinks an experiment. Re-derived through
+        `repair_verify.declared_param_overrides` over all 2,484 `node_repaired` rows at 2026-08-15
+        22:26 (v8 LIVE — this population is still growing, so quote the instant with the number):
+        FOUR rows on THREE nodes, all v8, and they split two-and-two. TIME pressure: v8 n3 a5 (the
+        batch/grad-accum reshuffle, effective batch preserved, science-neutral) and v8 n9 a1
+        (`n_epochs` 10->6, NOT neutral). MEMORY pressure: v8 n3 a4 (OOM, neutral) and v8 n8 a2 (OOM,
+        `batch_size` 8192->4096 AND `n_epochs` 15->8, NOT neutral — the epoch cut rides along with a
+        memory fix and is justified nowhere). So on that population the two pressures are TIED at one
+        science-altering instance each, this note reaches n9 and not n8, and nothing about a legible
+        budget would have helped n8.
+
+        THE RUNG THAT ALREADY CATCHES A SHRINK, and why this is not redundant with it. The stage
+        `expect.assert` fires on exactly this: v8 node 8's `train` returned `check_failed —
+        declared_condition_violated: training stopped at epoch 7.99, not the declared 15 epochs`.
+        Measured 2026-08-15 over every `looplab_stages.json` in `runs/`: 143 declared stages, 34
+        (24 %) carry an `assert` at all, 23 (16 %) name a quantity a shrink would falsify — but 16 of
+        those 23 are v8, i.e. on the CURRENT configuration nearly every `train`/`mine` stage carries
+        one, and the rung is not self-defeating (of 6 assert edits across 47 node manifest series,
+        ZERO weakened a declared quantity; v8 node 0's went 2 epochs -> 15). What that rung cannot do
+        is make the wrong move cheap: it fires at the stage boundary, so node 8 spent **14,105.1 s**
+        (3.9 GPU-h) discovering that its own repair had broken its own contract, and node 9's
+        repaired manifest still asserts "all 10 epochs completed" against code that now runs 6 — so
+        the shrink it chose is not merely incomparable, it is queued for the identical verdict. This
+        note is the rung ABOVE it, where the choice is made and costs nothing, and the assert is the
+        backstop for when it is made anyway.
         """
         from looplab.runtime.command_eval import format_time_budget
         budget = self._eval_time_budget()
@@ -895,11 +964,19 @@ class LLMRepoDeveloper:
             return ""
         span = format_time_budget(budget)
         return (
-            f"\n\nWALL-CLOCK BUDGET — one evaluation of this node gets {span}, end to end: every stage "
-            "you declare plus the protected scoring step. The schedule and the batch size YOU choose are "
-            "what decide whether it fits, so estimate before you commit (total_steps x per-step time) and "
-            "cut the SCHEDULE if it does not — fewer epochs or steps, a subsample, a larger batch if the "
-            "memory allows. An experiment still running at that wall is killed with NO metric, and every "
+            # PER STAGE, not a pool: the semantics the gate enforces and `_run_stages` implements.
+            # The old "end to end: every stage you declare plus the protected scoring step" is the
+            # sentence the docstring above measures; it must not come back.
+            f"\n\nWALL-CLOCK BUDGET — {span} PER STAGE. That is the ceiling for each stage "
+            "separately, not a pool divided between them: every stage you declare runs on its own "
+            "clock, and the protected scoring step then runs under the operator's own copy of the "
+            "same number, on top of yours and charged to nothing you declare. So do NOT hold time "
+            "back for the scorer or for the other stages — for each stage, declare the time THAT "
+            "stage actually needs, up to the budget. The schedule and the batch size YOU choose are "
+            "what decide whether it fits, so estimate before you commit (total_steps x per-step time) "
+            "and cut the SCHEDULE only if the stage cannot fit its own ceiling — fewer epochs or "
+            "steps, a subsample, a larger batch if the memory allows. A stage still running at ITS "
+            "declared wall is killed with NO metric, and every "
             "GPU-hour it spent is discarded: a shorter run that REPORTS A NUMBER beats a longer one that "
             "reports nothing. A stage `timeout` longer than the budget is not more budget — it only "
             "removes the guard, and a stage that outlives the budget spends GPU-hours the run was never "
@@ -909,6 +986,15 @@ class LLMRepoDeveloper:
             # merely unwise. The rest of the note is untouched — it is a contract, not prose.
             "`declare_stages` REFUSES a stage `timeout` above the budget, so declare the time you "
             "actually estimate a stage needs and cut the schedule to fit. "
+            # Spliced 2026-08-15. The five timeout repairs in the corpus all cut the experiment and
+            # none raised the ceiling, twice with hours of unclaimed ceiling sitting there — so the
+            # move has to be NAMED, not merely permitted. See this method's docstring.
+            "IF A STAGE WAS KILLED PURELY BY WALL CLOCK — real progress, no stall, no divergence — "
+            "and its declared `timeout` was BELOW the budget, then the first fix is the CEILING and "
+            "not the science: re-declare that stage nearer the budget and re-run it unchanged. "
+            "Cutting epochs, data or steps changes what the experiment MEASURES and makes this node "
+            "incomparable with its siblings, so spend the ceiling you were given before you spend "
+            "the comparison. "
             "Do not shrink the experiment past the point where it answers the "
             "researcher's question; shrink the schedule, and say in your notes what you cut.")
 

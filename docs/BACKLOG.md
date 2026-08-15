@@ -373,6 +373,155 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15] Both roles were told the per-eval budget is an END-TO-END POOL the pipeline
+  shares. It is a PER-STAGE ceiling, and believing otherwise is what killed v8 node 9 and shrank its
+  experiment from 10 epochs to 6.** The number has been shared since F1h shipped
+  (`command_eval.eval_spec_time_budget`, one derivation, three readers). The *semantics* were not,
+  and the two prompts got them backwards: `repo_developer._time_budget_note` said "one evaluation of
+  this node gets *N*s, **end to end**: every stage you declare plus the protected scoring step", and
+  `proposal_cues._cue_experiment_time_budget` said "each experiment **(train+eval)** must finish
+  within ~*N*s … leave room for data prep + eval", and the F1h hint beside it asked for an estimate of
+  "total_steps x per-step time, **plus data prep and scoring**" — the wrong quantity, named inside the
+  one sentence that asks for the arithmetic.
+  **Nothing in the engine implements a pool.** `_run_stages` takes each stage's own ceiling
+  (`finite_timeout(_stg.get("timeout", timeout), timeout)`) with no accumulator and no cross-stage
+  deadline; `eval_stages._resolve_stages` appends `score` with the operator's own `score_timeout`, a
+  *fresh copy* of the budget on top of everything preceding. `stages_over_time_budget` — the gate the
+  same Developer is refused by — already said this in as many words ("the protected `score` stage runs
+  at the operator's number ON TOP of whatever precedes it, which means a sum rule … would refuse every
+  manifest ever written"), and so did `docs/guide/configuration.md`. Only the prompts disagreed, and
+  they disagreed in the direction that costs GPU time.
+  **MEASURED over every `stage_finished` in `runs/` (2026-08-15): 51 stage rows ran LONGER than their
+  own run's entire per-eval budget and not one was killed for it.** 45 nodes of
+  `rubertlite-dense-retrieval` each spent a single `train` stage at 1.1x–6.0x a 3600 s budget and were
+  **scored**; v7 nodes 0/1 ran 29,389 s and 29,184 s against 21,600 s; v8 node 3 consumed 51,793 s of
+  stage wall clock against 36,000 s across its attempts and became the run's champion at 0.762048. A
+  pool that 51 rows walk through is not a pool.
+  **WHAT THE FICTION BOUGHT, and it is not what it looks like.** The tempting reading is
+  "the operator raised `eval.timeout` 21,600 → 36,000 and the agents kept sizing `train` from their own
+  reasoning". The corpus refuses it. Declared-pipeline / budget ratios by run:
+  `rubertlite-dense-retrieval` 4.0–24.1x, `rubert-dr-0807` 0.75–7.0x, v2 1.0–2.6x, v6 1.0–2.1x, v7 8.0x
+  and 4.2x — and **v8 alone at 0.60, 0.70, 0.83, 0.86, 0.89, 0.90, 0.90, 0.95, every node under 1.0.**
+  What changed at v8 is not the budget, it is the **authoring gate**: `943b8687` merged 2026-08-14
+  12:06 UTC and v8's engine loaded its source at 16:25, so v8 is the *first and only* run in the corpus
+  that ever evaluated under `stage_time_budget_refusal`. Before it, a role that could not size a
+  ceiling declared 48 hours and the question never arose. The gate removed that escape hatch — correctly
+  — and the role, now forced to name a real number and told the number was a pool, **partitioned** it.
+  v8's absolute `train` ceilings (14,400–30,000) are *higher* than v6's (14,400–28,800) at a 2.5x
+  smaller budget, so the roles do read the budget; they just spend it on the wrong stages. Node 9 gave
+  `mine` 7,200 s (it used **2,349.6**) and `train` 14,400 s, holding 14,400 s back for a `score` stage
+  that measures ~3,100 s on this task and is charged to none of it. Its `train` was SIGKILLed at
+  14,402.67 s at `7691/10590 [3:56:39<1:26:17]`, 73 % done, ~5,160 s short, with **21,600 s of ceiling
+  it was entitled to declare and never claimed**. So this is neither a general defect the corpus was
+  always carrying nor an artifact of one operator's configuration change: it is a NEW defect the gate
+  created, shaped by a false prompt, and it recurs in v9 at any budget — a *lower* budget makes it
+  worse.
+  **THE COST IS THE EXPERIMENT, NOT THE GPU-HOURS.** All five `stage_finished.status="timeout"` rows in
+  `runs/` were answered by a repair that made the experiment SMALLER — dense-retrieval n72 (fewer ANCE
+  negatives), v2 n3 ("fewer epochs / val subset"), v6 n5 (`n_epochs` 10→5), v8 n3 (15→8, `unmet`, never
+  landed), v8 n9 (10→6, **`verified`**, landed) — and **zero of the five raised the stage's own
+  ceiling**, though v8 n3 (22,000 against 36,000) and v8 n9 (14,400 against 36,000) had 14,000 s and
+  21,600 s of budget left to raise it into. v8 n9's diagnosis was *correct* ("73 % done, healthy
+  1.77s/it progress — no stall or divergence. This is a pure wall-clock budget issue"), so this is not
+  a role failing to read its log; it is a role with one move in its head. The OneCycleLR hypothesis is
+  now being evaluated at 6 epochs against siblings trained for 10 and 15, and
+  `repair_verify.declared_param_overrides` reports
+  `ParamOverride(param='train.training.n_epochs', declared=10.0, code=6.0)`. Across all **87**
+  `node_repaired` rows carrying a change set, a stage `timeout` was raised **exactly once** (v2 node 0,
+  14,400 → 21,600) and that raise went *above* the operator's budget, i.e. the gate refuses it today.
+  Within the budget it has never happened.
+  **HOW MUCH OF THAT THIS FIX ACTUALLY REACHES — less than the brief that asked for it implied, and
+  the correction belongs in the record.** Only **two** of the five timeouts had headroom to raise into
+  (v8 n3 at 22,000 and v8 n9 at 14,400, against 36,000); the other three declared a ceiling *equal* to
+  the budget (v2 n3, v6 n5, both 14,400) or *already above* it (dense-retrieval n72, 21,600 against
+  3,600), so no wording could have saved them — there the budget itself was the bound. And the ceiling
+  is not the only pressure that shrinks an experiment. Re-derived through
+  `declared_param_overrides` over all **2,484** `node_repaired` rows **at 2026-08-15 22:26, with v8
+  LIVE** — this population is still growing, so the instant is part of the number; a sibling measured
+  it as 1 node / 1 repair hours earlier and was right then — **four rows on three nodes, all v8**, and
+  they split two-and-two:
+
+  | node/attempt | pressure | override | science |
+  |---|---|---|---|
+  | v8 n3 a4 | memory (R-Drop OOM at bs 8192) | `batch_size` 8192→4096, `grad_accum` 2→4 | **neutral** (effective batch preserved) |
+  | v8 n3 a5 | time (stage timeout) | same pair, carried forward | **neutral** |
+  | v8 n8 a2 | memory (merge OOM) | `batch_size` 8192→4096, **`n_epochs` 15→8** | **altered** — the epoch cut rides along with a memory fix and is justified nowhere |
+  | v8 n9 a1 | time (under-declared ceiling) | **`n_epochs` 10→6** | **altered** |
+
+  So on that population the two pressures are **tied at one science-altering instance each**, this fix
+  reaches n9 and not n8, and a more legibly stated budget would not have helped n8 at all.
+  **THE RUNG THAT ALREADY CATCHES A SHRINK, and why the two are not redundant.** The agent-authored
+  stage `expect.assert` fires on exactly this: v8 node 8's `train` returned `check_failed —
+  declared_condition_violated: training stopped at epoch 7.99, not the declared 15 epochs, and no
+  final-model save is reported`. Measured 2026-08-15 over every `looplab_stages.json` in `runs/`:
+  **143 declared stages, 34 (24 %) carry an `assert` at all, 23 (16 %) name a quantity a shrink would
+  falsify** — but **16 of those 23 are v8**, i.e. on the current configuration nearly every
+  `train`/`mine` stage carries one; and the rung is not self-defeating, since of the **6** assert edits
+  across 47 node manifest series **zero** weakened a declared quantity (v8 node 0's went 2 epochs →
+  15). What it cannot do is make the wrong move *cheap*: it fires at the stage boundary, so node 8
+  spent **14,105.1 s (3.9 GPU-h)** discovering that its own repair had broken its own contract, and
+  node 9's repaired manifest still asserts "all 10 epochs completed" against code that now runs 6 —
+  the shrink it chose is not merely incomparable with its siblings, it is queued for the identical
+  verdict and another ~3-5 GPU-h. The prompt is the rung ABOVE that, where the choice is made and
+  costs nothing; the assert is the backstop for when it is made anyway. **So nothing new is proposed
+  here for the assert side.** The obvious ask — *require* the assertion to name the parameters the
+  Idea declares — would buy the ~6 % of current-configuration stages that do not already do it
+  voluntarily, and would add a rung to a mechanism that is working.
+  **FIXED** by making the two statements true: `_time_budget_note` and both Researcher time
+  statements now say **PER STAGE**, say the scoring step runs on the operator's own copy on top and is
+  charged to nothing the role declares, and drop "leave room for data prep + eval" — which was the
+  partition instruction itself. One new clause, and it is the measured gap: when a stage was killed
+  *purely* by wall clock (real progress, no stall, no divergence) and its declared `timeout` was
+  *below* the budget, the first fix is the CEILING and not the science. Prompt text only — no gate, no
+  clamp, no control flow on the eval path — so it grants the agent nothing it could not already
+  declare (`stage_time_budget_refusal` is unchanged and still bounds every ceiling at the operator's
+  number) and **nothing an agent writes can move a metric, a champion, selectability or a violation**
+  (docs/36). Driven by `tests/test_stage_timeout_budget.py`: a real three-stage pipeline whose declared
+  ceilings sum to 3x the budget runs to completion and reports its metric, which is the property that
+  makes the retired sentence false. Replayed over all 46 preserved event logs: **zero rows move** —
+  prompts are not folded.
+  **ALTERNATIVES REJECTED, on the numbers.** (1) *A submit-time SYMMETRIC check — the mirror of
+  `stages_over_time_budget`, warning when a declared pipeline sits far below its budget.* Refuted by
+  the corpus: under the per-stage rule "below the budget" is the CORRECT shape for most stages —
+  v8's `mine` declared 7,200 and used 2,349.6, exactly as it should — so the warning fires on **8 of
+  8** v8 manifests including the six that evaluated fine and the champion's. A signal at 100 %
+  precision-zero is not a signal, and CLAUDE.md already records the advisory rung MEASURED SPENT for
+  the read-fence case. (2) *Let an overrunning stage draw on unused eval budget, bounded by the
+  remaining ceilings of the stages still to come.* **The pool it would draw on does not exist**: there
+  is no cumulative eval clock anywhere in `_run_stages` or `run_command_eval`, so this is not a bound
+  being relaxed but a whole-eval deadline being INVENTED — on the most dangerous path in the repo, to
+  hand back budget the role was always allowed to declare up front and simply did not. It also arrives
+  at the worst instant (the wall) to make a decision the authoring gate already proved is free at
+  authoring time. (3) *Loosen `_safe_reuse_start` so raising a ceiling does not forfeit a completed
+  stage.* The clause that actually bit is the MANIFEST one (`eval_stages.py:667`), not the non-`.py`
+  one a sibling measured; node 9's repair comment names the incentive verbatim ("overrides the CLI
+  `--n_epochs 10` so the completed `mine` stage stays reusable"). Rejected anyway: it is the one change
+  here that would let something the agent WRITES decide whether a stale checkpoint is scored, for
+  2,349.6 s of `mine` on one corpus row, against the failure class that has cost this project the most.
+  (4) *Build nothing and state the residue.* Legitimate for (1)–(3); not for a sentence in a CONTRACT
+  that is false, that both roles read, and that is demonstrably what the roles did.
+  **RESIDUE LEFT OPEN, deliberately.** (a0) **Every population figure here is dated and
+  configuration-scoped on purpose.** v8 was live throughout and kept producing instances, so a corpus
+  snapshot reads this as rare while on the current configuration it is ongoing: 2,481 → 2,484
+  `node_repaired` rows and 1 → 3 override nodes inside a few hours, and v8 gained node 10 while this
+  entry was being written. Re-run the scans; do not inherit the numbers. (a) A prompt cannot be
+  measured offline. Whether v9's roles
+  actually claim the ceiling is a fact only v9 produces, and the check is cheap: the ratio table above
+  re-derives in one pass. (b) `eval_deadline_grace_s = 1800` in the prepared v9 task is a *partial*
+  mitigation and is now documented as one — it would not have saved node 9 (5,160 s short) and the
+  one-shot judge correctly answers `NOT_FINISHING` at 73 %. (c) **Raising a ceiling still costs a full
+  re-run** through the manifest clause of `_safe_reuse_start`, so the note asks for a move the engine
+  charges for; a timeout-ONLY manifest edit provably rewrites no argv and could be exempted, but that
+  is a change on the reuse decision and wants its own measurement and its own entry. (d) Nothing
+  reconciles the OPERATOR's intent with the implementation: `eval.timeout` reads as a per-eval budget
+  and behaves as a per-stage one, which is why 51 rows outspend it silently. Making it a real
+  pipeline-wide bound is a defensible design and is NOT what this entry did — it would refuse manifests
+  that have always worked, and `stages_over_time_budget`'s own docstring measured that trade and
+  declined it. (e) The "all four `stage_finished` timeout rows / 22.0 GPU-hours" census in
+  `config.py`, `eval_stages.py` and `sandbox.py` was re-derived here to **five rows / 24.1 GPU-hours**;
+  the missing fourth row of the old count lived in a run directory (`rubertlite-dr-unified-v5`) that is
+  no longer on this box, which is a standing hazard for any figure derived from `runs/`.
+
 - **[FIXED 2026-08-15] `metric_subject` was INERT on exactly the task family it was built for: the
   subject had to be a LITERAL path, and on that family the output path is chosen by the AGENT.**
   `eval.metric.subject` shipped as a list of literal workdir-relative paths, so declaring one requires

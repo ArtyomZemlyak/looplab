@@ -168,6 +168,128 @@ def test_the_stages_prompt_states_that_the_refusal_exists():
     assert "21600s (~6.0h)" in note
 
 
+# ============================================================ the budget is PER STAGE, not a pool
+# (2026-08-15) The gate above holds the Developer to ONE number; these hold the number to ONE
+# MEANING. Until this change the two prompts announced it as a pool — "end to end: every stage you
+# declare plus the protected scoring step" — which is neither what `_run_stages` implements nor what
+# `stages_over_time_budget` (the gate the same role is refused by) says. The corpus is unambiguous:
+# 51 `stage_finished` rows in `runs/` ran LONGER than their own run's entire per-eval budget and not
+# one was killed for it, 45 of them scored. What the fiction bought is in `_time_budget_note`'s
+# docstring — v8's eight manifests all sit at 0.60-0.95 of budget because the role PARTITIONED a
+# pool, node 9 reserved 14400 s for a ~3100 s scorer and its `train` then died 73 % through with
+# 21600 s of ceiling it was entitled to and never claimed.
+
+def _dev_note(budget):
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+
+    class _T:
+        def eval_spec(self):
+            return {"command": ["python", "-m", "vectorsearch.test"], "timeout": budget}
+
+    dev = object.__new__(LLMRepoDeveloper)
+    dev.task = _T()
+    return dev._time_budget_note()
+
+
+def test_a_pipeline_whose_declared_ceilings_sum_past_the_budget_runs_to_completion(tmp_path):
+    """DRIVEN, with real subprocesses: the property that makes the pool sentence false.
+
+    Two declared stages at the FULL budget each plus the appended `score` at the operator's own
+    number — 3x the budget as a sum, and every one of them accepted by the authoring gate, because
+    the rule is per stage. The pipeline runs past the budget in total wall clock and still reports
+    its metric. If the engine ever grew a cross-stage deadline this goes red, which is the point:
+    the note tells a role it may size each stage to the whole budget, and that promise has to be
+    kept by the runtime and not just by the prompt.
+    """
+    budget = 4.0
+    for name in ("prep", "train"):
+        (tmp_path / f"{name}.py").write_text("import time; time.sleep(1.4); print('ok')\n",
+                                             encoding="utf-8")
+    (tmp_path / "score.py").write_text(
+        'import time, json; time.sleep(1.4); print(json.dumps({"metric": 0.9}))\n', encoding="utf-8")
+    stages = [{"name": "prep", "command": [sys.executable, "prep.py"], "timeout": budget},
+              {"name": "train", "command": [sys.executable, "train.py"], "timeout": budget}]
+    # The gate accepts it: 8.0 s of declared ceiling against a 4.0 s budget is not a refusal.
+    assert stage_time_budget_refusal(stages, budget) is None
+    (tmp_path / "looplab_stages.json").write_text(json.dumps({"stages": stages}), encoding="utf-8")
+
+    es = {"command": [sys.executable, "score.py"], "timeout": budget, "metric": _M}
+    chain = _Resolver()._resolve_stages(str(tmp_path), es, score_cmd=[sys.executable, "score.py"],
+                                        score_timeout=budget)
+    assert [s["name"] for s in chain] == ["prep", "train", "score"]
+    # The appended stage gets a FRESH copy of the operator's number — never `budget - what precedes`.
+    assert chain[-1]["timeout"] == budget
+    res = run_command_eval([sys.executable, "score.py"], str(tmp_path), budget, _M,
+                           stages=chain, log_dir=str(tmp_path))
+    assert [s["status"] for s in res.stages] == ["ok", "ok", "ok"]
+    assert res.metric == 0.9 and res.timed_out is False
+    # The whole pipeline outlived the "end to end" budget it was once said to share.
+    assert sum(s["seconds"] for s in res.stages) > budget
+
+
+def test_neither_role_is_told_the_budget_is_a_pool_the_pipeline_shares():
+    """The two prompts are the two halves of ONE schedule (the Researcher picks epochs, the Developer
+    picks the batch size and declares the ceiling), so they may not disagree about what the number
+    means. Negative pins on the retired sentences, because what must not come back is the TEXT."""
+    note = _dev_note(V7_BUDGET)
+    assert "PER STAGE" in note and "not a pool divided between them" in note
+    assert "end to end" not in note
+    assert "do NOT hold time back for the scorer" in note.replace("—", "-")
+    # The scorer's independence is the half the partition arithmetic got wrong.
+    assert "charged to nothing you declare" in note
+
+    from looplab.core.models import RunState
+    from looplab.engine.proposal_cues import ProposalCuesMixin
+
+    class _Cues(ProposalCuesMixin):
+        _eval_spec = {"command": ["python", "x.py"], "timeout": V7_BUDGET}
+        _repo_spec = {"editable_path": "/x"}
+        eval_deadline_grace_s = 0.0
+
+        def _experiment_time_budget(self):
+            return V7_BUDGET
+
+    # BOTH Researcher-facing time statements, because there are two and they both said "pool":
+    # the older per-proposal cue ("each experiment (train+eval) must finish within …", present 54
+    # times verbatim in v7's own spans.jsonl) and the F1h hint spliced beside it.
+    hint = _Cues()._time_budget_hint_text()
+    assert "PER STAGE, not a pool" in hint and "21600s (~6.0h)" in hint
+    assert "end to end" not in hint
+    assert "own copy of it on top" in hint
+    # The third spelling of the pool lived inside the ESTIMATE clause, i.e. it named the wrong
+    # quantity to estimate — which is the whole mechanism, one sentence smaller.
+    assert "plus data prep and scoring" not in hint
+    assert "are not charged to training's" in hint
+
+    cue, _steering = _Cues()._cue_experiment_time_budget(RunState(goal="g", direction="max"), None, None)
+    assert "each STAGE of an experiment must finish within" in cue
+    assert "(train+eval)" not in cue
+    # The partition instruction is the one that produced node 9's 14400 s reservation.
+    assert "leave room for data prep + eval" not in cue
+    assert "do NOT leave room in it for data prep or scoring" in cue
+
+
+def test_a_wall_clock_kill_below_the_budget_is_answered_at_the_ceiling_not_at_the_science():
+    """THE MEASURED COST, and the only new instruction in the note.
+
+    All five `stage_finished.status == "timeout"` rows in `runs/` were answered by a repair that made
+    the EXPERIMENT smaller — `n_epochs` 10->5 (v6 n5), 15->8 (v8 n3), 10->6 (v8 n9), fewer epochs /
+    a val subset (v2 n3), fewer ANCE negatives (dense-retrieval n72) — and ZERO of the five raised
+    the stage's own ceiling, though v8 n3 and v8 n9 had 14000 s and 21600 s of budget left to raise
+    it into. Across all 87 `node_repaired` rows carrying a change set, a stage `timeout` was raised
+    exactly once and that raise went ABOVE the budget, i.e. the gate refuses it today. So the move
+    has to be NAMED. The repair session reaches this note and nothing else about time
+    (`_run`'s user prompt splices it; the stages phase is skipped on a repair)."""
+    note = _dev_note(V7_BUDGET)
+    assert "the first fix is the CEILING and not the science" in note
+    assert "re-declare that stage nearer the budget" in note
+    # And it must stay CONDITIONAL: a crash, a stall or a divergence is not a ceiling problem, and a
+    # note that said "always raise it" would buy the same GPU-hours back at full price.
+    assert "killed PURELY by wall clock".upper()[:24] in note.upper()
+    assert "no stall, no divergence" in note
+    assert "below the budget" in note.lower()
+
+
 # ------------------------------------------------- consume + run: recorded, and score still bounded
 def _write_manifest(wd, train_timeout):
     (wd / "looplab_stages.json").write_text(json.dumps({"stages": [
