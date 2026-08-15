@@ -266,26 +266,40 @@ def test_default_run_does_not_persist_an_operator_env_secret(tmp_path, monkeypat
                    f"weights sha {_ENTROPY_BLOB}"])
     assert _ENV_SECRET not in tail and _ENV_SECRET not in captured
     assert "***REDACTED_ENV***" in tail
-    # ...and the two things that must SURVIVE: a benign env value, and — at the default — a blob
-    # that only the opt-in entropy pass may touch. An operator debugging a checkpoint mismatch
-    # needs that hash, which is exactly why the entropy half stayed gated.
+    # ...and the benign env value must SURVIVE: the screen is authenticated by NAME, so a
+    # non-secret variable's value is never a mask candidate however long it is.
     assert _ENV_BENIGN in tail
-    assert _ENTROPY_BLOB in tail
+    # The blob is masked at the SHIPPED default since 2026-08-15 — see the two tests below, which
+    # drive both directions of that flip end to end.
+    assert _ENTROPY_BLOB not in tail
 
 
-def test_opt_in_entropy_pass_still_reaches_the_persisted_tail(tmp_path):
-    tail, _ = _run_leaky_engine(tmp_path, [f"weights sha {_ENTROPY_BLOB}"], redact_output=True)
+def test_the_shipped_default_masks_an_unknown_shape_credential_in_the_persisted_tail(tmp_path):
+    """THE FLIP, driven at the SHIPPED default — note there is no `redact_output=` here, which is
+    the whole point of the test.
+
+    `_ENTROPY_BLOB` carries no credential SHAPE (`_PATTERNS` cannot see it) and is not one of this
+    operator's env VALUES (`redact_env_values` cannot see it), so before 2026-08-15 it reached
+    `node_evaluated.stdout_tail` verbatim — and from there `events.jsonl`, the span trace, the UI
+    node detail and every export. The entropy pass is the only screen that catches this class, and
+    it now runs by default.
+    """
+    tail, captured = _run_leaky_engine(tmp_path, [f"weights sha {_ENTROPY_BLOB}"])
     assert _ENTROPY_BLOB not in tail and "***REDACTED***" in tail
+    assert _ENTROPY_BLOB not in captured      # no captured-output field kept it, not just this one
 
 
-def test_the_entropy_pass_keeps_the_diagnostics_the_corpus_says_operators_need(tmp_path):
-    """THE NEGATIVE CONTROL, driven end-to-end with the lossy pass ON — the posture the docs
-    recommend for untrusted tiers, and the one where over-masking actually costs something.
+def test_the_shipped_default_keeps_the_diagnostics_the_corpus_says_operators_need(tmp_path):
+    """THE NEGATIVE CONTROL, and the reason the flip is safe rather than merely cheap — driven at
+    the SHIPPED default, again with no `redact_output=`.
 
     Every string here is a real shape lifted from `runs/`: the exact tokens this pass masked before
     `_entropy_candidate`/`_ENTROPY_TOKEN_CHARS`. If any one comes back as `***REDACTED***`, the
     operator has lost the filename out of their own traceback — which is what 13 of 13 entropy
-    masks over the corpus's 744 persisted tails actually were.
+    masks over the corpus's 744 persisted tails actually were, and re-measured 2026-08-15 over
+    1,652 tails the pass changes NONE of them. Over-masking is the failure this flip could have
+    shipped; the assertion is `not in`, verbatim survival, and it is checked BOTH ways in the same
+    run as the mask above.
     """
     survivors = [
         '  File "/home/jovyan/data/looplab/runs/rubertlite-dr-unified-v2/nodes/node_0/'
@@ -295,10 +309,28 @@ def test_the_entropy_pass_keeps_the_diagnostics_the_corpus_says_operators_need(t
         "CrossBatchMultipleNegativesRankingLoss",
         "vectorsearch/experiments/qwen3_hn_rubert-tiny-lite/final/model",
     ]
-    tail, _ = _run_leaky_engine(tmp_path, survivors, redact_output=True)
+    tail, _ = _run_leaky_engine(tmp_path, survivors)
     assert "***REDACTED***" not in tail
     for line in survivors:
         assert line in tail, line
+
+
+def test_turning_the_entropy_pass_OFF_still_masks_shapes_and_env_values(tmp_path, monkeypatch):
+    """The opt-OUT half of the same flip, so the switch's cost is stated by a test and not only by
+    a comment: `redact_output=False` gives up the ENTROPY pass and nothing else.
+
+    An operator reading "redact output secrets: off" could reasonably think they had turned tail
+    redaction off. They have not — that was true until 2026-08-14 and is the defect backlog C2
+    closed. Shapes and this box's own env values are masked at every tail whatever this says.
+    """
+    monkeypatch.setenv("C2FIXTURE_DB_PASSWORD", _ENV_SECRET)
+    tail, captured = _run_leaky_engine(
+        tmp_path,
+        [f"leaking sk-abcdefABCDEF0123456789TOKEN pw {_ENV_SECRET} blob {_ENTROPY_BLOB}"],
+        redact_output=False)
+    assert "sk-abcdefABCDEF0123456789TOKEN" not in tail and "sk-***" in tail      # shape: always
+    assert _ENV_SECRET not in tail and _ENV_SECRET not in captured                # env value: always
+    assert _ENTROPY_BLOB in tail                                  # ...and only THIS is given up
 
 
 # --- the entropy pass's COMPOSITION screen (the half that made a default flip safe) --------------

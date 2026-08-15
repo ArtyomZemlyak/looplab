@@ -770,8 +770,11 @@ The sandbox tier is chosen by **trust mode**, not your environment (`make_sandbo
 Additional safety monitors are off by default. Under the default `trust_gate=audit` they only surface signals;
 `gate`/`block` acts only on high-precision signals:
 
-- `redact_output` — adds the high-entropy pass to the stdout/stderr tail redactor. Known credential
-  shapes and the operator's own secret env values are masked before persistence either way.
+- `redact_output` — adds the high-entropy pass to the stdout/stderr tail redactor. **ON by default
+  since 2026-08-15** (unlike the monitors below it), because its false positives were measured away:
+  the composition screen took it from 13 of 744 persisted tails — all 13 traceback file paths — to 0.
+  Known credential shapes and the operator's own secret env values are masked before persistence
+  either way, so this flag is not the on/off switch for tail redaction.
 - `reward_hack_detect` — flag suspicious wins (grader/answer-key access, frozen-file writes,
   suspiciously perfect metrics).
 - `code_leakage_detect` — static scan for fit-before-split / fit-on-test.

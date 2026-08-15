@@ -162,7 +162,22 @@ class EngineOptions:
     trust_gate: str = "audit"            # T2: audit|gate|block — what a hack/leak flag does to selection
     code_leakage_detect: bool = False    # I3: static code-leakage scan per node
     critic_check: bool = False           # C4: execution-free critic per node
-    redact_output: bool = False          # B3: redact secrets from persisted output tails
+    # B3: the ENTROPY half of the persisted-tail redactor (shapes + this operator's env values are
+    # masked at every tail regardless, since 2026-08-14). Flipped to True on 2026-08-15 WITH the
+    # `Settings` default, deliberately NOT recorded as a divergence in
+    # `tests/test_options_divergence.py::EXPECTED` — and that is a decision, not an omission.
+    # Every row on that table diverges because a bare `Engine(...)` must not silently gain work or
+    # authority its caller did not ask for: unasked LLM calls (`train_monitor`), the power to
+    # terminate an eval (`asha_live_kill`), a paid cadence (`deep_research_every`), a different
+    # merge (`merge_mode`). NONE of that applies here — this knob makes no call, spends nothing,
+    # kills nothing, and cannot change what a node scores. It only decides whether a base64-shaped
+    # token in captured subprocess output is written verbatim into the caller's durable event log.
+    # There is no reading on which persisting an unmasked credential is the CONSERVATIVE library
+    # behaviour, so keeping the old value here would have re-opened backlog C2 for every library
+    # embedder and all ~170 direct `Engine(...)` constructions in the suite while the product
+    # surface was fixed. The false-positive cost that argued for OFF is measured at 0 of 1,652
+    # persisted tails across the whole preserved corpus (`core/redact.py::_entropy_candidate`).
+    redact_output: bool = True
     novelty_mode: str = "llm"            # off | algo | llm — how a proposal is dedup-checked
     novelty_gate: bool = False           # E1: dedup near-duplicate proposals (algo mode)
     novelty_epsilon: float = 0.05

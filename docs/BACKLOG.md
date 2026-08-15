@@ -119,6 +119,17 @@ site that proves it is open.
    default config by `tests/test_redact.py`. Residual, verified 2026-08-14: the two
    `agents/cli_agent.py:349,370` `stdout_tail` producers still bypass `_redact` (they feed the
    in-memory `AgentRun` telemetry). The reconciled §1 C2 row is the authoritative record.]
+   **[AND THE FLIP LANDED 2026-08-15, so this entry's own headline is now false in both halves.**
+   `Settings.redact_output` and `EngineOptions.redact_output` both default to `True`: the split
+   above made the entropy half separable, `_entropy_candidate` + `_ENTROPY_TOKEN_CHARS` removed
+   its false positives (13 of 744 persisted tails, 13/13 filesystem paths, -> 0; re-measured
+   2026-08-15 over 1,652 tails across 82 event logs, still 0, while the pre-fix rule changes 18
+   of the same 1,652), and the owner made the call the fix deliberately left to them. Driven at
+   the SHIPPED default in `tests/test_redact.py` in BOTH directions — the credential is absent
+   and the corpus's real traceback paths survive verbatim. Deliberately NO
+   `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row: measured, all 46 preserved snapshots carry the key
+   explicitly (45 `false`, 1 `true`) and resume unchanged, so the flip reaches no recorded run
+   and a `setdefault` row could never fire.]
 3. ~~**The hardened exploit suite re-flags the grader import the detector just sanctioned (P1, S).**~~
    `engine/evaluate.py:807-815` correctly passes `grader_import_ok=True` to `detect_reward_hacks`
    when the task ships `grader.py` as an asset — and then `evaluate.py:819` runs
