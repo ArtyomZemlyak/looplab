@@ -18,7 +18,7 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { driftStatus, leakageStatus, rewardHackStatus, OBJECTIVE_SOURCE_LABEL,
   objectiveMetricSource, objectiveSourceCaveated, objectiveSourceHelp } from './trustSemantics.js'
-import { metricComparable, sortRuns } from './runIndex.js'
+import { bestMetricCaveatLabel, metricComparable, sortRuns } from './runIndex.js'
 import { crossRunGroups, groupClaim, rankCoverage } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -2454,8 +2454,14 @@ export function CrossRunPanel({ state, onClose }) {
     ? <span className="muted" title="no rank: this run's event log stops being readable, so the value beside it is the best of a PREFIX">—</span>
     : <span title={row.tied ? `tied with ${row.tied} other run(s) at this value` : 'rank within this comparable group'}>
         #{row.rank}{row.tied ? ' (tie)' : ''}</span>)
+  // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
+  // column: this table's whole job is to say which recorded value led, and a qualifier one column
+  // away from the value is a qualifier an operator scanning a leaderboard does not read. The row
+  // keeps its rank — see `crossRunRank.js::buildGroup` for why caveat and not unrank.
   const metricCell = row => <>{fmt(row.value)}
     {row.confirmed ? ' (confirmed mean)' : ''}
+    {row.caveats.map(slug => <span className="pill warn" key={slug} style={{ marginLeft: 6 }}
+      title={row.caveatNotice}>{bestMetricCaveatLabel(slug)}</span>)}
     {row.provisional && <span className="muted" title="this run has not finished; its best can still improve"> · best so far</span>}
   </>
   return (

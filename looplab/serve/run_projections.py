@@ -19,6 +19,7 @@ import stat
 from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_snapshot_token)
+from looplab.engine.champion_caveats import champion_metric_caveats
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
@@ -114,6 +115,21 @@ def run_summaries(srv, only=None) -> list:
                 "source_integrity": srv.log_integrity(rd),
                 "best_metric": (best.metric if best else None),
                 "best_confirmed": (best.confirmed_mean if best else None),
+                # WHAT KIND OF NUMBER the two fields above are, when the run recorded a caveat about
+                # it and selected on it anyway. Every OTHER field the row carries about the champion
+                # is the number itself, so a client reading this row could not derive it: `violations`,
+                # `metric_provenance` and `reward_hacks` all stop at the run-state payload. Two rungs
+                # put a caveated number here — `metric_salvage: "select"` (which mints no violation
+                # row, so the node is feasible and competes) and `trust_gate: "audit"`, the DEFAULT
+                # (which enforces nothing, so a hard reward-hack/leakage signal excludes nothing).
+                # The rule is `engine/champion_caveats.py` and it is spelled as calls to the same
+                # predicates the fold and the cross-run writers use, never as a re-reading of the rows
+                # here — see that module for why this is NOT `memory.unreliable_metric_ids` (which is
+                # empty on a champion by construction). Additive with a reader-side default: `[]` on
+                # a legacy client's absent key, and an EMPTY list means the run recorded no caveat,
+                # never that a detector ran (`reward_hack_detect` is off by default). Cached WITH the
+                # fold, so it costs one derivation per changed log rather than one per poll.
+                "best_metric_caveats": champion_metric_caveats(st),
                 "stop_reason": st.stop_reason,
                 # Cached with the fold so liveness polling can cheaply decide whether the
                 # durable-resume reconciler is needed. Without this bit every dashboard poll

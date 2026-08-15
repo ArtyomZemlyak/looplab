@@ -559,12 +559,21 @@ holds no concepts at all, which is why **Runs → Concepts** below is the only c
 | **Runs → Concepts** | The concept tree across the runs the list is currently showing, folded from each run's `concepts` rollup — the same array Lineage draws, so the project folder and every list filter apply unchanged, and an extra scope button narrows to the runs checked for Compare. Ids are `/`-paths, so each row's ancestors are materialized from the id itself and marked `grouping` when no run named them. A node reports the DISTINCT runs at or below it, the experiments tagged with exactly that id, and a best metric **only** where the contributing runs share one task and one objective direction. Above the tree: how many runs in scope carry any tag at all. Below it: an always-present **Untagged** bucket, then **Studied together** — the co-occurrence pairs, an unordered pair of concepts one run was tagged with, weighted by the number of DISTINCT runs that named both, with an operator-visible floor (default 2 runs). Selecting a concept adds its partners to the detail pane. | It is not a taxonomy. Runs that disagree about the hierarchy stay separate roots; ids differing only in `-` versus `_` are reported side by side and never merged, because merging them would be LoopLab asserting a taxonomy nobody authored — renaming a concept across runs is a governed cross-run action, not a render-time guess. No subtree experiment TOTAL is shown: one experiment carries several tags, so summing a subtree would count it more than once. A concept absent from the tree means untagged, not unstudied. Co-occurrence is folded from the same rows as the tree, never fetched: the server's cross-run corpus is the run-end capsule ledger, whose membership is not this list's (measured 2026-08-06 on the shipped corpus: 3 capsules against 15 tagged runs), and rendering that inside a filtered view would misstate the population. A pair below the floor is COUNTED and named, so an empty panel reads as "nothing repeats yet" rather than "nothing co-occurs"; a pair is evidence one run named both ids, so a `grouping` row never has partners. |
 | **Run → Lineage** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Lineage previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. An experiment whose membership could not be materialized is withheld from the chips ROW-WISE and disclosed as `PARTIAL · N withheld` — its siblings stay filterable and the counts become a lower bound; only a run-scoped integrity failure (degraded run base, malformed receipt store) refuses the whole bar as `UNAVAILABLE`. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Lineage while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio-wide research index. |
 
-The run workspace's legacy **Analysis → Cross-run** panel is likewise not a scientific comparison surface.
-It retains bounded same-task-ID navigation and per-run objective observations, but does not rank, crown, draw
-relative bars, or overlay values on one axis. A shared `task_id` does not bind metric name/unit, dataset and
-evaluation identity, or a comparison protocol; those operations remain unavailable until a validated
-`ComparisonContract` exists. If the displayed run has no non-blank `task_id`, the panel fails closed with no
-observations: multiple legacy rows with a missing identity are not members of one task.
+The run workspace's **Analysis → Cross-run** panel (*Same-task run comparison*) ranks, and only inside a
+**comparable group** — one `task_id` **and** one objective direction, re-tested per partition with the same
+`metricComparable` predicate the run list sorts by, never across the corpus. Ranks are **competition** ranks,
+so identical values share one and ties are named rather than ordered by array position. Two rows never hold a
+rank on their number alone: a run whose `source_integrity` says the fold saw only a readable **prefix** keeps
+its row and its value and holds no rank at all (a prefix's best is not the run's best), and — since
+2026-08-15 — a run whose `best_metric_caveats` is non-empty keeps its rank and is **marked**. Those two are
+opposite decisions on purpose: a caveated value *is* that run's best, crowned by the run's own selector under
+a rung its operator configured, so unranking it would overrule a recorded decision, while a prefix value is
+not a best at all. Every group also prints what it does **not** claim: a shared `task_id` does not bind metric
+name/unit, dataset and evaluation identity or a comparison protocol (the run row carries none of them), and
+nothing on the row says which artifact a number is about — the metric **subject** is still not published there
+(docs 31/35). No normalized cross-group score, no relative bars, no single axis. If the displayed run has no
+non-blank `task_id`, the panel fails closed with no observations: multiple legacy rows with a missing identity
+are not members of one task.
 
 ## Which memory panel am I looking at?
 
@@ -850,6 +859,26 @@ server derives this from the bytes (`source_integrity` on the run-state envelope
 probe and each run-list row); `looplab repair-log RUN_DIR` names the exact boundary, and
 `docs/guide/cli-reference.md#repair-log` explains what causes one. The banner is not dismissible
 because nothing you can do in the browser makes it stop being true.
+
+**A `salvaged` or `trust-flagged` pill beside a run's best metric.** The run selected on a number its
+own record carries a caveat about, and the caveat travels with the number so the portfolio cannot read
+it as a plain measurement. There are exactly two, they come from the server
+(`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
+operator set rather than a bug:
+
+- **`salvaged`** — the champion's evaluation FAILED and the run recovered the number with its own
+  declared reader. Under the default `metric_salvage: audit` such a node is excluded from selection
+  and can never be the champion, so this pill means `select` is on and the operator accepted the value
+  as comparable. It is the same word the node's own **Metrics** tab prints for that number.
+- **`trust-flagged`** — the champion carries a high-precision reward-hack or leakage signal and this
+  run's `trust_gate` is `audit`, which surfaces without enforcing. Under `gate`/`block` the node could
+  not have been selected, so this pill and those rungs never coexist.
+
+Neither pill is a claim that anything is wrong with the run: it is the claim that the number in the
+`best` column is not the same kind of evidence as the one beside it. **An absent pill is not a
+certificate either** — `reward_hack_detect` is off by default, so the second caveat is silent on most
+runs, and only what a run RECORDED can be reported. Open the run and read the node's Trust and Metrics
+tabs before reusing its configuration.
 
 **`EACCES` executing a file under `node_modules` (e.g. esbuild), or `vite: not found`.** Vite's
 `esbuild` runs a **native binary** during install/build. `EACCES` when *executing* it means the

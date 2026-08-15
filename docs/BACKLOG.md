@@ -733,6 +733,101 @@ site that proves it is open.
     underivable. Both need a server-side field first; that is the next unit of work, and it is one
     field, not thirteen client fixes.
 
+- **[FIXED 2026-08-15, the same day the census above named it — and the measurement narrows the
+  claim, which is the half worth keeping] `/api/runs` published `best_metric` and nothing that could
+  qualify it, so a caveated champion was portfolio-wide, unlabelled and underivable.** The census
+  entry above is right that no client fix reaches this: `run_projections.py::run_summaries` builds
+  the row from a fold and keeps the number alone — no `violations`, no `metric_provenance`, no node
+  id, no `reward_hacks` — while `RunState.best()` reads `best_node_id`, which `_select_best` derives
+  from `promotion_eligible_nodes`, i.e. from whatever THAT run's rungs were willing to crown. **Two
+  rungs crown a caveated number and only one of them needs a setting changed:** `metric_salvage:
+  "select"` over operator-produced output mints NO violation row, so a metric recovered from a FAILED
+  eval is feasible and competes; and `trust_gate: "audit"` — **the shipped default** — makes
+  `flagged_node_ids` empty, so a node with a high-precision reward-hack/leakage signal is excluded
+  from nothing and can be champion with the signal recorded all along. The second is the wider hole
+  and the census did not name it.
+  **MEASURED FIRST, over the 46 preserved runs in `runs/` (the same `fold` `/api/runs` serves), and
+  the claim came back NARROWER than stated:** 37 runs carry a `best_metric` and **ZERO of them are
+  caveated today**. The corpus holds exactly ONE salvaged node — `rubertlite-dr-unified-v6` node 3,
+  0.728113, condition `artifact_contract` — and its producer is `agent_stage`, which
+  `SalvagedMetric.violation_rows` keeps excluded under every rung but `off`; re-running the fold's own
+  `_select_best` over all 46 logs with the `select` rows removed moves **0 champions**, even though
+  that node's number beats its run's champion (0.727991). Two runs carry any `reward_hack` row and one
+  (`task-g7` node 1) carries a HARD signal; neither run's champion is the flagged node. So "can
+  already BE a salvaged number" is REACHABLE and not REALIZED, and this fences a state rather than
+  cleaning up a corpus — said here because the census's wording reads as the stronger claim.
+  **THE FIELD IS NOT `memory.py::unreliable_metric_ids`, and that is the design decision.** That join
+  is the obvious candidate (it already unites the salvage and trust families for the cross-run
+  writers) and its intersection with `{best_node_id}` is EMPTY under every rung **as a theorem**:
+  `metric_unmeasured` needs a `metric_salvaged` violation row, a violation row makes the node
+  infeasible, and `SearchFitness.eligible` requires feasibility; `flagged_node_ids` is non-empty only
+  under `gate`/`block`, and `_select_best` passes exactly that set in as its exclusion. A field
+  stating that join would be a constant `false` on the one row it decorates. What `engine/
+  champion_caveats.py::champion_metric_caveats` states is the **complementary half of each of those
+  two members** — salvaged-and-ADMITTED where the join has salvaged-and-excluded, flagged-and-NOT-
+  ENFORCED where it has flagged-and-enforced — so it is the same join read on the other side of the
+  selection boundary, and both halves are spelled as CALLS to that join's own two primitives
+  (`metric_unmeasured`; `hard_flagged_ids` minus `flagged_node_ids`) rather than as a fresh reading of
+  `violations` or `reward_hacks`. That is what stops it drifting from the rung that decides it, and
+  the rung is `violation_rows`, whose whole job is deciding whether a row exists.
+  **Two slugs and deliberately no third.** A REPAIRED DECLARATION (`declaration_repaired`, the F1e
+  re-check) is a measured metric and `trustSemantics.js` already answers `measured` for it, so marking
+  it here would put the portfolio row in disagreement with the node tab — the exact defect this
+  vocabulary closes, one direction over. An UNBOUND METRIC SUBJECT under `audit`/`off` is not marked
+  either, and that is the negative control with teeth: the LIVE `rubertlite-dr-unified-v8`'s champion
+  (node 1, 0.738425) carries `metric_provenance = {"subject_bound": false, "unbound_reason":
+  "not_declared", "subjects": []}`, which is the state 82 of 83 corpus metrics are in, so a caveat
+  there would fire on the rule and not on a finding. Under `require` that rung mints a row and the
+  node is infeasible — the first theorem again. Additive with a reader-side default (invariant #5),
+  no `fold` change, no new `run_started` key (which would revoke every issued speculation-calibration
+  receipt), and computed inside the summary cache's miss branch, so it costs one derivation per
+  changed log rather than one per poll.
+  **CLIENTS WIRED: two, and the rest are stated rather than started.** `runIndex.js` gains the reading
+  rule and the wording (`bestMetricCaveats` / `bestMetricCaveatNotice`, one home, the shape
+  `sourceIncomplete`/`sourceIntegrityNotice` already have for the integrity receipt beside it), and
+  the two surfaces taking it are `RunList`'s run card (a `warn` pill above the `nodes · direction`
+  line, beside the `incomplete record` receipt) and the **cross-run leaderboard**
+  (`crossRunRank.js` + `panels.jsx::CrossRunPanel`) — the surface that makes a claim an operator ACTS
+  on, since they go and reuse the winning configuration. There the decision is **CAVEAT, NOT UNRANK**,
+  and it is deliberately the OPPOSITE of the `sourceIncomplete` rung one line above it in
+  `buildGroup`: a prefix-folded value is not that run's best and no ordering may use it, while a
+  caveated value IS that run's best, crowned by the run's own selector under a rung the operator
+  configured — dropping it would overrule a recorded decision and publish a leaderboard that
+  disagrees with the runs in it. The row keeps its rank, gains a marker in the OBJECTIVE cell (not the
+  status column: a qualifier a column away from the number is one nobody reads), and the group's
+  refusal list gains a line naming how many rows are caveated and **whether one of them leads**.
+  `groupClaim`'s existing provenance refusal was NARROWED by exactly the width of what the row now
+  carries — the metric SUBJECT is still not published there, so it keeps its docs 31/35 example and
+  loses only the sentence that became false. **LEFT OPEN, honestly:** `portfolioModel.js`,
+  `RunCompare`, `MapView`, `conceptForest.js::nodeBest` and `runIndex.js::sortRuns` (which sorts on
+  `best_confirmed ?? best_metric` and now COULD refuse to rank a caveated row, a decision with the
+  same caveat-vs-unrank argument and no measurement behind it yet) all read the same row and are one
+  call from correct; ConceptFrame `refs` (`concept_frame.py`) still stop at `feasible` and need the
+  same treatment on a DIFFERENT payload, which is a second server-side unit of work and not this one.
+  **PROVED** in `tests/test_champion_metric_caveats.py` (tier 1 throughout: a real `events.jsonl`
+  written with `EventStore`, folded by the real `fold`, projected by the real `run_summaries` off a
+  real `make_app` AppState — and the salvage rows are ASKED of `SalvagedMetric.violation_rows` rather
+  than hand-written, because the whole finding is about which rung mints a row) plus
+  `ui/test/bestMetricCaveats.test.js` (reading rule + leaderboard model) and
+  `ui/test/crossRunCaveatRender.test.js` (the panel rendered through a JSDOM client root). Negative
+  controls in both halves: a measured run gains no label INCLUDING the v8-shaped champion above (the
+  naive "it has provenance, so qualify it" implementation turns every run on the box orange, and that
+  case catches it), the `audit` rung leaves the row uncaveated because it left the node unselected,
+  `gate` needs no caveat because it moved the champion, an advisory `perfect_metric` is not a caveat,
+  and a measured leaderboard renders byte-for-byte what it did. **Non-vacuity verified by mutating a
+  throwaway copy of the tree** (`git archive HEAD | tar -x`): dropping the projection field reds 7 of
+  10 python tests; the naive-provenance rule reds exactly the negative control; **stating the JOIN
+  instead of its complement reds 5, including the theorem test** — which is the docstring's claim
+  driven rather than asserted; a browser slug renamed reds the cross-language vocabulary check; and
+  the pre-fix `crossRunRank.js`/`panels.jsx` red 5 of 8 UI tests while the rendered negative control
+  stays green. Docs moved in the same change (`docs/guide/ui.md` — including the panel's own
+  description, which still said it "does not rank, crown" after the 2026-08-14 ranking landed —
+  `docs/guide/tasks.md`, `docs/guide/configuration.md`'s `metric_salvage`/`trust_gate` rows,
+  `docs/guide/architecture.md` and the `e_sal`/`t_gate` blocks of
+  `docs/infographic/agent-architecture.html`). **Residue, stated not patched:** an empty list is not a
+  certificate — `reward_hack_detect` is OFF by default, so the trust member is silent on almost every
+  run on this box, and only what a run RECORDED can be reported.
+
 - **[FIXED 2026-08-15, same day — and the fix cost nothing, which is the part worth keeping]
   `metric_series(whole_run=true)` could not reach the head of any log over 33.5 MB, and said the
   opposite** (found 2026-08-15 auditing the merge day's `tools/log_tools.py`). `_MAX_SCAN_BYTES`

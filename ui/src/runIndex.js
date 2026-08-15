@@ -56,6 +56,64 @@ export function sourceIntegrityNotice(run = {}) {
     + 'not happen.'
 }
 
+// --- What kind of number `best_metric` IS ---------------------------------------------------------
+// The server's `best_metric_caveats` receipt (`looplab/engine/champion_caveats.py`) — the run's own
+// recorded caveat about the number this row publishes, in a list the row could not previously carry.
+// It exists because `/api/runs` publishes `best_metric` and nothing else about the champion: no
+// `violations`, no `metric_provenance`, no node id. Two rungs put a caveated number there and the
+// browser can derive NEITHER of them from the row — `metric_salvage: "select"` (a metric recovered
+// from a FAILED eval, admitted into selection, and no violation row minted to notice it by) and
+// `trust_gate: "audit"`, the shipped DEFAULT (a high-precision reward-hack/leakage signal recorded
+// about the champion and enforced against nothing).
+//
+// The words are the SERVER's, mirrored here rather than re-derived, and `salvaged` is deliberately
+// the same word `trustSemantics.js::OBJECTIVE_SALVAGED` prints for the node inside the run — the
+// portfolio row and that node's Metrics tab must not describe one number two ways. An UNKNOWN slug
+// is kept and rendered rather than dropped: a server that learns a third caveat must not read as a
+// clean run to an older browser.
+export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
+export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
+
+// ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
+// legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
+// list is not a certificate — it says the run recorded no such caveat, never that a detector ran
+// (`reward_hack_detect` is off by default), which is `trustSemantics.js`' first rule.
+export function bestMetricCaveats(run = {}) {
+  const raw = run?.best_metric_caveats
+  if (!Array.isArray(raw)) return []
+  return raw.filter(slug => typeof slug === 'string' && slug.trim()).map(slug => slug.trim())
+}
+
+export const bestMetricCaveated = (run = {}) => bestMetricCaveats(run).length > 0
+
+// The SHORT word for a table cell, and the one place it is spelled. An unrecognised slug renders as
+// itself — the server said something this browser has no sentence for, and printing the raw word is
+// how the operator finds out, where dropping it would republish the number as unqualified.
+const CAVEAT_LABEL = {
+  [CHAMPION_CAVEAT_SALVAGED]: 'salvaged',
+  [CHAMPION_CAVEAT_TRUST_FLAGGED]: 'trust-flagged',
+}
+export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
+
+// The one wording the browser prints about a caveated `best_metric`, mirroring
+// `engine/champion_caveats.py`'s vocabulary comment. Every sentence says the same two things: what
+// the number is, and that the run SELECTED on it anyway — because the operator's question here is
+// never "is this run flagged", it is "may I reuse this configuration".
+export function bestMetricCaveatNotice(run = {}) {
+  const slugs = bestMetricCaveats(run)
+  if (!slugs.length) return ''
+  const sentences = slugs.map(slug => (
+    slug === CHAMPION_CAVEAT_SALVAGED
+      ? 'This run’s best metric was NOT measured: its evaluation failed and the run recovered the '
+        + 'number with its own declared reader. metric_salvage is set to “select”, so it competes '
+        + 'for champion like a measured result.'
+      : slug === CHAMPION_CAVEAT_TRUST_FLAGGED
+        ? 'The node this number comes from carries a high-precision reward-hacking or leakage '
+          + 'signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.'
+        : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+  return sentences.join(' ')
+}
+
 export function terminalReady(run = {}) {
   return !!run.finished && !finalizationIncomplete(run) && run.engine_running === false
 }

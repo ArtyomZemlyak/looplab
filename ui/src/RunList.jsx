@@ -11,7 +11,8 @@ import DensityToggle from './DensityToggle.jsx'
 import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
 import {
-  ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED, comparisonScope, filterRuns,
+  ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED, bestMetricCaveatLabel,
+  bestMetricCaveatNotice, bestMetricCaveats, comparisonScope, filterRuns,
   indexProjects, effectiveRunStatus, metricComparable, projectRunCounts, scopeRuns, selectionNotice,
   sortRuns, sourceIncomplete, sourceIntegrityNotice,
 } from './runIndex.js'
@@ -2877,6 +2878,19 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 {sourceIncomplete(r) && <div className="pill warn" role="status"
                   title={sourceIntegrityNotice(r)}>incomplete record</div>}
                 <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
+                {/* WHAT KIND OF NUMBER that is — touching the value it qualifies, above the
+                    `nodes · direction` line rather than at the end of the card, because an operator
+                    scanning this column is deciding which configuration to reuse and a caveat they
+                    reach after the number is one they read after acting on it. (The integrity
+                    receipt sits ABOVE the value for the stronger version of the same rule: it
+                    qualifies every field on the card, not just this one.) Both rungs that produce a
+                    caveat are UNDERIVABLE in the browser — the row carries no violations, no
+                    provenance and no node — so this is the server's word, printed, not re-derived.
+                    `role="status"` matches the receipt so a screen reader reaches both in order. */}
+                {bestMetricCaveats(r).map(slug => (
+                  <div className="pill warn" role="status" key={slug}
+                    title={bestMetricCaveatNotice({ best_metric_caveats: [slug] })}>
+                    {bestMetricCaveatLabel(slug)}</div>))}
                 <div className="muted">{r.nodes} nodes · {r.direction}</div>
                 {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is
                     a real timestamp (1970-01-01T00:00:00Z) and `0 && <div/>` renders a bare `0` into

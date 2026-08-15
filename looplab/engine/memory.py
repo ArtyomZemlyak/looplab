@@ -216,6 +216,14 @@ def unreliable_metric_ids(state) -> set:
     Deliberately NOT included: tombstoned/aborted nodes (every caller already drops those on its own
     lifecycle grounds) and unevaluated ones (no number to be unreliable).
 
+    ITS INTERSECTION WITH THE CHAMPION IS EMPTY, and that is a theorem rather than a corpus fact —
+    both members are populations the SELECTOR already refuses (a `metric_salvaged` row makes the node
+    infeasible; `flagged_node_ids` is passed straight into `SearchFitness.eligible`). So this is the
+    wrong question to ask about `best_node_id`, and `engine/champion_caveats.py` is the right one: it
+    states the COMPLEMENTARY half of these same two families — salvaged-and-ADMITTED, flagged-and-NOT
+    ENFORCED — through these same two primitives. The two are one rule read on either side of the
+    selection boundary, which is why neither restates the other's predicate.
+
     Not wrapped in a containment `except`: both halves are total by construction —
     `metric_unmeasured` reads one list and `flagged_node_ids` is the same helper the fold itself
     calls on every replay — and swallowing an error here would return the EMPTY set, i.e. would
