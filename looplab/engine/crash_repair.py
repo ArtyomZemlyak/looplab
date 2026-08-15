@@ -150,7 +150,8 @@ class CrashRepairMixin:
     @in_llm_lane("build")
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
                       reason: str = "crash", *, repair_log=None,
-                      depth: Optional[int] = None, attempts_left: Optional[int] = None) -> dict:
+                      depth: Optional[int] = None, attempts_left: Optional[int] = None,
+                      log_tools=None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str}.
 
@@ -190,7 +191,20 @@ class CrashRepairMixin:
         Both are re-asked `_TRIAGE_REASK_LIMIT` times before they are acted on: one non-answer is not
         a diagnosis, and stopping a node on the first one costs a whole node for a single flapped
         socket (measured: `developer.repair` calls = 0). The rule path stays reserved for the
-        genuinely different case of no judge being wired at all."""
+        genuinely different case of no judge being wired at all.
+
+        `log_tools` (from `engine/train_monitor.py::repair_log_tools`, built by the CALLER because
+        only the eval frame holds the workdir + this attempt's log plan + its byte floor) is this
+        judge's permission to LOOK at the dead eval's own stage logs instead of diagnosing from
+        `_eval_failure_text`'s 500-character stderr tail. `None` — the default, an old `Settings`, a
+        non-command eval, a failure before any log existed — reproduces the historical ask exactly:
+        `_accepted_kwargs` will not pass it to a seam that does not name it, and the one seam that
+        does treats `None` as "no extra tools". See that function's docstring for the v8 node 3
+        measurement that made this necessary, and note what it is NOT: nothing read through these
+        tools may become a fact the record rests on. The verdict vocabulary is unchanged, the terminal
+        still carries the eval's own authenticated `reason`, and no metric, champion, selectability or
+        violation moves on anything a model saw here — doc 36's line, in the same place
+        `_repair_critic` holds it."""
         # Tag the failure kind so the LLM agent (and the rule's marker scan) see crash vs timeout.
         tagged = f"[failure kind: {reason}]\n{error}"
         fn = getattr(self.researcher, "triage_crash", None)
@@ -203,7 +217,7 @@ class CrashRepairMixin:
             # ending the node on an answer nobody could read.
             for _round in range(1 + _TRIAGE_REASK_LIMIT):
                 verdict = self._ask_triage(fn, state, node, tagged, attempt, reason,
-                                           repair_log, depth, attempts_left)
+                                           repair_log, depth, attempts_left, log_tools)
                 if verdict["action"] in AGENT_TRIAGE_ACTIONS:
                     return verdict
             return verdict
@@ -222,7 +236,7 @@ class CrashRepairMixin:
                             _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
-                    repair_log, depth, attempts_left) -> dict:
+                    repair_log, depth, attempts_left, log_tools=None) -> dict:
         """ONE ask of the wired judge, normalized to a `TRIAGE_ACTIONS` verdict.
 
         Split out of `_triage_crash` so the re-ask above is a loop over a single, total function
@@ -253,8 +267,22 @@ class CrashRepairMixin:
             # and use to stop the node and pause the RUN. That is the worst possible way for a
             # signature change to land, so the call is narrowed to what the callee actually
             # accepts. A `**kwargs` implementation gets everything, as before.
+            # The log-query provider rides in the SAME narrowed bag as the three arguments the
+            # 2026-08-13 change added, and for the identical reason: `triage_crash` is a DUCK-TYPED
+            # seam, so a fourth keyword passed unconditionally to an implementation written against
+            # the old signature raises TypeError — which the fail-closed handler below reads as a dead
+            # provider and turns into a stopped node PLUS a RUN-level pause.
+            # `tests/test_repair_stop_decision.py::
+            # test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider` is the standing
+            # proof of the mechanism, and this file's own test drives it again with `log_tools` set.
+            #
+            # It is listed UNCONDITIONALLY here, exactly like the three beside it. A `if is not None`
+            # would read like the safety and is not it — `_accepted_kwargs` is — and the two spellings
+            # are indistinguishable to a new seam, whose `tools=None` default and an explicit `None`
+            # are the same value. One rule for the whole bag is the reviewable one.
             extra = {"history": _format_repair_log(repair_log),
-                     "stages_passed": depth, "attempts_left": attempts_left}
+                     "stages_passed": depth, "attempts_left": attempts_left,
+                     "tools": log_tools}
             with self.tracer.span("triage", attempt=attempt, reason=reason):
                 out = fn(node, tagged, attempt, state=state, brief=brief,
                          **_accepted_kwargs(fn, extra))

@@ -616,6 +616,132 @@ site that proves it is open.
   (`_LOOK_INVITATION`, `_ASHA_LOOK_INVITATION`) already say "search for a traceback" and were left
   byte-identical — the sentence was aspirational and is now true, and a prompt change is a behaviour
   change that deserves its own measurement.
+- **[FIXED 2026-08-15] The one role whose job is "why did this stage die" was diagnosing from 500
+  CHARACTERS, and it read the wrong progress bar.** Every other reader of a live training log got
+  widened this week — both watchdogs got `read_log`/`metric_series` (`train_monitor_tools`) precisely
+  because a slice cannot answer the question they are asked. The CRASH/TIMEOUT triage judge was not,
+  and its slice is the smallest in the engine: `engine/evaluate.py::_eval_failure_text` hands it
+  `res.stderr[-500:]` with the failing stage's name prepended, where the watchdog's digest at least
+  comes off a 128 KiB read.
+  **Measured, on the live run.** `rubertlite-dr-unified-v8` node 3, stage `train`,
+  `stage_finished.status="timeout"` at 22,003.138 s against its own declared 22,000 s ceiling. The
+  node's 9.44 MB `train.log` (bytes 0..9,442,344 — attempt 6 begins at 9,442,344, timestamped
+  08:13:35) holds **three** progress-bar lanes: `10590` (11,709 renders, last `10590/10590
+  [5:29:35]`), `313` (907 renders, completed), and `361` (224 renders, last `223/361 [31:29<19:50,
+  8.63s/it]`). Between the first and the last, in plain text 83,697 characters from the end:
+  `{'train_runtime': 19775.2984, …, 'train_loss': 22.405478578158657, 'epoch': 14.98}` and
+  `Started testing...`. Training finished all 15 epochs in 5 h 29 m; the kill landed ~20 minutes
+  from the end of a RETRIEVAL phase. The durable `node_repaired` row for attempt 5 carries
+  `error_in` of **522 characters**, and it is exactly `[failed stage: train]` plus the last two
+  renders of the `361` lane. Its rationale: *"Timeout in train from R-Drop's ~10x per-step slowdown
+  (node 3 is still in epoch 1 at 31:20 vs node 1's 15 epochs in 4260s). Reduce compute: halve
+  per-step batch to 4096 with grad_accum 4 … and cut n_epochs 15->8"* — and `31:20` is verbatim the
+  `222/361` render's elapsed field. **This was not the model ignoring what it had:** the tail it was
+  handed contains neither `10590` nor the word `epoch`.
+  **And the second cost is not the one it looks like.** That `n_epochs` 15→8 **never landed**: the
+  repo's own rung caught it — `repair_verify` stamped `unmet: ['grad_accum', 'n_epochs']` on that
+  same row — no repaired file sets it, and `vectorsearch/configs/config.yaml` still reads
+  `n_epochs: 15`. The diff applied only `batch_size = 4096` + `gradient_accumulation_steps = 4`,
+  which holds the effective batch at 16,384 and is compute-neutral by intent. (`grad_accum` is the
+  known abbreviation FALSE POSITIVE that was fixed on 2026-08-15 — v8's engine loaded its source at
+  16:25, so its rows were graded by the pre-fix rule; `n_epochs` is the true positive.) So the
+  experiment was NOT silently altered, and what happened instead is worse for the clock: a wrong
+  diagnosis bought a fix that is **inert against the actual failure**. Measured on the live log,
+  attempt 6 is re-running the same 10,590 steps at `1928/10590 [57:46]` = 1.798 s/step, which
+  projects 19,038 s of training plus ~3,058 s of retrieval at attempt 5's own pace = **22,096 s
+  against the same 22,000 s ceiling**. The same 6.1 GPU-hours are being spent to reach the same kill.
+  **Population, measured over all of `runs/`** (2,481 `node_repaired` rows, 14 runs). `reason` is a
+  recent field: 12 rows carry `timeout`/`crash` (11 + 1), all in v7/v8. **Eight of those twelve make
+  a claim about training PROGRESS or PHASE, and exactly ONE is contradicted by the node's own log** —
+  this one. Widening to the rows whose failure kind is re-derivable from the adjacent
+  `stage_finished` status adds five more progress/phase claims (v6 n5 a4 "trains stably to step
+  4614/7060", v6 n0 a2 and v2 n3 a3 "training completed", v2 n0 a5 "the training loop finally started
+  (1/28080 iters)", v7 n1 a3 "crash at step 50") and **every one of them is CORRECT**. So the honest
+  count is 1, and the structure behind it is the finding: in all five correct cases the process died
+  while the training bar was the last thing rendering, so the tail happened to be the right window.
+  What is common is the SHAPE — **109 of the 109 stage logs over 200 KB in `runs/` carry more than
+  one progress-bar lane** (measured 2026-08-15; it read 108/109 an hour earlier, before the live run
+  appended a second lane to the last single-lane file, which is itself the point). What is rare, so far once, is a kill landing after the training lane
+  completed. Nothing in a tail says which case it is in.
+  **Fixed** by wiring the same tool provider into the triage path: `Settings.repair_log_tools` (ON;
+  `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row OFF) → `train_monitor.repair_log_tools`, which delegates to
+  the watchdogs' own `_log_query_tools`/`monitor_log_sources` — ONE derivation of what is lookable,
+  ONE reading of `attempt_byte_floor`. `train_monitor.needs_log_snapshot` was extracted out of
+  `_evaluate`'s inline `or` because the repair path's snapshot has to be taken on behalf of a reader
+  that has not asked yet (a "before" cannot be derived at the failure), and a rule buried in a local
+  is one no test can reach — which is how the clause could have been dropped with every guard green.
+  `UnifiedAgent._REPAIR_LOOK_INVITATION` is spliced at the same position pattern as `budget`/`depth`,
+  so `repair_log_tools=false` reproduces the historical message byte for byte; `triage_look_invitation`
+  is its own `PROMPT_KEYS` row for the same reason.
+  **Cost, measured (mean of 5, warm, on node 3's real workdir).** Engine side, per FAILED attempt:
+  `needs_log_snapshot` 0.001 ms, `eval_log_plan` 0.004 ms, `snapshot_training_logs` + plan + provider
+  **1.35 ms** together. Tool side, on the real 10.0 MB `train.log`: `read_log` tail 7.1 ms, search
+  8.0 ms, `metric_series` default 28 ms, whole-run hourly **525 ms** (the call that answers this
+  question; it reads and states all 10,017,726 bytes). Turn grant `_REPAIR_LOOK_TURNS = 4`, ADDITIVE
+  over a finite `agent_max_turns` and a no-op when the operator configured none — deliberately not
+  the watchdog's 6, which is that judge's whole budget for a call with nothing else to spend it on,
+  whereas this sits on top of one already sized for `read_code`/`find_analogous` and needs only the
+  new shape (a whole-run series, one search, one follow-up, one spare).
+  **Alternatives rejected.** (a) *Just make the tail bigger.* It would have worked HERE — the
+  `'epoch': 14.98` line is 83,697 chars back, inside a 128 KiB tail — and it does not generalize:
+  the whole-run scan above shows the answer can be anywhere, and 500 → 131,072 characters of tqdm
+  fill is 26 renders of context per model call for a fact one aggregation answers. (b) *Teach
+  `_eval_failure_text` to detect a phase change and say so.* That is a heuristic over the candidate's
+  own text, in the one string that IS the engine's account of what went wrong; a wrong heuristic
+  there is worse than no heuristic, and doc 36 says the engine should stop choosing what the role is
+  shown rather than choose better. (c) *Give the DEVELOPER's repair call the tools too.* It is the
+  role that wrote the wrong fix, but it goes through three unrelated adapters (whole-file, repo
+  session, CLI-backed) and the misdiagnosis is the TRIAGE rationale; one seam, one measurement.
+  (d) *Reuse `train_monitor_tools` as the switch.* Two paid surfaces on completely different
+  cadences — ~200 timer ticks per node against one look per failed attempt — so an operator who
+  turned one off has said nothing about the other.
+  **Residue, left open.** (1) The triage judge can now SEE the log; nothing makes it look. The
+  invitation is a prompt, and the v7 `_LOOK_INVITATION` measurement is the standing evidence that a
+  model handed both a tail and a tool still reasons from the tail. There is no deterministic rung
+  here the way `LossTrajectoryTracker` is one for the watchdog, and there deliberately is not: this
+  judge's verdict decides nothing about the record, so a veto would have nothing to protect.
+  (2) The 500-char tail itself is unchanged — this widens what may be ASKED, not what is handed over —
+  so a run with `repair_log_tools=false`, or an eval that writes no named stage log, is exactly where
+  it was. (3) The population number is 1, from a corpus where `reason` has only been recorded on two
+  runs; it is a lower bound on a young field, not a rate.
+
+- **[OPEN, added 2026-08-15] A repair may change a hyperparameter that is PART OF THE COMPARISON,
+  and nothing in the record would say so (P1, M).** Filed as the separate defect it is, and filed
+  with its evidence stated accurately, because the obvious version of this story is false. **On node
+  3 the change did not land.** The attempt-5 rationale said *"cut n_epochs 15->8 to bring total
+  wall-time near node 1's"*, `repair_verify` answered `unmet: ['grad_accum', 'n_epochs']`, no
+  repaired file sets it and `config.yaml` still reads 15 — so this node is NOT an instance of the
+  defect landing. It is an instance of the engine ASKING for it and the repair failing to do what it
+  said, which are two different bugs and only one of them is this row.
+  **Why the row exists anyway.** The ask is designed in, not accidental:
+  `engine/crash_repair.py::_repair_error_context`'s `[failure kind: timeout]` directive tells the
+  Developer to reduce compute by *"fewer estimators/boosting rounds, **fewer epochs**, fewer CV folds
+  or seeds…"*. A repair acting on a CORRECT timeout diagnosis has exactly the authority node 3's
+  rationale claimed, and if it applies the change there is nothing that marks the resulting number.
+  `node_repaired` carries `files`/`changed`/`rationale`/`verified`; `node_evaluated` carries the
+  metric; no row says "this experiment's declared training length is no longer the one its siblings
+  ran". `engine/repair_verify.py` is the nearest rung and answers a different question — did the diff
+  do what the rationale SAID — so a repair that states "cut n_epochs 15->8" and does it is `verified`,
+  which is correct and is precisely the problem. Note also that the only thing that stopped it here
+  was a MISS by the repair, i.e. nothing that can be relied on: had `unmet` been `verified`, the
+  number this node eventually reports would have been R-Drop at 8 epochs ranked against node 1's
+  15-epoch 0.7384, inside the same rationale that names that comparison.
+  **Not folded into the row above, on purpose.** That one is about what the repairer may SEE; this is
+  about what the RECORD says after it acts. Widening the first cannot touch the second by
+  construction (docs/36: a wider action space must not widen the trusted set), and a better-informed
+  repairer is if anything MORE likely to correctly conclude "this really is too slow, cut the epochs".
+  **Sketch, not a decision.** The comparison-bearing quantity is whatever the Researcher's Idea
+  declared; a repair that changes one is not illegitimate — the alternative is discarding the node —
+  it is *unremarked*. Candidates, increasing cost: a `comparability` note minted on `node_repaired`
+  when a repair's diff moves a declared idea parameter, carried onto `node_evaluated` and rendered
+  beside the metric the way `best_metric_caveats` renders the salvage and trust-gate caveats
+  (`engine/champion_caveats.py` is the shape); or the stronger form, where such a node is admitted
+  but held out of same-family ranking. Both need a definition of "declared parameter" the engine can
+  DERIVE rather than a model assert, which is the open design question — and note that
+  `repair_verify`'s claim extractor already parses parameter names out of a rationale, which is the
+  wrong side of the trust line to build this on (the agent writes the rationale).
+  **Evidence to start from:** `runs/rubertlite-dr-unified-v8` node 3, attempts 4 and 5 (the ask, the
+  claim, and the `unmet` that recorded the miss).
 
 - **[FIXED 2026-08-15] A superseded prefetch retired its IDEA, and the board then forbade
   re-proposing it.** The Layer-5 refund returns the node SLOT of a speculative build the Card

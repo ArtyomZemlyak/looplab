@@ -477,6 +477,52 @@ one real run turned an out-of-credits `402` into **2345 `node_repaired` events o
 wall-clock actually went (LLM vs eval vs repair vs tools, per node **and** run-level, reconciled
 against the run's real duration with the untraced remainder named).
 
+### What the triage judge is allowed to look at
+
+Until 2026-08-15 the answer was: `res.stderr[-500:]`. Five hundred characters — the tail of one
+stream, prefixed with the failing stage's name. That is the *whole* evidence base for the role whose
+job is "why did this stage die, and what should change", and on a long run it is not a summary of the
+failure, it is **the last frames of whatever happened to be rendering when the process died**.
+
+The measurement that ended it is `runs/rubertlite-dr-unified-v8` node 3. Its `train` stage declared a
+22,000 s ceiling and was killed at 22,003 s, and its log holds two progress bars on different totals:
+the training bar reached `10590/10590 [5:29:35]` and printed `{'train_runtime': 19775.3, …, 'epoch':
+14.98}` — all fifteen epochs, done — after which a retrieval phase started its own bar and was killed
+at `223/361 [31:29<19:50]`, about twenty minutes from a result. The 522-character `error_in` on that
+`node_repaired` row contains the last two renders of the *second* bar and nothing else. The verdict
+read that bar's elapsed field as training progress ("node 3 is still in epoch 1 at 31:20"; `31:20` is
+verbatim the `222/361` render) and prescribed halving the batch **and** cutting `n_epochs` 15 → 8.
+Six GPU-hours went in the bin — and are going in again. That epochs cut **never landed**:
+`repair_verify` stamped `unmet: ['grad_accum', 'n_epochs']` on the same row, no repaired file sets
+it and the node's `config.yaml` still reads `n_epochs: 15`. So the wrong diagnosis bought a fix
+that is inert against the real failure — attempt 6 is re-running the same 10,590 steps, measured
+live at `1928/10590 [57:46]` (1.798 s/step), which projects 19,038 s of training plus ~3,058 s of
+retrieval at attempt 5's own pace: 22,096 s against the same 22,000 s ceiling.
+
+With `repair_log_tools` on (the default) the judge gets the same `read_log` / `metric_series` pair
+the two live-eval watchdogs already have, over the same map: the stage logs this eval's own resolved
+plan names, chosen by NAME and never by path, each read a bounded seek whose answer states the bytes
+it covered. One `metric_series(metric="step", whole_run=true)` on that log answers the question the
+tail could not: the counter reached 10,590 of 10,590, and the `223` belongs to a lane whose total is
+361. On a node that really *was* still training (v6 node 5's timeout, killed at `4614/7060`) the same
+call says so, which is the point — the tools are not a thumb on the scale toward "it finished".
+
+**`LogSource.floor` matters more here than anywhere else.** A repair runs when an attempt has just
+died, on a log every earlier attempt of that node also appended to; the floor is
+`attempt_byte_floor` over the snapshot taken *before this attempt started*, so a repairer diagnosing
+attempt N cannot read attempt N-1's curve as its own. That snapshot is why the log plan is resolved
+at the top of every attempt rather than lazily at the failure — by then there is no "before" left to
+take.
+
+**It widens what the judge can SEE and nothing it can decide.** The verdict vocabulary is still
+`repair` / `abandon` / `reject_idea`, both fail-closed degradations above are unchanged, and the
+terminal below the triage call still carries the eval's own authenticated failure `reason`. Nothing
+a model reads through these tools can reach a metric, a champion, selectability or a violation — it
+is text the candidate's own script wrote, which is exactly the line `docs/36` draws.
+
+Turn it off and the paid call you have always made is reproduced byte for byte, prompt included; a
+run resumed from a snapshot written before the field existed gains nothing.
+
 ### …and the same breaker on the **proposal** path
 
 The Researcher degrades too, and until 2026-08-05 nothing noticed. When its provider is unreachable
@@ -587,6 +633,7 @@ stripped). A missing file falls back to the built-in default.
 | `tool_strategist_system` | The agent (tool-using) Strategist |
 | `pilot_system` | The unified agent's action pilot (chooses the next macro action) |
 | `triage_system` | The unified agent's crash triage (retry / repair / abandon) |
+| `triage_look_invitation` | The sentence that tells crash triage its 500-char stderr tail may be about a DIFFERENT PHASE than the one it is diagnosing. Spliced only when `repair_log_tools` actually wired the log tools, so it is a separate key: with the tools off the historical ask is reproduced byte for byte |
 | `foresight_system` | The foresight ranker (predict-before-execute idea/hypothesis prioritization) |
 | `bestofn_judge_system` | The best-of-N judge (picks the best of N candidate implementations) |
 | `merge_system` | The hybrid-merge adjudicator (lesson & hypothesis-board consolidation); `$kind` and `$detail` vars |

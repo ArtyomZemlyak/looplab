@@ -531,6 +531,24 @@ class Settings(BaseSettings):
     # bounded: up to `train_monitor._MONITOR_LOOK_TURNS` extra round trips per tick, and a default
     # tool read is a 256 KiB seek (~12 ms) — see that module's measured cost table.
     train_monitor_tools: bool = True
+    # The same permission for the CRASH/TIMEOUT TRIAGE judge — the role whose whole job is "why did
+    # this stage die", and the only one still deciding it from a slice. What it is handed is
+    # `_eval_failure_text`'s `res.stderr[-500:]`: five hundred CHARACTERS, not the watchdog's 128 KiB.
+    # ON by default because that slice was measured insufficient in the sharpest possible way —
+    # `runs/rubertlite-dr-unified-v8` node 3 finished all 15 epochs (`10590/10590`, `'epoch': 14.98`)
+    # and was killed 20 minutes into a RETRIEVAL bar; the 522-char `error_in` held only that second
+    # bar, and the verdict read its elapsed field as training progress ("still in epoch 1 at 31:20").
+    # It then prescribed a fix for a problem the node did not have. (Its `n_epochs` 15->8 never
+    # landed — `repair_verify` stamped `unmet` on that row and `config.yaml` still says 15 — so the
+    # measured cost is not an altered experiment but an inert one: attempt 6 re-ran the same 10,590
+    # steps at 1.798 s/step, projecting 22,096 s against the same 22,000 s ceiling.)
+    # OFF restores the historical ask byte for byte (no `_REPAIR_LOOK_INVITATION`, no extra tools).
+    # Cost, measured on node 3's real workdir (mean of 5, warm): the engine-side derivation is
+    # 1.35 ms per failed attempt for the whole added path (log plan + attempt-floor snapshot +
+    # source map), plus up to `UnifiedAgent._REPAIR_LOOK_TURNS` extra round trips whose tool calls
+    # cost 7 ms (a `read_log` tail) to 525 ms (a whole-run hourly scan of the real 10.0 MB log).
+    # Paid once per FAILED ATTEMPT, not on a timer like the watchdog's.
+    repair_log_tools: bool = True
     # ASHA live-curve watchdog (sibling of the training monitor): reads the latest INTERMEDIATE value of
     # the objective metric off the live log (reusing the eval's OWN metric reader). Finished-endpoint rank
     # remains advisory. An opt-in KILL additionally requires an operator-declared metric.resource_key and
@@ -2239,6 +2257,11 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # An old run resumes WITHOUT the log tools: this table exists so a resume cannot silently add
     # paid calls, and an agentic tick costs up to `_MONITOR_LOOK_TURNS` extra round trips.
     "train_monitor_tools": False,
+    # Same rule, same reason, for the triage judge's look: an old run resumes with the historical
+    # single ask. It needs its OWN row rather than riding on the one above — they are two independent
+    # `Settings` fields, and a snapshot written between the two changes carries `train_monitor_tools`
+    # explicitly (so no `setdefault` fires for it) while genuinely predating this one.
+    "repair_log_tools": False,
     "asha_live": False,
     "asha_live_kill": False,
     "asha_live_quantile": 0.5,
