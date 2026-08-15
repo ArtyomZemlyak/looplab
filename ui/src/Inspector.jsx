@@ -11,7 +11,8 @@ import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
-import { nodeFeasibilityStatus, isSalvagedMetricViolation } from './trustSemantics.js'
+import { nodeFeasibilityStatus, isSalvagedMetricViolation, OBJECTIVE_MEASURED,
+  OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceHelp } from './trustSemantics.js'
 import { EXTRA_METRIC_CHANNEL_HELP, EXTRA_METRIC_CHANNEL_LABEL,
   extraMetricChannel } from './extraMetrics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
@@ -2516,7 +2517,9 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
   </>
 }
 
-function Metrics({ n, detail, state, runId }) {
+// Exported for the same reason `MetricCurves` is: nothing in the suite MOUNTS `Inspector.jsx`, and
+// the objective row's label is a claim about a RECORD that has to be driven, not read off the source.
+export function Metrics({ n, detail, state, runId }) {
   const seeds = detail?.confirm_seeds_detail || {}
   const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
   // Every metric reported anywhere in the run (the objective ★ + all extras), shown for
@@ -2531,10 +2534,24 @@ function Metrics({ n, detail, state, runId }) {
   // `train_auc` had no way to tell which was measured and which the candidate simply printed.
   // `unknown` is a run recorded before the channel was written down — NOT a synonym for declared:
   // every such value in the preserved corpus was in fact auto-captured.
+  //
+  // AND THE ★ ROW'S OWN SOURCE, which said a hardcoded `measured` about every node until
+  // 2026-08-15 — including one whose `violations` carry `metric_salvaged`, which this same record
+  // describes to the Trust tab as "Metric salvaged, not measured". `trustSemantics.js` owns the
+  // decision (see `objectiveMetricSource`): the vocabulary must have ONE home, because two homes
+  // drifting is exactly the defect, and the JSX one was reachable by no test.
   const nodes = Object.values(state?.nodes || {})
   const extraKeys = [...new Set(nodes.flatMap(x => Object.keys(x.extra_metrics || {})))]
   const champ = state?.best_node_id != null ? nodes.find(x => x.id === state.best_node_id) : null
   const showChamp = champ && champ.id !== n.id
+  const objective = objectiveMetricSource(n)
+  const objectiveCaveated = objective.channel !== OBJECTIVE_MEASURED
+  // The ★ row prints TWO numbers and the source column can only label one of them. The `best #N`
+  // cell is a DIFFERENT node's record, so it gets its own read rather than inheriting this one —
+  // under `metric_salvage: "select"` the champion is precisely the node that can be salvaged, and a
+  // row reading `salvaged | 0.74 | 0.81` must not leave the second number looking like the measured
+  // one by contrast.
+  const champObjective = champ ? objectiveMetricSource(champ) : null
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
     ...extraKeys.map(k => ({
@@ -2549,11 +2566,23 @@ function Metrics({ n, detail, state, runId }) {
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
         <td>{r.star ? '★ ' : ''}{r.k}</td>
         <td className="muted">{r.star
-          ? <span title="The run's objective: read by the operator's own metric spec on the protected score stage.">measured</span>
+          ? <span className={objectiveCaveated ? 'warn' : ''}
+            title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
           : <span className={r.channel === 'declared' ? '' : 'warn'}
             title={EXTRA_METRIC_CHANNEL_HELP[r.channel]}>{EXTRA_METRIC_CHANNEL_LABEL[r.channel]}</span>}</td>
         <td>{fmt(r.mine)}</td>
-        {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+        {showChamp && <td>{r.star && champObjective.channel !== OBJECTIVE_MEASURED
+          ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
+            {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
+          : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+    {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
+        scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
+        is the number that drives selection, so the caveat is printed rather than only hovered. It
+        renders the SAME sentence the tooltip carries, from the same call, so the two cannot drift. */}
+    {objectiveCaveated && <div className="muted">
+      The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
+      {objectiveSourceHelp(objective)}
+    </div>}
     {anyUnverified && <div className="muted">
       Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing
       declaring or checking them — the code that produced the number also chose to print it. They

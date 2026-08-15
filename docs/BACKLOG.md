@@ -362,6 +362,41 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15, same day] The Metrics tab called a number `measured` that the engine refuses
+  to call measured** (found by the merge-day record-honesty review). `ui/src/Inspector.jsx::Metrics`
+  built the objective ★ row with no source of its own and rendered a HARDCODED `measured` under the
+  tooltip *"read by the operator's own metric spec on the protected score stage"* — for every node,
+  including the ones `trustSemantics.nodeFeasibilityStatus` describes one tab over as *"Metric
+  salvaged, not measured"*. **Reproduced by driving the real component** (SSR-loaded, four records,
+  pre-fix): a `metric_salvaged` node, a `metric_subject_unbound` node, a `metric_salvage: "select"`
+  node — the rung where a salvaged number COMPETES FOR CHAMPION and mints no violation row at all —
+  and a clean node all rendered the BYTE-IDENTICAL cell. So the tab an operator opens to read
+  numbers flattened exactly the distinction the salvage/subject vocabulary exists to draw: the one
+  between `runs/rubertlite-dr-unified-v6` node 4's recorded 0.225 (a human's checkpoint an absolute
+  path in an editable config pointed at, `train.log` RECALL@100 0.726) and a number measured on what
+  a node produced. **THE FIX is the vocabulary, not three special cases:** `trustSemantics.js` gains
+  `objectiveMetricSource(node)` / `objectiveSourceHelp(source)` — a pure model beside the React half,
+  driven by `node --test`, because the decision was inline in JSX and nothing in the suite MOUNTS
+  `Inspector.jsx`, which is why this survived. THREE channels, `measured` | `salvaged` |
+  `measured, no subject`, and the third is deliberately NOT the second: an unbound metric WAS
+  measured by the protected scoring path and nothing was recovered, so "salvaged" is a false
+  accusation one condition over — the trap `isUnboundSubjectViolation`'s own comment records.
+  `salvaged` is one word for both salvage rungs, because `select` removes the EXCLUSION and not the
+  fact; the tooltip carries which rung, which stage failed, and which subject rule. Two states are
+  labelled `measured` on the record's own authority and both are argued in the model: a CONSTRAINT
+  violation (a fact about a bound — feasibility is an EVERY-row question, "what is this number" is an
+  ANY-row one) and `declaration_repaired` (`salvaged: False` is spelled out and the engine's docstring
+  says it "reads as measured everywhere"; the tooltip carries the correction). Driven in
+  `ui/test/metricsTabObjectiveSource.test.js` — 9 model cases plus the component RENDERED through
+  `renderToStaticMarkup`, with a genuinely-measured node as the negative control, and the render half
+  fails on a mutated copy of the tree carrying the pre-fix row. **Residue, stated not patched:** an
+  unbound subject under the non-enforcing `metric_subject` rungs (`audit`/`off`) mints no row and is
+  NOT labelled — that is 82 of 83 preserved corpus metrics, so a label there fires on the rule rather
+  than the finding, and it would put this tab back in disagreement with the Trust tab, which reads
+  the same record as "Feasible". And `panels.jsx::ParetoPanel` populates its front with
+  `n.feasible !== false`, so a `select`-admitted salvaged node's metric is ranked there with no
+  caveat at all — the same defect one surface over, now one `objectiveMetricSource` call from fixed.
+
 - **[FIXED 2026-08-15, same day — and the fix cost nothing, which is the part worth keeping]
   `metric_series(whole_run=true)` could not reach the head of any log over 33.5 MB, and said the
   opposite** (found 2026-08-15 auditing the merge day's `tools/log_tools.py`). `_MAX_SCAN_BYTES`
