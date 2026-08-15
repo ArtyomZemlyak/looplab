@@ -100,7 +100,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 178
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 179
+    # 208 -> 209 Settings and 178 -> 179 catalogued rows on 2026-08-15: `repair_log_tools`,
+    # whether the crash/timeout TRIAGE judge may query the failed eval's stage logs instead of
+    # diagnosing from `res.stderr[-500:]`. A row rather than an uncurated omission for the same
+    # reason `train_monitor_tools` beside it is one — it changes what the evidence for a paid,
+    # node-ending judgement IS, and it buys extra model round trips when it is on.
     # 199 -> 201 Settings and 168 -> 170 catalogued rows: TWO rows landed together on 2026-08-13.
     # `assistant_time_budget_s` gave the CHAT its own wall clock — `run_turn` read the engine-wide
     # `agent_time_budget_s` and then applied `or 300.0`, so the neighbouring row's documented
@@ -128,7 +133,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 211
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 212
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

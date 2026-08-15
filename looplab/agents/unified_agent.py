@@ -177,7 +177,8 @@ class UnifiedAgent(WrapsDeveloper):
     )
 
     def _pilot_emit(self, messages: list, emit_spec: dict, finalize, fallback, *,
-                    state=None, bind_state: bool = True, transport_fallback=None):
+                    state=None, bind_state: bool = True, transport_fallback=None,
+                    extra_tools=None, extra_turns: int = 0):
         """Drive the pilot tool loop for one emit, containing everything but a budget stop.
 
         `choose_action` and `triage_crash` differ only in prompt, schema and coercion; this owns what
@@ -203,9 +204,31 @@ class UnifiedAgent(WrapsDeveloper):
         `bind_state` is a flag rather than an inference from `state is not None` because the two
         callers genuinely differ: the pilot binds unconditionally, while triage binds only when it
         was handed a run state — collapsing that would silently change which tools are reachable.
+
+        `extra_tools` is a PER-CALL provider merged over the standing pilot toolset for this emit
+        only, and `extra_turns` the turn grant that comes with it. Both default to the identity: with
+        no extra provider the loop is handed `self._pilot_tools` itself (not a one-element composite,
+        which would be a different object with a different `specs()` ordering) and `self._loop_opts`
+        unchanged, so every existing caller's request is byte-identical. The pilot toolset is FIRST in
+        the composite because `CompositeTools` dedups first-provider-wins: a per-call provider must
+        never be able to shadow a standing tool by reusing its name.
+
+        The grant is ADDITIVE and only over a FINITE budget. `max_turns=0` means unlimited, and
+        `0 + n` would silently turn an operator's "no turn cap" into a cap of n — the loop is already
+        bounded there by `agent_emit_after`/`agent_emit_force` and the stuck detector, which is what
+        that configuration chose.
         """
         if bind_state and self._pilot_tools is not None and hasattr(self._pilot_tools, "bind_state"):
             self._pilot_tools.bind_state(state, None)
+        tools = self._pilot_tools
+        loop_opts = self._loop_opts
+        if extra_tools is not None:
+            from looplab.agents.agent import CompositeTools
+            tools = (CompositeTools([self._pilot_tools, extra_tools])
+                     if self._pilot_tools is not None else extra_tools)
+            _configured = int(getattr(loop_opts, "max_turns", 0) or 0)
+            if _configured > 0 and extra_turns > 0:
+                loop_opts = loop_opts.replace(max_turns=_configured + int(extra_turns))
         # Resolve through `agent.py`'s module global at CALL time, not at import time: a
         # module-level `from ... import drive_tool_loop` early-binds the function object, so a
         # monkeypatch on the documented seam `looplab.agents.agent.drive_tool_loop` (CLAUDE.md;
@@ -220,8 +243,8 @@ class UnifiedAgent(WrapsDeveloper):
         # keeps its own no-emit `fallback`: only the exception path is evidence about the transport.
         _transport = transport_fallback if transport_fallback is not None else fallback
         return resilient(
-            lambda: drive_tool_loop(self._pilot_client, self._pilot_tools, messages, emit_spec,
-                                    finalize=finalize, fallback=fallback, **self._loop_opts),
+            lambda: drive_tool_loop(self._pilot_client, tools, messages, emit_spec,
+                                    finalize=finalize, fallback=fallback, **loop_opts),
             lambda: _transport(messages))
 
     def choose_action(self, state: RunState, legal: list[dict], recommended: Optional[dict] = None,
@@ -358,9 +381,49 @@ class UnifiedAgent(WrapsDeveloper):
         "`triage_crash` exactly once with your `action` and a one-sentence `rationale`."
     )
 
+    # The sentence that tells the triage judge the stderr tail is not all it may have. Spliced ONLY
+    # when log tools are actually wired (`engine/train_monitor.py::repair_log_tools`), at the SAME
+    # position pattern as `budget` and `depth` — the two other additive lines above the evidence
+    # block — so `repair_log_tools=false` reproduces the historical message byte for byte.
+    #
+    # It NAMES the failure it exists to end, for `train_monitor._LOOK_INVITATION`'s reason: a model
+    # handed both a tail and a tool still reasons from the tail. On `rubertlite-dr-unified-v8` node 3
+    # the whole 522-character tail was two renders of a RETRIEVAL progress bar that started AFTER
+    # training had finished all 15 epochs, and the verdict read its elapsed field as training
+    # progress — "node 3 is still in epoch 1 at 31:20" — about a run that was twenty minutes from a
+    # result. Telling it the window is small is not the same as telling it the window may be about a
+    # DIFFERENT PHASE than the one it is diagnosing, so this says the second thing.
+    _REPAIR_LOOK_INVITATION = (
+        "YOU CAN LOOK AT THE LOGS. The error below is a SHORT tail — a few hundred characters — of "
+        "one stream, and on a long run it is usually the last frames of whatever was rendering when "
+        "the process died. THAT IS NOT NECESSARILY THE PHASE THAT FAILED: a training stage often "
+        "finishes its epochs and then encodes/evaluates/retrieves under a SECOND progress bar with a "
+        "different total, and the elapsed time in that bar is NOT training time. Before you say how "
+        "far the run got, or that it never started, or that it was too slow, USE YOUR TOOLS: "
+        "`metric_series` (metric='step' or 'epoch', whole_run=true) for what the run actually "
+        "completed, and `read_log` to search for the traceback, the final summary line, or the "
+        "run's start. If the tools disagree with the tail, the tools have more evidence.\n"
+        "This matters most for a TIMEOUT: 'cut the epochs' is the wrong fix for a run that already "
+        "finished its epochs, and it silently changes the experiment the node was built to measure.")
+
+    # The turn grant that comes with those tools, and it is deliberately NOT the watchdog's
+    # `_MONITOR_LOOK_TURNS=6`, which is that judge's WHOLE budget for a call with nothing else to
+    # spend it on. This is ADDITIVE over a budget the operator already sized for the pilot tools
+    # (`read_code`/`find_analogous`), so it should cover only the new shape and nothing else: the
+    # whole-run series that answers "what phase is this", one `read_log` that finds the traceback or
+    # the final summary line, and one narrower follow-up. That is three, plus one spare for a
+    # refusal-and-retry (a mistyped `log` name costs a turn and returns the list of real ones). The
+    # emit turn and the orientation turns are not new and are already paid for.
+    #
+    # Four rather than "whatever the loop allows" because triage is on the EVAL-BLOCKING thread and
+    # fires at the worst moment — a timeout repair happens after a multi-hour node has already died,
+    # with the GPU idle behind it. It applies only when `agent_max_turns` is finite; see `_pilot_emit`
+    # for why an unlimited budget stays unlimited.
+    _REPAIR_LOOK_TURNS = 4
+
     def triage_crash(self, node, error: str, attempt: int, *, state: Optional[RunState] = None,
                      brief: str = "", history: str = "", stages_passed: Optional[int] = None,
-                     attempts_left: Optional[int] = None) -> Optional[dict]:
+                     attempts_left: Optional[int] = None, tools=None) -> Optional[dict]:
         """Decide what to do with a just-crashed node: returns ``{"action", "rationale"}`` where
         action ∈ {repair, abandon, reject_idea} — or one of the engine's two fail-closed verdicts
         when this call could not produce one of those (see the bottom of this docstring) — or
@@ -375,6 +438,21 @@ class UnifiedAgent(WrapsDeveloper):
         `attempts_left` is the remaining hard cap. Both exist because this call IS the loop's
         stopping rule — see `_TRIAGE_SYSTEM`. All three are keyword-only with empty/None defaults, so
         an older caller (and every test double) still gets the historical single-traceback prompt.
+
+        `tools` (from `engine/train_monitor.py::repair_log_tools`) is the fourth such argument and the
+        one that stops the ENGINE choosing for this judge what it is allowed to see. The three above
+        are all still fixed slices; this one lets it ASK the dead eval's own stage logs — what step
+        the run reached, whether a second phase had already started, where the traceback is. The
+        stderr tail still arrives spliced, so a model that ignores the tools answers exactly as it did
+        before, and `_REPAIR_LOOK_INVITATION` is what tells it they are there. Additive by
+        construction: `_TRIAGE_SYSTEM` and every evidence header are unchanged, and `tools=None`
+        reproduces the historical message byte for byte.
+
+        It widens what this judge can SEE and nothing else. The verdict vocabulary, the coercion, both
+        fail-closed degradations and the caller's terminal are untouched, so nothing a model reads
+        here can reach a metric, a champion, selectability or a violation — the text these tools return
+        is what the candidate's own script wrote, which is `engine/metric_salvage.py`'s rule two
+        packages over.
 
         NEITHER degradation path answers "repair", and they answer DIFFERENT things: `_finalize`'s
         out-of-enum branch says `unreadable` (the model is alive, this node stops) and `_fallback`
@@ -395,12 +473,16 @@ class UnifiedAgent(WrapsDeveloper):
                   f"Attempts left before the hard cap stops this node anyway: {attempts_left}.\n")
         depth = ("" if stages_passed is None else
                  f"Pipeline stages that passed before this failure: {stages_passed}.\n")
+        # Same shape as the two lines above it (empty string when the thing it describes is absent),
+        # which is what makes `tools=None` byte-identical to the historical prompt.
+        look = ("" if tools is None else
+                render(self.prompts, "triage_look_invitation", self._REPAIR_LOOK_INVITATION) + "\n")
         messages = [
             {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)},
             {"role": "user", "content": (
                 (brief + "\n" if brief else "") +
                 f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"
-                + budget + depth +
+                + budget + depth + look +
                 f"--- ERROR (stderr tail) ---\n{error}\n"
                 + (f"{history}\n" if history else "") +
                 f"--- CODE (tail) ---\n{code_tail}\n"
@@ -515,7 +597,8 @@ class UnifiedAgent(WrapsDeveloper):
         # run-halting `unanswerable`.
         return self._pilot_emit(messages, emit_spec, _finalize, _no_emit,
                                 state=state, bind_state=state is not None,
-                                transport_fallback=_transport_failed)
+                                transport_fallback=_transport_failed,
+                                extra_tools=tools, extra_turns=self._REPAIR_LOOK_TURNS)
 
     # --------------------------------------------------- Repair critic (F8: the stop, not the fix)
     _REPAIR_CRITIC_SYSTEM = (

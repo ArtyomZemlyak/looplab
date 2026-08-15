@@ -179,8 +179,9 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     seen = {}
 
     def spy(_self, messages, emit_spec, finalize, fallback, *, state=None, bind_state=True,
-            transport_fallback=None):
-        seen.update(state=state, bind_state=bind_state)
+            transport_fallback=None, extra_tools=None, extra_turns=0):
+        seen.update(state=state, bind_state=bind_state, extra_tools=extra_tools,
+                    extra_turns=extra_turns)
         # The two degradations must arrive as two DIFFERENT callables: the loop's no-emit fallback
         # says `unreadable` (the endpoint answered), the transport one says `unanswerable` and
         # carries the marker. One callable for both is how a prose-answering live endpoint paused a
@@ -197,6 +198,10 @@ def test_triage_without_a_run_state_reaches_the_helper_with_binding_off(monkeypa
     agent.triage_crash(node, "boom", 1)
     assert (seen["state"], seen["bind_state"]) == (None, False), (
         "triage with no run state must not ask the helper to bind tools to it")
+    # ...and a caller that was given no log tools asks for no per-call provider, so the loop is handed
+    # `self._pilot_tools` itself and `self._loop_opts` unchanged — the historical request byte for
+    # byte (`engine/train_monitor.py::repair_log_tools`, `Settings.repair_log_tools`).
+    assert seen["extra_tools"] is None
     from looplab.engine.triage import (TRIAGE_TRANSPORT_FAILURE_KEY, UNANSWERABLE_TRIAGE_ACTION,
                                        UNREADABLE_TRIAGE_ACTION, is_transport_failure_verdict)
     assert seen["no_emit"]["action"] == UNREADABLE_TRIAGE_ACTION

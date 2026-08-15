@@ -574,6 +574,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         train_monitor_kill = _opt("train_monitor_kill")
         train_monitor_kill_confidence = _opt("train_monitor_kill_confidence")
         train_monitor_tools = _opt("train_monitor_tools")
+        repair_log_tools = _opt("repair_log_tools")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
         asha_live_quantile = _opt("asha_live_quantile")
@@ -1058,6 +1059,12 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # a slice. Read by `train_monitor.monitor_log_tools`, the ONE place the two watchdogs build
         # their provider, so both honour one switch.
         self._train_monitor_tools = bool(train_monitor_tools)
+        # Whether the CRASH/TIMEOUT TRIAGE judge may LOOK at the dead eval's stage logs instead of
+        # diagnosing from `_eval_failure_text`'s 500-char stderr tail. Read by
+        # `train_monitor.repair_log_tools`, the ONE place the repair path builds its provider — the
+        # same shape as the line above, and deliberately its own switch: the watchdog's tools are paid
+        # on a TIMER up to ~200 times per node, this one is paid once per failed attempt.
+        self._repair_log_tools = bool(repair_log_tools)
         # ASHA live-curve rank watchdog (advisory in the product surface; opt-in kill). off == today.
         self._asha_live = bool(asha_live)
         self._asha_live_kill = bool(asha_live_kill)

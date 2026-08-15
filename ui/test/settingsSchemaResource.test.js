@@ -69,7 +69,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   prescribes rather than by bumping the number: the catalogue was 178 keys and removing exactly
   //   `auto_extra_metrics` gave back 177, so this is one real addition with nothing renamed away
   //   underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 178)
+  //   178 -> 179 (2026-08-15): `repair_log_tools` — whether the crash/timeout TRIAGE judge may
+  //   query the failed eval's stage logs instead of diagnosing from the last 500 characters of
+  //   its stderr. NINTH occurrence, and the Python guard caught it first for the fifth
+  //   consecutive time. Verified as the paragraph prescribes rather than by bumping the number:
+  //   the catalogue was 179 keys and removing exactly `repair_log_tools` gave back 178, so this
+  //   is one real addition with nothing renamed away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 179)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

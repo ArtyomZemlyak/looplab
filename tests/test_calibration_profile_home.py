@@ -59,7 +59,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-15  redact_output False -> True  (intentional SECURITY-default change; field set
 #               unchanged, but the complete settings envelope and therefore old receipts genuinely
 #               changed). See the second history block below.
-_EXPECTED_DIGEST = "sha256:b4cbea5c0cca14fadb17d5714e9101d68828c654a915ff12286046e5e914d97a"
+_EXPECTED_DIGEST = "sha256:fbbfc189001e2a66c099f76e3e8ba51d7b9c045a275f2bf6139f241732f2dce8"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -248,7 +248,20 @@ _EXPECTED_DIGEST = "sha256:b4cbea5c0cca14fadb17d5714e9101d68828c654a915ff1228604
 #               `implementation_digest`, `runtime_scope_sha256`, and the `forced_debug` ->
 #               `no_forced_debug` scorer-fidelity rename — so the revocation this line records costs
 #               nothing that was not already spent.
-_EXPECTED_FIELD_COUNT = 208
+#   2026-08-15  + repair_log_tools  (may the crash/timeout TRIAGE judge query the failed eval's
+#               stage logs instead of diagnosing from `res.stderr[-500:]`). The 'field set changed
+#               too' branch: an AST scan reports exactly this one field ADDED and none removed, so
+#               `_EXPECTED_FIELD_COUNT` goes 208 -> 209 and both pins are re-set.
+#               INERT for a calibration replicate, twice over — the profile's toy workload is the
+#               `solution.py` path, which writes no per-stage `<stage>.log`, so `repair_log_tools`
+#               resolves to `None` at `needs_log_snapshot` before any provider is built; and a
+#               replicate that never fails never reaches `_triage_crash` at all. The guard is
+#               deliberately not clever enough to exempt an inert knob, and re-pinning is right
+#               rather than merely necessary for the usual reason: this field decides what EVIDENCE
+#               a paid stop decision is made on, and an envelope that cannot state that is not the
+#               envelope a later receipt would be compared against. Old receipts SHOULD stop
+#               verifying; the one on this box was already dead on four independent axes.
+_EXPECTED_FIELD_COUNT = 209
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

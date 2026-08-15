@@ -64,6 +64,13 @@ PROMPT_KEYS: tuple[str, ...] = (
     # chain circling? vs what do I change next?) and folding it into the triage prompt would change
     # the shipped text of a paid agent whose verdict is the loop's primary stop.
     "repair_critic_system",
+    # The triage judge's LOOK invitation — the sentence that tells it the stderr tail may be about a
+    # different phase than the one it is diagnosing, spliced only when `repair_log_tools` actually
+    # wired the log tools. A SEPARATE key from `triage_system` because it is CONDITIONAL text: an
+    # operator override of the system prompt must not lose it, and (the direction that matters more)
+    # `repair_log_tools=false` must keep reproducing the historical message byte for byte, which it
+    # cannot if the sentence lives inside a prompt that is always rendered.
+    "triage_look_invitation",
     "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
     # The concept-vocabulary consolidation prompt (doc 25 SE-10). A SEPARATE key from
     # `merge_system`: consolidating an axis/slug vocabulary is a different job from the generic

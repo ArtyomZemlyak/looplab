@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 178
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 179
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -88,7 +88,17 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # argument for showing it: 12 of the 12 secondary metrics in this box's preserved runs came through
 # that undeclared channel, one of them a schema VERSION number, and all of them were rendered beside
 # the protected objective with nothing marking the difference.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "36f5eb275a4bd27c918945673ab6cd9fd1a94ea787493aba590c5f0b2578bf03"
+# (179 since `repair_log_tools`: may the crash/timeout TRIAGE judge query the dead eval's stage logs
+# instead of diagnosing from `res.stderr[-500:]`? Curated beside the watchdog row above because it is
+# the same question about a role whose slice is 260x smaller, and because the measurement is sharper:
+# on `rubertlite-dr-unified-v8` node 3 the whole 522-character tail was a RETRIEVAL progress bar that
+# started after training had finished all 15 epochs, and the verdict read its elapsed field as
+# training progress and prescribed a fix for a problem the node did not have, discarding 6.1
+# GPU-hours — and, since its `n_epochs` 15->8 never landed (`repair_verify`: `unmet`), buying an
+# attempt 6 that re-ran the same 10,590 steps into the same ceiling. It buys extra paid round trips,
+# once per FAILED ATTEMPT rather than on a timer, which is the cost half of the same question every
+# watchdog row here answers.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "352c95e596f0c5eea5f3e96b3c1e9b82556e55d497a43f658d515bc5841d3eb0"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

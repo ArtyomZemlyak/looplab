@@ -73,6 +73,12 @@ class EngineOptions:
     # ON is already opting into the paid verdict, and the slice it would otherwise get was measured
     # insufficient — see the Settings field's comment.
     train_monitor_tools: bool = True
+    # Let the CRASH/TIMEOUT triage judge query the failed eval's stage logs instead of deciding from
+    # `res.stderr[-500:]`. NOT a divergence for the same reason as the row above and one more: it is a
+    # modifier on a call the engine ALREADY makes once per failed attempt (`_triage_crash`), so a bare
+    # `EngineOptions` caller gains no new call — only a better-informed one, and only when the eval
+    # wrote a nameable stage log at all (the toy/dataset paths never do).
+    repair_log_tools: bool = True
     asha_live: bool = False              # ASHA live-curve rank watchdog (advisory); off = today
     asha_live_kill: bool = False         # opt-in: tree-kill a persistently-underperforming node early
     asha_live_quantile: float = 0.5      # rank bar = this quantile of finished siblings' finals (median)

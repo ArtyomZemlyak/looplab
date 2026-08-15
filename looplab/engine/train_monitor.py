@@ -1215,6 +1215,53 @@ def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
     return training_log_digest(raw, max_lines=max_lines, max_chars=max_chars)
 
 
+def needs_log_snapshot(engine, eval_spec) -> bool:
+    """Must this attempt take the pre-attempt log snapshot and resolve its log plan?
+
+    A NAMED RULE because it has three independent readers with different lifetimes and the third one
+    cannot take its own: the two watchdogs read the logs WHILE the attempt runs, and the repair
+    triage reads them AFTER it has died. A snapshot is a "before" — deriving it lazily at the failure
+    is too late, because by then the attempt's own bytes are in the file and there is nothing left to
+    take a before OF, so every `LogSource.floor` would be 0 and a repairer would read its
+    predecessor's curve as its own. So the decision has to be made where the attempt STARTS, on
+    behalf of a reader that has not been asked for anything yet.
+
+    It was an inline `or` of the first two clauses in `engine/evaluate.py::_evaluate`, and this
+    change would have made it three — i.e. a rule no test could reach without driving a whole
+    sandboxed eval. Driven on a throwaway copy of the tree, deleting the repair clause from that
+    inline form left every guard in the suite green, which is why it is a function now. Every disjunct is gated on `eval_spec` because only the
+    command-eval path writes the per-stage `<stage>.log` any of this is about; the `solution.py`
+    paths (toy/dataset) have no such log and must keep paying nothing.
+    """
+    if not eval_spec:
+        return False
+    if getattr(engine, "_train_monitor", False):
+        return True
+    if getattr(engine, "_asha_live", False) and isinstance(eval_spec, dict):
+        return True
+    return bool(getattr(engine, "_repair_log_tools", False))
+
+
+def _log_query_tools(workdir, log_plan, log_snapshot):
+    """The `LogQueryTools` provider over THIS eval's stage logs, or None when there is no nameable
+    log yet. The ONE construction both LOOK paths use — the gate is the caller's.
+
+    It exists as its own function because there are now two roles that may look and they must not be
+    able to disagree about WHAT is lookable. The source map is `monitor_log_sources` in both cases —
+    one derivation of rule 2's boundary (`eval_log_plan` over the resolved pipeline) and one reading
+    of rule 1's floor (`attempt_byte_floor`), so a repairer diagnosing attempt N reaches exactly the
+    bytes the watchdog was reading while attempt N ran, and no byte of attempt N-1.
+
+    The map stays a CALLABLE even on the repair path, where the eval is already over and it cannot
+    move. That is deliberate: a second, frozen construction here would be a second answer to "which
+    logs exist", and the whole point of this function is that there is one.
+    """
+    from looplab.tools.log_tools import LogQueryTools
+    if not monitor_log_sources(workdir, log_plan, log_snapshot):
+        return None
+    return LogQueryTools(lambda: monitor_log_sources(workdir, log_plan, log_snapshot))
+
+
 def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     """The log tools this tick's judge may LOOK with, or None to keep the historical one-shot call.
 
@@ -1238,10 +1285,55 @@ def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     """
     if not getattr(engine, "_train_monitor_tools", False):
         return None
-    from looplab.tools.log_tools import LogQueryTools
-    if not monitor_log_sources(workdir, log_plan, log_snapshot):
+    return _log_query_tools(workdir, log_plan, log_snapshot)
+
+
+def repair_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
+    """The log tools the CRASH/TIMEOUT TRIAGE judge may LOOK with, or None to keep the historical
+    stderr-tail-only ask.
+
+    WHY THE REPAIR PATH NEEDED THIS TOO (measured, `runs/rubertlite-dr-unified-v8` node 3, attempt 5)
+    ---------------------------------------------------------------------------------------------
+    The watchdogs got `read_log`/`metric_series` because a bounded tail cannot answer the question
+    they are asked. Triage is asked a HARDER version of the same question — "why did this stage die"
+    — and it was still working from a slice, and a much smaller one: `_eval_failure_text` hands it
+    `res.stderr[-500:]`, five hundred CHARACTERS, where the watchdog's digest at least came off a
+    128 KiB read.
+
+    Node 3 declared a 22,000 s ceiling and was SIGKILLed at 22,003 s. Its `train.log` holds two
+    progress bars with different totals: the training bar reached `10590/10590 [5:29:35]` and the
+    stage then printed `{'train_runtime': 19775.3, …, 'epoch': 14.98}` — all 15 epochs, done — after
+    which a RETRIEVAL bar started and was killed at `223/361 [31:29<19:50]`, about twenty minutes
+    from finishing. The durable `node_repaired.error_in` for that attempt is 522 characters and
+    contains ONLY the last two renders of the second bar. The triage verdict read the second bar's
+    elapsed field as training progress — *"node 3 is still in epoch 1 at 31:20"*, and `31:20` is
+    verbatim the `222/361` render — and prescribed halving the batch AND cutting `n_epochs` 15 -> 8.
+    The evidence that refutes it was 83,697 characters back in the same file, on a plain
+    non-progress-bar line. 6.1 GPU-hours were discarded — and then spent AGAIN: the epochs cut never
+    landed (`repair_verify` stamped `unmet: ['grad_accum', 'n_epochs']` on that row, no repaired file
+    sets it, `config.yaml` still reads 15), so attempt 6 re-ran the SAME 10,590 steps and, measured
+    live at `1928/10590 [57:46]` = 1.798 s/step, projects 19,038 s of training + ~3,058 s of
+    retrieval = 22,096 s against the same 22,000 s ceiling. A wrong diagnosis bought a fix that was
+    inert against the actual failure, which is the cost this widening is meant to stop.
+
+    So the fix is the same one, one role over: let it ASK the log instead of being handed the end of
+    it. Everything else — the boundary, the floor, the source map — is `monitor_log_tools`' and is
+    shared through `_log_query_tools` rather than written a second time.
+
+    A FREE FUNCTION for the same reason its sibling is (see above), and gated on its OWN setting
+    (`Settings.repair_log_tools`) rather than on `train_monitor_tools`: the two are different paid
+    surfaces on different cadences, and an operator who turned the timer-fired watchdog's tools off
+    to stop ~200 agentic ticks per node has said nothing about the one look that happens when a
+    multi-hour node has already died. `getattr` is total over a partially-built engine.
+
+    None also when the eval wrote no nameable log — which is every non-command eval (`solution.py`,
+    toy, dataset) and every failure before the first stage opened its log. `UnifiedAgent.triage_crash`
+    reads `None` as "no extra tools" and splices no invitation, so the off path is the historical
+    prompt and the historical toolset, byte for byte.
+    """
+    if not getattr(engine, "_repair_log_tools", False):
         return None
-    return LogQueryTools(lambda: monitor_log_sources(workdir, log_plan, log_snapshot))
+    return _log_query_tools(workdir, log_plan, log_snapshot)
 
 
 class TrainingMonitorMixin:

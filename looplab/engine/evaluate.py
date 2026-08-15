@@ -59,7 +59,8 @@ from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
                                             declared_pipeline_seconds, developer_stuck_contract,
                                             repair_floor_stop, repair_redone_work_stop)
-from looplab.engine.train_monitor import eval_log_plan, snapshot_training_logs
+from looplab.engine.train_monitor import (eval_log_plan, needs_log_snapshot, repair_log_tools,
+                                          snapshot_training_logs)
 
 # Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
 # Every `to_thread.run_sync` in the engine draws on that default, and an in-flight eval holds a token
@@ -1712,13 +1713,16 @@ class EvaluateMixin:
             while True:
                 _t0 = time.time()
                 # repair/retry attempts reuse the workdir and sandbox stage logs append.
-                # When either watchdog is enabled, snapshot every existing log before this attempt
-                # starts so it cannot rank/classify prior-attempt bytes. Keep the monitor-off path free
-                # of extra filesystem work (`off == today`).
+                # When anything will READ those logs, snapshot every existing one before this attempt
+                # starts, so no reader can rank, classify or diagnose from prior-attempt bytes. Keep
+                # the all-off path free of extra filesystem work (`off == today`).
                 _eval_spec = getattr(self, "_eval_spec", None)
-                _watching_logs = (
-                    (getattr(self, "_train_monitor", False) and bool(_eval_spec))
-                    or (getattr(self, "_asha_live", False) and isinstance(_eval_spec, dict)))
+                # WHO WILL READ THESE LOGS, and therefore whether this attempt owes them a "before".
+                # A named rule (`train_monitor.needs_log_snapshot`) rather than an inline `or`,
+                # because its THIRD reader — the repair triage below — reads only after the attempt
+                # has already died, so the snapshot has to be taken on behalf of something that has
+                # not asked for anything yet. See that function for the whole argument.
+                _watching_logs = needs_log_snapshot(self, _eval_spec)
                 _log_snapshot = snapshot_training_logs(workdir) if _watching_logs else None
                 # Which log each phase of THIS attempt writes. Both watchdogs live across the WHOLE
                 # eval — setup, every stage, and the ALWAYS-appended `score` stage — so without the
@@ -2099,10 +2103,23 @@ class EvaluateMixin:
                 # cap: there IS a bound in that case (the ceiling), and the whole point of telling the
                 # judge is that "a stop and a cap-out are not the same surprise". Telling it `None` on
                 # exactly the runs that carry the loosest bound was the least useful place to be coy.
+                # THE LOG TOOLS THIS TRIAGE MAY LOOK WITH. Built HERE, at the call, because this frame
+                # is the only place that holds all three of the things `monitor_log_sources` needs —
+                # the workdir, THIS attempt's resolved log plan and the byte snapshot taken before it
+                # started — and because `_triage_crash` is instance-monkeypatched by tests, which must
+                # keep replacing the whole decision rather than half of a construction.
+                #
+                # `_log_snapshot` is what makes this safe to hand a role: it was taken before this
+                # attempt ran, so `attempt_byte_floor` puts the floor exactly where this attempt's
+                # bytes begin and a repairer diagnosing attempt N cannot read attempt N-1's curve as
+                # its own. That is the same floor `read_training_tail_raw` respects — one boundary,
+                # now three readers.
+                _repair_tools = repair_log_tools(self, workdir, _log_plan, _log_snapshot)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
-                                            attempts_left=_repair_attempts_left(attempt, _repair_cap))
+                                            attempts_left=_repair_attempts_left(attempt, _repair_cap),
+                                            log_tools=_repair_tools)
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
