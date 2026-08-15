@@ -1016,6 +1016,60 @@ site that proves it is open.
   the constant cannot be imported at module scope, and the sibling cap at `unified_agent.py:593`
   needs the same call made deliberately rather than by symmetry.
 
+- **[FIXED 2026-08-15, partially] `repair_verify`'s `unmet` was right ONCE in the first four verdicts
+  it produced on a live GPU run, and one of its two false-positive shapes was undocumented**
+  (measured 2026-08-15 over every `node_repaired` in `runs/`). The rung shipped 2026-08-13 and
+  `rubertlite-dr-unified-v7` + `-v8` are the only runs it has actually graded: **4 `unmet` rows, 1
+  true positive.** The three misses are three different mechanisms and only one of them was known.
+  (a) **Truncation, still live.** v7 node 0 attempt 2 is stamped `unmet ['nll_cos']`; the full
+  690-char rationale recovered from `spans.jsonl` scores `verified`. The intake fix (`2e898b7f`,
+  above) landed 2026-08-14 22:33 UTC and v8's engine process started at 16:25 — **a running
+  interpreter does not reload its source**, so every v7/v8 verdict was computed on a 300-char prefix
+  and will be until those runs restart. Nothing to patch; the docstring now says that a verdict on a
+  row written before the restart is a verdict about a prefix.
+  (b) **The cited baseline** — the residue `repair_verify.py`'s docstring named and then dismissed
+  with "on the corpus zero of the four surviving `unmet`s is that shape". **That sentence is
+  falsified**: v8 node 3 attempt 2 was convicted on `mining_type` / `n_negatives`, both inside "Node
+  1's identical mining config (…) already passed and reached 0.7384", and re-measured over the whole
+  tree 4 of the 14 surviving `unmet` verdicts convict on evidence rather than a promise. FIXED for
+  ONE of the two sub-shapes, in the direction the docstring itself prescribed: `_CITATION_RE` +
+  `_is_citation_only` demote to **`unstated`**, never to `verified`, never by dropping the token from
+  `claims`. Deliberately narrow — a clause bound to another NODE/RUN/ATTEMPT and nothing else, not
+  the "vs"/"unlike"/"compared with" phrasing list the original text rightly refused. The other three
+  cite the CRASH (`pos_scores_broadcast` / `s_dd_local` off a shape-mismatch message, a 0-byte stub
+  parquet, the stage a timeout moved to) and are LEFT, because "the crash is in X" sits on a continuum
+  with the dense-retrieval node 11 family where the repair then edited a different file and saying so
+  is the rung working.
+  (c) **An abbreviation of the identifier the code uses** — a shape the docstring did not name at
+  all. v8 node 3 attempt 4 promised "halve per-step batch to 4096 and raise `grad_accum` to 4" and
+  its diff sets `batch_size = 4096` and `gradient_accumulation_steps = 4`. FIXED by
+  `_abbreviated_identifier`: part-wise prefix matching against identifiers the DIFF contains, bounded
+  three ways because this is the only rule here that can reach `verified` — never for a FILE claim,
+  ≥2 underscore parts of ≥3 chars each, and at least one part must actually be SHORTENED (without
+  that last bound `mine_stage`, which `_IDENT_RE` extracts from the file claim `mine_stage.py`, is
+  met by any `mine_stage_helper` in the diff and the true positive silently becomes `verified`).
+  **Replayed over all 2,480 `node_repaired` rows on both text bases (4,959 verdicts): exactly three
+  rows move** — v8 n3 a2 `unmet`→`unstated`, v8 n3 a4 `unmet`→`verified`, and v6 n1 a1 keeps `unmet`
+  with `train.py` dropped from the reported list. **Zero `inert` verdicts move, so no
+  `INERT_REPAIR_LIMIT` chain and no stop fires differently**, and v8 n3 a1 — the true positive — is
+  untouched. **Corrections to the figures the docstring quotes:** v4's event log is GONE from the box
+  (v5's already was), so "2,477 repairs / 134 model-authored / 126 concrete" cannot be re-derived;
+  the five surviving runs give 2,444 / 101 / 92 and the whole tree 2,480 / 137 / 125. 2,343
+  boilerplate is exact. 13 inert → 11. And **"38 named a concrete change that appears nowhere in the
+  diff" is not the count of `unmet` verdicts** — it counts rows with at least ONE absent token, while
+  `verify_repair` needs EVERY claim absent; the verdict counts are 7 (five-run, full text) and 17
+  (whole tree, durable text). **STILL OPEN, measured not assumed:** the 14 surviving `unmet`s split
+  7 / 2 / 5 — seven genuine, two withdrawn here (plus one row's list shortened), and five left: the
+  three crash-citation rows above, a NEGATED claim satisfied by indirection (v6 n1 a1 "drop those
+  unsupported args", kept by deleting the `"%params%"` placeholder) and an exception name read as a
+  claim (`IndentationError`). Four of the seven "genuine" ones are arguable: the
+  `rubertlite-dense-retrieval` node 11 family names the BROKEN component and edits a different file,
+  which is a diagnosis rather than a promise — left `unmet` because a claim-clause whitelist would
+  demote all four and turning "you touched the wrong file" into "nothing to check" is the worse
+  trade. Also unchanged and now pinned: `_claim_met`'s base test is a plain SUBSTRING, so `mine_stage`
+  has always been met by a `mine_stage_helper` in the diff; tightening that is a change to how every
+  claim is scored and owes its own corpus replay.
+
 - **`write_file`/`edit_file` route around the stage-timeout-vs-budget refusal** (found 2026-08-14
   auditing 8461ff43). `repo_write_tools.py:434` applies `stage_budget_refusal` inside
   `_declare_stages` only; `_write` (`:622-643`) and `_edit` (`:645+`) apply the syntax and

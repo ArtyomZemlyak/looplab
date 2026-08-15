@@ -102,6 +102,63 @@ _V7_RATIONALE = (
     "accumulate 2, grad clip 1.0, bs 8k, positive_threshold 1).")
 
 
+# ---------------------------------------------------------------- the three LIVE v8 verdicts
+# All three are VERBATIM from `runs/rubertlite-dr-unified-v8` node 3, recovered whole from that run's
+# `spans.jsonl` (the durable rows hold only the first 300 characters, which is what the engine
+# process behind that run actually read — it started before the intake cap was raised and a running
+# interpreter does not reload its source). They are the entire live evidence for this rung's
+# precision: three `unmet` verdicts, hand-audited to ONE true positive.
+#
+# Attempt 1 — THE TRUE POSITIVE, and the row every change here must leave alone. It promised an edit
+# to the node's own stage script and edited the shared library instead: different blast radius.
+_V8_TRUE_POSITIVE = (
+    "The mine stage (first stage, 0 passed) crashed on its own coverage guardrail "
+    "(assert coverage>=0.9, got 0.43), not on R-Drop — node 1's identical mining config passed "
+    "and hit 0.7384, so the approach is sound. Fix mine_stage.py (a .py-only edit) to relax the "
+    "coverage threshold or fall back to random negatives so the pipeline reaches training and the "
+    "R-Drop hypothesis can be tested.")
+# …its real change set and the head of the real diff. `mine_stage.py` is nowhere in either.
+_V8_TRUE_POSITIVE_CHANGED = ["vectorsearch/data/mine_negatives.py"]
+_V8_TRUE_POSITIVE_REGION = (
+    "vectorsearch/data/mine_negatives.py\n@@\n+import random\n"
+    "+        # joinable, restoring ~100% coverage.\n+        rng = random.Random(self.seed)\n")
+
+# Attempt 2 — THE CITED BASELINE, the residue the module docstring named before it was ever seen
+# live. Both tokens the engine convicted on sit inside a clause about NODE 1; the sentence that says
+# what THIS repair will do ("Next change: …") names nothing a diff could contain, which is why
+# `unstated` is the honest answer and `unmet` was an accusation the text does not support.
+_V8_CITED_BASELINE = (
+    "The crash is the mine stage's coverage guardrail (0.43 < 0.9), before any R-Drop training ran "
+    "— a mechanical mining-coverage issue, not evidence the R-Drop idea is wrong. Node 1's "
+    "identical mining config (mining_type=1, n_negatives=2) already passed and reached 0.7384, so "
+    "the config can clear the guardrail; the previous repair's change to mine_negatives.py was "
+    "never actually applied (engine couldn't verify it), so a genuine targeted fix is still "
+    "available. Next change: make mining produce >=2 negatives for >=90% of rows (relax/restore the "
+    "mining threshold to node-1 behavior) via a .py-only edit so no finished stages are re-run.")
+_V8_CITED_BASELINE_CHANGED = ["mine_stage.py"]
+_V8_CITED_BASELINE_REGION = (
+    "mine_stage.py\n@@\n+    # silently reused and reproduces the old ~43% coverage forever. "
+    "Force a fresh mine here.\n+    shutil.rmtree(out_dir, ignore_errors=True)\n")
+
+# Attempt 4 — THE ABBREVIATION, a shape the docstring did not name at all. The repair did exactly
+# what it said; the codebase spells the parameter `gradient_accumulation_steps` and the model wrote
+# the colloquial `grad_accum`, so a literal-token extractor convicted a kept promise.
+_V8_ABBREVIATION = (
+    "CUDA OOM in train caused by R-Drop's two forward passes doubling peak memory at batch 8192 "
+    "(node 1 fit the same batch without R-Drop). Fix: halve per-step batch to 4096 and raise "
+    "grad_accum to 4 so effective batch stays 8192 while peak memory drops to node-1's "
+    "single-forward footprint. R-Drop is a sound idea; this is a mechanical memory fix, not a "
+    "rejection.")
+_V8_ABBREVIATION_CHANGED = ["vectorsearch/train.py"]
+_V8_ABBREVIATION_REGION = (
+    "vectorsearch/train.py\n@@\n"
+    "+    # per-device batch and double gradient accumulation to keep the SAME effective batch size\n"
+    "+    # (8192 x 2 accum = 16384) while fitting in memory. Config is pydantic-mutable, so this is "
+    "a\n"
+    "+    config.train.training.batch_size = 4096\n"
+    "+    config.train.training.gradient_accumulation_steps = 4\n")
+
+
 class _ClaimingDev:
     """A developer that makes exactly the change the rationale's SECOND half promises (and still
     fails, so the loop runs to the operator's cap rather than to a metric)."""
@@ -429,9 +486,13 @@ def test_truncation_can_only_ever_lose_a_claim_never_invent_one():
 
 
 def test_a_cited_name_and_a_claimed_name_are_the_same_token_to_this_rung():
-    """The residual, stated as a truth table rather than papered over — see the module docstring for
-    why it is not patched. What matters is that the row this rung EXISTS for stays red: a repair that
-    promises to remove something and then does not is still caught."""
+    """The residual that SURVIVES the citation demotion, as a truth table. `_CITATION_RE` recognizes
+    a clause bound to another NODE/RUN/ATTEMPT and deliberately nothing else, so "unlike the working
+    nll_cos runs (0.728)" — a phrasing, not a reference — is still read as a claim. That is the
+    narrowness being chosen on purpose (module docstring: the open-ended "vs" / "unlike" / "compared
+    with" list would drop the real claim in "unlike the old nll_cos path, which I deleted").
+    What matters most is that the row this rung EXISTS for stays red: a repair that promises to
+    remove something and then does not is still caught."""
     diff = "<whole-file solution>\n@@\n-old = 1\n+new = 2\n"
     kw = dict(changed=["train.py"], code_changed=True)
 
@@ -457,6 +518,250 @@ def test_a_cited_name_and_a_claimed_name_are_the_same_token_to_this_rung():
     # 5. Prose with no concrete token either way is `unstated`, never `unmet` — "I could not check
     #    this" and "this checked out" stay different facts.
     assert verdict("the approach is sound; this is a mechanical bug") == REPAIR_UNSTATED
+
+
+# ------------------------------------------- what `unmet` may CONVICT on (the 2026-08-15 rung)
+def _verdict(rationale, changed, region):
+    return verify_repair(rationale, changed=changed, deleted=[], code_changed=False, region=region)
+
+
+def test_the_three_live_v8_verdicts_are_one_accusation_and_two_withdrawals():
+    """THE MEASUREMENT, as a truth table over the only three `unmet` rows this rung has ever
+    produced on a real GPU run. Hand-audited: 1 true positive, 2 false positives of DIFFERENT shapes.
+    Being right one time in three is not "some imprecision" in an advisory signal — the judge reads
+    it, and a line that is wrong twice in three is a line a reader learns to discount."""
+    # 1. THE TRUE POSITIVE. It said it would edit the node's own stage script and edited the shared
+    #    library instead. This must survive every rule added here — a missed discrepancy is the
+    #    strictly worse error, because a false `verified` is a claim the RECORD makes for the agent.
+    true_pos = _verdict(_V8_TRUE_POSITIVE, _V8_TRUE_POSITIVE_CHANGED, _V8_TRUE_POSITIVE_REGION)
+    assert true_pos.verdict == REPAIR_UNMET
+    assert "mine_stage.py" in true_pos.unmet
+    # Its own citation ("node 1's identical mining config passed and hit 0.7384") is real and is
+    # correctly ignored: the promise is in the NEXT sentence, so the clause window never reaches it.
+    assert not true_pos.actionable   # and it still stops nothing
+
+    # 2. THE CITED BASELINE. Every convicted token was inside a clause about node 1. `unstated`, the
+    #    verdict that already means "I could not check this" — never `verified`.
+    cited = _verdict(_V8_CITED_BASELINE, _V8_CITED_BASELINE_CHANGED, _V8_CITED_BASELINE_REGION)
+    assert cited.verdict == REPAIR_UNSTATED
+    assert cited.unmet == ()
+    # NOTHING IS DROPPED. The tokens are still on the record as claims; what changed is only whether
+    # the engine is willing to accuse the repair of breaking a promise on their strength.
+    assert {"mining_type", "n_negatives"} <= set(cited.claims)
+
+    # 3. THE ABBREVIATION. The repair really did halve the batch to 4096 and raise accumulation to 4;
+    #    the codebase spells it `gradient_accumulation_steps`.
+    abbrev = _verdict(_V8_ABBREVIATION, _V8_ABBREVIATION_CHANGED, _V8_ABBREVIATION_REGION)
+    assert abbrev.verdict == REPAIR_VERIFIED
+    assert abbrev.unmet == ()
+
+
+def test_the_abbreviation_rule_cannot_meet_a_file_claim_or_a_one_word_one():
+    """The dangerous direction, bounded. This is the only rule here that can reach `verified`, and a
+    false `verified` is worse than a false `unmet` — so each bound gets a row."""
+    from looplab.engine.repair_verify import _abbreviated_identifier
+
+    # It works, and it works off the DIFF's own identifiers rather than any vocabulary carried here.
+    assert _abbreviated_identifier(
+        "grad_accum", "+ gradient_accumulation_steps = 4\n") == "gradient_accumulation_steps"
+    # A FILE claim never goes through it: a path is the axis "different blast radius" is measured on.
+    # KNOW WHAT THIS ONE IS: the `_claim_met` ordering that enforces it is DEFENSIVE, not load-
+    # bearing today, and saying so is the point — mutating it away leaves this file green, because a
+    # file token cannot be abbreviated at all under the current regexes. The reason is checkable
+    # rather than assertable-by-comment, so it is checked: `_FILE_RE` always requires an extension,
+    # so every file claim carries a `.`, while `_IDENT_RE` never produces a token containing one —
+    # so no candidate part can ever start with `stage.py`. The guard exists so that widening EITHER
+    # regex later cannot silently open the path; this assertion is what would go red if one did.
+    from looplab.engine.repair_verify import _FILE_RE, _IDENT_RE
+    _corpus = " ".join([_V8_TRUE_POSITIVE_REGION, _V8_ABBREVIATION_REGION,
+                        "mine_stage_helpers = 1", "train_py_helper = 2", "a.b_c = 3"])
+    assert all("." not in t for t in _IDENT_RE.findall(_corpus))
+    assert all("." in t for t in _FILE_RE.findall(
+        "fix mine_stage.py and vectorsearch/train.py and looplab_stages.json"))
+    assert _abbreviated_identifier("mine_stage.py", "+ mine_stage_helpers = 1\n") is None
+    v = _verdict("Fix mine_stage.py to relax the threshold", ["mine_negatives.py"],
+                 "mine_negatives.py\n@@\n+def mining_stage_helper(x):\n")
+    assert v.verdict == REPAIR_UNMET and "mine_stage.py" in v.unmet
+    # THE BACK DOOR THAT BOUND EXISTS FOR, and the reason an abbreviation must SHORTEN a part.
+    # `_IDENT_RE` extracts the twin identifier `mine_stage` from the file claim `mine_stage.py`, so a
+    # whole-part prefix match would meet the twin off a `mine_stage_helper` in the diff, acquit the
+    # row on that one met claim, and turn the live true positive into `verified` without ever
+    # touching the file rule. `pos_scores` is not `pos_scores_broadcast`; `grad_accum` IS
+    # `gradient_accumulation_steps`.
+    assert _abbreviated_identifier("mine_stage", "+def mine_stage_helper(x):\n") is None
+    assert _abbreviated_identifier("pos_scores", "+ pos_scores_broadcast = 1\n") is None
+    # …and the bare identifier `mine_stage` does not match that run's real diff either.
+    assert _abbreviated_identifier("mine_stage", _V8_TRUE_POSITIVE_REGION) is None
+    # ONE part is never an abbreviation of anything: `accum` must not be met by `accumulator`.
+    assert _abbreviated_identifier("accum", "+ accumulator = 0\n") is None
+    # A part under three characters is not evidence: `a_b` must not reach `alpha_beta`.
+    assert _abbreviated_identifier("a_b", "+ alpha_beta = 1\n") is None
+    # The diff's identifier may carry EXTRA trailing parts, never FEWER — a claim about
+    # `pos_scores_broadcast` is not met by a diff that only mentions `pos_scores`.
+    assert _abbreviated_identifier("pos_scores_broadcast", "+ pos_scores = q @ d.T\n") is None
+    # And a prefix that is not part-wise is not a match: parts align positionally or not at all.
+    assert _abbreviated_identifier("accum_grad", "+ gradient_accumulation_steps = 4\n") is None
+
+
+def test_the_plain_substring_match_is_the_older_looser_rule_and_is_unchanged():
+    """A residue this change deliberately does NOT touch, pinned so nobody reads the bound above as
+    covering it. `_claim_met`'s base test is `token in region`, i.e. a SUBSTRING — so `mine_stage`
+    has always been met by a `mine_stage_helper` in the diff, before any abbreviation rule existed.
+    That is the extractor's oldest and loosest edge and it is left alone on purpose: tightening it to
+    an identifier-boundary match is a change to how EVERY claim is scored, with its own corpus
+    replay to pay for, and it is not what the 2026-08-15 measurement was about."""
+    assert _verdict("Fix mine_stage.py to relax the threshold", ["mine_negatives.py"],
+                    "mine_negatives.py\n@@\n+def mine_stage_helper(x):\n").verdict == REPAIR_VERIFIED
+
+
+def test_a_citation_may_acquit_but_never_convict_and_never_reaches_verified():
+    """The asymmetry the demotion is built on, and the reason a model gains nothing by writing into
+    it: steering a claim inside a `node N` clause buys `unstated`, which is itself reported."""
+    from looplab.engine.repair_verify import _is_citation_only
+
+    # EVERY occurrence must be inside a citation clause. One real promise about the same token is
+    # enough to keep the conviction — otherwise one throwaway "node 1 used nll_cos" would launder it.
+    both = "node 1 used nll_cos; I deleted the nll_cos path entirely"
+    assert not _is_citation_only("nll_cos", both)
+    assert _verdict(both, ["train.py"], "train.py\n@@\n-x = 1\n+x = 2\n").verdict == REPAIR_UNMET
+    # A citation ACQUITS when the diff really contains the token — unchanged behaviour, and the
+    # reason the demotion cannot cost a `verified`.
+    assert _verdict("node 1 already set rdrop_alpha", ["train.py"],
+                    "train.py\n@@\n+rdrop_alpha = 0.1\n").verdict == REPAIR_VERIFIED
+    # The demotion's ONLY landing place is `unstated`. Nothing in this rung may turn a token the
+    # diff does not contain into a pass.
+    demoted = _verdict("node 1 already set rdrop_alpha", ["train.py"],
+                       "train.py\n@@\n-x = 1\n+x = 2\n")
+    assert demoted.verdict == REPAIR_UNSTATED and demoted.unmet == ()
+    assert REPAIR_VERIFIED not in {demoted.verdict}
+    # The clause window ends at the clause, not the sentence: a promise after the semicolon stands.
+    after = "node 1 reached 0.73; I will set rdrop_alpha"
+    assert not _is_citation_only("rdrop_alpha", after)
+    assert _verdict(after, ["train.py"], "train.py\n@@\n-x = 1\n").verdict == REPAIR_UNMET
+
+
+def test_the_historical_corpus_cases_the_docstring_cites_keep_their_verdicts():
+    """The regression floor: the rows the module docstring names, replayed as fixtures so a later
+    widening of either rule has to move one of them to go green. Every one is verbatim from `runs/`.
+
+    Rules that only ever get tested on the cases they were written for are how an extractor drifts
+    into noise — these are the ones they must NOT touch."""
+    # rubertlite-dr-unified-v6 node 1 attempt 1: a NEGATED claim ("drop those unsupported args")
+    # kept by deleting the `"%params%"` placeholder that passed them. Still `unmet`, and left that
+    # way on purpose — a rule for the indirection would have to model the manifest, not the text.
+    # What the citation rule DOES do here is drop `train.py`, which sits in the node-1 clause.
+    v6 = _verdict(
+        "The crash is purely mechanical: node 1 passed three CLI args the harness's train.py "
+        "argparse does not define (gradient_accumulation_steps, max_grad_norm, weight_decay). The "
+        "fix is to drop those unsupported args and keep the supported set node 0 used "
+        "(loss.temperature, batch_size, learning_rate, n_epochs, warmup_ratio), still applying the "
+        "symmetric mnsr loss + lr 1e-3 change in the solution code.",
+        ["looplab_stages.json"],
+        'looplab_stages.json\n@@\n     "python",\n     "-m",\n-    "vectorsearch.train",\n'
+        '-    "%params%"\n+    "vectorsearch.train"\n    ],\n-   "gpus": 1,\n')
+    assert v6.verdict == REPAIR_UNMET
+    assert "train.py" not in v6.unmet, "a token inside the node-1 clause may not convict"
+    assert "gradient_accumulation_steps" in v6.unmet, "the promise itself still stands"
+
+    # rubertlite-dense-retrieval node 11 attempt 2: the rationale names the BROKEN component and the
+    # repair edits the eval harness. Deliberately left `unmet` — a claim-clause whitelist would
+    # demote this whole family, and "you said the bug was in X and did not touch X" is worth saying.
+    dense = _verdict(
+        "The device mismatch error is a mechanical bug in the NegLogLikelihoodCos_S implementation "
+        "— EMA buffers or learnable threshold parameters weren't moved to the correct GPU device. "
+        "The idea itself (EMA centering + learnable threshold to stabilize training at sharp "
+        "temperature 0.01) is sound and directly addresses the constant-loss failures of nodes 8/9. "
+        "Fixing device placement is straightforward.",
+        ["looplab_eval.py"],
+        "looplab_eval.py\n@@\n+    # CRITICAL: load to CPU first, then move to target device.\n")
+    assert dense.verdict == REPAIR_UNMET and "NegLogLikelihoodCos_S" in dense.unmet
+
+    # rubert-dr-0807 node 8 attempt 4: a MIXED row. `cloud_io` / `replace_sampler_ddp` are a history
+    # of past fixes; the "Fix:" clause names three mechanisms the diff does not use (it guards the
+    # barrier instead). The citations drop out of the reported list, the conviction stands.
+    mixed = _verdict(
+        "The failures are moving through distinct mechanical PL/DDP API issues (cloud_io, "
+        "replace_sampler_ddp, pickle __main__, now process-group-not-initialized), and the InfoNCE "
+        "baseline idea is sound. Fix: on a single GPU, disable DDP (set Trainer strategy to "
+        "'auto'/'ddp_notebook' or call torch.distributed.init_process_group before any distributed "
+        "op) so the group-size call never runs uninitialized.",
+        ["train.py"],
+        "train.py\n@@\n-            torch.distributed.barrier()\n"
+        "+            if torch.distributed.is_initialized():\n"
+        "+                torch.distributed.barrier()\n")
+    assert mixed.verdict == REPAIR_UNMET and "init_process_group" in mixed.unmet
+
+    # THE NEGATIVE CONTROL. The same three rules over a repair that kept its promise exactly, in the
+    # codebase's own spelling, with no citation anywhere: nothing here may make that anything but
+    # `verified`, and nothing may make an ordinary broken promise anything but `unmet`.
+    assert _verdict("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                    "train.py\n@@\n-n_epochs = 10\n+n_epochs = 5\n").verdict == REPAIR_VERIFIED
+    assert _verdict("cutting n_epochs 10 -> 5 to fit the budget", ["train.py"],
+                    "train.py\n@@\n-lr = 1e-4\n+lr = 3e-4\n").verdict == REPAIR_UNMET
+
+
+def test_neither_demotion_can_reach_the_byte_anchored_verdict_or_move_a_stop():
+    """The tiering, re-proved against the new rules. `inert` is the ONLY verdict the loop acts on and
+    it is decided before the rationale is read, so no wording — citation-shaped, abbreviation-shaped
+    or otherwise — can reach it, and `inert_streak` cannot move because of anything written here."""
+    for rationale in (_V8_CITED_BASELINE, _V8_ABBREVIATION, _V8_TRUE_POSITIVE,
+                      "node 1 used gradient_accumulation_steps = 4"):
+        v = verify_repair(rationale, changed=[], deleted=[], code_changed=False,
+                          region="+ gradient_accumulation_steps = 4\nmine_stage.py\n")
+        assert v.verdict == REPAIR_INERT and v.actionable and v.unmet == ()
+    # And the streak reads the byte verdict only: a row demoted from `unmet` to `unstated` breaks a
+    # chain exactly the way `unmet` did, because neither is `inert`.
+    assert inert_streak([{"verified": REPAIR_INERT}, {"verified": REPAIR_UNSTATED}]) == 0
+    assert inert_streak([{"verified": REPAIR_INERT}, {"verified": REPAIR_INERT}]) == 2
+
+
+def test_the_engine_stamps_the_withdrawn_verdicts_on_the_durable_row(tmp_path):
+    """Tier 1, through the REAL loop: the two withdrawals are not a property of a pure function, they
+    are what `node_repaired.verified` says and therefore what a resumed judge reads back.
+
+    Driven with the abbreviation case because it is the one that changes what the judge is TOLD: the
+    row goes from `unmet ['grad_accum']` — which `_format_repair_log` renders as an accusation — to
+    `verified`, which renders as nothing at all."""
+
+    class _AbbrevDev:
+        """Makes the change in the CODEBASE's spelling, which is what the rationale abbreviates."""
+
+        def __init__(self):
+            self.repair_calls = 0
+
+        def implement(self, idea):
+            return _BAD
+
+        def repair(self, idea, code, error):
+            self.repair_calls += 1
+            return f"{_BAD}gradient_accumulation_steps = 4\nbatch_size = 4096\n"
+
+    evs, _ = _drive(tmp_path / "abbrev", _AbbrevDev(), _Judge(rationale=_V8_ABBREVIATION),
+                    inline_repair_attempts=1)
+    row = _repairs(evs)[0].data
+    assert row["verified"] == REPAIR_VERIFIED, (row["verified"], row.get("unmet"))
+    assert row["unmet"] == []
+    # The judge is told NOTHING about this row, which is the point — a kept promise earns no note.
+    rendered = _format_repair_log([{"attempt": 1, "error": "e", "fix": _V8_ABBREVIATION,
+                                    "changed": ["train.py"], "stages_passed": 0,
+                                    "verified": row["verified"], "unmet": row["unmet"]}])
+    assert "could not find what this fix said it would change" not in rendered
+
+
+def test_the_true_positive_still_reaches_the_judge_as_an_accusation(tmp_path):
+    """The other half of the same tier-1 proof, and the one that must never go quiet: a repair that
+    named its own stage script and edited something else is still stamped `unmet` on the durable row
+    AND still rendered to the judge in the engine's own voice."""
+    evs, _ = _drive(tmp_path / "truepos", _MovingDev(), _Judge(rationale=_V8_TRUE_POSITIVE),
+                    inline_repair_attempts=1)
+    row = _repairs(evs)[0].data
+    assert row["verified"] == REPAIR_UNMET, (row["verified"], row.get("unmet"))
+    assert "mine_stage.py" in row["unmet"]
+    rendered = _format_repair_log([{"attempt": 1, "error": "e", "fix": _V8_TRUE_POSITIVE,
+                                    "changed": ["mine_negatives.py"], "stages_passed": 0,
+                                    "verified": row["verified"], "unmet": row["unmet"]}])
+    assert "could not find what this fix said it would change" in rendered
+    assert "mine_stage.py" in rendered
 
 
 # ------------------------------------------------------------------ the claim extractor
