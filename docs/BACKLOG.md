@@ -362,6 +362,55 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15, same day] Fifty full pipeline re-runs where there were zero, and
+  `inline_repair_retrain_cap` charged none of them** (found by the merge-day COMPOSITION review —
+  three same-day changes, each individually documented and defensible, whose product nobody could
+  see from one branch). (a) `inline_repair_attempts` 12 -> 0 (F8: the bound became a judgment);
+  (b) `_effective_repair_cap(0)` -> `_UNLIMITED_REPAIR_CEILING` (50), which is a TIGHTENING of the
+  `or 10**9` it replaced; (c) `triage.py::_rule_triage` turned the no-judge path's `abandon` for a
+  NON-MECHANICAL crash into `repair` (F5 deleted the Debug node that had made `abandon`
+  conservative). **Driven, not argued** (`tests/test_first_stage_repair_cost.py`, over the real
+  `_evaluate` loop with only the subprocess layer stubbed): with no triage model wired — a supported
+  configuration, `crash_repair.py::_triage_crash`'s own "a configuration, not a failure" branch — a
+  first-stage `RuntimeError` buys **51 full pipeline evaluations, 50 repairs, `full_retrain_charged`
+  = 0**, every one a full re-run (`start_stage=None`). **NONE OF THE THREE IS WRONG AND NEITHER IS
+  THE CHARGING RULE.** `_repair_forces_full_retrain` asks "is completed EARLIER-stage work being
+  discarded?", answers False for a first-stage failure because nothing completed, and delegates:
+  "an ordinary retry, bounded by the attempt budget like any other". THE DELEGATION IS WHAT MOVED —
+  when that sentence was written the attempt budget was 12 and was the TRANSITION; F8 made it 50 and
+  moved the transition to a judgement. **And the critic is not there.** `repair_critic_after=3` is
+  the answer to "the 50 is bounded in practice", and it is true on `rubertlite-dr-unified-v8` (6
+  consultations) — but `crash_repair.py::_repair_critic` reads `researcher.repair_critic`, the SAME
+  object that would have carried `triage_crash`, so in the configuration that produces the 50 there
+  is no critic either: driven, 50 consultations all returning `no repair critic wired`. The 50 is
+  not a floor beneath a judgement there; it is the entire policy. **And it is live**: v8 node 3 spent
+  four repairs on a first-stage (`mine`) failure — attempts 1-3 with `stages_passed: 0` — for
+  4911 + 1168 + 504 + 2984 = **9567 s of wall clock, `full_retrain_charged` = 0**, on a run whose
+  `max_eval_seconds` is `None`, i.e. with no cost floor over that chain at all.
+  **THE FIX IS NOT the obvious one, and the live record is what rejected it.** "Charge the cap on ANY
+  repair that re-runs a stage that already ran" was DRIVEN on a mutated tree: it abandons v8 node 3
+  at three repairs, one before its `mine` stage passed on the fourth. The count is calibrated for a
+  re-TRAIN (that manifest declares `train` at 22000 s) and the work being redone is a 5400 s `mine`;
+  routing one into the other charges a cheap thing at an expensive thing's rate. So the ledger stays
+  a COUNT of discarded re-trains and the SAME operator number is ALSO spent in the unit the
+  first-stage case actually costs: `repair_judgment.repair_redone_work_stop` stops a chain that has
+  spent `(cap + 1)` times what the task DECLARES one full pipeline costs
+  (`declared_pipeline_seconds` over the stage `timeout`s, or the single-command timeout). Durable
+  across a resume via a new additive `node_repaired.eval_seconds` + `_durable_repair_seconds` — a
+  bound a resume refunds is not a bound. It FAILS OPEN twice: `cap = 0` stays the documented
+  unlimited, and an eval declaring no timeout licenses no number and is not bounded, because a floor
+  that guessed a pipeline's cost would abandon nodes on a number nobody wrote. On the driven runaway
+  it binds at 15 repairs instead of 50; on v8 node 3's real numbers it does not fire (9567 s against
+  a 93000 s allowance). **No `Settings` field** — the field SET is unchanged at 211 against master,
+  so no calibration receipt is revoked and neither pin moves — and the replay is proved: folding the
+  live v8 log on both trees gives the byte-identical `RunState` digest
+  `sha256:12d8fc0098cd3b8b7aa65fa9c745a3d90c46ea37f263afb6aad664a7890912cc`.
+  **Residue, stated not patched:** the critic still cannot answer the cost question even where it IS
+  wired — `format_repair_trajectory` renders cause / stages_passed / fix / changed / stderr and no
+  seconds at all, so a chain that is genuinely progressing and genuinely unaffordable looks the same
+  to it as one that is progressing and cheap. The seconds floor bounds that from underneath; nothing
+  yet lets the judgement see it.
+
 - **The repair critic's VERDICT is not recorded — only that it was asked** (observed on
   `rubertlite-dr-unified-v8`, 2026-08-15). `engine/evaluate.py:2127`'s `repair_critic` span carries
   `{attempt, node_id, generation}` and nothing else, and a `continue` verdict appends no event at all;
