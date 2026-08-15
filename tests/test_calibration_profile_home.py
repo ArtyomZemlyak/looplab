@@ -56,7 +56,10 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-14  + sandbox_readonly_rootfs (the untrusted/hostile Docker tier's container ROOT
 #               FILESYSTEM: "" = the historical writable image, a size = `--read-only` plus a tmpfs
 #               scratch of that size). See the second history block below for why.
-_EXPECTED_DIGEST = "sha256:2ce17ec9afac3317d4452c2a4ec59d8b4e625f0c4e8bb61220fbb22a5b9f23d2"
+#   2026-08-15  redact_output False -> True  (intentional SECURITY-default change; field set
+#               unchanged, but the complete settings envelope and therefore old receipts genuinely
+#               changed). See the second history block below.
+_EXPECTED_DIGEST = "sha256:b4cbea5c0cca14fadb17d5714e9101d68828c654a915ff12286046e5e914d97a"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -212,6 +215,39 @@ _EXPECTED_DIGEST = "sha256:2ce17ec9afac3317d4452c2a4ec59d8b4e625f0c4e8bb61220fbb
 #               whether a replicate that installs a system package, or writes a cache under $HOME,
 #               succeeds or fails. An envelope that cannot state that is not the envelope a later
 #               receipt would be compared against.
+#   2026-08-15  redact_output False -> True. **The 'field set UNCHANGED' branch**, which this file's
+#               own assertion message tells you not to re-pin — so read why this is the second
+#               legitimate instance rather than the bug that message is written for, and the
+#               precedent is one line up in the first history block: `concept_retag_every 30 -> 5`
+#               (2026-08-11), recorded there as "field set unchanged, but the complete settings
+#               envelope and therefore old receipts genuinely changed". The DERIVATION did not move
+#               — `_declared_settings_json_defaults` reads `Settings`' declared defaults, and a
+#               declared default is exactly what changed — so the two causes the guard separates are
+#               still separated; what this case shows is that "field set unchanged" is necessary but
+#               not sufficient evidence of a refactor, and the tie-breaker is whether a REVIEWER
+#               deliberately moved a default in the same change.
+#               VERIFIED BY DIFFING THE FIELD SET AGAINST MASTER, NOT FROM THE COUNT, exactly as the
+#               2026-08-14 entries above prescribe: an AST scan of `Settings`' annotated assignments
+#               in both trees reports [] added and [] removed, with the ORDER identical too — so
+#               `_EXPECTED_FIELD_COUNT` STAYS at 208 and a +1/-1 cannot be hiding behind an
+#               unchanged integer. Only the digest is re-pinned.
+#               It is NOT inert for a calibration replicate, and that is what makes re-pinning right
+#               rather than merely necessary: the profile inherits the new `True`, so every
+#               replicate's persisted `stdout_tail`/`stderr_tail`/`error`/`reason` now runs the
+#               ENTROPY pass as well as the always-on shape/env passes. A receipt asserts what its
+#               replicates RECORDED, and this changes the bytes that reach `events.jsonl` — the same
+#               kind of claim `auto_extra_metrics` was re-pinned for on 2026-08-14, in the mirror
+#               direction (that field can empty a record, this one can mask one). Measured, the
+#               entropy pass changes 0 of 1,652 persisted tails across the whole preserved corpus,
+#               so no replicate's DIAGNOSTICS are expected to move; the envelope moves regardless,
+#               because the digest binds the complete non-variant map and is deliberately not clever
+#               enough to exempt a knob whose measured effect is currently zero.
+#               Old receipts SHOULD stop verifying. On this box exactly one exists
+#               (`.looplab/speculation-quality.receipt.json`) and it was ALREADY dead before this
+#               change on four independent axes — `calibration_profile_digest`,
+#               `implementation_digest`, `runtime_scope_sha256`, and the `forced_debug` ->
+#               `no_forced_debug` scorer-fidelity rename — so the revocation this line records costs
+#               nothing that was not already spent.
 _EXPECTED_FIELD_COUNT = 208
 
 

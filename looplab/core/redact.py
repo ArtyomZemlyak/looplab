@@ -17,15 +17,21 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
 * **always, at every tail** — the known credential SHAPES in `_PATTERNS` (negligible false-positive
   risk, which is why they were already documented "always redacted") and the operator's own secret
   ENV VALUES (`redact_env_values`, below).
-* **`redact_output` only** — the ENTROPY pass, the half with a real false-positive cost, which is
-  why it is separable at all. It remains OPT-IN: `Settings.redact_output` still defaults to
-  `False`, and its own comment says why the default was deliberately NOT flipped in the change that
-  made flipping it cheap (a security default is the owner's call, not one box's corpus's). See
-  `_entropy_candidate` for the measurement that would justify a default-on entropy pass (its false
-  positives on this box's own corpus were 13/13 filesystem paths, and they are gone) and for the
-  one coverage class deliberately traded away. **Do not read that measurement as the posture**:
-  until the owner flips the field, a high-entropy base64 credential printed by an eval reaches the
-  durable tail unmasked unless a known shape or an env value catches it.
+* **`redact_output` only** — the ENTROPY pass, the half that once had a real false-positive cost,
+  which is why it is separable at all. It is **ON by default since 2026-08-15**, on the owner's
+  ruling over the measurement in `_entropy_candidate` and `_ENTROPY_TOKEN_CHARS`: those false
+  positives were 13 of 744 persisted tails and 13 of 13 were filesystem paths inside tracebacks, and
+  after the composition + separator screens the pass changes 0 of 1,652 tails over the whole
+  preserved corpus (re-measured 2026-08-15 at more than twice the size the flip was argued on),
+  while the pre-fix rule still changes 18 of those same 1,652. See `_entropy_candidate` for the
+  screen that did it and for the one coverage class deliberately traded away.
+
+  The two halves therefore no longer differ in POSTURE, only in what they can be turned off
+  independently of: an operator who sets `redact_output=False` keeps shapes and env values at every
+  tail and gives up only the entropy pass. The field is deliberately absent from
+  `config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, which states the three reasons where the map's rule
+  lives; the short one is that all 46 preserved snapshots carry this key explicitly, so a
+  `setdefault` row could never fire.
 
 `redact_output_tail` is the ONE spelling of that split; `engine/audit.py::Engine._redact` is its
 only production caller and funnels all six persisted output tails through it.
@@ -201,8 +207,12 @@ def _entropy_candidate(token: str) -> bool:
 # distinct masked tokens / 5,289 occurrences fall to 5 / 2,347, of which 2,343 are ONE opaque
 # account identifier and the remaining four are a paper DOI slug and two conference filenames. Over
 # the 744 persisted output TAILS specifically, the entropy pass now changes nothing at all (was 13,
-# all false) — which is the measurement a default-on `Settings.redact_output` would rest on. The
-# field is still `False`; the measurement is the argument for flipping it, not a report that it was.
+# all false) — which is the measurement the default-on `Settings.redact_output` rests on.
+#
+# RE-MEASURED 2026-08-15 before that flip, over the corpus at its then size (1,652 non-blank tails
+# across 82 event logs, more than twice the above): the entropy pass changes **0**, the same 5
+# distinct tokens / 2,347 occurrences stand, and the PRE-FIX rule replayed over the identical corpus
+# still changes 18 tails — all 18 filesystem paths. The field is now `True`.
 #
 # The cost is stated rather than hidden: a base64 credential CONTAINING a `/` is now scanned as its
 # slash-free runs, so one whose longest run falls under `min_len` escapes the pass. Measured on

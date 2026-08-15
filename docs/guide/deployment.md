@@ -23,7 +23,9 @@ export LOOPLAB_DOCKER_IMAGE=python:3.12-slim     # bake the framework's deps int
 Because the container runs `--network none`, a candidate can't fetch anything at eval time — the
 image must already contain the dependencies. Bounded stdout/stderr tails in events, traces and the UI
 are always screened for known credential shapes and for the values of your own secret-named env vars;
-`redact_output=true` adds the high-entropy pass on top. Neither scrubs raw node-workdir `setup.log`,
+`redact_output` (ON by default since 2026-08-15) adds the high-entropy pass on top — composition-screened
+(mixed case + digits, `/` a separator) so it masks base64-shaped credentials and not the file paths in
+your tracebacks. Neither scrubs raw node-workdir `setup.log`,
 stage logs, `eval.log`, source or artifacts. Do not expose secrets to candidate code, and
 protect/retain the run root as sensitive data.
 

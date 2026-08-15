@@ -594,3 +594,116 @@ def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
         and getattr(pools[0].func, "id", None) == "_watch_limiter", (
         "the intervention poll must draw on the dedicated watch pool, never anyio's shared default "
         f"— it passes limiter={[ast.unparse(pool) for pool in pools]}")
+
+
+# --- the two 2026-08-13 paid, default-ON settings that had no legacy row (merge-day review) ------
+#
+# `developer_probe` (True) and `repair_critic_after` (3) landed the same day as three siblings that
+# DID get a row (`train_monitor_tools`, `proposal_width`, `metric_subject`), and both add work to a
+# run: a subprocess-launching `run_probe` tool plus an 887-byte-different Developer system prompt,
+# and a paid `@in_llm_lane` critic with the authority to abandon a repair chain. `setdefault` runs
+# over EVERY snapshot version, so without these rows all 46 preserved runs resumed into treatments
+# their own first halves never had.
+
+_NEW_LEGACY_ROWS = {"developer_probe": False, "repair_critic_after": 0}
+
+
+def test_the_two_paid_2026_08_13_defaults_have_a_legacy_row_with_their_historical_value():
+    for key, historical in _NEW_LEGACY_ROWS.items():
+        assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS[key] == historical, key
+        # (c) of the table's own rule: the value must be a real historical one, and for both of
+        # these the SHIPPED default is the other thing — so the row is doing work, not restating.
+        assert Settings.model_fields[key].default != historical, key
+
+
+def test_a_pre_field_snapshot_resumes_WITHOUT_the_probe_and_WITHOUT_the_critic(tmp_path):
+    """DRIVEN over the real schema-0 snapshot the review named, not a synthetic dict.
+
+    `runs/live_toy/config.snapshot.json` is a pre-versioning full Settings dump that predates all
+    five of that day's fields. Its three sibling rows already restored their historical values; the
+    two new ones must now do the same, through the same `settings_from_snapshot` a resume calls.
+    """
+    from pathlib import Path
+
+    snapshot_file = (Path(__file__).resolve().parents[1] / "runs" / "live_toy"
+                     / "config.snapshot.json")
+    on_disk = snapshot_file.read_text(encoding="utf-8") if snapshot_file.exists() else None
+    if on_disk is not None:
+        raw = json.loads(on_disk)
+    else:
+        # `runs/` is not part of the source checkout, so a fresh clone (and every git WORKTREE)
+        # lacks it. Reconstruct the same shape rather than skipping: a pre-versioning snapshot is a
+        # full Settings dump with no `config_snapshot_schema` and none of that day's five keys —
+        # which is exactly what the real file is, verified against it when it IS present.
+        raw = {k: v for k, v in Settings().masked_snapshot().items()
+               if k not in {"config_snapshot_schema", "developer_probe", "repair_critic_after",
+                            "train_monitor_tools", "proposal_width", "metric_subject",
+                            "inline_repair_attempts"}}
+    assert raw.get("config_snapshot_schema") is None, "expected a PRE-versioning snapshot"
+    for key in _NEW_LEGACY_ROWS:
+        assert key not in raw, f"{key} is present, so this snapshot cannot exercise the row"
+
+    resumed = settings_from_snapshot(raw)
+    # the two new rows...
+    assert resumed.developer_probe is False
+    assert resumed.repair_critic_after == 0
+    # ...beside the three siblings that already had one, so the set really is complete for that day
+    assert resumed.train_monitor_tools is False
+    assert resumed.proposal_width is False
+    assert resumed.metric_subject == "off"
+    # The row `repair_critic_after` compounds with is `inline_repair_attempts`, and note it does NOT
+    # fire here: the real snapshot spells `1` explicitly, which is a `setdefault` no-op and an
+    # operator choice this map must never overwrite. That is the point — the critic row has to carry
+    # its own historical value, because the neighbour that bounds the same loop may already be set.
+    assert resumed.inline_repair_attempts == raw.get("inline_repair_attempts", 0)
+
+    if on_disk is not None:
+        assert snapshot_file.read_text(encoding="utf-8") == on_disk, (
+            "settings_from_snapshot mutated the evidence bytes")
+
+
+def test_a_FRESH_config_keeps_the_probe_and_the_critic_the_operator_chose():
+    """The other direction, which is what makes the rows a MIGRATION and not a default change: a
+    snapshot that CARRIES the keys is untouched, because the map is a `setdefault`."""
+    fresh = Settings().masked_snapshot()
+    assert fresh["developer_probe"] is True and fresh["repair_critic_after"] == 3
+    resumed = settings_from_snapshot(fresh)
+    assert resumed.developer_probe is True and resumed.repair_critic_after == 3
+
+    # ...including a snapshot that explicitly spells the HISTORICAL value on the shipped schema —
+    # an operator's own choice must be indistinguishable from a legacy default at the boundary.
+    chosen = Settings(developer_probe=False, repair_critic_after=0).masked_snapshot()
+    assert settings_from_snapshot(chosen).developer_probe is False
+
+    # ...and one that spells the PRODUCT value while omitting nothing else survives a migration that
+    # only fills absences.
+    mixed = dict(fresh)
+    mixed.pop("developer_probe")
+    assert settings_from_snapshot(mixed).developer_probe is False
+    assert settings_from_snapshot(mixed).repair_critic_after == 3
+
+
+def test_redact_output_is_deliberately_NOT_a_legacy_row():
+    """The judgement recorded beside the map, held as a test so it is not silently reversed.
+
+    It fails (a): the field predates `config.snapshot.json` itself, so no snapshot format that has
+    ever existed can omit it and a `setdefault` row could never fire. It fails (b): no paid call, no
+    intervention, no concurrency, no selection policy — write-side only, exactly the exemption
+    `auto_extra_metrics` is documented under.
+    """
+    assert "redact_output" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS
+    assert "auto_extra_metrics" not in LEGACY_CONFIG_SNAPSHOT_DEFAULTS   # the stated precedent
+
+    # (a), driven: a snapshot with the key absent is the only thing a row could act on, and every
+    # preserved run carries it. Note what a row WOULD do if added — it would pin `False` over a
+    # fresh config that omitted the key, i.e. hand a NEW run the pre-flip posture.
+    stripped = {k: v for k, v in Settings().masked_snapshot().items() if k != "redact_output"}
+    assert settings_from_snapshot(stripped).redact_output is True, (
+        "an absent redact_output must fall through to the LIVE default, not to a pinned False")
+
+    # and a snapshot that DOES carry it keeps what it recorded, whichever way — which is the whole
+    # of invariant #6 for this field and is why no row is needed to get it.
+    for recorded in (True, False):
+        snap = Settings(redact_output=recorded).masked_snapshot()
+        assert snap["redact_output"] is recorded          # RECORDED, never omitted-as-default
+        assert settings_from_snapshot(snap).redact_output is recorded

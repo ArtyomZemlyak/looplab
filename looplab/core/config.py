@@ -975,23 +975,39 @@ class Settings(BaseSettings):
     # durable log on the DEFAULT path, which is what gating the whole pass on an off-by-default flag
     # meant for six weeks. What this flag gates is the ENTROPY pass, which masks a 24+ character
     # base64-ish run above the entropy cutoff: on ML output that also hit legitimate data hashes,
-    # model checksums and embedding dumps, and THAT false-positive cost is why it is opt-in.
-    # Recommended on for untrusted tiers.
+    # model checksums and embedding dumps, and THAT false-positive cost is what kept it opt-in.
     #
-    # THE FALSE-POSITIVE COST IS NOW MEASURED, and it is far smaller than this default assumes.
-    # Over every persisted tail in `runs/` (744 non-blank stdout/stderr/error/reason values, 45
-    # event logs) the entropy pass changed 13 — and all 13 were FALSE, every one a filesystem path
-    # inside a traceback collapsing to `File "***REDACTED***.py"`. Zero were credentials.
-    # `core/redact.py::_entropy_candidate` + `_ENTROPY_TOKEN_CHARS` screen those out (character
-    # composition + `/` as a separator) and re-measured over the same corpus the entropy pass now
-    # changes **0 of 744** tails, while masked tokens across ALL durable string values fall from 138
-    # distinct / 5,289 occurrences to 5 / 2,347. So the empirical objection to a default-on entropy
-    # pass at the TAIL no longer holds, and the ~30 `redact_persisted_text` boundaries have always
-    # run this same pass unconditionally anyway. The default is deliberately left OFF here pending
-    # an owner decision rather than flipped in the same change as the redactor fix that would
-    # justify it — flipping a security default on the strength of one box's corpus is a call for
-    # the operator, not for the change that made it cheap. See `core/redact.py::redact_output_tail`.
-    redact_output: bool = False
+    # **ON BY DEFAULT SINCE 2026-08-15 — the operator's call, on the measurement below.** The
+    # false-positive cost that justified the OFF default was measured on 2026-08-14 and then
+    # REMOVED: over every persisted tail in `runs/` the entropy pass used to change 13 of 744, and
+    # all 13 were FALSE — every one a filesystem path inside a traceback collapsing to
+    # `File "***REDACTED***.py"`. Zero were credentials.  `core/redact.py::_entropy_candidate`
+    # (mixed case AND digits, the composition of a base64 credential and of nothing else in an ML
+    # log) plus `_ENTROPY_TOKEN_CHARS` (`/` is a SEPARATOR, not a token character) screen those out.
+    # RE-MEASURED 2026-08-15 over the whole preserved corpus at its current size — 1,652 non-blank
+    # `stdout_tail`/`stderr_tail`/`error`/`reason` values across 82 event logs, i.e. more than twice
+    # the corpus the flip was argued on — the entropy pass changes **0 of 1,652** tails, while the
+    # pre-fix rule still changes 18 of the same 1,652 and all 18 are filesystem paths. Masked tokens
+    # across ALL durable string values are 5 distinct / 2,347 occurrences (was 138 / 5,289), of
+    # which 2,343 are one opaque account identifier.
+    #
+    # So the default now matches the two things that were already true and out of step with it: the
+    # ~30 ALWAYS-ON `redact_persisted_text` boundaries have run this same pass unconditionally since
+    # B3 (162,472 `***REDACTED***` markers are already durable in the corpus's `spans.jsonl`), and
+    # this module's own docstring asserted the pass was on for six weeks while the field said
+    # otherwise. The tail was the ONE durable diagnostic channel that skipped the screen the rest of
+    # the tree applies; it no longer is.
+    #
+    # WHAT AN OPERATOR GIVES UP BY SETTING IT FALSE, stated so the switch stays honest: a
+    # high-entropy base64 credential printed by an eval reaches `node_evaluated.stdout_tail` — and
+    # therefore `events.jsonl`, the span trace, the UI node detail, an export and a bug report —
+    # unmasked, unless a known shape (`_PATTERNS`) or one of this operator's own env VALUES
+    # (`redact_env_values`) catches it. Both of those are masked either way, at every tail, whatever
+    # this field says. What is NOT recovered by turning it off is a destroyed traceback path: the
+    # composition screen is unconditional, so `False` buys back nothing the fix already gave.
+    # Deliberately NOT in `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` — see that map's closing section for the
+    # three independent reasons. See `core/redact.py::redact_output_tail`.
+    redact_output: bool = True
     # B5 reward-hacking detector: a host-side monitor that flags suspicious wins (grader/answer-key
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
@@ -2365,6 +2381,41 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # commit before that date. Note the fence's `warn` rung is NOT the historical value: it writes
     # to stderr, which is the captured `RunResult.stderr` the repair loop reads.
     "read_fence": "off",
+    # THE DEVELOPER'S PROBE, added 2026-08-13 defaulting to ON (F2, `tools/dev_probe.py`). It
+    # satisfies (a)+(b)+(c), and (b) in TWO independent ways rather than one — which is why it is
+    # here despite the probe having no domain event of its own.
+    #   * a TOOL the run never had: `run_probe` joins the Developer's toolset at
+    #     `adapters/repo_developer.py::_scout_tools`, the one point all four phases compose, so a
+    #     resumed node's Developer can spend turns — and therefore money — on probe calls that the
+    #     first half of the same run's event log contains zero of. Each probe also LAUNCHES A
+    #     SUBPROCESS on the operator's box. It is sandboxed (no write anywhere, no exec, no GPU, its
+    #     own always-`deny` read fence, a disposable tempdir) and that is exactly why it needs no
+    #     event — but "no side effect" is not "no work", and this map is about work.
+    #   * a DIFFERENT PROMPT: `_REPO_DEV_SYSTEM_BODY`'s "you CANNOT execute anything yourself"
+    #     clause is spliced as one of two alternatives at the SAME position, so the two values
+    #     produce two different Developer system prompts — measured 887 bytes apart, first
+    #     divergence at offset 455. A prompt is a contract; resuming a run into the other one is
+    #     changing what the agent was told mid-log.
+    # (c) is `False`, pointable at every commit before 2026-08-13, and the field's own comment
+    # already states that `developer_probe=false` restores the old prompt BYTE FOR BYTE — which is
+    # what makes this row a restoration rather than a guess.
+    "developer_probe": False,
+    # THE REPAIR CRITIC'S CADENCE, added 2026-08-13 defaulting to 3 (F8). (a) holds. (b) is paid
+    # work AND an intervention, the two strongest columns at once: from the 4th durable repair on a
+    # node, `agents/unified_agent.py::repair_critic` is a SECOND model asked whether the chain is
+    # circling, called `@in_llm_lane` on every subsequent repair — and it has the authority to
+    # ABANDON the chain, so a resumed node can stop repairing where the first half of its own run
+    # would have kept going. Note how it interacts with the `inline_repair_attempts: 0` row above:
+    # where THAT row fires it restores the historical unlimited loop, and without this row the same
+    # resume would put a paid judge on top of it that the run never had. The two are independent,
+    # though — `runs/live_toy` spells `inline_repair_attempts: 1` explicitly, so that row is an inert
+    # `setdefault` there while this one still fires, which is exactly why each carries its own value
+    # rather than one being inferred from the other.
+    # (c) is `0`, and it is pointable rather than guessed — the field's own comment spells it "no
+    # critic (the loop stops on triage + the floors, exactly as it did before 2026-08-13)". It is
+    # NOT the "magnitudes stay out" case: 0 here is a real OFF, not a disabled magnitude, which is
+    # the same distinction that admits `inline_repair_attempts` and `deep_research_every`.
+    "repair_critic_after": 0,
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour
@@ -2375,6 +2426,38 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     #  * magnitudes and depths for behaviour that ALREADY existed — `debug_depth`,
     #    `context_budget_chars`, `developer_plan_max_steps`, `agent_emit_after`: guessing 0/off there
     #    disables working machinery rather than preserving history.
+    #
+    # AND ONE NAMED EXCLUSION, because it will otherwise be re-litigated every time the field moves:
+    # `redact_output`, flipped False -> True on 2026-08-15, gets NO ROW. The case FOR one is real
+    # and is the only one worth stating — a resumed pre-flip run would start masking mid-record, so
+    # its own log would say two different things about the same kind of value in its two halves.
+    # It loses on three independent grounds, any one of which is sufficient:
+    #  (a) FAILS OUTRIGHT, and this is the decisive one. `redact_output` is a B3 field that predates
+    #      `config.snapshot.json` itself (2026-06-23), so no snapshot format that has ever existed
+    #      could omit it. Measured over all 46 preserved run directories on this box: 46 of 46
+    #      carry the key explicitly (45 `false`, 1 `true`). `migrate_config_snapshot` is a
+    #      `setdefault`, so the row would be a provable NO-OP on every run it was added to protect —
+    #      a rule with no reachable case is worse than no rule, because a later reader takes its
+    #      presence as evidence the question was live. Contrast `inline_repair_attempts`, the other
+    #      CHANGED-default entry here: that one exists precisely FOR the pre-versioning snapshot
+    #      that does not carry the key, and such a snapshot exists. For this field it cannot.
+    #  (b) FAILS. No paid call, no intervention, no concurrency, no selection policy: this is a
+    #      write-side transformation of a durable diagnostic STRING. It cannot fail a node, buy a
+    #      repair, or move a champion. The precedent is `auto_extra_metrics`, whose own settings-doc
+    #      row states the exemption in these words — write-side only, the fold never reads it, so it
+    #      cannot change how an already-recorded run replays and it needs no row here.
+    #  (c) IS NOT WELL-FORMED. `False` meant "no tail redaction AT ALL" before 2026-08-14 and means
+    #      "no ENTROPY tail redaction" after, because the same change that made the flip cheap moved
+    #      known credential SHAPES and the operator's own env VALUES to unconditional at every tail.
+    #      So re-entry ALREADY changes the tail's redaction posture on all 46 preserved runs and no
+    #      row was added for that — correctly. Pinning the entropy half alone would preserve half of
+    #      a posture whose other half is deliberately unpinned, which is not a historical value.
+    # The mid-record concern itself is also the smallest version of itself: the entropy pass changes
+    # 0 of 1,652 persisted tails across the whole preserved corpus, the ~30 always-on
+    # `redact_persisted_text` boundaries have carried this exact pass unconditionally the entire
+    # time (so a redaction-posture change mid-corpus is that corpus's normal state, not a novelty),
+    # and `***REDACTED***` is a self-describing marker — a reader can SEE that a mask happened,
+    # which is not true of any behavioural change this table does protect.
     # A new field belongs here only when it (a) postdates 2026-06-23, (b) defaults to adding paid
     # calls / interventions / concurrency / a different selection policy, and (c) has a historical
     # value you can point at a commit for. When (c) fails, leave it out and say so here. A CHANGED
