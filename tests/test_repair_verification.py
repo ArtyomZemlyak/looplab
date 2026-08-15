@@ -19,14 +19,17 @@ from looplab.core.models import Idea, NodeStatus
 from looplab.engine import crash_repair, evaluate as ev_mod
 from looplab.engine.crash_repair import _format_repair_log
 from looplab.engine.orchestrator import Engine
-from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, REPAIR_INERT, REPAIR_UNMET,
+from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_MIN_PARTS,
+                                          REPAIR_INERT, REPAIR_UNMET,
                                           REPAIR_UNSTATED, REPAIR_VERDICTS, REPAIR_VERIFIED,
-                                          changed_region, claimed_tokens, inert_streak,
-                                          verify_repair)
+                                          changed_region, claimed_tokens,
+                                          declared_param_overrides, inert_streak, verify_repair)
 from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, TRIAGE_ACTIONS, coerce_triage_action
 from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+from looplab.engine import repair_verify
+import time
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
 from tests._source_scan import names_read
@@ -175,8 +178,12 @@ class _ClaimingDev:
         return f"{_BAD}rdrop_alpha = 0.1\n"
 
 
-def _drive(run_dir, dev, judge, **kw):
-    """Seed one node and run the REAL repair loop over it (no genesis, no policy search)."""
+def _drive(run_dir, dev, judge, *, seed_params=None, **kw):
+    """Seed one node and run the REAL repair loop over it (no genesis, no policy search).
+
+    `seed_params` overrides the seeded node's DECLARED `idea.params`. The toy default is the
+    benchmark space's bare `x`/`y`, which `declared_param_overrides` excludes by design — the
+    override tests need a dotted declaration, i.e. a repo-task-shaped one."""
     kw.setdefault("auto_install_deps", False)
     kw.setdefault("inline_repair", True)
     eng = Engine(run_dir, task=ToyTask.load(TASK), researcher=judge, developer=dev,
@@ -185,7 +192,9 @@ def _drive(run_dir, dev, judge, **kw):
                      {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
     eng.store.append("node_created", {
         "node_id": 0, "parent_ids": [], "operator": "draft",
-        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "idea": {"operator": "draft",
+                 "params": dict(seed_params) if seed_params else {"x": 1.0, "y": 1.0},
+                 "rationale": "seed"},
         "code": dev.implement(None)})
 
     async def _bounded() -> bool:
@@ -910,137 +919,6 @@ def test_the_limit_is_a_named_constant_the_loop_actually_reads(limit_name):
     assert limit_name in src
 
 
-def test_the_two_per_token_scans_are_derived_once_per_verification(monkeypatch):
-    """Both scans were rebuilt PER CLAIMED TOKEN over inputs that do not change across the loop.
-
-    `_abbreviated_identifier` ran `set(_IDENT_RE.findall(region))` over the whole 40 KB
-    `changed_region` for every token `claimed_tokens` produced (uncapped — the intake bound is a
-    2,000-character rationale, which yields tens to low hundreds), and `_is_citation_only` rebuilt
-    `_citation_clauses(rationale)` for every UNMET one. That is quadratic in exactly the two numbers
-    that grow together, on a rung the loop runs once per repair, in a run where one node recorded
-    2,345 of them.
-
-    Counted rather than timed: what the fix has to hold is that each derivation happens ONCE, which a
-    wall-clock assertion could not state and a source pin could not observe. The verdict is compared
-    against the un-instrumented answer in the same breath, because a "fix" that stopped scanning
-    would also satisfy the count.
-    """
-    from looplab.engine import repair_verify as rv
-
-    # Many tokens, none of them met by the region, so BOTH loops run to their full length: the unmet
-    # comprehension over every claim, then the citation demotion over every one of those.
-    tokens = " ".join(f"alpha_beta_{n}" for n in range(60))
-    rationale = f"Fix: rewrite {tokens} and drop lr_schedule_warmup"
-    region = "trainer.py\n-    old = 1\n+    new = 2\n" + ("# padding line\n" * 400)
-    expected = verify_repair(rationale, changed=["trainer.py"], region=region)
-
-    idents, clauses = [], []
-    real_idents, real_clauses = rv.region_identifiers, rv._citation_clauses
-
-    def _idents(value):
-        idents.append(value)
-        return real_idents(value)
-
-    def _clauses(value):
-        clauses.append(value)
-        return real_clauses(value)
-
-    monkeypatch.setattr(rv, "region_identifiers", _idents)
-    monkeypatch.setattr(rv, "_citation_clauses", _clauses)
-    out = verify_repair(rationale, changed=["trainer.py"], region=region)
-
-    assert (out.verdict, out.claims, out.unmet) == (expected.verdict, expected.claims, expected.unmet)
-    assert out.claims and len(out.claims) > 50, "the loops did not run to any interesting length"
-    assert len(idents) == 1, f"the diff was re-scanned {len(idents)} times for one verification"
-    assert len(clauses) == 1, f"the rationale was re-clause-scanned {len(clauses)} times"
-
-
-def test_the_hoisted_scans_are_still_callable_on_their_own():
-    """Both helpers keep deriving their own input when a caller has none — the truth-table tests
-    below and any future caller drive them directly, and a required parameter would make the hoist a
-    contract change rather than a shared computation."""
-    from looplab.engine.repair_verify import _abbreviated_identifier, _is_citation_only
-
-    region = "config.py\n-    gradient_accumulation_steps = 1\n+    gradient_accumulation_steps = 4\n"
-    assert _abbreviated_identifier("grad_accum", region) == "gradient_accumulation_steps"
-    assert _is_citation_only("nll_cos", "node 1 used nll_cos") is True
-
-
-def test_the_triage_providers_construction_does_not_park_the_engine_loop(tmp_path):
-    """`repair_log_tools` GLOBS the workdir and then `open`s + byte-probes every stage log this
-    attempt wrote. It was a plain ARGUMENT to `self._triage_crash(...)` inside `async def _evaluate`,
-    so all of that ran on the engine's event loop — and on the geesefs/S3 mounts a run root usually
-    lives on, a directory lookup that MISSES costs 105-950 ms (`core/fence.py::_warm_directory_lookup`
-    measured it). One node's crash triage therefore stalled every concurrent eval, both watchdogs and
-    the run loop, once per repair attempt.
-
-    Same class as `train_monitor._monitor_training`'s (fixed 2026-08-15), at the one site where the
-    CONSUMER is not itself offloaded — so the hand-off has to be its own rather than a closure inside
-    an existing one.
-
-    Driven through the real `_evaluate`: the production construction is replaced by one that blocks
-    for a fixed time, and a sibling task on the same loop counts its own ticks while that is in
-    flight. On the loop, the sibling records nothing across the block; off it, the sibling keeps
-    running. No source pin can tell those apart.
-    """
-    import time
-
-    from looplab.engine import evaluate as _ev
-
-    blocked_for = 0.25
-    calls: list[float] = []
-
-    def _slow_provider(engine, workdir, log_plan=None, log_snapshot=None):
-        calls.append(time.monotonic())
-        time.sleep(blocked_for)          # blocking, exactly as a cold-mount glob + open is
-        return None                      # the historical "no tools" answer: nothing else changes
-
-    dev, judge = _MovingDev(), _Judge()
-    eng = Engine(tmp_path / "run", task=ToyTask.load(TASK), researcher=judge, developer=dev,
-                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
-                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=2)
-    eng.store.append("run_started",
-                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
-    eng.store.append("node_created", {
-        "node_id": 0, "parent_ids": [], "operator": "draft",
-        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
-        "code": dev.implement(None)})
-
-    ticks: list[float] = []
-
-    async def _main():
-        import anyio as _anyio
-
-        done = _anyio.Event()
-
-        async def _heartbeat():
-            while not done.is_set():
-                ticks.append(time.monotonic())
-                await _anyio.sleep(0.01)
-
-        async with _anyio.create_task_group() as tg:
-            tg.start_soon(_heartbeat)
-            with _anyio.move_on_after(180):
-                await eng._evaluate(0, _anyio.CapacityLimiter(1), None)
-            done.set()
-
-    original = _ev.repair_log_tools
-    _ev.repair_log_tools = _slow_provider
-    try:
-        anyio.run(_main)
-    finally:
-        _ev.repair_log_tools = original
-
-    assert calls, "the repair loop never built a triage provider — the test proved nothing"
-    # The loop must have made progress DURING each block. One tick per 10 ms of a 250 ms block is
-    # ~25; require a handful so a slow CI box cannot make a genuinely-blocked loop look responsive.
-    for started in calls:
-        during = [t for t in ticks if started < t < started + blocked_for]
-        assert len(during) >= 3, (
-            f"the event loop made {len(during)} tick(s) while the triage provider was being built — "
-            "the construction is running on the loop")
-
-
 # ============================================================ the declared-parameter override rung
 # A DIFFERENT QUESTION FROM EVERY TEST ABOVE, asked of different inputs. `verify_repair` compares the
 # rationale against the diff; `declared_param_overrides` compares the RECORD's declared coordinates
@@ -1355,3 +1233,134 @@ def test_the_whole_file_artifact_is_attributed_by_the_same_rule_as_a_path(tmp_pa
                                     code=after, baseline_code=before) == ()
     assert len(declared_param_overrides({"train.training.batch_size": 8192.0}, {},
                                         code=after, baseline_code="")) == 1
+
+
+def test_the_two_per_token_scans_are_derived_once_per_verification(monkeypatch):
+    """Both scans were rebuilt PER CLAIMED TOKEN over inputs that do not change across the loop.
+
+    `_abbreviated_identifier` ran `set(_IDENT_RE.findall(region))` over the whole 40 KB
+    `changed_region` for every token `claimed_tokens` produced (uncapped — the intake bound is a
+    2,000-character rationale, which yields tens to low hundreds), and `_is_citation_only` rebuilt
+    `_citation_clauses(rationale)` for every UNMET one. That is quadratic in exactly the two numbers
+    that grow together, on a rung the loop runs once per repair, in a run where one node recorded
+    2,345 of them.
+
+    Counted rather than timed: what the fix has to hold is that each derivation happens ONCE, which a
+    wall-clock assertion could not state and a source pin could not observe. The verdict is compared
+    against the un-instrumented answer in the same breath, because a "fix" that stopped scanning
+    would also satisfy the count.
+    """
+    from looplab.engine import repair_verify as rv
+
+    # Many tokens, none of them met by the region, so BOTH loops run to their full length: the unmet
+    # comprehension over every claim, then the citation demotion over every one of those.
+    tokens = " ".join(f"alpha_beta_{n}" for n in range(60))
+    rationale = f"Fix: rewrite {tokens} and drop lr_schedule_warmup"
+    region = "trainer.py\n-    old = 1\n+    new = 2\n" + ("# padding line\n" * 400)
+    expected = verify_repair(rationale, changed=["trainer.py"], region=region)
+
+    idents, clauses = [], []
+    real_idents, real_clauses = rv.region_identifiers, rv._citation_clauses
+
+    def _idents(value):
+        idents.append(value)
+        return real_idents(value)
+
+    def _clauses(value):
+        clauses.append(value)
+        return real_clauses(value)
+
+    monkeypatch.setattr(rv, "region_identifiers", _idents)
+    monkeypatch.setattr(rv, "_citation_clauses", _clauses)
+    out = verify_repair(rationale, changed=["trainer.py"], region=region)
+
+    assert (out.verdict, out.claims, out.unmet) == (expected.verdict, expected.claims, expected.unmet)
+    assert out.claims and len(out.claims) > 50, "the loops did not run to any interesting length"
+    assert len(idents) == 1, f"the diff was re-scanned {len(idents)} times for one verification"
+    assert len(clauses) == 1, f"the rationale was re-clause-scanned {len(clauses)} times"
+
+
+def test_the_hoisted_scans_are_still_callable_on_their_own():
+    """Both helpers keep deriving their own input when a caller has none — the truth-table tests
+    below and any future caller drive them directly, and a required parameter would make the hoist a
+    contract change rather than a shared computation."""
+    from looplab.engine.repair_verify import _abbreviated_identifier, _is_citation_only
+
+    region = "config.py\n-    gradient_accumulation_steps = 1\n+    gradient_accumulation_steps = 4\n"
+    assert _abbreviated_identifier("grad_accum", region) == "gradient_accumulation_steps"
+    assert _is_citation_only("nll_cos", "node 1 used nll_cos") is True
+
+
+def test_the_triage_providers_construction_does_not_park_the_engine_loop(tmp_path):
+    """`repair_log_tools` GLOBS the workdir and then `open`s + byte-probes every stage log this
+    attempt wrote. It was a plain ARGUMENT to `self._triage_crash(...)` inside `async def _evaluate`,
+    so all of that ran on the engine's event loop — and on the geesefs/S3 mounts a run root usually
+    lives on, a directory lookup that MISSES costs 105-950 ms (`core/fence.py::_warm_directory_lookup`
+    measured it). One node's crash triage therefore stalled every concurrent eval, both watchdogs and
+    the run loop, once per repair attempt.
+
+    Same class as `train_monitor._monitor_training`'s (fixed 2026-08-15), at the one site where the
+    CONSUMER is not itself offloaded — so the hand-off has to be its own rather than a closure inside
+    an existing one.
+
+    Driven through the real `_evaluate`: the production construction is replaced by one that blocks
+    for a fixed time, and a sibling task on the same loop counts its own ticks while that is in
+    flight. On the loop, the sibling records nothing across the block; off it, the sibling keeps
+    running. No source pin can tell those apart.
+    """
+    import time
+
+    from looplab.engine import evaluate as _ev
+
+    blocked_for = 0.25
+    calls: list[float] = []
+
+    def _slow_provider(engine, workdir, log_plan=None, log_snapshot=None):
+        calls.append(time.monotonic())
+        time.sleep(blocked_for)          # blocking, exactly as a cold-mount glob + open is
+        return None                      # the historical "no tools" answer: nothing else changes
+
+    dev, judge = _MovingDev(), _Judge()
+    eng = Engine(tmp_path / "run", task=ToyTask.load(TASK), researcher=judge, developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True, inline_repair_attempts=2)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": dev.implement(None)})
+
+    ticks: list[float] = []
+
+    async def _main():
+        import anyio as _anyio
+
+        done = _anyio.Event()
+
+        async def _heartbeat():
+            while not done.is_set():
+                ticks.append(time.monotonic())
+                await _anyio.sleep(0.01)
+
+        async with _anyio.create_task_group() as tg:
+            tg.start_soon(_heartbeat)
+            with _anyio.move_on_after(180):
+                await eng._evaluate(0, _anyio.CapacityLimiter(1), None)
+            done.set()
+
+    original = _ev.repair_log_tools
+    _ev.repair_log_tools = _slow_provider
+    try:
+        anyio.run(_main)
+    finally:
+        _ev.repair_log_tools = original
+
+    assert calls, "the repair loop never built a triage provider — the test proved nothing"
+    # The loop must have made progress DURING each block. One tick per 10 ms of a 250 ms block is
+    # ~25; require a handful so a slow CI box cannot make a genuinely-blocked loop look responsive.
+    for started in calls:
+        during = [t for t in ticks if started < t < started + blocked_for]
+        assert len(during) >= 3, (
+            f"the event loop made {len(during)} tick(s) while the triage provider was being built — "
+            "the construction is running on the loop")
