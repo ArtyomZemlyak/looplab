@@ -362,6 +362,19 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **The repair critic's VERDICT is not recorded — only that it was asked** (observed on
+  `rubertlite-dr-unified-v8`, 2026-08-15). `engine/evaluate.py:2127`'s `repair_critic` span carries
+  `{attempt, node_id, generation}` and nothing else, and a `continue` verdict appends no event at all;
+  only a STOP is visible, and then only indirectly, as the `abandon` triage_action it produces. So an
+  operator auditing why a repair chain ran to six attempts can see the critic was consulted and cannot
+  see what it decided or why. Measured on that run: 6 consultations, 0 stops, and the chains were in
+  fact progressing (node 3 went semantic-failure -> logic edit -> its own code bug -> fix -> `mine`
+  PASSED), so the verdicts were right — which is exactly the case where nobody notices the record is
+  missing. This is the same shape as the calibration-receipt rejection that was misreported twice in
+  one day because the mechanism said nothing about its own reasoning; that one was fixed by making the
+  refusal name its cause. F8's whole premise is that a JUDGEMENT replaces a counter, and a judgement
+  that leaves no trace cannot be reviewed, tuned or trusted.
+
 - **[FIXED 2026-08-15, same day] The Metrics tab called a number `measured` that the engine refuses
   to call measured** (found by the merge-day record-honesty review). `ui/src/Inspector.jsx::Metrics`
   built the objective ★ row with no source of its own and rendered a HARDCODED `measured` under the
