@@ -68,7 +68,9 @@
 //     whose live runs re-fold on every poll. And drawing 5 objectives on one axis needs a per-run
 //     rescale, which is the normalized-score objection again wearing a line chart. Worth building when
 //     the summary row carries the series; the shape of `groupTrajectoryGap` below is left as the note.
-import { metricComparable, sourceIncomplete } from './runIndex.js'
+import {
+  bestMetricCaveatNotice, bestMetricCaveats, metricComparable, sourceIncomplete,
+} from './runIndex.js'
 
 // Render backstop. `run_summaries` folds every run directory on the box, and the panel is a table.
 const MAX_GROUP_ROWS = 100
@@ -151,6 +153,7 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
       comparableRuns: comparable.reduce((sum, group) => sum + group.size, 0),
       rankedRuns: comparable.reduce((sum, group) => sum + group.ranked, 0),
       integrityExcluded: groups.reduce((sum, group) => sum + group.integrityExcluded, 0),
+      caveatedRuns: groups.reduce((sum, group) => sum + group.caveatedCount, 0),
     },
   }
 }
@@ -174,6 +177,23 @@ function buildGroup(bucket, limit) {
     // the table that can still move.
     provisional: entry.run.finished !== true,
     sourceIncomplete: sourceIncomplete(entry.run),
+    // WHAT KIND OF NUMBER this row's value is, from the server's `best_metric_caveats` receipt
+    // (`looplab/engine/champion_caveats.py`). This closes refusal 2 below by exactly the width of
+    // what the row now carries and no more: the caveat says the run RECORDED something about its
+    // champion's number and selected on it anyway — a salvage the operator admitted with
+    // `metric_salvage: "select"`, or a hard reward-hack/leakage signal its `trust_gate` did not
+    // enforce.
+    //
+    // CAVEAT, AND DELIBERATELY NOT UNRANK — the same decision `panels.jsx::ParetoPanel` settled on
+    // 2026-08-15, and NOT the `sourceIncomplete` rung one line up, which is why the two are separate
+    // fields rather than one "eligible" flag. An incomplete log means the value shown is the best of
+    // a PREFIX: it is not this run's best and no ordering can use it. A caveated value IS this run's
+    // best — the run's own selector crowned it under a rung the operator configured — so dropping it
+    // from the ordering would publish a leaderboard that disagrees with the runs it ranks, and would
+    // overrule a recorded operator decision to boot. What it must never be is SILENT, because this
+    // table is the surface an operator reads to decide which configuration to reuse.
+    caveats: bestMetricCaveats(entry.run),
+    caveatNotice: bestMetricCaveatNotice(entry.run),
   }))
   const eligible = entries.filter(entry => !entry.sourceIncomplete)
   const values = [...new Set(eligible.map(entry => entry.value))]
@@ -219,6 +239,12 @@ function buildGroup(bucket, limit) {
     size: entries.length,
     ranked: ordered.length,
     integrityExcluded: unranked.length,
+    // Counted over EVERY entry, ranked or not: a caveat is a fact about the number, and an unranked
+    // row still shows its value.
+    caveatedCount: entries.filter(entry => entry.caveats.length).length,
+    // Whether the row that WON is one of them, which is the sharper question and the one the group's
+    // refusal names — a caveated also-ran changes nothing about who leads.
+    caveatedLeader: ordered.some(entry => entry.rank === 1 && entry.caveats.length),
     provisionalCount: entries.filter(entry => entry.provisional).length,
     confirmedCount: entries.filter(entry => entry.confirmed).length,
     distinctValues: values.length,
@@ -260,10 +286,25 @@ export function groupClaim(group) {
   const refusals = [
     'This orders the values these runs RECORDED. `/api/runs` carries no metric name, unit, dataset or '
     + 'evaluation protocol, so a shared task ID does not prove the runs measured the same thing.',
-    'It is not a claim that each number is about the artifact its own run produced — metric '
-    + 'provenance is not recorded (docs 31/35: two nodes here recorded 0.224975 for a checkpoint '
-    + 'neither of them trained).',
+    // NARROWED 2026-08-15, by exactly the width of what the row now carries. `best_metric_caveats`
+    // records whether the champion's number was SALVAGED or TRUST-FLAGGED; it still records nothing
+    // about the metric SUBJECT — which artifact the number is a claim about — and that is the half
+    // docs 31/35 measured, so the refusal keeps its example and loses only the sentence that is no
+    // longer true.
+    'It is not a claim that each number is about the artifact its own run produced — the metric '
+    + 'SUBJECT is not recorded on this row (docs 31/35: two nodes here recorded 0.224975 for a '
+    + 'checkpoint neither of them trained).',
   ]
+  if (group.caveatedCount > 0) {
+    // The COUNT and the LEADERSHIP are two different facts and the sentence says both: a caveated
+    // also-ran is a footnote, a caveated leader is the answer to "which configuration should I
+    // reuse". Neither is unranked — see the `caveats` comment in `buildGroup`.
+    refusals.push(`${group.caveatedCount} run(s) in this group publish a best metric their own run `
+      + 'recorded a caveat about (salvaged, or from a trust-flagged node) and selected on anyway. '
+      + (group.caveatedLeader
+        ? 'One of them leads this group. Open it before reusing its configuration.'
+        : 'None of them leads this group.'))
+  }
   if (group.integrityExcluded > 0) {
     refusals.push(`${group.integrityExcluded} run(s) in this group hold no rank: their event log `
       + 'stops being readable, so the value shown is the best of a PREFIX, not of the run.')

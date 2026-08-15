@@ -198,6 +198,9 @@ _LAYOUT = {
     # deterministic recovery of a metric the eval already produced, for a node that failed for
     # some other reason (doc: docs/guide/tasks.md "Metric salvage")
     "metric_salvage": "engine",
+    # what KIND of number a run's champion metric is, for the /api/runs row that publishes the
+    # number and nothing that could qualify it (the complement of memory.unreliable_metric_ids)
+    "champion_caveats": "engine",
     "memory_tools": "tools",
     # what of the cross-run memory is attributable to ONE run, and may go when that run is deleted
     "memory_cascade": "serve",

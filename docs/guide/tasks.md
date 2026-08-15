@@ -329,6 +329,19 @@ overrode, with no metric attached — so "this declaration shape breaks" can sti
 Under `metric_salvage: "select"` with operator-produced output no violation is minted at all, and the
 node stays in every population, annotated as recovered rather than measured.
 
+**And when such a node becomes the champion, the PORTFOLIO says so** (since 2026-08-15). The two rules
+above are exclusions, and an exclusion has nothing to say about a number the run selected on: a
+`select`-admitted salvage is in `feasible_nodes`, so it can be `best_node_id`, so it can be the
+`best_metric` every cross-run surface reads off `/api/runs` — a row that carries the number and no
+violations, no provenance and no node id, i.e. one no client can qualify. `best_metric_caveats` is that
+missing fact: `salvaged` when the champion's number was recovered and admitted, `trust_flagged` when the
+champion carries a hard reward-hack/leakage signal a `trust_gate: audit` run enforced nothing about. It
+is the complementary half of the same two families the cross-run exclusion joins — salvaged-and-admitted
+rather than salvaged-and-excluded, flagged-and-not-enforced rather than flagged-and-enforced — and it is
+derived from those same two predicates, never re-read off the rows (`engine/champion_caveats.py`).
+Measured over the 46 preserved runs when it shipped: 37 carry a best metric and none of them is
+caveated, so this fences a reachable state rather than describing the corpus.
+
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine
 re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against
