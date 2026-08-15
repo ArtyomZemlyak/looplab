@@ -46,7 +46,9 @@ Each is universal (no path list, no command list), and each closes a recorded in
 2. **It cannot write. Anywhere.** Not site-packages, not the run directory, not the event log, not
    even its own scratch. THREE mechanisms, and what each is for is stated exactly — measured by
    mutating each one out of a throwaway tree and watching which tests survive:
-     * the audit hook refuses `open` for write and the filesystem-mutating `os.*`/`shutil.*` events.
+     * the audit hook refuses `open` for write and the filesystem-mutating `os.*`/`shutil.*` events
+       — the `os.*` half SPLICED from `read_fence.MUTATION_EVENTS` rather than listed again, so the
+       one table `tests/test_read_fence.py` re-derives from the interpreter covers both surfaces.
        This is the rung that produces an ACTIONABLE message, in the one exception type
        `except OSError:` does not swallow. It sees only what CPython AUDITS, which is much less than
        "the ways a file can come into existence" — see the residual below. It is ALSO the only rung
@@ -273,9 +275,26 @@ class LoopLabProbeRefused(Exception):
 # Filesystem mutation that does not go through `open` (a rename, an unlink, a tree copy). Refusing
 # these is what makes the message ACTIONABLE; the RLIMIT_FSIZE backstop below is what makes the
 # boundary hold for anything not on this list.
-_MUTATE = frozenset((
-    "os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.link", "os.symlink", "os.truncate",
-    "os.chmod", "os.chown", "os.utime", "os.setxattr", "os.removexattr", "os.startfile",
+#
+# The `os.*` half is SPLICED from `read_fence.MUTATION_EVENTS`, the registry that already answers
+# "which audited events change a file", not copied out of it. This launcher templates
+# `read_fence.fence_inputs`/`render` and `landlock.no_mutation_source()` in the same way, so the
+# splice is the module's existing shape; what it buys is that
+# `tests/test_read_fence.py::test_mutation_arg_shapes_match_the_interpreter` RE-DERIVES that table
+# from a recording audit hook, so an interpreter that renames or drops an event goes red ONCE for
+# both surfaces. A hand-kept second copy inherits none of that — it just stops covering the event,
+# silently, which is the exact failure mode `_UNAUDITED_MUTATORS` below is re-derived to prevent.
+_MUTATE = frozenset(%(mutations)r) | frozenset((
+    # This surface's own additions, which the read fence deliberately does NOT carry — and the
+    # reason it does not is a fact about IT, not about them. That fence refuses paths under a ROOT,
+    # where every one of these lowers to an `os.*` event or an `open` on the SAME path, so a row
+    # would be a second name for a refusal that already happened. Here the rule is "no write
+    # ANYWHERE": there is no path test to defer to, and refusing at the name the program actually
+    # called leaves the raising frame at that `shutil.move` instead of several frames inside the
+    # stdlib, which is what the model reads. `os.startfile` is Windows-only and mutates nothing —
+    # it is here because it OPENS something with the shell, i.e. rule 3's act under a filesystem
+    # spelling.
+    "os.startfile",
     "shutil.copyfile", "shutil.copymode", "shutil.copystat", "shutil.copytree", "shutil.move",
     "shutil.rmtree", "shutil.unpack_archive",
 ))
@@ -414,6 +433,11 @@ def render_launcher(program_path: str) -> str:
     rules — `%`-formatting does not re-scan what it substitutes."""
     return _LAUNCHER % {"refusal": PROBE_REFUSAL, "program": str(program_path),
                         "unaudited": tuple(_UNAUDITED_MUTATORS),
+                        # SORTED so two renders of one registry are byte-identical: a dict's
+                        # order is its insertion order, and a launcher that changes shape when
+                        # someone
+                        # reorders a table is a diff nobody can read.
+                        "mutations": tuple(sorted(read_fence.MUTATION_EVENTS)),
                         "landlock": landlock.no_mutation_source(),
                         "landlock_fn": landlock.NO_MUTATION_FUNCTION}
 

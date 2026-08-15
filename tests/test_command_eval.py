@@ -795,3 +795,98 @@ def test_a_reused_stages_artifact_still_feeds_the_secondary_readers_but_only_und
     assert [s["status"] for s in typo.stages] == ["ok", "ok"]
     assert typo.extra_metrics is None
     assert typo.violations == [{"name": "budget", "value": None, "max": 5, "min": None}]
+
+
+# --------------------------------------------------------------------- the subject rides every exit
+#
+# `run_command_eval` returns `_run.early` BEFORE its own backstop bind, so an early return that
+# omits `metric_subject=run.metric_subject` DROPS a subject `_run_stages` already bound at the score
+# stage's start — and `engine/eval_dispatch.py`'s fallback then stamps `absent_metric_subject()`,
+# i.e. `unbound_reason: "not_declared"`, about a declaration the operator DID write. Under
+# `metric_subject="require"` that wrong slug rides into the operator-facing `metric_salvaged`
+# violation row and points the repair at the wrong fix (declare a subject vs. produce the file).
+# `env_unsupported` was the one of five that omitted it.
+
+def _subject_chain(tmp_path, last: dict) -> list:
+    """A `train` that PRODUCES the subject, then `last` — whatever way it is about to fail.
+
+    The subject has to be written by the pipeline rather than by the test: `_run_stages` binds it
+    against this attempt's freshness floor, so a file the test dropped in beforehand would bind
+    `stale` and the assertion would pass for the wrong reason.
+    """
+    (tmp_path / "t.py").write_text(
+        "open('model.bin', 'w').write('the node\\'s own checkpoint')\n", encoding="utf-8")
+    return [{"name": "train", "command": [sys.executable, "t.py"]}, dict(last)]
+
+
+def _docker_wrap_without_rebind():
+    """A wrap that CLAIMS to be docker and cannot carry a declared env — the `env_unsupported`
+    refusal, exactly as `tests/test_stage_environment.py` drives it."""
+    def old_wrap(argv, host_cwd):
+        return list(argv)
+    old_wrap._docker = True
+    return old_wrap
+
+
+@pytest.mark.parametrize("status", ["needs_failed", "env_unsupported", "fail", "expect_failed",
+                                    "check_failed"])
+def test_every_early_return_carries_the_subject_it_already_bound(tmp_path, status):
+    """One property, driven through all five refusals `_run_stages` can end on.
+
+    Each fails the FINAL stage — the one whose start binds the subject — so in every case the record
+    that leaves `run_command_eval` must name the artifact the engine looked at. What must never
+    happen is `subject_bound: True` degrading to "no subject was declared" because of HOW the stage
+    failed: the reason a node produced no metric and the referent of the metric it did not produce
+    are independent facts.
+    """
+    scorer = {"name": "score", "command": [sys.executable, "-c", "print('scored nothing')"]}
+    kw: dict = {}
+    if status == "needs_failed":
+        scorer["needs"] = ["absent.bin"]                    # present-but-different from the subject
+    elif status == "env_unsupported":
+        scorer["env"] = {"VS_LOCAL_DATA_ROOT": "/data/local"}
+        kw["wrap"] = _docker_wrap_without_rebind()
+    elif status == "fail":
+        scorer["command"] = [sys.executable, "-c", "raise SystemExit(3)"]
+    elif status == "expect_failed":
+        scorer["expect"] = {"files": ["never_written.json"]}
+    else:
+        scorer["check"] = True
+        kw["check_fn"] = lambda stage, tail: "the scorer printed no metric"
+
+    res = run_command_eval([sys.executable, "-c", "pass"], str(tmp_path), 60, _M,
+                           stages=_subject_chain(tmp_path, scorer),
+                           subject=["model.bin"], **kw)
+
+    assert res.failed_stage == "score" and res.stages[-1]["status"] == status
+    assert res.metric_subject is not None, (
+        f"the {status} early return dropped the bound subject; eval_dispatch's fallback will now "
+        "record `not_declared` about a subject the operator declared and the engine bound")
+    assert res.metric_subject["subject_bound"] is True
+    assert res.metric_subject["subjects"][0]["path"] == "model.bin"
+    assert res.metric_subject.get("unbound_reason") is None
+
+
+def test_a_sixth_early_return_added_without_the_subject_goes_red():
+    """The five above are the five that exist TODAY. This is the rule they are instances of.
+
+    AST, not a substring: every `run.early = RunResult(...)` inside `_run_stages` must pass
+    `metric_subject`. A comment carrying the word cannot satisfy an `ast.keyword`, and a sixth
+    refusal added later (a new contract, a new tier) is red here before it can ship a record whose
+    `unbound_reason` is about the wrong question.
+    """
+    import ast
+
+    from looplab.runtime import command_eval
+    from tests._source_scan import function_tree
+
+    tree = function_tree(command_eval._run_stages)
+    early = [node.value for node in ast.walk(tree)
+             if isinstance(node, ast.Assign)
+             and any(isinstance(t, ast.Attribute) and t.attr == "early" for t in node.targets)
+             and isinstance(node.value, ast.Call)]
+    assert len(early) >= 5, "the early-return returns moved; re-derive this scan before trusting it"
+    for call in early:
+        assert "metric_subject" in {kw.arg for kw in call.keywords}, (
+            f"a `run.early = RunResult(...)` at line {call.lineno} of `_run_stages` does not carry "
+            "`metric_subject=run.metric_subject`, so a bound subject is dropped on that exit")

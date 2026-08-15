@@ -1492,6 +1492,43 @@ def stages_over_time_budget(stages, budget: Optional[float]) -> list:
     return over
 
 
+def record_stages_over_time_budget(stages, budget: Optional[float], *, at: str,
+                                   enforced: bool) -> int:
+    """Emit ONE zero-work marker span per over-budget stage; return how many. The evidence half.
+
+    `stages_over_time_budget` above answers WHICH stages are over; this is the only way that answer
+    reaches an operator after the session that produced it. It had TWO bodies — `engine/eval_stages.py`
+    (`at="resolve"`, `enforced=False`: a manifest that got past the authoring gate by being
+    hand-written, carried over from a parent, or resumed from a run predating the gate) and
+    `adapters/repo_developer.py` (`at="declare"`, `enforced=True`: the emit-spec refusal) — differing
+    only in those two literals. Nothing type-checks a `tracing.operation` kwarg, so an attribute added
+    or a span renamed on one side emitted a differently-shaped row into the SAME trace under the same
+    name, and the operator's evidence that their budget is too small would have depended on which
+    door the manifest came through. One writer, two literals.
+
+    It lives here rather than in either caller because they straddle the layering line — the repo
+    Developer may not import `engine` — and beside `stages_over_time_budget`, which both already
+    import from this module for the very list it renders. `at`/`enforced` are keyword-ONLY and have
+    no defaults: a third call site must say which moment it is recording and whether anything was
+    refused, rather than inheriting a neighbour's answer.
+
+    Never raises. This is diagnostics on the path of a real evaluation or a real authoring turn, and
+    a tracer that is not wired (or a span that fails to open) must not take either down.
+    """
+    over = stages_over_time_budget(stages, budget)
+    if not over:
+        return 0
+    from looplab.core import tracing
+    for name, declared in over:
+        try:
+            with tracing.operation("stage_timeout_over_budget", stage=name, declared_s=declared,
+                                   budget_s=budget, at=at, enforced=bool(enforced)):
+                pass
+        except Exception:  # noqa: BLE001 — a marker span may never fail the work it marks
+            pass
+    return len(over)
+
+
 def stage_time_budget_refusal(stages, budget: Optional[float]) -> Optional[str]:
     """The AUTHORING-time refusal for the first over-budget stage, or None when the manifest fits.
 
@@ -2189,10 +2226,18 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # the repair loop ask the Developer to make the metric appear.
             stage_results.append({"name": _sname, "status": "env_unsupported", "exit_code": 0,
                                   "seconds": 0.0, "concern": _env_problem.format(stage=_sname)})
+            # `metric_subject` rides out with EVERY early return, this one included. `run_command_eval`
+            # returns `_run.early` BEFORE its own backstop bind, so a subject this loop already bound
+            # (the bind runs at the top of the final stage's iteration, above) is simply lost if the
+            # field is omitted — and `eval_dispatch`'s fallback then stamps `absent_metric_subject()`,
+            # i.e. `unbound_reason: "not_declared"`, about a declaration the operator DID write. Same
+            # defect the bind-before-`needs` ordering above was moved for, and under
+            # `metric_subject="require"` the wrong slug rides into the operator-facing
+            # `metric_salvaged` violation row and points the repair at the wrong fix.
             run.early = RunResult(
                 exit_code=2, stdout=run.out, metric=None, timed_out=False,
                 stderr=_env_problem.format(stage=_sname),
-                stages=stage_results, failed_stage=_sname)
+                stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half

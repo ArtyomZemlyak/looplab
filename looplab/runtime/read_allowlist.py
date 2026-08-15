@@ -136,6 +136,15 @@ def mount_sources(repo_spec: Optional[dict]) -> list:
     fact `engine/eval_dispatch.py::_data_binds` turns into a read-only-or-not container bind — so it
     maps to `readwrite` here and everything else to `read`. A bare-string data spec is the
     back-compat shape and is read-only, exactly as `_data_binds` treats it.
+
+    THIS IS THE ONE ENUMERATION OF THE DECLARED MOUNTS, for BOTH spellings of the boundary:
+    `read_fence.fence_inputs` carves its allow-list out of this same list rather than walking the
+    spec a second time. It had its own walk until 2026-08-15 and the two already disagreed — that
+    one called `ref.get("path")` unguarded — which is a disagreement about what an eval may read
+    between the audit hook and the kernel ruleset. Which reading is right, and why the guards are
+    asymmetric, is argued at the call site over there; `mount_sources` keeps the bare-string shape
+    for `data:` because the schema has one, and drops a non-dict `references:` entry because that
+    schema never had one and a malformed declaration must degrade to "no declaration".
     """
     spec = repo_spec or {}
     out: list = []
@@ -196,12 +205,23 @@ def derive(*, workdir, run_dir=None, repo_spec: Optional[dict] = None,
     return list(out.items())
 
 
-def refusal_hint(path) -> str:
-    """The sentence a refused read must carry — it names the FIX, because the reader is the repair
-    loop and after it the operator, and 1/116 measured refusals are LEGITIMATE work (node 36's
-    teacher checkpoint). A boundary whose message is only "denied" is a boundary that costs repair
-    attempts."""
-    return (f"read refused: {path} is outside this eval's declared read set. This node runs in its "
-            "own workspace; anything it legitimately reads from elsewhere has to be DECLARED — add a "
-            "`data:` or `references:` mount for it in the task, or use a workdir-relative path. "
-            "(`looplab landlock-check <run_dir>` prints the exact set this run grants.)")
+# THERE IS NO REFUSAL SENTENCE IN THIS MODULE, and that is a decision — do not add one back.
+#
+# A `refusal_hint(path)` lived here from the day the module was written until 2026-08-15, stating
+# "the sentence a refused read must carry". It had ZERO callers for its whole life, and it could not
+# have had one, because neither surface that refuses a read has a place to put it:
+#
+#   * the KERNEL rung (`landlock.py`) refuses in its own path walk. Its answer is `EACCES` — a bare
+#     errno, delivered to whatever called `open`, with no room for a sentence at all. That is the
+#     whole reason `read_fence.py`'s hook is kept BESIDE it rather than replaced by it;
+#   * the audit-hook rung (`read_fence.py`) raises a non-`OSError` carrying
+#     `read_fence.REFUSAL_MESSAGE`, which already names the same fix in the operator's own
+#     vocabulary ("ask the operator for a `data:`/`references:` mount"). Splicing this module's
+#     sentence in beside it would say the same thing twice, and say it WRONGLY: that fence refuses a
+#     path because it is INSIDE the editable source root, which is a different predicate from "not
+#     in the declared read set" and would send a repair at the wrong fix.
+#
+# What the dead text was right about is preserved where it is live: the refusal a node actually gets
+# names the FIX, because its reader is the repair loop and then the operator, and 1 in 116 measured
+# refusals is LEGITIMATE work (node 36's teacher checkpoint). The place to change that wording is
+# `read_fence.REFUSAL_MESSAGE`; the place to see what this run grants is `looplab landlock-check`.

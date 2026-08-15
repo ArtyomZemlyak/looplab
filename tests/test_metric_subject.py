@@ -1109,3 +1109,51 @@ def test_landlock_check_names_the_kind_when_a_task_genuinely_declares_nothing(tm
         "kind": "quadratic", "id": "q", "goal": "min", "direction": "min"}))
     assert result.exit_code == 0, result.output
     assert "declares no repo spec" in result.output and "'quadratic'" in result.output
+
+
+# ----------------------------------------------- one containment rule, injected or not
+
+
+@pytest.mark.parametrize("rel", ["out/model.bin", "../escape.bin", "/etc/passwd", "loop/a",
+                                 "out/../out/model.bin", "link_out/model.bin"])
+def test_the_un_injected_confine_is_the_SAME_rule_the_engine_binds_with(tmp_path, rel):
+    """`bind_one(confine=None)` must reach `command_eval._confined`, not a second body of it.
+
+    Containment is what decides whether a recorded number is a claim about bytes inside the node's
+    own workdir, and doc 25 RA-05 extracted `_confined` precisely because three hand-copies of that
+    rule had drifted. `_fallback_confine` was a fourth, and the two bodies agreeing on the day it was
+    written is exactly what makes the shape dangerous — `_confined` has already been FIXED once
+    since (`Path.resolve()` raises `RuntimeError` on a symlink loop the candidate can create in its
+    own workdir, which pre-extraction took down the RUN instead of failing the node).
+
+    Driven over the adversarial spellings rather than asserted equal by inspection: every row is a
+    real path on disk, and both spellings must answer identically about each.
+    """
+    from looplab.runtime.command_eval import _confined
+
+    wd = tmp_path / "wd"
+    (wd / "out").mkdir(parents=True)
+    (wd / "out" / "model.bin").write_bytes(b"weights")
+    (tmp_path / "escape.bin").write_bytes(b"somebody else's checkpoint")
+    (wd / "loop").mkdir()
+    (wd / "loop" / "a").symlink_to(wd / "loop" / "b")      # …and b points back at a: a real loop
+    (wd / "loop" / "b").symlink_to(wd / "loop" / "a")
+    (wd / "link_out").symlink_to(tmp_path)                  # a symlink OUT of the workdir
+
+    assert ms._fallback_confine(str(wd), rel) == _confined(str(wd), rel), (
+        "the un-injected containment answered differently from the one the engine injects")
+
+
+def test_a_symlink_loop_inside_the_workdir_fails_the_node_rather_than_the_run(tmp_path):
+    """The FIX the copy would have missed, stated as its own case because it is the one that cost a
+    run: a candidate can `ln -s b a; ln -s a b` in its own workdir and name `a` as the subject.
+    `Path.resolve()` raises `RuntimeError` there — not `OSError`, not `ValueError` — so a
+    containment guard that catches only those two propagates out of the eval worker with no node
+    terminal. Here it must be an ordinary unbound record."""
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "a").symlink_to(wd / "b")
+    (wd / "b").symlink_to(wd / "a")
+    row = ms.bind_one(str(wd), "a")                         # no `confine=` — the fallback path
+    assert row["bound"] is False and row["reason"] == "escapes"
+    assert ms.bind(["a"], str(wd), since=None)["unbound_reason"] == "escapes"
