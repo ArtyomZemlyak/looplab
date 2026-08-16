@@ -1923,6 +1923,68 @@ places: **D3 ≡ I2** (adapters), **D4 ≡ I3-provenance** (D4 shipped, I3-drift
 `tools/web.py` + `tools/literature.py`), **A0e ≡ C3** (both shipped, and both superseded by the
 2026-08-13 repair judgment).
 
+### §0.5 CLAUDE.md's package map carried FIVE duplicated rows for ~2.7 days (collapsed 2026-08-16)
+
+✅ **What it was.** `CLAUDE.md`'s package map had TWO rows for each of `looplab/core/`,
+`looplab/events/`, `looplab/runtime/`, `looplab/tools/` and `looplab/engine/` — ten table rows for
+five packages, 3 KB to 26 KB each. Which one a reader met depended only on where they stopped
+reading, and Markdown renders both without complaint.
+
+**How long, and how it got there.** Born in the merge `b4ecb320` (2026-08-13 13:57 UTC, "merge F1d
+stage environment; sweep the shadowing-pin hazard tree-wide") — a four-row conflict hunk resolved by
+keeping BOTH sides, in the same commit whose own message records collapsing "every duplicated
+module-level constant" because "a union leaves both statements and Python silently uses the last".
+The tree got that treatment; the table did not. The fifth pair (`engine/`) arrived in `e9930e77`
+(2026-08-14 09:22 UTC, "merge master into F1"). **52 commits touched `CLAUDE.md` between then and the
+collapse (32 on master's first-parent line) and none of them noticed** — every one of them spliced
+into whichever copy its anchor string hit first.
+
+**What the duplication was HIDING.** The two copies of a row were not older/newer; they were two
+independently-evolved descendants, so content was lost in BOTH directions, and the corrections that
+landed on the losing side were silently reverted for anyone who stopped at the first copy:
+
+| The row a reader hits FIRST said | The code says |
+|---|---|
+| `runtime/`: "it is a PATH fence, not an inode one" (unqualified) | Only on the READ path. `read_fence.py`: "The RARE events do resolve symlinks, and the asymmetry is the whole design" — `os.chdir` + the twelve `MUTATION_EVENTS` buy a memoized `realpath` and a `/proc/self/fd` lookup. The second copy carried the qualifier AND the 2026-08-13 re-measurement (+254 %, ~474 us/call on geesefs) that `read_fence.py`'s own comment records; the first copy stopped at the original +88 %/+2.8 % pair |
+| `engine/`: a `metric_salvaged` node "can never become champion or be bred from", flat | `core/config.py:867` `metric_salvage_repair: bool = True` — a node whose repaired declaration passes the re-checked artifact contract loses the violation, restricted to operator-produced output. **This is the exact claim `a8d43b50` (2026-08-13 15:06) was written to fix**, in four places at once (config.py, configuration.md, the Web editor help text, CLAUDE.md), because all four stated the `audit` guarantee "as if the violation were unconditional". The next day's merge put the un-fixed sentence back as the copy a reader meets first |
+| `engine/`: `widths.py` is "the ONE live concurrency-width settling rule" | `engine/widths.py` also holds `per_experiment_gpu_budget` (plus `proposal_derived_width`, `settled_width_refusal`). The same `a8d43b50` fixed this too — its message says it "updates CLAUDE.md's `widths.py` entry, which still described the module as single-purpose after it gained a prompt-facing GPU-ceiling derivation" — and the same merge reverted it for the first reader. `per_experiment_gpu_budget` appeared in `CLAUDE.md` on the SECOND engine row and nowhere else |
+| `engine/`: `cadence.py::cadence_due`, one pace (second copy) | `cadence.py` defines `cadence_due` AND `occupancy_due` (the backlog F1g occupancy pace, the 167.7 GPU-h finding). `occupancy_due` appeared on the FIRST engine row and nowhere else — loss in the other direction |
+
+Also lost to whichever copy you missed: the whole `core/envsafe.py` block (3,008 chars, second copy
+only); `traceview.claimed_build_traces` and `span_index._anchored`'s `?before=` rule (first `events/`
+copy only); and everything `tools/` says about `dev_probe.py` and `log_tools.py` — the second
+`tools/` row was a 236-byte stub next to a 15 KB one.
+
+**The hazard this created, which is the reason this is recorded and not just fixed.** This file is
+edited by SPLICING text into these very long rows, and a merge conflict in it is resolved by
+computing a branch's addition against its merge base and splicing at an anchor string.
+**A substring splice picks whichever copy it hits first.** Four such splices landed on 2026-08-15
+and hit the right row by luck. A splice into the wrong copy is invisible: the text IS there, in a
+row nobody reads, and `mkdocs`, the doc-contract tests and every reviewer see a file that contains
+what it should.
+
+**The fix.** One row per package, content = the UNION of both copies with duplicate sentences
+collapsed once and every contradiction refereed against the code (the four rows above; in each case
+the true statement won and the false one was dropped, never averaged). Verified mechanically, not by
+reading: 202 sentence-level segments across the ten originals, 193 present verbatim in the merged
+rows and 1 modulo punctuation; the 8 that span an edit point were re-checked clause by clause (68
+clauses, 62 present, 6 absent — 2 of them the `widths.py` and `cadence.py` framings the code
+overruled, the other 4 the sub-row collapse below, counted twice because it is in both copies).
+Independently, a per-token multiset check requires `count(merged) >= max(count(copy A), count(copy
+B))` for every word — zero deficits on `core`/`runtime`/`tools`/`engine`, and `events`'s 24 deficits
+are asserted equal, token for token, to the one span deliberately collapsed.
+
+**One more instance, one level down, found by the same pass:** the `events/` row carried the phrase
+"digest, readmodel, exporters + the pure UI projections (…)" TWICE inside a SINGLE row, in both
+copies. `traceview.py`'s expansion lived only in the first list and `authoring_projection.py` only in
+the second — the identical splice hazard, at sub-row scale. Collapsed into one list holding both.
+
+⬜ **Still open (cheap).** Nothing enforces one row per path. A ~10-line assertion in
+`tests/test_documentation_contracts.py` over `CLAUDE.md`'s package-map table — first column unique —
+would have caught this on 2026-08-13 at 13:57 and would catch the next merge that does it. Note
+§0.3's `trust/` row is a *different* defect in the same table (the row is unique, it is just wrong
+about redaction) and a uniqueness check does not see it.
+
 ---
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
