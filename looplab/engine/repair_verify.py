@@ -746,11 +746,13 @@ def _assigned_numeric_paths(source: str) -> dict:
     helper `def` earlier in the file carries a different default, because the nested assignment is
     visited last and overwrites the agreeing one. That row reaches `champion_caveats` as
     `params_overridden` on the run's best number. It also hands an adversarial candidate both
-    directions for free — a one-line decoy `def _unused(): cfg.a.b = <the declared value>` after a
-    real divergence answers "agrees" — and it breaks `declared_param_overrides`' baseline
-    attribution, which acquits only on an EQUAL prior value and therefore charges a repair with a
-    literal no attempt ever made effective. So the nodes are sorted by `(lineno, col_offset)` before
-    the dict is written, and the dict then means what it says. (Textual order still is not execution
+    directions for free — a one-line decoy `def _unused(): cfg.a.b = <the declared value>`, nested
+    ANYWHERE in the file, outranks a real module-level divergence and answers "agrees" — and it
+    breaks `declared_param_overrides`' baseline attribution, which acquits only on an EQUAL prior
+    value: a repair that merely DELETES a dead helper carrying `1024`, over a module body that said
+    `4096` before and after, was charged with introducing the 4096 (driven; `tests/
+    test_repair_verification.py` keeps all three). So the nodes are sorted by `(lineno, col_offset)`
+    before the dict is written, and the dict then means what it says. (Textual order still is not execution
     order — a nested `def` may run after the module body — which is exactly why the module docstring
     says this is a statement about two artifacts and never "this is what ran".)
 

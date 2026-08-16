@@ -1180,6 +1180,20 @@ def test_a_helper_default_earlier_in_the_file_does_not_convict_the_agreeing_modu
     assert [(o.code, o.line) for o in rows] == [(4096.0, 5)], \
         "a nested decoy must not suppress the divergence the module body really carries"
 
+    # THE THIRD CONSEQUENCE, on the attribution rather than the verdict. `baseline_files` acquits
+    # only on an EQUAL prior value, so a wrong prior charges a repair with a literal no attempt ever
+    # made effective: here the module body says 4096 before AND after and the repair only deleted a
+    # dead helper carrying 1024, which the deepest-wins reading reported as this repair introducing
+    # the 4096.
+    baseline = ("def _legacy():\n"
+                "    cfg.train.training.batch_size = 1024\n"
+                "\n"
+                "cfg.train.training.batch_size = 4096\n")
+    after_delete = "cfg.train.training.batch_size = 4096\n"
+    assert declared_param_overrides(declared, {"t.py": after_delete},
+                                    baseline_files={"t.py": baseline}) == (), \
+        "deleting a dead helper is not this repair introducing the value the module body already had"
+
     # The rule stated directly, so it is not only observable through the public wrapper: the value
     # kept for a repeated path is the one with the LARGEST source position, never the deepest node.
     assert _assigned_numeric_paths(helper_default_first)[("cfg", "train", "training",
