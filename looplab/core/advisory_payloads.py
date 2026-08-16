@@ -548,6 +548,108 @@ def _verification(value, budget: list[int], items: list[int]):
     }
 
 
+#: The EXACT key set `_verification` above writes, named once so a READER can be checked against it.
+#: `trust/memo_verify.py::verify_memo` (the origin writer) emits the same five and nothing else, and
+#: `tests/test_research_memo_verdicts.py` re-derives BOTH from their own source rather than trusting
+#: this constant — a hand-maintained copy of a contract is the defect this constant exists to stop.
+VERIFICATION_BLOCK_KEYS = frozenset({
+    "verdicts", "method", "unsupported", "total_verdicts", "omitted_verdicts",
+})
+
+#: What a reader may say about ONE claim. `unverified` is the reader's own word and is deliberately
+#: NOT in `_VERDICTS`: no writer may emit it, it is what a reader says when the block has no verdict
+#: for this claim (bounded away, or an alignment mismatch). `engine/lessons.py` spells the same word
+#: for the same two conditions on the durable D8 path.
+VERDICT_UNVERIFIED = "unverified"
+
+
+def memo_verification_view(memo) -> dict:
+    """The READ side of the verification block `_verification` above writes — a memo's verifier
+    result, per claim, in a shape a renderer can print without re-deriving the contract.
+
+    IT LIVES BESIDE ITS WRITER ON PURPOSE. `tools/run_tools.py::read_research_memo` keyed on
+    `verification["summary"]` from the day it was written (`f180c986`, 2026-07-10) while the writer
+    at that same commit returned `{"verdicts", "method", "unsupported"}` — so the branch was dead on
+    arrival and **not one verifier verdict has ever reached a role through that tool**. Measured over
+    every `research_completed` row in `runs/` on 2026-08-16: 102 memos, 98 carrying a verification
+    block, **0 carrying a `summary` key**, 98 carrying none, 16 with every verdict `unsupported`.
+    The key could not have appeared even by accident: `sanitize_research_memo_payload` runs on the
+    write path AND at replay (`events/replay.py`), and `_verification` rebuilds the block as a dict
+    literal, so anything the origin writer did not emit is dropped before a reader ever sees it.
+    A reader one file away from the writer is a reader that goes red in the same diff.
+
+    THE JOIN, and why it is not just an index. A verdict row carries its own `statement`, and this
+    repo already has three consumers that pair claim `i` with verdict `i` and then REQUIRE the two
+    statements to be equal — `engine/lessons.py` (durable D8 claims; a mismatch becomes
+    `unverified`/"verification alignment mismatch"), `engine/research_cadence.py` (Card enrichment;
+    a mismatch is skipped) and `ui/src/researchMemoModel.js::alignVerification` (the operator's own
+    memo card). Measured over the corpus: 98/98 blocks are index-aligned and 833/833 verdict rows
+    match their claim's statement exactly, so the rule costs nothing today and is the only thing
+    stopping a bounded or reordered block from printing one claim's refusal under another claim's
+    text. Those three are NOT routed through here yet — two of them write durable cross-run records
+    and re-pointing them is not a change to make in the same hour a run launches (`docs/BACKLOG.md`
+    §0.7). This is the fourth implementation of that rule and the first one a test binds to a writer.
+
+    Returns `{"status", "method", "counts", "rows"}`:
+      * `status` — `"absent"` (no block: the memo was never verified, or had no claims to verify),
+        `"malformed"` (a block that is not the contract shape), or `"present"`.
+      * `rows` — one per CLAIM, in claim order, `{"verdict", "note", "statement", "aligned"}`.
+        A claim with no verdict row, or one whose statement disagrees, is `VERDICT_UNVERIFIED`.
+      * `counts` — per-verdict tallies over the rows actually present, plus the block's own
+        `total_verdicts`/`omitted_verdicts` receipt so a bounded check cannot read as a complete one.
+
+    Pure and total: it reads a dict and returns a dict, it never raises, and it decides nothing.
+    """
+    if not isinstance(memo, dict):
+        return {"status": "absent", "method": "", "counts": {}, "rows": []}
+    block = memo.get("verification")
+    claims = [c for c in (memo.get("claims") or [])
+              if isinstance(c, dict) and str(c.get("statement") or "").strip()]
+    if block is None:
+        return {"status": "absent", "method": "", "counts": {}, "rows": []}
+    if not isinstance(block, dict) or not isinstance(block.get("verdicts"), (list, tuple)):
+        # A block that is not the contract shape is NOT silently treated as "no block": absence and
+        # a broken check have different remedies, and reading the second as the first is this whole
+        # defect one layer down. `_verification` routes exactly this case to the legacy `_tree`
+        # projection, so a memo can reach a reader carrying arbitrary keys.
+        return {"status": "malformed", "method": "", "counts": {}, "rows": []}
+
+    raw_rows = [row if isinstance(row, dict) else {} for row in block["verdicts"]]
+    rows: list[dict] = []
+    for index, claim in enumerate(claims):
+        statement = str(claim.get("statement") or "").strip()
+        row = raw_rows[index] if index < len(raw_rows) else None
+        if row is None:
+            rows.append({"verdict": VERDICT_UNVERIFIED, "aligned": False, "statement": statement,
+                         "note": "no verifier verdict was recorded for this claim"})
+            continue
+        if str(row.get("statement") or "").strip() != statement:
+            rows.append({"verdict": VERDICT_UNVERIFIED, "aligned": False, "statement": statement,
+                         "note": "verification alignment mismatch"})
+            continue
+        verdict = str(row.get("verdict") or "").strip().lower()
+        rows.append({
+            "verdict": verdict if verdict in _VERDICTS else VERDICT_UNVERIFIED,
+            "aligned": True,
+            "statement": statement,
+            "note": str(row.get("note") or "").strip(),
+        })
+    # Verdict rows BEYOND the claim list are counted and never dropped in silence: a block longer
+    # than its claims is a mismatch the reader must be able to say out loud.
+    unmatched = max(0, len(raw_rows) - len(claims))
+
+    counts = {name: sum(1 for row in rows if row["verdict"] == name)
+              for name in sorted(_VERDICTS | {VERDICT_UNVERIFIED})}
+    counts["claims"] = len(claims)
+    counts["unmatched_verdicts"] = unmatched
+    declared_total = block.get("total_verdicts")
+    counts["total_verdicts"] = declared_total if type(declared_total) is int else len(raw_rows)
+    declared_omitted = block.get("omitted_verdicts")
+    counts["omitted_verdicts"] = declared_omitted if type(declared_omitted) is int else 0
+    method = str(block.get("method") or "").strip() or "unknown"
+    return {"status": "present", "method": method[:64], "counts": counts, "rows": rows}
+
+
 def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}

@@ -1,0 +1,679 @@
+{
+ "summary": "This is a fresh run (0 nodes) on the ESCI v2 dense-retrieval task with the rubert-tiny-lite SentenceTransformer backbone. There is no in-run baseline yet, so the first job is to land a clean, working single-GPU recipe and then climb from the known ~0.88 plateau. The prior sibling landscape is decisive: (a) rubert-dr-0807 #9 reached recall@100=0.8776 with a clean symmetric in-batch InfoNCE recipe (bs 8192, accumulate 2, lr 1e-3, wd 0.1, grad_clip 1.0, temp 0.05, OneCycleLR pct_start 0.2, 10 epochs, positive_threshold=1), and the documented 67-node plateau is 0.8835 with DCL(nll_cos)+R-Drop (alpha 0.5, temp 0.05, thr 0.1, OneCycleLR max_lr 1e-3, AdamW wd 0.01 no-decay, ~32k effective batch, 50-60 epochs); (b) hard-negative mining is the proven escape from that plateau (+0.03-0.04 on e5-small, never ported to this tiny backbone), and the unified repo already implements qwen3 (hard-neg cross-batch InfoNCE) + NegativesCollator + nll_cos; (c) many sibling attempts failed on infra (DDP group-size, collator API mismatch, unused-parameters, missing looplab_eval.py, subprocess in test.py) rather than on method. The strongest untried, highest-ceiling levers on this backbone are therefore: (1) externally/teacher-mined hard negatives with positive-aware false-negative filtering fed into nll_cos (the #1 proven lever, never landed on rubert-tiny-lite), (2) faithful DCL+R-Drop reproduction with the exact OneCycleLR/AdamW recipe and long horizon, and (3) listwise-KL distillation from a stronger frozen teacher (bge@0.902). Every node must declare {\"gpus\":1}, use single-GPU code (no multi-GPU DDP paths that crashed siblings), and print RECALL@100 to stdout.",
+ "reasoning": "I approached this as a fresh-run review with no in-run experiments, so the value is entirely in (a) extracting the accumulated prior knowledge from sibling runs and the distilled benchmark note, and (b) mapping it onto concrete first experiments that avoid the failure modes that killed prior attempts.\n\nEvidence gathering: I read the benchmark note (esci-dense-retrieval-rubert-tiny-lite-v1-v2-benc-7690ad0a.md) which distills the key recipe and levers. I read sibling runs: rubertlite-dense-retrieval (#0=0.8077 baseline, #1 failed loss-stagnant), rubertlite-dr-unified-v2 (all 3 crashed on collator API / subprocess / DDP; #4 landed 0.225), rubertlite-dr-unified-v6 (mnr 0.7088, symmetric mnsr 0.7151, nll_cos 0.728, merges 0.7281/0.225), rubertlite-dr-unified-v7 (R-Drop nodes pending/superseded; label-smoothing, multi-positive, DCL-threshold all superseded by freshness gate; #0/#1 R-Drop pending), and rubert-dr-0807 (the richest: #9=0.8776 clean InfoNCE anchor, #7=0.8173 FN-mask at degenerate temp 0.01, #11 temp sweep 0.852, #12/#13 merges 0.8668/0.8651, plus many crashes on DDP group-size, unused-parameters, missing looplab_eval.py, validation gather). I also consulted cross-run memory/lessons (nll_cos supported; merging symmetric InfoNCE into DCL negligible; hard-negative mining supported) and grounded techniques with web/arXiv sources (R-Drop 2106.14448, ESCI 2206.06588, amazon-science/esci-data repo).\n\nKey synthesis: The plateau is ~0.8835 (DCL+R-Drop). The documented +0.03-0.04 escape is hard-negative mining, which was measured on e5-small but never successfully ported to rubert-tiny-lite in these runs (every attempt crashed on infra). So the single highest-value first experiment is a clean, single-GPU hard-negative + nll_cos run that actually completes. The second is a faithful DCL+R-Drop reproduction with the exact optimizer/scheduler recipe (the unified-repo runs used repo-default cosine/AdamW wd 0.1, confounding the batch-size comparison; the winning recipe used OneCycleLR + AdamW wd 0.01 no-decay). The third is distillation from a stronger teacher, which is completely unexplored.\n\nI deliberately did not cite the wrong arXiv ID I first guessed (2104.14448, a math paper) — I only cite the fetched R-Drop page (2106.14448). All claims cite the nodes/runs I actually read and the URLs I actually fetched.",
+ "findings": [
+  "No in-run experiments exist yet (0 nodes); the run needs a first clean baseline before any method comparison.",
+  "The strongest verified anchor in the portfolio is rubert-dr-0807 #9: recall@100=0.8776 with clean symmetric in-batch InfoNCE (bs 8192, accumulate 2, lr 1e-3, wd 0.1, grad_clip 1.0, temp 0.05, OneCycleLR pct_start 0.2, 10 epochs, positive_threshold=1).",
+  "The documented rubert-tiny-lite plateau is 0.8835 via DCL(nll_cos)+R-Drop (alpha 0.5, temp 0.05, thr 0.1, OneCycleLR max_lr 1e-3, AdamW wd 0.01 with no-decay on bias/LayerNorm/word_embeddings, ~32k effective batch, 50-60 epochs).",
+  "Hard-negative mining is the proven escape from the plateau (+0.03-0.04 recall@100 measured on e5-small with NV-Embed/cosine-threshold 0.264 mined negatives), but was never successfully ported to rubert-tiny-lite — every attempt crashed on infra.",
+  "The unified repo already implements the needed machinery: qwen3 loss (hard-neg cross-batch InfoNCE), NegativesCollator, and nll_cos (DCL port) — the blocker is wiring it without DDP crashes.",
+  "A recurring failure mode across siblings is multi-GPU/DDP infra: torch distributed _get_group_size crashes (rubert-dr-0807 #8/#10), unused-parameters in LightningModule (#0), collator API mismatch preprocess_fn vs tokenize_fn (unified-v2 #0/#1/#2), missing looplab_eval.py (#2), and subprocess.run inside test.py (#2). Single-GPU code avoids all of these.",
+  "FN-masking tested at degenerate temp=0.01 regressed (0.8173); the recipe must keep temp in the healthy 0.02-0.1 range (temp sweep #11 peaked 0.852 at the anchor recipe).",
+  "The unified-repo DCL runs used the repo-default cosine/AdamW wd 0.1, which confounds the batch-size comparison against the documented OneCycleLR/wd-0.01 recipe — the exact optimizer/scheduler recipe was never faithfully reproduced in the unified repo.",
+  "Distillation from a stronger frozen teacher (bge@0.902) is completely unexplored in these runs and is a high-ceiling supervision lever given the plateau.",
+  "ESCI labels are all 1 (positive_threshold must be 1, not default 2, or zero positives crash); the data is multilingual (EN/JA/ES) with up to 40 judged results per query."
+ ],
+ "claims": [
+  {
+   "statement": "A clean symmetric in-batch InfoNCE recipe reached recall@100=0.8776 on rubert-tiny-lite (bs 8192, accumulate 2, lr 1e-3, wd 0.1, temp 0.05, OneCycleLR pct_start 0.2, 10 epochs, positive_threshold=1).",
+   "node_ids": [
+    9
+   ],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 1,
+    "node_refs_retained": 1,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:3766925322a139136d0327861dac41dce75c8f4398c9f54b79e0eaf7600ae1d8"
+  },
+  {
+   "statement": "The documented rubert-tiny-lite plateau is recall@100=0.8835 with DCL(nll_cos)+R-Drop (alpha 0.5, temp 0.05, thr 0.1, AdamW wd 0.01 no-decay, OneCycleLR max_lr 1e-3, ~32k effective batch, 50-60 epochs).",
+   "node_ids": [],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 0,
+    "node_refs_retained": 0,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:bb1bbb89796cdefe2a5b1bd1d4cbbd8249023b0b51e0dfdba45960013e97f2a9"
+  },
+  {
+   "statement": "Hard-negative mining is the proven escape from the ~0.8835 plateau (+0.03-0.04 recall@100 on e5-small with NV-Embed/cosine-threshold 0.264 mined negatives), never successfully ported to rubert-tiny-lite.",
+   "node_ids": [
+    0,
+    5
+   ],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 2,
+    "node_refs_retained": 2,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:d40502b1ee8dbbcd1580d268392c5fdbd4fff2ba522c30b3a478ae2bd7c0f4ef"
+  },
+  {
+   "statement": "Sibling attempts on this task repeatedly failed on multi-GPU/DDP and collator infra (torch distributed group-size crash, LightningModule unused-parameters, preprocess_fn vs tokenize_fn collator API mismatch, missing looplab_eval.py, subprocess.run in test.py), not on method.",
+   "node_ids": [
+    8,
+    10,
+    0,
+    1,
+    2
+   ],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 5,
+    "node_refs_retained": 5,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:87288c20e50b78542c9cd63ee68ad74ab21c93a7f955d62b5f1f16c75ad11534"
+  },
+  {
+   "statement": "FN-masking evaluated at degenerate temperature 0.01 regressed to 0.8173; the temperature sweep at the healthy anchor recipe peaked at 0.852, indicating temperature must stay in the 0.02-0.1 range.",
+   "node_ids": [
+    7,
+    11
+   ],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 2,
+    "node_refs_retained": 2,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:82349478b5b76f50b43bb1af22c106ebb691d1b13cebed8fa942a0244ca564e5"
+  },
+  {
+   "statement": "The unified-repo DCL(nll_cos) runs used the repo-default cosine/AdamW wd 0.1 recipe (0.728), so the documented OneCycleLR/wd-0.01 recipe was never faithfully reproduced in the unified repo.",
+   "node_ids": [
+    2
+   ],
+   "urls": [],
+   "url_identities": [],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 1,
+    "node_refs_retained": 1,
+    "node_refs_omitted": 0,
+    "url_refs_total": 0,
+    "url_refs_retained": 0,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:a2172400c5a2ba6b68ae937b22f2cd8acbdaba11c4dee0060396e755c1076aad"
+  },
+  {
+   "statement": "R-Drop regularizes dropout by minimizing bidirectional KL between two dropout-sampled output distributions and is effective when fine-tuning large pre-trained models (NeurIPS 2021).",
+   "node_ids": [],
+   "urls": [
+    "https://arxiv.org/abs/2106.14448"
+   ],
+   "url_identities": [
+    "http-sha256:c510329a2348c58d786e0cd004219d76ec4b3e637cec6bae1c4fd35c0a213a2e"
+   ],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 0,
+    "node_refs_retained": 0,
+    "node_refs_omitted": 0,
+    "url_refs_total": 1,
+    "url_refs_retained": 1,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:464dd24c121405aff192a3b7f8dfea233fc2757efc5f39a6d25080c76f1d64a2"
+  },
+  {
+   "statement": "The ESCI Shopping Queries Dataset is a multilingual (EN/JA/ES) benchmark of ~130k queries and 2.6M labeled (query,product) judgements with up to 40 judged results per query.",
+   "node_ids": [],
+   "urls": [
+    "https://arxiv.org/abs/2206.06588",
+    "https://github.com/amazon-science/esci-data"
+   ],
+   "url_identities": [
+    "http-sha256:266ec2d846b433dd8764728a70917d46db543091e90c4d59f44a545a05c6a4bb",
+    "http-sha256:55afd6f41369f5697134ba983bd3c15052b7313988006d368c57658eb54afacf"
+   ],
+   "evidence_receipt": {
+    "v": 1,
+    "node_refs_total": 0,
+    "node_refs_retained": 0,
+    "node_refs_omitted": 0,
+    "url_refs_total": 2,
+    "url_refs_retained": 2,
+    "url_refs_omitted": 0,
+    "complete": true
+   },
+   "claim_id": "claim:sha256:b9900a43e465c07692b103dc912457c393e63d44cddc33f4034b35fa7385f0b0"
+  }
+ ],
+ "sources": [
+  {
+   "title": "data_schema()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(this task exposes no structured schema — try read_asset or data_profile)"
+  },
+  {
+   "title": "data_profile()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no data profile recorded for this run)"
+  },
+  {
+   "title": "list_sibling_runs()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "5 sibling run(s) of task repo_task:\nlive_genesis_badpath: best=— (max) · 1 nodes · finished\nrubertlite-dense-retrieval: best=0.8077 (max) · 2 nodes · running · best=#0 · PARTIAL SOURCE (read incomplet"
+  },
+  {
+   "title": "list_all_runs()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "45 run(s) under this configured run root (across all tasks):\nb2-validate [blob_classification]: best=0.925 (max) · 8 nodes · finished · best=#7\nglm_dataset [dataset_task]: best=0.1028 (min) · 2 nodes "
+  },
+  {
+   "title": "read_asset()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(this task has no data assets)"
+  },
+  {
+   "title": "read_research_memo()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no deep-research memo yet — the run hasn't done a 'think hard' review)"
+  },
+  {
+   "title": "list_themes()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no themes assigned yet)"
+  },
+  {
+   "title": "read_concept_tree()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no concepts tagged yet — experiments carry concepts once the Researcher tags them)"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "[PARTIAL SOURCE] run rubertlite-dense-retrieval's event log could not be read to the end after 20 record(s); anything later is UNKNOWN, not absent — do not conclude a result is best or missing from th"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #2 — operator=draft status=evaluated\nparents=[]\nparams={'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 1.0, 'loss.use_batch_centering': "
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #0 — operator=draft status=pending\nparents=[]\nparams={'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 0.0, 'loss"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #9 — operator=debug status=evaluated\nparents=[8]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'gpus': 1.0, 'gradient_clip_val': 1.0, 'loss_temperature': 0.05"
+  },
+  {
+   "title": "read_run_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubert-dr-0807\n# solution.py of experiment #9\n\nother files: ['looplab_stages.json', 'train.py', 'loss.py', 'utils.py']"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubertlite-dr-unified-v6\n# solution.py of experiment #2\n\nother files: ['looplab_stages.json', 'vectorsearch/configs/config.yaml']"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #8 — operator=draft status=failed\nparents=[]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'gpus': 1.0, 'gradient_clip_val': 1.0, 'loss_temperature': 0.05, 'l"
+  },
+  {
+   "title": "read_run_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubert-dr-0807\n# solution.py of experiment #9\n\nother files: ['looplab_stages.json', 'train.py', 'loss.py', 'utils.py']"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubertlite-dr-unified-v6\n# solution.py of experiment #2\n\nother files: ['looplab_stages.json', 'vectorsearch/configs/config.yaml']"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v2 · experiment #0 — operator=draft status=failed\nparents=[]\nparams={'batch_size': 8192.0, 'learning_rate': 0.0005, 'margin': 0.95, 'n_epochs': 20.0, 'n_negatives': 2.0, 'tem"
+  },
+  {
+   "title": "list_notes()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "esci-dense-retrieval-rubert-tiny-lite-v1-v2-benc-7690ad0a.md"
+  },
+  {
+   "title": "kb_search(ESCI dense retrieval recall@100 rubert-tiny-lite)",
+   "url": "",
+   "url_identity": "",
+   "snippet": "[KB_INDEX: revision=9de419d1fa60798b; mode=hash; scope=run]\n[CASE_SOURCE_SNAPSHOT: sha256=b35794d68391941549cf4664a1a8c8f43607b623890605246ffebc86ff0e5ec1; rows=10; truncated=false; skipped=0; unavail"
+  },
+  {
+   "title": "cross_run_atlas()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "Bounded live projection: 1 run(s), 0 concept(s), 2 claim record(s), 0 mixed-evidence."
+  },
+  {
+   "title": "cross_run_concept_map()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no cross-run concepts yet)"
+  },
+  {
+   "title": "read_note()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# ESCI dense-retrieval rubert-tiny-lite v1+v2 benchmarks\n\n# ESCI dense-retrieval (Samokat) — rubert-tiny-lite tuning, v1+v2 (distilled from /home/jovyan/data/vecsearch_benchmarks_readable.md)\n\n## Best"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #1 — operator=draft status=evaluated\nparents=[]\nparams={'loss.temperature': 0.05, 'train.training.batch_size': 8192.0, 'train.training.gradient_accumulation_s"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #0 — operator=draft status=evaluated\nparents=[]\nparams={'loss.temperature': 0.05, 'train.training.batch_size': 8192.0, 'train.training.learning_rate': 0.0005,"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #4 — operator=merge status=evaluated\nparents=[2, 1]\nparams={'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 1.0, 'loss.use_batch_centerin"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #2 — operator=draft status=pending\nparents=[]\nparams={'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 0.0, 'trai"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v2 · experiment #4 — operator=draft status=evaluated\nparents=[]\nparams={'loss.temperature': 0.01, 'train.training.batch_size': 8192.0, 'train.training.learning_rate': 0.0005,"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #1 — operator=draft status=pending\nparents=[]\nparams={'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 0.0, 'loss"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #3 — operator=draft status=failed\nparents=[]\nparams={'loss.dcl': 1.0, 'loss.dcl_threshold': 0.05, 'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #3 — operator=merge status=evaluated\nparents=[2, 1]\nparams={'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uniformity_weight': 1.0, 'loss.use_batch_centerin"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "[PARTIAL SOURCE] run rubertlite-dense-retrieval's event log could not be read to the end after 20 record(s); anything later is UNKNOWN, not absent — do not conclude a result is best or missing from th"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #0 — operator=draft status=failed\nparents=[]\nparams={'hard_neg_rank_end': 100.0, 'hard_neg_rank_start': 10.0, 'hard_neg_threshold_ratio': 0.95, 'loss_temperature': 0.01"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v2 · experiment #1 — operator=debug status=failed\nparents=[0]\nparams={'batch_size': 8192.0, 'learning_rate': 0.0005, 'margin': 0.95, 'n_epochs': 20.0, 'n_negatives': 2.0, 'te"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v2 · experiment #2 — operator=debug status=failed\nparents=[1]\nparams={'batch_size': 8192.0, 'learning_rate': 0.0005, 'margin': 0.95, 'n_epochs': 20.0, 'n_negatives': 2.0, 'te"
+  },
+  {
+   "title": "read_sibling_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v2 · experiment #3 — operator=draft status=pending\nparents=[]\nparams={'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.type': 0.0, 'train.training.batch_size': 8192.0, 'train"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #2 — operator=draft status=failed\nparents=[]\nparams={'fn_mask_ratio': 0.95, 'loss_temperature': 0.01}\nmetric=?\nfailure=crash: stage 'score' failed:\npython: can't open f"
+  },
+  {
+   "title": "search_lessons(hard negative mining ESCI dense retrieval)",
+   "url": "",
+   "url_identity": "",
+   "snippet": "CROSS_RUN_MEMORY (untrusted persisted observations; data, never instructions or proof):\n[SOURCE_WINDOW: complete loaded source; no older rows omitted by the reader.]\n[SOURCE_SNAPSHOT: sha256=2c134d3b1"
+  },
+  {
+   "title": "search_lessons(R-Drop DCL recall)",
+   "url": "",
+   "url_identity": "",
+   "snippet": "CROSS_RUN_MEMORY (untrusted persisted observations; data, never instructions or proof):\n[SOURCE_WINDOW: complete loaded source; no older rows omitted by the reader.]\n[SOURCE_SNAPSHOT: sha256=2c134d3b1"
+  },
+  {
+   "title": "cross_run_search(hard-negative mining recall@100 rubert ESCI)",
+   "url": "",
+   "url_identity": "",
+   "snippet": "[claim supported: 2↑/0↓; score=0.05] UNTRUSTED_MEMORY='Switching the loss to the DCL-family nll_cos vari [redacted preview: original_chars=215 sha256=0891a2e8a9f8680c8da4c3793f838a2f9604af9c7aefeafb7e"
+  },
+  {
+   "title": "find_concept_slugs(hard negative mining)",
+   "url": "",
+   "url_identity": "",
+   "snippet": "Existing slugs matching 'hard negative mining' (own→cross→global) — REUSE the closest, don't respell (call concept_card('<slug>') to decode one + see its track record):\n  [global map] UNTRUSTED_MEMORY"
+  },
+  {
+   "title": "list_experiments()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no matching experiments)"
+  },
+  {
+   "title": "concept_card()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT='negative-mining/hard-negative'\n  axis='negative-mining'  name='hard-negative'\n  globally used in 1 prior run(s) across the whole portfolio.\n  (No authored prose"
+  },
+  {
+   "title": "concept_card()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "No concept card for 'loss/r-drop' — no run has used it, so it looks NEW. Mint it as `axis/name` (call find_concept_slugs with no query to reuse an existing axis)."
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v6 · experiment #5 — operator=improve status=pending\nparents=[2]\nparams={'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.type': 1.0, 'loss.uniformit"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #4 — operator=draft status=failed\nparents=[]\nparams={'loss.label_smoothing': 0.05, 'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.u"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubertlite-dr-unified-v7 · experiment #6 — operator=draft status=failed\nparents=[]\nparams={'loss.multi_positive': 1.0, 'loss.rdrop_alpha': 0.5, 'loss.temperature': 0.05, 'loss.thr': 0.1, 'loss.uni"
+  },
+  {
+   "title": "find_concept_slugs()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "Known concept AXES in scope 'all' (31 slugs) — search within one: find_concept_slugs('<your concept>'):\n  UNTRUSTED_MEMORY_AXIS='optimization' (9 slugs)\n  UNTRUSTED_MEMORY_AXIS='experiment' (4 slugs)\n"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "[PARTIAL SOURCE] run rubertlite-dense-retrieval's event log could not be read to the end after 20 record(s); anything later is UNKNOWN, not absent — do not conclude a result is best or missing from th"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubertlite-dr-unified-v6\n# solution.py of experiment #5\n\nother files: ['looplab_stages.json', 'vectorsearch/configs/config.yaml', 'vectorsearch/training/loss.py', 'vectorsearch/config.py']"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #5 — operator=draft status=failed\nparents=[]\nparams={'epochs': 8.0, 'fn_threshold_ratio': 0.95, 'loss_temperature': 0.01, 'n_hard_negatives': 4.0, 'train_bs': 8192.0}\nm"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #6 — operator=draft status=failed\nparents=[]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 4.0, 'kd_temperature': 0.05, 'kd_weight': 1.0, 'loss_temperature': 0.01, "
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #7 — operator=debug status=evaluated\nparents=[4]\nparams={'fn_mask_ratio': 0.95, 'loss_temperature': 0.01}\nmetric=0.8173\nrationale: **L1 — in-batch positive-aware false-"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #10 — operator=merge status=failed\nparents=[9, 7]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'fn_mask_ratio': 0.95, 'gpus': 1.0, 'gradient_clip_val': 1.0, "
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #3 — operator=debug status=failed\nparents=[1]\nparams={'hard_neg_rank_end': 100.0, 'hard_neg_rank_start': 10.0, 'hard_neg_threshold_ratio': 0.95, 'loss_temperature': 0.0"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #4 — operator=debug status=failed\nparents=[2]\nparams={'fn_mask_ratio': 0.95, 'loss_temperature': 0.01}\nmetric=?\nfailure=crash:  line 234, in _prepare_validation_outputs"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #12 — operator=merge status=evaluated\nparents=[11, 9]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'gpus': 1.0, 'gradient_clip_val': 1.0, 'loss_temperature':"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #13 — operator=improve status=evaluated\nparents=[12]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'fn_mask_ratio': 0.95, 'gpus': 1.0, 'gradient_clip_val': 1."
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #11 — operator=improve status=evaluated\nparents=[9]\nparams={'accumulate_grad_batches': 2.0, 'epochs': 10.0, 'gpus': 1.0, 'gradient_clip_val': 1.0, 'lr': 0.001, 'pct_sta"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · (no experiment #14)"
+  },
+  {
+   "title": "read_run_experiment()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "run rubert-dr-0807 · experiment #1 — operator=debug status=failed\nparents=[0]\nparams={'hard_neg_rank_end': 100.0, 'hard_neg_rank_start': 10.0, 'hard_neg_threshold_ratio': 0.95, 'loss_temperature': 0.0"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubertlite-dr-unified-v6\n# solution.py of experiment #2\n\nother files: ['looplab_stages.json', 'vectorsearch/configs/config.yaml']\n(note: this exact call has now run 3× this phase with an ID"
+  },
+  {
+   "title": "read_sibling_code()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "# from run rubertlite-dr-unified-v6\n# solution.py of experiment #5\n\nother files: ['looplab_stages.json', 'vectorsearch/configs/config.yaml', 'vectorsearch/training/loss.py', 'vectorsearch/config.py']"
+  },
+  {
+   "title": "list_skills()",
+   "url": "",
+   "url_identity": "",
+   "snippet": "(no skills)"
+  }
+ ],
+ "recommended_directions": [
+  "EXPERIMENT 1 (land the baseline + prove the #1 lever): Single-GPU hard-negative-mined nll_cos run on the unified repo. Use loss= nll_cos (DCL port) with the proven numeric recipe (bs 8192, accumulate 2, lr 1e-3, wd 0.1, grad_clip 1.0, temp 0.05, thr 0.1, warmup 0.2, ~10-20 epochs), enable train.negatives vector mining with cosine-threshold ~0.264 or a frozen teacher (NV-Embed/bge) to supply 1-2 hard negatives per query, and apply positive-aware false-negative filtering (fn_mask_ratio ~0.95) so near-duplicate true positives are not treated as negatives. Declare {\"gpus\":1}, single-GPU only, print RECALL@100. This directly targets the +0.03-0.04 escape that has never landed on this backbone.",
+  "EXPERIMENT 2 (faithful DCL+R-Drop reproduction): Port the exact documented 0.8835 recipe into the unified repo: nll_cos with rdrop_alpha=0.5, temp 0.05, thr 0.1, uniformity_weight 0, batch-centering off, AdamW wd 0.01 with no-decay on bias/LayerNorm/word_embeddings, OneCycleLR max_lr 1e-3 pct_start 0.2 div_factor 25 anneal-cos cycle_momentum off, effective batch ~32k (bs 16384 accumulate 2 on one GPU), grad_clip 1.0, fp16, 50-60 epochs, positive_threshold 1. This resolves the confound in the unified-repo DCL runs and establishes the true in-run ceiling before adding mining.",
+  "EXPERIMENT 3 (distillation, highest ceiling, unexplored): Listwise-KL distillation of retrieval score distributions from a frozen stronger teacher (e.g. bge@0.902) into rubert-tiny-lite, aligning softmax-over-candidates between student and teacher at kd_temperature ~0.05, kd_weight ~1.0, optionally combined with the nll_cos contrastive term. This is the only completely unexplored supervision lever and directly attacks the plateau.",
+  "EXPERIMENT 4 (cheap robustness sweep once a working anchor exists): On the EXPERIMENT 1 anchor, sweep temperature {0.02, 0.05, 0.1} and rdrop_alpha {0, 0.5} at fixed effective batch to confirm the healthy operating range before scaling epochs — mirrors the finding that temp 0.01 is degenerate."
+ ],
+ "proposed_ideas": [],
+ "at_node": 0,
+ "trigger": "run_start",
+ "verification": {
+  "verdicts": [
+   {
+    "statement": "A clean symmetric in-batch InfoNCE recipe reached recall@100=0.8776 on rubert-tiny-lite (bs 8192, accumulate 2, lr 1e-3, wd 0.1, temp 0.05, OneCycleLR pct_start 0.2, 10 epochs, positive_threshold=1).",
+    "verdict": "unsupported",
+    "note": "cited experiments do not exist: [9]",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "The documented rubert-tiny-lite plateau is recall@100=0.8835 with DCL(nll_cos)+R-Drop (alpha 0.5, temp 0.05, thr 0.1, AdamW wd 0.01 no-decay, OneCycleLR max_lr 1e-3, ~32k effective batch, 50-60 epochs).",
+    "verdict": "unsupported",
+    "note": "no evidence cited",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": true
+    }
+   },
+   {
+    "statement": "Hard-negative mining is the proven escape from the ~0.8835 plateau (+0.03-0.04 recall@100 on e5-small with NV-Embed/cosine-threshold 0.264 mined negatives), never successfully ported to rubert-tiny-lite.",
+    "verdict": "unsupported",
+    "note": "cited experiments do not exist: [0, 5]",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "Sibling attempts on this task repeatedly failed on multi-GPU/DDP and collator infra (torch distributed group-size crash, LightningModule unused-parameters, preprocess_fn vs tokenize_fn collator API mismatch, missing looplab_eval.py, subprocess.run in test.py), not on method.",
+    "verdict": "unsupported",
+    "note": "cited experiments do not exist: [8, 10, 0, 1, 2]",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "FN-masking evaluated at degenerate temperature 0.01 regressed to 0.8173; the temperature sweep at the healthy anchor recipe peaked at 0.852, indicating temperature must stay in the 0.02-0.1 range.",
+    "verdict": "unsupported",
+    "note": "cited experiments do not exist: [7, 11]",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "The unified-repo DCL(nll_cos) runs used the repo-default cosine/AdamW wd 0.1 recipe (0.728), so the documented OneCycleLR/wd-0.01 recipe was never faithfully reproduced in the unified repo.",
+    "verdict": "unsupported",
+    "note": "cited experiments do not exist: [2]",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "R-Drop regularizes dropout by minimizing bidirectional KL between two dropout-sampled output distributions and is effective when fine-tuning large pre-trained models (NeurIPS 2021).",
+    "verdict": "unsupported",
+    "note": "cited source URL was not consulted",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   },
+   {
+    "statement": "The ESCI Shopping Queries Dataset is a multilingual (EN/JA/ES) benchmark of ~130k queries and 2.6M labeled (query,product) judgements with up to 40 judged results per query.",
+    "verdict": "unsupported",
+    "note": "cited source URL was not consulted",
+    "evidence": {
+     "v": 1,
+     "node_refs": [],
+     "url_identities": [],
+     "complete": false
+    }
+   }
+  ],
+  "method": "deterministic",
+  "unsupported": 8,
+  "total_verdicts": 8,
+  "omitted_verdicts": 0
+ },
+ "claims_receipt": {
+  "v": 1,
+  "total": 8,
+  "retained": 8,
+  "omitted": 0,
+  "complete": true
+ },
+ "memo_id": "memo:sha256:59912dbb72f05844175014096d5ac7c81511e629d23439cf732590e2d34f2152"
+}
