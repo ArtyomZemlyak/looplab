@@ -2165,12 +2165,11 @@ join, and rendering absence as silence — each go red.
    `engine/research_cadence.py`, `ui/src/researchMemoModel.js`). Only the first is bound to the writer
    by a test. Route the two engine ones through it once there is time to re-verify the durable
    cross-run output byte for byte. Effort S, blast radius L.
-3. **The PUSHED half of this signal still carries the number unqualified.** `agents/roles.py::
-   _state_brief` renders `research[-1]["summary"]` into every Researcher prompt with no verification
-   status at all, and it is auto-pushed — no tool call needed. Measured on v8: **11 of its 14 memo
-   summaries contain `0.8776`**, including the `at_node: 0` one, whose verdict list is 8/8
-   `unsupported`. The tool is the pull channel and is now honest; the push channel is not. This is the
-   higher-value remaining fix and it touches a prompt string, so it wants its own change.
+3. ✅ **CLOSED 2026-08-16 by §0.8 — and one of its two numbers was wrong.** The push channel is now
+   qualified (`Settings.memo_verdict_cue`). Read §0.8 before quoting this row: "11 of its 14 memo
+   summaries contain `0.8776`" is true of the FULL summaries (11 of 15 today) and **false of what is
+   pushed** — `_state_brief` delivers a 300-char head, and the literal survives that cut in **0 of
+   15**. The harm was real and the carrier was the rounded `~0.88`.
 4. **The DURABLE claims reach the Researcher's advisory pack with their verdict stripped too, and
    this one is a sibling of the same defect rather than a promise broken.** `engine/lessons.py`
    carries each memo claim's `{verdict, method, note}` into `research_claims.jsonl`, and
@@ -2188,6 +2187,111 @@ join, and rendering absence as silence — each go red.
    docstring was two keys behind its own return until this change. Nothing systematically checks a
    docstring's key list against the dict a function returns; the AST helpers in
    `tests/test_research_memo_verdicts.py` are ~30 lines and generalize.
+
+### §0.8 The memo SUMMARY a prompt pushes is the one field no verifier has ever checked (2026-08-16)
+
+Closes §0.7 #3. §0.7 fixed the PULL channel: a role that calls `read_research_memo` now gets the
+per-claim verdicts. This is the PUSH channel — `agents/roles.py::_state_brief` splices
+`state.research[-1]["summary"]` into a prompt with no tool call needed — and the framing that sent
+me at it was wrong in one measurable way, which is worth recording before the fix.
+
+**RE-DERIVED, and the residue note's own literal does not survive.** `_state_brief` renders a 300-char
+head of the whitespace-collapsed summary. Over `rubertlite-dr-unified-v8`'s 15 memos, `0.8776` is in
+**11 full summaries and 0 pushed windows**. The claim "11 of 14 memo summaries contain 0.8776",
+carried into a prompt, is a fact about a field the prompt truncates. Aiming a fix at that literal
+would have been vacuous.
+
+**WHAT IS ACTUALLY WRONG IS SHARPER.** `trust/memo_verify.py::verify_memo` verifies `memo["claims"]`
+and returns `None` when a memo has none. **It has never looked at `memo["summary"]` at any commit.**
+So the field the brief pushes is the one field of the memo that no verifier has ever checked — the
+verdict is not merely elsewhere in the payload, it does not exist for this text. And it is not one
+role: measured over v8's own `spans.jsonl`, the line reached **293 real prompts** in three phases —
+`propose` 269, `triage` 20, `repair_critic` 4 — i.e. exactly the reachable subset of `_state_brief`'s
+five call sites (`node_build._choose_action` needs `agent_drives_actions`, off in v8). **Not one of
+those 293 whole prompts contains the word `Verifier` or the word `unsupported`**, while the memo
+behind 52 of them records `total_verdicts: 8, unsupported: 8` and opens *"…then climb from the known
+~0.88 plateau"* — the rounded `rubert-dr-0807` number, from a run `engine/eval_contract.py` reports
+as a different evaluation contract (different eval command, different declared paths). That sentence
+is v8's stated research direction.
+
+**IT IS A MECHANISM, NOT ONE RUN'S ACCIDENT** — which is the question that decides fix-vs-note. Over
+all 103 `research_completed` rows in `runs/`: 100 memos are pushable; **81** push a decimal number;
+**76** push one from a memo carrying a non-`supported` verdict; **26** are pushed from a memo with no
+supported verdict at all; and **13** push a ≥3-decimal number that is a node metric of a provably
+different-contract run and of no node of their own — `rubertlite-dr-unified-v6` 7, `rubert-dr-0807`
+2, v7 2, v8 1, `lt_dataset` 1. Five runs.
+
+**WHAT SHIPPED.** `core/advisory_payloads.py::memo_verdict_cue` — one bounded clause, spliced at ONE
+position in the existing line, built from `memo_verification_view` (the reader §0.7 placed beside its
+writer). It names the memo's own claim tally and says that nothing verifies the summary itself; it
+says `NOT RUN` and `UNREADABLE` out loud, because a missing check read as a passing one is this whole
+defect family. `verdict_tally` is now shared with `tools/run_tools.py::_verifier_lead`, byte-identical
+to the literal it replaced, so the two channels cannot come to spell one block two ways in one prompt.
+`Settings.memo_verdict_cue` (ON) gates it; `false` restores the historical line **byte for byte**, the
+`developer_probe` / `train_monitor_tools` pattern. Threaded exactly like `_digest_cap`: registry
+`roles.RESEARCHER_HINT_ATTRS` for the two propose paths, `Engine._memo_verdict_cue` for the three
+engine-method call sites.
+
+**COST, and what was displaced: nothing, and that is measured rather than assumed.** Replayed over
+all 103 memos: 100 lines change, **0 lose a byte** of the text they carried before, and the clause is
+87-120 chars (median **102**). v8's real `propose` user turn has a median of **15,930** chars, so that
+is **0.64 %**; its largest is 24,021 against a `context_budget_chars` of 1,000,000. §0.7 #1's 2.2×
+over-cap problem is the TOOL's `RESULT_CAP`, a hard 4,000-char head cut; this site has no cap that
+binds. Paying for the clause out of the 300-char summary slice was the alternative and is refused
+below.
+
+**HOLDS THE LINE (docs/36).** It widens what a role SEES and nothing it TRUSTS. The verdicts come
+from `trust/memo_verify.py`, engine-side, before the memo was ever appended; the cue is a pure
+function of folded `RunState`. Folding all 46 event logs in `runs/` on the base tree and on this one,
+back to back — 222 nodes, 37 champions at 2026-08-16 — gives a byte-identical result and one digest,
+`6d7d37f28c53ee19`. No metric, champion, selectability decision or violation can move, and no model's
+own text decides its own verdict.
+
+| Option | Why not |
+|---|---|
+| **(a) Refuse to push a summary whose verdicts are wholly unsupported** | **Refused on the corpus**, the same way §0.7 (b) was. 26 of the 100 pushable memos have no supported verdict at all, and 45 of the 45 verdicts the DETERMINISTIC pass emits are `unsupported` about the CITATION — a fact about the footnote. Suppression drops a real finding for a bad reference, and silently, which is worse than the defect it fixes. |
+| **(b) Strip foreign-contract numbers out of the pushed text** | Refused on three independent grounds. (i) It cannot work on the case that motivated it: v8's carrier was `~0.88`, a rounded form no value-matching stripper reaches — my own corpus join needed ≥3 decimals against node metrics across 57 runs to stay honest. (ii) A summary is prose with no per-number provenance, so deciding which number is foreign means reading the model's own text for a record-side judgement, which docs/36 forbids. (iii) `eval_contract.py` is `engine/` and `roles.py` is `agents/`, which `engine` imports at module scope — the import would close the cycle. The right home for the contract receipt is the TOOL surface, where the foreign run id is known, and it is already there (`ForeignRunReader`, §0.6). |
+| **(c) Pay for the clause out of the 300-char summary slice** | Refused, and measured: nothing at this site binds (0.64 % of the median turn, 2.4 % of `context_budget_chars` at the largest), so the only thing "paying" buys is a shorter finding. A longer verdict list would then shorten the summary, i.e. a memo with more bad claims would deliver less of its own text — exactly backwards. |
+| **(d) Push the whole `_verifier_lead` block ahead of the summary** | Right for a 4,000-char tool answer that a role asked for; wrong for a line that rides in EVERY proposal, triage and repair-critic prompt of the run. It is ~1.4 kB against this clause's 102 chars, and the pull channel already carries it for a role that wants the detail — the push channel's job is to make that role WANT to. |
+| **(e) State the residue and leave it** | The count decides this one: 76 of 100 pushable memos push a number from a memo with a non-`supported` verdict, over five runs, into three phases. That is a mechanism. |
+| **(f) No `Settings` flag — make it unconditional** | A prompt is a contract here. The flag costs one field and buys the negative control that proves the historical bytes are still reachable, plus an off switch an operator can reach mid-incident. |
+
+**`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`: NO ROW, deliberately, and the reasoning is `redact_output`'s.**
+The map admits a field on (a) postdates 2026-06-23, (b) defaults to adding paid calls / interventions
+/ concurrency / a different selection policy, and (c) a historical value you can point at a commit
+for. (a) and (c) hold trivially. **(b) fails**: no paid call, no intervention, no concurrency, no
+selection policy — the cue makes no request, spends nothing, kills nothing, and reads a payload the
+resumed run's own log already contains (98 of 103 memos in `runs/` carry a verification block,
+including every pre-field one). `developer_probe` is the near precedent and is instructive rather
+than contrary: its entry says (b) held "in TWO independent ways", a subprocess-launching TOOL *and* a
+different prompt — the tool is what carried it, and a prompt divergence alone has never admitted a
+row here. The residual concern is real and is the smallest version of itself: a resumed run's two
+halves would say different things about the same memo. So does every prompt change this repo has ever
+made without a row, and unlike those, this one only makes the run's OWN recorded refusal legible.
+
+⬜ **Still open.**
+1. §0.7 #4 is untouched and is now the last unqualified push channel: `engine/claims_retrieval.py`
+   computes `n_unverified` for every durable cross-run claim and `render_context_pack` never prints
+   it, while 22 of the 42 rows in the live store carry a non-`supported` verdict. It is the same
+   defect one store over, and it wants the same shape — the tally beside the text, nothing withheld.
+2. **The board and the digest are the LOUDER carriers of a foreign number, and this change does not
+   touch them.** Measured over the same 293 v8 prompts: **241** contain `0.8776` somewhere and
+   **293** contain `0.8835`, but the takeaway line carries neither. The hosts are the open-belief
+   board rows (`hypothesis_added` minted from the memo's own `recommended_directions` — 110
+   occurrences), the sibling-run digest line `rubert-dr-0807 …: best=0.8776` (58), and card summaries
+   (the rest). A `recommended_direction` has NO per-claim verdict — the verifier grades `claims`, and
+   directions are not claims — so the fix here does not generalize to the board and a different one is
+   needed. Note what is NOT a carrier: `agents/hints.py::render_hint_directives` FILTERS every
+   `source="deep_research"` row out of the operator-authority block, both by stamp and by prefix,
+   so the `hint` §0.6 traced is not in a prompt today — measured rather than read off the filter:
+   the literal `deep-research directions:` occurs **0 times** in the whole 320 MB of v8's
+   `spans.jsonl`, i.e. in none of that run's recorded LLM input or output, while its `events.jsonl`
+   holds 14 such rows (two of them carrying `0.8776`). The board rows those same
+   `recommended_directions` became DO reach the prompt, which is why item 2 is open at all.
+3. `docs/guide/configuration.md` carries the settings-catalogue paragraph **four times verbatim**
+   (lines ~77-85) and its "18 essential / 176 catalogued" figures disagree with the "180 of 213" in
+   the same sentence. Pre-existing; I updated only the two numbers my own field moves, because
+   collapsing a duplicated paragraph is a different change.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 

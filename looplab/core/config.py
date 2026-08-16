@@ -1082,6 +1082,30 @@ class Settings(BaseSettings):
     # verdicts as the evidence gate for persisted D8 cross-run claims; unavailable/misaligned stays
     # unverified. ON by default (no-op with no memo/claims).
     research_verify: bool = True
+    # D8's PUSH half: qualify the memo SUMMARY `agents/roles.py::_state_brief` splices into every
+    # Researcher / crash-triage / repair-critic prompt with the verifier result the payload already
+    # carries (`core/advisory_payloads.py::memo_verdict_cue`). ON by default since 2026-08-16.
+    #
+    # The verifier checks `memo["claims"]`; it has NEVER looked at `memo["summary"]`, so the pushed
+    # field is the one field of the memo nothing checks — and until the same day, the verdicts could
+    # not be PULLED either (`read_research_memo` keyed on a `verification["summary"]` no writer
+    # emits). Measured over `runs/rubertlite-dr-unified-v8`'s `spans.jsonl`, that line reached 293
+    # real prompts (propose 269, triage 20, repair_critic 4) and not one of the 293 whole prompts
+    # contains the word `Verifier` or the word `unsupported`, while the memo behind 52 of them
+    # records `total_verdicts: 8, unsupported: 8` and opens "climb from the known ~0.88 plateau" —
+    # a rounded `rubert-dr-0807` number on a different `engine/eval_contract.py` contract. Over the
+    # whole corpus: 100 of 103 memos are pushable, 81 push a decimal number, 76 push a number from a
+    # memo carrying a non-`supported` verdict, and 13 push a >=3dp number that is a metric of a
+    # provably different-contract run — five runs, not one, so this is a mechanism and not v8's
+    # accident.
+    #
+    # `false` reproduces the historical line BYTE FOR BYTE: the cue is spliced at one position and
+    # nothing else moves (the `developer_probe` / `train_monitor_tools` pattern). It ANNOTATES and
+    # withholds nothing — an unsupported memo's summary is still delivered in full, because 26 of the
+    # 100 pushable memos have no supported verdict at all and 45 of the 45 deterministic verdicts are
+    # unsupported about the CITATION, so suppression would drop real findings over bad footnotes.
+    # It reaches no metric, champion, selectability decision or violation (docs/36).
+    memo_verdict_cue: bool = True
     # C4 independent critic: an execution-free critic of each solution (stub / hardcoded-metric /
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under

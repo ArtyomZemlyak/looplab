@@ -125,7 +125,8 @@ class NodeBuildMixin:
             # field at all. `for_proposal=False` keeps the board's content (which is real context for
             # choosing a macro action) and drops the two claim contracts that only a proposer can
             # honour — see `_state_brief`.
-            brief = _state_brief(state, None, for_proposal=False)
+            brief = _state_brief(state, None, for_proposal=False,
+                                 memo_verdicts=getattr(self, "_memo_verdict_cue", False))
         except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
             brief = ""
         # Signal-delivery (§1): the pilot picks the next macro action, so a standing operator

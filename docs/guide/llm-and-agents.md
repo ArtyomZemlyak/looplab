@@ -579,7 +579,7 @@ but nothing injects it into a prompt"* — the same class the hint registry
 | **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`), naming the eval PHASE the verdict was about (`log_role`/`stage` on the alert row) rather than calling every verdict "training" |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
-| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand, **each claim carrying the verdict this run's own verifier gave it** (`supported` / `unsupported` / `unclear` / `cited`, or `unverified` when the check was bounded away or its rows do not align with the claims) — the groundless ones LEAD the answer, above the memo's summary, because the agent layer keeps the first 4,000 chars and drops the rest; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
+| **Deep-research memo** | `RunState.research` | Researcher, crash-triage, repair-critic | a one-line takeaway in the state brief — **prefixed with the memo's own verifier tally** and with the fact that the verifier checks a memo's CLAIMS and never its summary (`Settings.memo_verdict_cue`, ON; `false` restores the historical line byte for byte) — **plus** a `read_research_memo` tool to pull the full findings/claims on demand, **each claim carrying the verdict this run's own verifier gave it** (`supported` / `unsupported` / `unclear` / `cited`, or `unverified` when the check was bounded away or its rows do not align with the claims) — the groundless ones LEAD the answer, above the memo's summary, because the agent layer keeps the first 4,000 chars and drops the rest; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
 | **Operator yields** | derived from the DAG | Strategist | a per-operator gain-per-second line in the strategist brief, so it tunes the operator mix from evidence, not priors |
 | **Operator directives** | `RunState.pending_hints` | Researcher, Strategist, pilot, crash-triage, **Developer** | one `render_hint_directives` helper — the engine also folds directives into the idea handed to `implement`, so a directive steers the **code**, not only the proposal |
 | **Run states** (paused / awaiting-approval / trust-flag / stuck-build) | `RunState` | boss / assistant | an "ATTENTION" block in the boss context, surfacing the states where human intervention is most valuable |
@@ -599,6 +599,31 @@ field nothing writes is a red test rather than a quiet one. What that does NOT c
 returns a string, so nothing here reaches a metric, a champion, a selectability decision or a
 violation (docs/36 — a wider CONTEXT must not widen the trusted set), and folding all 46 event logs
 in `runs/` gives a byte-identical corpus digest before and after.
+
+**And a delivered signal has two channels, which can disagree about the same payload.** The row
+above is one signal with a PULL half (the tool) and a PUSH half (`roles.py::_state_brief`), and the
+push half needed its own fix on the same day. `trust/memo_verify.py::verify_memo` verifies a memo's
+`claims` and has never, at any commit, looked at its `summary` — so the field the state brief splices
+into a prompt is the one field of the memo that no verifier has ever checked, and it reaches THREE
+phases, not one: measured over `rubertlite-dr-unified-v8`'s `spans.jsonl`, **293 real prompts**
+(`propose` 269, `triage` 20, `repair_critic` 4), and **none of those 293 whole prompts contains the
+word `Verifier` or the word `unsupported`**, while the memo behind 52 of them records
+`total_verdicts: 8, unsupported: 8` and opens *"climb from the known ~0.88 plateau"* — a rounded
+number from `rubert-dr-0807`, which `engine/eval_contract.py` reports as a different evaluation
+contract. (The literal `0.8776` is in 11 of that run's 15 full memo summaries and in **0** of the
+300-char windows the brief actually pushes; the carrier was the rounded form.) Corpus-wide: of the
+100 pushable memos in `runs/`, 81 push a decimal number, 76 push one from a memo carrying a
+non-`supported` verdict, and 13 push a ≥3-decimal number that is a node metric of a provably
+different-contract run and of no node of their own — across five runs, so this is a mechanism rather
+than one run's accident. The cue ANNOTATES and withholds nothing: replayed over all 103 memos, 100
+lines change, **0 lose a byte** of the text they carried before, and the added clause is 87-120 chars
+(median 102 — 0.64 % of v8's median 15,930-char user turn, against a `context_budget_chars` of
+1,000,000, so it displaces nothing). Suppressing an unsupported memo's summary was weighed and
+refused for the reason the pull half refused it: 26 of those 100 memos have no supported verdict at
+all and 45 of the 45 verdicts the deterministic pass emits are `unsupported` about the CITATION, so
+suppression drops real findings over bad footnotes. And it states no opinion about which number is
+foreign — a summary is prose with no per-number provenance, and deciding that from the model's own
+text is what docs/36 forbids.
 
 **The invariant.** `engine/signal_delivery.py` is a registry of these routes (signal → folded field
 → injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol

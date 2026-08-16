@@ -666,6 +666,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         novelty_semantic_threshold = _opt("novelty_semantic_threshold")
         digest_char_cap = _opt("digest_char_cap")
         research_verify = _opt("research_verify")
+        memo_verdict_cue = _opt("memo_verdict_cue")
         workdir_audit = _opt("workdir_audit")
         trace_llm_io = _opt("trace_llm_io")
 
@@ -849,6 +850,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
             pass
         self._research_verify = bool(research_verify)
+        # D8 PUSH half: `roles._state_brief` renders the latest memo's SUMMARY into every Researcher,
+        # crash-triage and repair-critic prompt, and the verifier never checks a summary — so the cue
+        # carries the memo's own CLAIM tally beside it. Threaded exactly like `_digest_cap` above:
+        # setattr on the researcher (registry `roles.RESEARCHER_HINT_ATTRS`, so every wrapper mirrors
+        # it) for the two propose paths, and an engine attribute for the three call sites that are
+        # engine methods (`crash_repair._ask_triage`/`_ask_repair_critic`, `node_build._choose_action`).
+        self._memo_verdict_cue = bool(memo_verdict_cue)
+        try:
+            setattr(researcher, "_memo_verdict_cue", bool(memo_verdict_cue))
+        except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
+            pass
         self._workdir_audit = bool(workdir_audit)
         # ADR-17 capture policy for THIS run's tracer (below). None = declare nothing and let the
         # process-wide `set_llm_capture` default decide, exactly as before this knob existed.

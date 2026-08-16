@@ -266,7 +266,8 @@ class CrashRepairMixin:
             try:
                 # NOT a proposal: this asks for a `TRIAGE_ACTIONS` verdict, not an `Idea`, so the
                 # board's claim contracts are instructions it cannot follow (see `_state_brief`).
-                brief = _state_brief(state, None, for_proposal=False)
+                brief = _state_brief(state, None, for_proposal=False,
+                                     memo_verdicts=getattr(self, "_memo_verdict_cue", False))
             except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                 brief = ""
             # Signal-delivery (§1): a standing directive (e.g. "prefer lighter models") is
@@ -401,7 +402,8 @@ class CrashRepairMixin:
             try:
                 # NOT a proposal, exactly as in `_ask_triage`: this asks for a stop/continue verdict,
                 # so the board's claim contracts are instructions it cannot follow.
-                brief = _state_brief(state, None, for_proposal=False)
+                brief = _state_brief(state, None, for_proposal=False,
+                                     memo_verdicts=getattr(self, "_memo_verdict_cue", False))
             except Exception:  # noqa: BLE001 - a brief is advisory; never block on it
                 brief = ""
             # Own span, and it bands as `triage` beside the stop decision it belongs to rather than

@@ -100,7 +100,15 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 179
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 180
+    # 212 -> 213 Settings and 179 -> 180 catalogued rows on 2026-08-16: `memo_verdict_cue`,
+    # whether the deep-research takeaway PUSHED into every Researcher / crash-triage /
+    # repair-critic prompt carries the memo's own verifier tally. A row rather than an
+    # uncurated omission for the reason `research_verify` beside it is one — it is the
+    # DELIVERY half of that verifier, the verifier only ever checks a memo's CLAIMS so the
+    # summary this line pushes is the one field of the memo nothing checks, and it changes a
+    # PROMPT, which is a contract here: an operator must be able to see the switch that
+    # restores the historical bytes. It buys no paid call and moves nothing.
     # 208 -> 209 Settings and 178 -> 179 catalogued rows on 2026-08-15: `repair_log_tools`,
     # whether the crash/timeout TRIAGE judge may query the failed eval's stage logs instead of
     # diagnosing from `res.stderr[-500:]`. A row rather than an uncurated omission for the same
@@ -133,7 +141,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 212
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 213
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

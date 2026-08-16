@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events import digest
-from looplab.core.advisory_payloads import VERDICT_UNVERIFIED, memo_verification_view
+from looplab.core.advisory_payloads import (VERDICT_UNVERIFIED, memo_verification_view,
+                                            verdict_tally)
 from looplab.core.models import NodeStatus, RunState, extra_metric_channel
 from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools._runcache import RunStateCache
@@ -701,12 +702,11 @@ class RunTools:
         rows = view.get("rows") or []
         checked = sum(counts.get(name, 0) for name in
                       ("supported", "unsupported", "unclear", "cited"))
-        tally = ", ".join(
-            f"{counts.get(name, 0)} {label}" for name, label in (
-                ("unsupported", "UNSUPPORTED"), ("supported", "supported"),
-                ("unclear", "unclear"), ("cited", "cited-but-unjudged"),
-                (VERDICT_UNVERIFIED, "unverified"))
-            if counts.get(name, 0))
+        # ONE tally vocabulary, shared with the PUSH channel (`roles.py::_state_brief` renders the
+        # same block through `advisory_payloads.memo_verdict_cue`). Byte-identical to the literal
+        # this replaced; it is a shared table rather than a second copy because a role can see both
+        # surfaces in one prompt and two spellings of the same counts read as two different checks.
+        tally = verdict_tally(counts)
         head = (f"Verifier ({view.get('method') or 'unknown'} check; {checked} of "
                 f"{counts.get('claims', 0)} claims checked): {tally or 'nothing to report'}.")
         lines = [head]
