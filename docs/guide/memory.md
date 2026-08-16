@@ -210,6 +210,70 @@ Written durably, at cost, and consumed by no prompt and no decision:
   provenance only. None is returned to a reasoning role; `status` gates visibility and
   `provenance` labels the skill read path as described above.
 
+## The evaluation contract: what a number from another run means
+
+A shared `task_id` is an operational lookup key. It does **not** bind the metric's name, its unit, the
+dataset, or the harness that produced it — so two runs listed side by side may have optimized the same
+metric name against different corpora with different scorers. `ui/src/crossRunRank.js` has refused to
+claim otherwise since it shipped; since 2026-08-16 the run-reading **tools** state the same boundary as
+a fact on the row instead of leaving it to be inferred.
+
+`looplab/engine/eval_contract.py` reads one run's own `task.snapshot.json` — the operator's declaration,
+written by the engine at setup — and derives its **evaluation contract**: the metric reader (`kind` plus
+the pattern/key it matches), the eval `command`, and the declared artifact/data paths. Two runs are
+comparable when those are equal. Deliberately **not** part of the identity: `direction` and `task_id`
+(the existing scope predicates already gate on both), the goal prose (it drifts between reruns of one
+evaluation), and timeouts/seeds/footprints (they change what a run costs, never what its number means).
+
+**The metric name is not the key, and this is the trap.** Measured on this box (2026-08-16, 46 run
+directories with a `task.snapshot.json`): `stdout_regex` / `RECALL@100: ([0-9.]+)` is byte-identical
+across three different contracts —
+
+| contract | eval command | declared paths | runs |
+|---|---|---|---|
+| `repo_task` | `python -m vectorsearch.test` | `/home/jovyan/data/vectorizer-unified` | v2, v6, v7, v8 |
+| `rubert_dr_0804` / `rubert_dr_0807` | `python looplab_eval.py --save_path models/rubertlite_run --gpus 1` | `…/vectorizer/dense-retrieval`, `…/datasets/dense-retrieval/rubertlite` | 0804, 0805, 0807 |
+| (the human's own harness) | operator-declared | `…/vectorizer/dense-retrieval` | `rubertlite-dense-retrieval` |
+
+Partitioning on the metric name would merge exactly the runs this exists to separate. `(task_id,
+direction)` is wrong in **both** directions on the same corpus: it *under*-splits (`rubertlite-dense-
+retrieval` folds to `repo_task` and is listed as a sibling of v8, with its `best=0.8077`, while running a
+different harness) and it *over*-splits (`rubert_dr_0804` and `rubert_dr_0807` are the same contract
+under two task ids).
+
+**What it does.** `SiblingRunTools`, `AllRunsTools` and their shared `ForeignRunReader` plumbing append a
+deterministic receipt beside another run's number: a short suffix on a listing row
+(`· DIFFERENT EVAL CONTRACT (not this run's scale)`) and, on a per-experiment read, one sentence naming
+which facet differs, placed **before** the metric line it qualifies.
+
+**What it does not do**, and each of these is load-bearing:
+
+* It **withholds nothing**. The number is still shown, the code is still readable, the params are still
+  there. It annotates.
+* It **fails open**. A contract that cannot be read is `None` — a third answer, never "different". Of the
+  46 runs with an event log, 12 have no readable contract and are never flagged. Hiding a legitimate
+  prior result would be worse than the defect.
+* It **cannot reach the record**. Every consumer is a tool output string; nothing touches `RunState`,
+  writes an event, or is read by `fold`. No metric, champion, selectability decision or violation can
+  move on it (`docs/36`).
+* It is **silent for the operator's assistant**. `MachineRunsTools` binds no self run, so portfolio reads
+  by a human are unchanged byte for byte. The boundary is about what a *run* treats as its target.
+
+**What it does not reach, stated rather than patched.** A foreign number quoted inside a *native* row's
+prose is invisible to any row-level rule. `rubertlite-dr-unified-v7` is a genuine `repo_task` run, and it
+published: *"…0.8173 at temp 0.01 and 0.8651 at temp 0.05, both below the 0.8776 symmetric-InfoNCE
+baseline."* Two of those floats are v7's own and legitimately comparable; the third is `rubert-dr-0807`'s
+and is not. One sentence, three numbers, two provenances — no deterministic rule separates them, which is
+why nothing here tries to, and why a value-stripping filter over the cross-run **memory** stores is not
+implementable. See `docs/BACKLOG.md` §0.6.
+
+The cross-run memory rows carry no contract at all: measured over the live store, **0 of 132 rows** (23
+lessons, 63 research claims, 4 capsules, 21 cases, 21 meta-notes) carry a metric name, a dataset path, an
+eval command or a contract identity, while 132 of 132 carry `run_id` and `task_id`. A retrieval partition
+keyed on a stored contract is therefore inert on the existing corpus and a fail-closed one would blank it
+entirely — which is why this change is at the tool surface, where the run directory can be read, and not
+at the store.
+
 ## Current cross-run boundary and the research-index target
 
 The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.

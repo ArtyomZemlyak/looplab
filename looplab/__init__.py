@@ -140,6 +140,7 @@ _LAYOUT = {
     "env_inspect": "tools",
     "errors": "core",
     "eval_dispatch": "engine",
+    "eval_contract": "engine",  # what a run's numbers were measured BY (docs/BACKLOG.md §0.6)
     "fence": "core",           # the shared durable writer-fence protocol (doc 25 CO-01)
     "judge": "trust",         # one structured-judge invocation (doc 25 CT-09)
     "factory": "agents",      # the agent/role composition root (doc 25 RA-01)
