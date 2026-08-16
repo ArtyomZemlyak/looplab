@@ -183,3 +183,31 @@ def test_load_bearing_source_comments_match_current_identity_and_replay_contract
     assert not [claim for claim in stale_claims if claim in source]
     novelty = (ROOT / "looplab/engine/novelty.py").read_text(encoding="utf-8")
     assert "This is a behavioral admission decision" in novelty
+
+
+def test_the_package_map_names_each_package_exactly_once():
+    """Two rows for one package is invisible, and it silently reverted a fix for 2.7 days.
+
+    CLAUDE.md's package map is the first thing every coding agent reads, and its rows are 3-26 KB
+    long, so they are EDITED BY SPLICING text into them. A splice lands in whichever row it matches
+    first. On 2026-08-13 a conflict was resolved by keeping both sides of four rows, and on
+    2026-08-14 a fifth; the engine row's PRE-FIX copy became the one a reader meets first, so
+    `a8d43b50`'s correction of two false statements (that a `metric_salvaged` node can NEVER become
+    champion — `metric_salvage_repair` is the exception, default on; and that `widths.py` holds ONE
+    rule — it holds two) was reverted for every reader while still present further down. The
+    asymmetry was total: `per_experiment_gpu_budget` appeared only in the corrected copy and
+    `occupancy_due` only in the stale one, so neither was simply newer. 52 commits touched this file
+    in the 2.7 days it lived and none noticed, because nothing looked.
+
+    Deliberately keyed on the PATH cell alone. It cannot see a unique row with wrong content (the
+    `trust/` row credits redaction to it while `core/redact.py` owns it — a different defect,
+    recorded in the backlog), and it is not meant to: this asserts the one property whose violation
+    is undetectable by reading, since both copies look correct in isolation.
+    """
+    rows = re.findall(r"^\| (`looplab/[^`]*`) \|", (ROOT / "CLAUDE.md").read_text(), re.M)
+    assert rows, "the package map has no `looplab/...` rows — the table moved or its shape changed"
+    duplicated = sorted(name for name, n in Counter(rows).items() if n > 1)
+    assert not duplicated, (
+        f"{duplicated} appear more than once in CLAUDE.md's package map. Two rows for one package "
+        "means a reader — and a splice — takes whichever comes first, and the other copy's content "
+        "is invisible. Merge them into one row rather than adding a second.")
