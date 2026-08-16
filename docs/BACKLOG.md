@@ -2064,6 +2064,131 @@ least one test.
 
 ---
 
+### §0.7 The memo's verifier verdicts never reached a single role (2026-08-16)
+
+✅ **What it was — one line of a renderer, dead for the whole life of the feature.** The deep-research
+memo carries a per-claim verifier result. `looplab/tools/run_tools.py::RunTools._research_memo` ended
+with
+
+```python
+ver = m.get("verification")
+if isinstance(ver, dict) and ver.get("summary"):
+    parts.append("Verifier: " + str(ver["summary"]).strip())
+```
+
+**No memo has ever carried a `summary` key.** The block that IS written holds `verdicts`, `method`,
+`unsupported`, `total_verdicts`, `omitted_verdicts` — so the renderer keyed on a field the writer has
+never produced and **not one verifier verdict has ever reached a role through this tool, on this box,
+ever.** The tool's own docstring one line above promised "evidence-cited claims (and any verifier
+verdicts)"; that sentence was false. It was dead ON ARRIVAL, not by drift: `f180c986` (2026-07-10)
+added the renderer, and the writer at that same commit already returned
+`{"verdicts", "method", "unsupported"}`. `git log -S` over every version of `trust/verify.py` →
+`trust/memo_verify.py`, `engine/research_cadence.py` and `core/advisory_payloads.py` finds three
+constructions of the block in history and **none** of them writes a `summary`. It could not have
+appeared by accident either: `sanitize_research_memo_payload` runs on the write path AND at replay
+(`events/replay.py`), and `_verification` rebuilds the block as a dict literal, so a key no origin
+writer emits is stripped before any reader sees it.
+
+**THE MEASUREMENT.** Over every `research_completed` row in `runs/` (2026-08-16):
+
+| | |
+|---|---|
+| memos | **102** |
+| carrying a `verification` block | **98** |
+| …carrying a `summary` key | **0** |
+| …with no `summary` at all | **98** |
+| …with EVERY verdict `unsupported` | **16** |
+| verdict rows | **833** (`supported` 377 · `unsupported` 405 · `unclear` 51) |
+| block shapes | 64 five-key · 34 legacy three-key (`method`/`unsupported`/`verdicts`) |
+| claim↔verdict alignment | **98/98** index-aligned, **833/833** statement-exact |
+
+**What it cost on the live run.** `rubertlite-dr-unified-v8`'s `at_node: 0`, `trigger: run_start`
+memo records `total_verdicts: 8, unsupported: 8, method: deterministic`. Verdict[0] is
+`{"verdict": "unsupported", "note": "cited experiments do not exist: [9]", "evidence": {…,
+"complete": false}}` against a claim quoting `recall@100=0.8776` whose `node_ids: [9]` names a node
+in a DIFFERENT run. That number became the run's stated anchor ("climb from the known ~0.88
+plateau"), rode into a `hint`, into the builder's prompt and into node 9's repair rationale ("sibling
+hit 0.8776 with it") — see §0.6 — and the operator has since confirmed it is not a comparable
+evaluation at all. **The refusal was in the same payload, one key away, and no role could read it.**
+
+**A SECOND measurement decided the SHAPE, and it is the one that makes this more than a typo.**
+Replayed over all 102 memos through the real renderer: **88 render LONGER than the agent layer's
+4,000-char `RESULT_CAP`** (median 6,974, max 9,381), and that cut is HEAD-KEEP — the tail is dropped.
+The old `Verifier:` line was the LAST thing in the answer, so even had the key existed it would have
+been the first thing thrown away on 86 % of reads. On v8's own memo the `Claims` section began at
+char **3,889** of a 7,862-char answer — 111 chars before the cut — so a verdict rendered only beside
+its claim would not have reached the Researcher either. **Anything a reader must not miss has to be
+above the summary, not below the findings.**
+
+**Delivered.** `core/advisory_payloads.py::memo_verification_view` — the read side, placed BESIDE the
+`_verification` writer it mirrors — plus a rewritten `_research_memo` that leads with the verifier's
+counts and its ungrounded claims, tags every claim row with its verdict, and says `Verifier: NOT RUN`
+(4 of 102 memos) or `UNREADABLE` rather than falling silent. `trust/memo_verify.py::verify_memo`'s own
+docstring listed three of the five keys it returns and now lists five, as a stated contract.
+Replayed over the corpus: **102/102 memo reads change and 102/102 now carry a verifier line INSIDE
+the 4,000-char window**; 89 lead with a named ungrounded-claim list; 0 lines present before are absent
+after. Nothing else moves — folding all **46** event logs (**221** nodes, **37** champions) gives a
+byte-identical corpus digest on both trees, because the change is a tool OUTPUT STRING plus one new
+function nothing existing calls. **QUOTE THE INSTANT — v8 is live and this measurement moved under
+its own feet.** Folding the SAME base tree twice, minutes apart, already disagrees about exactly one
+run: `rubertlite-dr-unified-v8`, whose engine is still appending. Its `state_sha256` changes while
+its metrics, statuses, violations, `best_node_id` and node count do not, so a naive before/after
+comparison across the two passes reports one differing state and it is not the change. The
+invariance claim above is the SAME-INSTANT control: base tree and commit tree folded back to back
+over one corpus, **0 of 46 states differ** and both digest `9378b51a`. `tests/test_research_memo_verdicts.py` drives it on v8's REAL memo
+(`tests/data/v8_research_memo.json`, verbatim from that run's log); six mutations on a throwaway tree
+— the dead `summary` branch restored verbatim, a reader keyed on a field nobody writes, suppressing
+unsupported claims, moving the verdict back to the tail, dropping the statement-equality half of the
+join, and rendering absence as silence — each go red.
+
+**ALTERNATIVES REJECTED, with the evidence.**
+
+| Option | Why not |
+|---|---|
+| **(a) Pin the new key** (`assert '"verdicts"' in source`) | Would not have caught the original defect and would not catch the next one — a positive source pin sits just as happily beside a dead branch. The guard re-derives BOTH key sets by AST from the writers' own returns and asserts reader ⊆ writer, so the general defect is what goes red. |
+| **(b) Withhold an `unsupported` claim entirely, or replace it with the refusal** | **Refused on the corpus.** 405 of 833 verdict rows are `unsupported` and 16 of 98 blocks are entirely so, so this empties the Claims section on 16 memos — and an empty section reads as "the memo made no claims", a worse lie. Decisively: **45 of the 45 verdicts the DETERMINISTIC pass emits are `unsupported`** with a note about the CITATION (`no evidence cited`, `cited experiments do not exist`, `cited source URL was not consulted`), which is a fact about the footnote and not about the claim. Hiding a true finding behind a bad footnote is worse than the defect. The refusal LEADS the statement instead. |
+| **(c) Fail-shut — refuse the memo when the block is absent or malformed** | The tool is CONTEXT, not a gate, and `execute` has a never-raise contract. Withholding 4 memos that were simply never verified suppresses real findings to punish a missing check. Fail-LOUD instead: absence and malformation each get their own sentence (they have different remedies), and not a byte of the memo is withheld. |
+| **(d) Join verdict `i` to claim `i` by index alone** | The index is right on 98/98 blocks today, but a bounded or reordered block would print one claim's refusal under another claim's text — the worst possible failure for this surface. The join requires statement equality, which is the rule `engine/lessons.py`, `engine/research_cadence.py` and `ui/src/researchMemoModel.js::alignVerification` already apply; a mismatch reads `unverified`, never a neighbour's verdict. |
+| **(e) Route the three existing consumers through the new reader too** | Right, and deliberately NOT done in the same hour a run launches: two of them (`engine/lessons.py`, `engine/research_cadence.py`) write durable CROSS-RUN records and Card enrichment, so a changed join changes durable output. Stated below instead. |
+
+⬜ **Still open, in priority order.**
+1. **The memo render has no budget of its own** and is 2.2× the cap it is delivered under. Measured:
+   the `Findings` section alone costs a median **2,030** chars of the 4,000 (12 model-authored bullets,
+   median 204 chars each, p90 342) and exceeds 2,000 chars on 54 of 102 memos, while the evidence-
+   bearing `Claims` rows sit behind it. The lead block this change adds costs ~1.4 kB and pushed
+   **137** fully-cited claim bullets out of the delivered window across the corpus (exact duplication
+   between the lead and the claim rows was removed to give some back). The fix is for the tool to spend
+   `tools/_base.py::fit_rows`/`clip` on its OWN answer — deciding what survives — rather than letting
+   the loop's blind head-cut decide. Effort M. **Not done here because it changes what a role reads for
+   reasons unrelated to this defect and cannot be validated against behaviour in the time available.**
+2. **Four implementations of one claim↔verdict join** (`memo_verification_view`, `engine/lessons.py`,
+   `engine/research_cadence.py`, `ui/src/researchMemoModel.js`). Only the first is bound to the writer
+   by a test. Route the two engine ones through it once there is time to re-verify the durable
+   cross-run output byte for byte. Effort S, blast radius L.
+3. **The PUSHED half of this signal still carries the number unqualified.** `agents/roles.py::
+   _state_brief` renders `research[-1]["summary"]` into every Researcher prompt with no verification
+   status at all, and it is auto-pushed — no tool call needed. Measured on v8: **11 of its 14 memo
+   summaries contain `0.8776`**, including the `at_node: 0` one, whose verdict list is 8/8
+   `unsupported`. The tool is the pull channel and is now honest; the push channel is not. This is the
+   higher-value remaining fix and it touches a prompt string, so it wants its own change.
+4. **The DURABLE claims reach the Researcher's advisory pack with their verdict stripped too, and
+   this one is a sibling of the same defect rather than a promise broken.** `engine/lessons.py`
+   carries each memo claim's `{verdict, method, note}` into `research_claims.jsonl`, and
+   `engine/claims_retrieval.py` computes `n_unverified` / `unverified` for every claim it retrieves
+   (`:173-175`, `:510-516`) — and then `render_context_pack` prints only the cross-run aggregation,
+   `[n_support↑/n_oppose↓]`, and never the verifier's own answer. Measured over the live store
+   `/home/jovyan/data/looplab-memory`: of **42** claim rows, **22 carry a non-`supported` verdict**
+   (20 `unsupported`, 2 `unclear`), and every one of them reaches the proposing Researcher with no
+   sign that the run which wrote it could not ground it. `n_support`/`n_oppose` count OBSERVATIONS
+   agreeing across runs; the verdict says whether the claim was ever tied to evidence at all, and the
+   two are not substitutes. Unlike the memo tool, no docstring here promises the verdict — it is a
+   computed-and-dropped field, not a false contract, which is why it is a separate row. Effort S; it
+   touches the Researcher's pushed advisory text, so it wants the same care as #3.
+5. **`verification` is not the only stale contract in this family.** `trust/memo_verify.py`'s
+   docstring was two keys behind its own return until this change. Nothing systematically checks a
+   docstring's key list against the dict a function returns; the AST helpers in
+   `tests/test_research_memo_verdicts.py` are ~30 lines and generalize.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in

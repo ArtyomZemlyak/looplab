@@ -435,8 +435,17 @@ def verify_memo(memo: dict, state: RunState, client=None,
                 parser: str = "tool_call") -> Optional[dict]:
     """Verify a memo's claims. Deterministic layer always runs; the LLM rubric pass upgrades
     `cited` claims to supported/unsupported/unclear when a client is wired. Returns
-    {"verdicts": [{statement, verdict, note}], "method": "deterministic"|"llm",
-     "unsupported": n} or None when the memo has no claims (nothing to verify)."""
+    {"verdicts": [{statement, verdict, note, evidence}], "method": "deterministic"|"llm",
+     "unsupported": n, "total_verdicts": n, "omitted_verdicts": n} — ALL FIVE keys, always — or
+    None when the memo has no claims (nothing to verify).
+
+    THAT KEY LIST IS A CONTRACT, not documentation. `tools/run_tools.py::read_research_memo` keyed
+    on a `verification["summary"]` this function has never returned, at any commit, so no verifier
+    verdict reached a role through that tool for the whole life of the feature (98 blocks in `runs/`,
+    0 summaries). The reader is now `core/advisory_payloads.py::memo_verification_view`, beside the
+    sanitizer that re-emits this dict, and `tests/test_research_memo_verdicts.py` re-derives BOTH key
+    sets from this source and that one — so adding a key here without a reader, or reading a key
+    nothing writes, is a red test rather than a silently empty answer."""
     raw_claims = (memo or {}).get("claims") if isinstance(memo, dict) else ()
     claims = list(raw_claims[:_MAX_CLAIMS]) if isinstance(raw_claims, (list, tuple)) else []
     if not claims:

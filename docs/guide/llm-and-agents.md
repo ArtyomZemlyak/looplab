@@ -579,10 +579,26 @@ but nothing injects it into a prompt"* — the same class the hint registry
 | **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`), naming the eval PHASE the verdict was about (`log_role`/`stage` on the alert row) rather than calling every verdict "training" |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
-| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
+| **Deep-research memo** | `RunState.research` | Researcher | a one-line takeaway in the state brief **plus** a `read_research_memo` tool to pull the full findings/claims on demand, **each claim carrying the verdict this run's own verifier gave it** (`supported` / `unsupported` / `unclear` / `cited`, or `unverified` when the check was bounded away or its rows do not align with the claims) — the groundless ones LEAD the answer, above the memo's summary, because the agent layer keeps the first 4,000 chars and drops the rest; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
 | **Operator yields** | derived from the DAG | Strategist | a per-operator gain-per-second line in the strategist brief, so it tunes the operator mix from evidence, not priors |
 | **Operator directives** | `RunState.pending_hints` | Researcher, Strategist, pilot, crash-triage, **Developer** | one `render_hint_directives` helper — the engine also folds directives into the idea handed to `implement`, so a directive steers the **code**, not only the proposal |
 | **Run states** (paused / awaiting-approval / trust-flag / stuck-build) | `RunState` | boss / assistant | an "ATTENTION" block in the boss context, surfacing the states where human intervention is most valuable |
+
+**A delivered signal can still be silently empty, and this one was.** `read_research_memo`'s
+renderer keyed on `verification["summary"]` — a field neither writer has ever produced — from the
+commit that introduced it (2026-07-10) until 2026-08-16. Measured over every `research_completed`
+row in `runs/`: **98 memos carry a verification block, 0 carry a `summary` key**, and 16 have every
+verdict `unsupported`, so **not one verifier verdict ever reached a role through that tool**. The
+signal-delivery probe could not see it: the memo WAS delivered, in full, minus the one part that
+said whether to believe it. `rubertlite-dr-unified-v8` paid for that — its `at_node: 0` memo records
+`total_verdicts: 8, unsupported: 8`, the first of them refusing a `recall@100=0.8776` claim with
+`cited experiments do not exist: [9]`, and the number became the run's stated anchor anyway. The
+reader now lives beside the writer (`core/advisory_payloads.py::memo_verification_view`) and
+`tests/test_research_memo_verdicts.py` re-derives BOTH key sets from source, so a reader keyed on a
+field nothing writes is a red test rather than a quiet one. What that does NOT change: the tool
+returns a string, so nothing here reaches a metric, a champion, a selectability decision or a
+violation (docs/36 — a wider CONTEXT must not widen the trusted set), and folding all 46 event logs
+in `runs/` gives a byte-identical corpus digest before and after.
 
 **The invariant.** `engine/signal_delivery.py` is a registry of these routes (signal → folded field
 → injection site → consumer), and `tests/test_signal_delivery.py` asserts each injection symbol

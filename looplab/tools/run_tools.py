@@ -15,9 +15,24 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events import digest
+from looplab.core.advisory_payloads import VERDICT_UNVERIFIED, memo_verification_view
 from looplab.core.models import NodeStatus, RunState, extra_metric_channel
 from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools._runcache import RunStateCache
+
+# How many groundless claims the memo render LEADS with, and how much of each it shows. Both are
+# measured, not chosen: over all 98 verification blocks in `runs/`, a cap of 6 covers 79 of them
+# completely (81 %), 8 would cover 94, and the unsupported statements have a median length of 178
+# chars and a p90 of 273. The whole leading block is therefore bounded at roughly 1.6 kB of the
+# agent layer's 4,000-char `RESULT_CAP` — which matters because the rest of this render routinely
+# does not fit: replayed over all 102 memos in `runs/`, 88 of them render LONGER than the cap and
+# the median render is 6,974 chars, so the loop's head-keep cut throws the tail away. On v8's own
+# `at_node: 0` memo the `Claims` section begins at char 3,889 — 111 chars before the cut — so a
+# verdict rendered only beside its claim would not have reached the Researcher at all. Anything the
+# reader must not miss has to be ABOVE the summary, not below the findings.
+_MEMO_LEAD_VERDICTS = 6
+_MEMO_LEAD_STATEMENT = 140
+_MEMO_LEAD_NOTE = 110
 
 
 def _is_number(v: str) -> bool:
@@ -127,7 +142,9 @@ class RunTools:
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_research_memo",
                 "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
-                "evidence-cited claims. The run periodically does a 'think hard' review over all "
+                "evidence-cited claims, EACH WITH THE VERDICT this run's own verifier gave it "
+                "(supported / unsupported / unclear), so you can tell a measured result from an "
+                "unsupported assertion before you build on it. The run periodically does a 'think hard' review over all "
                 "results (and the web); only its top recommended directions are pushed into your "
                 "context automatically — call this to pull the rest of the reasoning before "
                 "proposing, when you want the deeper analysis behind those directions.",
@@ -620,20 +637,130 @@ class RunTools:
             prefix = ""
         return f"#{nid} concept delta vs {base}: {prefix}{body}"
 
+    def _verifier_lead(self, view: dict) -> tuple[str, set[int]]:
+        """The memo's verifier result, rendered FIRST — counts, then the claims it could not ground.
+
+        Returns the block and the claim INDEXES it already spelled out, so the `Claims` section below
+        can tag those without repeating their note verbatim: measured over the corpus, the lead costs
+        ~1.4 kB and pushes 137 fully-cited claim bullets out of the 4,000-char window it has to share,
+        and paying for the same sentence twice is the cheapest of those chars to give back.
+
+        WHY IT LEADS AND WHY IT NAMES ITS OWN ABSENCE. The memo carries a per-claim verifier result
+        and no role has ever seen one: this renderer keyed on `verification["summary"]`, a field no
+        writer has ever produced (`core/advisory_payloads.py::memo_verification_view` records the
+        census — 98 blocks, 0 summaries), so the branch was dead from the commit that added it. What
+        that cost is on the record: `rubertlite-dr-unified-v8`'s `at_node: 0` memo carries
+        `total_verdicts: 8, unsupported: 8`, the first of them `{"verdict": "unsupported", "note":
+        "cited experiments do not exist: [9]"}` against a claim quoting `recall@100=0.8776` from a
+        node id belonging to a DIFFERENT run — and that number became the run's stated anchor, rode
+        into a hint and into node 9's repair rationale, while its own refusal sat unread in the same
+        payload. So the refusal LEADS the claim rather than trailing it; a reader that skims, or a
+        4,000-char cut that lands mid-answer, must take the refusal with the number and not after it.
+
+        A groundless claim is still RENDERED, in full, under its verdict. Suppressing it was weighed
+        and refused on the corpus: 405 of 833 verdict rows are `unsupported` and 16 of 98 blocks are
+        entirely so, and 45 of the 45 verdicts the DETERMINISTIC pass emits are `unsupported` with a
+        note about the CITATION (`no evidence cited`, `cited experiments do not exist`, `cited source
+        URL was not consulted`) — which is a fact about the footnote and not about the claim. Hiding
+        a true finding behind a bad citation is a worse renderer than the one being replaced.
+
+        Fail-LOUD, never fail-shut. `absent` and `malformed` each get a sentence, because this whole
+        defect is a missing thing being read as a passing one; but neither withholds a byte of the
+        memo. This is a tool OUTPUT STRING and nothing else: it reaches no metric, no champion, no
+        selectability decision and no violation, and no model's own text decides its own verdict —
+        the verdicts come from `trust/memo_verify.py`, engine-side, before this is ever called
+        (docs/36: a wider action space, and a wider CONTEXT, must not widen the trusted set).
+
+        WHO THIS ACTUALLY REACHES, measured over every `spans.jsonl` in `runs/`: 400 calls in NINE
+        phases — `propose` 218, `strategist_consult` 37, `hyp_prioritize` 36, `report` 34,
+        `foresight_rank` 32, **`create_node` 25**, `triage` 9, `deep_research` 8, `lessons_distill` 1
+        — so this is not only the proposing Researcher. The two that matter for the v8 incident are
+        the last ones anybody would have guessed: the number reached "the builder's prompt and node
+        9's repair rationale" (docs/BACKLOG.md §0.6), and `create_node` and `triage` are exactly those
+        two surfaces. They gain CONTEXT only; `TRIAGE_ACTIONS`, the fail-closed degradations and the
+        terminal's authenticated `reason` are untouched, the same line `engine/train_monitor.py::
+        repair_log_tools` already holds.
+
+        THE ONE SELF-REFERENCE WORTH CHECKING, and it is clear. `readonly_run_tools` hands a full
+        `RunTools` to five auxiliary passes including the SEMANTIC MEMO VERIFIER itself
+        (`trust/memo_verify.py::_verify_tools`), so a judge could in principle read verdicts while
+        producing one. It cannot read its OWN: `engine/research_cadence.py` appends the memo only
+        AFTER `verify_memo` returns, so `state.research[-1]` is always the PREVIOUS memo — and on the
+        first memo of a run (v8's incident memo, `trigger: run_start`) it is empty. Empirically the
+        question has never arisen either: of those 400 calls, ZERO come from a verification pass.
+        """
+        status = view.get("status")
+        if status == "absent":
+            return ("Verifier: NOT RUN for this memo — its claims are unchecked. Absence of a "
+                    "verdict is not a pass; treat every number below as the memo's own assertion.",
+                    set())
+        if status == "malformed":
+            return ("Verifier: result RECORDED BUT UNREADABLE for this memo (the verification block "
+                    "is not the shape this run writes) — treat its claims as unchecked.", set())
+        counts = view.get("counts") or {}
+        rows = view.get("rows") or []
+        checked = sum(counts.get(name, 0) for name in
+                      ("supported", "unsupported", "unclear", "cited"))
+        tally = ", ".join(
+            f"{counts.get(name, 0)} {label}" for name, label in (
+                ("unsupported", "UNSUPPORTED"), ("supported", "supported"),
+                ("unclear", "unclear"), ("cited", "cited-but-unjudged"),
+                (VERDICT_UNVERIFIED, "unverified"))
+            if counts.get(name, 0))
+        head = (f"Verifier ({view.get('method') or 'unknown'} check; {checked} of "
+                f"{counts.get('claims', 0)} claims checked): {tally or 'nothing to report'}.")
+        lines = [head]
+        # Omission is stated, never inferred from a short list: a bounded check that reads as a
+        # complete one is the same error this whole renderer exists to stop.
+        if counts.get("omitted_verdicts"):
+            lines.append(f"  (verification incomplete: {counts['omitted_verdicts']} of "
+                         f"{counts.get('total_verdicts', 0)} claims were never checked.)")
+        if counts.get("unmatched_verdicts"):
+            lines.append(f"  ({counts['unmatched_verdicts']} verdict(s) matched no claim in this "
+                         "memo — the check and the claim list disagree.)")
+        bad = [(i, r) for i, r in enumerate(rows)
+               if r.get("verdict") in ("unsupported", VERDICT_UNVERIFIED)]
+        listed: set[int] = set()
+        if bad:
+            lines.append("  These claims are NOT grounded — the run's own verifier could not tie "
+                         "them to an experiment in THIS run or to a source it read. Do not carry "
+                         "their numbers forward as measured results:")
+            for index, row in bad[:_MEMO_LEAD_VERDICTS]:
+                listed.add(index)
+                label = ("UNSUPPORTED" if row.get("verdict") == "unsupported" else "UNVERIFIED")
+                note = clip(str(row.get("note") or "").strip(), _MEMO_LEAD_NOTE, note="…")
+                stmt = clip(str(row.get("statement") or "").strip(), _MEMO_LEAD_STATEMENT, note="…")
+                lines.append(f"  - [{label}: {note or 'no reason recorded'}] {stmt}")
+            if len(bad) > _MEMO_LEAD_VERDICTS:
+                lines.append(f"  - (+{len(bad) - _MEMO_LEAD_VERDICTS} more not grounded; every "
+                             "claim carries its verdict under Claims below.)")
+        return "\n".join(lines), listed
+
     def _research_memo(self, st: RunState) -> str:
         """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top
-        `recommended_directions` are auto-pushed into the prompt; this returns the summary + findings
-        + evidence-cited claims (and any verifier verdicts) so the agent can pull the reasoning behind
-        those directions instead of it being recorded-but-unread. Soft-fails to a plain note."""
+        `recommended_directions` are auto-pushed into the prompt; this returns the verifier's per-claim
+        verdicts, then the summary + findings + evidence-cited claims, so the agent can pull the
+        reasoning behind those directions instead of it being recorded-but-unread. Every claim is
+        rendered with the verdict the run's own verifier gave it (`_verifier_lead` documents why the
+        verdicts lead rather than trail, and what the previous renderer's dead `verification["summary"]`
+        branch cost on `rubertlite-dr-unified-v8`). Soft-fails to a plain note."""
         research = getattr(st, "research", None) or []
         if not research:
             return "(no deep-research memo yet — the run hasn't done a 'think hard' review)"
         m = research[-1]
         if not isinstance(m, dict):
             return "(research memo unavailable)"
+        # ONE derivation of the verdicts, from the module that WRITES them, used by both the lead
+        # block and the per-claim tags — so the two halves of this answer cannot come to disagree
+        # about the same claim. `rows` is per CLAIM and in claim order, which is what makes the
+        # positional read below safe; a claim whose verdict is missing or misaligned reads
+        # `unverified` rather than borrowing its neighbour's.
+        view = memo_verification_view(m)
+        lead, spelled_out = self._verifier_lead(view)
         parts: list[str] = []
         at = m.get("at_node")
         parts.append(f"Deep-research memo (at node {at}):" if at is not None else "Deep-research memo:")
+        parts.append(lead)
         if m.get("summary"):
             parts.append("Summary: " + str(m["summary"]).strip())
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
@@ -641,18 +768,28 @@ class RunTools:
             parts.append("Findings:\n" + "\n".join(f"  - {f}" for f in findings[:12]))
         claims = [c for c in (m.get("claims") or []) if isinstance(c, dict) and c.get("statement")]
         if claims:
-            def _cite(c: dict) -> str:
+            verdict_rows = view.get("rows") or []
+            def _cite(index: int, c: dict) -> str:
                 nodes = ", ".join(f"#{n}" for n in (c.get("node_ids") or []))
                 urls = ", ".join(str(u) for u in (c.get("urls") or []))
                 cite = "; ".join(x for x in (nodes, urls) if x)
-                return f"  - {str(c['statement']).strip()}" + (f"  [evidence: {cite}]" if cite else "")
-            parts.append("Claims (with evidence):\n" + "\n".join(_cite(c) for c in claims[:12]))
+                row = verdict_rows[index] if index < len(verdict_rows) else {}
+                verdict = str(row.get("verdict") or "").strip()
+                # No verdict block at all leaves the claim untagged rather than tagged "unverified":
+                # the lead already said the check never ran, and repeating it on twelve rows spends
+                # the answer's remaining budget saying one thing many times.
+                tag = f"[{verdict.upper()}] " if verdict and view.get("status") == "present" else ""
+                # The lead already printed this claim's reason verbatim; repeat the LABEL so the
+                # row is self-describing, never the sentence.
+                note = "" if index in spelled_out else str(row.get("note") or "").strip()
+                reason = f"  [verifier: {clip(note, _MEMO_LEAD_NOTE, note='…')}]" if note else ""
+                return (f"  - {tag}{str(c['statement']).strip()}"
+                        + (f"  [evidence: {cite}]" if cite else "") + reason)
+            parts.append("Claims (with evidence and verifier verdict):\n"
+                         + "\n".join(_cite(i, c) for i, c in enumerate(claims[:12])))
         dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
         if dirs:
             parts.append("Recommended directions:\n" + "\n".join(f"  - {d}" for d in dirs[:8]))
-        ver = m.get("verification")
-        if isinstance(ver, dict) and ver.get("summary"):
-            parts.append("Verifier: " + str(ver["summary"]).strip())
         return "\n".join(parts)
 
 
