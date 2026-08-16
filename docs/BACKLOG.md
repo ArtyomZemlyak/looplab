@@ -373,6 +373,104 @@ site that proves it is open.
 
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
+- **[FIXED 2026-08-15] `declared_param_overrides` read a file in BREADTH-FIRST order, so a helper
+  `def` outranked the module body and a node whose code AGREES with its declaration could be stamped
+  `params_overridden` — on the champion.** `_assigned_numeric_paths`' docstring says LAST WRITE WINS
+  "matching what the interpreter would do if both ran in order". It walked `ast.walk`, which is BFS:
+  every module-level statement is yielded before anything nested inside one, so "last" meant DEEPEST,
+  which is the inverse rule. Driven, not read — `def _defaults(cfg): cfg.train.training.batch_size =
+  4096` above a module-level `cfg.train.training.batch_size = 8192` returns a `ParamOverride` at
+  line 3 against a declaration the effective assignment satisfies exactly. That row does not stay on
+  the attempt: `champion_caveats.py::champion_metric_caveats` calls the whole-node form off folded
+  state on every `/api/runs` poll, so a helper's default convicts the run's best number, which is the
+  one direction this vocabulary was built to be careful in ("a false `params_overridden` on the
+  champion is worse than a missed one"). The same bug is a free EVASION worn the other way: the
+  identical one-line decoy, agreeing with the declaration and called by nobody, SUPPRESSED a real
+  divergence — so a `not in` pin on either half would have held neither. **The fix is to sort the
+  assignment nodes by `(lineno, col_offset)` before writing the dict**, i.e. to make the code do what
+  its own docstring says. Non-vacuity proved by mutating a throwaway `git archive HEAD` tree: the new
+  test fails there and passes here. **It changes NOTHING on the corpus** — re-derived over all 46
+  preserved logs, both orderings return the identical answer on every one of the 218 folded nodes,
+  because the real champion's `train.py` assigns each path exactly once. That is why nobody saw it,
+  and it is the argument for the property test rather than against the fix. A decoy placed strictly
+  AFTER the effective assignment still wins and is left open on purpose: that is the dead-branch
+  residual the module docstring already states, and no static reader can do better.
+  **Evidence:** `looplab/engine/repair_verify.py::_assigned_numeric_paths`,
+  `tests/test_repair_verification.py::test_a_helper_default_earlier_in_the_file_does_not_convict_the_agreeing_module_body`.
+
+- **[STATED, NOT FIXED — 2026-08-15] `verified` means "at least one claimed token appears somewhere
+  in the diff", and the diff is searched as FLAT TEXT — so a DELETED line, unchanged CONTEXT and any
+  COMMENT the agent wrote all count as evidence a promise was kept.** The row that shows it is on the
+  live run: `rubertlite-dr-unified-v8` node 9 attempt 2 promises *"reduce n_epochs to ~6 … so the
+  declared epoch count matches the actual training end"* and does the OPPOSITE — it deletes the
+  `config.train.training.n_epochs = 6` its own previous attempt added, raises the stage `timeout`
+  14400 → 22000 instead, and leaves the manifest passing `--train.training.n_epochs 10`. Verdict:
+  `verified`, `unmet: ()`. The two occurrences that met its claims are the DELETED assignment and an
+  added comment reading *"n_epochs comes from the CLI … and is NOT overridden here"* — the verifier
+  satisfied by a comment DENYING the action it certifies, which is CLAUDE.md's own guard-test rule
+  ("a guard test must not be satisfiable by a COMMENT") turned on the guard. This is the asymmetric
+  direction: tonight's merge fixed two `unmet` FALSE POSITIVES, which are advisory noise a judge can
+  discount, while a false `verified` is the record affirming ON THE AGENT'S BEHALF.
+  **Population, measured** by replaying all 2,487 `node_repaired` rows in `runs/` through the real
+  `verify_repair` on regions rebuilt from each attempt's own predecessor (2026-08-15 23:40 UTC): 76
+  `verified` · 12 `unmet` · 46 `inert` · 2,353 `unstated`; of the 75 `verified` rows carrying both a
+  rationale and a change set, **48 have at least one claimed token with NO occurrence on an added
+  CODE line** — 26 tokens / 18 rows comment-only, 20 / 14 deletion-only, 32 / 21 context-only. Not
+  one row; most of the population.
+  **Why it is stated and not patched — every candidate was driven and refused.** *(a) make a comment
+  not count:* moves FOUR of 2,487 rows (all `verified` → `unmet`) and does **not** move the row above,
+  since the deletion still matches. *(b) make a DELETED line not count:* provably wrong —
+  `rubert-dr-0807` node 12 attempt 2 claims *"replace_sampler_ddp was removed from Trainer.__init__;
+  drop the arg"* and is CORRECTLY `verified` by a `-` line alone. *(c) require EVERY claim rather than
+  one:* convicts at the 48/75 scale above on evidence nobody has audited row by row, against this
+  rung's own rule that a weak signal may ACQUIT and may not CONVICT. *(d) read the DIRECTION:*
+  unrecoverable in principle here — "reduce n_epochs to 6" and "drop the n_epochs override" are one
+  token in one file, and separating them needs the VALUE out of model-authored prose, which is exactly
+  the text this rung's trust tier is defined by not reading. `declared_param_overrides` can see a value
+  only because it compares committed BYTES against a DECLARATION the Researcher minted with no
+  rationale in the loop; a free-text repair promise has no such second artifact.
+  **What was done instead:** the bound is stated on the WORD in `repair_verify.py`'s docstring and in
+  CLAUDE.md — `verified` means "the repair's vocabulary appears in what it changed", never "the repair
+  did what it said" — and the row is PINNED in `tests/test_repair_verification.py::
+  test_verified_means_the_vocabulary_appears_and_never_that_the_repair_did_what_it_said`, together
+  with the `drop the arg` case that refutes patch (b), so a future direction-aware rung has a red test
+  to turn green rather than a paragraph to rediscover. **Nothing about this can move the loop**:
+  `REPAIR_INERT` is the only verdict `_evaluate` acts on and it is decided on BYTES before a claim is
+  read, so the whole residue is confined to a durable column and to prompt text.
+  *(The repair's OUTCOME was right — spending unclaimed ceiling instead of shrinking the experiment is
+  what `_time_budget_note` now asks for. It is the VERDICT that is wrong about it.)*
+
+- **[FIXED 2026-08-15] Two published measurements of ONE population disagreed inside a single merge,
+  and a retracted projection survived at a seventh site nobody enumerated.** Both are documentation,
+  both were re-derived rather than re-read. (1) `champion_caveats.py`, `CLAUDE.md` and
+  `docs/guide/tasks.md` all said "exactly ONE of 297 nodes" has code contradicting its declared
+  parameters, while `adapters/repo_developer.py::_time_budget_note` — merged in the SAME range —
+  named v8 nodes 3, 8 AND 9 from the `node_repaired` side. Re-derived by calling
+  `champion_metric_caveats`' own predicate on every folded node in all 46 logs: **four of 218 folded
+  nodes** at 2026-08-15 23:41 UTC (v8 nodes 3, 8, 10, 11), one caveated RUN. 297 was the
+  `node_created` COUNT (300 by then), not the folded population. The correction that matters is not
+  the digit: this population **moves both ways while a run is live** — node 9 carried an `n_epochs`
+  10 / 6 override at 23:34 and did not at 23:41, its second repair having deleted that assignment —
+  so a caveat derived live from folded state must QUOTE ITS INSTANT and must not be written as a
+  corpus statistic. (2) The 2026-08-15 retraction of the falsified 22,096 s projection covered the
+  five sites `docs/BACKLOG.md` enumerated plus `docs/guide/llm-and-agents.md`. **`CLAUDE.md`'s
+  `looplab/tools/` row was a seventh and still asserted it in the present tense** ("projects 22,096 s
+  into the same 22,000 s ceiling — a wrong diagnosis buying a fix inert against the real failure"),
+  in the file every coding agent reads first, about a node that PASSED in 19,915.75 s and became the
+  champion. Retracted there now, with the same account the other six carry (the margin came from
+  attempt 5 deleting the in-`train` `test_model()` call, not from the batch halving and not from the
+  epoch cut, which never landed), and `llm-and-agents.md`'s "still quoted at five other sites" — true
+  when written on its branch, false once it merged after the retraction — corrected with it.
+  **What this range got right, checked the same way and worth recording:** the four hand-resolved
+  conflicting files (`CLAUDE.md`, `docs/infographic/agent-architecture.html`, `docs/guide/
+  architecture.md`, `docs/guide/configuration.md`) were reconstructed mechanically against both
+  parents and the merge base — `git merge-file` on the blobs, token-level for CLAUDE.md's 22 KB table
+  row — and every one is the EXACT three-way union, with no text dropped, duplicated or misplaced;
+  the diagram still parses, holds 85 blocks / 48 edges with every edge endpoint resolving and no id
+  minted twice; `configuration.md` still has 203 settings rows with no duplicate name. The
+  reconstructed `tests/test_repair_verification.py` lost nothing either: every top-level symbol and
+  import of BOTH parents is present at HEAD.
+
 - **[FIXED 2026-08-15] Both roles were told the per-eval budget is an END-TO-END POOL the pipeline
   shares. It is a PER-STAGE ceiling, and believing otherwise is what killed v8 node 9 and shrank its
   experiment from 10 epochs to 6.** The number has been shared since F1h shipped

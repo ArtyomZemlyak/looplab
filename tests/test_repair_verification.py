@@ -22,7 +22,7 @@ from looplab.engine.orchestrator import Engine
 from looplab.engine.repair_verify import (INERT_REPAIR_LIMIT, PARAM_OVERRIDE_MIN_PARTS,
                                           REPAIR_INERT, REPAIR_UNMET,
                                           REPAIR_UNSTATED, REPAIR_VERDICTS, REPAIR_VERIFIED,
-                                          changed_region, claimed_tokens,
+                                          _assigned_numeric_paths, changed_region, claimed_tokens,
                                           declared_param_overrides, inert_streak, verify_repair)
 from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, TRIAGE_ACTIONS, coerce_triage_action
 from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
@@ -1075,6 +1075,133 @@ def test_a_computed_value_is_not_resolved_and_a_broken_file_is_not_evidence():
     # `True` is `isinstance(int)`; reporting it as agreeing with a declared 1.0 would be the record
     # asserting something nobody wrote.
     assert declared_param_overrides({"a.flag": 1.0}, {"t.py": "cfg.a.flag = True\n"}) == ()
+
+
+def test_verified_means_the_vocabulary_appears_and_never_that_the_repair_did_what_it_said():
+    """THE `verified` RESIDUE, pinned from the real row rather than described (2026-08-15).
+
+    `rubertlite-dr-unified-v8` node 9 attempt 2 promises "reduce n_epochs to ~6" and does the
+    opposite: it DELETES the `n_epochs = 6` its own previous attempt added, raises the stage timeout
+    instead, and leaves the manifest passing 10. It is stamped `verified`, and the occurrences that
+    met its claims are the DELETED line and an added COMMENT saying `n_epochs` is NOT overridden —
+    the verifier satisfied by a comment denying the action it certifies.
+
+    Both halves of the mechanism are asserted, because a reader who knows only one will reach for the
+    wrong fix (both were driven over the corpus and both are refused in the module docstring): a
+    claimed token is matched against the region as FLAT TEXT, so a `-` line counts — which is
+    CORRECT for `rubert-dr-0807` node 12's "drop the arg", the second case below — and `verified`
+    needs only ONE claim met, not all of them.
+
+    This is a RESIDUE PIN, not a property this repo wants. It asserts today's answer so the bound
+    stays visible and so a future direction-aware rung has a red test to turn green. If you are
+    changing this, the module docstring holds the measurement (48 of 75 `verified` rows rest at least
+    partly on a non-added-code occurrence) and the two patches that were tried and rejected.
+    """
+    # The real diff, reduced to the three lines that carry the verdict.
+    region = (
+        "vectorsearch/train.py\n"
+        "--- \n+++ \n@@ -30,11 +30,8 @@\n"
+        "     config.train.training.batch_size = 4096\n"
+        "-    config.train.training.n_epochs = 6\n"
+        "+    # n_epochs comes from the CLI (--train.training.n_epochs 10) and is NOT overridden "
+        "here,\n"
+        "+    # so the declared 10-epoch OneCycleLR schedule runs to completion.\n")
+    rationale = ("The OneCycleLR idea is sound (sibling hit 0.8776 with it); the train stage simply "
+                 "times out because 10 epochs at bs 8192/acc 2 needs ~5.4h vs the ~4h budget, so "
+                 "reduce n_epochs to ~6 (3.2h) so the declared epoch count matches the actual "
+                 "training end while keeping OneCycleLR and all other node-3 settings.")
+    v = verify_repair(rationale, changed={"looplab_stages.json", "vectorsearch/train.py"},
+                      code_changed=True, region=region)
+    assert v.verdict == REPAIR_VERIFIED and v.unmet == ()
+    assert "n_epochs" in v.claims, "precondition: the promise really is extracted as a claim"
+    # WHY, both halves. A deleted line and a comment are the only occurrences there are.
+    assert "n_epochs" not in "\n".join(
+        ln[1:].split("#", 1)[0] for ln in region.splitlines() if ln.startswith("+")), \
+        "precondition: no ADDED code line carries the token — only a comment and a deletion do"
+    # And ONE met claim is enough on its own — the other half of the mechanism. Strip every
+    # occurrence of `n_epochs` out of the region and the row is STILL `verified`, off the incidental
+    # `OneCycleLR` alone, with `unmet` empty because nothing is reported unless NOTHING matched.
+    only_other = region.replace("n_epochs", "n_steps")
+    assert "n_epochs" not in only_other, "precondition: the claimed token is really gone"
+    weaker = verify_repair(rationale, changed={"vectorsearch/train.py"}, code_changed=True,
+                           region=only_other)
+    assert weaker.verdict == REPAIR_VERIFIED and weaker.unmet == () and "n_epochs" in weaker.claims
+
+    # THE CASE THAT MAKES "a deleted line is not evidence" WRONG, so the residue cannot be closed
+    # that way: `rubert-dr-0807` node 12 attempt 2, correctly verified by a removal alone.
+    drop = ("train.py\n--- \n+++ \n@@ -10,4 +10,3 @@\n"
+            "     trainer = Trainer(\n"
+            "-        replace_sampler_ddp=False,\n"
+            "         accelerator='gpu',\n")
+    assert verify_repair("replace_sampler_ddp was removed from Trainer.__init__; drop the arg.",
+                         changed={"train.py"}, code_changed=True,
+                         region=drop).verdict == REPAIR_VERIFIED
+
+
+def test_a_helper_default_earlier_in_the_file_does_not_convict_the_agreeing_module_body():
+    """THE ORDERING DEFECT, driven in both directions (2026-08-15).
+
+    `_assigned_numeric_paths` keeps LAST WRITE WINS on a repeated path, and its docstring says that
+    means what the interpreter would do if both ran in order. `ast.walk` is BREADTH-FIRST, so it
+    yielded every module-level statement before anything nested in one and "last" meant DEEPEST —
+    the inverse rule, failing in the direction this rung is least allowed to fail in.
+
+    Case A is the cost: a node whose module body assigns exactly what it DECLARED is convicted
+    because a helper `def` earlier in the file carries a different default. That row is not a note
+    on an attempt, it is `params_overridden` on the run's best number
+    (`champion_caveats.py::champion_metric_caveats` calls the whole-node form off folded state), so
+    the false positive lands on the one claim the vocabulary exists to make carefully.
+
+    Case B is the same bug worn the other way and is why a `not in` pin would not have held it: the
+    identical one-line decoy, agreeing with the declaration and reachable by nobody, SUPPRESSED a
+    real divergence. Both are one `def` an adversarial candidate writes for free.
+
+    A decoy placed strictly AFTER the effective assignment still wins, and that is deliberate — it
+    is the dead-branch residual the module docstring states, and no static reader can do better.
+    What is fixed is the part that was not a residual but an ordering mistake.
+    """
+    declared = {"train.training.batch_size": 8192.0}
+    helper_default_first = (
+        "def _defaults(cfg):\n"
+        "    cfg.train.training.batch_size = 4096\n"
+        "\n"
+        "cfg = Config()\n"
+        "cfg.train.training.batch_size = 8192\n")
+    assert declared_param_overrides(declared, {"train.py": helper_default_first}) == (), \
+        "a nested helper default must not outrank the module body that agrees with the declaration"
+
+    decoy_first = (
+        "def _unused():\n"
+        "    cfg.train.training.batch_size = 8192\n"
+        "\n"
+        "cfg = Config()\n"
+        "cfg.train.training.batch_size = 4096\n")
+    rows = declared_param_overrides(declared, {"train.py": decoy_first})
+    assert [(o.code, o.line) for o in rows] == [(4096.0, 5)], \
+        "a nested decoy must not suppress the divergence the module body really carries"
+
+    # THE THIRD CONSEQUENCE, on the attribution rather than the verdict. `baseline_files` acquits
+    # only on an EQUAL prior value, so a wrong prior charges a repair with a literal no attempt ever
+    # made effective: here the module body says 4096 before AND after and the repair only deleted a
+    # dead helper carrying 1024, which the deepest-wins reading reported as this repair introducing
+    # the 4096.
+    baseline = ("def _legacy():\n"
+                "    cfg.train.training.batch_size = 1024\n"
+                "\n"
+                "cfg.train.training.batch_size = 4096\n")
+    after_delete = "cfg.train.training.batch_size = 4096\n"
+    assert declared_param_overrides(declared, {"t.py": after_delete},
+                                    baseline_files={"t.py": baseline}) == (), \
+        "deleting a dead helper is not this repair introducing the value the module body already had"
+
+    # The rule stated directly, so it is not only observable through the public wrapper: the value
+    # kept for a repeated path is the one with the LARGEST source position, never the deepest node.
+    assert _assigned_numeric_paths(helper_default_first)[("cfg", "train", "training",
+                                                         "batch_size")] == (8192.0, 5)
+    # And the shipped fixture is unmoved — the real champion's file assigns each path exactly once,
+    # which is why the corpus never showed this.
+    assert len(declared_param_overrides(_V8_NODE3_PARAMS,
+                                        {"vectorsearch/train.py": _V8_NODE3_TRAIN_PY})) == 2
 
 
 def test_this_rung_cannot_be_reached_or_evaded_by_anything_the_agent_WROTE_ABOUT_it():

@@ -87,14 +87,28 @@ selection over all 46 logs with `metric_salvage="select"` moves ZERO champions, 
 node's number beats its run's champion (0.727991). Two runs carry any `reward_hack` row and one
 (`task-g7`, node 1) carries a HARD signal; neither run's champion is the flagged node.
 
-**`params_overridden` IS NOT EMPTY, and it lands on the live run's champion.** Re-measured
-2026-08-15 over the same 46 logs: exactly ONE of the 297 nodes on this box has code contradicting
-its declared parameters — `rubertlite-dr-unified-v8` node 3, `batch_size` declared 8192 / code 4096
-and `gradient_accumulation_steps` declared 2 / code 4 — and that node is the run's champion at
-0.762048, +0.0236 clear of the field. So this member is a fence around a state that is not merely
-reachable but OCCUPIED, by the best result this box has produced. (The denominator is small and
-should be quoted: 25 of those 297 nodes declare a dotted numeric parameter at all, all of them on the
-four `rubertlite-dr-unified-v{2,6,7,8}` runs; the toy and benchmark spaces declare bare names, which
+**`params_overridden` IS NOT EMPTY, and it lands on the live run's champion.** RE-DERIVED
+2026-08-15 23:41 UTC over the same 46 logs by calling this module's own predicate on every folded
+node: **FOUR of the 218 folded nodes** have code contradicting their declared parameters, all four on
+`rubertlite-dr-unified-v8` — node 3 (`batch_size` declared 8192 / code 4096, `gradient_accumulation_
+steps` 2 / 4), node 8 (`batch_size` 8192 / 4096 AND `n_epochs` 15 / 8), and nodes 10 and 11 (the same
+batch/accum pair, at 2048 / 8 and 4096 / 4). Node 3 is the run's champion at 0.762048, +0.0236 clear
+of the field, so exactly ONE of the 46 RUNS is caveated — which is the number this paragraph is about,
+the member being per-CHAMPION.
+
+**The earlier reading of "exactly ONE of 297 nodes" was wrong and is retracted here, and how it was
+wrong is worth more than the number.** 297 was the `node_created` COUNT (300 by 23:41) and not the
+folded population; and it missed nodes 8 and 9, which `adapters/repo_developer.py::_time_budget_note`
+had ALREADY named from the `node_repaired` side in the same change — two derivations of one
+population, published disagreeing, in one merge. **QUOTE THE INSTANT WITH THE NUMBER here, because
+this population MOVES BOTH WAYS while v8 runs**: node 9 carried an `n_epochs` 10 / 6 override at
+23:34 and does not at 23:41, its second repair having deleted that very assignment. A caveat derived
+live from folded state is not a corpus statistic and must not be written as one.
+
+So the member is a fence around a state that is not merely reachable but OCCUPIED, repeatedly, by the
+run that produced the best result on this box. (The denominator is small and should be quoted too: 28
+of those 218 nodes declare a dotted numeric parameter at all, all on the four
+`rubertlite-dr-unified-v{2,6,7,8}` runs; the toy and benchmark spaces declare bare names, which
 `PARAM_OVERRIDE_MIN_PARTS` excludes by design.) TWO shapes it deliberately does not see, both
 measured: a declaration contradicted by the node's YAML CONFIG rather than by its code (five nodes,
 re-derived under this rung's OWN contiguous-suffix rule against every YAML in each working set —

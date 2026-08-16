@@ -498,9 +498,11 @@ Six GPU-hours went in the bin. That epochs cut **never landed**: `repair_verify`
 
 **The projection that stood here — 22,096 s into the same 22,000 s ceiling, extrapolated live from
 `1928/10590 [57:46]` at 1.798 s/step — has since been FALSIFIED by the run, and it is corrected here
-rather than left standing** (the same figure is still quoted at five other sites, which belong to the
-change that measured it: `docs/BACKLOG.md`, `docs/guide/configuration.md`'s `repair_log_tools` row,
-the process diagram's `e_ir` block, `core/config.py` and `engine/train_monitor.py`). The retry took
+rather than left standing**. Five sibling sites carried the same figure and were retracted in the
+same session (`docs/BACKLOG.md`, `docs/guide/configuration.md`'s `repair_log_tools` row, the process
+diagram's `e_ir` block, `core/config.py` and `engine/train_monitor.py`); a SEVENTH, `CLAUDE.md`'s
+`looplab/tools/` row, was outside that enumeration and was retracted on 2026-08-15 once a review
+found it still asserting the projection as current. The retry took
 **19,915.75 s** and PASSED. What saved it was not the epoch cut but a second edit in the same repair,
 which deleted the in-`train` `test_model()` call on the note that the full-index retrieval "is run
 independently by the protected `score` stage" — and `score` then ran 3,130.3 s of its own. The point
