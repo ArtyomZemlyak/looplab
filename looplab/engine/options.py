@@ -246,6 +246,11 @@ class EngineOptions:
     novelty_semantic_threshold: float = 0.92
     digest_char_cap: int = 0             # M5: digest prompt budget; 0 = auto-scale with run size
     research_verify: bool = True         # D8: verify memo claims against cited evidence
+    # D8 push half: the memo summary's prompt line carries the verifier's own claim tally. Matches
+    # the `Settings` default (so NOT a divergence-table row) for the reason `redact_output` is not
+    # one either: every row there exists because a bare `Engine(...)` must not gain unasked work or
+    # authority, and this reads a folded payload — no call, no money, no kill, no selection.
+    memo_verdict_cue: bool = True
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     # ADR-17: capture this run's bounded/redacted LLM I/O into its spans.jsonl. Bound to the run's OWN
     # Tracer (core/tracing.py) rather than the process-global flag, so two Engines in one process keep

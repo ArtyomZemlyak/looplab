@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 179
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 180
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -98,7 +98,17 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # attempt 6 that re-ran the same 10,590 steps into the same ceiling. It buys extra paid round trips,
 # once per FAILED ATTEMPT rather than on a timer, which is the cost half of the same question every
 # watchdog row here answers.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "352c95e596f0c5eea5f3e96b3c1e9b82556e55d497a43f658d515bc5841d3eb0"
+# (180 since `memo_verdict_cue`: does the deep-research takeaway pushed into every Researcher /
+# crash-triage / repair-critic prompt carry the memo's own verifier tally? Curated beside
+# `research_verify` because it is that verifier's DELIVERY half — the verifier only ever checks a
+# memo's CLAIMS, so the SUMMARY this line pushes is the one field of the memo nothing checks.
+# Measured on `rubertlite-dr-unified-v8`: 293 real prompts carried that line and not one of the
+# 293 whole prompts contains the word `Verifier` or `unsupported`, while the memo behind 52 of
+# them records `unsupported: 8` of 8 and opens "climb from the known ~0.88 plateau" — a rounded
+# number from a run `engine/eval_contract.py` calls a different evaluation contract. It buys no
+# paid call and moves nothing; it is a row because a prompt is a contract and OFF must restore
+# the historical line byte for byte.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ef3ad6c1e3942a2ef97d8e51b71cf1b35d76aac1ce97b5c8ffe9ebcf652bff32"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

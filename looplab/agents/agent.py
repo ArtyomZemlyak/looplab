@@ -301,7 +301,9 @@ class ToolUsingResearcher:
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
                                                      hyp_order=getattr(self, "_hyp_order", None),
-                                                     board_cards=self._visible_board_cards)
+                                                     board_cards=self._visible_board_cards,
+                                                     memo_verdicts=bool(getattr(
+                                                         self, "_memo_verdict_cue", False)))
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},

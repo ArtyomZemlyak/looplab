@@ -59,7 +59,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-15  redact_output False -> True  (intentional SECURITY-default change; field set
 #               unchanged, but the complete settings envelope and therefore old receipts genuinely
 #               changed). See the second history block below.
-_EXPECTED_DIGEST = "sha256:fbbfc189001e2a66c099f76e3e8ba51d7b9c045a275f2bf6139f241732f2dce8"
+_EXPECTED_DIGEST = "sha256:044ee80b84a6b6f0102a074c227bc33b1ad8677e1e70434ddf5f070df22c9abc"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -261,7 +261,27 @@ _EXPECTED_DIGEST = "sha256:fbbfc189001e2a66c099f76e3e8ba51d7b9c045a275f2bf6139f2
 #               a paid stop decision is made on, and an envelope that cannot state that is not the
 #               envelope a later receipt would be compared against. Old receipts SHOULD stop
 #               verifying; the one on this box was already dead on four independent axes.
-_EXPECTED_FIELD_COUNT = 209
+#   2026-08-16  + memo_verdict_cue  (does the deep-research takeaway PUSHED into every
+#               Researcher / crash-triage / repair-critic prompt carry the memo's own verifier
+#               tally). The 'field set changed too' branch: an AST scan of `Settings` against
+#               `d7d4b436` reports exactly this one field ADDED and none removed, so
+#               `_EXPECTED_FIELD_COUNT` goes 209 -> 210 and both pins are re-set.
+#               INERT for a calibration replicate, and inert twice over: the profile's toy
+#               workload records no `research_completed` row, so `state.research` is empty and
+#               `_state_brief` emits no takeaway line at all — the cue has nothing to qualify —
+#               and the replicate's roles are `cli/__init__.py::_make_calibration_roles`, whose
+#               researcher is the GPU probe rather than an `LLMResearcher`. The guard is
+#               deliberately not clever enough to exempt an inert knob, and re-pinning is right
+#               rather than merely necessary for the reason `repair_log_tools` above records:
+#               this field decides what a paid role is TOLD, and an envelope that cannot state
+#               that is not the envelope a later receipt would be compared against.
+#               Old receipts SHOULD stop verifying, and the revocation costs nothing that was
+#               not already spent: the one receipt on this box
+#               (`.looplab/speculation-quality.receipt.json`) carries
+#               `calibration_profile_digest: sha256:e3fd5e10…`, which is neither the digest
+#               being replaced nor the new one — it was already dead before this change, as the
+#               two entries above it also record.
+_EXPECTED_FIELD_COUNT = 210
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

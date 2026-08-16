@@ -650,6 +650,79 @@ def memo_verification_view(memo) -> dict:
     return {"status": "present", "method": method[:64], "counts": counts, "rows": rows}
 
 
+#: The ORDER and the WORDING every surface tallies a verification block in. It is one table because
+#: the memo now reaches a role through TWO channels — the `read_research_memo` tool (PULL) and the
+#: `roles.py::_state_brief` résumé (PUSH) — and a role that sees both must not have to reconcile two
+#: vocabularies for the same block. `unsupported` leads because it is the only bucket a reader must
+#: act on; zero-count buckets are dropped so the tally carries information wherever it appears.
+_VERDICT_TALLY_LABELS: tuple[tuple[str, str], ...] = (
+    ("unsupported", "UNSUPPORTED"), ("supported", "supported"),
+    ("unclear", "unclear"), ("cited", "cited-but-unjudged"),
+    (VERDICT_UNVERIFIED, "unverified"),
+)
+
+
+def verdict_tally(counts) -> str:
+    """`"6 UNSUPPORTED, 2 supported"` from a `memo_verification_view` counts mapping. `""` when the
+    block reports nothing at all — a caller says what an empty tally means in its own words, because
+    "nothing to report" and "no claims" are different sentences on the two surfaces that print it.
+
+    Pure and total; a non-mapping reads as empty rather than raising, since both callers are on
+    never-raise paths (a tool answer and a prompt brief)."""
+    if not isinstance(counts, dict):
+        return ""
+    return ", ".join(f"{counts.get(name, 0)} {label}" for name, label in _VERDICT_TALLY_LABELS
+                     if counts.get(name, 0))
+
+
+def memo_verdict_cue(memo) -> str:
+    """ONE bracketed clause qualifying a memo SUMMARY that is being pushed into a prompt. `""` never
+    happens for a dict — absence and unreadability get sentences of their own, because this whole
+    defect family is a missing check being read as a passing one.
+
+    WHY THE SUMMARY NEEDS ITS OWN SENTENCE, and it is the sharpest fact here: `trust/memo_verify.py::
+    verify_memo` verifies `memo["claims"]` and returns `None` when there are none. **It never looks at
+    `memo["summary"]` at any commit.** So the field `roles.py::_state_brief` pushes into every
+    Researcher, crash-triage and repair-critic prompt is the one field of the memo that no verifier
+    has ever checked — the verdict is not merely elsewhere in the payload, it does not exist for this
+    text. That is why the clause states the CLAIM tally *and* says the summary is outside it, rather
+    than implying the tally covers what follows it.
+
+    WHAT IT COST, on the record. `rubertlite-dr-unified-v8`'s `at_node: 0` memo records
+    `total_verdicts: 8, unsupported: 8` — verdict[0] refusing a `recall@100=0.8776` claim with
+    `cited experiments do not exist: [9]`, a node id belonging to `rubert-dr-0807`, a run
+    `engine/eval_contract.py` reports as a DIFFERENT evaluation contract (different eval command,
+    different declared paths). Its summary opens *"…then climb from the known ~0.88 plateau"*, and
+    measured over that run's own `spans.jsonl` the pushed line reached **293 real prompts** (propose
+    269, triage 20, repair_critic 4) carrying that rounded foreign plateau in 52 of them, with the
+    word `unsupported` and the word `Verifier` appearing NOWHERE in any of the 293 whole prompts.
+    Note what that measurement also REFUTES: the literal `0.8776` is in 11 of the run's 15 full memo
+    summaries but in **0** of the 300-char windows `_state_brief` actually pushes, so the pushed
+    carrier was the rounded `~0.88`, not the number the residue note named.
+
+    IT ANNOTATES AND WITHHOLDS NOTHING, the same line `tools/run_tools.py::_verifier_lead` holds one
+    channel over. Suppressing an unsupported memo's summary was weighed and refused on the corpus:
+    26 of the 100 pushable memos in `runs/` have NO supported verdict at all, and 45 of the 45
+    verdicts the DETERMINISTIC pass emits are `unsupported` about the CITATION — a fact about the
+    footnote, not the claim. Dropping a real finding because its footnote is bad is worse than the
+    defect. It also states no opinion about which number is foreign: a summary is prose with no
+    per-number provenance, and deciding that from the model's own text is what docs/36 forbids.
+
+    Pure, total, and it decides nothing: a string built from a folded `RunState` payload."""
+    view = memo_verification_view(memo)
+    status = view.get("status")
+    if status == "absent":
+        return (" [VERIFIER: NOT RUN on this memo's claims — absence of a verdict is not a pass, "
+                "and nothing verifies the summary itself]")
+    if status == "malformed":
+        return (" [VERIFIER: result RECORDED BUT UNREADABLE for this memo — treat its claims as "
+                "unchecked; nothing verifies the summary itself]")
+    counts = view.get("counts") or {}
+    tally = verdict_tally(counts) or "nothing to report"
+    return (f" [VERIFIER on this memo's {counts.get('claims', 0)} claim(s): {tally}; "
+            "nothing verifies the summary itself]")
+
+
 def sanitize_research_memo_payload(payload, *, add_receipts: bool = True) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}

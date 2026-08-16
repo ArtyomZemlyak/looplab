@@ -75,7 +75,13 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   consecutive time. Verified as the paragraph prescribes rather than by bumping the number:
   //   the catalogue was 179 keys and removing exactly `repair_log_tools` gave back 178, so this
   //   is one real addition with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 179)
+  //   179 -> 180 (2026-08-16): `memo_verdict_cue` — whether the deep-research takeaway PUSHED
+  //   into every Researcher / crash-triage / repair-critic prompt carries the memo's own
+  //   verifier tally. TENTH occurrence, and the Python guard caught it first for the sixth
+  //   consecutive time. Verified as the paragraph prescribes rather than by bumping the
+  //   number: the catalogue was 180 keys and removing exactly `memo_verdict_cue` gave back
+  //   179, so this is one real addition with nothing renamed away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 180)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)

@@ -14,6 +14,7 @@ import json
 import random
 from typing import Optional, Protocol
 
+from looplab.core.advisory_payloads import memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
                                  developer_artifact_footprint, hypothesis_statement_digest,
                                  normalize_researcher_footprint)
@@ -327,7 +328,9 @@ FACADE_STAGE_ATTRS: tuple[str, ...] = ("researcher", "developer", "stage_clients
 # the agentic path and the plain path would ask the model different questions and no test would care.
 #
 # A strict subset by design. `_digest_cap` is a numeric cap consumed separately, `_hyp_order` orders
-# the open-hypothesis board inside `_state_brief`, and `_novelty_stance` / `_steering_context` /
+# the open-hypothesis board inside `_state_brief`, `_memo_verdict_cue` is a BOOLEAN threaded into
+# `_state_brief` the same way (config, not prose — the `_digest_cap` shape exactly), and
+# `_novelty_stance` / `_steering_context` /
 # `_cross_run_advisory_receipt` are read structurally rather than concatenated as prose.
 #
 # The two BUDGET cues are LAST on purpose, and in this order. `_complexity_hint` already carries the
@@ -345,7 +348,7 @@ RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt",
-    "_gpu_budget_hint", "_time_budget_hint")
+    "_gpu_budget_hint", "_time_budget_hint", "_memo_verdict_cue")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -888,7 +891,7 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
 
 def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  hyp_order: Optional[list[str]] = None, board_cards: Optional[list] = None,
-                 *, for_proposal: bool = True) -> str:
+                 *, for_proposal: bool = True, memo_verdicts: bool = False) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
     if best is not None:
@@ -934,7 +937,26 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # reasoning (available to the agentic Researcher). Best-effort; skipped when there's no memo.
     research = getattr(state, "research", None) or []
     if research and isinstance(research[-1], dict) and research[-1].get("summary"):
-        lines.append("Latest deep-research takeaway: "
+        # `memo_verdicts` (Settings.memo_verdict_cue) splices the memo's own verifier result at the
+        # SAME position and changes nothing else, so OFF reproduces the historical line byte for
+        # byte — the `developer_probe`/`train_monitor_tools` pattern, for the same reason: a prompt
+        # is a contract and a resumed run must be able to keep the one it was written for.
+        #
+        # WHY THIS LINE NEEDED IT. `trust/memo_verify.py::verify_memo` verifies `memo["claims"]` and
+        # has never, at any commit, looked at `memo["summary"]` — so the one field this line pushes
+        # is the one field of the memo nothing checks, and until 2026-08-16 the verdicts could not be
+        # PULLED either (`read_research_memo` keyed on a `verification["summary"]` no writer emits).
+        # Measured over `rubertlite-dr-unified-v8`'s own `spans.jsonl`: this line reached 293 real
+        # prompts in three phases (propose 269, triage 20, repair_critic 4) and NONE of those 293
+        # whole prompts contains the word `Verifier` or the word `unsupported`, while its `at_node: 0`
+        # memo — the one whose summary says "climb from the known ~0.88 plateau", a rounded
+        # `rubert-dr-0807` number on a DIFFERENT `engine/eval_contract.py` contract — records
+        # `total_verdicts: 8, unsupported: 8`. The cue is engine-derived (`trust/memo_verify.py`
+        # wrote the verdicts before the memo was ever appended) and states a fact about the CHECK, so
+        # it widens what the role SEES and nothing it trusts: no metric, champion, selectability or
+        # violation can move, and no model's own text decides its own verdict (docs/36).
+        lines.append("Latest deep-research takeaway"
+                     + (memo_verdict_cue(research[-1]) if memo_verdicts else "") + ": "
                      + " ".join(str(research[-1]["summary"]).split())[:300]
                      # channel-neutral: a plain researcher has no tools, so state that the depth is
                      # recorded rather than commanding a `read_research_memo` call it can't make.
@@ -1015,7 +1037,9 @@ class LLMResearcher:
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
                                                      hyp_order=getattr(self, "_hyp_order", None),
-                                                     board_cards=visible_cards)
+                                                     board_cards=visible_cards,
+                                                     memo_verdicts=bool(getattr(
+                                                         self, "_memo_verdict_cue", False)))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "
