@@ -1118,12 +1118,14 @@ def test_verified_means_the_vocabulary_appears_and_never_that_the_repair_did_wha
     assert "n_epochs" not in "\n".join(
         ln[1:].split("#", 1)[0] for ln in region.splitlines() if ln.startswith("+")), \
         "precondition: no ADDED code line carries the token — only a comment and a deletion do"
-    # And one met claim is enough on its own: drop `n_epochs` from the region entirely and the row
-    # is still `verified` off `OneCycleLR` alone.
-    only_other = region.replace("config.train.training.n_epochs = 6", "config.train.foo = 6") \
-                       .replace("--train.training.n_epochs 10", "OneCycleLR")
-    assert verify_repair(rationale, changed={"vectorsearch/train.py"}, code_changed=True,
-                         region=only_other).verdict == REPAIR_VERIFIED
+    # And ONE met claim is enough on its own — the other half of the mechanism. Strip every
+    # occurrence of `n_epochs` out of the region and the row is STILL `verified`, off the incidental
+    # `OneCycleLR` alone, with `unmet` empty because nothing is reported unless NOTHING matched.
+    only_other = region.replace("n_epochs", "n_steps")
+    assert "n_epochs" not in only_other, "precondition: the claimed token is really gone"
+    weaker = verify_repair(rationale, changed={"vectorsearch/train.py"}, code_changed=True,
+                           region=only_other)
+    assert weaker.verdict == REPAIR_VERIFIED and weaker.unmet == () and "n_epochs" in weaker.claims
 
     # THE CASE THAT MAKES "a deleted line is not evidence" WRONG, so the residue cannot be closed
     # that way: `rubert-dr-0807` node 12 attempt 2, correctly verified by a removal alone.
