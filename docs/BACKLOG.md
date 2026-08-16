@@ -1985,6 +1985,83 @@ would have caught this on 2026-08-13 at 13:57 and would catch the next merge tha
 §0.3's `trust/` row is a *different* defect in the same table (the row is unique, it is just wrong
 about redaction) and a uniqueness check does not see it.
 
+### §0.6 A run climbed toward a number from an evaluation it cannot be measured on (2026-08-16)
+
+🟡 **What it was.** `rubertlite-dr-unified-v8` scores `python -m vectorsearch.test` over
+`/home/jovyan/data/vectorizer-unified` against the v2 local data root. `rubert-dr-0807` runs a
+different harness entirely — `python looplab_eval.py --save_path models/rubertlite_run --gpus 1` over
+`/home/jovyan/data/vectorizer/dense-retrieval`. Two evaluations, two artifacts. At `at_node: 0`,
+`trigger: "run_start"`, v8's Researcher wrote into `research_completed.data.memo.findings[1]`:
+
+> The strongest verified anchor in the portfolio is rubert-dr-0807 #9: recall@100=0.8776
+
+— and into `.summary` ("the prior sibling landscape is decisive"), from where the engine re-emitted it
+as a `hint` ("already proven to take the same backbone from ~0.74 to 0.8776 in sibling rubert-dr-0807
+node 9"), which reached the builder's prompt and node 9's repair rationale ("the OneCycleLR idea is
+sound (sibling hit 0.8776 with it)"). v8's own champion is 0.762048. **The memo's own verifier already
+said the citation was bad** — `verification.verdicts[0]` reads `{"verdict": "unsupported", "note":
+"cited experiments do not exist: [9]"}`, because node 9 exists in the sibling and not in v8 — and the
+number propagated regardless, with `evidence_receipt.complete: true`.
+
+**THE MEASUREMENT that decided the fix.** Two counts, and they point at different places.
+
+1. **Where the number actually travelled.** Over v8's `spans.jsonl`, tool calls whose span carries
+   `0.8776`: `read_run_experiment` 50, `read_research_memo` 36, `read_run_code` 26, `list_all_runs` 20,
+   `read_sibling_experiment` 12 — against `cross_run_search` **2**. The **run-reading tools** are the
+   primary carrier; the cross-run memory store is secondary. `AllRunsTools`' own docstring said why:
+   it "deliberately does NOT filter by task: it just gives the agent the capability, and the agent
+   decides when a foreign run is relevant" — i.e. comparability was delegated to the model's judgement,
+   which is exactly what `docs/36` says a record-side input may not be.
+2. **What the rows carry.** Over the live store `/home/jovyan/data/looplab-memory`, 132 rows (23
+   lessons, 63 research claims, 4 capsules, 21 cases, 21 meta-notes): **132/132 carry `run_id` and
+   `task_id`; 0/132 carry a metric name, a dataset path, an eval command or a contract identity.**
+   `research_claims.metric` exists on 42 rows and is the empty string on all 42 — the number lives only
+   in `statement` prose. And 46 run directories carry a `task.snapshot.json`, from which the contract
+   *is* derivable: 22 distinct contracts, 5 of them holding more than one run.
+
+**Delivered.** `looplab/engine/eval_contract.py` (the contract identity: metric reader + eval command +
+declared paths, tri-state `comparable()` where `None` ≠ `False`) wired into `ForeignRunReader` so
+`list_sibling_runs` / `list_all_runs` / `read_*_experiment` / `read_*_code` /
+`find_analogous_across_runs` carry a deterministic receipt beside a foreign run's number. Fail-open;
+withholds nothing; reaches no metric, champion, selectability or violation. Replayed over the corpus:
+of 2,070 rows a portfolio listing would show, 1,080 gain the receipt, 948 are UNKNOWN and untouched,
+42 are same-contract and untouched. **v8 keeps v2/v6/v7 unflagged and flags 0804/0805/0807 and
+`rubertlite-dense-retrieval`.** Nothing in `fold` changes — the code is in `looplab/tools/`, which
+`events/replay.py` does not import, and `tests/test_eval_contract.py` folds the foreign log before and
+after every provider call and requires byte equality. Five mutations (comparable-always-true,
+fail-closed-on-unknown, key-on-metric-name-only, and each of the two wiring sites removed) each kill at
+least one test.
+
+**ALTERNATIVES REJECTED, with the evidence.**
+
+| Option | Why not |
+|---|---|
+| **(a) Carry a contract on the cross-run ROW and partition retrieval on it**, mirroring `crossRunRank.js` | Right long-term; **inert now**. 0 of 132 existing rows carry any contract field, so a new one is populated only by future writes and a fail-CLOSED filter would blank the entire live corpus. Deriving it at read time from `run_id` is unsound: `run_id` collides (`run`, `smoke`, `demo` all appear across runs — which is why `run_uid` exists, and it is absent on 7/23 lessons and 24/63 claims), and the retrievers are constructed with `memory_dir` alone and have no run root to resolve against. **Still open — see below.** |
+| **(b) Say it in the PROMPT and change no retrieval** | The advisory rung is **measured spent** in this repo: `runs/rubertlite-dr-unified-v6` node 4's `edit_file` note fired verbatim, is in that node's `spans.jsonl`, and the node still scored a human's checkpoint and recorded 0.225 (`CLAUDE.md`, `runtime/read_fence.py`). What shipped is deliberately *not* this: a fact stamped on the evidence at the point of consumption, the same shape as the existing `· PARTIAL SOURCE` receipt on those very rows — but **it has not been measured to change Researcher behaviour, and is not claimed to.** |
+| **(c) Refuse to surface the foreign metric VALUE, keep the qualitative lesson** | The operator's complaint is about the number, so this was weighed hardest, and it **splits**. On the cross-run store it is **provably not implementable**: `rubertlite-dr-unified-v7` (a genuine `repo_task` run on v8's own contract) published *"…0.8173 at temp 0.01 and 0.8651 at temp 0.05, both below the 0.8776 symmetric-InfoNCE baseline"* — one sentence, three floats, two provenances, and separating them needs semantic judgement, which is the thing that may not decide comparability. On the run-reading tools it *is* implementable but not in the time available: the value would have to come out of text `RunTools` formats at **eight** sites, that text also carries the params (0807 node 9's row holds `loss_temperature 0.05`, `lr 0.001`, `pct_start 0.2` beside its metric), and `RunTools` is also the reader for a run's OWN nodes, where withholding is a plain bug. **Still open — see below.** |
+| **(d) State the residue, build nothing** | Rejected only because the contract primitive is cheap, provable, and is the thing (a) and (c) both need before they can exist. The residue is stated anyway, below. |
+
+⬜ **Still open, in priority order.**
+1. **Withhold the value at the tool surface** (option (c), the half that is implementable): thread a
+   per-read "foreign contract" flag through `RunTools`' eight metric-emission sites so a foreign run's
+   objective value is replaced by a named refusal while its params, code and rationale survive intact.
+   This is the change that would have stopped the incident rather than annotating it. Effort M — the
+   care is in never firing on a run's own nodes.
+2. **Stamp the contract on cross-run rows at WRITE time** (option (a)'s write half) so the retrieval
+   partition becomes possible on rows written from here on. Effort S. It cannot help any existing row
+   and must not be shipped with a fail-closed reader.
+3. **The laundered-prose residue is unfixable by any row-level rule** and should stay stated rather
+   than patched. 12 of the 19 `repo_task` research claims that reach a `repo_task` run carry a
+   foreign-contract number inside native prose. The place to intervene is the *writer* — a run should
+   not publish another evaluation's number as its own claim — not the reader.
+4. **`proposal_cues._scoped` and `LessonScope.allows` disagree about the same store**, and the looser
+   one is the prompt path: bound `CrossRunTools` admits **0** foreign-task lessons for v8, while the
+   Researcher's advisory pack admits **3** lessons and **2** capsules from `rubert_dr_0807` at
+   fingerprint similarity **0.353** against a 0.34 threshold. Two readers of one `lessons.jsonl` with
+   two answers is the defect doc 25 TO-07 already fixed once for `CrossRunTools` vs `MemoryTools`.
+   Effort S to state, M to reconcile — and reconciling downward hides rows, so it needs its own
+   measurement first.
+
 ---
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI

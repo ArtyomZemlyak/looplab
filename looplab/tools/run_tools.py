@@ -675,9 +675,84 @@ class ForeignRunReader:
         self.max_chars = max_chars
         self._runs = RunStateCache(self.run_root)
         self._reader = RunTools(max_chars=max_chars)
+        # run_id -> EvalContract|None. `task.snapshot.json` is written once at setup and never
+        # rewritten, so one read per run per provider is the whole cost. `None` is a CACHED answer
+        # ("unknown"), not a cache miss — re-reading a missing snapshot on every listing row would
+        # pay the miss 46 times per `list_all_runs` on this box.
+        self._contracts: dict[str, object] = {}
+        self._self_contract_cached: tuple = ()
 
     def _state(self, run_id: Optional[str]) -> Optional[RunState]:
         return self._runs.state(run_id)
+
+    # --- evaluation-contract receipt -----------------------------------------
+    #
+    # WHY THIS SITS IN THE SHARED PLUMBING and not in one provider: all three foreign-run readers
+    # emit another run's METRIC, and the number that reached `rubertlite-dr-unified-v8`'s Researcher
+    # came through two of them. Measured over v8's `spans.jsonl`, the tool calls whose span carries
+    # `0.8776` are `read_run_experiment` 50, `read_research_memo` 36, `read_run_code` 26,
+    # `list_all_runs` 20, `read_sibling_experiment` 12 — against `cross_run_search` 2. The cross-run
+    # MEMORY store is a secondary carrier here; these tools are the primary one.
+    #
+    # WHAT IT DOES AND DOES NOT DO. It appends a deterministic sentence beside a foreign run's number
+    # saying that run measured it with a different harness. It does NOT withhold the number, does not
+    # rank, does not re-label anything, and touches no `RunState`: every caller below is a tool
+    # OUTPUT STRING, so nothing here can reach a metric, a champion, a selectability decision or a
+    # violation (docs/36) and a replay is unaffected by construction.
+    #
+    # WHY NOT WITHHOLD, which was the stronger option and was rejected on measurement rather than on
+    # taste. The value would have to come out of text `RunTools` formats at eight separate sites, and
+    # that text also carries the PARAMS — `rubert-dr-0807` node 9's row holds `loss_temperature 0.05`,
+    # `lr 0.001` and `pct_start 0.2` beside its metric — so no rule over the rendered string can drop
+    # the one without the others. `RunTools` is also the reader for a run's OWN nodes, where
+    # withholding would be a straightforward bug. Threading a per-read flag through all eight is the
+    # right shape and is the backlog entry; it is not a change to make in the same hour a run launches.
+    # COST, measured 2026-08-16 on the real 59-directory `runs/` corpus (geesefs mount): one full
+    # pass of `contract_for_run_dir` over every directory is 675 ms, of which the 25 MISSING snapshots
+    # are 382 ms (~15 ms each) — a missing-file open on this mount is the expensive case, which is why
+    # `None` is CACHED as an answer rather than retried per row. Against the tool that pays it,
+    # `list_all_runs` costs ~2,500 ms warm on that corpus (dominated by one fold per run) and this
+    # adds **+23 ms**, i.e. 0.9 %. If a future caller pays it somewhere a fold is not already
+    # happening, re-measure before assuming it is free.
+    def _contract_for(self, run_id: str):
+        from looplab.engine.eval_contract import contract_for_run_dir
+        key = str(run_id)
+        if key not in self._contracts:
+            run_dir = self._runs.safe_dir(key)
+            self._contracts[key] = (contract_for_run_dir(run_dir)
+                                    if run_dir is not None else None)
+        return self._contracts[key]
+
+    def _self_contract(self):
+        """This provider's OWN run's contract, or `None` when it is not bound to one.
+
+        `MachineRunsTools` never binds a self run (its `bind_state` is a documented no-op for the
+        operator's portfolio assistant), so it gets `None` here and every notice below stays empty —
+        the operator's own cross-task reads are unchanged, byte for byte. That is deliberate: this
+        boundary is about what a RUN treats as its target, not about what a human may look at.
+        """
+        run_id = str(getattr(self, "self_run_id", "") or "")
+        if self._self_contract_cached[:1] != (run_id,):
+            self._self_contract_cached = (run_id, self._contract_for(run_id) if run_id else None)
+        return self._self_contract_cached[1]
+
+    def _contract_notice(self, run_id: str) -> str:
+        """The full sentence, for a per-read receipt. Empty unless provably a different contract."""
+        from looplab.engine.eval_contract import contract_notice
+        try:
+            return contract_notice(self._self_contract(), self._contract_for(run_id),
+                                   other_run_id=str(run_id))
+        except Exception:  # noqa: BLE001 - never-raise contract; an unreadable contract is UNKNOWN
+            return ""
+
+    def _contract_suffix(self, run_id: str) -> str:
+        """The listing-row form, beside `_partial_suffix` — the same shape for the same reason.
+
+        Short on purpose: a listing prints one row per run and the full sentence would swamp it. The
+        row says THAT the boundary exists; `read_*_experiment` on that run states which facet differs.
+        """
+        return " · DIFFERENT EVAL CONTRACT (not this run's scale)" if self._contract_notice(
+            run_id) else ""
 
     def _scope_denial(self, run_id: str, st: RunState) -> str:
         """Non-empty = refuse this read, with the reason. Default: no scope filter at all.
@@ -710,7 +785,12 @@ class ForeignRunReader:
             return denial
         self._reader.bind_state(st, None)
         note = self._runs.source_note(run_id)
-        return (f"{note}\n" if note else "") + prefix + self._reader.execute(tool, args)
+        # The contract receipt rides BESIDE the source receipt, at the head, for the same reason that
+        # one does: a number read from a foreign run looks authoritative on its own, and by the time
+        # the reader reaches the metric line the qualification has to already have been said.
+        contract = self._contract_notice(str(run_id))
+        head = "\n".join(part for part in (note, contract) if part)
+        return (f"{head}\n" if head else "") + prefix + self._reader.execute(tool, args)
 
 
 class SiblingRunTools(ForeignRunReader):
@@ -826,7 +906,7 @@ class SiblingRunTools(ForeignRunReader):
             lines.append(f"{rid}: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
-                         + self._partial_suffix(rid))
+                         + self._partial_suffix(rid) + self._contract_suffix(rid))
         head = f"{len(lines)} sibling run(s) of task {self.task_id or '?'}:"
         return head + "\n" + "\n".join(lines) if lines else "(no sibling runs of this task)"
 
@@ -865,6 +945,10 @@ class SiblingRunTools(ForeignRunReader):
         return "nearest across sibling runs (by param-distance):\n" + "\n".join(
             f"dist={d:.3f}  run {rid} "
             f"{self._reader._line(n, state=views[rid][0], axes_by_node=views[rid][1])}"
+            # `find_analogous_across_runs` ranks by PARAM distance and prints each row's
+            # metric, so a nearby config from another harness reads as "how a nearby config
+            # performed" on this run's scale. Same receipt, same rule.
+            f"{self._contract_suffix(rid)}"
             for d, rid, n in scored[:k])
 
 
@@ -939,7 +1023,7 @@ class AllRunsTools(ForeignRunReader):
             lines.append(f"{rid} [{st.task_id or '?'}]: best={digest.fmt_num(best.metric) if best else '—'} "
                          f"({st.direction}) · {len(st.nodes)} nodes · {phase}"
                          + (f" · best=#{best.id}" if best else "")
-                         + self._partial_suffix(rid))
+                         + self._partial_suffix(rid) + self._contract_suffix(rid))
         return (f"{len(lines)} run(s) under this configured run root (across all tasks):\n"
                 + "\n".join(lines)
                 ) if lines else "(no other runs under this configured run root)"
