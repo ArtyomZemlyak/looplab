@@ -1884,9 +1884,189 @@ STAGE_CHECK_UNSTRUCTURED = "unstructured"
 # one non-physical member and is admissible only because the condition was DECLARED — see
 # `engine/eval_stages.py`, which refuses that kind outright when the stage declared no `expect.assert`
 # (a checker may not invoke a contract that does not exist).
+# The one member of that set whose evidence the ENGINE can also read — see the epoch-floor block
+# below. Named rather than spelled inline because the veto is scoped to exactly this kind and a
+# typo'd literal would silently widen it to the five PHYSICAL failures, which no derivation here
+# may touch.
+STAGE_CHECK_DECLARED_CONDITION = "declared_condition_violated"
 STAGE_CHECK_HARD_KINDS = ("crash", "nan_or_inf_loss", "no_artifact_written", "silent_fallback",
-                          "loss_unchanged_from_first_step", "declared_condition_violated",
+                          "loss_unchanged_from_first_step", STAGE_CHECK_DECLARED_CONDITION,
                           STAGE_CHECK_UNSTRUCTURED)
+
+
+# --- THE DECLARED-EPOCH FLOOR: the one question the checker kept getting wrong -------------------
+# `declared_condition_violated` is the only hard kind that is not a claim about MECHANISM, and it is
+# the only one whose evidence is a NUMBER the trainer prints about itself. That is what made it
+# unstable: on `runs/rubertlite-dr-unified-v9` node 0 the SAME stage, re-run, produced two verdicts
+# on evidence that differs only in its noise —
+#   attempt A  {'train_runtime': 5137.504, …, 'epoch': 14.87}  -> FAIL declared_condition_violated
+#                "training ended at epoch 14.87, not all 15 epochs completed."
+#   attempt B  {'train_runtime': 5128.1169, …, 'epoch': 14.87} -> OK
+# — and the refusal bought a full re-train: 8,399.9 stage seconds, 2.33 GPU-h, for a result that
+# came back byte-for-byte the same shape. The two prompts are 4,710 characters each and every loss
+# line in them differs, because two runs of the same training are not bit-identical; NOTHING that
+# bears on "did the declared epochs run" differs between them. So the divergence is in the JUDGE,
+# not in its input, and canonicalizing the input cannot reach it.
+#
+# WHAT THE MODEL IS ACTUALLY BEING ASKED. `epoch: 14.87` against `n_epochs: 15` is not the trainer
+# stopping early. HF derives `max_steps` from a FLOORED updates-per-epoch and then takes the CEILED
+# number each epoch, so the step budget runs out inside the last epoch: measured on that node's own
+# log, 114 optimizer steps per epoch (logging_steps=10, 0.0877 epoch per logged line) against a
+# 1,695-step schedule = 14.868 epochs, and the bar reached `1695/1695`. The shortfall is 15 steps of
+# 1,710, it is a property of the library's arithmetic, and it is UNREPAIRABLE — the re-train the
+# refusal bought reported 14.87 again. Deciding that by asking a model is asking it to know a third
+# party's rounding convention, at temperature, from a 4,000-character tail.
+#
+# WHY THE STEP COUNTER IS THE WRONG DETERMINISTIC ANSWER, and this is the measurement that shaped
+# this block. "Did the counter reach its total?" is TRUE for every one of the five
+# `declared_condition_violated` rows in `runs/`, the genuine shrinkages included: v8 node 8 reached
+# `11232/11232`, v8 node 9 `4236/4236`, v9 node 1 `5652/5652`, each with its own `train_runtime`
+# summary — all three had had their SCHEDULE shrunk and then completed it. A pre-answer keyed on the
+# bar would have said "complete" about exactly the node the rung exists to refuse. It is also not
+# reachable from here at all: the bar is written to STDERR and the checker is handed `run.out`, so
+# the string `1695/1695` appears in none of the four v9 prompts.
+#
+# WHAT IS DECIDABLE is the trainer's own final epoch against the DECLARED one, and the corpus says
+# the two populations do not touch. Replaying all 42 stage-check calls in `runs/` that carried an
+# `expect.assert` (v6/v8/v9 — no other run has ever declared one): 18 land inside the last declared
+# epoch with a shortfall of 0.00-0.13 epochs, 4 fall short by 4.01-49.00. A one-epoch boundary sits
+# in a gap 7.7x above the largest benign shortfall and 4.0x below the smallest genuine one.
+#
+# WHAT THIS MAY AND MAY NOT DO (docs/36). The numbers come from text the candidate's own training
+# script wrote, so this derivation may only ever ACQUIT — it downgrades a `declared_condition_violated`
+# refusal to `inconclusive` and can never raise a verdict, never fail a stage, and never touch the
+# five PHYSICAL kinds. That is not a new authority for the candidate: a script that wants this rung
+# silent can already have it by printing no epoch at all (the checker's own prompt says "if the
+# output does not say either way, reply OK"), so a reading that requires it to print a HIGH epoch
+# adds no route that was not already open and wider. Nothing on the RECORD side moves either — the
+# metric still comes from the operator's reader over the protected `score` stage, `expect.files` has
+# already been verified on disk, and a vetoed row is still marked and still visible.
+EPOCH_COMPLETION_REACHED = "reached"
+EPOCH_COMPLETION_SHORT = "short"
+EPOCH_COMPLETION_UNKNOWN = "unknown"
+# How much of the stage's stdout the derivation reads. Deliberately WIDER than the 4,000 characters
+# the model is shown: the model's window is a context budget, this one only has to contain the
+# trainer's end-of-training summary, and a script that prints a few pages after training would push
+# that summary out of a 4,000-char tail and turn a decidable case into `unknown`. Fail-closed either
+# way — `unknown` leaves the refusal standing.
+#
+# In the SHIPPED configuration this is the whole of `run.out`: `run_argv` already clamps each stream
+# to `max_output_bytes` (64,000, and `engine/eval_dispatch.py` passes no other value — the
+# speculation envelope even pins it), so the bound below can never bind there. It is written down
+# anyway because `run_command_eval` is a public entry point a library caller can hand a larger cap,
+# and a derivation on the eval's critical path owes its own bound rather than inheriting somebody
+# else's.
+DECLARED_EPOCH_SCAN_CHARS = 65536
+# The boundary, in epochs. ONE, because a trainer that completed N epochs reports a final epoch in
+# (N-1, N] — the fraction is where the step budget ran out inside the last one — while a shrunken
+# schedule reports a whole number of epochs less. See the 0.13 / 4.01 measurement above.
+DECLARED_EPOCH_TOLERANCE = 1.0
+# The stage-row key the veto is recorded under. A THIRD key beside `concern` and
+# `check_inconclusive`, not a reuse of either: `concern` means "this is why the stage FAILED" and
+# this stage did not fail, `check_inconclusive` carries what the MODEL said, and this carries what
+# the ENGINE read that contradicts it. Folding them would make the row unable to say that the two
+# disagreed, which is the whole event worth recording.
+STAGE_CHECK_EPOCH_VETO_KEY = "check_epoch_reached"
+
+# "all <N> [word]{0,4} epochs" — the declaration shape, and deliberately only that shape. It must
+# see `all 15 training epochs`, `all 50 epochs of DCL+R-Drop nll_cos training` and
+# `all 10 epochs completed with mined negatives disabled`, and it must NOT try to read a bare
+# `15 epochs` out of prose, because the veto's whole safety rests on the number being the
+# declarer's own TARGET rather than any epoch count that happens to be in the sentence.
+_DECLARED_EPOCHS_RE = re.compile(
+    r"\ball\s+(\d{1,4})\s+(?:[A-Za-z][A-Za-z0-9_+.\-]*\s+){0,4}?epochs?\b", re.IGNORECASE)
+# The trainer's END-OF-TRAINING summary and the epoch INSIDE it. One regex, not two, and that is
+# the point: reading the last `'epoch':` anywhere and separately asking whether a `train_runtime`
+# record exists would accept a script that trains twice and is killed inside the second training,
+# because the FIRST training's summary is still in the window. Binding the epoch to the summary
+# record makes "the trainer finished" and "this is where it finished" one fact.
+_TRAIN_SUMMARY_EPOCH_RE = re.compile(
+    r"['\"]train_runtime['\"]\s*:.{0,400}?['\"]epoch['\"]\s*:\s*(\d+(?:\.\d+)?)", re.DOTALL)
+
+
+def declared_epoch_target(assertion: str) -> Optional[int]:
+    """The epoch count a stage's `expect.assert` DECLARES, or None when it declares none — or more
+    than one, which is the same answer for the same reason.
+
+    Two distinct numbers ("all 15 epochs … then all 3 fine-tuning epochs") mean the sentence has no
+    single target, and a veto that picked one would be choosing which half of the declaration to
+    hold the stage to. None is the fail-closed answer: the refusal stands."""
+    found = {int(m) for m in _DECLARED_EPOCHS_RE.findall(assertion or "")}
+    if len(found) != 1:
+        return None
+    n = found.pop()
+    return n if n >= 1 else None
+
+
+def training_summary_epoch(text: str) -> Optional[float]:
+    """The epoch the trainer reported in its own END-OF-TRAINING summary, or None if it never
+    wrote one.
+
+    None is not "zero epochs" — it is "the trainer did not say it finished", which is exactly the
+    state a killed or crashed training leaves behind, and which must never satisfy the floor."""
+    found = _TRAIN_SUMMARY_EPOCH_RE.findall(text or "")
+    if not found:
+        return None
+    try:
+        return float(found[-1])
+    except (TypeError, ValueError):        # pragma: no cover — the group is a float literal
+        return None
+
+
+def declared_epoch_completion(assertion: str, text: str) -> tuple:
+    """`(state, target, observed)` — did the trainer's own summary reach the DECLARED epoch count?
+
+    TOTAL and pure; the one derivation the veto turns on, hoisted so it has a truth table
+    (`tests/test_stage_epoch_floor.py`) rather than living inside `_run_stages`' frame.
+
+      • `reached` — a target was declared, the trainer wrote its end-of-training summary, and that
+        summary's epoch is inside the LAST declared epoch (> target - 1). The only state that
+        acquits.
+      • `short`   — a target was declared and the summary is a whole declared epoch or more below
+        it. The shrunken-experiment state; the refusal stands and this says so explicitly.
+      • `unknown` — no single declared target, or no end-of-training summary. Also the refusal
+        standing, but for the opposite reason: nothing here has an opinion.
+    """
+    target = declared_epoch_target(assertion)
+    if target is None:
+        return EPOCH_COMPLETION_UNKNOWN, None, None
+    observed = training_summary_epoch(text)
+    if observed is None:
+        return EPOCH_COMPLETION_UNKNOWN, target, None
+    if observed > target - DECLARED_EPOCH_TOLERANCE:
+        return EPOCH_COMPLETION_REACHED, target, observed
+    return EPOCH_COMPLETION_SHORT, target, observed
+
+
+def epoch_floor_acquits(kind: str, assertion: str, text: str, *, artifact_contract: bool) -> tuple:
+    """`(acquitted, note)` for one checker verdict. The whole veto, in one statable place.
+
+    FOUR conjuncts, and each is a separate way to fail closed:
+      1. the verdict is `declared_condition_violated` — the five PHYSICAL kinds are claims about
+         mechanism that no epoch reading contradicts, and this must never reach them;
+      2. the stage DECLARED artifacts (`expect.files`), which `verify_stage_artifacts` has already
+         checked on disk before the checker was consulted. This is what lets the veto rescue the
+         WHOLE verdict rather than only its epoch clause: every declaration in the corpus that
+         names something besides an epoch count names a SAVED ARTIFACT, and that clause is the one
+         the engine has already answered deterministically. A declaration whose second clause is
+         something else again — "and validation loss below 5" — is a QUALITY judgement the base
+         prompt has forbidden the checker to fail a stage for since the incident where it failed the
+         run's best model, so the only clauses this can wrongly acquit are ones that were never
+         admissible;
+      3. a single declared epoch target;
+      4. the trainer's own end-of-training summary, inside the last declared epoch.
+
+    Returns the ENGINE's sentence when it acquits, so the row records what contradicted the model
+    rather than only that something did."""
+    if kind != STAGE_CHECK_DECLARED_CONDITION or not artifact_contract:
+        return False, ""
+    state, target, observed = declared_epoch_completion(assertion, text)
+    if state != EPOCH_COMPLETION_REACHED:
+        return False, ""
+    return True, (f"the stage declared {target} epochs and its own end-of-training summary reports "
+                  f"epoch {observed:g}, inside the last declared epoch, so the declared-condition "
+                  f"refusal is not acted on (a fractional final epoch is how the trainer reports a "
+                  f"step budget that ran out inside the last epoch, not a shortened run)")
 
 
 @dataclass(frozen=True)
@@ -2115,6 +2295,11 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
     behind a model call that may be unwired, rate-limited, or simply absent — an operator running
     without a reflect client still gets artifact verification, which is most of the value for none
     of the cost.
+    There is a THIRD rung and it runs AFTER the model, not before: `epoch_floor_acquits` is the
+    deterministic answer to the one declared-condition question the checker measurably could not
+    hold steady (a completed training whose last logged epoch is a fraction below its declared
+    count), and it may only ever downgrade that ONE kind to `inconclusive`. Nothing here may fail a
+    stage on the candidate's own text.
 
     DECLARED ENVIRONMENT (`env`): the per-stage overlay on top of `ex.env` (which already carries the
     run- and task-level layers). It is resolved per stage rather than hoisted, because it is the one
@@ -2356,6 +2541,23 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
             # whether what came back may end a node — see `STAGE_CHECK_HARD_KINDS` for the 46.6
             # GPU-hours that motivated splitting "this stage failed" from "I cannot tell".
             _kind, _text = _stage_check_outcome(_concern)
+            # THE DECLARED-EPOCH FLOOR. The one question this checker keeps getting wrong is one
+            # the log states exactly, so it is not left to the model: see `epoch_floor_acquits` and
+            # the block above it for the 8,399.9 s the instability cost and for why the STEP
+            # COUNTER — the obvious deterministic answer — is true of every genuine shrinkage in the
+            # corpus and therefore useless. It reads a WIDER window than the model was shown, and it
+            # may only ACQUIT: `_kind` is only ever moved DOWN to `inconclusive`, so no derivation
+            # over the candidate's own text can fail a stage, and the four physical kinds are out of
+            # its reach by name.
+            _epoch_ok, _epoch_note = epoch_floor_acquits(
+                _kind, _assertion, run.out[-DECLARED_EPOCH_SCAN_CHARS:],
+                artifact_contract=bool(_expect.get("files")))
+            if _epoch_ok:
+                _kind = STAGE_CHECK_INCONCLUSIVE
+                # The ENGINE's reading, beside the MODEL's, and never instead of it: the row has to
+                # be able to say the two disagreed, or the next reader cannot tell a stage nobody
+                # doubted from one whose refusal was overridden.
+                stage_results[-1][STAGE_CHECK_EPOCH_VETO_KEY] = _epoch_note[:300]
             if _text and _kind != STAGE_CHECK_INCONCLUSIVE:
                 stage_results[-1]["status"] = "check_failed"
                 stage_results[-1]["concern"] = str(_text)[:300]

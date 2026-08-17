@@ -2293,6 +2293,131 @@ made without a row, and unlike those, this one only makes the run's OWN recorded
    the same sentence. Pre-existing; I updated only the two numbers my own field moves, because
    collapsing a duplicated paragraph is a different change.
 
+### §0.9 The stage checker returned two verdicts on one experiment, and the re-train cost 2.33 GPU-h (2026-08-17)
+
+`runtime/command_eval.py::_run_stages` holds the stage success contract in two halves: a
+DETERMINISTIC artifact check (`expect.files`), then the agent-declared `expect.assert` sentence
+handed to an LLM checker. The LLM half returned **two different verdicts on the same experiment**.
+`runs/rubertlite-dr-unified-v9` node 0, `train`, two attempts:
+
+    attempt A  {'train_runtime': 5137.504,  …, 'epoch': 14.87}  ->  check_failed, 8,399.9 s
+               "declared_condition_violated: training ended at epoch 14.87, not all 15 epochs completed."
+    attempt B  {'train_runtime': 5128.1169, …, 'epoch': 14.87}  ->  ok, 8,370.6 s
+
+**IT IS THE JUDGE, NOT THE INPUT, AND THAT DISTINCTION HAD TO BE SETTLED FIRST** — a divergence in
+what the checker was FED is a materially different defect with a different remedy. Both prompts are
+recovered verbatim from `spans.jsonl` (spans `88aa6becedf4bdbb`, 2026-08-16 21:46:47Z and 00:09:54Z);
+both are **4,710 characters**, share a byte-identical system prompt and declared condition, and are
+NOT byte-identical to each other — every loss line differs, because two runs of one training are not
+bit-identical. Nothing that bears on the claim differs: both end `'epoch': 14.87`, both carry the
+trainer's `train_runtime` summary, both print `RECALL@100:`. So there is no canonicalization that
+reaches this: the salient reading was already identical and the model still answered both ways
+(`deepseek-v4-flash`, `temperature 0.6`, `reasoning_effort high`).
+
+**AND THE REFUSAL IS WRONG ON THE MERITS, though not for the reason first offered.** `1695/1695` is
+100 % of the scheduled steps and the trainer returned normally — but `epoch: 14.87` is not merely
+"the last logged epoch". Re-derived from that node's own log: `logging_steps=10` and the epoch
+counter advances 0.0877 per logged line, i.e. **114 optimizer steps per epoch** against a
+**1,695-step** schedule = 14.868 epochs. HF sizes `max_steps` from a FLOORED updates-per-epoch
+(15 × 113) and then takes the CEILED number each epoch, so the budget runs out 15 steps of 1,710
+inside the last epoch. The stage ran its whole schedule, saved `final/model.safetensors` and is
+**0.9 % short of 15.00 full passes** — a property of the library's arithmetic, unrepairable, and the
+8,399.9 s re-train the refusal bought reported `14.87` again and was then accepted.
+
+**THE STEP COUNTER IS NOT THE DETERMINISTIC PRE-ANSWER, and this is the measurement that shaped the
+fix.** "Did the counter reach its total?" is TRUE of every one of the five
+`declared_condition_violated` rows in `runs/` — the genuine shrinkages included. v8 node 8 reached
+`11232/11232`, v8 node 9 `4236/4236`, v9 node 1 `5652/5652`, each with its own `train_runtime`
+summary; all three had had their SCHEDULE cut and then completed it. A rung keyed on the bar would
+have acquitted exactly the node this contract exists to refuse. It is also unreachable from this
+path: the bar is written to **stderr** and the checker is handed `run.out`, so the string `1695/1695`
+appears in **none** of the four v9 prompts.
+
+**HOW RARE, AND WHAT IT COSTS.** Over all 47 preserved event logs: **358** `stage_finished` rows,
+**23** `check_failed` (206,458.9 stage seconds = **57.35 GPU-h**). Only **5** of those 23 are
+`declared_condition_violated` — the kind this touches — worth 38,794.3 s (10.78 GPU-h), and all 5 are
+v8/v9, because `expect.assert` has only ever been declared on v2/v6/v8/v9 (**42** of the **123**
+stage-check calls in the corpus carry a declared condition). Of the 5, **exactly ONE** is the
+false-refusal shape. So the population is small and the fix shrinks to match it — but the one row is
+a full re-train on a 14-node budget, and the rung is live.
+
+**THE SEPARATION IS NOT A THRESHOLD ANYBODY TUNED.** Replaying the deterministic reading over all 42
+declared-condition checks: **18** land inside the last declared epoch, shortfall **0.00-0.13** epochs;
+**4** fall short by **4.01-49.00**. A one-epoch boundary sits 7.7× above the largest benign shortfall
+and 4.0× below the smallest genuine one. There is no `(OK, short)` cell — the deterministic reading
+never wants to convict where the model acquitted, so the rung gains no new appetite.
+
+**WHAT SHIPPED.** `runtime/command_eval.py::epoch_floor_acquits`, applied in `_run_stages` after the
+verdict is read, over a 64 KiB window of `run.out` (wider than the 4,000 chars the model is shown, so
+a chatty script cannot push the summary out of range). FOUR conjuncts, each fail-closed: the verdict
+is `declared_condition_violated`; the stage declared `expect.files` and they already passed on disk;
+the `assert` names exactly one epoch count; and the trainer's own **end-of-training summary** reports
+an epoch inside the last declared one. Then the verdict degrades to `inconclusive` and BOTH readings
+land on the stage row — `check_inconclusive` (what the model said) and the new
+`check_epoch_reached` (what contradicted it). Epoch and summary are read by ONE regex, not two, so a
+script that trains twice and dies inside the second training cannot pair the first training's
+summary with the second's counter.
+
+**HOLDS THE LINE (docs/36).** The numbers come from text the candidate's own script wrote, so the
+derivation may only ever **ACQUIT**: it moves a kind DOWN to `inconclusive` and can never fail a
+stage, never raise a verdict, and never reach the five PHYSICAL kinds. That grants the candidate no
+route it did not already have and a narrower one than it has: a script that wants this rung silent
+can get that today by printing no epoch at all, since the checker's own prompt says *"if the output
+does not say either way, reply OK"* — a reading that requires it to print a HIGH epoch is strictly
+harder to satisfy than the silence already available. Nothing on the record side moves: the metric
+still comes from the operator's reader over the protected `score` stage, `expect.files` ran first,
+and a vetoed row still carries `check_inconclusive`, which is the key `metric_salvage.VETO_STAGE_KEYS`
+scans — so the veto can never make salvage MORE permissive. Folding all 47 event logs on the base
+tree and on this one — 227 folded nodes, 38 champions, 184 recorded metrics, 1 violation and 104
+folded stage rows — gives one digest, `a033f538e8ba7cf2`: **no metric, champion, selectability
+decision or violation can move**, and the only thing that would have moved is one stage's `check_failed` -> `ok`.
+
+**THE REGRESSION FIXTURES ARE THE REAL LOGS.** `tests/fixtures/stage_epoch_floor_corpus.json` holds
+the exact stdout tails, declared conditions and model replies of five live checker calls lifted from
+`spans.jsonl` — v9 node 0 both attempts, v9 node 1, v8 node 8, v8 node 9 —
+and `tests/test_stage_epoch_floor.py` drives them through a REAL `run_command_eval` over a real
+subprocess (tier 1: what is asserted is whether the `score` stage RAN). v8 node 8 is the case where
+triage ABANDONED the node rather than score a shrunken run; it, v8 node 9 and v9 node 1 must keep
+their refusals or this change is worse than the defect. Non-vacuity was verified by mutating a
+THROWAWAY `tar` copy of the tree with seven mutations — the rung deleted with a comment left behind
+carrying every pinned literal; the veto widened off its one kind; the summary requirement dropped for
+"the last epoch anywhere"; the tolerance loosened to 8 epochs; the artifact conjunct dropped; the
+declaration parser made greedy; and the veto allowed to acquit an `unknown` — and **all seven go red,
+each on the test written for it**.
+
+| Option | Why not |
+|---|---|
+| **(a) Hand the checker a deterministic pre-answer to "did the step counter reach its total?"** | **Refused on the corpus, twice over.** It is TRUE of all three genuine shrinkages (11232/11232, 4236/4236, 5652/5652), so it acquits the node the rung exists to refuse; and the bar is on stderr, so it is in none of the prompts this path builds. The question that IS decidable is the trainer's final epoch against the DECLARATION, which is what shipped. |
+| **(b) Canonicalize / complete the judge's input so two attempts cannot differ** | **Refuted by the bytes.** The two 4,710-char prompts differ in every loss line because two trainings are not bit-identical, and no canonicalization changes that; meanwhile the fields that bear on the claim were ALREADY identical in both. The divergence is downstream of the input, so this buys nothing at this site. |
+| **(c) Splice the derived facts into the prompt as context and let the model agree** | Strictly weaker than acting on them, and it cannot be validated offline. If the engine can state the answer, asking a model at `temperature 0.6` to concur with it re-introduces the exact instability being removed — and a prompt is a contract here, so the change would ship unmeasured. Kept as the thing NOT done rather than a future item: the derivation IS the pre-answer. |
+| **(d) Require a repeated verdict before a refusal costs a re-train** | Cheap (one extra call, 2-16 s, against 2.33 GPU-h) and it probably would have saved this row — attempt B's call on near-identical evidence said OK. Refused as the PRIMARY because it has no floor: it lowers the rate of a systematically wrong answer without bounding it, it re-asks the model a question the log states exactly, and it spends an extra call on all 4 genuine refusals for nothing. It remains available as a belt over the residue below. |
+| **(e) Let the deterministic reading CONVICT as well as acquit** | Refused on doctrine and on the corpus. The epoch is text the candidate's own script wrote — `metric_salvage.py`'s rule and docs/36's "what the candidate controls may REFUSE a binding and may never ELECT one" — and a convicting rung reading it hands the candidate a kill switch over its own siblings. There is also nothing to buy: the corpus has no `(OK, short)` row, so conviction would move zero stages. |
+| **(f) Require the assert's non-epoch clause to be matched against `expect.files` path-wise** | Refused as brittle: the declarations spell the same directory two ways (`experiments/nllcos_…` in the assert, `vectorsearch/experiments/nllcos_…` in `files`), so a path check would make the veto inert on half the corpus. The conjunct that shipped is coarser and honest — the stage must have DECLARED artifacts and they must already have passed — and the residue is bounded: every corpus assert's second clause is a saved artifact, and a second clause that is neither an epoch count nor an artifact ("and validation loss below 5") is a QUALITY judgement the base prompt has forbidden the checker to fail a stage for since the incident where it failed the run's best model. |
+| **(g) State the residue and leave it** | One row of 23, but it is a full re-train on a live 14-node budget, the rung is ON by default, and the shape is not exotic: a fractional final epoch is what HF reports for ANY schedule whose steps do not divide evenly, and 18 of the 42 declared-condition checks in the corpus already sit in that band. |
+
+**NO `Settings` FLAG, and no `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` ROW.** There is no prompt divergence
+to gate — the model is asked exactly what it was asked before and the change is entirely in what the
+engine DOES with an answer — so a flag would only buy the ability to turn a fail-closed acquittal back
+into a false refusal. On the legacy map, `redact_output`'s ground (b) fails outright: no paid call,
+no intervention, no concurrency, no selection policy; the derivation makes no request and can only
+ever spend LESS GPU time than the behaviour it replaces.
+
+⬜ **Still open.**
+1. **The 4,000-character tail is the deeper defect and this does not fix it.** The window handed to
+   the checker starts mid-token (`r_second': 6280.573, …`) and holds ~38 log lines of a 1.4-hour
+   training; the step counter, the trainer's banner, the "Saving model" line and every restart are
+   outside it. The two live-eval watchdogs and the crash-triage judge were all moved off fixed slices
+   onto `tools/log_tools.py` (`read_log` / `metric_series` over `eval_log_plan`'s sources); **the
+   inter-stage checker is the last judge in the engine still handed a blind tail**, and it is the one
+   that can end a node. Same remedy, already built.
+2. `no_artifact_written` is reachable for a stage whose `expect.files` the engine has ALREADY
+   verified on disk one branch earlier — v8 node 8's own refusal says "and no final-model save is
+   reported" about a node whose declared artifact passed. That is the same class of defect as this
+   one (a model asked something the engine already knows) at a different kind, and it is not touched
+   here because no corpus row turns on it alone.
+3. The veto rescues the WHOLE verdict, not only its epoch clause. Bounded by (f) above rather than
+   closed, and stated in `epoch_floor_acquits`' own docstring.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
