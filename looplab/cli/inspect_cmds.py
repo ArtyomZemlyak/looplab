@@ -610,3 +610,124 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
     with os.fdopen(r, "rb") as fh:
         typer.echo("probe: " + fh.read().decode("utf-8", "replace"))
     os.waitpid(pid, 0)
+
+
+# --- STAGE DUPLICATION -------------------------------------------------------------------------
+# The reporter half of `runtime/stage_identity.py`, and the reason that module exists at all. It
+# answers the two questions nobody could answer without a 20-minute sha256 sweep over 20 GB of
+# preserved workdirs — which is why the wrong reuse key (the node's DECLARED mining params, 4 wrong
+# of 7 on this corpus) looked obviously right and shipped nowhere near a measurement.
+#
+#   1. DUPLICATED WORK — stages whose recorded output identity is byte-identical. An OBSERVED fact
+#      about what was produced, never a prediction from what a node declared about itself.
+#   2. WOULD-BE REUSE — stages whose recorded input KEY is equal, split into the ones whose outputs
+#      then agreed (a correct hit a cache would have made) and the ones whose outputs DID NOT (a
+#      WRONG hit). The second number is the one that decides whether a cache may ever ship, and it
+#      is deliberately reported even when it is zero, because "no wrong hits over N candidates" and
+#      "no candidates" are different states with the same headline.
+#
+# Read-only, no model, no fold of anything but `stage_finished`. A row from before this instrument
+# shipped carries neither field and is counted as UNKEYED rather than as evidence either way.
+def _stage_identity_rows(store) -> list:
+    """Every `stage_finished` row that carries a stage-identity record, oldest first."""
+    from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,
+                                                STAGE_OUTPUTS_KEY)
+    out: list = []
+    for ev in store.read_all():
+        if getattr(ev, "type", None) != "stage_finished":
+            continue
+        data = getattr(ev, "data", None) or {}
+        out.append({"node": data.get("node_id"), "name": data.get("name"),
+                    "status": data.get("status"), "seconds": float(data.get("seconds") or 0.0),
+                    "key": data.get(STAGE_INPUT_KEY), "key_reason": data.get(STAGE_KEY_REASON),
+                    "outputs": data.get(STAGE_OUTPUTS_KEY)})
+    return out
+
+
+def _output_fingerprint(outputs) -> Optional[str]:
+    """The `(path, digest)` set a completed stage recorded, as one comparable string, or None.
+
+    The PATH travels with the digest on purpose. Two stages that wrote identical bytes to different
+    declared paths did the same work and are duplication worth reporting; two that wrote different
+    bytes to the same path are not. Folding either into the other loses one of those facts, so the
+    fingerprint carries both and the report says which question it is answering.
+    """
+    if not isinstance(outputs, list) or not outputs:
+        return None
+    parts = []
+    for row in outputs:
+        if not isinstance(row, dict) or not row.get("bound"):
+            return None                       # an unbound output names nothing anybody may compare
+        parts.append(f"{row.get('path')}={row.get('digest_mode')}:{row.get('digest')}")
+    return "|".join(sorted(parts))
+
+
+@app.command(name="stage-dups")
+def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
+    """Duplicated stage work in a run, and what a cross-node reuse key would have done (read-only).
+
+    Two independent reports over the same rows, because they answer different questions and the
+    corpus that motivated this had them disagree: the DECLARED-parameter grouping that looked like
+    12 duplicated `mine` stages on `rubertlite-dr-unified-v8` is 4 groups of provably-identical
+    output, and a key built on that declaration would have been wrong 4 times in 7.
+    """
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    rows = _stage_identity_rows(store)
+    if not rows:
+        typer.echo("no stage rows in this run.")
+        return
+    done = [r for r in rows if r["status"] == "ok"]
+    keyed = [r for r in done if r["key"]]
+    typer.echo(f"stage rows: {len(rows)}  completed: {len(done)}  with an input key: {len(keyed)}")
+    if len(keyed) < len(done):
+        reasons: dict = {}
+        for r in done:
+            if not r["key"]:
+                reasons[r["key_reason"] or "unrecorded"] = reasons.get(r["key_reason"] or
+                                                                       "unrecorded", 0) + 1
+        typer.echo("  unkeyed: " + ", ".join(f"{k}={v}" for k, v in sorted(reasons.items())))
+
+    # 1. OBSERVED duplication — identical output identity, whatever anybody declared.
+    by_fp: dict = {}
+    for r in done:
+        fp = _output_fingerprint(r["outputs"])
+        if fp:
+            by_fp.setdefault((r["name"], fp), []).append(r)
+    dup_seconds = 0.0
+    typer.echo("\nidentical outputs (observed, not predicted):")
+    for (name, _fp), group in sorted(by_fp.items(), key=lambda kv: -len(kv[1])):
+        if len(group) < 2:
+            continue
+        # The FIRST one is work that had to happen; every later one is the duplication.
+        repeat = sum(g["seconds"] for g in group[1:])
+        dup_seconds += repeat
+        nodes = ", ".join(str(g["node"]) for g in group)
+        typer.echo(f"  {name}: {len(group)} stages produced the same bytes "
+                   f"(nodes {nodes}) — {repeat / 3600.0:.2f} h after the first")
+    if dup_seconds <= 0:
+        typer.echo("  none.")
+    else:
+        typer.echo(f"  total duplicated: {dup_seconds / 3600.0:.2f} h")
+
+    # 2. WHAT THE KEY WOULD HAVE DONE. First-wins, exactly as a cache would: the earliest completed
+    # stage under a key is the source, everything after it is a candidate hit.
+    seen: dict = {}
+    hits = wrong = 0
+    saved = 0.0
+    for r in keyed:
+        src = seen.get(r["key"])
+        if src is None:
+            seen[r["key"]] = r
+            continue
+        hits += 1
+        saved += r["seconds"]
+        a, b = _output_fingerprint(src["outputs"]), _output_fingerprint(r["outputs"])
+        if a is None or b is None or a != b:
+            wrong += 1
+            typer.echo(f"  WRONG HIT: {r['name']} node {r['node']} would have reused node "
+                       f"{src['node']}'s artifact, which is NOT what it produced")
+    typer.echo(f"\ncross-node reuse key: {hits} candidate hit(s), {wrong} of them WRONG, "
+               f"{saved / 3600.0:.2f} h")
+    typer.echo("  a wrong hit is a stale artifact silently feeding the next stage — the number "
+               "that decides whether a cache may ship, not the hours.")

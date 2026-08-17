@@ -53,7 +53,14 @@ def test_runtime_holds_only_process_execution_modules():
                      # may read; `landlock` applies it in the child between fork and exec. The
                      # POLICY over all three — which rung, whether a violation is minted — lives in
                      # `engine/`, which is the split this package boundary exists to hold.
-                     "metric_subject", "read_allowlist", "landlock"}, (
+                     "metric_subject", "read_allowlist", "landlock",
+                     # `stage_identity` (2026-08-17) is the same kind of fact one question over:
+                     # WHAT a stage ran on and WHAT it produced, both derived from bytes at the
+                     # instants the eval path already has them (before the command, and when the
+                     # `expect.files` contract passes). It records onto the stage row and decides
+                     # nothing — every POLICY that could read it (a reuse cache, a duplication
+                     # report) lives above, which is the same split `metric_subject` is here for.
+                     "stage_identity"}, (
         "a module that is not process execution landed in runtime again")
 
 

@@ -38,7 +38,12 @@ GROUPS = {
     # no cross-run store, and nothing in `looplab/` ever reads the file back. The group docstring
     # carries that exception explicitly rather than letting "read-only" quietly become false.
     "inspect_cmds": {"replay", "speculation-gate", "timings", "inspect", "readmodel", "tensorboard",
-                     "landlock-check"},
+                     # `stage-dups` is run diagnostics in the strictest sense: it folds nothing but
+                     # this run's own `stage_finished` rows, calls no model, writes nothing, and
+                     # reads no cross-run store. It sits beside `timings` because it answers the
+                     # sibling question — `timings` says where the wall clock went, this says how
+                     # much of it produced bytes some other node had already produced.
+                     "landlock-check", "stage-dups"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",
