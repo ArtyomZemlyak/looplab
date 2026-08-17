@@ -141,6 +141,15 @@ separation + byte-offset seeks is the Grafana-Tempo / Jaeger / Perfetto pattern;
 kept over SQLite/Arrow deliberately — no locking, atomic-rename-safe on the FUSE/NFS/S3 mounts the
 rest of the store already guards for.)
 
+Full-row windows coalesce selected rows separated by at most 256 KiB into continuous reads capped at
+8 MiB. This targets the S3/FUSE cost boundary: the previous reader issued one seek/read (normally one
+range GET) per selected span, while S3 cannot return disjoint ranges in one GET. Gap bytes are never
+parsed or returned, and every selected slice still passes its exact row digest plus normalized-light
+comparison. `tools/bench_trace_s3_reads.py` drives the production planner across dense, 4-way and
+32-way-interleaved layouts; the 256 KiB threshold captures the large request-count win in a moderately
+interleaved trace without the ~30× byte amplification a 1 MiB/single-cover strategy creates in a
+highly interleaved one.
+
 ### Browser projection boundary
 
 `spans.jsonl` is diagnostic files-as-truth, but it is not a trusted HTTP payload. Custom exporters,
@@ -184,6 +193,14 @@ because the window is a TAIL and widening is therefore the same tail extended �
 anchoring at: every band the conversation reads, with none of their contents, each carrying its
 `anchor`. It is the SAME band derivation the conversation uses (`_conversation_bands`) and is served
 from the in-memory light index without touching `spans.jsonl` — 7,048 episodes in 82 ms on that node.
+The map response is capped at 10,000 rows but the cap is now a page size, not a history wall:
+`?before=<first-visible-anchor>` is an exclusive episode cursor, and the browser prepends older pages
+until `has_older` is false. Every page echoes the initial tail's inclusive `snapshot` anchor and the
+browser sends it on the next request, so normal live appends cannot move a backward walk. Cursor and
+snapshot are validated against the selected node and lifecycle's derived
+bands (not just any span in the run); a stale/foreign cursor is refused with 409
+`trace_episode_cursor_unknown`. Thus a node with more than 10,000 bands can still reach its first
+episode while every response remains bounded.
 An anchor the index cannot place is refused (409 `trace_anchor_unknown`), never degraded to the tail,
 and it is material in both the index's window revision and the route's ETag so a conditional read can
 never answer one anchor with another's body.

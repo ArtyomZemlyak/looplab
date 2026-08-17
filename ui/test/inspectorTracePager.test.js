@@ -49,6 +49,24 @@ const conversationPage = (limit, totalStages = 200) => {
   }
 }
 
+const episodePage = ({ before = null, anchors, nextBefore = null, older = 0, newer = 0,
+  snapshot = 'r4' }) => ({
+  schema: 2,
+  node_id: '7',
+  attempt: 0,
+  run_generation: null,
+  episodes: anchors.map((anchor, index) => ({
+    band: `band-${anchor}`, anchor, trace_id: 'trace-episodes', label: 'inline_repair',
+    start: index, seconds: 1, status: 'OK', spans: 2, ordinal: Number(anchor.slice(1)),
+    reason: null, generations: 1, tools: 0,
+  })),
+  page: { snapshot, before, next_before: nextBefore, has_older: nextBefore != null,
+    older_episodes: older, newer_episodes: newer },
+  projection: { schema: 2, truncated: older + newer > 0, total_spans: 20,
+    visible_spans: 20, omitted_spans: 0, total_episodes: 4,
+    visible_episodes: anchors.length, omitted_episodes: 4 - anchors.length },
+})
+
 // The observer stub is the whole point of this harness: jsdom has no IntersectionObserver, and a
 // real one would need real geometry. Driving the callback directly is also CLOSER to the property —
 // what matters is what happens when the sentinel comes into view, not how the browser decided it did.
@@ -199,6 +217,75 @@ test('scrolling the conversation sentinel into view fetches a bigger window and 
       dom.window.close()
     }
   })
+
+test('the steps control pages past the episode-map ceiling to the earliest row', async () => {
+  const dom = installDom()
+  installObserver()
+  const requests = []
+  globalThis.fetch = async url => {
+    const path = String(url)
+    requests.push(path)
+    let body = {}
+    if (path.includes('/conversation')) body = conversationPage(512)
+    if (path.includes('/episodes')) {
+      const before = new URL(path, 'http://localhost').searchParams.get('before')
+      body = before === 'r3'
+        ? episodePage({ before: 'r3', anchors: ['r1', 'r2'], newer: 2 })
+        : episodePage({ anchors: ['r3', 'r4'], nextBefore: 'r3', older: 2 })
+    }
+    return { ok: true, status: 200, json: async () => body }
+  }
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trace } = await vite.ssrLoadModule('/src/Inspector.jsx')
+    const { createRoot } = await import('react-dom/client')
+    const { act } = await import('react-dom/test-utils')
+    const container = dom.window.document.getElementById('root')
+    const root = createRoot(container)
+    const settle = async () => {
+      await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)) })
+    }
+    const bounded = traceProps({
+      n: { id: 7, attempt: 0, status: 'done',
+        trace: { nodes: [], projection: { total_spans: 20, visible_spans: 10,
+          omitted_spans: 10 } } },
+    })
+    await act(async () => { root.render(React.createElement(Trace, bounded)) })
+    await settle()
+
+    const steps = [...container.querySelectorAll('.trace-episodes > button')]
+      .find(button => /steps/.test(button.textContent))
+    assert.ok(steps != null, 'a bounded trace must expose its episode control')
+    await act(async () => { steps.click() })
+    await settle()
+
+    const episodeCalls = () => requests.filter(path => path.includes('/episodes'))
+    assert.equal(episodeCalls().length, 1)
+    assert.match(episodeCalls()[0], /\/episodes\?attempt=0$/)
+    const earlier = container.querySelector('button.trace-episodes-earlier')
+    assert.ok(earlier != null, 'a capped map must offer its older cursor page')
+    assert.match(container.querySelector('.trace-episodes-body').textContent, /of 2/)
+
+    await act(async () => { earlier.click() })
+    await settle()
+    assert.equal(episodeCalls().length, 2)
+    assert.match(episodeCalls()[1], /\/episodes\?attempt=0&before=r3&snapshot=r4$/)
+    assert.equal(container.querySelectorAll('button.trace-episodes-earlier').length, 0,
+      'the control stops paging only after the beginning is loaded')
+    assert.match(container.querySelector('.trace-episodes-body').textContent, /of 4/)
+    assert.doesNotMatch(container.querySelector('.trace-episodes-body').textContent,
+      /Showing the most recent/, 'the merged map now proves it is complete')
+
+    await act(async () => { root.unmount() })
+  } finally {
+    await vite.close()
+    dom.window.close()
+  }
+})
 
 test('at the ceiling the operator gets the COUNT, not another sentinel', async () => {
   const dom = installDom()

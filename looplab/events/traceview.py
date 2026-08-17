@@ -57,8 +57,10 @@ TRACE_DETAIL_SPAN_CAP = 256
 TRACE_CARD_RESEARCH_CAP = 256
 TRACE_CARD_NODE_CAP = 256
 TRACE_CONVERSATION_SPAN_CAP = 512
-# The EPISODE MAP's ceiling (`node_episodes`). Not a span window: an episode row carries identity,
-# timing and counts, never contents, and the whole map is derived from light spans already in memory.
+# The EPISODE MAP's per-response ceiling (`node_episodes`). Not a span window: an episode row carries
+# identity, timing and counts, never contents, and the map is derived from light spans in memory. The
+# route pages older rows with an exclusive cursor, so this is a response bound rather than a history
+# bound.
 # The largest node in the shipped 43-run corpus (rubert-dr-0804 node 1, 14,507 spans / 2,345 inline
 # repairs) yields 7,048 bands, so this leaves real headroom while keeping the response finite.
 TRACE_NODE_EPISODE_CAP = 10000
@@ -66,6 +68,15 @@ TRACE_NODE_EPISODE_CAP = 10000
 # ceiling keeps both HTTP responses and the archived trace.json finite without imposing a topology
 # depth limit (a 4,096-deep valid tree is still part of the public projection contract).
 TRACE_PROJECTION_JSON_MAX_BYTES = 64 * 1024 * 1024
+
+
+class TraceEpisodeCursorUnknown(ValueError):
+    """An episode-map cursor does not belong to the selected node lifecycle."""
+
+    def __init__(self, before: Optional[str], *, field: str = "before"):
+        super().__init__("episode-map cursor is not in the selected node lifecycle")
+        self.before = before
+        self.field = field
 
 
 def trace_projection_json_bytes(
@@ -1725,6 +1736,8 @@ def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spa
 
 def node_episodes(spans: list[dict], node_id, *, total_spans=None,
                   cap: int = TRACE_NODE_EPISODE_CAP,
+                  before: Optional[str] = None,
+                  snapshot: Optional[str] = None,
                   _normalized: bool = False) -> dict:
     """THE MAP of one node's trace: every band its conversation reads, with no band's contents.
 
@@ -1742,7 +1755,7 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
     Each row carries only identity, timing, counts and the `anchor` to seek to; contents stay behind
     the window the operator then moves.
 
-    Cheap ON PURPOSE, so this can be a plain one-shot read beside a bounded one: it takes the LIGHT
+    Cheap ON PURPOSE, so each bounded response can be read beside a span window: it takes the LIGHT
     spans the index already holds in memory (`SpanIndex.light_spans_for_node`, measured 11.8 ms for
     all 14,507 of that node's spans) and touches spans.jsonl not at all. Measured 2026-08-13 over
     that node: 7,048 bands in 82 ms of CPU, no disk read. `turns` are threaded and discarded — they
@@ -1752,12 +1765,49 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
     spans = list(spans) if _normalized else _normalize_spans(spans)
     stages, matching_spans = _conversation_bands(spans, keep=lambda s, trace_nid: (
         (nid := effective_node_id(s, trace_nid)) is not None and str(nid) == str(node_id)))
+    # Bind a multi-request walk to the newest episode present on its first page. Normal live appends
+    # then land after this inclusive boundary and cannot shift the page population while an operator
+    # walks backwards. (A pathological late-closing band whose earlier start inserts before the
+    # boundary changes the total and is rejected by the browser's page merge.)
+    raw_snapshot = snapshot
+    snapshot = settle_trace_anchor(snapshot)
+    if raw_snapshot is not None and str(raw_snapshot).strip() and snapshot is None:
+        raise TraceEpisodeCursorUnknown(None, field="snapshot")
+    if snapshot is not None:
+        try:
+            snapshot_end = next(index for index, stage in enumerate(stages)
+                                if stage.get("anchor") == snapshot) + 1
+        except StopIteration as exc:
+            raise TraceEpisodeCursorUnknown(snapshot, field="snapshot") from exc
+        stages = stages[:snapshot_end]
+    elif stages:
+        snapshot = stages[-1].get("anchor")
+
     total_episodes = len(stages)
     cap = max(0, int(cap))
-    # The TAIL, like every other trace window — and for the same reason: the newest is what a live
-    # reader is looking at. A node past this ceiling is not in the shipped corpus (the largest is
-    # 7,048), and the receipt states the omission rather than letting the list read as complete.
-    visible = stages[-cap:] if cap else []
+    # A page is the TAIL before an EXCLUSIVE episode cursor. The first request therefore preserves
+    # the old newest-first-window contract, while repeated ``before=<first visible anchor>`` requests
+    # walk all the way to the beginning without ever returning one band twice. The cursor is checked
+    # against the already node/generation-filtered stages, not merely the run index: a span from a
+    # different node or lifecycle must not turn a page request into a plausible but wrong map.
+    raw_before = before
+    before = settle_trace_anchor(before)
+    if raw_before is not None and str(raw_before).strip() and before is None:
+        raise TraceEpisodeCursorUnknown(None)
+    end = total_episodes
+    if before is not None:
+        try:
+            end = next(index for index, stage in enumerate(stages)
+                       if stage.get("anchor") == before)
+        except StopIteration as exc:
+            raise TraceEpisodeCursorUnknown(before) from exc
+    start = max(0, end - cap)
+    visible = stages[start:end]
+    # Every real band has an anchor: synthesized/live bands fall back to their latest content span
+    # in `_conversation_bands`. Keep this explicit anyway so a malformed legacy row cannot publish a
+    # cursor that will only fail on the next click.
+    next_before = visible[0].get("anchor") if start > 0 and visible else None
+    has_older = bool(start > 0 and next_before)
     # Flat counts, not the band's `rollup`: a map row is chosen from, not read from, and the nested
     # token/cost record is most of its bytes. Measured on rubert-dr-0804 node 1 — 7,048 rows, 2.3 MB
     # with the rollup and 1.1 MB without, for a control the operator opens on a node whose trace they
@@ -1776,7 +1826,11 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
         total_episodes=total_episodes, visible_episodes=len(episodes),
         omitted_episodes=max(0, total_episodes - len(episodes)))
     return {"schema": TRACE_PROJECTION_SCHEMA, "node_id": str(node_id),
-            "episodes": episodes, "projection": projection}
+            "episodes": episodes,
+            "page": {"snapshot": snapshot, "before": before, "next_before": next_before,
+                     "has_older": has_older, "older_episodes": start,
+                     "newer_episodes": max(0, total_episodes - end)},
+            "projection": projection}
 
 
 def build_trace_conversation(state: RunState, spans: list[dict], trace_id, *, total_spans=None,

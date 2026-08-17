@@ -38,8 +38,8 @@ from looplab.events.eventstore import (
     _interprocess_lock, decode_jsonl_line, iter_event_jsonl)
 from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import (
-    TRACE_PROJECTION_SCHEMA, trace_file_revision, trace_projection_json_bytes,
-    unavailable_projection)
+    TRACE_NODE_EPISODE_CAP, TRACE_PROJECTION_SCHEMA, TraceEpisodeCursorUnknown,
+    trace_file_revision, trace_projection_json_bytes, unavailable_projection)
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
     EV_TRUST_GATE_CHANGED,
@@ -2378,6 +2378,10 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/episodes")
     def node_episodes_route(run_id: str, nid: int,
+                            limit: int = Query(default=TRACE_NODE_EPISODE_CAP, ge=1,
+                                               le=TRACE_NODE_EPISODE_CAP),
+                            before: Optional[str] = Query(default=None),
+                            snapshot: Optional[str] = Query(default=None),
                             attempt: Optional[int] = Query(default=None, ge=0),
                             expected_generation: Optional[str] = Query(default=None)):
         """THE MAP of one node's trace: every episode (band) it recorded, with none of their contents.
@@ -2391,11 +2395,13 @@ def build_router(srv) -> APIRouter:
         the operator gets a map instead: each row names an episode and carries the `anchor` to put a
         window on it (`?before=` on `/trace` and `/conversation`).
 
-        Cheap by construction: the whole map comes from the in-memory light index and reads no
-        spans.jsonl bytes (measured 82 ms for that node's 7,048 bands), which is why it is served
-        whole rather than paged. It is a READ of the current lifecycle by default and takes the same
-        `attempt` a historical read takes, so the map and the window it aims always describe one
-        generation."""
+        Cheap by construction: the map comes from the in-memory light index and reads no
+        spans.jsonl bytes (measured 82 ms for 7,048 bands). A response is nevertheless capped at
+        10,000 rows; ``before`` is an exclusive cursor over that node lifecycle so a larger history
+        remains reachable in bounded responses. ``snapshot`` carries the first page's newest anchor
+        through the walk, excluding normal live appends from later pages. It is a READ of the current
+        lifecycle by default and takes the same `attempt` a historical read takes, so the map and the
+        window it aims always describe one generation."""
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(rd, expected_generation)
         current_attempt = _cached_node_attempt(rd, nid)
@@ -2407,8 +2413,13 @@ def build_router(srv) -> APIRouter:
             raise _attempt_cas_409(nid, attempt, current_attempt,
                                    "The node was reset before its episodes were read.")
         read_attempt = current_attempt if attempt is None else attempt
+        cursor_error = None
         try:
-            payload = srv.node_episode_map(rd, nid, generation=read_attempt)
+            payload = srv.node_episode_map(
+                rd, nid, generation=read_attempt, cap=limit, before=before, snapshot=snapshot)
+        except TraceEpisodeCursorUnknown as exc:
+            cursor_error = exc
+            payload = None
         except Exception:  # noqa: BLE001 - an unreadable index is an unavailable map, never an empty one
             payload = {"node_id": str(nid), **_trace_unavailable(episodes=[])}
         # The same post-read lifecycle CAS the window routes apply: a reset landing under this read
@@ -2417,6 +2428,19 @@ def build_router(srv) -> APIRouter:
         _assert_attempt_unchanged(rd, nid, current_attempt,
                                   message="The node was reset while its episodes were being read.")
         generation = _finish_trace_read(rd, before_generation, expected_generation)
+        # Lifecycle/run fences dominate cursor failure: a reset can make a previously valid cursor
+        # disappear while this read is deriving bands, and that is a superseded read rather than an
+        # operator choosing an invalid key. Only report the cursor once the surrounding snapshot is
+        # proven unchanged.
+        if cursor_error is not None:
+            raise HTTPException(409, {
+                "code": "trace_episode_cursor_unknown",
+                "before": cursor_error.before,
+                "cursor_field": cursor_error.field,
+                "message": "That episode cursor is not in this node lifecycle, so an older page "
+                           "cannot be selected from it.",
+                "remediation": "Reload this experiment's episodes and request the older page again.",
+            }) from cursor_error
         return _trace_response({**payload, "node_id": str(nid), "attempt": read_attempt,
                                 "run_generation": generation or None})
 

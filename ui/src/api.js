@@ -1254,11 +1254,16 @@ export const traceGenerationMatches = (payload, expectedGeneration) =>
 // of at the node's newest one. It travels here rather than at the call sites because a trace read has
 // exactly one spelling of its query, and an anchor a surface forgot to send is a surface silently
 // reading the tail while its picker says otherwise.
-export const traceReadQuery = (expectedGeneration, attempt, limit, before = null) => {
+export const traceReadQuery = (
+  expectedGeneration, attempt, limit, before = null, snapshot = null,
+) => {
   const query = new URLSearchParams()
   if (attempt != null) query.set('attempt', attempt)
   if (limit) query.set('limit', limit)
   if (before) query.set('before', before)
+  // Episode-map pagination pins a backward walk to the newest band from its first page. Other trace
+  // routes never pass this fifth argument, so their wire contract remains byte-for-byte unchanged.
+  if (snapshot) query.set('snapshot', snapshot)
   if (expectedGeneration) query.set('expected_generation', expectedGeneration)
   return query.size ? `?${query}` : ''
 }

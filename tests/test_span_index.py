@@ -119,6 +119,91 @@ def test_full_span_roundtrip_by_offset(run):
     assert idx.full_span("nope") is None
 
 
+def test_full_row_read_plan_coalesces_nearby_ranges_but_keeps_extent_bounded():
+    """One S3 range per JSONL row is the latency bug; one unbounded cover is not its fix."""
+    from looplab.events.span_index import _coalesced_full_read_plan
+
+    mib = 1024 * 1024
+    meta = [
+        (0, 1024),
+        (1024 + 64 * 1024, 2048),              # nearby: one bounded range request
+        (3 * mib, 3 * mib),                     # too far: do not download the whole gap
+        (6 * mib, 3 * mib),                     # adjacent, but together exceed a 4 MiB batch
+    ]
+    plan = _coalesced_full_read_plan(
+        [0, 1, 2, 3], meta, max_gap_bytes=256 * 1024, max_batch_bytes=4 * mib)
+
+    assert [(offset, length) for offset, length, _slices in plan] == [
+        (0, meta[1][0] + meta[1][1]),
+        (3 * mib, 3 * mib),
+        (6 * mib, 3 * mib),
+    ]
+    assert plan[0][2] == [(0, 0, 1024), (1, meta[1][0], 2048)]
+
+
+def test_full_row_read_plan_refuses_overlapping_persisted_offsets():
+    """Coalescing may reduce reads; it may never make a corrupt index alias two evidence rows."""
+    from looplab.events.span_index import _coalesced_full_read_plan
+
+    with pytest.raises(OSError, match="overlap"):
+        _coalesced_full_read_plan([0, 1], [(100, 50), (125, 50)])
+
+
+def test_node_offset_reader_uses_fewer_bounded_reads_without_weakening_validation(
+        run, monkeypatch):
+    """Drive the real reader: nearby selected rows share reads and still round-trip exactly."""
+    _rd, source, _spans = run
+    idx = get_index(source)
+    expected = idx.full_spans_for_node(0)
+    native_open = open
+    reads = []
+
+    class CountingFile:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def __enter__(self):
+            self.inner.__enter__()
+            return self
+
+        def __exit__(self, *exc):
+            return self.inner.__exit__(*exc)
+
+        def read(self, size=-1):
+            chunk = self.inner.read(size)
+            reads.append(len(chunk))
+            return chunk
+
+    def counted_open(*args, **kwargs):
+        return CountingFile(native_open(*args, **kwargs))
+
+    monkeypatch.setattr(span_index, "open", counted_open, raising=False)
+    actual = idx.full_spans_for_node(0)
+
+    assert _canon(actual) == _canon(expected)
+    assert len(reads) < len(actual), "the reader regressed to one remote range per span"
+    assert max(reads) <= span_index._FULL_READ_BATCH_MAX_BYTES
+
+    # Coalescing may not turn the surrounding batch into the unit of trust. Corrupt one selected
+    # slice in place and prove its original per-row digest still refuses the whole projection.
+    row = idx.by_sid["g0_1"]
+    offset, length = idx.meta[row]
+    with native_open(source, "r+b") as stream:
+        stream.seek(offset)
+        original = stream.read(length)
+        changed = original.replace(b'"output":"OOOO', b'"output":"POOO', 1)
+        assert changed != original and len(changed) == len(original)
+        stream.seek(offset)
+        stream.write(changed)
+        stream.flush()
+        os.fsync(stream.fileno())
+    with pytest.raises(OSError, match="source digest"):
+        idx.full_spans_for_node(0)
+
+
 def test_full_span_same_id_body_rewrite_fails_unavailable_on_row_digest(run):
     """A same-length row can keep its span_id while its diagnostic body becomes different evidence."""
     _rd, source, _spans = run

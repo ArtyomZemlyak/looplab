@@ -31,7 +31,7 @@ test.after(() => vite.close())
 const {
   EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, clampEpisodeIndex, episodeAnchor,
   episodeAt, episodeDurationLabel, episodeKindOptions, episodeLabel, episodeMapNotice,
-  episodeOrdinal, episodePosition, episodeSummary,
+  episodeOrdinal, episodePosition, episodeSummary, mergeEpisodePagePayload,
 } = model
 
 const episode = (over = {}) => ({
@@ -53,6 +53,54 @@ test('a map that could not be read is never an absent history', () => {
   assert.notEqual(EPISODE_MAP_UNAVAILABLE, EPISODE_MAP_EMPTY)
   // A node whose whole trace fits in one window read FINE and has nowhere to seek to. Distinct.
   assert.equal(buildEpisodeMap(payload([])).status, 'empty')
+})
+
+test('exclusive episode pages prepend into one reachable history', () => {
+  const pagePayload = (episodes, over = {}) => ({
+    schema: 2, node_id: '1', attempt: 0, run_generation: 'generation-a', episodes,
+    projection: { total_episodes: 6, visible_episodes: episodes.length,
+      omitted_episodes: 6 - episodes.length, truncated: true },
+    ...over,
+  })
+  const newest = pagePayload([
+    episode({ anchor: 'r5', ordinal: 5 }), episode({ anchor: 'r6', ordinal: 6 }),
+  ], { page: { snapshot: 'r6', before: null, next_before: 'r5', has_older: true,
+    older_episodes: 4, newer_episodes: 0 } })
+  const middle = pagePayload([
+    episode({ anchor: 'r3', ordinal: 3 }), episode({ anchor: 'r4', ordinal: 4 }),
+  ], { page: { snapshot: 'r6', before: 'r5', next_before: 'r3', has_older: true,
+    older_episodes: 2, newer_episodes: 2 } })
+  const oldest = pagePayload([
+    episode({ anchor: 'r1', ordinal: 1 }), episode({ anchor: 'r2', ordinal: 2 }),
+  ], { page: { snapshot: 'r6', before: 'r3', next_before: null, has_older: false,
+    older_episodes: 0, newer_episodes: 4 } })
+
+  const four = mergeEpisodePagePayload(newest, middle)
+  assert.deepEqual(four.episodes.map(row => row.anchor), ['r3', 'r4', 'r5', 'r6'])
+  assert.equal(four.projection.omitted_episodes, 2)
+  assert.equal(four.page.next_before, 'r3')
+  assert.equal(buildEpisodeMap(four).hasOlder, true)
+  assert.match(episodeMapNotice(buildEpisodeMap(four)), /most recent 4 of 6/)
+
+  const all = mergeEpisodePagePayload(four, oldest)
+  assert.deepEqual(all.episodes.map(row => row.anchor), ['r1', 'r2', 'r3', 'r4', 'r5', 'r6'])
+  assert.equal(all.projection.visible_episodes, 6)
+  assert.equal(all.projection.omitted_episodes, 0)
+  assert.equal(all.projection.truncated, false)
+  assert.equal(buildEpisodeMap(all).hasOlder, false)
+  assert.equal(episodeMapNotice(buildEpisodeMap(all)), '')
+
+  // Cursor and lifecycle are part of the representation. A late or foreign page is rejected rather
+  // than merged into a plausible-looking list whose seek anchors point somewhere else.
+  assert.equal(mergeEpisodePagePayload(newest, { ...middle, node_id: '2' }), null)
+  assert.equal(mergeEpisodePagePayload(newest, { ...middle, attempt: 1 }), null)
+  assert.equal(mergeEpisodePagePayload(newest, { ...middle, run_generation: 'generation-b' }), null)
+  assert.equal(mergeEpisodePagePayload(newest,
+    { ...middle, page: { ...middle.page, before: 'wrong' } }), null)
+  assert.equal(mergeEpisodePagePayload(newest,
+    { ...middle, page: { ...middle.page, snapshot: 'another-tail' } }), null)
+  assert.equal(mergeEpisodePagePayload(newest,
+    { ...middle, projection: { ...middle.projection, total_episodes: 7 } }), null)
 })
 
 test('only an episode that can be sought to is offered', () => {

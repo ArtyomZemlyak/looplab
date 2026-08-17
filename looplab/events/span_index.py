@@ -81,6 +81,15 @@ _VERIFIED_WINDOW_MAX = 256
 # derived index instead of the source file. The shared trace JSONL reader additionally caps a single
 # physical row at TRACE_JSONL_ROW_MAX_BYTES, so even a corrupt multi-GB line cannot become its carry.
 _SCAN_CHUNK_BYTES = 1024 * 1024
+# Full-row detail reads run through a FUSE/S3 file on the deployments this index is meant to
+# accelerate. One ``seek`` + ``read`` per selected JSONL row therefore behaves like one ranged GET
+# per span (measured on geesefs: ~3.4 ms/span before JSON projection). S3 cannot return disjoint
+# ranges in one GET, so join nearby rows into one bounded continuous read and validate only the
+# indexed slices from it. 256 KiB is below the measured request-latency break-even at 100 MiB/s;
+# the 8 MiB extent cap is the existing physical-row allocation ceiling, so coalescing never raises
+# the largest bytes object this reader may allocate.
+_FULL_READ_COALESCE_GAP_BYTES = 256 * 1024
+_FULL_READ_BATCH_MAX_BYTES = TRACE_JSONL_ROW_MAX_BYTES
 # A contiguous exporter receipt chain is the proof that an index may be extended. Size/mtime alone
 # cannot distinguish a true append from an in-place prefix rewrite followed by append, while hashing
 # the whole old prefix on every append is O(n²) live I/O. Receipts bind exact appended byte ranges to
@@ -232,6 +241,60 @@ def _read_exact(stream, size: int, *, label: str) -> bytes:
         chunks.append(chunk)
         remaining -= len(chunk)
     return b"".join(chunks)
+
+
+def _coalesced_full_read_plan(
+        rows: list[int], meta: list[tuple[int, int]], *,
+        max_gap_bytes: int = _FULL_READ_COALESCE_GAP_BYTES,
+        max_batch_bytes: int = _FULL_READ_BATCH_MAX_BYTES,
+) -> list[tuple[int, int, list[tuple[int, int, int]]]]:
+    """Plan bounded continuous reads for file-ordered selected rows.
+
+    Each result is ``(offset, length, slices)`` and each slice is
+    ``(row, relative_offset, row_length)``. Gaps are bytes belonging to unselected spans; they are
+    read only to avoid another remote range request and are never parsed or returned. A malformed
+    persisted index whose offsets move backwards/overlap fails closed here instead of letting a
+    merged buffer reorder or alias evidence. Repeated references to the exact same row remain
+    supported and preserve the old duplicate-output behaviour.
+    """
+    gap_cap = int(max_gap_bytes)
+    batch_cap = int(max_batch_bytes)
+    if gap_cap < 0 or batch_cap < 1:
+        raise ValueError("trace full-read coalescing bounds must be non-negative")
+
+    plan: list[tuple[int, int, list[tuple[int, int, int]]]] = []
+    previous: Optional[tuple[int, int, int]] = None
+    for row in sorted(rows):
+        off, length = meta[row]
+        if (not isinstance(off, int) or isinstance(off, bool) or off < 0
+                or not isinstance(length, int) or isinstance(length, bool)
+                or length < 1 or length > TRACE_JSONL_ROW_MAX_BYTES):
+            raise OSError(getattr(errno, "ESTALE", errno.EIO),
+                          "indexed trace row has invalid byte bounds")
+        end = off + length
+        if previous is not None:
+            prior_row, prior_off, prior_end = previous
+            duplicate = row == prior_row and off == prior_off and end == prior_end
+            if off < prior_end and not duplicate:
+                raise OSError(getattr(errno, "ESTALE", errno.EIO),
+                              "indexed trace row byte ranges overlap")
+        else:
+            duplicate = False
+
+        if plan:
+            start, extent, slices = plan[-1]
+            batch_end = start + extent
+            gap = max(0, off - batch_end)
+            merged_end = max(batch_end, end)
+            if (duplicate or (gap <= gap_cap and merged_end - start <= batch_cap)):
+                slices.append((row, off - start, length))
+                plan[-1] = (start, merged_end - start, slices)
+            else:
+                plan.append((off, length, [(row, 0, length)]))
+        else:
+            plan.append((off, length, [(row, 0, length)]))
+        previous = (row, off, end)
+    return plan
 
 
 def _source_region_sha256(stream, offset: int, length: int) -> str:
@@ -695,52 +758,57 @@ class SpanIndex:
     # "never WRONG data" promise enforceable, so it is a cost to reduce deliberately (a bounded
     # prefix + length is strictly weaker), never one to delete.
     def _read_full(self, rows: list[int]) -> list[dict]:
-        """Read and safely project selected full span lines by seeking to their byte offsets —
-        so a per-node/-trace/-span detail view touches only those bytes, not the whole file. `rows`
-        is a snapshot taken under `_rlock` by the caller; `self.meta` is append-only, so reading
-        `meta[r]` here (outside the lock) is safe — a concurrent append never moves an existing row."""
+        """Read and safely project selected full span lines through bounded coalesced ranges.
+
+        A per-node/-trace/-span view still touches only selected rows plus small bounded gaps, never
+        the whole file. Joining nearby rows changes the S3/geesefs cost from one range request per
+        span to one per <=8 MiB extent while every selected slice retains the exact SHA-256 and
+        normalized-light comparison that makes this accelerator fail closed. `rows` is a snapshot
+        taken under `_rlock` by the caller; the parallel arrays are append-only, so existing entries
+        never move while the slow reads run outside that lock.
+        """
         out: list[dict] = []
+        plan = _coalesced_full_read_plan(rows, self.meta)
         # Offset reads may happen after `get_index` released its source descriptor. Re-open with the
         # same no-follow/type/identity fence so replacing the run's sidecar with a symlink cannot
         # redirect a warm or persisted index into another run's private diagnostics.
         with open_private_trace_file(
                 self.path, expected_identity=self.identity, open_file=open) as f:
-            for r in sorted(rows):                 # sorted → mostly-sequential reads
-                off, length = self.meta[r]
+            for off, length, slices in plan:
                 f.seek(off)
-                data = _read_exact(f, length, label="indexed trace span")
-                if hashlib.sha256(data).hexdigest() != self.row_digests[r]:
-                    raise OSError(
-                        getattr(errno, "ESTALE", errno.EIO),
-                        "indexed trace row no longer matches its source digest", self.path)
-                try:
-                    obj = orjson.loads(data)
-                except orjson.JSONDecodeError as exc:
-                    raise OSError(
-                        getattr(errno, "ESTALE", errno.EIO),
-                        "indexed trace row is no longer valid JSON", self.path) from exc
-                if not isinstance(obj, dict):
-                    raise OSError(
-                        getattr(errno, "ESTALE", errno.EIO),
-                        "indexed trace row is no longer an object", self.path)
-                # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
-                # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
-                # would otherwise be returned as if it were this row's span. Cross-check the read
-                # span_id against the one this row indexes: on a provable mismatch skip it, so the
-                # accelerator returns None/less — never WRONG data — as its docstring promises.
-                normalized = _normalize_span(obj)
-                if normalized is None:
-                    raise OSError(
-                        getattr(errno, "ESTALE", errno.EIO),
-                        "indexed trace row is no longer a valid span", self.path)
-                # The persisted light row is also untrusted. Its node/trace/generation fields select
-                # membership before this read, so matching only span_id would let a crafted index
-                # validate source bytes while retaining attacker-chosen attribution metadata.
-                if _strip_span_io(normalized) != self.light[r]:
-                    raise OSError(
-                        getattr(errno, "ESTALE", errno.EIO),
-                        "indexed trace row metadata no longer matches its source", self.path)
-                out.append(normalized)
+                batch = _read_exact(f, length, label="indexed trace span batch")
+                view = memoryview(batch)
+                for r, relative, row_length in slices:
+                    data = view[relative:relative + row_length]
+                    if hashlib.sha256(data).hexdigest() != self.row_digests[r]:
+                        raise OSError(
+                            getattr(errno, "ESTALE", errno.EIO),
+                            "indexed trace row no longer matches its source digest", self.path)
+                    try:
+                        obj = orjson.loads(data)
+                    except orjson.JSONDecodeError as exc:
+                        raise OSError(
+                            getattr(errno, "ESTALE", errno.EIO),
+                            "indexed trace row is no longer valid JSON", self.path) from exc
+                    if not isinstance(obj, dict):
+                        raise OSError(
+                            getattr(errno, "ESTALE", errno.EIO),
+                            "indexed trace row is no longer an object", self.path)
+                    # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
+                    # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
+                    # would otherwise be returned as if it were this row's span. Cross-check the
+                    # complete normalized light record, not only span_id: attribution metadata chose
+                    # membership before this read and is part of the evidence being validated.
+                    normalized = _normalize_span(obj)
+                    if normalized is None:
+                        raise OSError(
+                            getattr(errno, "ESTALE", errno.EIO),
+                            "indexed trace row is no longer a valid span", self.path)
+                    if _strip_span_io(normalized) != self.light[r]:
+                        raise OSError(
+                            getattr(errno, "ESTALE", errno.EIO),
+                            "indexed trace row metadata no longer matches its source", self.path)
+                    out.append(normalized)
         return out
 
     def full_span(self, sid: str) -> Optional[dict]:
