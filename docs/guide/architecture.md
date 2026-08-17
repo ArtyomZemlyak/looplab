@@ -118,7 +118,7 @@ other work items that test the same hypothesis), **cross-run memory**
 |---|---|
 | Control loop + crash-resume | `engine/orchestrator.py` |
 | The two pacing clocks: the node-count window (`cadence_due`, behind lessons/deep-research/report/Strategist/concept cadences) and the occupancy pace (`occupancy_due` — produce while an eval is running and the board behind it does not cover the width; records no `at_node`, has no setting of its own) | `engine/cadence.py`, `engine/orchestrator.py::_occupancy_paced_creates` |
-| Standing watches: the durable always-on assistant record (`<runs>/assistant/.watches/`) + the lazily-started scheduler over it — the server evaluates the trigger, the wake-up carries its own stored instruction at the mode pinned when armed | `serve/assistant_watch.py`, `serve/routers/assistant.py`, `ui/src/assistantWatchModel.js` |
+| Standing watches + continuous work: one durable assistant record (`<runs>/assistant/.watches/`) and lazy scheduler for typed run/experiment/stage waits, every-N monitoring, and bounded resumable goal/TODO/checkpoint cycles — server-evaluated conditions, pinned target identity and permission mode | `serve/assistant_watch.py`, `serve/routers/assistant.py`, `ui/src/assistantWatchModel.js` |
 | Append-only log · pure fold · SQLite read-model | `events/eventstore.py`, `events/replay.py`, `events/readmodel.py` |
 | Researcher / Developer / unified agent | `agents/roles.py`, `agents/unified_agent.py` |
 | Canonical eval/LLM concurrency + named-lane broker | `engine/orchestrator.py`, `core/llm_broker.py`, `engine/strategy.py` |

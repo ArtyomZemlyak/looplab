@@ -136,7 +136,7 @@ from looplab.serve.protocol import (
 from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode
 
 # ---- vocabularies (closed on purpose; a typo must be a refusal, not a watch that never fires) ----
-WATCH_TRIGGER_KINDS = ("run_state", "schedule")
+WATCH_TRIGGER_KINDS = ("run_state", "target_status", "schedule", "work")
 
 # What a `run_state` watch may wait for. The eight run PHASES the read model already publishes, plus
 # ONE derived state the phase vocabulary cannot express: `engine_stopped` means no engine process
@@ -148,10 +148,29 @@ WATCH_RUN_STATES = (
     PHASE_ONBOARDING, PHASE_GROUNDING, PHASE_SEARCH, "engine_stopped",
 )
 
+# Status vocabularies for the generalized wait surface. ``run_state`` remains a compatibility
+# trigger because existing records must stay readable after an upgrade; new callers can address a
+# whole run, one experiment (node), or one named stage through the same typed shape.  This registry
+# is deliberately closed: a typo must fail while arming, not spend a day polling for a state no
+# projection can ever publish.
+WATCH_EXPERIMENT_STATES = ("pending", "evaluated", "failed", "tombstoned")
+WATCH_STAGE_STATES = (
+    "pending", "ok", "reused", "fail", "timeout", "needs_failed", "env_unsupported",
+    "expect_failed", "check_failed",
+)
+WATCH_TARGET_STATES = {
+    "run": WATCH_RUN_STATES,
+    "experiment": WATCH_EXPERIMENT_STATES,
+    "stage": WATCH_STAGE_STATES,
+}
+
 # `armed` -> `waking` -> (`armed` again for a schedule | a terminal). Terminals are final: nothing
 # in this module transitions out of one, so a resolved watch cannot be resurrected by a stale poll.
-WATCH_STATUSES = ("armed", "waking", "done", "cancelled", "expired", "failed", "interrupted")
-WATCH_TERMINAL_STATUSES = frozenset({"done", "cancelled", "expired", "failed", "interrupted"})
+WATCH_STATUSES = (
+    "armed", "waking", "done", "blocked", "cancelled", "expired", "failed", "interrupted",
+)
+WATCH_TERMINAL_STATUSES = frozenset(
+    {"done", "blocked", "cancelled", "expired", "failed", "interrupted"})
 
 # ---- the floor under "effectively infinite" (doc 36: a budget plus a judgment, never neither) ----
 WATCH_MIN_INTERVAL_S = 15.0          # below this a "monitor every N" is a tight poll wearing a name
@@ -179,6 +198,10 @@ WATCH_MAX_ACTIVE_PER_SESSION = 8
 WATCH_ID_RE = re.compile(r"[0-9a-f]{16}")
 _WATCH_DIR = ".watches"
 _MAX_INSTRUCTION_CHARS = 4000
+_MAX_CHECKPOINT_SUMMARY_CHARS = 4000
+_MAX_TODO_CHARS = 1000
+_MAX_TODOS = 100
+_MAX_TODOS_JSON_CHARS = 6000
 
 
 class WatchDeferred(Exception):
@@ -239,6 +262,128 @@ def _bounded_float(value, *, low: float, high: float, default: float, what: str)
     # every 15 believes they configured something they did not. Same rule as `engine/widths.py`.
     if out < low or out > high:
         raise WatchRefusal(f"{what} must be between {low:g} and {high:g} seconds (got {out:g})")
+    return out
+
+
+def _normalize_todos(value, *, what: str = "todos") -> list[dict]:
+    """A bounded, JSON-only TODO projection suitable for a durable work handoff."""
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise WatchRefusal(f"{what} must be an array")
+    if len(value) > _MAX_TODOS:
+        raise WatchRefusal(f"{what} may contain at most {_MAX_TODOS} items")
+    out = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise WatchRefusal(f"every {what} item must be an object")
+        content = str(item.get("content") or "").strip()
+        status = str(item.get("status") or "pending")
+        if not content:
+            raise WatchRefusal(f"every {what} item needs content")
+        if len(content) > _MAX_TODO_CHARS:
+            raise WatchRefusal(f"a {what} item is too long (max {_MAX_TODO_CHARS} chars)")
+        if status not in ("pending", "in_progress", "completed"):
+            raise WatchRefusal(
+                f"unknown TODO status {status!r} — use pending, in_progress, or completed")
+        out.append({"content": content, "status": status})
+    encoded = json.dumps(out, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded) > _MAX_TODOS_JSON_CHARS:
+        raise WatchRefusal(
+            f"{what} is too large for a resumable handoff (max {_MAX_TODOS_JSON_CHARS} chars)")
+    return out
+
+
+def normalize_target_status_trigger(trigger) -> dict:
+    """Validate the typed run / experiment / stage condition shared by watches and work waits."""
+    if not isinstance(trigger, dict):
+        raise WatchRefusal("a target_status watch needs a trigger object")
+    target = trigger.get("target")
+    if not isinstance(target, dict):
+        raise WatchRefusal("a target_status watch needs a typed `target` object")
+    target_kind = str(target.get("kind") or "").strip()
+    if target_kind not in WATCH_TARGET_STATES:
+        raise WatchRefusal(
+            f"unknown target kind {target_kind!r} — use one of: "
+            f"{', '.join(WATCH_TARGET_STATES)}")
+    run = str(target.get("run") or "").strip()
+    if not run:
+        raise WatchRefusal("a status target needs the run id")
+    clean_target = {"kind": target_kind, "run": run}
+    if target_kind in ("experiment", "stage"):
+        node = target.get("node")
+        if isinstance(node, bool):
+            raise WatchRefusal("an experiment target needs a non-negative integer `node`")
+        try:
+            node = int(node)
+        except (TypeError, ValueError) as exc:
+            raise WatchRefusal(
+                "an experiment target needs a non-negative integer `node`") from exc
+        if node < 0:
+            raise WatchRefusal("an experiment target needs a non-negative integer `node`")
+        clean_target["node"] = node
+    if target_kind == "stage":
+        stage = str(target.get("stage") or "").strip()
+        if not stage:
+            raise WatchRefusal("a stage target needs its stage name")
+        if len(stage) > 200:
+            raise WatchRefusal("a stage name is too long (max 200 chars)")
+        clean_target["stage"] = stage
+
+    until = trigger.get("until")
+    if isinstance(until, str):
+        until = [until]
+    allowed = WATCH_TARGET_STATES[target_kind]
+    if not isinstance(until, (list, tuple)) or not until:
+        raise WatchRefusal(
+            f"a {target_kind} status watch needs `until` — one or more of: "
+            f"{', '.join(allowed)}")
+    wanted = []
+    for state in until:
+        state = str(state or "").strip()
+        if state not in allowed:
+            raise WatchRefusal(
+                f"unknown {target_kind} state {state!r} — use one of: {', '.join(allowed)}")
+        if state not in wanted:
+            wanted.append(state)
+    return {"kind": "target_status", "target": clean_target, "until": wanted}
+
+
+def normalize_work_checkpoint(checkpoint) -> dict:
+    """Validate the model's durable handoff before the scheduler acts on it.
+
+    A malformed or missing checkpoint never defaults to ``continue``: after a mutating cycle the
+    server cannot know which side effects happened, and replaying on a guess is the unsafe branch.
+    """
+    if not isinstance(checkpoint, dict):
+        raise WatchRefusal("a continuous-work cycle must leave a checkpoint")
+    status = str(checkpoint.get("status") or "").strip()
+    if status not in ("continue", "waiting", "done", "blocked"):
+        raise WatchRefusal(
+            "checkpoint status must be continue, waiting, done, or blocked")
+    summary = str(checkpoint.get("summary") or "").strip()
+    if not summary:
+        raise WatchRefusal("a continuous-work checkpoint needs a handoff summary")
+    if len(summary) > _MAX_CHECKPOINT_SUMMARY_CHARS:
+        raise WatchRefusal(
+            f"the checkpoint summary is too long (max {_MAX_CHECKPOINT_SUMMARY_CHARS} chars)")
+    if "todos" not in checkpoint:
+        raise WatchRefusal("a continuous-work checkpoint needs the complete TODO list")
+    out = {"status": status, "summary": summary,
+           "todos": _normalize_todos(checkpoint.get("todos"), what="checkpoint todos")}
+    if checkpoint.get("next_in_s") is not None:
+        if status != "continue":
+            raise WatchRefusal("next_in_s is only valid for a continue checkpoint")
+        out["next_in_s"] = _bounded_float(
+            checkpoint.get("next_in_s"), low=WATCH_MIN_INTERVAL_S,
+            high=WATCH_MAX_INTERVAL_S, default=60.0, what="next_in_s")
+    if status == "waiting":
+        wait = checkpoint.get("wait")
+        if isinstance(wait, dict) and wait.get("kind") is None:
+            wait = {"kind": "target_status", **wait}
+        out["wait"] = normalize_target_status_trigger(wait)
+    elif checkpoint.get("wait") is not None:
+        raise WatchRefusal("wait is only valid for a waiting checkpoint")
     return out
 
 
@@ -342,6 +487,15 @@ class WatchStore:
         trigger = record.get("trigger")
         if not isinstance(trigger, dict) or trigger.get("kind") not in WATCH_TRIGGER_KINDS:
             return False
+        try:
+            # A known kind is not enough for an autonomous, potentially paid wake-up: validate the
+            # entire condition again at the disk trust boundary. In particular, a hand-edited work
+            # record with no resumable checkpoint must be dropped rather than started from a guess.
+            WatchStore._normalize_trigger(trigger)
+            if trigger.get("kind") == "work":
+                normalize_work_checkpoint(record.get("checkpoint"))
+        except WatchRefusal:
+            return False
         return isinstance(record.get("session"), str) and bool(record["session"])
 
     # ---- arming ---------------------------------------------------------------------------
@@ -361,6 +515,7 @@ class WatchStore:
         if len(instruction) > _MAX_INSTRUCTION_CHARS:
             raise WatchRefusal(f"the instruction is too long (max {_MAX_INSTRUCTION_CHARS} chars)")
         trigger = self._normalize_trigger(trigger)
+        initial_todos = trigger.pop("initial_todos", []) if trigger.get("kind") == "work" else []
         ts = time.time() if now is None else float(now)
         wakeups_cap = int(_bounded_float(
             max_wakeups, low=1, high=WATCH_MAX_WAKEUPS_CEILING,
@@ -376,11 +531,12 @@ class WatchStore:
             "status": "armed",
             "created": ts,
             "updated": ts,
-            # The first check of a `run_state` watch is IMMEDIATE (the condition may already hold —
+            # The first check of a status/work watch is IMMEDIATE (the condition may already hold —
             # "tell me when run X finishes" about a run that finished an hour ago must answer now,
             # not in five seconds). A schedule's first wake-up is one interval away, because "every
             # N minutes" starting instantly would fire twice for the operator's first interval.
-            "next_due": ts if trigger["kind"] == "run_state" else ts + trigger["every_s"],
+            "next_due": (ts + trigger["every_s"]
+                         if trigger["kind"] == "schedule" else ts),
             "attempts": 0,
             "wakeups": 0,
             "max_wakeups": wakeups_cap,
@@ -395,6 +551,16 @@ class WatchStore:
             # is gone or not yet, and a record an operator reads should show it. A pre-existing
             # record without the key reads the same way — absent is "never seen".
             record["run_seen"] = False
+        elif trigger["kind"] == "target_status":
+            record["target_seen"] = False
+        elif trigger["kind"] == "work":
+            # This is the compact durable handoff, distinct from the transcript. The transcript is
+            # evidence and context; the checkpoint is the bounded state a fresh process needs in
+            # order to resume the next safe cycle without asking the model to summarize history.
+            record["checkpoint"] = {
+                "status": "continue", "summary": "No work cycle has run yet.",
+                "todos": initial_todos,
+            }
         with self._lock:
             # COUNT AND WRITE UNDER ONE LOCK. This was a check-then-act with the count outside the
             # lock and the write inside it, so two arms racing (two tabs, or the agent tool and the
@@ -422,6 +588,14 @@ class WatchStore:
             every = _bounded_float(trigger.get("every_s"), low=WATCH_MIN_INTERVAL_S,
                                    high=WATCH_MAX_INTERVAL_S, default=300.0, what="every_s")
             return {"kind": "schedule", "every_s": every}
+        if kind == "work":
+            every = _bounded_float(trigger.get("every_s"), low=WATCH_MIN_INTERVAL_S,
+                                   high=WATCH_MAX_INTERVAL_S, default=60.0, what="every_s")
+            return {"kind": "work", "every_s": every,
+                    "initial_todos": _normalize_todos(trigger.get("initial_todos"),
+                                                      what="initial_todos")}
+        if kind == "target_status":
+            return normalize_target_status_trigger(trigger)
         run = str(trigger.get("run") or "").strip()
         if not run:
             raise WatchRefusal("a run_state watch needs the run id to watch")
@@ -604,6 +778,17 @@ def describe_trigger(trigger: dict) -> str:
         else:
             unit = f"{every:g} s"
         return f"every {unit}"
+    if trigger.get("kind") == "work":
+        return "continuous work until it reports done or blocked"
+    if trigger.get("kind") == "target_status":
+        target = trigger.get("target") or {}
+        label = f"run {target.get('run')}"
+        if target.get("kind") in ("experiment", "stage"):
+            label += f" experiment {target.get('node')}"
+        if target.get("kind") == "stage":
+            label += f" stage {target.get('stage')}"
+        states = trigger.get("until") or []
+        return f"{label} to reach {' or '.join(str(s) for s in states)}"
     states = trigger.get("until") or []
     return f"run {trigger.get('run')} to reach {' or '.join(str(s) for s in states)}"
 
@@ -626,9 +811,37 @@ WAKEUP_PREAMBLE = (
     "Standing instruction:\n{instruction}"
 )
 
+WORK_PREAMBLE = (
+    "[automatic continuous-work cycle — nobody typed this]\n"
+    "This chat previously armed durable work that survives page and server restarts.\n"
+    "Goal: {goal}\n"
+    "Previous checkpoint: {summary}\n"
+    "Current TODOs: {todos}\n"
+    "This is cycle {wakeup} of at most {max_wakeups}.\n"
+    "Server observation that resumed this cycle: {observation}\n"
+    "\n"
+    "Make concrete progress toward the goal using the tools available in the pinned permission "
+    "mode. Do not busy-poll a run, experiment, or stage: if progress depends on one, checkpoint as "
+    "`waiting` with a typed target condition and let the server observe it without model calls. "
+    "Before `final_answer`, call `checkpoint_work` exactly once with a compact handoff, the complete "
+    "current TODO list, and one decision: `continue`, `waiting`, `done`, or `blocked`. Use `done` only "
+    "after verifying the goal; use `blocked` when another autonomous cycle cannot safely help."
+)
+
 
 def wakeup_instruction(record: dict, observation) -> str:
     """The full model-facing instruction for one wake-up — the record's own sentence, in context."""
+    if (record.get("trigger") or {}).get("kind") == "work":
+        checkpoint = record.get("checkpoint") if isinstance(record.get("checkpoint"), dict) else {}
+        return WORK_PREAMBLE.format(
+            goal=record.get("instruction", ""),
+            summary=str(checkpoint.get("summary") or "No prior checkpoint.")[:_MAX_CHECKPOINT_SUMMARY_CHARS],
+            todos=json.dumps(checkpoint.get("todos") or [], ensure_ascii=False, sort_keys=True,
+                             separators=(",", ":"))[:_MAX_TODOS_JSON_CHARS],
+            observation=json.dumps(observation, sort_keys=True, default=str)[:1500],
+            wakeup=int(record.get("wakeups", 0)) + 1,
+            max_wakeups=record.get("max_wakeups"),
+        )
     return WAKEUP_PREAMBLE.format(
         waiting_for=record.get("waiting_for") or describe_trigger(record.get("trigger") or {}),
         observation=json.dumps(observation, sort_keys=True, default=str)[:1500],
@@ -692,10 +905,12 @@ class WatchService:
     """
 
     def __init__(self, store: WatchStore, *, observe_run: Callable, run_turn_fn: Callable,
-                 append_turn: Callable, interval_s: float = 2.0, on_error: Optional[Callable] = None,
+                 append_turn: Callable, observe_target: Optional[Callable] = None,
+                 interval_s: float = 2.0, on_error: Optional[Callable] = None,
                  session_exists: Optional[Callable] = None):
         self.store = store
         self.observe_run = observe_run          # run_id -> the read model's row (or None)
+        self.observe_target = observe_target    # typed target -> bounded status projection
         self.run_turn_fn = run_turn_fn          # (record, instruction) -> the turn result dict
         self.append_turn = append_turn          # (session, turn dict) -> None
         # session id -> True (there) / False (PROVABLY gone) / None (cannot tell). The third answer
@@ -823,7 +1038,109 @@ class WatchService:
         trigger = record.get("trigger") or {}
         if trigger.get("kind") == "run_state":
             return self._service_run_state(record, trigger, now=now)
+        if trigger.get("kind") == "target_status":
+            return self._service_target_status(record, trigger, now=now)
+        if trigger.get("kind") == "work":
+            checkpoint = record.get("checkpoint") or {}
+            if checkpoint.get("status") == "waiting" and isinstance(checkpoint.get("wait"), dict):
+                return self._service_target_status(
+                    record, checkpoint["wait"], now=now, resume_work=True)
+            return self._wake(
+                record, observation={"reason": "continuous_work_cycle", "at": now}, now=now)
         return self._wake(record, observation={"reason": "scheduled", "at": now}, now=now)
+
+    def _service_target_status(self, record: dict, trigger: dict, *, now: float,
+                               resume_work: bool = False):
+        """Evaluate one typed status condition without asking the model.
+
+        Identity is pinned on first sight. A run reset or a node retry is a different target even
+        when it reuses the same human label; silently following it would make a watch report on an
+        object the operator never armed and make a work cycle repeat against unknown state.
+        """
+        terminal = "blocked" if resume_work else "failed"
+        if self.observe_target is None:
+            return self._retire(
+                record, status=terminal,
+                reason="typed status observation is unavailable on this server")
+        target = trigger.get("target") or {}
+        try:
+            observation = self.observe_target(target)
+        except Exception as exc:  # noqa: BLE001 - a read failure is a retry, never a guessed state
+            attempts = int(record.get("attempts", 0)) + 1
+            return self.store.update(
+                record["id"], attempts=attempts,
+                next_due=now + next_poll_delay(attempts),
+                last_error=(f"could not read {describe_trigger(trigger)}: "
+                            f"{type(exc).__name__}"))
+
+        prefix = "work_wait_" if resume_work else "target_"
+        if record.get(f"{prefix}seen") and isinstance(observation, dict):
+            pinned_generation = record.get(f"{prefix}run_generation")
+            observed_generation = observation.get("run_generation")
+            if (pinned_generation is not None and observed_generation is not None
+                    and pinned_generation != observed_generation):
+                return self._retire(
+                    record, status=terminal, observation=observation,
+                    reason=(f"{describe_trigger(trigger)} changed run generation while it was "
+                            "being watched; the replacement was not followed automatically"))
+            pinned_attempt = record.get(f"{prefix}attempt")
+            observed_attempt = observation.get("attempt")
+            if (pinned_attempt is not None and observed_attempt is not None
+                    and pinned_attempt != observed_attempt):
+                return self._retire(
+                    record, status=terminal, observation=observation,
+                    reason=(f"{describe_trigger(trigger)} changed experiment attempt while it was "
+                            "being watched; the replacement was not followed automatically"))
+        if isinstance(observation, dict) and observation.get("impossible"):
+            return self._retire(
+                record, status=terminal, observation=observation,
+                reason=str(observation.get("reason") or
+                           f"{describe_trigger(trigger)} can no longer be reached"))
+        if not isinstance(observation, dict) or not observation.get("present"):
+            return self._service_absent_target(
+                record, trigger, observation, now=now, prefix=prefix, terminal=terminal)
+
+        fields = {}
+        if not record.get(f"{prefix}seen"):
+            fields[f"{prefix}seen"] = True
+            if observation.get("run_generation") is not None:
+                fields[f"{prefix}run_generation"] = observation.get("run_generation")
+            if observation.get("attempt") is not None:
+                fields[f"{prefix}attempt"] = observation.get("attempt")
+            record = self.store.update(record["id"], **fields) or record
+
+        states = frozenset(str(s) for s in (observation.get("states") or ()))
+        if not states.intersection(trigger.get("until") or ()):
+            attempts = int(record.get("attempts", 0)) + 1
+            return self.store.update(
+                record["id"], attempts=attempts, last_observation=observation,
+                next_due=now + next_poll_delay(attempts), last_error="")
+        return self._wake(record, observation=observation, now=now)
+
+    def _service_absent_target(self, record: dict, trigger: dict, observation, *, now: float,
+                               prefix: str, terminal: str):
+        label = describe_trigger(trigger)
+        observation = observation if isinstance(observation, dict) else {
+            "target": trigger.get("target"), "present": False}
+        if record.get(f"{prefix}seen"):
+            return self._retire(
+                record, status=terminal, observation=observation,
+                reason=f"{label} disappeared, so this exact condition can no longer be met")
+        started = float(record.get(f"{prefix}started", record.get("created", now)) or now)
+        deadline = started + WATCH_RUN_APPEARANCE_GRACE_S
+        if now >= deadline:
+            return self._retire(
+                record, status=terminal, observation=observation,
+                reason=(f"{label} never appeared in the "
+                        f"{WATCH_RUN_APPEARANCE_GRACE_S / 60:g} minute appearance window"))
+        attempts = int(record.get("attempts", 0)) + 1
+        observation = {**observation, "present": False, "awaiting_first_sight": True,
+                       "give_up_at": deadline}
+        return self.store.update(
+            record["id"], attempts=attempts, last_observation=observation,
+            next_due=min(now + next_poll_delay(attempts), deadline),
+            last_error=(f"{label} does not exist yet — waiting for it to appear "
+                        f"(giving up in {max(0.0, deadline - now) / 60:.0f} min if it does not)"))
 
     def _service_run_state(self, record: dict, trigger: dict, *, now: float):
         run_id = trigger.get("run")
@@ -943,6 +1260,7 @@ class WatchService:
         claimed = self.store.claim(record["id"], now=now)
         if claimed is None:
             return None
+        trigger = claimed.get("trigger") or {}
         instruction = wakeup_instruction(claimed, observation)
         try:
             result = self.run_turn_fn(claimed, instruction)
@@ -956,12 +1274,15 @@ class WatchService:
                                      last_error="deferred: the chat was busy with a live turn")
         except Exception as exc:  # noqa: BLE001 - a failed wake-up is reported, never crashed on
             return self._retire(
-                claimed, status="failed", observation=observation,
+                claimed, status=("blocked" if trigger.get("kind") == "work" else "failed"),
+                observation=observation,
                 reason=f"the wake-up turn failed: {type(exc).__name__}")
         self._record_turn(claimed, result, observation)
         wakeups = int(claimed.get("wakeups", 0)) + 1
-        trigger = claimed.get("trigger") or {}
-        if trigger.get("kind") == "run_state":
+        if trigger.get("kind") == "work":
+            return self._complete_work_cycle(
+                claimed, result, observation=observation, wakeups=wakeups, now=now)
+        if trigger.get("kind") in ("run_state", "target_status"):
             # A run-state watch is a ONE-SHOT by construction: its condition was met, so re-arming
             # it would wake on the same fact forever. "Watch it again" is a new watch, which is also
             # the only shape under which the operator re-consents to the spend.
@@ -977,6 +1298,76 @@ class WatchService:
         return self.store.update(
             claimed["id"], status="armed", wakeups=wakeups, last_observation=observation,
             next_due=now + float(trigger.get("every_s") or 300.0), last_error="")
+
+    def _complete_work_cycle(self, record: dict, result, *, observation, wakeups: int, now: float):
+        """Apply the cycle's explicit handoff; never infer ``continue`` from an absent one."""
+        try:
+            checkpoint = normalize_work_checkpoint(
+                result.get("work_checkpoint") if isinstance(result, dict) else None)
+        except WatchRefusal as exc:
+            counted = self.store.update(
+                record["id"], wakeups=wakeups, last_observation=observation) or record
+            return self._retire(
+                counted, status="blocked", observation=observation,
+                reason=(f"continuous work stopped after cycle {wakeups}: {exc}; automatic replay "
+                        "was refused because the previous cycle's outcome is not safely resumable"))
+
+        counted = self.store.update(
+            record["id"], wakeups=wakeups, checkpoint=checkpoint,
+            last_observation=observation) or record
+        if checkpoint["status"] == "done":
+            return self.store.update(
+                counted["id"], status="done", last_error="",
+                waiting_for="continuous work completed")
+        if checkpoint["status"] == "blocked":
+            return self._retire(
+                counted, status="blocked", observation=observation,
+                reason=f"continuous work reported a blocker: {checkpoint['summary'][:300]}")
+        if wakeups >= int(counted.get("max_wakeups", WATCH_DEFAULT_MAX_WAKEUPS)):
+            return self._retire(
+                counted, status="expired", observation=observation,
+                reason=(f"continuous work reached its {wakeups}-cycle budget with checkpoint "
+                        f"status {checkpoint['status']}"))
+
+        if checkpoint["status"] == "waiting":
+            wait = checkpoint["wait"]
+            fields = {
+                "status": "armed", "attempts": 0,
+                "next_due": now + WATCH_POLL_BASE_S, "last_error": "",
+                "waiting_for": f"continuous work; {describe_trigger(wait)}",
+                "work_wait_seen": False, "work_wait_started": now,
+                "work_wait_run_generation": None, "work_wait_attempt": None,
+            }
+            # Fence the dependency at the HANDOFF, not at the first scheduler poll seconds later.
+            # A retry/reset in that gap is exactly the replacement-following race the identity
+            # fields exist to prevent. This is still a server read and never a model call; a
+            # transient read failure simply leaves first sight to the ordinary bounded poll path.
+            if self.observe_target is not None:
+                try:
+                    first = self.observe_target(wait.get("target") or {})
+                except Exception as exc:  # noqa: BLE001 - the next server poll retries this read
+                    fields["last_error"] = (
+                        f"could not read {describe_trigger(wait)} at handoff: "
+                        f"{type(exc).__name__}")
+                else:
+                    if isinstance(first, dict):
+                        fields["last_observation"] = first
+                        if first.get("present"):
+                            fields["work_wait_seen"] = True
+                            fields["work_wait_run_generation"] = first.get("run_generation")
+                            fields["work_wait_attempt"] = first.get("attempt")
+                        states = frozenset(str(s) for s in (first.get("states") or ()))
+                        if first.get("impossible") or states.intersection(wait.get("until") or ()):
+                            fields["next_due"] = now
+            return self.store.update(
+                counted["id"], **fields)
+        delay = float(checkpoint.get("next_in_s")
+                      or (counted.get("trigger") or {}).get("every_s") or 60.0)
+        return self.store.update(
+            counted["id"], status="armed", attempts=0, next_due=now + delay,
+            waiting_for="continuous work until it reports done or blocked", last_error="",
+            work_wait_seen=False, work_wait_started=None,
+            work_wait_run_generation=None, work_wait_attempt=None)
 
     def _record_turn(self, record: dict, result, observation) -> None:
         """Append the wake-up to the SESSION TRANSCRIPT, where the operator already looks.
@@ -1000,6 +1391,8 @@ class WatchService:
             "applied": result.get("applied") or [],
             "todos": result.get("todos") or [],
         }
+        if isinstance(result.get("work_checkpoint"), dict):
+            turn["work_checkpoint"] = result["work_checkpoint"]
         if result.get("error_kind"):
             turn["error_kind"] = result["error_kind"]
         # Same rule as an operator-typed turn: a salvage must not read as a conclusion.

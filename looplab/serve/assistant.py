@@ -1465,7 +1465,8 @@ class ShareStore:
 
 # --------------------------------------------------------------------------- system prompt + toolset
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
-                  cross_run_tools: bool = False, taxonomy_tools: bool = False) -> str:
+                  cross_run_tools: bool = False, taxonomy_tools: bool = False,
+                  work_cycle: bool = False, standing_work: bool = False) -> str:
     mode = normalize_mode(mode)
     mode_line = {
         "plan": "MODE=plan: you are READ-ONLY. You may inspect files and runs and PROPOSE changes in "
@@ -1527,8 +1528,20 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "knowledge base, so it is unavailable in read-only plan mode and follows the active "
            "permission policy in mutating modes.\n"
            if knowledge_dir else "")
-        + "Be concise and concrete; use Markdown. When you have the answer, call `final_answer` exactly "
-        "once with your reply.")
+        + ("This is one DURABLE CONTINUOUS-WORK CYCLE. The automatic instruction names the goal, "
+           "previous checkpoint and TODOs. Make concrete progress, then call `checkpoint_work` exactly "
+           "once before `final_answer`: choose continue, waiting, done, or blocked; include a compact "
+           "handoff and the complete current TODO list. Never busy-poll a status yourself — checkpoint "
+           "as waiting with a typed run/experiment/stage target so the server can wait without model "
+           "calls. Do not claim done until you verified the goal.\n" if work_cycle else "")
+        + ("For work that must outlive this reply, use standing tools instead of promising to keep "
+           "working in this HTTP turn: `watch_status` waits for a typed run/experiment/stage state, "
+           "`watch_every` monitors every N seconds, and `work_until_done` runs resumable goal/TODO/"
+           "checkpoint cycles until done or blocked. List or stop them with `list_watches` / "
+           "`stop_watch`.\n" if standing_work else "")
+        + "Be concise and concrete; use Markdown. Your final reply answers only the CURRENT request "
+        "and reports only work performed in this turn; earlier conversation is context, not work to "
+        "recap. When you have the answer, call `final_answer` exactly once with your reply.")
 
 
 # @-mentions: `@run:<id>` and `@file:<path>` in the user's message are expanded (server-side, before
@@ -1569,8 +1582,9 @@ def expand_mentions(text: str, run_root, *, alive_fn: Optional[Callable] = None,
 def _emit_spec() -> dict:
     return {"type": "function", "function": {
         "name": "final_answer",
-        "description": "Provide your final reply to the user (Markdown). Call this exactly once when "
-                       "you are done using tools.",
+        "description": "Provide the final Markdown reply for the current request only. Report work "
+                       "performed in this turn; use earlier conversation only as context and do not "
+                       "recap it. Call this exactly once when you are done using tools.",
         "parameters": {"type": "object",
                        "properties": {"reply": {"type": "string"}}, "required": ["reply"]}}}
 
@@ -1580,7 +1594,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 client=None, subagents: bool = False, mcp: bool = False, settings=None,
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
-                mutation_journal_path=None, mutation_recovery: bool = False, watches=None):
+                mutation_journal_path=None, mutation_recovery: bool = False, watches=None,
+                work_cycle: bool = False):
     """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
     memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
     in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
@@ -1677,6 +1692,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns())]
     providers.append(TodoTools(on_todos=on_todos))
+    if work_cycle:
+        providers.append(WorkCheckpointTools())
     # Standing watches (BACKLOG §F4) — present in EVERY mode including read-only plan, because
     # arming one takes no action; it records an instruction to run LATER at this chat's already-
     # pinned mode. Deliberately NOT on the `mutation_recovery` path above: a recovered dangling turn
@@ -1897,7 +1914,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
              on_todos: Optional[Callable] = None, reply_sink: Optional[Callable] = None,
              on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
              command_service=None, command_key_namespace: str = "",
-             mutation_journal_path=None, mutation_recovery: bool = False, watches=None) -> dict:
+             mutation_journal_path=None, mutation_recovery: bool = False, watches=None,
+             work_cycle: bool = False) -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -1913,7 +1931,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         command_service=command_service,
                         command_key_namespace=command_key_namespace,
                         mutation_journal_path=mutation_journal_path,
-                        mutation_recovery=mutation_recovery, watches=watches)
+                        mutation_recovery=mutation_recovery, watches=watches,
+                        work_cycle=work_cycle)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -1923,7 +1942,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     _has_taxonomy = _has_cross_run
     convo = [{"role": "system", "content": system_prompt(
         mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None),
-        cross_run_tools=_has_cross_run, taxonomy_tools=_has_taxonomy)}]
+        cross_run_tools=_has_cross_run, taxonomy_tools=_has_taxonomy,
+        work_cycle=work_cycle, standing_work=watches is not None)}]
     for m in messages:
         role = m.get("role")
         # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,
@@ -1994,6 +2014,10 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     def _collect(attr):
         return [a for p in getattr(tools, "providers", []) if hasattr(p, attr) for a in getattr(p, attr)]
 
+    def _checkpoint_fields():
+        checkpoints = _collect("checkpoints")
+        return {"work_checkpoint": checkpoints[-1]} if checkpoints else {}
+
     # WHAT HAPPENED TO MY TURN. On a cut-short exit the loop salvages one forced emit from what it
     # gathered — the right move — but presenting a cut-short investigation as a finished answer is
     # how "the assistant hangs around 40 tool uses and then something odd comes back" reads to an
@@ -2008,7 +2032,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the request
         return {"ok": False, **safe_assistant_failure(e), "steps": steps,
                 "applied": _collect("applied"), "proposals": _collect("proposals"),
-                "todos": _collect("todos"), "refs": refs, "mode": mode}
+                "todos": _collect("todos"), "refs": refs, "mode": mode,
+                **_checkpoint_fields()}
     reply = reply or box.get("reply") or "(no reply)"
     # Real token streaming of the FINAL answer: after the tool loop has acted, generate the
     # user-facing answer with a streaming call over the accumulated trace, pushing tokens to the sink.
@@ -2070,6 +2095,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     return {"ok": True, "reply": reply, "steps": steps,
             "applied": _collect("applied"), "proposals": _collect("proposals"),
             "todos": _collect("todos"), "refs": refs, "mode": mode,
+            **_checkpoint_fields(),
             # Absent on an ordinary turn. Present, with its kind and numbers, when the answer above
             # is a salvage rather than a conclusion — so the UI can say so instead of the operator
             # inferring it from a reply that stops early.
@@ -2125,12 +2151,72 @@ class TodoTools:
         return f"(todos updated: {done}/{len(items)} done)"
 
 
+class WorkCheckpointTools:
+    """The explicit durable handoff at the end of one continuous-work cycle.
+
+    This tool does not schedule anything and grants no authority. It only records the model's last
+    valid judgment in this in-memory turn result; ``WatchService`` validates it again before making
+    the durable transition. Keeping the decision explicit is what prevents a cut-off mutating turn
+    from being replayed under an invented default of ``continue``.
+    """
+
+    def __init__(self):
+        self.checkpoints: list[dict] = []
+
+    def bind_state(self, state=None, parent=None) -> None:
+        return None
+
+    def specs(self) -> list[dict]:
+        from looplab.tools._base import fn_spec
+        todo = {"type": "object", "properties": {
+            "content": {"type": "string"},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+        }, "required": ["content", "status"]}
+        target = {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["run", "experiment", "stage"]},
+            "run": {"type": "string"},
+            "node": {"type": "integer", "minimum": 0},
+            "stage": {"type": "string"},
+        }, "required": ["kind", "run"]}
+        wait = {"type": "object", "properties": {
+            "target": target,
+            "until": {"type": "array", "items": {"type": "string"}},
+        }, "required": ["target", "until"]}
+        return [fn_spec(
+            "checkpoint_work",
+            "Finish this continuous-work cycle with a durable handoff. Call exactly once before "
+            "final_answer. `waiting` requires a typed run/experiment/stage condition; the server "
+            "will poll it without model calls. `done` means the goal was verified; `blocked` means "
+            "another autonomous cycle cannot safely help.",
+            {"status": {"type": "string", "enum": ["continue", "waiting", "done", "blocked"]},
+             "summary": {"type": "string", "description": "compact completed-work and next-step handoff"},
+             "todos": {"type": "array", "items": todo},
+             "wait": wait,
+             "next_in_s": {"type": "number",
+                            "description": "optional delay before a continue cycle"}},
+            ["status", "summary", "todos"])]
+
+    def execute(self, name: str, args: dict) -> str:
+        if name != "checkpoint_work":
+            return f"(unknown tool: {name})"
+        if self.checkpoints:
+            return ("(checkpoint refused: this cycle already recorded its handoff; "
+                    "call final_answer now)")
+        from looplab.serve.assistant_watch import WatchRefusal, normalize_work_checkpoint
+        try:
+            checkpoint = normalize_work_checkpoint(args or {})
+        except WatchRefusal as exc:
+            return f"(checkpoint refused: {exc})"
+        self.checkpoints.append(checkpoint)
+        return f"(continuous-work checkpoint recorded: {checkpoint['status']})"
+
+
 class WatchTools:
     """Arm a STANDING watch that outlives this turn, this request and this browser (BACKLOG §F4).
 
     The operator's three asks — "infinite assistant mode; waiting on statuses; monitoring every N" —
-    reach the model as two verbs, because they are two conditions over one mechanism: wait for a run
-    to reach a state, or wake on a schedule. Everything durable about it lives in
+    reach the model as typed status waits, scheduled monitoring, and resumable work cycles over one
+    mechanism. Everything durable about it lives in
     `serve/assistant_watch.py`; this is only the vocabulary the model speaks.
 
     Present in EVERY mode, read-only plan included. Arming a watch takes no action on anything — it
@@ -2149,9 +2235,17 @@ class WatchTools:
 
     def specs(self) -> list[dict]:
         from looplab.serve.assistant_watch import (
-            WATCH_MAX_INTERVAL_S, WATCH_MIN_INTERVAL_S, WATCH_RUN_STATES)
+            WATCH_EXPERIMENT_STATES, WATCH_MAX_INTERVAL_S, WATCH_MIN_INTERVAL_S,
+            WATCH_RUN_STATES, WATCH_STAGE_STATES)
         from looplab.tools._base import fn_spec
         states = ", ".join(WATCH_RUN_STATES)
+        target = {"type": "object", "properties": {
+            "kind": {"type": "string", "enum": ["run", "experiment", "stage"]},
+            "run": {"type": "string", "description": "run id"},
+            "node": {"type": "integer", "minimum": 0,
+                     "description": "required for experiment/stage"},
+            "stage": {"type": "string", "description": "required for stage"},
+        }, "required": ["kind", "run"]}
         return [
             fn_spec(
                 "watch_run",
@@ -2167,6 +2261,19 @@ class WatchTools:
                                                 "instruction, since nobody will be there to clarify"}},
                 ["run", "until", "instruction"]),
             fn_spec(
+                "watch_status",
+                "Wait durably for a typed run, experiment, or stage status, then carry out an "
+                "instruction. The server evaluates the condition without model calls and pins the "
+                "run generation / experiment attempt so a reset is never silently followed.",
+                {"target": target,
+                 "until": {"type": "array", "items": {"type": "string"},
+                           "description": (f"run: {states}; experiment: "
+                                           f"{', '.join(WATCH_EXPERIMENT_STATES)}; stage: "
+                                           f"{', '.join(WATCH_STAGE_STATES)}")},
+                 "instruction": {"type": "string",
+                                 "description": "complete standalone instruction for the wake-up"}},
+                ["target", "until", "instruction"]),
+            fn_spec(
                 "watch_every",
                 "Run an instruction on a repeating schedule until its budget runs out — the "
                 "'monitor every N' mode. Each wake-up is a fresh turn appended to this chat.",
@@ -2177,6 +2284,24 @@ class WatchTools:
                  "max_wakeups": {"type": "integer",
                                  "description": "stop after this many wake-ups (optional)"}},
                 ["every_s", "instruction"]),
+            fn_spec(
+                "work_until_done",
+                "Start durable continuous work toward a goal. Work runs as bounded resumable "
+                "cycles with TODOs and explicit checkpoints, survives page/server restarts, waits "
+                "on typed statuses without model polling, and stops on done, blocked, lifetime, "
+                "cycle budget, or operator cancellation.",
+                {"goal": {"type": "string", "description": "the durable goal"},
+                 "todos": {"type": "array", "items": {"type": "object", "properties": {
+                     "content": {"type": "string"},
+                     "status": {"type": "string",
+                                "enum": ["pending", "in_progress", "completed"]}},
+                     "required": ["content", "status"]}},
+                 "every_s": {"type": "number",
+                             "description": (f"default delay between continue cycles "
+                                             f"({WATCH_MIN_INTERVAL_S:g}–{WATCH_MAX_INTERVAL_S:g}s)")},
+                 "max_cycles": {"type": "integer", "description": "bounded cycle budget"},
+                 "lifetime_s": {"type": "number", "description": "bounded total lifetime"}},
+                ["goal"]),
             fn_spec("list_watches", "List this chat's standing watches and what each is waiting for.",
                     {}, []),
             fn_spec("stop_watch", "Stop one of this chat's standing watches.",
@@ -2193,17 +2318,32 @@ class WatchTools:
                 trigger = {"kind": "run_state", "run": args.get("run"), "until": until}
                 rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
                                        trigger=trigger)
+            elif name == "watch_status":
+                trigger = {"kind": "target_status", "target": args.get("target"),
+                           "until": args.get("until")}
+                rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
+                                       trigger=trigger)
             elif name == "watch_every":
                 trigger = {"kind": "schedule", "every_s": args.get("every_s")}
                 rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
                                        trigger=trigger, max_wakeups=args.get("max_wakeups"))
+            elif name == "work_until_done":
+                trigger = {"kind": "work", "every_s": args.get("every_s"),
+                           "initial_todos": args.get("todos")}
+                rec = self.watches.arm(
+                    instruction=str(args.get("goal") or ""), trigger=trigger,
+                    max_wakeups=args.get("max_cycles"), lifetime_s=args.get("lifetime_s"))
             elif name == "list_watches":
                 rows = self.watches.list()
                 if not rows:
                     return "(no standing watches on this chat)"
-                return "\n".join(
-                    f"{r['id']}  [{r['status']}]  waiting for {r.get('waiting_for')}  "
-                    f"({r.get('wakeups', 0)}/{r.get('max_wakeups')} wake-ups)" for r in rows)
+                lines = []
+                for row in rows:
+                    unit = "cycles" if (row.get("trigger") or {}).get("kind") == "work" else "wake-ups"
+                    lines.append(
+                        f"{row['id']}  [{row['status']}]  waiting for {row.get('waiting_for')}  "
+                        f"({row.get('wakeups', 0)}/{row.get('max_wakeups')} {unit})")
+                return "\n".join(lines)
             elif name == "stop_watch":
                 stopped = self.watches.cancel(str(args.get("id") or ""))
                 if stopped is None:

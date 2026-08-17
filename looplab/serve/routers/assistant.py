@@ -36,13 +36,14 @@ from looplab.serve.assistant import (
     safe_assistant_failure as _safe_assistant_failure,
     sanitize_assistant_message as _sanitize_assistant_message)
 from looplab.serve.assistant_watch import (
-    SessionWatches, WatchDeferred, WatchRefusal, WatchService, WatchStore)
+    SessionWatches, WatchDeferred, WatchRefusal, WatchService, WatchStore,
+    observed_run_states)
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.http import json_object
 from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
     ASSISTANT_STREAM_END_SENTINEL, PERM_ALLOW_ALWAYS, PERM_ALLOW_ONCE, PERM_DENY,
-    SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
+    RUN_GENERATION_FIELD, SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
 from looplab.tools.perm_modes import (
     GRANT_TTL_SECONDS, RememberedGrantStore, classify_action, normalize_mode)
 from looplab.core.redact import redact_secrets
@@ -350,6 +351,61 @@ def watch_observe_run(srv, run_id: str):
         # Not-there is the observation `WatchService` already handles conservatively.
         return None
     return {**rows[0], "engine_running": _engine_liveness(rd)}
+
+
+def watch_observe_target(srv, target: dict):
+    """A bounded, generation-aware status projection for run / experiment / stage waits."""
+    target = dict(target or {})
+    run_id = str(target.get("run") or "")
+    try:
+        rd = srv.run_dir(run_id)
+    except HTTPException as exc:
+        if exc.status_code in (404, 410):
+            return {"target": target, "present": False, "run_present": False, "states": []}
+        raise
+    payload = srv.state_payload(rd)
+    state = payload.get("state") if isinstance(payload.get("state"), dict) else {}
+    generation = payload.get(RUN_GENERATION_FIELD)
+    kind = target.get("kind")
+    base = {"target": target, "run_present": True, "run_generation": generation}
+    if kind == "run":
+        states = observed_run_states(state)
+        return {**base, "present": True, "phase": state.get("phase"),
+                "engine_running": state.get("engine_running"),
+                "finished": bool(state.get("finished")), "states": sorted(states)}
+
+    nodes = state.get("nodes") if isinstance(state.get("nodes"), dict) else {}
+    node_id = target.get("node")
+    node = nodes.get(str(node_id))
+    if node is None:
+        node = nodes.get(node_id)
+    if not isinstance(node, dict):
+        return {**base, "present": False, "experiment": node_id, "states": []}
+    status = str(node.get("status") or "pending")
+    attempt = node.get("attempt")
+    if kind == "experiment":
+        states = {status}
+        if node.get("tombstoned"):
+            states.add("tombstoned")
+        return {**base, "present": True, "experiment": node_id, "attempt": attempt,
+                "status": status, "metric": node.get("metric"),
+                "failed_stage": node.get("failed_stage"), "states": sorted(states)}
+
+    stage_name = target.get("stage")
+    stages = node.get("stages") if isinstance(node.get("stages"), list) else []
+    stage = next((row for row in stages
+                  if isinstance(row, dict) and row.get("name") == stage_name), None)
+    if stage is None:
+        if status == "pending":
+            return {**base, "present": True, "experiment": node_id, "attempt": attempt,
+                    "stage": stage_name, "status": "pending", "states": ["pending"]}
+        return {**base, "present": False, "impossible": True, "experiment": node_id,
+                "attempt": attempt, "stage": stage_name, "states": [],
+                "reason": (f"stage {stage_name} was not recorded before experiment {node_id} "
+                           f"became {status}")}
+    stage_status = str(stage.get("status") or "pending")
+    return {**base, "present": True, "experiment": node_id, "attempt": attempt,
+            "stage": stage_name, "status": stage_status, "states": [stage_status]}
 
 
 def watch_session_exists(sessions: "SessionStore", sid) -> Optional[bool]:
@@ -1639,6 +1695,9 @@ def build_router(srv) -> APIRouter:
     def _watch_observe_run(run_id: str):
         return watch_observe_run(srv, run_id)
 
+    def _watch_observe_target(target: dict):
+        return watch_observe_target(srv, target)
+
     def _watch_run_turn(record: dict, instruction: str) -> dict:
         """Run ONE wake-up turn, through the SAME `run_turn` an operator-typed turn goes through.
 
@@ -1681,7 +1740,8 @@ def build_router(srv) -> APIRouter:
                 # A wake-up may not arm further watches. One standing watch that arms another is an
                 # unbounded population with a bounded per-watch budget, which is not a bound at all
                 # — the floor doc 36 asks for has to hold over the whole tree, not each node of it.
-                watches=None)
+                watches=None,
+                work_cycle=(record.get("trigger") or {}).get("kind") == "work")
         finally:
             _release_turn(sid, cancel_ev, turn_epoch)
         if declined and isinstance(res, dict):
@@ -1714,7 +1774,8 @@ def build_router(srv) -> APIRouter:
 
     _watch_service = WatchService(
         _watches, observe_run=_watch_observe_run, run_turn_fn=_watch_run_turn,
-        append_turn=_watch_append, session_exists=_watch_session_exists,
+        append_turn=_watch_append, observe_target=_watch_observe_target,
+        session_exists=_watch_session_exists,
         on_error=_watch_scheduler_error)
     # Settle whatever the previous process left mid-wake, and start the scheduler only if this
     # server actually has standing watches — see `WatchService.bootstrap`.
@@ -1730,7 +1791,7 @@ def build_router(srv) -> APIRouter:
         return {k: record.get(k) for k in (
             "id", "session", "mode", "status", "instruction", "trigger", "waiting_for",
             "created", "updated", "next_due", "wakeups", "max_wakeups", "expires_at",
-            "last_observation", "last_error")}
+            "checkpoint", "last_observation", "last_error")}
 
     @router.get("/api/assistant/watches")
     def list_watches(session: Optional[str] = None, active: bool = False):
@@ -1739,7 +1800,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/watches")
     async def arm_watch(request: Request):
-        """Arm a standing watch from the UI (the agent's own path is the `watch_run`/`watch_every`
+        """Arm standing status/schedule/work from the UI (the agent uses the corresponding watch
         tools). The MODE comes from the session, never from the body — a request that could name its
         own mode would let a read-only chat arm a mutating watch."""
         body = await json_object(request)
@@ -1751,12 +1812,16 @@ def build_router(srv) -> APIRouter:
         trigger = body.get("trigger")
         if not isinstance(trigger, dict):
             trigger = {"kind": body.get("kind"), "run": body.get("run"),
-                       "until": body.get("until"), "every_s": body.get("every_s")}
+                       "target": body.get("target"), "until": body.get("until"),
+                       "every_s": body.get("every_s"),
+                       "initial_todos": body.get("todos")}
         try:
             record = _session_watches(sid, mode).arm(
-                instruction=str(body.get("instruction") or ""), trigger=trigger,
+                instruction=str(body.get("instruction") or body.get("goal") or ""), trigger=trigger,
                 waiting_for=str(body.get("waiting_for") or ""),
-                max_wakeups=body.get("max_wakeups"), lifetime_s=body.get("lifetime_s"))
+                max_wakeups=(body.get("max_wakeups")
+                             if body.get("max_wakeups") is not None else body.get("max_cycles")),
+                lifetime_s=body.get("lifetime_s"))
         except WatchRefusal as exc:
             raise HTTPException(400, {"code": "watch_refused", "message": str(exc)}) from exc
         return {"ok": True, "watch": _watch_public(record)}
