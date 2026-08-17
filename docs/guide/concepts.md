@@ -744,6 +744,26 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   RECORD rests on it: the deterministic `expect.files` contract has already run and passed before the
   checker is consulted, and the metric still comes from the operator's reader over the protected
   `score` stage.
+  Since 2026-08-17 there is a **deterministic floor under the one verdict that is not a claim about
+  mechanism**. `declared_condition_violated` is the only hard kind whose evidence is a number the
+  trainer prints about itself, and it was measurably unstable: on `rubertlite-dr-unified-v9` node 0
+  the same `train` stage, re-run, drew `FAIL declared_condition_violated: training ended at epoch
+  14.87, not all 15 epochs completed` and then `OK` on evidence that differs only in training noise —
+  and the refusal bought a full re-train, **8,399.9 stage seconds / 2.33 GPU-h**, for the same
+  result. A final epoch of `14.87` against `n_epochs: 15` is not an early stop: HF derives its step
+  budget from a floored updates-per-epoch and then takes the ceiled number each epoch, so the budget
+  runs out inside the last one (measured on that node: 114 steps per epoch against a 1,695-step
+  schedule = 14.868 epochs, bar at `1695/1695`). The engine now reads that itself: when the stage
+  declared an epoch count, declared artifacts that already passed `expect.files` on disk, and the
+  trainer wrote its own end-of-training summary **inside the last declared epoch**, a
+  `declared_condition_violated` refusal degrades to `inconclusive` and the row records both readings
+  (`check_inconclusive` = what the model said, `check_epoch_reached` = what contradicted it). It may
+  only ever ACQUIT — it cannot fail a stage, cannot raise a verdict, and cannot reach the five
+  physical kinds — because the numbers come from text the candidate's own script wrote. **A shrunken
+  experiment is still refused**: `rubertlite-dr-unified-v8` node 8 (7.99 of a declared 15, after a
+  repair cut `n_epochs`), v8 node 9 (5.99 of 10) and v9 node 1 (1.0 of 50) all keep their refusals,
+  and all three had reached `100 %` of their own shrunken step schedule — which is why the boundary
+  is the trainer's own final *epoch* against the *declaration* and never the progress bar.
 
 The operator's `cmd` is the **authoritative, non-rewritable scoring stage** and its stdout is where the
 trusted metric reader reads. The Developer's STAGES phase supplies only the stages that run BEFORE it

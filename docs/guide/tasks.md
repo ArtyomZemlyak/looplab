@@ -197,6 +197,15 @@ before the next stage runs, and has two halves:
   `inconclusive`, because a checker may not invoke a contract that does not exist. State the
   **work**, never the result quality — `"recall beats 0.85"` is the search's judgement, not a stage's,
   and the checker will not enforce it.
+  If the sentence names an epoch count (`"all 15 training epochs completed and …"`), the engine reads
+  the trainer's own end-of-training summary and **will not act on a `declared_condition_violated`
+  refusal when that summary lands inside the last declared epoch** — a final epoch of `14.87` against
+  a declared 15 is how a trainer reports a step budget that ran out inside the last epoch, not a
+  shortened run, and asking a model to know that convention cost 2.33 GPU-h on the live corpus. The
+  floor only ever acquits: a run that stopped a whole declared epoch or more short (7.99 of 15, 1.0
+  of 50) is still refused, and so is one whose trainer never wrote a summary at all. Note this needs
+  the stage to declare `files` as well — the acquittal rests on the artifact half of the declaration
+  having already been checked on disk.
 
 **The metric must say what it is ABOUT — `eval.metric.subject`.** `expect` and `needs` describe a
 stage's files; `subject` describes the *number*. It names the workdir-relative artifact the metric is a
