@@ -2607,17 +2607,92 @@ that the state does **not** clear by itself once the engine is gone. Docs:
    second way to end a wrap-up whose only advantage over the first is that it destroys the run's
    accounting. Not built.
 
-**STILL OPEN.** ⬜ **The UI's own remedy for this state does not work on a naturally-finished run.**
+~~**STILL OPEN.** ⬜ **The UI's own remedy for this state does not work on a naturally-finished run.**~~
+**CONFIRMED AND FIXED 2026-08-17 (second pass).** The filing re-derived and held, with three
+corrections and one measurement it did not have.
+
 `ui/src/runIndex.js` diagnoses exactly this shape as `finalization-stalled` (*"Finalization stopped
-before wrap-up completed"*) and offers a **“Reattach finalization”** button — which maps through
-`api.js` to a durable `run_abort` command, and `RunCommandService`'s `attach` path then looks for a
-matching `run_abort` already in the log. `live-deps4-0804` finished *naturally*
+before wrap-up completed"*) and offered a **“Reattach finalization”** button — which maps through
+`Dock.jsx::TRANSPORT_INTENTS` to a durable `run_abort` command, and `_decide_run_abort` answers
+`attach` while `submit`'s attach arm requires a matching `run_abort` ALREADY in the log
+(`_pending_finalize_intent`). `live-deps4-0804` finished *naturally*
 (`stop_reason: no_eligible_candidate`, no `stop_requested`), so there is none and the record is
-rejected `command_intent_missing`. The button is therefore inert on precisely the runs whose card it
-appears on, and the TUI's `finalize` verb takes the same route. The server-side remedy exists
-(`POST /api/runs/{id}/resume`), and **the UI never calls it** — grep of `ui/src/` finds no `/resume`
-URL. Recorded rather than fixed here: it is a control-plane change on a spawn path, it needs its own
-measurement of which runs reach `attach` versus `spawn`, and it is not what blocked the deletion.
+rejected `command_intent_missing` — **driven, not inferred**:
+`tests/test_stalled_finalization_affordance.py` builds the shape, POSTs the exact UI payload
+(`{"type": "run_abort", "data": {"reason": "finalized"}}`) at the real `/commands` endpoint and reads
+`rejected / command_intent_missing / retryable false`, with a spawn recorder proving nothing was
+launched. **No other client path reaches it either**: `_decide_resume` REJECTS `finalize_in_progress`
+while a finalize is pending, so the Resume control is refused too, and the legacy `POST /control`
+refuses through `reject_if_active` for the same reason. `POST /api/runs/{id}/resume` really is the
+only endpoint that acts (`allow_incomplete_finalize=True`), and `ui/src/` still contains no `/resume`
+URL.
+
+**THREE CORRECTIONS to the filing.** (1) The surface is not "the run card": the empty-canvas card
+only renders with ZERO active nodes, and `live-deps4-0804` had nodes — the button the operator saw is
+**Dock's transport row** (`Dock.jsx`, mode `finalization-stalled`), which renders at any node count.
+Both are fixed. (2) `POST /api/runs/{id}/resume` is a weaker remedy than "the server-side remedy
+exists" suggests: `_append_resume_request` classifies mode from `stop_requested and last_stop >
+last_finish`, which is FALSE for a naturally-finished run, so it spawns `looplab resume` and not
+`looplab finalize`. That happens to complete the wrap-up (`classify_prior_run` → `finalization_pending`
+→ `wrap_up_only`), but the verdict is re-derived in a second process at a second instant, and
+`run_cmds.py::resume`'s own comment records that race being MEASURED: a `finalize` finishing while a
+`resume` waited for the singleton turned a warning into a lift and burned the remaining budget as
+four identical fallback nodes. (3) The button is inert but not harmful: a `rejected` record with
+`retryable: false` does not block `reject_if_active`. What it does leave is the operator-facing
+damage — the rejection's own remediation reads *"inspect/repair the event log"*, about a log that is
+not damaged.
+
+**POPULATION.** The card appears for any run in `finalization-stalled`; the button works iff the log
+carries a still-effective `run_abort` (`stop_requested == "finalized"`, which is exactly what
+`_attached_finalize_intact` re-checks). So the question is how many stalls would be of each kind, and
+the corpus answers it the only way it can — by how runs FINISH. Re-scanned all 41 surviving
+`events.jsonl` on 2026-08-17 (`live-deps4-0804` is gone: finalized and then deleted, which is the
+whole point): **39 finished runs, and 2 of them carry a `run_abort` at all** (`rubertlite-dense-retrieval`
+and `-v7`, both `stop_reason: aborted`). Zero are currently half-finalized. So on this box the shape
+where Reattach CAN work is 2 of 39 (5 %) and the shape where it cannot is 37 of 39 — **the defect is
+WIDER than "an edge case", not narrower**, even though instances of the stall itself are rare (1 in
+42 historically). That asymmetry is what decided the fix: the working case is the minority, so it
+could not be treated as the default and papered over.
+
+**WHAT SHIPPED — the card states the remedy; it does not grow a second button.** `runIndex.js` gains
+`pendingFinalizeIntent` + `stalledFinalizationRemedy` (one model, both surfaces). With a pending
+finalize, Dock and the canvas card are **unchanged, field for field** — pinned by a deep-equal
+negative control against the shipped presentation literal. Without one, they say so and print
+`looplab finalize <runs>/<run id>`, the same command the deletion refusal already names, with the
+disclosure that the wrap-up uses the configured model if one is reachable. Four mutations on a
+throwaway `/tmp` copy prove non-vacuity (predicate stuck true / stuck false, the overlay dropping the
+command, and `_decide_run_abort` returning `append` instead of `attach`); each turns a listed test red.
+
+**ALTERNATIVES REJECTED.**
+
+1. **Point the affordance at `POST /api/runs/{id}/resume`.** It works, and it is still wrong here.
+   It SPAWNS AN ENGINE — paid work, on a run the operator asked only to tidy up — so honouring "must
+   not silently start paid work" would need a confirmation dialog naming the spawn, i.e. a new client
+   call plus a new consent surface for a state measured at 1 in 42. It would also entrench the route
+   the tree calls *legacy* and whose `allow_incomplete_finalize=True` is the one opt-out
+   `durable_op.py` says no destructive caller may have. And per correction (2) it fires the WRONG
+   VERB at this shape, resolved by a classification that two processes re-derive at two instants.
+2. **A server-side finalize-only endpoint** doing what `cli/run_cmds.py::finalize`'s crash-boundary
+   branch does. Cost: a new route, its own durable identity/idempotency, its own liveness and
+   lifecycle-lock ladder, and it STILL spawns (the wrap-up needs an `Engine` + the task snapshot +
+   the singleton), so it buys a narrower promise at the price of a second spawn path — and it is
+   `/resume` with better manners. Reconsider if stalled finalizations stop being a population of one.
+3. **Make `_decide_run_abort` APPEND when there is no pending intent.** One line, and it edits the
+   run's authoritative record to make a button work: the appended `run_abort` leaves
+   `last_stop_request_seq > last_finish_seq`, which `cli/run_cmds.py::finalize` explicitly refuses to
+   create and says why (a later raw `resume` then reads as an unserved FINALIZE), and which
+   `_append_resume_request` classifies on. Rejected: a control-plane change that rewrites what the
+   log MEANS, to fix what a card SAYS.
+4. **Keep the button and improve the failure copy.** Free, and it still asks the operator to fire a
+   command that cannot succeed and leaves a rejected durable record behind. A control whose only
+   outcome is a good error message is not a control.
+
+**STILL OPEN after this.** ⬜ The surviving Reattach button spawns a driver process (proved by the
+negative control's spawn recorder) and its label and tooltip do not say so. That is pre-existing
+behaviour on the path this change deliberately left byte-for-byte intact, so it is recorded rather
+than half-changed here. ⬜ The TUI's `finalize` verb and the Assistant's `/finalize` still take the
+durable-command route and get the raw `command_intent_missing` sentence; only the two web surfaces
+that OFFER the action unprompted were fixed.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 

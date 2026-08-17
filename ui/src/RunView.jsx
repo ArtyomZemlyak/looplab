@@ -284,6 +284,13 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
     {transport?.busy && <p className="dag-empty-command-note">
       {pendingAction ? `${pendingAction} command is already in progress.` : 'A run command is already in progress.'}
     </p>}
+    {/* A remedy this surface cannot perform, printed as the exact command instead of a button that
+        would submit an intent the server rejects. Selectable text on purpose: the alternative is a
+        control that spawns an engine, which is paid work nobody asked this card for. */}
+    {presentation.command && <>
+      <pre className="dag-empty-command"><code>{presentation.command}</code></pre>
+      {presentation.commandNote && <p className="dag-empty-command-note">{presentation.commandNote}</p>}
+    </>}
     {actions.length > 0 && <div className="dag-empty-actions">
       {actions.map(item => {
         const isTransport = TRANSPORT_EMPTY_ACTIONS.has(item.id)
@@ -2420,7 +2427,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const emptyPresentation = dagEmptyPresentation({
     displayed: state, live, resourceStatus: runStatus, connected,
-    historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq,
+    historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq, runId,
   })
   const approvalCommand = approvalCommandFor(live)
   const revealEvents = () => {

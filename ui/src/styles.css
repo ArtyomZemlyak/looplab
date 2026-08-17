@@ -167,6 +167,11 @@ button { font: inherit; }
 .dag-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
 .dag-empty-actions .btn { min-height: 40px; }
 .dag-empty-command-note { margin-top: 10px !important; color: var(--working); font-size: 12px; }
+/* The operator has to SELECT this to run it, so it may not be clipped: a shell command shown with
+   its tail cut off is worse than no command at all. Scrolls inside its own box instead. */
+.dag-empty-command { margin: 12px auto 0; max-width: 420px; padding: 8px 10px; overflow-x: auto;
+  border: 1px solid var(--line-2); border-radius: 6px; background: var(--bg-2); text-align: left; }
+.dag-empty-command code { font-size: 12px; line-height: 1.45; white-space: pre; user-select: all; }
 .dag-empty-spinner { display: block; width: 25px; height: 25px; margin: 0 auto 10px;
   border: 3px solid var(--line-2); border-top-color: var(--accent); border-radius: 50%;
   animation: historySpin .8s linear infinite; }

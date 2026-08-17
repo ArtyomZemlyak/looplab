@@ -622,6 +622,19 @@ which completes the wrap-up already on disk without starting any new work or nee
 then delete. The dialog now carries that remediation verbatim from the server. A run whose engine is
 still *alive* is a different refusal (`engine_running`) and should simply be left to finish.
 
+**And the workspace says the same thing, because there are two ways into that state and only one of
+them has a control.** A stalled finalization that began as an operator **Finalize** left a
+`run_abort` on the log, and Dock's **Reattach finalization** attaches to it and launches a driver to
+finish the wrap-up — unchanged. A run that finished *by itself* recorded no such request, so the same
+button submitted a command the server rejected `command_intent_missing`, with a remediation telling
+the operator to inspect and repair an event log that was not damaged. That run now gets the command
+instead of the button, in Dock and on the empty Lineage canvas: the workspace states that nothing
+here will resume it and prints `looplab finalize <runs>/<run id>` to copy. It is deliberately not a
+second button — every server path that could act from the browser **spawns an engine**, which is paid
+work and a different promise from "reattach"; the command re-enters the wrap-up only, never the
+search, and it writes the report, lessons and cost roll-up the run still owes, so it uses the
+configured model if one is reachable and names what it degraded if not.
+
 **A selection of runs can be deleted in one gesture**, and it is a *queue* over the same per-run
 transaction rather than a bulk endpoint — each deletion keeps its own idempotency key, generation+seq
 fence and durable receipt. That shapes what you see: it runs strictly **sequentially** (each receipt

@@ -15,7 +15,7 @@ import {
 import Markdown from './markdown.jsx'
 import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
-import { runLifecycle } from './runIndex.js'
+import { runLifecycle, stalledFinalizationRemedy } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
@@ -902,6 +902,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // state only hides duplicate controls; it never promotes a run to finished by itself.
   const lifecycle = runLifecycle(live || {})
   const mode = lifecycle.mode
+  // Non-null exactly when the durable `run_abort` this transport submits would be REJECTED — see
+  // `runIndex.js::stalledFinalizationRemedy`. Derived here so the two branches below cannot disagree.
+  const stalledRemedy = stalledFinalizationRemedy(live || {}, runId)
   useEffect(() => {
     if (!startOverDialogIntent) return
     if (startOverDisabled || mode !== 'finished'
@@ -1396,11 +1399,26 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             </>}
             {!transportBusy && !transportFailure && mode === 'finalizing' && <span className="muted" role="status">Finalizing…</span>}
             {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">Finishing write-out…</span>}
-            {!transportBusy && !transportFailure && mode === 'finalization-stalled' && <>
+            {/* Reattach is offered only when there IS a pending finalize to reattach to — see
+                `runIndex.js::pendingFinalizeIntent`. On a naturally-finished run this same button
+                submitted a `run_abort` the server rejects `command_intent_missing`, whose own
+                remediation tells the operator to inspect/repair an event log that is not damaged.
+                The command below is the one that clears the state, and it is TEXT because every
+                affordance that could act from here spawns an engine. */}
+            {!transportBusy && !transportFailure && mode === 'finalization-stalled'
+              && !stalledRemedy && <>
               <span className="muted" role="alert">Finalization stalled</span>
               <button className="btn sm" onClick={onFinalize}
                 title="Resume pending finalization">Reattach finalization</button>
             </>}
+            {!transportBusy && !transportFailure && mode === 'finalization-stalled'
+              && stalledRemedy && <div className="transport-message" role="alert">
+              <span>Finalization stalled — no pending finalize to reattach</span>
+              <span className="transport-detail">
+                {stalledRemedy.why}, and nothing here will resume it. Complete the wrap-up from a
+                shell: <code>{stalledRemedy.command}</code>
+              </span>
+            </div>}
             {!transportBusy && !transportFailure && mode === 'running' && <>
               <button className="btn sm" aria-label="Stop run without finalizing"
                 title="Stop now; resume or finalize later" onClick={onStop}><OpIcon name="pause" size={13} /></button>
