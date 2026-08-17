@@ -223,169 +223,24 @@ class WorkspaceSeeder:
             self._e.store.append(EV_WORKSPACE_SEEDED, {"node_id": nid, "materialized": seeded})
 
     def seed_repo_tree(self, src, dst, ignore, mode: str = "auto") -> int:
-        """Materialize an editable repo's *source* into the node workdir under a seeding `mode`:
-        - "auto" (default) / "tracked": copy the git-TRACKED files (the real code surface — fast,
-          deterministic) so a working tree bloated with untracked artifacts (model checkpoints,
-          datasets — often many GB) is NOT deep-copied into every node. "auto" silently falls back
-          to a full copy when `src` is not a git repo; "tracked" also falls back (there's nothing
-          else to copy) but is the explicit "code only" intent.
-        - "all": force a full recursive copytree (legacy behavior) — use for small repos or when
-          untracked files are needed at eval time.
-        Returns the number of tracked files copied, or -1 when a full copytree was used."""
-        import shutil
-        import subprocess
-        from looplab.runtime.sandbox import git_subprocess_env
-        src = Path(src); dst = Path(dst)
-        tracked = None
-        if mode != "all":
-            # Ask git directly (no `.git`-at-root check): the editable repo is often a SUBDIR of a
-            # larger git repo whose `.git` lives in a parent, so `(src/'.git').exists()` is False even
-            # though `git -C src ls-files` correctly lists the files tracked under src. Use it whenever
-            # git returns a non-empty tracked set; otherwise (non-git / nothing tracked) fall back.
-            try:
-                out = subprocess.run(["git", "-C", str(src), "ls-files", "-z"],
-                                     capture_output=True, text=True, timeout=120,
-                                     env=git_subprocess_env())
-                if out.returncode == 0:
-                    files = [p for p in out.stdout.split("\0") if p]
-                    if files:
-                        tracked = files
-            except Exception:
-                tracked = None                   # git missing / not a repo -> copytree fallback
-        if tracked is None:
-            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
-            return -1
-        dst.mkdir(parents=True, exist_ok=True)
-        n = 0
-        for rel in tracked:
-            s = src / rel
-            if s.is_dir() or not s.exists():     # submodule dir / deleted-but-tracked path
-                continue
-            d = dst / rel
-            d.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(s, d)
-            n += 1
-        return n
+        """Delegate to the shared evaluation/Developer candidate seeding rule."""
+        from looplab.engine.workspace_seed import seed_repo_tree
+        return seed_repo_tree(src, dst, ignore, mode)
 
     def seed_protected_files(self, src, dst, protect, *, reserved_top=()) -> list[str]:
-        """Materialize the editable's OPERATOR-PROTECTED files into the node workdir, on top of
-        whatever `seed_repo_tree` copied and REGARDLESS of the seed mode.
-
-        Two facts have to compose and did not: `protect` says "this file is the operator's, the agent
-        may never write it", and `_resolve_stages` appends the operator's `cmd` as the final PROTECTED
-        `score` stage that runs IN THIS WORKDIR. Under the default `seed_mode="auto"` the workdir gets
-        the git-TRACKED files, so an operator scorer that was never committed — the normal state of a
-        file added to drive LoopLab — is simply absent, and the score stage dies with
-        `python: can't open file '…/looplab_eval.py'` AFTER the node has already paid for a full train.
-        Nothing caught it because `protect` governs WRITES and nothing made it govern MATERIALIZATION;
-        the agent cannot repair it either, since the one file it would have to create is the one file
-        the write gate refuses. Seeding it here is what makes the workdir's protected file a fact the
-        Developer's prompt is already allowed to assume ("unless the operator PROTECTED an existing
-        scorer, which you must NOT rewrite").
-
-        Deliberately the per-editable `protect` list and NOT `RepoTask._protected_names()`: that one
-        also folds in the read-only DATA MOUNT names (materialized as symlinks by the caller — a copy
-        would shadow the mount) and the eval's metric-FILE reader paths (files the eval WRITES, which
-        do not exist in the source at all). Tree entries (`dir/**`) are refused BEFORE the glob, and
-        the ordering is the point rather than the result: `is_file()` below already drops what a
-        `**` match yields on a Python where it means directories only (3.13 changed it to yield files
-        too), but the WALK is the cost — `protect: ["checkpoints/**"]` over a heavy untracked
-        directory would otherwise be re-walked once per node, for nothing.
-
-        A glob is expanded against the SOURCE; a `protect` entry that matches nothing is silently
-        skipped, because protecting a file the EVAL creates is legal and common. Everything else fails
-        closed: a match that resolves outside the source root (a symlink out of the repo) or whose
-        destination resolves outside the workdir is dropped rather than copied, and a `reserved_top`
-        first segment (a mount name) is refused so this can never shadow a mount. Returns the
-        workdir-relative paths copied, for the `workspace_seeded` record."""
-        import shutil
-        src = Path(src)
-        dst = Path(dst)
-        try:
-            root = src.resolve()
-            base = dst.resolve()
-        except OSError:                              # unreadable source/destination -> nothing to seed
-            return []
-        out: list[str] = []
-        seen: set[str] = set()
-        for entry in (protect or []):
-            rel = str(entry).replace("\\", "/").strip()
-            while rel.startswith("./"):
-                rel = rel[2:]
-            if not rel or rel in (".", "/") or rel.endswith("/**"):
-                continue
-            # `Path.glob` on a pattern with no magic still works, but it silently yields NOTHING for a
-            # pattern carrying a `..` segment, so a literal name is resolved directly and then checked
-            # against the root — an escape is dropped, not quietly ignored as "no match".
-            matches = sorted(root.glob(rel)) if any(c in rel for c in "*?[") else [root / rel]
-            for m in matches:
-                try:
-                    real = m.resolve()
-                    relp = real.relative_to(root)    # never copy from OUTSIDE the editable source
-                except (OSError, ValueError):
-                    continue
-                if not real.is_file():               # a missing entry / a directory has nothing to copy
-                    continue
-                key = relp.as_posix()
-                if key in seen or relp.parts[0] in tuple(reserved_top):
-                    continue
-                target = dst / relp
-                try:                                 # …and never WRITE outside the node workdir
-                    target.resolve().relative_to(base)
-                except (OSError, ValueError):
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(real, target)
-                seen.add(key)
-                out.append(key)
-        return out
+        """Delegate to the shared evaluation/Developer protected-file rule."""
+        from looplab.engine.workspace_seed import seed_protected_files
+        return seed_protected_files(src, dst, protect, reserved_top=reserved_top)
 
     def link_input(self, src, dst) -> None:
-        """Mount a large, read-only task input (dataset / reference repo) into the node workdir as a
-        SYMLINK rather than a deep copy: these are immutable inputs the eval reads, not the agent's
-        edit target, so per-node copies just burn wall-clock + disk (acute on an S3-backed FUSE
-        mount). Idempotent (resume / re-seed); falls back to a copy (`copy_input`) if the symlink
-        can't be made."""
-        import os as _os
-        src = Path(src); dst = Path(dst)
-        if dst.is_symlink() or dst.exists():
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            _os.symlink(src, dst, target_is_directory=src.is_dir())
-            return
-        except OSError:
-            pass
-        self.copy_input(src, dst)
+        """Delegate to the shared evaluation/Developer input-mount rule."""
+        from looplab.engine.workspace_seed import link_input
+        return link_input(src, dst)
 
     def copy_input(self, src, dst, ignore=None) -> None:
-        """The ONE copy-in path for data/reference sources (the `mount:false` branch of
-        `seed_workspace` and `link_input`'s no-symlink fallback used to duplicate it with subtle
-        divergence). Idempotent. For a directory, try a CoW clone first (`cp --reflink=always`):
-        on a reflink-capable fs (btrfs/XFS) a per-node "copy" of a multi-GB dataset costs ~zero
-        bytes and milliseconds — and edits stay node-local (copy-on-write), so the editable-copy
-        semantics are preserved. Without CoW an N-node run pays N full byte copies (mega-review:
-        20 GB × 50 nodes ≈ 1 TB), which remains the documented cost of `mount:false` on ext4.
-        `--reflink=always` fails FAST on a non-CoW fs / cross-device copy → full copytree fallback
-        with the usual ignore patterns (the verbatim clone skips them — data trees don't carry
-        .git/.venv; the pruning is a code-tree concern)."""
-        import shutil
-        import subprocess
-        import sys as _sys
-        src = Path(src); dst = Path(dst)
-        if dst.is_symlink() or dst.exists():
-            return
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if src.is_dir():
-            if _sys.platform != "win32" and shutil.which("cp"):
-                r = subprocess.run(["cp", "-R", "--reflink=always", "--", str(src), str(dst)],
-                                   capture_output=True)
-                if r.returncode == 0:
-                    return
-                shutil.rmtree(dst, ignore_errors=True)   # a partial clone must not survive the fallback
-            shutil.copytree(src, dst, dirs_exist_ok=True, ignore=ignore)
-        elif src.is_file():
-            shutil.copy2(src, dst)
+        """Delegate to the shared evaluation/Developer input-copy rule."""
+        from looplab.engine.workspace_seed import copy_input
+        return copy_input(src, dst, ignore)
 
     def sandbox_cwd(self, workdir, cwd_spec) -> str:
         """Resolve the eval `cwd` against the node's sandbox workdir. A relative cwd joins the

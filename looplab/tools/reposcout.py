@@ -24,7 +24,7 @@ from pathlib import Path
 
 from looplab.core import _pathsafe
 from looplab.tools._base import (   # shared schema builder, bounded renderers, the loop's cap
-    RESULT_CAP, fit_rows, fn_spec)
+    RESULT_CAP, capabilities_for_specs, fit_rows, fn_spec)
 
 # Path/secret guards now live in _pathsafe (shared with the write/shell/git providers so every tool
 # enforces the same rules). Bound under the historical private names because this module's own call
@@ -191,6 +191,12 @@ class RepoScoutTools:
                       "max_hits": {"type": "integer", "description": "cap on hits (optional, default 40)"}},
                      ["pattern"]),
         ]
+
+    def capabilities(self):
+        return capabilities_for_specs(
+            self.specs(), effect="read", risk="low", idempotency="idempotent",
+            concurrency_safe=True, cancellable=False, approval="never",
+            source="looplab.tools.reposcout")
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}

@@ -334,8 +334,10 @@ stays focused and the trace reads cleanly:
    authoring stays in the STAGES phase.
 
 A **repair** skips stages+plan and is one focused session. The first **two** phases are read-only: they
-get the repo scouts, the env inspector and the probe (`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`,
-`py_api`, `read_installed`, `grep_installed`, `gpu_info`, `run_probe`) — but **no write tools** — so the Developer
+get the repo scouts, the env inspector, the probe, and any operator-pinned preflight commands
+(`read_file`, `grep`, `find_files`, `list_dir`, `pkg_info`, `py_api`, `read_installed`,
+`grep_installed`, `gpu_info`, `run_probe`, and—only when declared—`run_dev_command`) — but **no write
+tools** — so the Developer
 reads the real eval/entry script and
 the files it will change *before* deciding what to do, instead of planning blind off a truncated
 preview. Two tools make this practical:
@@ -359,12 +361,20 @@ one imports. `env_inspect` answers *static* questions (a version, a signature, a
 `run_probe` answers "does this actually work **here**" — does this import, does this CSV parse, does
 the code I just staged get this API right.
 
-**It is not a shell, and that is the design, not a limitation.** The [source-tree read
+**It is not a free-form shell, and that is the design, not a limitation.** The [source-tree read
 fence](tasks.md) is a CPython audit hook: it covers `open` inside an interpreter and nothing else. A
 tool that could run `cat`, `cp` or `bash` would be an execution surface the fence does not reach — one
 `cp <source>/final/model.safetensors ./ckpt` away from laundering somebody else's result into a node's
 workspace, which is exactly the defect the fence was built for. So the probe surface **is** the
 interpreter, which is a *boundary* rather than an allow-list of commands that would need maintaining.
+
+When an operator really does want compilation, a focused test, or a Bash validator, the separate
+[`developer_commands`](tasks.md#operator-pinned-developer-commands) contract records the **complete**
+argv in the task snapshot and exposes only `run_dev_command(name)`. That does not widen `run_probe`:
+the command runs in a disposable candidate workspace, and the model cannot add arguments or retain
+candidate-tree changes (declared mounts retain their task/trust-tier policy). This is an in-house
+repo Developer contract; external coding-agent presets keep their own native process/tool boundary
+and do not receive `run_dev_command`.
 
 Four rules, none of them a list:
 

@@ -21,7 +21,7 @@ import random
 import re
 from typing import NamedTuple, Optional
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
@@ -87,6 +87,98 @@ class DataSpec(BaseModel):
         if self.mount and self.edit:
             self.mount = False
         return self
+
+
+class DeveloperCommandSpec(BaseModel):
+    """One exact command the operator grants to the repo Developer.
+
+    The model selects only ``name``.  It never supplies argv, cwd, environment or timeout, so the
+    authority recorded in ``task.snapshot.json`` is the authority that executes.  A shell is still
+    expressible when it is intentional (for example ``["bash", "scripts/check.sh"]``), but no
+    model-authored text is interpolated into that shell command.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    command: list[str]
+    description: str = ""
+    cwd: str = "."
+    timeout: float = 120.0
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("name")
+    @classmethod
+    def _safe_name(cls, value):
+        name = str(value or "").strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,63}", name):
+            raise ValueError("developer command name must start with a letter and contain at most "
+                             "64 ASCII letters, digits, '_', '-' or '.'")
+        return name
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _exact_argv(cls, value):
+        if not isinstance(value, list) or not value:
+            raise ValueError("developer command must be a non-empty argv list (never a shell string)")
+        if len(value) > 64:
+            raise ValueError("developer command argv may contain at most 64 items")
+        if any(not isinstance(item, str) for item in value):
+            raise ValueError("every developer command argv item must be a string")
+        if not value[0].strip():
+            raise ValueError("developer command executable may not be empty")
+        if any("\x00" in item for item in value):
+            raise ValueError("developer command argv may not contain NUL bytes")
+        if any(len(item) > 4096 for item in value) or sum(map(len, value)) > 16_384:
+            raise ValueError("developer command argv is too large (4096 chars/item, 16384 total)")
+        return list(value)
+
+    @field_validator("description")
+    @classmethod
+    def _bounded_description(cls, value):
+        text = str(value or "").strip()
+        if len(text) > 500:
+            raise ValueError("developer command description may contain at most 500 characters")
+        return text
+
+    @field_validator("cwd")
+    @classmethod
+    def _contained_cwd(cls, value):
+        raw = str(value or ".").strip().replace("\\", "/")
+        # Check both path dialects: ``Path('C:/x').is_absolute()`` is false on POSIX, but a task
+        # snapshot may move between hosts and must not acquire a different boundary on reload.
+        if (not raw or raw.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", raw)
+                or raw.startswith("//")):
+            raise ValueError("developer command cwd must be relative to the disposable workspace")
+        if len(raw) > 1024:
+            raise ValueError("developer command cwd may contain at most 1024 characters")
+        parts = [part for part in raw.split("/") if part not in ("", ".")]
+        if any(part == ".." for part in parts) or "\x00" in raw:
+            raise ValueError("developer command cwd may not escape the disposable workspace")
+        return "/".join(parts) or "."
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _bounded_timeout(cls, value):
+        import math
+        if isinstance(value, bool):
+            raise ValueError("developer command timeout must be a number of seconds, not a boolean")
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("developer command timeout must be a finite number of seconds") from None
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 600:
+            raise ValueError("developer command timeout must be > 0 and <= 600 seconds")
+        return timeout
+
+    @field_validator("env", mode="before")
+    @classmethod
+    def _safe_env(cls, value):
+        from looplab.core.envsafe import validate_env_map
+        clean, err = validate_env_map("developer command `env`", value or {})
+        if err:
+            raise ValueError(err)
+        return clean
 
 
 # What a pathless `file_json`/`file_regex` reader COSTS in each of EvalSpec's four reader slots —
@@ -1072,6 +1164,10 @@ class RepoTask(BaseModel):
     # DataSpec {path, mount, edit, copy_modify, preprocess, extend}. Mounted read-only at ./<name> unless
     # its spec says otherwise. See DataSpec for the per-source permission semantics.
     data: dict[str, DataSpec] = Field(default_factory=dict)
+    # Optional execution surface for the in-house repo Developer. Each entry pins the complete
+    # operation in the task snapshot; the agent can choose a name but cannot author an argv. Empty
+    # preserves the historical no-command behaviour and prompt byte-for-byte.
+    developer_commands: list[DeveloperCommandSpec] = Field(default_factory=list)
 
     @field_validator("data", mode="before")
     @classmethod
@@ -1081,6 +1177,19 @@ class RepoTask(BaseModel):
         if isinstance(v, dict):
             return {k: ({"path": val} if isinstance(val, str) else val) for k, val in v.items()}
         return v
+
+    @field_validator("developer_commands")
+    @classmethod
+    def _commands_distinct(cls, value):
+        if len(value or []) > 32:
+            raise ValueError("a repo task may declare at most 32 developer commands")
+        seen: set[str] = set()
+        duplicate = next((spec.name for spec in (value or [])
+                          if spec.name in seen or seen.add(spec.name)), None)
+        if duplicate is not None:
+            raise ValueError(f"duplicate developer command name {duplicate!r}")
+        return value
+
     eval: Optional[EvalSpec] = None            # operator-given eval; None when onboard=True
     # cli_overrides hyperparameter space (Phase 2): name -> (lo, hi). When set with
     # eval.params_style="cli_overrides", the Researcher tunes these and they become CLI
@@ -1469,6 +1578,8 @@ class RepoTask(BaseModel):
             "protected_names": self._protected_names(),
             "references": [r.model_dump() for r in self.references],
             "data": {name: spec.model_dump() for name, spec in self.data.items()},
+            "developer_commands": [spec.model_dump() for spec in self.developer_commands],
+            "eval_env": dict(self.eval.env) if self.eval is not None else {},
             # Back-compat single-seed hint (first editable): consumers that still seed one dir.
             "editable_path": mounts[0]["path"] if mounts else "",
         }

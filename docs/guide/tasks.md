@@ -71,6 +71,56 @@ phase's `declare_stages` emit), submit (`cmd.stages`) and consume time (the engi
 hand-written `looplab_stages.json`; `score` is reserved in a Developer manifest, and an invalid manifest
 falls back to the single command instead of half-running).
 
+### Operator-pinned Developer commands
+
+For fast feedback while it authors, grant the in-house repo Developer a small set of **exact commands** with
+`developer_commands`. This is how to let it compile Python, run a focused test, invoke a repository
+validator, or run a prescribed Bash script without giving the model an arbitrary shell:
+
+```yaml
+developer_commands:
+  - name: compile_python
+    description: compile every Python source file
+    command: [python, -m, compileall, -q, .]
+    timeout: 120
+  - name: unit_smoke
+    command: [python, -m, pytest, -q, tests/test_schema.py]
+    timeout: 300
+  - name: validate_dataset
+    command: [bash, scripts/validate_dataset.sh]
+    cwd: .
+    env: { VALIDATION_MODE: strict }
+    timeout: 300
+```
+
+The model receives one function, `run_dev_command(name)`. It chooses only the declared name; argv,
+`cwd`, `env`, and timeout all come from the operator-owned task snapshot and cannot be supplied or
+overridden in a tool call. A Bash command is therefore possible only when its complete argv was
+explicitly recorded by the operator—there is no string interpolation or model-authored suffix.
+
+Each call materializes a **disposable candidate workspace** using the same shape as evaluation: the
+seeded editable repo(s), protected files, declared data/reference inputs, and the Developer's current
+staged writes/deletions. Output is returned with exit code, timeout/cancellation state, bounded
+stdout/stderr, and SHA-256 receipts for the command policy and staged overlay. Every change inside the
+candidate tree is then discarded. A successful formatter cannot silently author node code; a real fix
+still has to pass through `write_file`/`edit_file`, so `node_created.files` remains the complete record.
+Declared mounts are outside that retention claim: they preserve their task policy. In `trusted_local`
+the command is a normal host process, so an operator-pinned validator must treat mounted inputs as
+read-only; use `untrusted`/`hostile` when that must be a container-enforced boundary.
+
+This is a **preflight**, not an eval stage: its standard GPU environment is disabled, it is capped at
+600 seconds, has no metric or selection authority, and must not be used for training.
+`untrusted`/`hostile` reuse the normal hardened Docker tier (`--network none`, resource caps, and
+`runsc` for hostile). `trusted_local` remains the
+documented process tier and assumes these are operator-authored commands on the operator's machine;
+it is neither a multi-tenant nor a hard device boundary. Command `env` uses the same
+declared-environment validator: secrets and engine-owned names are refused before they can enter the
+durable snapshot.
+
+This contract belongs to LoopLab's in-house repo Developer. External coding-agent presets own their
+own process and shell boundary; `developer_commands` neither injects `run_dev_command` into those
+CLIs nor constrains commands they execute through their native tools.
+
 **Each stage may declare what it READS — `needs`.** The counterpart of `expect`, and the half that was
 missing until 2026-08-13: a manifest described what every stage produced and nothing about what it
 consumed, so a pipeline whose stages disagreed about where a file lives had no way to say so. Both of
@@ -850,6 +900,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `editable_path` | Path to the repo; mounted into each eval workdir (a worktree copy). `~`/`$VARS` expand |
 | `edit_surface` | Globs the agent may edit **or create** (reject-not-strip) |
 | `protect` | Files the agent may **never** touch (e.g. the eval entrypoint). Also copied into every node workdir regardless of `seed_mode` — see the note above |
+| `developer_commands` | Optional exact compile/test/lint/data-validation commands exposed as `run_dev_command(name)`. The model selects only a name; the operator-pinned argv/cwd/env/timeout execute in a disposable candidate workspace and candidate-tree changes are discarded. Declared mounts retain their task/trust-tier policy. See [Operator-pinned Developer commands](#operator-pinned-developer-commands) |
 | `eval.command` | The command run to evaluate a candidate (**argv list, no shell** — no `&&`) |
 | `eval.protect_entrypoint` | Freeze the file `eval.command` executes, when the argv names one (`python -m pkg.mod`, `python score.py`, optionally behind a transparent launcher such as `chrt -f 99 …` / `nice -n 10 …` / `srun --gres=gpu:1 …`) **and the editable source already ships it**. Default `true`. Set `false` to hand a shipped scorer back to the Developer. A command naming no in-repo file (a shell wrapper, a console script, `python -c`, `torchrun`/`accelerate`/`deepspeed`) is warned about at submit instead — see the edit-surface section above |
 | `eval.setup` | Optional command run **before** each eval to install **dependencies** (e.g. `pip install -r requirements.txt`). **Not for training** — training is a stage the agent declares (see below). |

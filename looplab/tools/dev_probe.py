@@ -178,6 +178,8 @@ RESIDUALS, stated rather than papered over
 from __future__ import annotations
 
 import os
+import hashlib
+import re
 import shutil
 import sys
 import tempfile
@@ -185,7 +187,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.runtime import landlock, read_fence
-from looplab.tools._base import RESULT_CAP, clip, fn_spec, stream_tails
+from looplab.tools._base import (RESULT_CAP, CancelSignal, ToolCapability, ToolResult,
+                                 clip, fn_spec, stream_tails)
 
 # A probe is a QUESTION, not a job. The hard ceiling is well under a training stage's: anything that
 # needs longer is a declared eval stage, which is the surface with a metric contract and a repair
@@ -487,17 +490,48 @@ class DevProbeTools:
                     ["code"]),
         ]
 
+    def capabilities(self) -> list[ToolCapability]:
+        schema = self.specs()[0]["function"]["parameters"]
+        return [ToolCapability(
+            name="run_probe", effect="execute", risk="medium", idempotency="idempotent",
+            concurrency_safe=True, cancellable=True, approval="never", input_schema=schema,
+            output_schema={"type": "object", "properties": {
+                "exit_code": {"type": ["integer", "null"]},
+                "timed_out": {"type": "boolean"}, "cancelled": {"type": "boolean"},
+                "output": {"type": "string"}}},
+            source="looplab.tools.dev_probe")]
+
     def execute(self, name: str, args: dict) -> str:
+        return self.execute_result(name, args).content
+
+    def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
         args = args or {}
         if name != "run_probe":
-            return f"(unknown tool: {name})"
+            return ToolResult(content=f"(unknown tool: {name})", is_error=True, retryable=False,
+                              provenance={"source": "developer_probe"})
+        code = str(args.get("code") or "")
         try:
-            return self._probe(str(args.get("code") or ""), args.get("timeout"))
+            text = self._probe(code, args.get("timeout"), cancel_check=cancel_check)
         except Exception as e:  # noqa: BLE001 — a provider returns an error string, never raises
-            return f"(probe error: {type(e).__name__}: {e})"
+            return ToolResult(content=f"(probe error: {type(e).__name__}: {e})", is_error=True,
+                              retryable=False, provenance={"source": "developer_probe"})
+        first = text.splitlines()[0] if text else ""
+        match = re.match(r"exit=(-?\d+)", first)
+        exit_code = int(match.group(1)) if match else None
+        timed_out = "TIMEOUT" in first
+        cancelled = "CANCEL" in first
+        return ToolResult(
+            content=text,
+            structured={"exit_code": exit_code, "timed_out": timed_out,
+                        "cancelled": cancelled, "output": text},
+            is_error=(exit_code != 0 or timed_out or cancelled),
+            retryable=True if (timed_out or cancelled) else False,
+            provenance={"source": "developer_probe"},
+            receipt={"code_sha256": hashlib.sha256(
+                code.encode("utf-8", errors="replace")).hexdigest()})
 
     # ------------------------------------------------------------------------------------ the run
-    def _probe(self, code: str, timeout) -> str:
+    def _probe(self, code: str, timeout, *, cancel_check=None) -> str:
         if not code.strip():
             return "(run_probe: give a `code` string — the Python program to run)"
         if len(code) > _MAX_CODE_CHARS:
@@ -547,12 +581,15 @@ class DevProbeTools:
             # SCRIPT's directory, which is the probe's scratch, making `probe`/`probe_launcher`
             # importable names ahead of the real ones. It does not touch PYTHONPATH, so the fence is
             # unaffected, and the launcher puts the replica cwd on the path explicitly instead.
+            signal = CancelSignal(cancel_check)
             rc, out, err, timed_out = run_argv(
                 [sys.executable, "-P", str(launcher)], str(work), to, env=env,
-                max_output_bytes=_MAX_OUTPUT)
+                max_output_bytes=_MAX_OUTPUT, cancel=signal)
+            cancelled = signal.is_set()
+            timed_out = bool(timed_out and not cancelled)
         finally:
             shutil.rmtree(root, ignore_errors=True)
-        return self._project(rc, out, err, timed_out, to, replica_note)
+        return self._project(rc, out, err, timed_out, to, replica_note, cancelled=cancelled)
 
     def _install_fence(self, fence_dir: Path) -> bool:
         """Render THIS run's source-tree read fence into the probe's own fence directory.
@@ -611,7 +648,7 @@ class DevProbeTools:
             note += f"; {skipped} omitted to stay under the replica cap — read them with read_file"
         return note + ")"
 
-    def _project(self, rc, out, err, timed_out, to: float, note: str) -> str:
+    def _project(self, rc, out, err, timed_out, to: float, note: str, *, cancelled=False) -> str:
         """The bounded output projection: exit status, then each stream as a TAIL.
 
         Tails, not heads, for the reason `clip(keep="tail")` exists — the end of a command's output
@@ -621,6 +658,8 @@ class DevProbeTools:
         head = f"exit={rc}"
         if timed_out:
             head += f" (TIMEOUT after {int(to)}s — a probe is a question; a long job is an eval stage)"
+        elif cancelled:
+            head += " (CANCELLED by the user)"
         elif rc == _SIGXFSZ_RC:
             # The kernel backstop fired, i.e. something wrote through a path the audit hook cannot
             # see. Say what happened, in the hook's own words — an unexplained "exit=-25" reads as a
@@ -632,7 +671,16 @@ class DevProbeTools:
             parts.append("stdout:\n" + clip(out, out_take, keep="tail", note="…(truncated)…\n"))
         if err and err.strip():
             parts.append("stderr:\n" + clip(err, err_take, keep="tail", note="…(truncated)…\n"))
-        if not (out or "").strip() and not (err or "").strip():
+        # On kernels without Landlock the launcher contributes one honest reduced-guarantee line
+        # to stderr. That is harness telemetry, not an answer from a program that printed nothing;
+        # retain the actionable empty-answer hint instead of letting the warning mask it.
+        err_text = (err or "").strip()
+        reduced_warning_only = (
+            err_text.startswith(
+                "LOOPLAB probe: the kernel no-write rung could not be applied")
+            and "\n" not in err_text
+        )
+        if not (out or "").strip() and (not err_text or reduced_warning_only):
             parts.append("(no output — a probe only returns what it PRINTS)")
         return clip("\n".join(parts), RESULT_CAP, keep="head", reserve=80,
                     note="\n(probe result clipped)")
