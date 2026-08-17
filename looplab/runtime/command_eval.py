@@ -38,6 +38,11 @@ from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa
 # two channels the same way — `runtime` may import `core`, and this is the site that KNOWS which
 # door each value came through.
 from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED
+# The two stage-row identity slots and the derivation behind them. A LEAF under this module — it
+# reaches back for `_confined`/`normalize_declared_path` through deferred, function-local imports
+# only (`metric_subject`'s precedent), so this module-level import closes no cycle.
+from looplab.runtime.stage_identity import (STAGE_INPUT_KEY, STAGE_KEY_REASON,  # noqa: F401
+                                            STAGE_OUTPUTS_KEY, stage_output_identity)
 from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
                                      docker_gpu_env, docker_run_argv, docker_timed_out,
                                      finite_timeout, json_line_extras,
@@ -2271,7 +2276,8 @@ def absent_metric_subject() -> dict:
 def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Optional[str],
                 metric: dict, eval_started: float, check_fn,
                 subject: Optional[list] = None,
-                subject_glob: Optional[list] = None) -> _EvalRun:
+                subject_glob: Optional[list] = None,
+                stage_key_fn=None) -> _EvalRun:
     """Run the declared stage pipeline in order; the LAST stage's output feeds the metric read.
 
     Multi-stage pipeline (data_prep → train → eval): run each stage in ORDER in the SAME workdir
@@ -2424,6 +2430,21 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stderr=_env_problem.format(stage=_sname),
                 stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
+        # THE STAGE'S INPUT KEY, derived BEFORE the command runs because that is the only instant the
+        # workdir holds this stage's inputs and not its outputs. It records; nothing branches on it —
+        # see `runtime/stage_identity.py` for the 4-of-7 wrong-hit measurement that decided a cache
+        # would NOT be built and for what the key does and does not cover. `stage_key_fn` is injected
+        # (the closure it needs lives in `looplab/engine/`, and `runtime` imports nothing above
+        # `core`); absent, the rows carry no key and every reader treats that as "cannot establish".
+        # NO injected function means NO row field at all, not a reason slug: "this eval ran without
+        # the instrument" (a library caller, an older engine) and "the instrument looked and could
+        # not bound this stage" are different facts, and only the second names something fixable.
+        _skey, _skey_reason = (None, "")
+        if stage_key_fn is not None:
+            try:
+                _skey, _skey_reason = stage_key_fn(stages, _i)
+            except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+                _skey, _skey_reason = None, "unreadable_workdir"
         _t0 = time.monotonic()
         # WALL-CLOCK stage start, beside the monotonic one that measures duration: the freshness half
         # of the success contract compares against `st_mtime`, which is wall clock, and monotonic
@@ -2463,6 +2484,14 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         _status = "timeout" if run.timed_out else ("ok" if run.rc == 0 else "fail")
         stage_results.append({"name": _sname, "status": _status, "exit_code": run.rc,
                               "seconds": round(time.monotonic() - _t0, 3)})
+        # The key rides on EVERY row, failed ones included: "this stage has no key" and "this stage's
+        # key did not match" are the two halves of a cache's yield, and only the first names anything
+        # anybody could fix. A failed row is never a reuse SOURCE — `reuse_refusal`'s callers filter
+        # on status — but it is evidence about the key's reach, which is what this instrument is for.
+        if _skey:
+            stage_results[-1][STAGE_INPUT_KEY] = _skey
+        elif _skey_reason:
+            stage_results[-1][STAGE_KEY_REASON] = _skey_reason
         # A stage that ran longer than its declared budget must SAY why. `seconds` alone would report
         # a 6 h stage as 6 h 20 m with nothing naming the extra twenty minutes, and the corpus reader
         # who reconstructs where the compute went (that is how the 22.0 discarded GPU-hours behind
@@ -2522,6 +2551,16 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 stderr=f"stage '{_sname}' failed its declared artifact contract: {_artifact_problem}",
                 stages=stage_results, failed_stage=_sname, metric_subject=run.metric_subject)
             return run
+        # WHICH BYTES the stage produced, bound at the instant the contract PASSED and against the
+        # identical `_w0` floor it was just held to. `verify_stage_artifacts` proves the artifact is
+        # there, non-empty and written by THIS run; only the content identity can later prove a reuse
+        # candidate is still the artifact its key names, which is why `reuse_refusal` requires both
+        # and why this is bound HERE rather than at the end of the pipeline — a later stage that
+        # rewrites an earlier one's output must not be able to change what this row says was made.
+        if _expect.get("files"):
+            _outs = stage_output_identity(_expect, str(ex.wd), _w0, stage=_sname)
+            if _outs:
+                stage_results[-1][STAGE_OUTPUTS_KEY] = _outs
         # Phase 3 — optional inter-stage verify: a stage flagged `"check": true` hands its output tail
         # to an agentic checker (Researcher/Developer) BEFORE the next stage runs; a returned concern
         # stops the pipeline early ("failed verification") so a bad artifact (e.g. a diverged train)
@@ -2627,7 +2666,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      on_deadline=None,
                      deadline_grace_max_s: Optional[float] = None,
                      subject: Optional[list] = None,
-                     subject_glob: Optional[list] = None) -> RunResult:
+                     subject_glob: Optional[list] = None,
+                     stage_key_fn=None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
     (defaults to the repo/workdir root, NOT the eval `cwd` subdir — so a root-level
@@ -2646,6 +2686,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     have. `None`/`[]` records nothing here; whether an unbound metric is then a VIOLATION is the
     engine's rung (`Settings.metric_subject`), never this function's, because this is also the
     library entry point tests and a future non-engine caller use.
+
+    `stage_key_fn(stages, index) -> (key, reason)` is the STAGE-IDENTITY instrument (see
+    `runtime/stage_identity.py`). It is INJECTED rather than imported because the import closure the
+    key needs lives in `looplab/engine/` and `runtime` imports nothing above `core` — the same shape
+    `check_fn` already has. It is asked once per stage, BEFORE the command, and its answer rides on
+    the stage row; nothing here branches on it, an exception from it is contained, and `None` leaves
+    the rows exactly as they were before it shipped.
 
     `subject_glob` (`EvalSpec.metric["subject_glob"]`) is the same declaration for a pipeline that
     names its OWN output directory — the shape of the path rather than the path, resolved here
@@ -2723,6 +2770,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # read a name the branch that ran happened not to bind (doc 25 RA-02).
     _run = (_run_stages(stages, _ex, timeout=timeout, start_stage=start_stage, metric=metric,
                         eval_started=_eval_started, check_fn=check_fn, subject=subject,
+                        stage_key_fn=stage_key_fn,
                         subject_glob=subject_glob)
             if stages else _run_single(command, _ex, timeout=timeout))
     if _run.early is not None:

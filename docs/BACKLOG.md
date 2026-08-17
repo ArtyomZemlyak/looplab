@@ -2655,6 +2655,166 @@ default**: `holdout_fraction=0.25` and `holdout_select=True` (`core/config.py:77
 reads "D1 holdout-gated promotion (B6, Arbor-style)"), implemented by
 `looplab/engine/holdout.py:59::HoldoutGrader`.
 
+### §0.12 The obvious reuse key for `mine` would have been wrong 4 times in 7, so the cache was not built (2026-08-17)
+
+**THE ASK, AND THE MEASUREMENT IT RESTED ON.** Hard-negative mining (`mine`) recomputes per node even
+when a sibling has already run what looks like the same configuration. Re-derived over every
+`stage_finished` row in `runs/`:
+
+    34   `mine` stage runs, 64,908.5 s = 18.03 h        (of 246.1 h of stage time corpus-wide, 7.3 %)
+    17   `ok`, mean 46.7 min;  6 `fail`;  4 `expect_failed`
+     7   `reused` (20.6 %), and EVERY ONE is within a single node's own retry after a repair
+         (v8 nodes 3x2, 9, 10x3; v9 node 5) — `start_stage` reuse is per-workdir by construction
+
+The proposed key was the node's DECLARED mining parameters (`idea.params`), which group v8's 16
+nodes into 4 configurations with 8 nodes sharing `{mining_type: 1, n_negatives: 2}`.
+
+**THE GROUPING IS TRUE AND THE KEY IS NOT, and this is the whole finding.** The declaration is
+decoration relative to what the stage computes. Of the 8 v8 nodes sharing that configuration, three
+(1, 7, 12) run **no `mine` stage at all** and the five that do run **four different entry points**
+writing four different paths (`python mine_stage.py`, `python -m vectorsearch.data.mine_negatives`,
+`python -m vectorsearch.mine_stage`, `python mine.py`). Meanwhile v8 nodes 5, 6, 9 and 14 declare
+**no mining parameters whatsoever** and all four mine. And v6/v7, quoted as "one configuration across
+7 and 8 nodes → all repeat", declare the EMPTY parameter set and contain **zero** `mine` stage rows
+between them — the grouping there is vacuous.
+
+**REPLAYED AGAINST THE BYTES.** Every surviving v8/v9 node workdir was swept for the artifact its
+`mine` stage declared, and the artifacts sha256'd. There are 4 distinct mined parquets across 10 paid
+v8 `mine` stages and 4 distinct across v9's 3, so duplication is REAL — five v8 nodes (3, 9, 10, 11,
+14) produced a byte-identical **79,586,058**-byte `hard_negatives.parquet` (`13db4477…`), and nodes
+4, 5 and 6 a byte-identical **58,431,283**-byte one (`34e9ca5e…`). Letting each declared-parameter
+group's first node feed the rest, first-wins, and checking the answer against those digests:
+
+    KEY                                          hits   WRONG   "saved"
+    declared mining params (the proposal)           7       4    6.15 h
+    declared params, cross-run too                  8       5    7.17 h
+    whole workdir tree                              0       0    0.00 h
+    stage entry + import closure + all non-.py      0       0    0.00 h
+    argv + closure + non-.py, minus the manifest    1       0    0.64 h   <- what shipped as the KEY
+    argv + closure only (config.yaml unbounded)     2       0    1.27 h   <- unsound, see below
+
+The four wrong hits are v8 n4←n3, n8←n3, n9←n5 and n14←n5 — each one a stale negatives set silently
+feeding a 5-hour training, at coordinates the run never occupied and with nothing downstream
+recording what the negatives were. **That is the number that decided this**, not the hours.
+
+**WHY NO SOUND KEY CAN PAY HERE, stated rather than engineered around.** The agent edits at NODE
+granularity, not stage granularity. Nodes 3, 9, 10, 11 and 14 mined identical bytes while their mine
+stages' own import closures differ in `vectorsearch/config.py` and their workdirs in
+`vectorsearch/configs/config.yaml` — files the mining script really does read. Only the OUTPUT is
+identical, and an output is not something a key may consult. The ceiling on a sound cross-node key on
+this corpus is therefore **1 reuse, 2,288 s, 0.64 h** — 3.5 % of the `mine` corpus and **0.26 % of
+all stage time**. The kernel enforcement rung `_safe_reuse_start`'s docstring is waiting on
+(Landlock scoped to a stage's declared `needs`) does **not** move it either: replayed with `needs`
+treated as a true bound, the same five nodes still differ inside the closure, so the yield stays 1.
+
+**THE REPLAY IS NECESSARILY APPROXIMATE, and saying so is part of the result.** A key is derived
+from the workdir as it stood BEFORE its stage ran; every preserved workdir is in its FINAL post-run
+state, so it holds the `train` stage's undeclared `checkpoint-NNNN/` directories, which did not exist
+when `mine` started. Replayed LITERALLY against the final state the shipped derivation makes **0**
+hits — and that zero is an artefact of the replay, not of the key. The 1/0/0.64 h row above is the
+closest reconstruction: the shipped derivation with everything under the experiment output tree
+treated as postdating `mine`. This is precisely why the instrument had to be a WRITER and not a
+script over `runs/` — the only place a key's real yield can be observed is a live run that records it
+at the instant it was true.
+
+**WHAT SHIPPED INSTEAD: the instrument, because the missing thing was the measurement.**
+`runtime/stage_identity.py` derives two facts per stage and writes them onto `stage_finished`
+(additive, fold-ignored, exactly like `expect_since`): `stage_input_key`, the sound key above, and
+`stage_outputs`, the `(size, sha256, file_identity)` of every declared artifact bound at the instant
+the `expect.files` contract passed. `looplab stage-dups RUN_DIR` reports duplicated OUTPUTS (observed
+bytes) beside would-be reuse HITS and, crucially, WRONG hits. Both halves of the table above took a
+20-minute sha256 sweep over 20 GB of preserved workdirs to produce, which is exactly why nobody had
+them and why the wrong key looked obviously right. Cost, measured warm on a 1 GB repo-task workdir
+(142 keyable files): **3.0-4.4 s per stage** — 0.15 % of a 2,290 s `mine`, 0.02 % of a 20,000 s
+`train`; the artifact copy a cache would additionally pay is 1.5 s for 80 MB on this geesefs mount,
+i.e. never the binding cost. That cost is BOUNDED and the bound had to be added, because
+`SAMPLE_ABOVE` (256 MiB per file) bounds nothing about a workdir holding two hundred 200 MB shards:
+the largest real repo-task workdir here digests **1,017 MB across 144 files** (three
+`checkpoint-NNNN/optimizer.pt` at 183.9 MB plus four `model.safetensors` at 92.2 MB), so
+`MAX_KEYED_BYTES` is 4 GiB — 4x that, ~60 s at ~70 MB/s, i.e. 2 % of the shortest stage this runs
+beside. Over the ceiling there is NO key rather than a partial one, and the running total is checked
+after the `lstat` and BEFORE the digest, so crossing it costs at most the ceiling.
+
+**WRITING THE CEILING'S TEST IS WHAT FOUND THAT THE REASONS WERE UNREACHABLE.** `workdir_content`
+returned a bare `None` and the caller mapped every refusal onto `unreadable_workdir`, so
+`too_many_files` had been sitting in `KEY_REASONS` from the first commit and could never be emitted —
+the same class of defect as the memo reader keyed on a field nothing writes (§0.7), one directory
+over. It now returns `(map, reason)` and the three facts stay three facts.
+
+**FAIL-CLOSED AT LEAST AS STRICTLY AS `_safe_reuse_start`**, which the request required and which is
+where the two predicates differ interestingly. Same clauses: an opaque entry point, a non-default
+`cwd`. One MORE: a workdir file that will not read refuses the key outright, because a content key
+that skipped it would be a key over a smaller set than it claims — the clause a NAME-based predicate
+does not need. Two clauses deliberately absent, and neither is a loosening: `_safe_reuse_start` fails
+closed on any DELETION and on any non-`.py` change because it reasons over a change SET of file names
+and can neither see a vanished module nor bound a non-`.py` read; a key over the CONTENT of the whole
+workdir has no change set, so a deleted file is absent from the digest map and a config is in it, and
+both are decided by the key differing. The one real narrowing is the manifest: `_safe_reuse_start`
+refuses across ANY `looplab_stages.json` change, this key excludes the file and carries the stage's
+own entry (argv, `expect` including its `assert`, `needs`, `env`) verbatim instead — so a change to a
+LATER stage's entry no longer forfeits an earlier stage, while the argv of everything a reuse would
+skip is still in the key byte for byte. And the reuse DECISION (`reuse_refusal`) is strictly stronger
+than the artifact contract: `verify_stage_artifacts` proves "written after this stage's start", which
+any later write satisfies; a reuse additionally requires the recorded `file_identity` AND the recorded
+digest to still match, so a same-size mtime-restored rewrite — the `metric_subject` incident's own
+shape — is refused.
+
+**THIRTEEN MUTATIONS, on a throwaway copy of the tree, each one going red** (`n` = tests that fail).
+The key: drop the non-`.py` content from the preimage (5); stop comparing the output digest in
+`reuse_refusal` (2); drop the `unresolved_entry` clause (1); drop `scope` (2); let `workdir_content`
+skip an unreadable file instead of failing closed (1); derive the key AFTER the command instead of
+before (1); never record the output identity (7); remove the instrument's containment `except` (1);
+check the byte ceiling AFTER the digest instead of before (1); collapse the two cost refusals onto
+one reason (3). The reporter: stop checking whether a hit was WRONG (2); treat an UNBOUND output as a
+comparable fingerprint (1); drop unkeyed rows silently instead of counting them (1).
+
+**One of those mutations was written as a passing test and had to be fixed to mean anything**, and it
+is worth recording because it is this file's own guard-test rule biting: "the key is derived BEFORE
+the command" was green under a fixture whose stage wrote only what it declared — a stage's own
+`expect.files` are excluded from its key, so before and after agreed and moving the derivation
+changed no assertion. The fixture now writes an UNDECLARED side file, which real miners do.
+
+`tests/test_stage_identity.py` is tier 1 throughout — a real `run_command_eval` over real workdirs,
+with the produced BYTES asserted beside every key comparison, because a key that agreed while the
+artifacts differed is the exact failure this design is bounded by.
+
+**ALTERNATIVES REJECTED, each on this corpus:**
+
+1. **Key on the declared mining params** (the proposal). 4 wrong of 7. Refused — and this is
+   `docs/36-agent-driven-decisions-2026-08-13.md`'s rule, not a corpus accident: the candidate
+   authors both the declaration and the code, so a declaration cannot be evidence about the code.
+2. **Key on the whole workdir tree.** Sound and yields **0** — every one of the 20 preserved
+   workdirs has a unique tree digest, differing in `train.py`/`loss.py`/`samplers.py`, i.e. files a
+   `mine` stage never reads. A key nobody can hit is not safer than no key, it is just a cost.
+3. **Key on the argv + import closure alone** (2 hits, 0 wrong here). Refused on the SAME ground
+   `_safe_reuse_start`'s non-`.py` clause stands on: `vectorsearch/configs/config.yaml` is in no
+   import closure and is read by every one of these miners. It is 0 wrong on this corpus by luck of
+   which configs happened to differ, and the failure mode it admits is precisely a silent stale score.
+4. **Build the cache off by default.** Refused: a decision arm that fires once per corpus is the
+   `if "agentless" in ctx.available_developers` shape this repo already has a registry guard for, and
+   an off-by-default fail-open surface still has to be right the day someone turns it on.
+5. **A SELECTION fix — report duplication so the board avoids electing two identical mining
+   configs.** This was the request's own fallback and the measurement refutes it too: a board keyed on
+   the declared configuration would suppress genuinely different mining 4 times in 7 while missing the
+   four nodes that declare nothing and mine anyway. What IS reportable is the observed byte identity,
+   after the fact — which is what `stage-dups` prints and why it is deliberately not a predictor.
+6. **Content-address the artifacts and hardlink duplicates.** Saves ~316 MB of disk on v8 and zero
+   GPU-hours. Not the problem.
+7. **Do nothing.** The closest call, and it is what the CACHE half resolved to. What kept the
+   instrument is that the two numbers deciding a cache — hits and WRONG hits — were not computable
+   from a live run at all, so every future version of this question would start with the same 20-minute
+   sweep and the same temptation to key on a declaration.
+
+**STILL OPEN.** (a) The key covers only what is INSIDE the workdir; the dataset mount, the model
+cache, site-packages and the interpreter are uncovered and the key is bound to one run's `scope` for
+exactly that reason. (b) A stage that writes an UNDECLARED file keys differently on its second
+attempt, so a repaired node stops being a reuse source — conservative, but it means the instrument
+under-reports reuse potential on repaired nodes, and `tests/test_stage_identity.py` drives that
+property rather than hiding it. (c) `_stage_reachable_files` credits any argv token ending in `.py`
+as a script, so `sh -c "python mine.py"` yields a closure holding a phantom; the key adds its own
+`unresolved_entry` refusal rather than changing that function, because that function is the LIVE
+reuse decision on a running run.
+
 ---
 
 ## 0. What concurrent sessions already shipped (verified in code, commit range `f98b1fb…42d5fc5`)

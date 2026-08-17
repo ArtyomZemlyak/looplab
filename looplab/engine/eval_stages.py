@@ -583,6 +583,39 @@ class EvalStagesMixin:
                 _credit(EvalStagesMixin._imported_modules("from", f"{m.group(1)} import ({inner})"))
         return out
 
+    def _stage_key_fn(self, workdir, cwd=None):
+        """The `stage_key_fn` `runtime/command_eval.py::_run_stages` calls once per stage, or None.
+
+        THE INJECTION EXISTS FOR LAYERING, not for configurability: the key needs
+        `_stage_reachable_files`, which lives here in `looplab/engine/`, and `runtime` imports nothing
+        above `core`. This is the same shape `metric_subject.bind_one(confine=…)` uses one file over —
+        the rule stays where the layer that owns it is, and the runtime is handed a callable.
+
+        `scope` binds every key this run mints to this run's own materialization. It is the run
+        DIRECTORY plus `setup_config_hash(task)` — the same digest `run_started.config_hash` carries
+        — because the key covers only what is INSIDE the workdir and a run with a different task
+        payload (a different seed, a different mount table, a different eval command) materializes a
+        different workdir from the same authored files. Two runs must never share a key; a resume of
+        the SAME run must, which is why it is the config hash and not a per-process nonce.
+
+        It RECORDS and decides nothing. `stage_identity.py`'s docstring holds the measurement that
+        decided a cross-node cache would not be built (7 hits / 4 wrong on the declared-params key
+        the request proposed; 1 hit / 0 wrong and 0.64 h on this one), and `reuse_refusal` is the
+        decision half a cache would call, driven today only by `looplab stage-dups`.
+        """
+        from looplab.core.setup_identity import setup_config_hash
+        from looplab.runtime.stage_identity import stage_input_key
+        try:
+            scope = f"{Path(getattr(self, 'run_dir', '') or '')}|" + setup_config_hash(
+                self.task.model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+            return None
+
+        def _key(stages, index):
+            reachable = EvalStagesMixin._stage_reachable_files(stages[:index + 1], workdir)
+            return stage_input_key(stages, index, workdir, scope=scope, reachable=reachable, cwd=cwd)
+        return _key
+
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
                           deleted=None, cwd=None):
         """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip
@@ -630,6 +663,17 @@ class EvalStagesMixin:
         (39 opaque rows, 29 of them locally resolvable), and that is the clause this predicate now
         bounds instead. Widening the non-`.py` clause would have bought zero of the corpus's repairs
         and cost the invariant.
+
+        AND THE CONTENT KEY THAT LOOKS LIKE IT SHOULD LOOSEN THIS DOES NOT (2026-08-17).
+        `runtime/stage_identity.py` derives a key over the CONTENT of the whole workdir, which needs
+        neither of the two clauses above — a deleted file is absent from a digest map and a config is
+        in it, so both are decided by the key differing. That key is a RECORDER and this predicate is
+        unchanged, for two measured reasons. (1) It buys nothing HERE: every corpus repair that had a
+        completed stage to forfeit changed `config.yaml`, whose content is in the key, so a
+        content-keyed version of this decision refuses in exactly the same places. (2) The key's own
+        cross-node yield is 1 reuse over the whole corpus against 4 WRONG hits for the declared-params
+        key the same request proposed, which is why no cache was built at all — see
+        `docs/BACKLOG.md` §0.12.
 
         WHAT WOULD MAKE IT SAFE is an ENFORCEMENT rung, not a better reading of the declaration: run
         each stage under a kernel read allow-list scoped to its OWN declared inputs (the pieces exist —

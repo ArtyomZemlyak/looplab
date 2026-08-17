@@ -680,6 +680,16 @@ class EvalDispatchMixin:
                              if start_stage is _UNSET else start_stage),  # Phase 2: re-run from a stage
                 stall_cap=self.eval_stall_timeout_s,          # #6: operator-set silence-before-kill cap (0 = off)
                 check_fn=check_fn,                            # Phase 3: optional inter-stage agentic verify
+                # THE STAGE IDENTITY INSTRUMENT. Derives each stage's reuse key before it runs and
+                # its outputs' content identity when its artifact contract passes; both ride on the
+                # stage row into `stage_finished`. Injected because the import closure it needs lives
+                # in the engine and `runtime` imports nothing above `core`. It records only — see
+                # `runtime/stage_identity.py` for why a cross-node cache was measured and refused.
+                # `workdir`, not `cwd`: `_stage_reachable_files` resolves script paths against the
+                # workdir ROOT, and the declared relative `cwd` rides separately as the fail-closed
+                # clause it is on `_safe_reuse_start` — the two arguments are the same pair that
+                # predicate takes, deliberately.
+                stage_key_fn=self._stage_key_fn(workdir, cwd=es.get("cwd") or None),
                 # The one-shot deadline judge (doc 39 site #2). Both are needed and are separate on
                 # purpose: the callback may be None (no client) while the cap is set, and the cap is
                 # the OPERATOR'S number — `sandbox._granted_grace` clamps to it in the runtime, so a

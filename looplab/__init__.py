@@ -251,6 +251,8 @@ _LAYOUT = {
     "read_allowlist": "runtime",   # the ONE derivation of what an eval may read, from the
     #                              operator's declared mounts
     "landlock": "runtime",         # the kernel read allow-list applied at the launch
+    "stage_identity": "runtime",   # what a stage RAN ON and what it MADE: the reuse key a cache
+    #                              would consult + the produced artifacts' content identity
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",

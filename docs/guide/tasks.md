@@ -353,6 +353,42 @@ path) and names the operator for the other (the declaration itself is wrong). Re
 deliberately kept: the artifact is produced by the agent's own pipeline, unlike a missing **protected
 script**, which no edit can ever create and which the engine refuses without asking for a repair.
 
+**Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
+engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates
+anything, neither costs a model call, and nothing in the loop branches on either:
+
+* `stage_input_key` — a digest over the stage's resolved argv, its declared contract (`expect`,
+  `needs`, `env`), the CONTENT of the transitive import closure of its entry script, **and the
+  content of every non-`.py` file in the workdir**, bound to this run's own identity. The split is
+  the trust model: the closure is the same bound the in-node reuse predicate already trusts for
+  Python reachability, and everything it structurally cannot see — a config, a data file, anything
+  `needs` does not declare because `needs` is a precondition and not a bound — is taken verbatim.
+  It is the key a cross-node reuse cache *would* consult, and it is absent with a **stated reason**
+  whenever it cannot be bounded: an opaque entry point (`python -m pip`, a shell wrapper), an entry
+  that resolves to no file, a non-default `cwd`, a file that will not read, or a workdir over the
+  cost ceilings (20,000 files / 4 GiB). The first three are the fail-closed clauses the in-node reuse
+  predicate already had; the rest are new here, because a content key that silently skipped a file it
+  could not read — or could not afford — would be a key over a smaller set than it claims, which is
+  how two different workdirs come to share one.
+* `stage_outputs` — the size, `sha256` and stat identity of every artifact the stage declared, bound
+  at the instant the `expect.files` contract passed. This is *which bytes*, and it is the only thing
+  that can later prove an artifact is still the one a key names.
+
+**Why this is a measurement and not a cache.** Hard-negative mining (`mine`) cost 18.03 h of the
+corpus's 246.1 h of stage time, and the obvious fix was to reuse a sibling node's negatives when the
+node's *declared* mining parameters matched. Replayed over the real runs against the sha256 of what
+each node actually mined, that key makes **7 hits, 4 of them wrong** — `rubertlite-dr-unified-v8`
+nodes 3, 4 and 8 all declare `{mining_type: 1, n_negatives: 2}` and mined three different negative
+sets. A key derived only from bytes the engine reads for itself makes **1 hit, 0 wrong, 0.64 h** —
+0.26 % of the corpus's stage time — because the agent edits at *node* granularity: five v8 nodes
+produced a byte-identical 79,586,058-byte parquet while their mining scripts' own import closures
+and configs genuinely differed. Only the OUTPUT is identical, and an output is not something a key
+may consult. So the cache was **not built**; `looplab stage-dups RUN_DIR` reports both numbers off
+the recorded rows, and the second one — how many hits would have been wrong — is what decides
+whether one ever ships. Cost of the instrument, measured warm on a 1 GB repo-task workdir (142
+keyable files): **3.0–4.4 s per stage**, i.e. 0.15 % of a 2,290 s `mine` and 0.02 % of a 20,000 s
+`train`.
+
 A failed `expect` fails the stage the same way a non-zero exit does (same `failed_stage`, same repair
 path), so nothing new happens mid-loop — but see **metric salvage** below: a stage that failed its
 `files` contract *after* already computing the metric no longer loses it. `expect` lives in the

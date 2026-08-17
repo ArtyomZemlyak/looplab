@@ -15,6 +15,7 @@ looplab replay          Pure fold of the event log → state (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
+looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -689,6 +690,57 @@ recompute the truth from the log itself (`looplab timings` does, and prints both
 `ts` has been on every event row since the first version of the envelope, so nothing had to be
 recorded for it. `elapsed_s` deliberately *includes* the idle gap of a stopped run: that gap is part
 of how long the run took, and `timings` names the untraced share of it.
+
+---
+
+## `stage-dups`
+
+Read-only. Answers two questions about a run's staged evals that nothing else can, and keeps them
+apart on purpose because on the corpus that motivated this they **disagreed**.
+
+```bash
+looplab stage-dups RUN_DIR
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `events.jsonl` only — no fold of anything but `stage_finished`) |
+
+The shape of the output (illustrative — the numbers are whatever the run recorded):
+
+```
+stage rows: 67  completed: 41  with an input key: 12
+  unkeyed: opaque_entry=29
+
+identical outputs (observed, not predicted):
+  mine: 5 stages produced the same bytes (nodes 3, 9, 10, 11, 14) — 2.56 h after the first
+  total duplicated: 2.56 h
+
+cross-node reuse key: 1 candidate hit(s), 0 of them WRONG, 0.64 h
+  a wrong hit is a stale artifact silently feeding the next stage — the number that decides
+  whether a cache may ship, not the hours.
+```
+
+* **Identical outputs** is an *observed* fact: two completed stages recorded the same
+  `(path, sha256)` set on their `stage_finished` rows, so they really did produce the same bytes. The
+  first one is work that had to happen; every later one is duplication, priced at its own recorded
+  seconds.
+* **Cross-node reuse key** replays `stage_input_key` first-wins, exactly as a cache would, and then
+  checks the answer against what each stage actually produced. **`WRONG` is the number that
+  matters.** It is printed even when it is zero, because "no wrong hits over 12 candidates" and "no
+  candidates" are different states with the same headline.
+
+**Why the two are separate.** The request that produced this command proposed keying reuse on each
+node's *declared* mining parameters. Replayed over the real runs that key makes 7 hits and **4 of
+them are wrong**: `rubertlite-dr-unified-v8` nodes 3, 4 and 8 all declare
+`{mining_type: 1, n_negatives: 2}` and mined three different negative sets, while nodes 5, 6, 9 and
+14 declare no mining parameters at all and mine anyway. A declaration the candidate authored is not
+evidence about what its code computed (see `docs/36-agent-driven-decisions-2026-08-13.md`), so the
+duplication report is keyed on produced BYTES and the reuse report on inputs the engine reads for
+itself — and this command prints both rather than letting one stand in for the other.
+
+**A row written before 2026-08-17 carries neither field** and is counted as *unkeyed*, not as
+evidence either way; a run from before that date reports `unrecorded=N` and no duplication.
 
 ---
 
