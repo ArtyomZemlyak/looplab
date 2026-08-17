@@ -611,6 +611,17 @@ merged into a shared family all stay, and the dialog says how many stayed and wh
 Skills and the curation logs are never cascaded. See
 [Memory & knowledge](memory.md#deleting-a-run-does-not-delete-what-it-taught-the-lab).
 
+**A run whose wrap-up never finished refuses to delete, and the fix is a command, not a retry.** A
+run that shows *“Finalization stopped before wrap-up completed”* — `run_finished` on the log, no
+`finalization_finished`, engine gone — answers Delete with `409 run_finalization_incomplete`. That
+state is genuine (the deletion guard cannot tell projections still being written from projections
+that stopped being written) but it does **not** resolve itself once the owning engine is gone, so
+refreshing forever is the wrong move. Run
+[`looplab finalize RUN_DIR`](cli-reference.md#this-is-what-a-run_finalization_incomplete-deletion-refusal-is-asking-for),
+which completes the wrap-up already on disk without starting any new work or needing a model, and
+then delete. The dialog now carries that remediation verbatim from the server. A run whose engine is
+still *alive* is a different refusal (`engine_running`) and should simply be left to finish.
+
 **A selection of runs can be deleted in one gesture**, and it is a *queue* over the same per-run
 transaction rather than a bulk endpoint — each deletion keeps its own idempotency key, generation+seq
 fence and durable receipt. That shapes what you see: it runs strictly **sequentially** (each receipt

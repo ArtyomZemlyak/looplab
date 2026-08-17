@@ -773,7 +773,16 @@ const runDeletionErrorMessage = error => {
     return 'Finish the existing Start over recovery before deleting this run.'
   }
   if (code === 'run_finalization_incomplete') {
-    return 'This run is still finishing its terminal records. Refresh it before deleting.'
+    // "Refresh it before deleting" was true of a LIVE engine and false of the case that actually
+    // reaches an operator: a run whose engine died mid-wrap-up is owned by nobody, so no amount of
+    // refreshing moves it and the advice is a loop. Prefer the server's own remediation, which
+    // names the command that clears it (`looplab finalize <run_dir>`); the fallback keeps both
+    // readings rather than asserting the transient one.
+    const remedy = typeof error?.remediation === 'string' ? error.remediation.trim() : ''
+    if (remedy) return remedy
+    return 'This run has an unfinished wrap-up. If its engine is still running, wait and refresh. '
+      + 'If the engine has stopped, only completing the wrap-up clears this — run '
+      + '`looplab finalize <run_dir>`, then delete.'
   }
   if (code === 'delete_cost_pending') {
     return 'Run cost records are still being finalized. Wait for them to settle, then reopen Delete.'

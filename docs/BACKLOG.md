@@ -2528,6 +2528,97 @@ afterwards. Writing it after the fence is taken would end the leak rather than s
 sidecar exists precisely to survive a crash *between* those points, so the honest fix is to write it
 under the fence and not before — a change to the deletion transaction's ordering, not to the reaper.
 
+
+### §0.11 "This run can never be deleted" — it could, by one command, and the refusal did not name it (2026-08-17)
+
+Reported as a permanent defect in the destructive-quiescence ladder: `runs/live-deps4-0804` answers
+`DELETE`/`POST /api/runs/live-deps4-0804/deletions` with `409 run_finalization_incomplete`, its
+engine died mid-finalization on 2026-08-04, nothing has owned it for 13 days, and — the claim —
+`refuse_unless_quiescent`'s third probe therefore refuses a state that nothing on the box can ever
+resolve, making a crash between `run_finished` and `finalization_finished` a permanently undeletable
+run. Proposed fixes ranged from teaching the finalize probe about engine liveness to adding an
+operator escape hatch.
+
+**REFUTED. There is a supported way out, it is one idempotent command, and it works.** The premise
+that carried the report was that no such command is registered — *"the registered commands are
+`memory-orphans`, `reap-service-files`, and nothing named finalize/resume"*. The Typer app registers
+**45** commands and four of them complete an interrupted wrap-up: `finalize`, `resume`, `run`, and
+the legacy `POST /api/runs/{id}/resume` (the tree's only `allow_incomplete_finalize=True` caller,
+which spawns `looplab resume`). The canonical one is `cli/run_cmds.py::finalize`, whose crash-boundary
+repair branch calls `finalize_run` directly on an already-`run_finished` run — no loop, no proposal,
+no lifecycle event, no reachable model required, idempotent, and already pinned by
+`tests/test_finalization_recovery.py`. `destructive_guard`'s own sibling refusal has said
+*"resume finalization first"* the whole time.
+
+**DRIVEN END TO END, 2026-08-17**, on a `/tmp` copy of the real run (original untouched, byte-identical
+md5 `8329bde4…`, mtime still 2026-08-04 16:17) with `memory_dir` redirected and the endpoint pointed
+at a closed port: `looplab finalize` exited 0, took the scope from 8 steps to 13
+(`… reflection` → `concept_curation, claim_curation, task_facets, llm_cost, complete`), appended
+`finalization_finished`, and `finalization_pending()` went False. Against the real server on two
+copies of that same run under one runs-root: **before → `409 run_finalization_incomplete`; after →
+`200 {"status": "succeeded"}`, directory gone.** Same run, same endpoint, one command between them.
+
+**POPULATION: 1 of 42.** Every `events.jsonl` under `runs/` was scanned (42 logs incl. the 36
+`specgate*/seed*-depth*` runs). Exactly one is half-finalized — `live-deps4-0804`, 8 steps, dead
+between `reflection` and `llm_cost`. The step COUNT is not the tell and reading it as one is a trap:
+36 of the 37 runs with 8 `finalize_step` rows are complete, because a toy run's 8 steps *end* with
+`llm_cost, complete` and carry `finalization_finished` (`specgate/seed0-depth0`:
+`begun, budget, diversity, case, reflection_begun, reflection, llm_cost, complete`). The real
+distribution over finished runs is 8 → 37, 10 → 1, 12 → 2. **A single instance, not a systematic
+one** — which is what decided the fix, per this file's own rule that the two deserve different ones.
+
+**SO THE GUARD IS RIGHT AND STAYS BYTE-FOR-BYTE.** `refuse_unless_quiescent` is unchanged: three
+probes, same set, same order, same three required keyword builders. What shipped is the sentence.
+`deletion_service.py`'s `run_finalization_incomplete` was the ONLY refusal in that function with no
+`remediation` field while five siblings around it carry one, and the UI turned it into *"This run is
+still finishing its terminal records. **Refresh it before deleting.**"* — advice that is true of a
+live engine and a closed loop for a dead one. Both now name `looplab finalize <run_dir>` and say
+that the state does **not** clear by itself once the engine is gone. Docs:
+`guide/cli-reference.md#finalize` gains the section a refused operator would search for, and
+`guide/ui.md` cross-links it from the Delete copy.
+
+**ALTERNATIVES REJECTED.**
+
+1. **Make the finalize probe consider ownership/liveness** — refuse only when `engine_liveness(rd)`
+   is not provably `False`, so an unowned stalled run reads as quiescent. This was the leading
+   candidate and it is *sound*: measured, the deletion path re-probes liveness under
+   `run_lifecycle_lock_http` immediately after the ladder, fails closed on an inconclusive probe
+   (`503 engine_liveness_unknown`) and refuses `409 engine_running`, and then
+   `engine_write_lock_http` **takes `engine.lock` itself**. Two independent gates, one of them
+   holding the actual lock, so widening the ladder's third rung would not have let a deletion race a
+   live engine. **Rejected anyway, on three grounds.** (a) It buys nothing a working command does
+   not already buy, and it buys it on the *destructive* path — the wrong place to spend a widening.
+   (b) It would delete a run whose wrap-up never ran, taking its budget summary, cost roll-up and
+   cross-run case with it; the wrap-up is cheap, offline and idempotent, so completing it is
+   strictly better than skipping it. (c) The ladder is shared by deletion, Replay and
+   `destructive_guard`, and only deletion's post-ladder gates were measured — narrowing a shared
+   rung on evidence from one of its three callers is how the next rung goes half-wired.
+2. **A fourth rung** (`finalize_abandoned`, or splitting live-vs-dead into two vocabularies) —
+   rejected outright. Each caller must supply a refusal builder for every rung, so a fourth costs
+   three new live HTTP codes for a state that already has a command; and the answer here is "do not
+   refuse", which no rung can express.
+3. **An operator escape hatch** — a `force`/`allow_incomplete_finalize` flag on the destructive path.
+   `durable_op.py` documents in prose that this opt-out is one *"no destructive caller may have"*,
+   and the reason is on the record: flattening `reject_if_active` into the ladder would have given
+   every destructive path a way past the finalize check. Adding the flag directly is the same move.
+4. **A `looplab finalize --abandon` / discard path** — write `FINALIZE_STEP_ABANDONED` on request.
+   It is engine-internal, written only for a staged *error* terminal, and `finalize_step` is not in
+   `CONTROL_EVENTS`, so no route or command can request it. Making it operator-reachable would add a
+   second way to end a wrap-up whose only advantage over the first is that it destroys the run's
+   accounting. Not built.
+
+**STILL OPEN.** ⬜ **The UI's own remedy for this state does not work on a naturally-finished run.**
+`ui/src/runIndex.js` diagnoses exactly this shape as `finalization-stalled` (*"Finalization stopped
+before wrap-up completed"*) and offers a **“Reattach finalization”** button — which maps through
+`api.js` to a durable `run_abort` command, and `RunCommandService`'s `attach` path then looks for a
+matching `run_abort` already in the log. `live-deps4-0804` finished *naturally*
+(`stop_reason: no_eligible_candidate`, no `stop_requested`), so there is none and the record is
+rejected `command_intent_missing`. The button is therefore inert on precisely the runs whose card it
+appears on, and the TUI's `finalize` verb takes the same route. The server-side remedy exists
+(`POST /api/runs/{id}/resume`), and **the UI never calls it** — grep of `ui/src/` finds no `/resume`
+URL. Recorded rather than fixed here: it is a control-plane change on a spawn path, it needs its own
+measurement of which runs reach `attach` versus `spawn`, and it is not what blocked the deletion.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
