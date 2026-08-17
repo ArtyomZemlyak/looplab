@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
-from looplab.tools._base import RESULT_CAP, clip, fn_spec
+from looplab.tools._base import RESULT_CAP, ToolCapability, clip, fn_spec
 # The per-stream tail budgets moved DOWN to `_base.py` beside `clip`/`fit_rows`: `run_probe`
 # (tools/dev_probe.py) reports the same two-stream shape and must not carry a second copy of the
 # rule that decides which half of a failure survives the cap. Imported under this module's own
@@ -123,6 +123,26 @@ class ShellTools:
                      "(Background commands are also auto-reaped after ~2h.)",
                      {"task_id": {"type": "string"}}, ["task_id"]),
         ]
+
+    def capabilities(self) -> list[ToolCapability]:
+        specs = {s["function"]["name"]: s["function"]["parameters"] for s in self.specs()}
+        rows = []
+        for name in ("run_command", "run_tests"):
+            rows.append(ToolCapability(
+                name=name, effect="execute", risk="high", idempotency="unknown",
+                concurrency_safe=False, cancellable=False, approval="policy",
+                input_schema=specs[name], source="assistant.shell.permission_mode"))
+        for name in ("read_output", "list_background"):
+            rows.append(ToolCapability(
+                name=name, effect="read", risk="low", idempotency="conditional",
+                concurrency_safe=False, cancellable=False, approval="never",
+                input_schema=specs[name], source="assistant.background_tasks"))
+        rows.append(ToolCapability(
+            name="kill_background", effect="control", risk="medium",
+            idempotency="idempotent", concurrency_safe=False, cancellable=False,
+            approval="policy", input_schema=specs["kill_background"],
+            source="assistant.shell.permission_mode"))
+        return rows
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}

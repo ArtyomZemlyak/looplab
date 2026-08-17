@@ -18,7 +18,7 @@ import inspect
 import io
 from contextlib import redirect_stderr, redirect_stdout
 
-from looplab.tools._base import RESULT_CAP, clip, fn_spec
+from looplab.tools._base import RESULT_CAP, capabilities_for_specs, clip, fn_spec
 
 # Per-result char cap. The agent loop hard-caps every tool result at RESULT_CAP chars
 # (agents/agent.py drive_tool_loop) and drops the TAIL past it — so a bigger provider-side cap isn't
@@ -130,6 +130,14 @@ class EnvInspectTools:
                     "not callable; this is the equivalent. Returns '(no CUDA / torch)' when unavailable "
                     "(e.g. CPU-only).", {}),
         ]
+
+    def capabilities(self):
+        # Some calls import an installed module to inspect it; that can run module import hooks, so
+        # describe the implementation as execute/conditional rather than overclaiming pure reads.
+        return capabilities_for_specs(
+            self.specs(), effect="execute", risk="low", idempotency="conditional",
+            concurrency_safe=False, cancellable=False, approval="never",
+            source="looplab.tools.env_inspect")
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}

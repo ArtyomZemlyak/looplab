@@ -115,6 +115,26 @@ _REPO_DEV_PROBE_EXECUTION = (
     "staged, never in the operator's source tree. Anything that must PRODUCE a file belongs in your "
     "node's files and its declared stages. ")
 
+# Exact commands are a different authority from the free-form probe. The model can select a name,
+# but every executable detail comes from the operator-owned task snapshot and the result workspace is
+# thrown away. Kept as two variants so a command-enabled/probe-disabled task never promises run_probe.
+_REPO_DEV_PINNED_EXECUTION = (
+    "Do NOT write helper/'cat'/'check' scripts into the repo. You have NO arbitrary shell and cannot "
+    "invent a command or its arguments. What you DO have is run_dev_command(name): select one of "
+    "the exact compile/test/lint/data-validation commands the OPERATOR pinned in this task. It runs "
+    "against a disposable candidate copy containing the seeded repo plus your currently staged edits. "
+    "Use it to verify a change instead of guessing. Changes inside its candidate tree are DISCARDED; "
+    "declared mounts retain their task/trust-tier policy. Persist a fix only with "
+    "write_file/edit_file. A long training/eval job still belongs in the "
+    "node's declared stages. ")
+
+_REPO_DEV_PINNED_AND_PROBE_EXECUTION = (
+    _REPO_DEV_PINNED_EXECUTION
+    + "For an ad-hoc Python-only question not covered by a pinned command, run_probe(code) is also "
+      "available under its stricter observe-only boundary: it cannot write, spawn, install, use a "
+      "GPU or read the operator's source tree. PROBE BEFORE inventing a shim/stub/fallback for an "
+      "environment fact. ")
+
 _REPO_DEV_SYSTEM_BODY_TAIL = (
     "ALWAYS use REPO-RELATIVE paths for the scouts (e.g. read_file('train.py'), not an absolute "
     "'/home/…/…' path — those are refused). If a grep/read keeps returning the same content, you "
@@ -293,6 +313,18 @@ _REPO_DEV_SYSTEM_BODY_TAIL = (
 
 # The PromptStore default for `repo_developer_system_body`, composed so the no-probe run's prompt is
 # byte-identical to what it has always been. `_system_body()` swaps only the middle clause.
+def _repo_dev_system_tail_with_commands() -> str:
+    """Specialize the scope sentence without minting a second module-global guidance owner."""
+    return _REPO_DEV_SYSTEM_BODY_TAIL.replace(
+        "SCOPE: your read/write tools reach ONLY this repo. Data/model files OUTSIDE it (a dataset or "
+        "checkpoint mount named in the task) are NOT readable by your tools here — don't try, and don't "
+        "hunt for them; just reference their given path in the CODE you write, which CAN open them at "
+        "runtime. ",
+        "SCOPE: your scout/read/write/probe tools reach ONLY this repo. Data/model files OUTSIDE it "
+        "(a dataset or checkpoint mount named in the task) are NOT directly readable through those "
+        "tools — don't hunt for them; reference their given path in the CODE you write. A separately "
+        "operator-pinned validation command receives the task's declared inputs in its disposable "
+        "candidate workspace. ")
 _REPO_DEV_SYSTEM_BODY = (_REPO_DEV_SYSTEM_BODY_HEAD + _REPO_DEV_NO_EXECUTION
                          + _REPO_DEV_SYSTEM_BODY_TAIL)
 _REPO_DEV_SYSTEM_BODY_WITH_PROBE = (_REPO_DEV_SYSTEM_BODY_HEAD + _REPO_DEV_PROBE_EXECUTION
@@ -360,7 +392,7 @@ class LLMRepoDeveloper:
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
-                 probe: bool = False, probe_timeout_s: float = 60.0):
+                 probe: bool = False, probe_timeout_s: float = 60.0, command_runtime=None):
         self.client = client
         self.task = task
         self.parser = parser
@@ -399,7 +431,9 @@ class LLMRepoDeveloper:
         # F2 · the probe's read fence is derived from the task's OWN repo spec, by the same
         # `read_fence.fence_inputs` that hands the engine its eval fence. Bound from the `rs` already
         # read above, once per node build rather than once per phase.
-        self._probe_repo_spec = rs if probe else None
+        self._dev_commands = list(rs.get("developer_commands") or [])
+        self._command_runtime = command_runtime
+        self._probe_repo_spec = rs if (probe or self._dev_commands) else None
         self.last_files: dict[str, str] = {}
         self.last_deleted: list[str] = []
         self.last_footprint: dict | None = None
@@ -625,8 +659,13 @@ class LLMRepoDeveloper:
         it replaces asserts the opposite ("you CANNOT execute anything yourself") and two paragraphs
         contradicting each other is worse than either one alone: that assertion is what the observed
         failure quoted back at itself before writing a fake loguru."""
-        default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
-                   else _REPO_DEV_SYSTEM_BODY)
+        if getattr(self, "_dev_commands", None):
+            clause = (_REPO_DEV_PINNED_AND_PROBE_EXECUTION if getattr(self, "_probe", False)
+                      else _REPO_DEV_PINNED_EXECUTION)
+            default = _REPO_DEV_SYSTEM_BODY_HEAD + clause + _repo_dev_system_tail_with_commands()
+        else:
+            default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
+                       else _REPO_DEV_SYSTEM_BODY)
         return render(self.prompts, "repo_developer_system_body", default)
 
     def _session_opts(self, *, max_turns=None, time_budget=None):
@@ -751,6 +790,11 @@ class LLMRepoDeveloper:
         writing phases — that is a property of the boundary, not of the toolset it is composed into
         (`tools/dev_probe.py`)."""
         extra = []
+        if getattr(self, "_dev_commands", None):
+            from looplab.tools.dev_commands import DevCommandTools
+            extra.append(DevCommandTools(getattr(self, "_probe_repo_spec", None),
+                                         runtime=getattr(self, "_command_runtime", None),
+                                         staged=write))
         if getattr(self, "_probe", False):
             from looplab.tools.dev_probe import DevProbeTools
             # `write` is the live RepoWriteTools: the probe replicates its staged `files` into its own

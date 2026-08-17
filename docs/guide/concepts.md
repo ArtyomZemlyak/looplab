@@ -1319,6 +1319,7 @@ Where each concept lives in the code:
 | CV harness, K-fold, purged walk-forward | `trust/cv.py` |
 | Leakage detectors + data profiler | `trust/leakage.py`, `core/profile.py` |
 | Vector store + agentic retrieval | `tools/vectorstore.py`, `tools/retrieval.py`, `tools/knowledge_tools.py`, `agents/agent.py` |
+| Typed tool capabilities/results, MCP structure/cancellation, and operator-pinned Developer commands | `tools/_base.py`, `agents/tool_loop.py`, `tools/mcp_tools.py`, `tools/dev_commands.py`, `engine/workspace_seed.py` |
 | Cross-run case library | `engine/memory.py` |
 | Part IV/V concept materialization + graph projections | `core/concepts.py`, `search/concept_projection.py`, the five-module concept cluster `search/concept_graph.py` (structure) → `search/concept_tagging.py` / `search/concept_lens.py` → `search/concept_analytics.py` → `search/concept_map.py` |
 | Live concept cadence (re-tag, consolidation, edges, coverage snapshot) | `engine/concept_cadence.py` |

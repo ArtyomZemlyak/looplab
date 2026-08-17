@@ -9,12 +9,17 @@ coroutines to that loop with `run_coroutine_threadsafe`. Importing this module f
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeout
+import json
 import os
 import threading
+import time
 from typing import Optional
 
 from mcp import ClientSession, StdioServerParameters  # noqa: F401  (import-fails -> MCP inert)
 from mcp.client.stdio import stdio_client
+
+from looplab.tools._base import ToolResult
 
 
 class _ServerHandle:
@@ -87,7 +92,11 @@ class _ServerHandle:
             listed = await self._session.list_tools()
             self._tools_cache = [
                 {"name": t.name, "description": t.description or "",
-                 "input_schema": getattr(t, "inputSchema", None) or {"type": "object", "properties": {}}}
+                 "input_schema": (getattr(t, "inputSchema", None)
+                                  or getattr(t, "input_schema", None)
+                                  or {"type": "object", "properties": {}}),
+                 "output_schema": (getattr(t, "outputSchema", None)
+                                   or getattr(t, "output_schema", None))}
                 for t in listed.tools]
         except Exception as e:  # noqa: BLE001
             self._err = e
@@ -108,16 +117,57 @@ class _ServerHandle:
     def tools(self) -> list:
         return list(self._tools_cache)
 
-    def call(self, tool: str, args: dict) -> str:
+    def call(self, tool: str, args: dict, *, cancel_check=None) -> ToolResult:
         fut = asyncio.run_coroutine_threadsafe(self._call(tool, args), self._loop)
-        return fut.result(timeout=120)
+        deadline = time.monotonic() + 120.0
+        while True:
+            if cancel_check is not None:
+                try:
+                    cancelled = bool(cancel_check())
+                except Exception:  # noqa: BLE001 - cancellation hint may not break transport
+                    cancelled = False
+                if cancelled:
+                    # Cancelling the submitted coroutine propagates into ClientSession.call_tool;
+                    # the SDK can then emit its protocol cancellation instead of leaving an orphaned
+                    # server task behind after the local agent turn has stopped.
+                    fut.cancel()
+                    raise InterruptedError("MCP call cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fut.cancel()
+                raise TimeoutError("MCP call timed out after 120 seconds")
+            try:
+                return fut.result(timeout=min(0.1, remaining))
+            except FutureTimeout:
+                continue
 
-    async def _call(self, tool: str, args: dict) -> str:
+    async def _call(self, tool: str, args: dict) -> ToolResult:
         res = await self._session.call_tool(tool, args or {})
         parts = []
         for c in getattr(res, "content", []) or []:
             parts.append(getattr(c, "text", None) or str(c))
-        return "\n".join(p for p in parts if p) or "(no content)"
+        structured = getattr(res, "structuredContent", None)
+        if structured is None:
+            structured = getattr(res, "structured_content", None)
+        meta = getattr(res, "_meta", None)
+        if meta is None:
+            meta = getattr(res, "meta", None)
+        text_content = "\n".join(p for p in parts if p)
+        if not text_content and structured is not None:
+            # The MCP spec asks servers with an output schema to return structuredContent and a
+            # backwards-compatible text block, but preserve usefulness when a server supplies only
+            # the structured half: the model-facing legacy view must not collapse to "no content".
+            try:
+                text_content = json.dumps(structured, ensure_ascii=False, sort_keys=True,
+                                          allow_nan=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                text_content = str(structured)
+        return ToolResult(
+            content=text_content or "(no content)",
+            structured=structured,
+            is_error=bool(getattr(res, "isError", False) or getattr(res, "is_error", False)),
+            provenance={"source": "mcp", "server": self.name, "tool": tool},
+            meta=meta)
 
 
 def connect_server(name: str, spec: dict):

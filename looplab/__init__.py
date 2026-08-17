@@ -134,6 +134,7 @@ _LAYOUT = {
     "deletion_service": "serve",
     "deletion_transaction": "serve",
     "dev_probe": "tools",      # F2: the Developer's bounded probe (no write, no exec, fenced)
+    "dev_commands": "tools",   # operator-pinned Developer commands in disposable workspaces
     "digest": "events",
     "durable_op": "serve",     # the shared reset/deletion receipt + quiescence kit (doc 25 SC-06)
     "edit_match": "tools",
@@ -332,6 +333,7 @@ _LAYOUT = {
     "memo_verify": "trust",
     "web": "tools",
     "workspace": "engine",
+    "workspace_seed": "engine",  # shared eval/Developer candidate filesystem primitives
     "write_tools": "tools",
 }
 

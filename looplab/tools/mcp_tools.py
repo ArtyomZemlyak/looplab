@@ -22,8 +22,12 @@ import logging
 import os
 import re
 import threading
+import inspect
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
+
+from looplab.tools._base import ToolCapability, ToolResult
 
 # The LoopLab repo root (…/looplab, two levels above this file) — where the default `.mcp.json`
 # lives. Computed locally instead of importing `looplab.serve.assistant.REPO_ROOT` (same value):
@@ -90,6 +94,18 @@ def _advertised_mcp_spec(server, tool: object) -> tuple[str, str, dict]:
         raise ValueError("tool input_schema is not finite JSON") from exc
     if len(encoded_schema) > _MCP_SCHEMA_MAX_BYTES:
         raise ValueError("tool input_schema exceeds the bounded schema budget")
+    output_schema = tool.get("output_schema")
+    if output_schema is not None:
+        if not isinstance(output_schema, dict):
+            raise ValueError("tool output_schema is not a JSON Schema object")
+        try:
+            encoded_output = json.dumps(
+                output_schema, ensure_ascii=False, allow_nan=False,
+                separators=(",", ":")).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("tool output_schema is not finite JSON") from exc
+        if len(encoded_output) > _MCP_SCHEMA_MAX_BYTES:
+            raise ValueError("tool output_schema exceeds the bounded schema budget")
     advertised = {"type": "function", "function": {
         "name": full, "description": description[:400], "parameters": parameters,
     }}
@@ -150,6 +166,7 @@ class McpTools:
         self.servers = servers or []
         self._route: dict = {}       # prefixed tool name -> (server, tool_name)
         self._specs: list[dict] = []
+        self._capabilities: dict[str, ToolCapability] = {}
         self.collisions: list[tuple[str, str, str]] = []
         self.rejections: list[tuple[str, str]] = []
         for s in self.servers:
@@ -203,6 +220,20 @@ class McpTools:
                         continue
                     self._route[full] = (s, original_name)
                     self._specs.append(advertised)
+                    try:
+                        call_signature = inspect.signature(s.call)
+                        cancellable = ("cancel_check" in call_signature.parameters or any(
+                            p.kind == inspect.Parameter.VAR_KEYWORD
+                            for p in call_signature.parameters.values()))
+                    except (TypeError, ValueError):
+                        cancellable = False
+                    self._capabilities[full] = ToolCapability(
+                        name=full, effect="external", risk="unknown", idempotency="unknown",
+                        concurrency_safe=False, cancellable=cancellable, approval="always",
+                        input_schema=advertised["function"]["parameters"],
+                        output_schema=(t.get("output_schema")
+                                       if isinstance(t.get("output_schema"), dict) else None),
+                        source=f"mcp:{getattr(s, 'name', '<unknown>')}:{original_name}")
                 except Exception as exc:  # noqa: BLE001 - keep malformed origin data isolated
                     origin = f"{getattr(s, 'name', None)!r}:{original_name!r}"
                     reason = str(exc) or type(exc).__name__
@@ -215,18 +246,47 @@ class McpTools:
     def specs(self) -> list[dict]:
         return list(self._specs)
 
+    def capabilities(self) -> list[ToolCapability]:
+        return [self._capabilities[name] for name in self._route]
+
     def execute(self, name: str, args: dict) -> str:
+        return self.execute_result(name, args).content
+
+    def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
         target = self._route.get(name)
         if not target:
-            return f"(unknown tool: {name})"
+            return ToolResult(content=f"(unknown tool: {name})", is_error=True, retryable=False,
+                              provenance={"source": "mcp"})
         server, tool = target
         try:
             # Cap at the loop's RESULT_CAP (the ToolProvider convention: derive budgets FROM it, not a
             # free-standing 8000 that the loop's own 4000 tail-cut always dominates anyway).
             from looplab.tools._base import RESULT_CAP
-            return _clip(str(server.call(tool, args or {})), RESULT_CAP)
+            call = server.call
+            try:
+                signature = inspect.signature(call)
+                accepts_cancel = ("cancel_check" in signature.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD
+                    for p in signature.parameters.values()))
+            except (TypeError, ValueError):
+                accepts_cancel = False
+            value = (call(tool, args or {}, cancel_check=cancel_check)
+                     if accepts_cancel else call(tool, args or {}))
+            result = ToolResult.coerce(value)
+            clipped = _clip(result.content, RESULT_CAP)
+            if clipped == result.content:
+                return result
+            return ToolResult(content=clipped, structured=result.structured,
+                              is_error=result.is_error, retryable=result.retryable,
+                              provenance=result.provenance, receipt=result.receipt, meta=result.meta)
+        except InterruptedError as e:
+            return ToolResult(content=f"(mcp call cancelled: {e})",
+                              structured={"cancelled": True}, is_error=True, retryable=True,
+                              provenance={"source": "mcp", "tool": name})
         except Exception as e:  # noqa: BLE001 - a tool error is data for the model, never a crash
-            return f"(mcp error calling {name}: {e})"
+            return ToolResult(content=f"(mcp error calling {name}: {e})", is_error=True,
+                              retryable=True,
+                              provenance={"source": "mcp", "tool": name})
 
     @classmethod
     def from_config(cls) -> "McpTools":
@@ -281,10 +341,17 @@ class GatedMcpTools:
     def specs(self) -> list[dict]:
         return self._inner.specs()
 
+    def capabilities(self) -> list[ToolCapability]:
+        return [replace(cap, approval="policy", source="gated:" + cap.source)
+                for cap in self._inner.capabilities()]
+
     def bind_state(self, state=None, parent=None) -> None:
         return None
 
     def execute(self, name: str, args: dict) -> str:
+        return self.execute_result(name, args).content
+
+    def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
         from looplab.tools.perm_modes import authorize
         try:
             args_json = json.dumps(args or {}, sort_keys=True, separators=(",", ":"),
@@ -302,8 +369,15 @@ class GatedMcpTools:
             denied=f"(MCP tool {name} is disabled in plan mode. Switch to default/acceptEdits/auto.)",
             declined=f"MCP tool {name}")
         if refusal:
-            return refusal
-        return self._inner.execute(name, args)
+            return ToolResult(content=refusal, is_error=True, retryable=False,
+                              provenance={"source": "mcp.permission", "tool": name},
+                              receipt={"arguments_sha256": args_digest, "approved": False})
+        result = self._inner.execute_result(name, args, cancel_check=cancel_check)
+        return ToolResult(content=result.content, structured=result.structured,
+                          is_error=result.is_error, retryable=result.retryable,
+                          provenance=result.provenance,
+                          receipt={**dict(result.receipt), "arguments_sha256": args_digest,
+                                   "approved": True}, meta=result.meta)
 
 
 _CACHED: Optional["McpTools"] = None

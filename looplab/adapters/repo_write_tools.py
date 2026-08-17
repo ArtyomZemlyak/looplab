@@ -20,6 +20,7 @@ from typing import Optional
 
 from looplab.tools.edit_match import apply_search_replace
 from looplab.tools.patch import SurfacePolicy
+from looplab.tools._base import capabilities_for_specs
 
 # Absolute paths to INPUT data files referenced in a stage command. Only clear INPUT-data extensions
 # (a checkpoint .ckpt/.pt an earlier stage WRITES is deliberately excluded, and relative paths resolve
@@ -391,6 +392,12 @@ class RepoWriteTools:
                                  "expect?:{files:[output paths this stage WRITES], assert?}}"}},
                      ["stages"]),
         ]
+
+    def capabilities(self):
+        return capabilities_for_specs(
+            self.specs(), effect="write", risk="medium", idempotency="conditional",
+            concurrency_safe=False, cancellable=False, approval="policy",
+            source="repo_task.edit_surface")
 
     def execute(self, name: str, args: dict) -> str:
         args = args or {}

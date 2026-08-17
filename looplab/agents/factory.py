@@ -350,6 +350,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             and callable(getattr(task, "repo_spec", None))
             and task.repo_spec().get("editables")):
         from looplab.adapters.repo_task import LLMRepoDeveloper
+        from looplab.tools.dev_commands import DeveloperCommandRuntime
         from looplab.agents.agent import loop_opts_from_settings as _loop_opts
         _handoff_dev = True
         developer = LLMRepoDeveloper(  # C4: plan decomposition + hard per-session backstop
@@ -365,7 +366,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             # Settings object, like every other knob above: `make_roles` is the ONE place a setting
             # becomes a role's behaviour, and a role that reads Settings itself is a second place.
             probe=getattr(settings, "developer_probe", True),
-            probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0))
+            probe_timeout_s=getattr(settings, "developer_probe_timeout_s", 60.0),
+            # Snapshot the eval trust tier here; the role/tool never reads live Settings.
+            command_runtime=DeveloperCommandRuntime.from_settings(settings))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

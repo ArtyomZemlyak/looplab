@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import hashlib
 import itertools
+import inspect
 import json
 import logging
 import re
@@ -24,7 +25,8 @@ from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
-from looplab.tools._base import RESULT_CAP
+from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
+                                 capability_manifest)
 from looplab.core.redact import redact_secrets
 # The typed options bundle (doc 25 AG-01). Re-exported here — and, through `agents/agent.py`, under
 # every historical spelling — because `loop_opts_from_settings` lives in THIS module and now returns
@@ -52,6 +54,7 @@ class CompositeTools:
     def __init__(self, providers: list, *, strict_collisions: bool = False):
         self.providers = providers
         self._route: dict[str, object] = {}
+        self._capabilities: dict[str, ToolCapability] = {}
         # De-dup by function name (FIRST provider wins): two providers registering the same tool name
         # otherwise (a) sent DUPLICATE specs to the endpoint — some OpenAI-compatible backends 400 on
         # that — and (b) routed execute() last-wins, silently shadowing the first provider. Dedup makes
@@ -59,6 +62,16 @@ class CompositeTools:
         self._specs: list[dict] = []
         self.collisions: list[tuple[str, str, str]] = []
         for p in providers:
+            declared: dict[str, ToolCapability] = {}
+            capability_fn = getattr(p, "capabilities", None)
+            if callable(capability_fn):
+                try:
+                    raw = capability_fn() or ()
+                    rows = raw.values() if isinstance(raw, dict) else raw
+                    declared = {c.name: c for c in rows if isinstance(c, ToolCapability)}
+                except Exception as exc:  # noqa: BLE001 - metadata must not disable a legacy tool
+                    _LOG.warning("ignoring invalid capability metadata from %s: %s",
+                                 type(p).__name__, exc)
             for spec in p.specs():
                 fname = (spec.get("function") or {}).get("name")
                 if not fname:
@@ -78,6 +91,17 @@ class CompositeTools:
                     continue
                 self._route[fname] = p
                 self._specs.append(spec)
+                # Never infer authority from a friendly-looking tool name. A provider that has not
+                # opted into the typed contract is explicitly UNKNOWN and policy code can fail closed.
+                cap = declared.get(fname)
+                if cap is None:
+                    fn = spec.get("function") or {}
+                    cap = ToolCapability.unknown(
+                        fname, input_schema=fn.get("parameters"),
+                        source=f"legacy:{type(p).__name__}")
+                self._capabilities[fname] = cap
+        self._manifest, self.manifest_hash = capability_manifest(
+            self._specs, self._capabilities.values())
 
     def specs(self) -> list[dict]:
         return list(self._specs)
@@ -85,6 +109,44 @@ class CompositeTools:
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)
         return p.execute(name, args) if p else f"(unknown tool: {name})"
+
+    def execute_result(self, name: str, args: dict, *, cancel_check=None) -> ToolResult:
+        """Typed dispatch, additive to the historical string-returning ``execute`` contract.
+
+        Providers may implement ``execute_result(name, args, cancel_check=...)`` to retain
+        structured output and cooperative cancellation. Legacy providers are wrapped without
+        changing their result bytes. Unknown calls are first-class errors instead of successful
+        strings for typed consumers, while ``execute`` keeps its original behaviour.
+        """
+        p = self._route.get(name)
+        if p is None:
+            return ToolResult(content=f"(unknown tool: {name})", is_error=True,
+                              retryable=False, provenance={"source": "composite"})
+        typed = getattr(p, "execute_result", None)
+        if callable(typed):
+            try:
+                signature = inspect.signature(typed)
+                accepts_cancel = ("cancel_check" in signature.parameters or any(
+                    param.kind == inspect.Parameter.VAR_KEYWORD
+                    for param in signature.parameters.values()))
+            except (TypeError, ValueError):
+                accepts_cancel = False
+            return ToolResult.coerce(
+                typed(name, args, cancel_check=cancel_check)
+                if accepts_cancel else typed(name, args))
+        return ToolResult.coerce(p.execute(name, args))
+
+    def capabilities(self) -> list[ToolCapability]:
+        return [self._capabilities[name] for name in self._route]
+
+    def capability(self, name: str) -> ToolCapability:
+        return self._capabilities.get(name) or ToolCapability.unknown(
+            name or "<unknown>", source="composite:unknown")
+
+    def manifest(self) -> dict:
+        # The manifest is JSON-shaped; a serialization round-trip prevents callers from mutating
+        # the canonical object whose digest is stamped onto subsequent tool observations.
+        return json.loads(json.dumps(self._manifest, ensure_ascii=False))
 
     def bind_state(self, state, parent=None) -> None:
         """Forward the live run to any run-aware provider (RunTools/DataTools); others ignore it."""
@@ -315,7 +377,7 @@ def _tool_call_args(tc: dict) -> tuple[str, dict]:
 
 
 def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
-                   on_tool_result=None) -> tuple[str, str]:
+                   on_tool_result=None, cancel_check=None) -> tuple[str, str]:
     """Execute ONE retrieval tool call and return `(capped_result, repeat_note)`.
 
     Every tool call ALWAYS executes and returns fresh content. The G2 read-dedup cache
@@ -332,8 +394,48 @@ def _run_tool_call(tools, name: str, args: dict, *, repeat_state: dict,
     # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
     # under the active operation span next to the generations that decided the call.
     with tracing.tool(name, _trace_preview(args)) as _tool_obs:
-        result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+        if tools is None:
+            typed_result = ToolResult(content=f"(unknown tool: {name})", is_error=True,
+                                      retryable=False)
+            capability = ToolCapability.unknown(name or "<unknown>", source="loop:no-provider")
+            manifest_hash = ""
+        else:
+            capability_fn = getattr(tools, "capability", None)
+            if callable(capability_fn):
+                capability = capability_fn(name)
+            else:
+                declared_fn = getattr(tools, "capabilities", None)
+                try:
+                    declared = declared_fn() if callable(declared_fn) else ()
+                    rows = declared.values() if isinstance(declared, dict) else declared
+                    capability = next((c for c in rows
+                                       if isinstance(c, ToolCapability) and c.name == name), None)
+                except Exception:  # noqa: BLE001 - metadata cannot disable execution compatibility
+                    capability = None
+                capability = capability or ToolCapability.unknown(
+                    name or "<unknown>", source=f"legacy:{type(tools).__name__}")
+            manifest_hash = str(getattr(tools, "manifest_hash", "") or "")
+            typed_execute = getattr(tools, "execute_result", None)
+            if callable(typed_execute):
+                try:
+                    signature = inspect.signature(typed_execute)
+                    accepts_cancel = ("cancel_check" in signature.parameters or any(
+                        param.kind == inspect.Parameter.VAR_KEYWORD
+                        for param in signature.parameters.values()))
+                except (TypeError, ValueError):
+                    accepts_cancel = False
+                typed_result = ToolResult.coerce(
+                    typed_execute(name, args, cancel_check=cancel_check)
+                    if accepts_cancel else typed_execute(name, args))
+            else:
+                typed_result = ToolResult.coerce(tools.execute(name, args))
+        result = typed_result.content
         _tool_obs.output(_trace_preview(result))
+        _tool_obs.set("capability", capability.as_dict())
+        if manifest_hash:
+            _tool_obs.set("capability_manifest_sha256", manifest_hash)
+        for key, value in typed_result.trace_attributes().items():
+            _tool_obs.set(f"result_{key}", value)
     # Cap once, up front — appending an explicit truncation marker when the cap actually
     # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
     # will carry (a single expression, not two kept-in-sync copies).
@@ -659,7 +761,8 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # Execute + trace + cap + repeat-ledger + provenance hook — see `_run_tool_call`,
                 # which owns the always-execute rule (P3) and the identical-result repeat note.
                 result, repeat_note = _run_tool_call(tools, name, args, repeat_state=repeat_state,
-                                                     on_tool_result=on_tool_result)
+                                                     on_tool_result=on_tool_result,
+                                                     cancel_check=_cancelled)
             result = _cap_tool_result(str(result))   # idempotent final bound (cancel/plan stubs too)
             messages.append({"role": "tool", "tool_call_id": tc.get("id", ""),
                              "name": name, "content": result + repeat_note})
