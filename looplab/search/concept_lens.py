@@ -144,6 +144,137 @@ def node_concept_delta(state, node_id) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# The RUN-CONSTANT split (2026-08-17) — which half of a membership is about the RUN
+# --------------------------------------------------------------------------- #
+
+# The receipt slugs this split can mint. They are reasons the CLAIM "true of every experiment" could
+# not be made; they are never reasons a membership is corrupt (those come from the projection itself
+# and are passed through verbatim).
+RUN_CONSTANT_UNCLASSIFIED_REASON = "unclassified_experiment"
+RUN_CONSTANT_INEXACT_REASON = "inexact_membership"
+RUN_CONSTANT_SINGLE_REASON = "single_experiment"
+RUN_CONSTANT_NO_EXPERIMENTS_REASON = "no_experiments"
+
+
+def run_constant_split(state) -> dict:
+    """Split a run's per-node concept memberships into the half that is about the RUN and the half that
+    is about an EXPERIMENT — the operator's own framing: *"нафига нам eval/recall_top_k и data/esci
+    концепты если они всегда будут? вот их надо на ран вешать. А так они просто захламляют."*
+
+    A concept carried by EVERY experiment in the run distinguishes none of them. It is a fact about the
+    run's task/stack, it belongs beside the run, and repeated once per node it is noise that crowds out
+    the one tag that actually says what the experiment did. Measured on `rubertlite-dr-unified-v9`
+    (2026-08-17): 40 of its 48 tag slots — 83.3 % — are the same five ids on all eight experiments, so
+    exactly ONE tag per node carries information and it is fifth in a list of six.
+
+    **This is a READER, and that is a decision, not an implementation detail.** "Constant across the
+    run" is a CROSS-NODE property and is therefore undecidable when a tag is written: when node 0 is
+    tagged nothing is known about node 7, so a writer-side `run_constant` flag would mean "constant
+    among the nodes that existed when I fired" and would say different things about the same concept
+    depending on when it was stamped. That is the identical ruling `extra_metrics` already carries
+    ("constancy … is undecidable at capture anyway because variance is a cross-node property, so a tag
+    derived from it would change as later nodes arrived"), and the same answer follows: derive it in
+    the projection, where the whole population is in hand, and write nothing new.
+
+    **It is deliberately NOT `RunState.run_base_concepts`, and that distinction is the finding.** The
+    run base is SEEDED from the first evaluated node's authored set
+    (`engine/concept_cadence.py::_maybe_seed_run_base_concepts`) and every later delta-authoring node
+    then inherits it through `replay.py::_materialize_concept_deltas` — so the base is SELF-CONFIRMING:
+    the derived intersection can never be smaller than the seeded base no matter what the later
+    Researchers meant, and on v9 the base therefore carries `training/negative_mining`, which is node
+    0's OWN subject (its hypothesis is "scale hard-negative mining … raise n_negatives from 2 to 4-8").
+    Deriving the intersection instead also works on the runs that have no base at all: `v7` has no
+    `run_concepts` event and still has two ids on all eight of its experiments.
+
+    FAIL-CLOSED on coverage, because "true of every experiment" is a claim about EVERY experiment. The
+    split is made only when every current experiment carries an EXACT membership; a run with one
+    unclassified node, one inexact receipt, or one experiment total gets an EMPTY `run_constant` and a
+    reason, which renders exactly as today. That is what keeps the negative control honest: on this
+    corpus v6 (4 of 7 unclassified), `rubertlite-dense-retrieval` (1 of 81) and v8 (16 of 16 tagged,
+    empty intersection) are all byte-identical before and after.
+
+    Returns, always, with sorted canonical ids:
+      {"run_constant": [ids],          # [] whenever `coverage` is not "complete"
+       "distinguishing": {nid: [ids]}, # every CURRENT node's membership minus `run_constant`
+       "no_distinguishing": [nids],    # tagged experiments whose whole membership is run-constant
+       "unclassified": [nids],         # current experiments carrying no membership at all
+       "population": int,              # experiments the intersection was taken over
+       "coverage": "complete"|"partial"|"unavailable",
+       "reasons": [slugs]}
+
+    `no_distinguishing` is the population the split EXISTS to make visible, and it is a DIFFERENT defect
+    from the redundancy: on v9 it is nodes 0 and 4 (on v7, nodes 0 and 7). Node 0 is one of that run's
+    FOUR hard-negative experiments and the only one the taxonomy cannot name — today it wears five chips
+    and reads as classified; named here it reads as what it is, an experiment no recorded tag separates
+    from node 4. The pass that would classify it is the concept cadence, which never fired in that run
+    (docs/BACKLOG.md §0.12). Never raises; malformed state fails closed."""
+    from looplab.search.concept_projection import current_concept_projection
+
+    projection = current_concept_projection(state)
+    memberships = {int(nid): sorted(set(ids))
+                   for nid, ids in (projection.memberships or {}).items()}
+    current = sorted(projection.active_nodes or ())
+    empty = {"run_constant": [],
+             "distinguishing": {nid: list(memberships.get(nid, ())) for nid in current},
+             "no_distinguishing": [], "unclassified": [], "population": 0}
+    if projection.global_reasons:
+        # Structural identity/store corruption is a statement about the whole projection: no subset of
+        # it supports a claim about every experiment. Hand back today's rendering with the receipt.
+        return {**empty, "coverage": "unavailable",
+                "reasons": sorted(set(projection.global_reasons))}
+
+    reasons: set[str] = set()
+    unclassified: list[int] = []
+    population: list[int] = []
+    for nid in current:
+        status, node_reasons = projection.node_status(nid)
+        ids = memberships.get(nid)
+        if not ids:
+            # An experiment with no membership is not evidence that a concept is universal — it is
+            # evidence that nobody classified it. Both an absent row and an exact known-empty one land
+            # here, and both are equally fatal to a "true of every experiment" claim.
+            unclassified.append(nid)
+            reasons.add(RUN_CONSTANT_UNCLASSIFIED_REASON)
+            continue
+        if status != "complete":
+            # A partial membership is a SUBSET of the truth, so its absence of a concept proves nothing
+            # and its presence cannot complete the population either. Keep the row rendered, refuse the
+            # claim, and name why through the projection's own reason vocabulary.
+            reasons.add(RUN_CONSTANT_INEXACT_REASON)
+            reasons.update(node_reasons or ())
+            continue
+        population.append(nid)
+    if not current:
+        reasons.add(RUN_CONSTANT_NO_EXPERIMENTS_REASON)
+    elif len(current) < 2:
+        # With one experiment every concept is trivially "constant" and the split would empty the only
+        # node in the run. A claim about variation needs something to vary against.
+        reasons.add(RUN_CONSTANT_SINGLE_REASON)
+    if reasons or len(population) != len(current) or len(population) < 2:
+        # `unclassified` is the actionable half of a refusal and is reported even though no claim was
+        # made: "this run has no run-level concepts" and "three experiments were never classified" are
+        # different sentences and the operator can only act on the second.
+        return {**empty, "unclassified": unclassified,
+                "coverage": "partial" if current else "unavailable",
+                "reasons": sorted(reasons)}
+
+    constant = set(memberships[population[0]])
+    for nid in population[1:]:
+        constant &= set(memberships[nid])
+    distinguishing = {nid: sorted(set(memberships.get(nid, ())) - constant) for nid in current}
+    return {
+        "run_constant": sorted(constant),
+        "distinguishing": distinguishing,
+        "no_distinguishing": [nid for nid in current
+                              if memberships.get(nid) and not distinguishing[nid]],
+        "unclassified": [],
+        "population": len(population),
+        "coverage": "complete",
+        "reasons": [],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Hierarchy + lens projections — any concept can be an axis
 # --------------------------------------------------------------------------- #
 

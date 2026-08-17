@@ -910,6 +910,48 @@ membership on the `Idea` with an explicit contract:
   event is the raw audit source. Replay materializes the effective full set in `RunState.node_concepts`
   after the complete DAG has folded.
 
+### The run-constant half of a membership
+
+Because the delta contract materializes each node's set as *base ∪ delta*, a run whose base is wide
+gives every experiment the same wide set, and a concept carried by **every** experiment distinguishes
+none of them. Measured 2026-08-17 over `runs/`: `rubertlite-dr-unified-v9` puts 40 of its 48 tag slots
+(83.3 %) on five ids shared by all eight experiments, so exactly one tag per node carries information;
+`rubertlite-dr-unified-v7` is 16 of 25 (64 %). Both are runs whose tags are **researcher-authored**. The
+three runs the classifier pass actually reached (`v8`, `v6`, `rubertlite-dense-retrieval`) have an
+**empty** intersection — a classifier tags each experiment on its own evidence and inherits nothing — so
+this is a property of the authored-tag regime, not of the corpus.
+
+`search/concept_lens.py::run_constant_split` is the one rule that separates the two halves, and it is a
+**projection, not a stamp**. "Constant across the run" is a cross-node property: when node 0 is tagged
+nothing is known about node 7, so a writer-side flag would mean *"constant among the nodes that existed
+when I fired"* and would say different things about the same concept depending on when it was written.
+Nothing new is recorded; no event type, no `RunState` field, no fold change, so every preserved log
+folds byte-identically.
+
+It is deliberately **not** `RunState.run_base_concepts`. The base is seeded from the first evaluated
+node's authored set and every later delta node inherits it back through the fold, so the base is
+self-confirming — the derived intersection can never be smaller than it, whatever the later Researchers
+meant. Deriving the intersection also works on a run with no `run_concepts` event at all (`v7` has none
+and still has two ids on all eight experiments).
+
+The split is **fail-closed on coverage**: it is a claim about *every* experiment, so it is made only
+when every current experiment carries an exact membership and there are at least two of them. One
+unclassified node, one inexact materialization receipt or a one-node run yields an empty `run_constant`
+plus a reason, and every reader then renders exactly what it rendered before.
+
+Its second output is the population it exists to make visible: **experiments with no distinguishing
+concept**, whose whole membership is the run constant. On v9 those are nodes 0 and 4 — and node 0 is the
+run's hard-negative *scaling* experiment. Today it wears five chips and reads as classified; named as
+having nothing of its own, it reads as what it is, an experiment the taxonomy says nothing about. The
+pass that would classify it is the concept cadence, which never fired in that run (see
+`docs/BACKLOG.md` §0.12).
+
+Readers: `GET /api/runs/{id}/concepts` publishes it as the additive `run_scope` block (withheld with
+`bounded_frame` whenever the frame's own membership projection was capped or torn, so the frame never
+names a constant it did not include); the agent tool `node_concepts` leads a node's line with its own
+concepts and names the run's once; the DAG's on-node chips order the experiment's own first and mark
+the run-wide ones. All three annotate and withhold nothing — every id still appears.
+
 When `card_driven_selection` is on (the default), a proposal reaches its node through a **native Card**
 rather than straight to `node_created`, and the Idea the build executes is rebuilt from the durable
 `card_added` action alone. So the whole authored concept envelope rides along on that row — the four

@@ -1,0 +1,992 @@
+{
+ "v7": [
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "regularization/r-drop"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Reproduce the documented DCL(nll_cos)+R-Drop winning recipe at FULL 50-60 epochs in the unified repo (loss.type=nll_cos, rdrop_alpha=0.5, lr 1e-3, wd 0.1, accumulate 2, grad clip 1.0, bs 8k, positive_",
+     "operator": "draft"
+    },
+    "node_id": 0,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "regularization/r-drop",
+      "optimization/effective-batch-size"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "The documented ~0.8835 DCL(nll_cos)+R-Drop recall@100 depends on the ~32k effective batch size, so doubling the effective batch on this single-GPU run (bs 8192\u219216384, accumulate 2\u21921, all else identica",
+     "operator": "draft"
+    },
+    "node_id": 1,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "regularization/r-drop",
+      "optimization/one-cycle-lr",
+      "optimization/weight-decay",
+      "optimization/training-length"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Using the documented OneCycleLR scheduler + wd 0.01 no-decay optimizer with DCL(nll_cos)+R-Drop at 20 epochs reaches the ~0.88 recall@100 ceiling within the 6h budget, confirming the repo-default cosi",
+     "operator": "draft"
+    },
+    "node_id": 2,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive/dcl-decoupled",
+      "loss/contrastive",
+      "regularization/r-drop"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Port hard-negative mining onto the DCL loss (the only lever documented to break the plateau): fix the SentenceTransformerDataCollator API mismatch (preprocess_fn -> tokenize_fn) that crashed every pri",
+     "operator": "draft"
+    },
+    "node_id": 3,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "regularization/r-drop",
+      "regularization/label-smoothing"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Adding label smoothing (a soft target) to the NLLCosLoss contrastive cross-entropy improves recall@100 by making training robust to ESCI's false-negative labels, which the hard thr-mask (which regress",
+     "operator": "draft"
+    },
+    "node_id": 4,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "loss/contrastive/confidence-regularization",
+      "loss/contrastive/false-negative-masking/positive-aware",
+      "regularization/r-drop"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Softly reweighting in-batch negatives by their confidence of being true negatives (CCR) in NLLCosLoss raises recall@100 over the hard thr-mask, because ESCI's many false-negative labels punish hard-ma",
+     "operator": "draft"
+    },
+    "node_id": 5,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "loss/contrastive/multi-positive",
+      "regularization/r-drop"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Adding multi-positive averaging (treating every other row in the batch that shares the same query as an additional positive for that query, via logsumexp over the positive set) to the DCL/nll_cos loss",
+     "operator": "draft"
+    },
+    "node_id": 6,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "regularization/r-drop",
+      "loss/contrastive"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Add R-Drop (rdrop_alpha=0.5) on top of the best DCL config and sweep epochs (30/50/60) plus rdrop_alpha (0.3/0.5/0.7) \u2014 the winning recipe used alpha=0.5 and 50-60 epochs, neither of which has been ru",
+     "operator": "draft"
+    },
+    "node_id": 7,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  }
+ ],
+ "v8": [
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "loss/contrastive/in-batch",
+      "loss/contrastive/false-negative-masking/positive-aware",
+      "negative-mining/hard-negative",
+      "negative-mining/teacher-mined"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "EXPERIMENT 1 (land the baseline + prove the #1 lever): Single-GPU hard-negative-mined nll_cos run on the unified repo. Use loss= nll_cos (DCL port) with the proven numeric recipe (bs 8192, accumulate ",
+     "operator": "draft"
+    },
+    "node_id": 0,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "loss/contrastive/decoupled-dcl"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "True decoupled-DCL mode (positive OUT of the denominator) with a hard-negative floor: the repo's nll_cos keeps the positive in the denominator, but the 0.8835 winning recipe's core differentiator was ",
+     "operator": "draft"
+    },
+    "node_id": 1,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive",
+      "loss/contrastive/false-negative-masking/positive-aware",
+      "negative-mining/hard-negative",
+      "training/scheduler/one-cycle",
+      "training/optimizer/weight-decay-no-decay"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Switching the optimizer/scheduler from the repo-default AdamW wd 0.1 + cosine LR to OneCycleLR (max_lr 1e-3, pct_start 0.2) + AdamW wd 0.01 with no-decay groups raises recall@100 well above the 0.71\u20130",
+     "operator": "draft"
+    },
+    "node_id": 2,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "concepts": [
+     "loss/contrastive",
+     "loss/contrastive/decoupled-dcl"
+    ]
+   },
+   "type": "run_concepts"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "regularization/r-drop"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Adding R-Drop (\u03b1=0.5) symmetric-KL regularization between two dropout passes on the DCL nll_cos loss raises recall@100 above the 0.7384 DCL-only anchor toward the 0.88 ceiling.",
+     "operator": "draft"
+    },
+    "node_id": 3,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/false-negative-masking/soft-confidence"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Replacing the hard FN exclusion (logit\u2192-inf) in NLLCosLoss with a soft downweight of likely-false-negative in-batch pairs (logit scaled by fn_soft_alpha=0.1 instead of dropped) raises recall@100 above",
+     "operator": "improve"
+    },
+    "node_id": 4,
+    "operator": "improve",
+    "parent_ids": [
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/false-negative-masking/category-aware"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Softly downweighting (not hard-excluding) in-batch negatives that share the query's category path \u2014 likely unlabeled positives in ESCI \u2014 reduces false-negative pressure and raises recall@100 above the",
+     "operator": "improve"
+    },
+    "node_id": 5,
+    "operator": "improve",
+    "parent_ids": [
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "training/multitask-prefix"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Adding ESCI relevance-class query prefixes (EXACT/SUBSTITUTE/COMPLEMENT) at both train and eval time raises test recall@100 above the 0.7384 DCL-only anchor.",
+     "operator": "improve"
+    },
+    "node_id": 6,
+    "operator": "improve",
+    "parent_ids": [
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "mean-merge of nodes 1,5",
+     "operator": "merge"
+    },
+    "node_id": 7,
+    "operator": "merge",
+    "parent_ids": [
+     1,
+     5
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "mean-merge of nodes 3,1",
+     "operator": "merge"
+    },
+    "node_id": 8,
+    "operator": "merge",
+    "parent_ids": [
+     3,
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "training/scheduler/one-cycle"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Replacing the cosine LR schedule with OneCycleLR (max_lr 1e-3, pct_start 0.2, div_factor 25, cycle_momentum off) on the node-3 DCL+R-Drop recipe raises test recall@100 well above 0.762, because the sc",
+     "operator": "improve"
+    },
+    "node_id": 9,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/multi-positive"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Multi-positive averaging in NLLCosLoss: the documented 0.8835 recipe explicitly used 'multi-positive (\u0443\u0441\u0440\u0435\u0434\u043d\u0435\u043d\u0438\u0435 \u043f\u043e \u043d\u0435\u0441\u043a\u043e\u043b\u044c\u043a\u0438\u043c \u043f\u043e\u0437\u0438\u0442\u0438\u0432\u0430\u043c \u043d\u0430 \u0437\u0430\u043f\u0440\u043e\u0441)', which the unified repo's nll_cos port is missing (",
+     "operator": "improve"
+    },
+    "node_id": 10,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/relevance-graded-weighting"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Relevance-graded positive weighting on the OneCycleLR R-Drop recipe: exploit ESCI's up-to-40 judged positives with their Exact/Substitute/Complement/Irrelevant graded labels (arXiv:2206.06588) by weig",
+     "operator": "improve"
+    },
+    "node_id": 11,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "mean-merge of nodes 3,9",
+     "operator": "merge"
+    },
+    "node_id": 12,
+    "operator": "merge",
+    "parent_ids": [
+     3,
+     9
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/in-batch",
+      "negative-mining/in-batch"
+     ],
+     "concepts_removed": [
+      "loss/contrastive/decoupled-dcl",
+      "regularization/r-drop"
+     ],
+     "hypothesis": "Disabling the mined-negative pipeline and switching to plain in-batch MNR (loss.type=mnr, negatives=null) on the node-3 training recipe raises test recall@100 well above 0.762, because the vector-mine",
+     "operator": "improve"
+    },
+    "node_id": 13,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "training/optimizer/weight-decay-no-decay"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "Switching the optimizer from the repo-default AdamW wd 0.1 (plain) to the documented recipe's AdamW wd 0.01 with no-decay param groups on bias/LayerNorm/word_embeddings raises test recall@100 above 0.",
+     "operator": "improve"
+    },
+    "node_id": 14,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "loss/contrastive/in-batch",
+      "negative-mining/in-batch"
+     ],
+     "concepts_removed": [
+      "loss/contrastive/decoupled-dcl",
+      "regularization/r-drop"
+     ],
+     "hypothesis": "EXPERIMENT 2 (faithful DCL+R-Drop reproduction): Port the exact documented 0.8835 recipe into the unified repo: nll_cos with rdrop_alpha=0.5, temp 0.05, thr 0.1, uniformity_weight 0, batch-centering o",
+     "operator": "improve"
+    },
+    "node_id": 15,
+    "operator": "improve",
+    "parent_ids": [
+     3
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "mode": "llm",
+    "rename": {
+     "data/esci": "task/esci",
+     "eval/recall_at_k": "evaluation/recall-at-k",
+     "loss/batch-centering": "loss/centering/batch",
+     "loss/centering": "loss/centering/batch",
+     "loss/contrastive/dcl/nll_cos": "loss/contrastive/nllcos",
+     "loss/temperature": "loss/contrastive/temperature",
+     "train/negatives": "training/negatives",
+     "train/negatives/in-batch": "sampling/in-batch/negatives",
+     "train/negatives/mining": "training/negative_mining"
+    }
+   },
+   "type": "concept_consolidation"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "eval/recall_at_k",
+     "loss/contrastive/dcl",
+     "mining/false_negative_filtering",
+     "mining/hard_negative",
+     "training/recipe"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 0
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/batch-centering",
+     "loss/contrastive",
+     "loss/contrastive/dcl",
+     "loss/contrastive/dcl/hard-negative",
+     "loss/temperature",
+     "loss/uniformity"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 1
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "optimizer/adamw",
+     "optimizer/weight_decay",
+     "scheduler/onecycle"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 2
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/contrastive/dcl",
+     "loss/contrastive/dcl/nll_cos",
+     "loss/temperature",
+     "regularization/rdrop",
+     "regularization/rdrop/symmetric-kl",
+     "training/dropout"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 3
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/contrastive/dcl",
+     "loss/contrastive/false-negative/hard-mask",
+     "loss/contrastive/false-negative/soft-downweight",
+     "loss/contrastive/nllcos",
+     "train/negatives/in-batch",
+     "train/negatives/mining"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 4
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "data/esci",
+     "loss/contrastive/nllcos",
+     "loss/contrastive/soft-negative/category-aware",
+     "sampling/in-batch/negatives"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 5
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "evaluation/recall-at-k",
+     "loss/contrastive/dcl",
+     "multitask/query-prefix",
+     "task/esci/relevance-classes"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 6
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/centering/batch",
+     "loss/contrastive/dcl",
+     "loss/contrastive/temperature",
+     "loss/contrastive/threshold",
+     "loss/downweight/category",
+     "loss/uniformity/weight",
+     "merge/mean",
+     "training/batch_size",
+     "training/negative_mining",
+     "training/negatives/count"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 7
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/batch-centering",
+     "loss/contrastive/dcl",
+     "loss/contrastive/temperature",
+     "loss/contrastive/threshold",
+     "loss/uniformity/weight",
+     "merge/mean",
+     "regularization/rdrop",
+     "train/negatives/mining",
+     "training/batch_size",
+     "training/negatives/count"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 8
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/contrastive/dcl/nll_cos",
+     "optimizer/adamw",
+     "optimizer/weight_decay",
+     "regularization/rdrop",
+     "scheduler/onecycle",
+     "training/recipe"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 9
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "data",
+     "data/esci",
+     "loss/contrastive",
+     "loss/contrastive/multi-positive",
+     "loss/contrastive/nllcos",
+     "loss/contrastive/temperature",
+     "loss/contrastive/threshold",
+     "training/batch_size"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 10
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "data/esci",
+     "loss/batch-centering",
+     "loss/contrastive",
+     "loss/contrastive/nllcos",
+     "loss/contrastive/relevance-graded-positive",
+     "loss/contrastive/temperature",
+     "loss/uniformity/weight",
+     "regularization/rdrop",
+     "scheduler/onecycle",
+     "task/esci/relevance-classes",
+     "train/negatives"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 11
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/batch-centering",
+     "loss/contrastive/dcl",
+     "loss/contrastive/temperature",
+     "loss/contrastive/threshold",
+     "loss/uniformity/weight",
+     "merge/mean",
+     "regularization/rdrop",
+     "scheduler/onecycle",
+     "train/negatives/mining",
+     "training/negatives/count"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 12
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/contrastive",
+     "loss/contrastive/dcl",
+     "loss/contrastive/nllcos",
+     "loss/contrastive/temperature",
+     "mining/false_negative_filtering",
+     "mining/hard_negative",
+     "sampling/in-batch/negatives",
+     "train/negatives/in-batch",
+     "train/negatives/mining",
+     "training/batch_size",
+     "training/negative_mining",
+     "training/negatives/count",
+     "training/recipe"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 13
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "data/esci",
+     "eval/recall_at_k",
+     "optimizer/adamw",
+     "optimizer/weight_decay",
+     "task/esci"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 14
+   },
+   "type": "node_concepts"
+  },
+  {
+   "data": {
+    "at_vocab": 53,
+    "concepts": [
+     "loss/centering/batch",
+     "loss/contrastive/dcl/nll_cos",
+     "loss/contrastive/temperature",
+     "loss/contrastive/threshold",
+     "loss/uniformity/weight",
+     "optimizer/adamw",
+     "optimizer/weight_decay",
+     "regularization/rdrop",
+     "regularization/rdrop/symmetric-kl",
+     "sampling/in-batch/negatives",
+     "scheduler/onecycle",
+     "training/batch_size",
+     "training/negatives/count"
+    ],
+    "generation": 0,
+    "mode": "llm",
+    "node_id": 15
+   },
+   "type": "node_concepts"
+  }
+ ],
+ "v9": [
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive/dcl/nll_cos",
+      "regularization/rdrop/symmetric-kl",
+      "training/negative_mining",
+      "data/esci",
+      "eval/recall_at_k"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Experiment D (scale hard-negative mining): same as A but raise n_negatives from 2 to 4-8. The documented lever (0\u21922) gave +0.03-0.04 on e5-small; the tiny backbone has never been tried beyond 2, and m",
+     "operator": "draft"
+    },
+    "node_id": 0,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "data/esci",
+      "eval/recall_at_k",
+      "loss/contrastive/dcl/nll_cos",
+      "regularization/rdrop/symmetric-kl",
+      "training/negative_mining",
+      "training/epochs"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "NEW \u2014 Long-horizon training to the documented 50-60 epochs on the champion recipe (DCL nll_cos + R-Drop \u03b1=0.5, temp 0.05, thr 0.1, bs 8192\u00d7acc2, lr 1e-3, wd 0.1, cosine, vector-mined n_negatives=2). E",
+     "operator": "draft"
+    },
+    "node_id": 1,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "full",
+     "concepts": [
+      "loss/contrastive/dcl/nll_cos",
+      "loss/contrastive/dcl/hard-negative",
+      "training/negative_mining",
+      "data/esci",
+      "eval/recall_at_k",
+      "regularization/rdrop/symmetric-kl"
+     ],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Adding the documented DCL aggressive hard-negative selection (only negatives with sim \u2265 mean_pos \u2212 0.05 in the denominator) to the NLLCos loss raises recall@100 above the 0.762 champion by focusing th",
+     "operator": "draft"
+    },
+    "node_id": 2,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "concepts": [
+     "loss/contrastive/dcl/nll_cos",
+     "regularization/rdrop/symmetric-kl",
+     "training/negative_mining",
+     "data/esci",
+     "eval/recall_at_k"
+    ]
+   },
+   "type": "run_concepts"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "training/batch_size"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "NEW \u2014 Effective-batch scaling to the documented recipe: keep the champion config (DCL nll_cos + R-Drop \u03b1=0.5, temp 0.05, thr 0.1, lr 1e-3, wd 0.1, cosine, vector-mined n_negatives=2) but raise gradien",
+     "operator": "draft"
+    },
+    "node_id": 3,
+    "operator": "draft",
+    "parent_ids": []
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "Experiment A (baseline reproduction): land the v8 champion recipe on this run's scale \u2014 DCL nll_cos + R-Drop \u03b1=0.5, temp 0.05, thr 0.1, bs 8192\u00d7accumulate 2, lr 1e-3, wd 0.1, cosine, 15 epochs, vector",
+     "operator": "improve"
+    },
+    "node_id": 4,
+    "operator": "improve",
+    "parent_ids": [
+     0
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "negative-mining/teacher-mined"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "NEW \u2014 Upgrade the hard-negative MINING ENCODER to the documented strong encoder (NV-Embed 0.95 or e5-small, or cosine-threshold 0.264), keeping n_negatives=2 (not 4) on the champion DCL+R-Drop recipe.",
+     "operator": "improve"
+    },
+    "node_id": 5,
+    "operator": "improve",
+    "parent_ids": [
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [
+      "negative-mining/bm25-lexical"
+     ],
+     "concepts_removed": [],
+     "hypothesis": "NEW \u2014 BM25-mined lexical negatives on the champion DCL+R-Drop recipe (n_negatives=2, bs 8192\u00d7acc2, lr 1e-3, wd 0.1, cosine, 15 epochs). Genuinely never implemented (no BM25/lexical code in the repo, n",
+     "operator": "improve"
+    },
+    "node_id": 6,
+    "operator": "improve",
+    "parent_ids": [
+     1
+    ]
+   },
+   "type": "node_created"
+  },
+  {
+   "data": {
+    "idea": {
+     "concept_mode": "delta",
+     "concepts": [],
+     "concepts_added": [],
+     "concepts_removed": [],
+     "hypothesis": "mean-merge of nodes 1,4",
+     "operator": "merge"
+    },
+    "node_id": 7,
+    "operator": "merge",
+    "parent_ids": [
+     1,
+     4
+    ]
+   },
+   "type": "node_created"
+  }
+ ]
+}

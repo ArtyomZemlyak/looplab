@@ -53,6 +53,20 @@ TRUNCATION_CAP_REASONS = frozenset({
     "edge_cap", "edge_endpoint_cap", "experiment_ref_cap",
 })
 
+# The completeness reasons `run_scope` may IGNORE — an ALLOW-LIST, so a reason added later blocks the
+# run-level split by default rather than silently inheriting a neighbour's judgement. `run_scope` is a
+# claim about MEMBERSHIPS ("carried by every experiment"), so only reasons that provably bear on no
+# membership are listed: the EDGE lane (a typed `is_a` assertion the split never reads — `rubertlite-dr-
+# unified-v8` carries `invalid_edge` and 16 of 16 exact memberships, and losing its split over a defect
+# in a different lane would be the over-broad gate this set exists to avoid), the METRIC lane, the
+# per-concept experiment-REF cap (a bound on the rendered join, not on who was tagged), and the run
+# GENERATION, which is an addressing fact about the frame. Everything else — every membership/identity
+# cap, every malformed-input receipt, and a torn log — makes the population inexact and blocks.
+RUN_SCOPE_BLIND_REASONS = frozenset({
+    "invalid_edge", "invalid_edge_map", "edge_cap", "edge_endpoint_cap",
+    "nonfinite_metric", "experiment_ref_cap", "generation_unavailable",
+})
+
 
 def concept_id(raw) -> Optional[str]:
     """Return a projection-safe canonical concept id, or ``None``."""
@@ -478,6 +492,7 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
     retain it without retaining the (potentially much larger) folded ``RunState``.
     """
     from looplab.search.concept_analytics import concept_metrics
+    from looplab.search.concept_lens import run_constant_split
 
     inputs = bounded_inputs(state, lens_pack)
     memberships = inputs["memberships"]
@@ -540,9 +555,23 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
             provenance_counts[provenance] = provenance_counts.get(provenance, 0) + 1
             reference_count += 1
 
+    # The RUN-level half of the memberships this frame publishes (2026-08-17). ONE rule, in
+    # `search/concept_lens.py`, computed over the folded state — but the frame may only PUBLISH it when
+    # the frame is exact and self-consistent: a bounded projection that dropped a membership row or an
+    # id would otherwise announce "carried by every experiment" about a population it truncated, which
+    # is the class of claim this module's whole receipt apparatus exists to refuse. Any cap or
+    # corruption reason, or a constant id the frame did not include, degrades it to the empty shape —
+    # i.e. exactly today's rendering, with the reason said.
+    run_scope = run_constant_split(state)
+    blinding = (reasons - RUN_SCOPE_BLIND_REASONS)
+    if blinding or not set(run_scope["run_constant"]).issubset(set(concept_ids)):
+        run_scope = {**run_scope, "run_constant": [], "no_distinguishing": [],
+                     "coverage": "partial",
+                     "reasons": sorted(set(run_scope["reasons"]) | {"bounded_frame"})}
     source_authoritative = source_divergence is None and bool(generation)
     return {
         "run_id": run_id,
+        "run_scope": run_scope,
         RUN_GENERATION_FIELD: generation or None,
         "requested_seq": requested_seq,
         "captured_seq": captured_seq,
@@ -658,6 +687,9 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
             "fallback": (None if requested_lens == effective_lens else "no_matching_edges"),
         },
         "lenses": lens_pack,
+        # Which half of a membership is about the RUN rather than about one experiment. Additive and
+        # reader-defaulted: a client that does not know the key renders exactly what it always did.
+        "run_scope": core["run_scope"],
         "tree": tree,
         "metrics": core["metrics"],
         "touch": touch,

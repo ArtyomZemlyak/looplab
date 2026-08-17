@@ -2619,6 +2619,128 @@ appears on, and the TUI's `finalize` verb takes the same route. The server-side 
 URL. Recorded rather than fixed here: it is a control-plane change on a spawn path, it needs its own
 measurement of which runs reach `attach` versus `spawn`, and it is not what blocked the deletion.
 
+### §0.12 The concept view showed one hard-negative experiment where the run had four (2026-08-17)
+
+The operator, in their own words: *"нафига нам eval/recall_top_k и data/esci концепты если они всегда
+будут? вот их надо на ран вешать. А так они просто захламляют."* — why carry a concept on a NODE when
+it is true of every node in the run; those belong to the RUN, and on nodes they are clutter. They then
+asked a question the concept lane could not answer: **"is there really only one hard-negative experiment
+in v9?"**
+
+**THE MEASUREMENT.** `runs/rubertlite-dr-unified-v9`, folded: eight experiments, all eight tagged, 48
+tag slots, and **40 of them (83.3 %) are the same five ids on every node** —
+`data/esci`, `eval/recall_at_k`, `loss/contrastive/dcl/nll_cos`, `regularization/rdrop/symmetric-kl`,
+`training/negative_mining`. Exactly ONE tag per node carries information, and on a six-id list it is
+fifth. Across `runs/` (41 event logs, 576 nodes, 1,933 tag slots, 50.1 % run-constant overall):
+
+    run                        nodes  tagged  slots  run-constant  provenance            concept cadence
+    rubertlite-dr-unified-v9       8       8     48   40  (83.3 %)  researcher-authored   never fired
+    rubertlite-dr-unified-v7       8       8     25   16  (64.0 %)  researcher-authored   never fired
+    specgate*/seed*-depth*  (36 logs)         1,368  912  (66.7 %)  researcher-authored   never fired
+    rubertlite-dr-unified-v8      16      16    120    0  ( 0.0 %)  classifier            fired once
+    rubertlite-dr-unified-v6       7       3     23    0  ( 0.0 %)  classifier            fired once
+    rubertlite-dense-retrieval    81      80    349    0  ( 0.0 %)  classifier            159 rows
+
+So **v9 is not an accident and the shape is not universal**: it is the AUTHORED-tag regime. Where the
+classifier ran, each experiment was tagged on its own evidence, inherited nothing, and the intersection
+is empty. Where it did not, the only taxonomy is the proposer's own declaration.
+
+**TWO THINGS THE FIRST READING GOT WRONG, and both are worth writing down.** (1) *"nodes 3-7 carry no
+tags"* is an artifact of reading `node_created.idea.concepts` off the wire. Those five nodes authored
+`concept_mode: "delta"` and the fold materializes base ∪ delta — **every node in v9 is tagged in
+state**, and corpus-wide only 5 of 576 nodes (0.9 %) carry no membership. The fold is not the defect.
+(2) The redundancy is therefore not "some nodes are empty, others repeat"; it is that the delta
+contract re-inflates the base onto every node and no reader could tell an inherited id from an
+authored one.
+
+**WHY THE RUN BASE IS THE WRONG PLACE TO LOOK.** `RunState.run_base_concepts` already IS a run-level
+concept home, which is what makes it tempting. But `engine/concept_cadence.py::_maybe_seed_run_base_concepts`
+SEEDS it from the first evaluated node's authored set, and `replay.py::_materialize_concept_deltas` then
+gives it back to every delta node — so **the base is self-confirming**: the derived intersection can
+never be smaller than it, whatever the later Researchers meant. On v9 that is exactly how
+`training/negative_mining` — node 0's OWN subject, whose hypothesis reads *"Experiment D (scale
+hard-negative mining): raise n_negatives from 2 to 4-8"* — became everybody's background.
+
+**WHAT IT COST.** Ground truth from the recorded hypotheses: v9 has FOUR hard-negative experiments —
+node 0 (mining `n_negatives` 2→4), node 2 (`dcl_threshold=0.05` aggressive selection in the loss), node
+5 (mining ENCODER swapped to e5-small-en-ru), node 6 (BM25 lexical negatives, `mining_type=3`). Asked
+"which experiments are about hard negatives", the concept lane answered two ways and both were useless:
+match `training/negative_mining` and you get all EIGHT (it is in the base); match the specific ids and
+you get 2, 5 and 6, each buried under five constants. **Node 0 is invisible either way, because its
+entire authored membership IS the run constant.**
+
+**THE FIX IS A READER, AND THE DECIDABILITY ARGUMENT IS THE WHOLE DESIGN.** "Constant across the run"
+is a CROSS-NODE property. When node 0 is tagged nothing is known about node 7, so a writer-side
+`run_constant` flag would mean *"constant among the nodes that existed when I fired"* and would say
+different things about the same concept depending on when it was stamped — the identical ruling
+`extra_metrics` already carries ("constancy … is undecidable at capture anyway because variance is a
+cross-node property, so a tag derived from it would change as later nodes arrived"). So:
+`search/concept_lens.py::run_constant_split` derives it in the projection, where the whole population is
+in hand. **No event type, no `RunState` field, no fold change** — invariants #5 and #7 have nothing to
+satisfy because nothing new is written, and replayed over all 41 logs the corpus digest is unchanged
+(576 nodes, 40 champions, 494 metrics, 1 violation, `b8d15e68062ff3b9` before and after).
+
+FAIL-CLOSED ON COVERAGE, because it is a claim about EVERY experiment: made only when every current
+experiment has an exact membership and there are at least two. One unclassified node, one inexact
+receipt or a one-node run ⇒ empty `run_constant` + a reason ⇒ today's rendering exactly. That is what
+makes v6, `rubertlite-dense-retrieval` and v8 byte-identical negative controls rather than assertions.
+
+Readers wired: `GET /api/runs/{id}/concepts` gains the additive `run_scope` block (withheld with
+`bounded_frame` when the frame's own membership projection was capped or torn — the frame may never
+name a constant it did not include); `tools/run_tools.py::node_concepts` leads a node's line with its
+OWN concepts; the DAG's chip strip orders the experiment's own first and marks the run-wide ones dashed.
+All three ANNOTATE — every id still appears — so no metric, champion, selectability or violation can
+move. `tests/test_concept_run_scope.py` drives it over v9's and v8's real folded shapes
+(`tests/fixtures/concept_run_scope_corpus.json`) and `ui/test/conceptRunScope.test.js` drives the
+browser half.
+
+**THE SECOND OUTPUT IS THE POINT, and it is a different defect from the redundancy.**
+`no_distinguishing` names the experiments whose whole membership is the run constant — v9 nodes 0 and 4,
+v7 nodes 0 and 7. Today node 0 wears five chips and reads as classified; named, it reads as what it is.
+**This does NOT get the operator to four**, and that is stated rather than engineered around: no
+derivation over what v9 recorded yields exactly {0, 2, 5, 6}. Params do not (node 3 also carries
+`n_negatives=4` and is a batch-scaling experiment, so a param rule gives five); authorship does not
+(node 1 authored `training/negative_mining` in its full set, so an authorship rule gives five); and the
+deterministic alias tagger finds nothing at all, because `graph_from_node_concepts` synthesizes no
+aliases (re-derived: `tag_text` returns `[]` for all eight v9 nodes against v9's own vocabulary). The
+only thing that separates node 0 from node 4 is the English of its hypothesis, which is the classifier's
+job.
+
+**STILL OPEN — ⬜ the concept classifier cadence is structurally unreachable on a run that is never
+quiescent, and that is why node 0 has no tag of its own.** `engine/concept_cadence.py::_should_consult_concepts`
+opens `if state.pending_nodes(): return False`. Since backlog F1f made evaluation children outlive the
+turn that admitted them, a run with continuously-overlapping multi-hour evals never has a quiescent
+moment. Measured by walking each log's node lifecycle:
+
+    run                        prefixes with >0 nodes and 0 pending    classifier tags
+    rubertlite-dr-unified-v9                                      0    0 of 8
+    rubertlite-dr-unified-v7                                      0    0 of 8
+    rubertlite-dr-unified-v8                                    148    16 of 16
+    rubertlite-dr-unified-v6                                    850    3 of 7
+    rubertlite-dense-retrieval                                  903    80 of 81
+
+A perfect correlation, and v9's whole event census confirms the blast radius: **zero**
+`concept_coverage_snapshot`, **zero** `coverage_snapshot` and **zero** strategy rows — the Strategist
+consult and both coverage snapshots share that same `pending_nodes()` gate, so the entire cadence family
+was starved for the run, not just the concept half.
+
+It is **deliberately not fixed here**, on this file's own rules: relaxing that gate would newly emit
+`node_concepts` with CLASSIFIER provenance, which the `graded_novelty` admission precheck reads — v9
+runs with `graded_novelty=True` and has a `novelty_rejected` row — so it reaches **selectability**,
+which is exactly what concepts may not do. It would also spend unbudgeted LLM money mid-eval, tag from a
+node whose result/log excerpts do not exist yet, and let the coverage snapshot's uncovered-region
+directive (deliberately behavioral) steer proposals from a different cadence. The remedy is a separate,
+measured change: a THIRD pace, on `cadence.py`'s stated rule that a new pace must record no `at_node`,
+scoped to the concept classifier only, with the graded-novelty evidence channel gated on it explicitly.
+Whoever takes it should re-read `engine/cadence.py::occupancy_due` first — it is the existing answer to
+"a node count cannot express that an evaluation has been running for four hours".
+
+⬜ **Second residue:** the run base could be re-derived at finalization from the intersection rather than
+seeded from node 0, which would stop it being self-confirming for the NEXT run's cross-run capsule. Not
+done: `run_base_concepts` is an inheritance source the fold reads, so changing what is written to it is a
+writer change with replay consequences, and the reader-side split makes it unnecessary for the operator's
+view. Recorded so the self-confirming property is not rediscovered.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
