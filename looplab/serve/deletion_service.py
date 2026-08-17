@@ -651,10 +651,29 @@ def begin_or_resume_run_deletion(
                     engine_start=lambda: HTTPException(409, _detail(
                         "engine_launching", "The run engine is still launching.",
                         operation_id=operation_id, retryable=True)),
+                    # This rung's refusal is the one that names no way forward, and that omission
+                    # is what it costs: `run_finalization_incomplete` is the ONLY probe of the
+                    # three whose state does not clear on its own. An active command reaches a
+                    # terminal and a launching engine either takes the lock or stops claiming it,
+                    # so "wait and press again" is true of both — but a finalization interrupted by
+                    # a dead engine is owned by nobody and advances never, so the same advice is a
+                    # loop. It is not unresolvable, and the remedy is not discoverable from here:
+                    # `looplab finalize <run_dir>` is a wrap-up-only re-entry that completes the
+                    # terminal already on disk (`cli/run_cmds.py::finalize`'s crash-boundary
+                    # repair), appends no lifecycle event, starts no work, needs no reachable
+                    # model, and is idempotent. Measured 2026-08-17 on `runs/live-deps4-0804`,
+                    # dead since 2026-08-04 with 8 of 13 finalize steps: the operator read this
+                    # sentence and concluded the run was permanently undeletable. It is not — the
+                    # command clears the state this refuses on, and the refusal now says so.
                     finalize_incomplete=lambda: HTTPException(409, _detail(
                         "run_finalization_incomplete",
                         "Finish terminal projections before deleting this run.",
-                        operation_id=operation_id)))
+                        operation_id=operation_id,
+                        remediation=(
+                            "Complete the interrupted wrap-up with `looplab finalize "
+                            f"<runs>/{rd.name}`, then delete. If the run's engine is still alive "
+                            "it will finish on its own; this state does NOT clear by itself once "
+                            "that engine is gone."))))
 
             with run_lifecycle_lock_http(rd):
                 if receipt is None or receipt["phase"] == "prepared":

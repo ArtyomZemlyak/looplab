@@ -391,6 +391,33 @@ that would **lift** a finished or stopped run back into the loop can still propo
 refusal — and it classifies the boundary **under the singleton lock**, so a `finalize` that completes
 while that `resume` waits cannot turn its warning into a lift (see [`resume`](#resume)).
 
+### This is what a `run_finalization_incomplete` deletion refusal is asking for
+
+A run whose engine died **between `run_finished` and `finalization_finished`** is finished, partly
+wrapped up, and owned by nobody. Every destructive whole-run operation refuses it — deletion with
+`409 run_finalization_incomplete`, Replay with *"cannot reset run: terminal projections are
+incomplete"* — because the quiescence ladder cannot distinguish "these projections are still being
+written" from "these projections stopped being written". **`looplab finalize RUN_DIR` is the
+supported way out, and it is the whole of it.** It completes the terminal already on disk, appends
+no lifecycle event, starts no work, needs no reachable model, and is idempotent; the refusal clears
+on the same command and the run then deletes normally.
+
+Two things worth knowing before you type it:
+
+- **It does not clear on its own.** The ladder's other two rungs refuse states that resolve
+  themselves — an active command reaches a terminal, a launching engine takes the lock or stops
+  claiming it — so *"wait and refresh"* is sound advice for those and a loop for this one. Once the
+  owning engine is gone, nothing on the box advances a stalled finalization until you ask it to.
+- **There is no discard.** `FINALIZE_STEP_ABANDONED` is written by the engine only for a staged
+  *error* terminal and no command or endpoint can request it, so the wrap-up cannot be thrown away
+  unfinished. Completing it is the only route to a deletable run — which is deliberate: the wrap-up
+  is what writes the run's budget, cost roll-up and cross-run case, and a run discarded before that
+  takes its own accounting with it.
+
+If the run's engine **is** still alive, none of this applies and you should let it finish: the
+deletion path takes `engine.lock` itself before it touches anything, so a live engine is refused
+with `engine_running` whatever state its finalization is in.
+
 ---
 
 ## `repair-log`
