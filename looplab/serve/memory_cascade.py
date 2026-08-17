@@ -154,6 +154,29 @@ class RunIdentity:
         """True when we could not learn this run's uid, so every match is by directory name alone."""
         return not self.run_uid
 
+    def unmatchable(self, row: dict) -> bool:
+        """True when this caller CANNOT match `row` on identity, whatever the row says.
+
+        The blind spot of the legacy fallback, and the one `owns` cannot report on. A caller with no
+        `run_uid` meets a row that HAS one and takes the first branch of `owns`, which requires
+        `self.run_uid`: it returns False without ever comparing a name. So the row is counted as
+        "written by another run" — indistinguishable, in the receipt, from a row that really was.
+
+        That is fine for a genuinely pre-uid run, because a pre-uid run's rows are pre-uid too and
+        name matching is the only identity either side has. It is NOT fine in a MIXED-generation
+        store, which is what a shared `~/.looplab/memory` becomes the day uid stamping lands: a
+        uid-less run deleted against a store whose every row carries a uid matches nothing at all,
+        and the purge answers `{"ok": true, "deleted": 0, "kept": 0, "identity": "run_id"}` — a clean
+        success that did no work, and an `identity` claiming a name keying that never happened.
+
+        MEASURED, 2026-08-17: all 216 cascadable rows in `~/.looplab/memory` carry a `run_uid`, and
+        all 54 parked deletion identities under `runs/` carry `run_uid: ""` because their runs
+        predate the field (the writer is `orchestrator.py`'s `run_started`, added 2026-08-11 in
+        `ab328ee4`). Every one of those purges was structurally incapable of matching a row, and
+        every one reported success. Counting this is what lets the receipt say so.
+        """
+        return self.legacy_only and bool(_text(row.get("run_uid")))
+
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
@@ -198,13 +221,39 @@ def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -
 
     Returns the fallback memory dir when the snapshot names none, and an empty `run_uid` when the log
     predates the field — both disclosed, never guessed at.
+
+    `run_uid_source` says WHY the uid is what it is, because an empty string alone has four different
+    meanings and the cascade behaves differently under each:
+
+    * `run_started`   — stamped and read. The purge is exactly keyed.
+    * `pre_uid_run`   — the log HAS a `run_started` and it carries no `run_uid`. The run genuinely
+                        predates the field (`orchestrator.py` began stamping it 2026-08-11,
+                        `ab328ee4`), its rows are pre-uid too, and name matching is the only identity
+                        either side has. Legacy matching is CORRECT here.
+    * `no_run_started` — no `run_started` in the log at all: a run that never got past setup, or a
+                        log that was reset. There is no evidence the run wrote anything.
+    * `unreadable`    — the log could not be read. NOT the same as "there is no uid", and the one
+                        case where a legacy purge may be keying on a name for a run that HAS a uid.
+
+    Recorded rather than inferred later, because after the run directory is gone nothing can tell
+    these apart — and an empty string in the parked sidecar reads, on every retry forever, as
+    "matched nothing", which is the reading that made 54 silent no-ops look like successes.
     """
     rd = Path(run_dir)
-    identity = {"run_id": _text(rd.name), "run_uid": "", "memory_dir": _text(fallback_memory_dir)}
+    identity = {"run_id": _text(rd.name), "run_uid": "", "memory_dir": _text(fallback_memory_dir),
+                "run_uid_source": "unreadable",
+                "memory_dir_source": "server_default" if _text(fallback_memory_dir) else "none"}
     try:
         cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
         if isinstance(cfg, dict) and _text(cfg.get("memory_dir")):
             identity["memory_dir"] = _text(cfg["memory_dir"])
+            # WHICH store this is, and how we know. `memory_dir` is a per-RUN setting, so a purge
+            # against the server's current global can be a purge against a store the run never wrote
+            # to — and the receipt could not tell the two apart, which made every "deleted: 0" look
+            # like it might have been aimed at the wrong directory. It is answerable for free at the
+            # only moment it is knowable (the run is still here), so it is recorded rather than
+            # argued about afterwards.
+            identity["memory_dir_source"] = "run_config"
     except Exception:  # noqa: BLE001 — a missing/damaged snapshot falls back, it does not refuse
         pass
     # Through the shared reader and the type CONSTANT, not a hand-rolled scan for a byte literal.
@@ -218,12 +267,18 @@ def run_memory_identity(run_dir: str | Path, *, fallback_memory_dir: str = "") -
     try:
         from looplab.events.eventstore import iter_event_jsonl
         from looplab.events.types import EV_RUN_STARTED
+        identity["run_uid_source"] = "no_run_started"
         for event in iter_event_jsonl(rd / "events.jsonl"):
             if (event or {}).get("type") == EV_RUN_STARTED:
                 identity["run_uid"] = _text((event.get("data") or {}).get("run_uid"))
+                # The DISTINCTION this field exists for: we reached the identity anchor and it did
+                # or did not carry a uid. Set only here, so a log we never finished reading keeps
+                # `unreadable` and is never reported as a run that predates the field.
+                identity["run_uid_source"] = ("run_started" if identity["run_uid"]
+                                              else "pre_uid_run")
                 break
     except Exception:  # noqa: BLE001 — same: no uid means legacy matching, not a refusal
-        pass
+        identity["run_uid_source"] = "unreadable"
     return identity
 
 
@@ -542,7 +597,7 @@ def _tier_from_verdicts(verdicts: Iterable[tuple[dict, str]], run: "RunIdentity"
     to bare-name matching still reported `identity: "run_uid"`, so the one case where a shared store
     can lose another checkout's rows was the case the receipt described as exactly keyed.
     """
-    deletable, kept, named, reasons = 0, 0, 0, {}
+    deletable, kept, named, blind, reasons = 0, 0, 0, 0, {}
     for row, reason in verdicts:
         if not reason:
             deletable += 1
@@ -551,12 +606,35 @@ def _tier_from_verdicts(verdicts: Iterable[tuple[dict, str]], run: "RunIdentity"
         elif reason != NOT_THIS_RUN:
             kept += 1
             reasons[reason] = reasons.get(reason, 0) + 1
-    return {"deletable": deletable, "kept": kept, "name_matched": named,
+        elif run.unmatchable(row):
+            # Counted OUTSIDE `kept`, deliberately. These are not rows the cascade decided to keep —
+            # they are rows it could not form an opinion about, and folding them into `kept` would
+            # report a judgement nothing made. See `RunIdentity.unmatchable`.
+            blind += 1
+    return {"deletable": deletable, "kept": kept, "name_matched": named, "unmatchable": blind,
             "reasons": [{"reason": r, "rows": n} for r, n in sorted(reasons.items())]}
 
 
 def _survey_tier(rows: Iterable[dict], keep_reason: Callable, run: "RunIdentity") -> dict:
     return _tier_from_verdicts(((row, keep_reason(row, run)) for row in rows), run)
+
+
+def blind_advisory(run: "RunIdentity", unmatchable: int, deleted: int) -> str:
+    """The sentence a receipt owes the operator when it matched nothing it COULD not have matched.
+
+    Built here, not at the two call sites, so the survey and the purge cannot describe the same
+    condition differently — the survey's number is the one the operator consents to and the purge's
+    is the one they are shown afterwards, and a disagreement between them reads as data loss.
+
+    Empty when there is nothing to disclose: a purge that deleted rows was not blind, and a purge
+    with no unmatchable rows had no blind spot to report."""
+    if not unmatchable or not run.legacy_only:
+        return ""
+    return (f"{unmatchable} row(s) in this store name a run incarnation (run_uid) while this run's "
+            f"own uid could not be read, so they could not be matched either way"
+            + (" — this purge could not have removed them" if not deleted else "")
+            + ". Runs started before 2026-08-11 predate uid stamping; if this run is one of them, "
+              "its rows would carry no uid either, and rows that DO carry one belong to other runs.")
 
 
 def _identity_label(run: "RunIdentity", name_matched: int) -> str:
@@ -583,11 +661,13 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
     base = Path(memory_dir) if memory_dir else None
     empty = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
              "identity": _identity_label(run, 0), "available": False,
-             "deletable": 0, "kept": 0, "name_matched": 0, "stores": [], "unreadable": [],
+             "deletable": 0, "kept": 0, "name_matched": 0, "unmatchable": 0, "advisory": "",
+             "stores": [], "unreadable": [],
              "preserved": [{"store": s, "reason": r} for s, r in PRESERVED_TIERS]}
     if not run.run_id or base is None or not base.is_dir():
         return empty
     stores, unreadable, total_deletable, total_kept, total_named = [], [], 0, 0, 0
+    total_blind = 0
     for filename, label, keep_reason in _tier_rules(base, run):
         path = base / filename
         if not path.exists():
@@ -603,10 +683,110 @@ def attributable_memory(memory_dir: str | Path | None, run_id: str, run_uid: str
         total_deletable += tier["deletable"]
         total_kept += tier["kept"]
         total_named += tier["name_matched"]
+        total_blind += tier["unmatchable"]
         stores.append({"store": label, "file": filename, **tier})
     return {**empty, "available": True, "deletable": total_deletable, "kept": total_kept,
             "name_matched": total_named, "identity": _identity_label(run, total_named),
+            "unmatchable": total_blind,
+            "advisory": blind_advisory(run, total_blind, total_deletable),
             "stores": stores, "unreadable": unreadable}
+
+
+def surviving_run_identities(runs_root: str | Path) -> dict:
+    """Every run still on disk, as the two namespaces a memory row can name it in.
+
+    `{"names": {...}, "uids": {...}, "unreadable": [...]}`. Both are needed and neither substitutes
+    for the other: a post-uid run's rows name it by `run_uid`, a pre-uid run's rows name it by
+    `run_id`, and a shared store holds both generations at once.
+
+    `unreadable` is the FAIL-CLOSED half. A surviving run whose event log we could not read has an
+    unknown uid, so a row carrying that uid would look like it belongs to nobody — and treating an
+    unknown as an orphan is how a maintenance sweep deletes a live run's evidence. Callers must
+    refuse to classify uid-carrying rows as orphaned while this list is non-empty; `orphan_survey`
+    does exactly that, and says so.
+    """
+    root = Path(runs_root)
+    names: set[str] = set()
+    uids: set[str] = set()
+    unreadable: list[str] = []
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        return {"names": names, "uids": uids, "unreadable": ["<runs root unreadable>"]}
+    for run_dir in entries:
+        try:
+            if not run_dir.is_dir() or run_dir.name.startswith("."):
+                continue
+        except OSError:
+            continue
+        names.add(run_dir.name)
+        identity = run_memory_identity(run_dir)
+        if identity["run_uid"]:
+            uids.add(identity["run_uid"])
+        elif identity["run_uid_source"] == "unreadable":
+            # We cannot say this run has no uid — only that we could not look. See above.
+            unreadable.append(run_dir.name)
+    return {"names": names, "uids": uids, "unreadable": unreadable}
+
+
+def orphan_survey(memory_dir: str | Path, runs_root: str | Path) -> dict:
+    """Which cross-run rows name a run that is no longer on disk — grouped by the run that wrote them.
+
+    The answer to "the store is full of rows from runs I deleted, what would it take to clean up",
+    and deliberately a SURVEY that names identities rather than a row-level delete list. The removal
+    a caller builds on top of this must go back through `purge_attributable_memory` once per
+    identity, so every tier predicate still applies — a lesson consolidated with another run's
+    evidence, a capsule whose concepts were merged, a claim another run's curation was computed over
+    are all still protected. A blunt "delete every orphaned row" would destroy exactly the shared
+    corroboration this module's opening docstring exists to defend, and the fact that the *writing*
+    run is gone does not make its contribution to a surviving row somebody else's to discard.
+
+    Rows are attributed the same way `RunIdentity.owns` attributes them: by `run_uid` when the row
+    carries one, by `run_id` only when it does not. So a uid-less row whose directory NAME is live is
+    NOT an orphan, which is the safety margin — it is indistinguishable from a live run's own legacy
+    row, and this survey must never propose it.
+    """
+    base = Path(memory_dir)
+    live = surviving_run_identities(runs_root)
+    blind = bool(live["unreadable"])
+    result = {"schema": MEMORY_CASCADE_SCHEMA, "memory_dir": str(base),
+              "runs_root": str(Path(runs_root)), "available": base.is_dir(),
+              "blind": blind, "unreadable_runs": sorted(live["unreadable"]),
+              "identities": [], "orphan_rows": 0, "live_rows": 0, "stores": []}
+    if not base.is_dir():
+        return result
+    groups: dict[tuple[str, str], int] = {}
+    for filename, label in CASCADED_TIERS:
+        path = base / filename
+        if not path.exists():
+            continue
+        try:
+            rows = _rows(path)
+        except StoreUnreadable:
+            result["stores"].append({"store": label, "file": filename, "unreadable": True})
+            continue
+        orphan = live_count = 0
+        for row in rows:
+            uid = _text(row.get("run_uid"))
+            name = _text(row.get("run_id"))
+            if uid:
+                # FAIL CLOSED while any surviving run's uid is unknown.
+                is_live = uid in live["uids"] or blind
+            else:
+                is_live = name in live["names"]
+            if is_live:
+                live_count += 1
+            else:
+                orphan += 1
+                groups[(name, uid)] = groups.get((name, uid), 0) + 1
+        result["orphan_rows"] += orphan
+        result["live_rows"] += live_count
+        result["stores"].append({"store": label, "file": filename,
+                                 "orphan_rows": orphan, "live_rows": live_count})
+    result["identities"] = [
+        {"run_id": run_id, "run_uid": uid, "rows": count}
+        for (run_id, uid), count in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return result
 
 
 def _reelect_active_cases(rows: list[dict], touched: Optional[set] = None) -> list[dict]:
@@ -660,7 +840,8 @@ def unreadable_identity_receipt(run_id: str, reason: str) -> dict:
     failure path is the one where a missing field silently offers a retry that cannot succeed."""
     return {"schema": MEMORY_CASCADE_SCHEMA, "run_id": _text(run_id), "run_uid": "",
             "memory_dir": "", "identity": "unknown", "ok": False,
-            "deleted": 0, "kept": 0, "stores": [],
+            "deleted": 0, "kept": 0, "name_matched": 0, "unmatchable": 0, "advisory": "",
+            "stores": [],
             "failures": [{"store": "identity", "error": str(reason)}]}
 
 
@@ -689,7 +870,8 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
     result = {"schema": MEMORY_CASCADE_SCHEMA, "run_id": run.run_id, "run_uid": run.run_uid,
               "memory_dir": str(base) if base is not None else "",
               "identity": _identity_label(run, 0), "ok": True,
-              "deleted": 0, "kept": 0, "name_matched": 0, "stores": [], "failures": []}
+              "deleted": 0, "kept": 0, "name_matched": 0, "unmatchable": 0, "advisory": "",
+              "stores": [], "failures": []}
     if not run.run_id or base is None or not base.is_dir():
         result["ok"] = False
         result["failures"].append({"store": "memory_dir", "error": "no cross-run memory directory"})
@@ -708,6 +890,11 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
                 # claim identity per row, and this runs while holding the store's interprocess lock.
                 verdicts = [(row, keep_reason(row, run)) for row in rows]
                 tier = _tier_from_verdicts(verdicts, run)
+                # Accumulated BEFORE the early exit. A store holding only rows this caller could not
+                # match has no deletable row and so never reaches the `stores` list below — which is
+                # exactly the store the operator most needs told about, because it is the one whose
+                # silence looks like "this run wrote nothing here".
+                result["unmatchable"] += tier["unmatchable"]
                 if not tier["deletable"]:
                     result["kept"] += tier["kept"]
                     continue
@@ -733,6 +920,7 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
             result["stores"].append({"store": label, "file": filename,
                                      "deleted": tier["deletable"], "kept": tier["kept"],
                                      "name_matched": tier["name_matched"],
+                                     "unmatchable": tier["unmatchable"],
                                      # Rows this purge REWROTE without deleting: a case group whose
                                      # champion it removed and re-elected. Counted because the row
                                      # belongs to another run and its meaning changed.
@@ -741,6 +929,7 @@ def purge_attributable_memory(memory_dir: str | Path | None, run_id: str,
             result["ok"] = False
             result["failures"].append({"store": label, "file": filename,
                                        "error": f"{type(exc).__name__}: {exc}"[:200]})
+    result["advisory"] = blind_advisory(run, result["unmatchable"], result["deleted"])
     return result
 
 
@@ -762,7 +951,8 @@ def _row_identity(row: Any) -> str:
 __all__ = [
     "MEMORY_CASCADE_SCHEMA", "NOT_THIS_RUN", "PRESERVED_TIERS", "attributable_memory",
     "purge_attributable_memory", "merged_concept_ids", "run_memory_identity",
-    "unreadable_identity_receipt",
+    "unreadable_identity_receipt", "blind_advisory", "RunIdentity",
+    "orphan_survey", "surviving_run_identities",
     "known_memory_dirs", "memory_dir_is_known",
     "lesson_keep_reason", "note_keep_reason", "case_keep_reason",
     "claim_keep_reason", "capsule_keep_reason",

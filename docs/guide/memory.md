@@ -606,6 +606,78 @@ server manages (its own, or one a surviving run names); it is not a free-form pa
 purge rewrites whatever it is pointed at. `GET /api/runs/{run_id}/memory-attribution` is the
 read-only preview the dialog is drawn from.
 
+### When the cascade could not have matched anything, it says so
+
+The cascade keys on `run_uid`, and a run started **before 2026-08-11** does not have one — uid
+stamping landed in `orchestrator.py`'s `run_started` that day. That is normally harmless, because
+such a run's memory rows have no uid either and name matching is the only identity either side has.
+
+It stops being harmless in a **mixed-generation store**, which every shared `memory_dir` became the
+day stamping landed. A uid-less run deleted against a store whose rows all carry a uid matches
+nothing at all: `RunIdentity.owns` takes its `run_uid` branch, which requires the caller's uid, and
+returns false without ever comparing a name. The purge then deleted nothing, kept nothing, and
+reported `{"ok": true, "deleted": 0, "kept": 0, "identity": "run_id"}` — a clean success claiming a
+keying that never happened, and indistinguishable from "this run contributed nothing".
+
+Two fields now separate those cases. `unmatchable` counts the rows this caller could not match
+either way — held apart from `kept`, because a row nobody could form an opinion about is not a
+judgement a rule made — and `advisory` is the sentence explaining it. Both appear on
+`memory-attribution` and on the `memory` block of a deletion receipt. Alongside them, the parked
+identity sidecar records **why** a uid is missing rather than an empty string: `run_uid_source` is
+`run_started`, `pre_uid_run` (the log has a `run_started` carrying no uid), `no_run_started`, or
+`unreadable` — and only the last is a case where a name keying might be hitting a run that does have
+a uid.
+
+### Rows whose run was never deleted through the UI
+
+A cascade only ever runs as part of a deletion. Runs removed **outside** the UI — a `rm -rf`, a
+temp directory, a worktree that was thrown away — leave their rows behind with no deletion to hang a
+cascade off, and nothing collects them. That is the usual reason a store fills up with rows from
+runs that no longer exist, and it is not a cascade failure.
+
+`looplab memory-orphans <memory_dir> --runs-root runs` is the deliberate sweep for it. It reports
+every row whose run is gone, grouped by the run that wrote it, and **writes nothing without
+`--apply`**. Nothing runs it automatically: these stores are shared and the purge is irreversible.
+
+Two properties make it safe to point at a live store:
+
+* **A surviving run's rows are never proposed.** Attribution is the cascade's own — by `run_uid`
+  when the row has one, by `run_id` only when it does not — so a uid-less row whose directory name
+  still exists is never a candidate, being indistinguishable from that live run's own legacy row.
+* **Removal goes back through the tier predicates**, once per contributing run, so a consolidated
+  lesson, a merged-concept capsule and a claim another run's curation was computed over all survive
+  their writer. The writing run being gone does not make its contribution to a *surviving* row
+  somebody else's to discard.
+
+If any surviving run's event log cannot be read the survey reports `blind` and refuses to call a
+uid-carrying row orphaned at all — an unknown uid must never read as an absent one.
+
+### Reaping the service files a finished deletion leaves behind
+
+Every whole-run deletion parks a receipt and an identity sidecar in the run root and takes a
+lifecycle lock. `run_projections.py` hides them from the run list, and until now nothing removed
+one, so they accumulated for the life of the deployment.
+
+`looplab reap-service-files runs` reports what would go and the rule that decided each file;
+`--apply` removes it, `--grace-hours` sets how cold a file must be (24 h by default). The refusals
+are the design (`serve/service_reaper.py`):
+
+| File | Removed when | Never removed when |
+|---|---|---|
+| `.looplab-delete-receipt-*` | the deletion **succeeded** and the receipt is cold | any non-succeeded status (a retry *resumes* from it), or `quarantine_ambiguous` at **any** age — an absorbing state whose receipt is the only record that a human still owes the run a look |
+| `.looplab-delete-identity-*` | its receipt is being removed; or no receipt was ever published and it is cold | its receipt is being kept — the pair is never split |
+| `.looplab-lifecycle-*.lock` | its digest matches no surviving run directory and it is cold | the run it fences still exists — `flock` is per-inode, so unlinking a held lock silently lets two processes hold it at once |
+| `.looplab-reset-receipt-*` | the reset **succeeded** and the receipt is cold | the reset is unfinished and re-enterable |
+| `.looplab-delete-fence-*` | never | it is live ownership of a run identity |
+| `.looplab-delete-quarantine-*` | never | it holds the run's own bytes |
+
+The grace period is what keeps a *succeeded* receipt answering a retry idempotently instead of
+turning the operator's second click into a `404` about a run they deliberately deleted.
+
+Note that `save_deletion_identity` runs **before** the transaction can refuse, so a deletion that is
+refused — a run that is not quiescent, say — still leaves a sidecar, and re-pressing the button
+leaves another. Those unpaired sidecars are collected by the same sweep once cold.
+
 ## Configuration
 
 - `LOOPLAB_MEMORY_DIR` — cross-run memory home (default `~/.looplab/memory`; `""` disables).
