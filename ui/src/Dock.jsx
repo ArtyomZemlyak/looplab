@@ -25,7 +25,7 @@ import {
   traceRetryMs,
 } from './traceScrollModel.js'
 import { NARR, GROUPS, GROUP_GLYPH, STATUS_NOISE, TYPE2GROUP, kindOf, isCuratedType,
-  eventNarration, liveStatusAgeLabel } from './narration.js'
+  eventNarration, liveStatusAgeLabel, pendingWorkLabel } from './narration.js'
 import { buildingGenerations, buildingMarkers, livePhase, phaseLabel } from './buildingModel.js'
 import { DIALOG_PRIORITY, useDialogFocus } from './useDialogFocus.js'
 
@@ -276,11 +276,10 @@ function agentStatus(live, log) {
     const action = /repair|debug/.test(op) ? 'Repairing' : /merge/.test(op) ? 'Merging into' : 'Writing'
     return `${action} experiment #${id}…`
   }
-  const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending')
-  // Surface eval_parallel fan-out. Each node owns its admitted reservation, which may be CPU-only or
-  // span one or more GPUs; the strip used to name only the highest id and hide concurrent work.
-  if (pend.length > 1) return `Running ${pend.length} experiments in parallel…`
-  if (pend.length) return `Running experiment #${pend[0].id}… (training)`
+  // Surface eval_parallel fan-out — but SPLIT, because `pending` is three states and calling them
+  // all "running in parallel" is false in the direction that hides a stall (see `pendingWork`).
+  const pendingLabel = pendingWorkLabel(live, log)
+  if (pendingLabel) return pendingLabel
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.
   let last = null

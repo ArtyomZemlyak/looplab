@@ -948,11 +948,70 @@ def _row_identity(row: Any) -> str:
         return ""
 
 
+def purge_orphan_identities(memory_dir, identities) -> dict:
+    """Purge every identity an `orphan_survey` proposed, and total the receipts.
+
+    THE ATTRIBUTION IS THE CASCADE'S, not a second one, and that is the whole reason this lives here
+    rather than at the caller: a row is a run's by `run_uid` when it carries one and by `run_id` only
+    when it does not — so a uid-less row whose directory NAME still exists is never proposed, because
+    it is indistinguishable from that live run's own legacy row. Each identity goes through
+    `purge_attributable_memory`, so every tier predicate still protects shared evidence: a lesson
+    consolidated with another run's support, a capsule whose concepts governance merged, and a claim
+    another run's curation decision was computed over all survive their writer. **The writing run
+    being gone does not make its contribution to a surviving row somebody else's to discard.**
+
+    A caller may only reach this with identities `orphan_survey` returned. It refuses nothing itself
+    and asks nothing: the survey already decided, the operator already consented, and a second
+    opinion here would be a second attribution rule — the thing this docstring exists to forbid.
+    """
+    deleted = kept = 0
+    failures: list[dict] = []
+    for identity in identities:
+        receipt = purge_attributable_memory(memory_dir, identity["run_id"], identity["run_uid"])
+        deleted += receipt["deleted"]
+        kept += receipt["kept"]
+        failures.extend(receipt["failures"])
+    return {"deleted": deleted, "kept": kept, "failures": failures}
+
+
+def render_orphan_survey(survey: dict, *, limit: int = 25) -> list[str]:
+    """The survey as the lines an operator reads, beside the survey that produces them.
+
+    It lives HERE and not at the CLI for the reason `orphan_survey` does: the numbers it prints are
+    this module's own vocabulary — `blind` (a surviving run whose identity could not be read, so a
+    uid-carrying row is NOT called orphaned), the per-store split, and the `run_uid`-less identity a
+    pre-2026-08-11 run necessarily has. A renderer one package away drifts from that vocabulary
+    silently, and the CLI group it used to sit in has a line ceiling that exists to stop exactly
+    this kind of accretion. The caller owns the DECISION (report vs `--apply`) and the exit code;
+    this owns only the words.
+    """
+    out = [f"{survey['memory_dir']} (runs root {survey['runs_root']})",
+           f"  {survey['orphan_rows']} row(s) whose run is gone · "
+           f"{survey['live_rows']} row(s) belonging to a run that still exists (untouched)"]
+    if survey["blind"]:
+        out.append(f"  BLIND: could not read the identity of {len(survey['unreadable_runs'])} "
+                   f"surviving run(s) — {', '.join(survey['unreadable_runs'][:5])}. "
+                   f"Rows naming a run_uid are NOT being called orphaned.")
+    for store in survey["stores"]:
+        if store.get("unreadable"):
+            out.append(f"  {store['store']:<18} UNREADABLE")
+        else:
+            out.append(f"  {store['store']:<18} orphan {store['orphan_rows']:>4}   "
+                       f"live {store['live_rows']:>4}")
+    out.append(f"\n  {len(survey['identities'])} contributing run(s) no longer on disk:")
+    for identity in survey["identities"][:limit]:
+        uid = identity["run_uid"] or "(no uid — pre-2026-08-11 run)"
+        out.append(f"    {identity['rows']:>4} rows  {identity['run_id']:<24} {uid}")
+    if len(survey["identities"]) > limit:
+        out.append(f"    … and {len(survey['identities']) - limit} more")
+    return out
+
+
 __all__ = [
     "MEMORY_CASCADE_SCHEMA", "NOT_THIS_RUN", "PRESERVED_TIERS", "attributable_memory",
     "purge_attributable_memory", "merged_concept_ids", "run_memory_identity",
     "unreadable_identity_receipt", "blind_advisory", "RunIdentity",
-    "orphan_survey", "surviving_run_identities",
+    "orphan_survey", "render_orphan_survey", "purge_orphan_identities", "surviving_run_identities",
     "known_memory_dirs", "memory_dir_is_known",
     "lesson_keep_reason", "note_keep_reason", "case_keep_reason",
     "claim_keep_reason", "capsule_keep_reason",

@@ -589,6 +589,46 @@ export const STATUS_NOISE = new Set([
 
 const STATUS_AGE_MIN_S = 20      // below this the clock is noise, and a blinking number reads as churn
 
+export function pendingWork(live, log = []) {
+  // "pending" is THREE states, and the strip used to call all of them "running in parallel".
+  // Measured on `rubertlite-dr-unified-v9` 2026-08-17: three pending nodes, of which ONE had a
+  // training process on a GPU, one had announced its evaluation and was between stages with nothing
+  // executing, and one had not begun — while the second card sat idle. "Running 3 experiments in
+  // parallel…" is false about two of the three, and it is false in the direction that hides a stall:
+  // an operator reading it sees a busy box.
+  //
+  // The split is derived from the LOG, not from the node payload, because the payload carries no
+  // eval-start field — `node_eval_started` exists only as an event. That is also the honest bound of
+  // this function: it answers "has this node's evaluation been announced", never "is a process
+  // alive". A node between stages, waiting on the GPU lease, or being repaired all read as STARTED,
+  // which is right — the evaluation owns them — and none of them is proof of a running process.
+  const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending')
+  const announced = new Set()
+  for (const event of log) {
+    if (event?.type !== 'node_eval_started') continue
+    const id = event?.data?.node_id ?? event?.node_id
+    if (id != null) announced.add(String(id))
+  }
+  const started = pending.filter(n => announced.has(String(n?.id)))
+  return { pending, started, queued: pending.filter(n => !announced.has(String(n?.id))) }
+}
+
+export function pendingWorkLabel(live, log = []) {
+  // One sentence for the strip, and it never claims more than `pendingWork` established.
+  const { pending, started, queued } = pendingWork(live, log)
+  if (!pending.length) return ''
+  if (pending.length === 1) {
+    return started.length
+      ? `Running experiment #${pending[0].id}… (training)`
+      : `Experiment #${pending[0].id} queued…`
+  }
+  if (started.length && queued.length) {
+    return `${started.length} experiment(s) evaluating, ${queued.length} queued…`
+  }
+  if (!started.length) return `${queued.length} experiments queued…`
+  return `${started.length} experiments evaluating…`
+}
+
 export function liveStatusStartedAt(live, log = []) {
   // The CURRENT PHASE's own start wins over everything below. The two answer different questions and
   // the phase's is the one an operator is asking: with beacons, "40m" against "Writing code for

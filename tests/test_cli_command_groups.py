@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from looplab.cli import concept_cmds, governance_cmds, inspect_cmds
+from looplab.cli import concept_cmds, governance_cmds, inspect_cmds, memory_cmds
 
 _CLI = Path(__file__).resolve().parents[1] / "looplab" / "cli"
 
@@ -45,6 +45,11 @@ GROUPS = {
                         "concept-steward", "concept-ratify", "claim-decide", "task-facets",
                         "task-facets-set", "claim-steward", "cross-run-digest", "cross-run-search",
                         "atlas", "claims"},
+    # `memory_cmds` is its own group because the line ceiling below refused to let it be a fourth
+    # domain inside `governance_cmds` — which was ALREADY eleven lines under the bound. Its contract
+    # is the one governance does not have: every command there RECORDS a decision and adds, this one
+    # REMOVES rows whose writing run is gone and decides nothing about their content.
+    "memory_cmds": {"memory-orphans"},
 }
 
 

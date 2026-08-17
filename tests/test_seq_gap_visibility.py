@@ -294,8 +294,19 @@ def test_every_real_run_still_loads_exactly_as_it_does_today():
             assert records >= physical or physical - records <= 1, (rd.name, physical, records)
         else:
             losses[rd.name] = (physical, records, receipt)
-    assert seen >= 40, f"expected the shipped corpus, found {seen} runs"
-    assert list(losses) == ["rubertlite-dense-retrieval"], losses
+    # NON-VACUITY, NOT A CENSUS. This used to demand `seen >= 40` — the corpus size on the day it
+    # was written — and that made an OPERATOR'S CLEANUP a red test: deleting stale runs on
+    # 2026-08-17 took the directory to 6 and broke a guard about log READING, which has nothing to
+    # do with how many runs are kept. `runs/` is the operator's working data, not a fixture; a test
+    # that pins its size is asserting something it does not own. What the floor is actually for is
+    # that the loop above ran at all, so it is a floor of ONE, and the message says which property
+    # went unchecked rather than naming a number nobody maintains.
+    assert seen >= 1, "no readable run log in runs/ — this regression net checked nothing"
+    # The one known lossy log is pinned only WHEN IT IS STILL HERE, for the same reason: its absence
+    # is a deletion, not a regression. Its presence is still held to the exact numbers below.
+    assert set(losses) <= {"rubertlite-dense-retrieval"}, losses
+    if "rubertlite-dense-retrieval" not in losses:
+        return
     physical, records, receipt = losses["rubertlite-dense-retrieval"]
     assert (physical, records) == (1624, 20)
     assert receipt == {"complete": False, "good_records": 20,
