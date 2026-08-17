@@ -272,6 +272,12 @@ One line each, all verified against real runs rather than read.
   `looplab finalize` returned it to `finished / not incomplete`, and its degradation note named
   exactly which artifacts the unreachable model cost and which land anyway. The UI reaches the same
   command through `Dock.jsx:1259` "Reattach finalization" and the `finalization-stalled` empty state.
+  **[corrected 2026-08-17] The second sentence was wrong, and it is the one bullet in this section
+  that was read rather than verified.** "Reattach finalization" submits a durable `run_abort`, which
+  ATTACHES to a finalize request already on the log; `live-deps4-0804` finished naturally and had
+  none, so the control was rejected `command_intent_missing` on exactly the run this bullet cites.
+  Driven in `tests/test_stalled_finalization_affordance.py`; the fix and its measurement are in
+  `docs/BACKLOG.md` §0.11.
 - **Every state I could reach offers an exit.** paused/stalled → Resume + Finalize; finished → Resume
   + Start over; grounding with a dead engine → stalled → Resume/Finalize/Events; approval → a
   dedicated topbar (`RunView.jsx:2599`) naming the exact `/approve #N`, shown whether or not the DAG

@@ -15,6 +15,21 @@ test('zero-node canvas renders the lifecycle model and hides meaningless graph c
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.dag-empty-actions \.btn \{ min-height: 44px; \}/)
 })
 
+test('both stalled-finalization surfaces take their offer from the one pure model', async () => {
+  // The DECISION is driven in runIndex.test.js and against the real server in
+  // tests/test_stalled_finalization_affordance.py; what these pins hold is that the two React
+  // halves ask the model instead of re-deriving it, and that the card can actually print the
+  // command the model returns.
+  const [runView, dock] = await Promise.all([source('RunView.jsx'), source('Dock.jsx')])
+  assert.match(runView, /sequence: history\.resolvedSeq \?\? viewSeq, runId,/)
+  assert.match(runView, /\{presentation\.command && <>[\s\S]*?<code>\{presentation\.command\}<\/code>/)
+  assert.match(dock, /const stalledRemedy = stalledFinalizationRemedy\(live \|\| \{\}, runId\)/)
+  assert.match(dock, /mode === 'finalization-stalled'\s*\n\s*&& !stalledRemedy && <>[\s\S]*?Reattach finalization/)
+  assert.match(dock, /mode === 'finalization-stalled'\s*\n\s*&& stalledRemedy &&[\s\S]*?<code>\{stalledRemedy\.command\}<\/code>/)
+  // The inert control must not survive anywhere as an ungated offer.
+  assert.doesNotMatch(dock, /finalization-stalled' && <>/)
+})
+
 test('canvas recovery reuses a committed exact-generation Dock controller', async () => {
   const [runView, dock] = await Promise.all([source('RunView.jsx'), source('Dock.jsx')])
   assert.match(dock, /useLayoutEffect\(\(\) => \{[\s\S]*?Object\.freeze\(\{[\s\S]*?runId, expectedGeneration/)

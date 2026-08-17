@@ -132,6 +132,71 @@ export function terminalReady(run = {}) {
   return !!run.finished && !finalizationIncomplete(run) && run.engine_running === false
 }
 
+// --- What a STALLED finalization's remedy actually IS ------------------------------------------
+// The transport's "finalize" action submits a durable `run_abort` command (`Dock.jsx`'s
+// TRANSPORT_INTENTS, `commandModel.js`'s TRANSPORT_EVENT_BY_ACTION), and on a run whose finalization
+// is already pending the server does NOT start one: `control_validation.py::_decide_run_abort`
+// answers `attach`, and `run_commands.py::submit` then requires a `run_abort` ALREADY IN THE LOG to
+// attach to (`_pending_finalize_intent`). There are two ways into `finalization-stalled` and only
+// one of them has that record:
+//
+//   * an operator FINALIZE whose engine then died — the `run_abort` is on the log, `stop_requested`
+//     folds to its reason, `attach` finds it, and the command spawns a driver that completes the
+//     wrap-up. This is the state the button was written for and it works.
+//   * a run that finished NATURALLY (`no_eligible_candidate`) and whose engine died between
+//     `run_finished` and `finalization_finished`. `stop_requested` is unset because nothing ever
+//     appended a `run_abort`, so the command is REJECTED `command_intent_missing` — whose server
+//     remediation reads "inspect/repair the event log", advice about a log that is not damaged.
+//     Measured on `runs/live-deps4-0804` (dead 2026-08-04, 8 of 13 finalize steps): the operator
+//     read that, and the run's own Delete refused too. `looplab finalize <run_dir>` cleared it.
+//
+// `stop_requested === 'finalized'` is the exact client-side spelling of the server's own attach
+// test, not an approximation of it: the fold sets `stop_requested` to the LAST `run_abort`'s reason
+// (`replay.py::_on_run_abort`), every first-party client sends `reason: 'finalized'`, and
+// `_attached_finalize_intact` re-checks `state.stop_requested == <that reason>` before the command
+// may proceed. A superseded `run_abort` (resumed since) therefore reads as absent on both sides,
+// and a finalize pending under a DIFFERENT reason would be rejected `finalize_payload_conflict`
+// rather than attached — also inert, so it belongs on the same side of this predicate.
+export const FINALIZE_INTENT_REASON = 'finalized'
+
+export function pendingFinalizeIntent(run = {}) {
+  return String(run?.stop_requested || '') === FINALIZE_INTENT_REASON
+}
+
+// The command the operator can actually run, spelled exactly as the server's own deletion refusal
+// spells it (`deletion_service.py`'s `run_finalization_incomplete` remediation) so the two surfaces
+// that describe this state name ONE remedy. `<runs>` stays a placeholder because the browser does
+// not know the server's runs root; the run directory is the run id and that part is exact.
+// A run id that is not a plain directory name degrades to `<run_dir>` rather than printing a command
+// the operator would paste into a shell.
+const RUN_DIR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+export function finalizeRecoveryCommand(runId = '') {
+  const name = String(runId || '').trim()
+  return `looplab finalize <runs>/${RUN_DIR_NAME_RE.test(name) ? name : '<run_dir>'}`
+}
+
+/** The whole remedy for a stalled finalization no client control can perform, or null when the
+ *  ordinary Reattach control still applies. One place decides it, because Dock's transport row and
+ *  the empty-canvas card must not describe one state two ways. */
+export function stalledFinalizationRemedy(run = {}, runId = '') {
+  if (pendingFinalizeIntent(run)) return null
+  // Which of the two inert shapes this is. A run with NO recorded stop finished by itself; one whose
+  // recorded stop carries another reason has an intent, just not one this control may alias (the
+  // server answers `finalize_payload_conflict` rather than `command_intent_missing`). Neither can be
+  // acted on from the browser, and saying "finished on its own" about the second would be false.
+  const why = String(run?.stop_requested || '')
+    ? 'This run already carries a finalize request recorded under a different reason, which this '
+      + 'control may not reattach to'
+    : 'This run finished on its own, so there is no pending finalize request to reattach to'
+  return {
+    why,
+    command: finalizeRecoveryCommand(runId),
+    note: 'It writes the report, lessons and cost roll-up this run still owes, so it uses the '
+      + 'configured model if one is reachable and names the artifacts it degraded if not. Until it '
+      + 'runs, deleting this run is refused for the same reason.',
+  }
+}
+
 export function runLifecycle(run = {}) {
   const incomplete = finalizationIncomplete(run)
   if (incomplete) return {
@@ -190,7 +255,7 @@ export function approvalCommandFor(state = {}) {
 // run merely "empty". RunView maps these action ids onto its already-authoritative controls.
 export function dagEmptyPresentation({
   displayed = {}, live = null, resourceStatus = 'ready', connected = true,
-  historyActive = false, reviewMode = false, sequence = null,
+  historyActive = false, reviewMode = false, sequence = null, runId = '',
 } = {}) {
   // Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
   // active nodes. Base the empty-state decision on the same projection or the canvas goes blank
@@ -220,11 +285,32 @@ export function dagEmptyPresentation({
       : 'The owner has not produced or shared an experiment card yet.',
     mode === 'finished' ? [action('report', 'View report', 'primary')] : [],
   )
-  if (mode === 'finalization-stalled') return result(
-    'finalization-stalled', 'danger', 'Finalization stopped before wrap-up completed',
-    'The engine stopped before the report, lessons, and final cost were safely written.',
-    [action('finalize', 'Reattach finalization', 'primary'), action('events', 'Show events')], 'assertive',
-  )
+  // REATTACH is offered only where there is something to reattach TO (see `pendingFinalizeIntent`).
+  // Without a pending finalize the same button submits a command the server rejects, so the card
+  // states the remedy instead of offering a control that cannot act. It is deliberately TEXT and not
+  // a second button: the paths that could act from here — `POST /api/runs/{id}/resume`, a
+  // finalize-only route — all SPAWN AN ENGINE, which is paid work and a different promise from
+  // "reattach". The command below re-enters wrap-up only (`cli/run_cmds.py::finalize`'s
+  // crash-boundary repair), never the search.
+  if (mode === 'finalization-stalled') {
+    const remedy = stalledFinalizationRemedy(state, runId)
+    if (!remedy) return result(
+      'finalization-stalled', 'danger', 'Finalization stopped before wrap-up completed',
+      'The engine stopped before the report, lessons, and final cost were safely written.',
+      [action('finalize', 'Reattach finalization', 'primary'), action('events', 'Show events')], 'assertive',
+    )
+    return {
+      ...result(
+        'finalization-stalled', 'danger', 'Finalization stopped before wrap-up completed',
+        `The engine stopped before the report, lessons, and final cost were safely written. ${remedy.why}, `
+        + 'and nothing on this server will resume it. Complete the wrap-up already on disk from a '
+        + 'shell — it is idempotent, and it re-enters the wrap-up only, never the search:',
+        [action('events', 'Show events', 'primary')], 'assertive',
+      ),
+      command: remedy.command,
+      commandNote: remedy.note,
+    }
+  }
   if (mode === 'finalizing' || mode === 'finishing') return result(
     mode, 'progress', 'Wrapping up this run…',
     mode === 'finishing'

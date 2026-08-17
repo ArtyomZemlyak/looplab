@@ -3,8 +3,9 @@ import assert from 'node:assert/strict'
 
 import {
   ALL_RUNS, UNASSIGNED_RUNS, dagEmptyPresentation, effectiveRunStatus, filterRuns, finalizationIncomplete,
-  indexProjects, lifecyclePhaseLabel, metricComparable, projectAncestorCollapsed, projectDepth,
-  runLifecycle, scopeRuns, sortRuns, terminalReady,
+  finalizeRecoveryCommand, indexProjects, lifecyclePhaseLabel, metricComparable,
+  pendingFinalizeIntent, projectAncestorCollapsed, projectDepth,
+  runLifecycle, scopeRuns, sortRuns, stalledFinalizationRemedy, terminalReady,
 } from '../src/runIndex.js'
 
 const projects = [
@@ -147,7 +148,11 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
   assert.deepEqual(ids(review), [], 'a live-looking review must never expose owner mutations')
 
   const cases = [
-    [{ nodes: {}, phase: 'finalizing', engine_running: false }, 'finalization-stalled', ['finalize', 'events']],
+    // A stall WITH a pending finalize keeps Reattach; the naturally-finished stall has its own case
+    // below, because that command cannot attach to an intent nothing ever recorded.
+    [{ nodes: {}, phase: 'finalizing', stop_requested: 'finalized', engine_running: false },
+      'finalization-stalled', ['finalize', 'events']],
+    [{ nodes: {}, phase: 'finalizing', engine_running: false }, 'finalization-stalled', ['events']],
     [{ nodes: {}, phase: 'finalizing', engine_running: true }, 'finalizing', []],
     [{ nodes: {}, finished: true, engine_running: true }, 'finishing', []],
     [{ nodes: {}, phase: 'spec_approval', paused: true, spec_approval_requested: true,
@@ -166,6 +171,84 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
     assert.equal(value.kind, kind)
     assert.deepEqual(ids(value), actions)
   })
+})
+
+// The projection `GET /api/runs/live-deps4/state` really returns for the shape that broke this —
+// `run_finished` + an open finalize scope + no `finalization_finished` + no `run_abort`, engine gone.
+// Pinned against the live server by `tests/test_stalled_finalization_affordance.py::
+// test_state_publishes_the_two_fields_the_stalled_card_decides_on`, so this fixture cannot drift
+// into a shape the server never produces.
+const NATURALLY_STALLED = Object.freeze({
+  nodes: {}, finished: true, phase: 'finalizing', finalization_incomplete: true,
+  stop_reason: 'no_eligible_candidate', stop_requested: null, engine_running: false,
+})
+// The other way into the same lifecycle: an operator FINALIZE whose engine died during wrap-up.
+const REATTACHABLE_STALLED = Object.freeze({ ...NATURALLY_STALLED, stop_requested: 'finalized' })
+
+test('a stalled finalization with nothing to reattach to is told the command instead', () => {
+  // Both shapes are the SAME lifecycle — the card must not stop appearing, only stop offering a
+  // control the server rejects.
+  assert.equal(runLifecycle(NATURALLY_STALLED).mode, 'finalization-stalled')
+  assert.equal(runLifecycle(REATTACHABLE_STALLED).mode, 'finalization-stalled')
+  assert.equal(effectiveRunStatus(NATURALLY_STALLED), 'finalizing')
+
+  assert.equal(pendingFinalizeIntent(NATURALLY_STALLED), false)
+  assert.equal(pendingFinalizeIntent(REATTACHABLE_STALLED), true)
+
+  const remedy = stalledFinalizationRemedy(NATURALLY_STALLED, 'live-deps4-0804')
+  assert.equal(remedy.command, 'looplab finalize <runs>/live-deps4-0804')
+  assert.match(remedy.why, /finished on its own/)
+  assert.equal(stalledFinalizationRemedy(REATTACHABLE_STALLED, 'live-deps4-0804'), null,
+    'a pending finalize keeps the ordinary Reattach control')
+
+  // A finalize recorded under some other reason is ALSO unattachable (the server answers
+  // finalize_payload_conflict), but it did not finish on its own and must not be told that it did.
+  const otherReason = stalledFinalizationRemedy({ ...NATURALLY_STALLED, stop_requested: 'budget' }, 'r')
+  assert.match(otherReason.why, /different reason/)
+
+  const card = dagEmptyPresentation({
+    displayed: NATURALLY_STALLED, live: NATURALLY_STALLED, resourceStatus: 'ready', connected: true,
+    runId: 'live-deps4-0804',
+  })
+  assert.equal(card.kind, 'finalization-stalled')
+  assert.equal(card.tone, 'danger')
+  assert.deepEqual(card.actions.map(item => item.id), ['events'],
+    'the inert Reattach control is not offered on a run that has no finalize intent')
+  assert.equal(card.command, 'looplab finalize <runs>/live-deps4-0804')
+  assert.match(card.commandNote, /model/, 'the wrap-up can make a paid call and must say so')
+  assert.match(card.body, /never the search/)
+})
+
+test('the stalled card a pending finalize gets is unchanged, field for field', () => {
+  // NEGATIVE CONTROL. The shape "Reattach finalization" was written for still gets exactly the
+  // presentation it shipped with — this literal is the pre-change output, so any drift in the copy,
+  // the tone, the live region or the action list fails here rather than being noticed in production.
+  const card = dagEmptyPresentation({
+    displayed: REATTACHABLE_STALLED, live: REATTACHABLE_STALLED, resourceStatus: 'ready',
+    connected: true, runId: 'live-deps4-0804',
+  })
+  assert.deepEqual(card, {
+    kind: 'finalization-stalled',
+    tone: 'danger',
+    title: 'Finalization stopped before wrap-up completed',
+    body: 'The engine stopped before the report, lessons, and final cost were safely written.',
+    actions: [
+      { id: 'finalize', label: 'Reattach finalization', emphasis: 'primary' },
+      { id: 'events', label: 'Show events', emphasis: 'secondary' },
+    ],
+    liveRegion: 'assertive',
+  })
+  assert.equal(card.command, undefined, 'a reattachable run is offered the button, not a command')
+})
+
+test('the printed recovery command never invents a run directory', () => {
+  assert.equal(finalizeRecoveryCommand('live-deps4-0804'), 'looplab finalize <runs>/live-deps4-0804')
+  // Anything that is not a plain directory name degrades to the placeholder rather than composing a
+  // shell line around it — this string is printed for an operator to paste.
+  for (const hostile of ['', '   ', '..', '../etc', '.hidden', 'a b', 'x;rm -rf /', 'a/b',
+    '$(id)', 'r'.repeat(200), null, undefined]) {
+    assert.equal(finalizeRecoveryCommand(hostile), 'looplab finalize <runs>/<run_dir>')
+  }
 })
 
 test('zero-node fallback distinguishes a retained disconnected state', () => {

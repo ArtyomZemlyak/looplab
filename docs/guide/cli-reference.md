@@ -408,6 +408,11 @@ Two things worth knowing before you type it:
   themselves — an active command reaches a terminal, a launching engine takes the lock or stops
   claiming it — so *"wait and refresh"* is sound advice for those and a loop for this one. Once the
   owning engine is gone, nothing on the box advances a stalled finalization until you ask it to.
+- **The browser cannot do it for you when the run finished by itself.** Dock's *Reattach
+  finalization* submits a durable `run_abort`, which ATTACHES to a finalize request already on the
+  log; a naturally-finished run never recorded one, so that control is not offered there and the
+  workspace prints this command instead (see [the UI guide](ui.md)). A run whose stall began as an
+  operator **Finalize** does carry the request, and Reattach still works on it.
 - **There is no discard.** `FINALIZE_STEP_ABANDONED` is written by the engine only for a staged
   *error* terminal and no command or endpoint can request it, so the wrap-up cannot be thrown away
   unfinished. Completing it is the only route to a deletable run — which is deliberate: the wrap-up
