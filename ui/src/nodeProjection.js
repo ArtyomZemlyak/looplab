@@ -51,6 +51,45 @@ export function authoritativeNodeConcepts(state = null) {
   return { concepts, withheld }
 }
 
+// The RUN-level half of the run's memberships: the concepts carried by EVERY current experiment, which
+// therefore distinguish none of them. The browser half of `search/concept_lens.py::run_constant_split`
+// and it mirrors that rule field-for-field, exactly as `conceptForest.js` mirrors `project_concept_map`
+// — the DAG reads `state.node_concepts` off the run state and never the /concepts frame, so a run-level
+// split that lived only on the frame would leave the node cards exactly as cluttered as they are.
+//
+// Why the browser may derive it at all: it is a pure fold over a snapshot the client already holds, and
+// "constant across the run" is a CROSS-NODE property that is undecidable when a tag is written (node 0
+// is tagged before node 7 exists), so there is no server-side truth being second-guessed here — there is
+// no writer-side answer to disagree with, by design.
+//
+// FAIL-CLOSED, and identically to the python: the claim is made only when every current experiment has
+// an EXACT membership and there are at least two of them. One withheld row, one untagged experiment or
+// one node in the run returns an empty set, which renders precisely as it did before.
+//
+// A withheld row needs NO separate rule and deliberately does not get one: `authoritativeNodeConcepts`
+// drops it from `concepts`, so the loop below meets it as an experiment with no membership and refuses
+// on exactly the same ground — absence is not universality. A second `if (withheld) return` beside that
+// would be a guard no mutation can make matter, which is the vacuity this file's own tests hunt for.
+export function runConstantConcepts(state = null, canonicalize = ids => ids) {
+  const { concepts } = authoritativeNodeConcepts(state)
+  const nodes = state?.nodes || {}
+  const aborted = new Set((state?.aborted_nodes || []).map(Number))
+  const active = Object.keys(nodes).filter(key => nodeIsActive(nodes[key], state, aborted))
+  if (active.length < 2) return new Set()
+  let constant = null
+  for (const key of active) {
+    // An experiment with no membership is not evidence that a concept is universal; it is evidence that
+    // nobody classified it, and it is equally fatal to a claim about EVERY experiment.
+    const ids = Object.hasOwn(concepts, key) ? canonicalize(concepts[key], key) : []
+    if (!ids || !ids.length) return new Set()
+    const own = new Set(ids)
+    if (constant === null) constant = own
+    else for (const id of [...constant]) if (!own.has(id)) constant.delete(id)
+    if (!constant.size) return new Set()
+  }
+  return constant || new Set()
+}
+
 // A retained concept row is authoritative only when replay emitted no
 // materialization receipt for it. The trust boundary is receipt presence (never the reason text);
 // malformed envelopes fail unavailable while future partial reasons remain safely display-only.

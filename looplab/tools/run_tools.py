@@ -604,7 +604,32 @@ class RunTools:
                         "no reliable ids remain")
             return f"#{nid}: (no concepts tagged)"
         prefix = f"PARTIAL (reasons={','.join(reasons)}); " if status == "partial" else ""
-        return f"#{nid} concepts: " + prefix + ", ".join(ids)
+        return f"#{nid} concepts: " + prefix + self._membership_line(st, nid, ids)
+
+    def _membership_line(self, st: RunState, nid: int, ids) -> str:
+        """One node's membership with the EXPERIMENT's own concepts LEADING and the run's said once.
+
+        A concept carried by every experiment in the run distinguishes none of them, and reading it off
+        one node's row is exactly the mistake it caused on `rubertlite-dr-unified-v9`: five of each
+        node's six ids are the run's own stack, so the one tag that says what the experiment did is
+        fifth in a list of six, and a reader asking "which experiments are about hard negatives" cannot
+        tell node 0 — whose WHOLE membership is the run constant — from node 4. Ordering is the fix:
+        nothing is withheld (every id still appears) and nothing is added.
+
+        Strictly inert unless `run_constant_split` could make its claim over EVERY experiment, so a run
+        with one unclassified node renders byte-for-byte as it did before."""
+        from looplab.search.concept_lens import run_constant_split
+        split = run_constant_split(st)
+        constant = split["run_constant"]
+        if split["coverage"] != "complete" or not constant:
+            return ", ".join(ids)
+        own = split["distinguishing"].get(nid) or []
+        shared = (f" — plus {len(constant)} carried by all {split['population']} experiments in this "
+                  f"run: " + ", ".join(constant))
+        if not own:
+            return ("(none of its own; every id it carries is run-wide, so the taxonomy says nothing "
+                    "about what this experiment varied)" + shared)
+        return ", ".join(own) + shared
 
     def _node_concept_delta_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):

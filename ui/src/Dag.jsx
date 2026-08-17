@@ -8,7 +8,7 @@ import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
-import { conceptMaterializationStatus } from './nodeProjection.js'
+import { conceptMaterializationStatus, runConstantConcepts } from './nodeProjection.js'
 import { dagCollapsedKey, dagLayoutProjection } from './dagProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
@@ -228,13 +228,29 @@ function ExpNode({ data }) {
   // past the glyph LOD. node_concepts keys are strings in the wire state; node.id is numeric, so read
   // both. Canonicalized through the consolidation rename so a retired raw id never shows next to its
   // canonical twin (conceptId.js keeps LLM-authored ids off the prototype chain).
-  const conceptTags = useMemo(() =>
+  const allConceptTags = useMemo(() =>
     conceptStatus === 'unavailable' ? []
       : nodeCanonicalConcepts(state.node_concepts, node.id, state.concept_consolidation || {}),
     [conceptStatus, node.id, state.node_concepts, state.concept_consolidation])
+  // A concept carried by EVERY experiment says nothing about this one. Measured on
+  // rubertlite-dr-unified-v9, 40 of the 48 tag slots were the same five ids on all eight nodes, so the
+  // strip's two-chip preview showed two run constants and the one tag that said what the experiment did
+  // sat behind "+4". Ordering is the whole fix — nothing is hidden, `conceptTags` still holds every id
+  // and the expander still lists them all — and the run-wide ones are marked so the strip cannot be
+  // re-read as "this experiment is about ESCI". Empty (hence today's order) whenever the split cannot
+  // be made over every experiment: see nodeProjection.js::runConstantConcepts.
+  const runConstant = useMemo(() => runConstantConcepts(
+    state, (ids, key) => nodeCanonicalConcepts(state.node_concepts, key, state.concept_consolidation || {})),
+    [state.node_concepts, state.nodes, state.aborted_nodes, state.concept_consolidation,
+      state.node_concept_materialization_receipts])
+  const conceptTags = useMemo(() => (runConstant.size
+    ? [...allConceptTags.filter(c => !runConstant.has(c)), ...allConceptTags.filter(c => runConstant.has(c))]
+    : allConceptTags), [allConceptTags, runConstant])
+  const ownConceptCount = conceptTags.length - conceptTags.filter(c => runConstant.has(c)).length
   const conceptPreview = <>
     {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
-    {conceptTags.slice(0, 2).map(c => <span key={c} className="nc-tag" title={c}>{c.split('/').pop()}</span>)}
+    {conceptTags.slice(0, 2).map(c => <span key={c} className={'nc-tag' + (runConstant.has(c) ? ' run-wide' : '')}
+      title={runConstant.has(c) ? `${c} — carried by every experiment in this run` : c}>{c.split('/').pop()}</span>)}
   </>
   const confirmed = node.confirmed_mean != null
   const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
@@ -244,9 +260,15 @@ function ExpNode({ data }) {
     : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   // The compact strip caps at two leaves; the full set also names the Card and opens from +N.
+  // The run-wide half is named rather than dropped: "this experiment has no concept of its own" is a
+  // fact an operator can act on (retag it), while five inherited chips read as a classified experiment.
+  const runWideNote = runConstant.size && conceptTags.length
+    ? (ownConceptCount ? ` (${conceptTags.length - ownConceptCount} of them carried by every experiment in this run)`
+      : ' — all of them carried by every experiment in this run, so none of them says what it varied')
+    : ''
   const conceptTruth = conceptStatus === 'unavailable' ? 'concepts unavailable, not empty'
     : conceptStatus === 'partial' ? `PARTIAL concepts (display-only): ${conceptTags.join(', ') || 'none retained'}`
-      : conceptTags.length ? `concepts: ${conceptTags.join(', ')}` : ''
+      : conceptTags.length ? `concepts: ${conceptTags.join(', ')}${runWideNote}` : ''
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
     + (conceptTruth ? ` · ${conceptTruth}` : '')
   const selectionLabel = [
