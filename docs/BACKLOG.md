@@ -2628,9 +2628,12 @@ only endpoint that acts (`allow_incomplete_finalize=True`), and `ui/src/` still 
 URL.
 
 **THREE CORRECTIONS to the filing.** (1) The surface is not "the run card": the empty-canvas card
-only renders with ZERO active nodes, and `live-deps4-0804` had nodes — the button the operator saw is
-**Dock's transport row** (`Dock.jsx`, mode `finalization-stalled`), which renders at any node count.
-Both are fixed. (2) `POST /api/runs/{id}/resume` is a weaker remedy than "the server-side remedy
+only renders with ZERO active nodes and `live-deps4-0804` had **3**
+(`docs/audit/2026-08-07-search-loop.md`), so the button the operator saw is **Dock's transport row**
+(`Dock.jsx`, mode `finalization-stalled`), which renders at any node count — which is also the line
+`docs/audit/2026-08-07-operator-surfaces.md` cited when it listed this state under *"What is fine …
+the UI reaches the same command"*. That bullet was read, not driven, and now carries a correction.
+Both surfaces are fixed. (2) `POST /api/runs/{id}/resume` is a weaker remedy than "the server-side remedy
 exists" suggests: `_append_resume_request` classifies mode from `stop_requested and last_stop >
 last_finish`, which is FALSE for a naturally-finished run, so it spawns `looplab resume` and not
 `looplab finalize`. That happens to complete the wrap-up (`classify_prior_run` → `finalization_pending`
