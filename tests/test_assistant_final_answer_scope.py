@@ -20,8 +20,10 @@ from __future__ import annotations
 from looplab.serve.assistant import (
     FINAL_ANSWER_DIRECTIVE,
     TURN_BOUNDARY_MARK,
+    _emit_spec,
     final_answer_directive,
     final_answer_messages,
+    system_prompt,
 )
 
 
@@ -59,6 +61,16 @@ def test_the_directive_scopes_the_answer_to_this_turn():
     assert TURN_BOUNDARY_MARK.lower() in lowered, "the directive must name the marker it points at"
     assert "do not re-summarize" in lowered
     assert "based on everything above" not in lowered, "the phrase that caused the defect"
+
+
+def test_non_stream_and_automatic_turns_receive_the_same_scope_rule():
+    """The streaming summariser has an authenticated marker; direct final_answer calls still need
+    the rule on both model-facing surfaces used by non-stream HTTP and automatic work cycles."""
+    prompt = system_prompt("plan").lower()
+    description = _emit_spec()["function"]["description"].lower()
+    for text in (prompt, description):
+        assert "current request" in text and "this turn" in text
+        assert "recap" in text
 
 
 def test_the_current_turn_is_marked_on_the_authenticated_request():

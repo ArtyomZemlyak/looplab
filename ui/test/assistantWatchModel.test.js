@@ -20,7 +20,7 @@ function watch(over = {}) {
 
 test('the terminal set mirrors the server, and an UNKNOWN status is not terminal', () => {
   assert.deepEqual([...WATCH_TERMINAL].sort(),
-    ['cancelled', 'done', 'expired', 'failed', 'interrupted'])
+    ['blocked', 'cancelled', 'done', 'expired', 'failed', 'interrupted'])
   // The failure mode is hiding a LIVE watch, not showing a dead one: a status from a newer server
   // must keep its row visible.
   assert.equal(isTerminal({ status: 'quiescing' }), false)
@@ -36,8 +36,9 @@ test('a waiting watch is never confusable with a stopped one', () => {
   assert.equal(statusText({}), 'unknown')
 })
 
-test('only an interrupted watch asks the operator for anything', () => {
+test('blocked and interrupted watches ask the operator for attention', () => {
   assert.equal(needsAttention(watch({ status: 'interrupted' })), true)
+  assert.equal(needsAttention(watch({ status: 'blocked' })), true)
   for (const status of ['armed', 'waking', 'done', 'cancelled', 'expired', 'failed']) {
     assert.equal(needsAttention(watch({ status })), false, status)
   }
@@ -60,6 +61,8 @@ test('a budget is shown only where it can actually move', () => {
   assert.equal(budgetText(watch()), '')
   assert.equal(budgetText(watch({ trigger: { kind: 'schedule', every_s: 60 }, wakeups: 3 })),
     '3/24 wake-ups')
+  assert.equal(budgetText(watch({ trigger: { kind: 'work', every_s: 60 }, wakeups: 3 })),
+    '3/24 cycles')
   assert.equal(budgetText(watch({ trigger: { kind: 'schedule' }, max_wakeups: 0 })), '')
 })
 
@@ -72,6 +75,8 @@ test('a row carries the sentence the SERVER stamped, never a re-derived one', ()
 
 test('a row says what it will DO when it wakes', () => {
   assert.equal(describeWatch(watch(), NOW).instruction, 'tell me the champion')
+  assert.equal(describeWatch(watch({ checkpoint: { summary: 'tests are green' } }), NOW).checkpoint,
+    'tests are green')
 })
 
 test('the strip hides itself when nothing is standing', () => {
@@ -96,7 +101,7 @@ test('active watches come first, in arm order, and do not reshuffle on a poll', 
   assert.deepEqual(shuffled.items.map(i => i.id), first.items.map(i => i.id))
 })
 
-test('a settled watch ages out of the strip but an INTERRUPTED one never does', () => {
+test('a settled watch ages out of the strip but an attention watch never does', () => {
   const stale = watch({ status: 'done', updated: NOW - 5000 })
   assert.equal(watchStrip([stale], { now: NOW }).items.length, 0,
     'a watch that already reported is history the transcript holds better')
@@ -107,6 +112,9 @@ test('a settled watch ages out of the strip but an INTERRUPTED one never does', 
   assert.equal(strip.attentionCount, 1)
   assert.equal(strip.activeCount, 0, 'it is not still watching, and must not claim to be')
   assert.equal(strip.items[0].stoppable, false)
+
+  const blocked = watch({ status: 'blocked', updated: NOW - 5_000_000 })
+  assert.equal(watchStrip([blocked], { now: NOW }).items.length, 1)
 })
 
 test('one watch reads as singular', () => {

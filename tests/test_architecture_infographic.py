@@ -18,6 +18,9 @@ def test_part_iv_v_flows_are_present_in_architecture_infographic():
         "per-node concept read family": "concept tree·nodes·delta",
         "profit semantics": "direction-normalized concept profit",
         "taxonomy serialization": "ledger CAS",
+        "typed assistant status wait": "run/experiment/stage status waits",
+        "continuous work handoff": "continue · waiting · done · blocked",
+        "turn-scoped final answer": "[current turn — answer this]",
     }
     missing = [label for label, token in required.items() if token not in text]
     assert not missing, f"Part IV/V flows missing from architecture infographic: {missing}"

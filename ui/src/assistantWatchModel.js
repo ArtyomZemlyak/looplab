@@ -15,14 +15,15 @@ import { durationLabel } from './format.js'
 // module has never heard of is treated as NOT terminal on purpose: an unknown status from a newer
 // server must read as "still going, we do not recognise this" and keep the row visible, never as
 // "finished" — hiding a live watch is the failure mode, and showing a dead one merely looks untidy.
-export const WATCH_TERMINAL = new Set(['done', 'cancelled', 'expired', 'failed', 'interrupted'])
+export const WATCH_TERMINAL = new Set(['done', 'blocked', 'cancelled', 'expired', 'failed', 'interrupted'])
 
-// What each status MEANS, in the words an operator uses. `interrupted` gets a full sentence because
-// it is the one status that asks something of them — everything else is just news.
+// What each status MEANS, in the words an operator uses. Attention statuses get explicit recovery
+// copy because they ask something of the operator — everything else is just news.
 const STATUS_TEXT = {
   armed: 'waiting',
   waking: 'running now',
   done: 'fired, and finished',
+  blocked: 'blocked — review the handoff',
   cancelled: 'stopped',
   expired: 'ran out of its budget',
   failed: 'failed',
@@ -33,11 +34,11 @@ export function isTerminal(watch) {
   return WATCH_TERMINAL.has(String(watch?.status || ''))
 }
 
-// Whether this row needs the operator to DO something. Only `interrupted` does: the server
-// deliberately refused to re-enter a mutating wake-up whose outcome is unknown, and a refusal
+// Whether this row needs the operator to DO something. `interrupted` refuses to re-enter a mutating
+// wake-up whose outcome is unknown; `blocked` refuses to invent a missing work handoff. A refusal
 // nobody is told about is exactly as invisible as the dropped monitoring it replaced.
 export function needsAttention(watch) {
-  return String(watch?.status || '') === 'interrupted'
+  return ['blocked', 'interrupted'].includes(String(watch?.status || ''))
 }
 
 export function statusText(watch) {
@@ -68,11 +69,11 @@ export function nextCheckText(watch, now = Date.now() / 1000) {
 // no meaningful "1 of 24" — it fires once by construction — and printing a budget it will never
 // spend invites the reading that it is going to keep waking.
 export function budgetText(watch) {
-  if (watch?.trigger?.kind !== 'schedule') return ''
+  if (!['schedule', 'work'].includes(watch?.trigger?.kind)) return ''
   const done = Number(watch?.wakeups || 0)
   const max = Number(watch?.max_wakeups || 0)
   if (!Number.isFinite(max) || max <= 0) return ''
-  return `${done}/${max} wake-ups`
+  return watch?.trigger?.kind === 'work' ? `${done}/${max} cycles` : `${done}/${max} wake-ups`
 }
 
 // One row's full description. `waitingFor` is the server's own sentence and is never re-derived
@@ -93,6 +94,7 @@ export function describeWatch(watch, now = Date.now() / 1000) {
     instruction: String(watch?.instruction || ''),
     nextCheck: nextCheckText(watch, now),
     budget: budgetText(watch),
+    checkpoint: String(watch?.checkpoint?.summary || ''),
     note: String(watch?.last_error || ''),
     stoppable: !isTerminal(watch),
   }
@@ -108,8 +110,8 @@ export function watchStrip(watches, { now = Date.now() / 1000, recentSeconds = 6
   for (const watch of rows) {
     if (!watch || !watch.id) continue
     if (!isTerminal(watch)) { active.push(watch); continue }
-    // `interrupted` is never aged out: it is the one terminal that asks the operator for something,
-    // and a request that expires on a timer is a request nobody made.
+    // Attention statuses are never aged out: they ask the operator for something, and a request
+    // that expires on a timer is a request nobody made.
     const updated = Number(watch.updated)
     if (needsAttention(watch)
         || (Number.isFinite(updated) && now - updated <= recentSeconds)) recent.push(watch)

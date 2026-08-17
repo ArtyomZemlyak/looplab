@@ -3740,6 +3740,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           onClick={() => stopWatch(item.id)}>Stop</button>}
       </div>
       <div className="asst-watch-what muted">{item.instruction}</div>
+      {item.checkpoint && <div className="asst-watch-note muted">Checkpoint: {item.checkpoint}</div>}
       {item.note && <div className="asst-watch-note muted">{item.note}</div>}
     </div>)}
   </div>)

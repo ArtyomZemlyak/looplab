@@ -695,7 +695,8 @@ def test_a_bad_record_can_never_kill_the_scheduler(tmp_path):
 
 
 def test_terminal_statuses_are_the_ones_nothing_transitions_out_of():
-    assert WATCH_TERMINAL_STATUSES == {"done", "cancelled", "expired", "failed", "interrupted"}
+    assert WATCH_TERMINAL_STATUSES == {
+        "done", "blocked", "cancelled", "expired", "failed", "interrupted"}
 
 
 # ------------------------------------------------------------------ the HTTP surface
@@ -867,7 +868,8 @@ def test_the_watch_tools_are_present_in_every_mode_including_read_only(tmp_path)
         tools = build_tools(tmp_path, mode=mode,
                             watches=SessionWatches(WatchStore(tmp_path), "s1", mode))
         names = {(spec.get("function") or {}).get("name") for spec in tools.specs()}
-        assert {"watch_run", "watch_every", "list_watches", "stop_watch"} <= names
+        assert {"watch_run", "watch_status", "watch_every", "work_until_done",
+                "list_watches", "stop_watch"} <= names
 
 
 def test_a_recovered_dangling_turn_gets_no_watch_tools(tmp_path):
@@ -878,7 +880,7 @@ def test_a_recovered_dangling_turn_gets_no_watch_tools(tmp_path):
     tools = build_tools(tmp_path, mode="plan", mutation_recovery=True,
                         watches=SessionWatches(WatchStore(tmp_path), "s1", "plan"))
     names = {(spec.get("function") or {}).get("name") for spec in tools.specs()}
-    assert not ({"watch_run", "watch_every"} & names)
+    assert not ({"watch_run", "watch_status", "watch_every", "work_until_done"} & names)
 
 
 def test_a_wake_up_may_not_arm_further_watches(tmp_path):
@@ -1070,8 +1072,9 @@ def test_the_server_wires_a_sink_that_records_the_failure(caplog):
     call = next(node for node in ast.walk(tree)
                 if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "WatchService")
     wired = {kw.arg for kw in call.keywords}
-    assert {"observe_run", "run_turn_fn", "append_turn", "session_exists", "on_error"} == wired, (
-        "the class names four collaborators plus the store; `on_error` was the one left None")
+    assert {"observe_run", "observe_target", "run_turn_fn", "append_turn", "session_exists",
+            "on_error"} == wired, (
+        "the class names typed observation and turn collaborators plus an error sink")
 
     sink = next(node for node in ast.walk(tree)
                 if isinstance(node, ast.FunctionDef) and node.name == "_watch_scheduler_error")
