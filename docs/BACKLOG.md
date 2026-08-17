@@ -2740,7 +2740,7 @@ seeded from node 0, which would stop it being self-confirming for the NEXT run's
 done: `run_base_concepts` is an inheritance source the fold reads, so changing what is written to it is a
 writer change with replay consequences, and the reader-side split makes it unnecessary for the operator's
 view. Recorded so the self-confirming property is not rediscovered.
-### §0.12 A red stage chip about an attempt that ended 177 minutes ago, over a node that was training (2026-08-17)
+### §0.13 A red stage chip about an attempt that ended 177 minutes ago, over a node that was training (2026-08-17)
 
 Reported by the operator: the Inspector's TRACE showed experiments #5 and #6 of the live
 `rubertlite-dr-unified-v9` **training**, while the Overview's eval-pipeline chips showed them
