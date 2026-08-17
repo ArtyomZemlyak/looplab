@@ -1083,6 +1083,26 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 n.idea = n.idea.model_copy(deep=True, update={"footprint": footprint})
         if d.get("footprint_finalized") is True:
             n.footprint_finalized = True
+        # THE REPAIR EPOCH. Advanced here and nowhere else, so that `_on_stage_finished` below can
+        # stamp every stage row with the attempt it belongs to and a reader can tell a superseded
+        # row from a current one (`core/models.py::stage_row_superseded`). It is derived from the
+        # log's ORDER rather than from a new event column on purpose: `stage_finished` has never
+        # carried a repair counter, so a writer-side column would answer this only for rows written
+        # after the change while the four affected runs already on disk stayed unattributable.
+        #
+        # MAX, not `+= 1`, and it is the row's OWN durable ordinal: this makes the counter
+        # idempotent under a duplicate or re-folded row (invariant #5 — the fold must not be
+        # order/duplication-sensitive), and it inherits `_durable_repair_ledger`'s own accounting
+        # for free, since a `salvage_cause_fix` row deliberately RE-STATES the ordinal it follows
+        # ("the ORDINAL this row FOLLOWS, not a new one" — `engine/evaluate.py`) and therefore
+        # charges no epoch here either. A row with no `attempt` (or a non-int/bool one — `True` is
+        # an `int` in python and would read as epoch 1) falls back to advancing by one, which is
+        # what a log written before the ordinal existed can support.
+        _ordinal = d.get("attempt")
+        if isinstance(_ordinal, int) and not isinstance(_ordinal, bool):
+            n.repairs = max(n.repairs, _ordinal)
+        else:
+            n.repairs += 1
 
 def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) -> None:
     """Make every surviving incumbent comparable on the newly-hidden partition.
@@ -1131,6 +1151,8 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.verifier_score = None   # R1-c: a soundness score judged the OLD attempt's result — discard it
         n.stages = []
         n.failed_stage = None
+        n.repairs = 0            # a fresh lifecycle's repair budget starts at zero, and so does the
+        #                          epoch its stage rows are stamped with (there are none left above)
         n.rerun_from = None
         n.rerun_stage = None
         requeued.add(n.id)
@@ -1288,6 +1310,12 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # LATE terminal from the attempt this reset abandons carries the OLD generation and is dropped
         # by `_attempt_matches` — so an in-flight pre-reset eval can't land its metric on the new code.
         n.attempt += 1
+        # …and the INLINE-REPAIR epoch restarts with it, for exactly the reason the generation
+        # bump exists: `engine/evaluate.py::_durable_repair_ledger` is generation-scoped, so the
+        # new lifecycle's repair budget genuinely begins at zero and a counter that carried over
+        # would report a node as repaired by work no longer in its own lifecycle. The stage rows an
+        # eval-type reset RETAINS are re-stamped to the fresh epoch below, where they are chosen.
+        n.repairs = 0
         if st.pause_node_id == n.id and st.pause_generation == old_generation:
             st.paused = False
             st.pause_node_id = None
@@ -1387,6 +1415,14 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 if prior.get("name") == stage:
                     n.stages = n.stages[:i]
                     break
+            # RE-STAMP what survives to the fresh epoch. A retained row IS this new lifecycle's
+            # starting truth — its artifacts are exactly what the restart reuses — so it is not
+            # superseded by anything, and leaving it carrying the OLD lifecycle's repair epoch
+            # would print a number beside it from a generation that no longer exists. Written as a
+            # replacement dict rather than a mutation because `n.stages` may still be the list a
+            # previous fold pass built (the fold re-enters on every read).
+            n.stages = [({**prior, "repairs": 0} if isinstance(prior, dict) else prior)
+                        for prior in n.stages]
             if holdout_was_disclosed:
                 # Stage reuse can retain a model trained on the old search complement. A disclosed
                 # partition forces a full freshly-materialized eval in the next epoch; source code
@@ -1426,22 +1462,57 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.stop_reason = None
         st.stop_requested = None
 
+def _stage_epoch(row) -> int:
+    """The repair epoch already recorded on a folded stage row, defaulting to 0.
+
+    A row this fold built always carries one; the default covers a row a caller handed in (tests
+    and the CLI both construct `Node(stages=[…])`) and keeps this arithmetic total, since a `None`
+    would make the surrounding `max` a TypeError inside the fold loop, which has no per-event
+    try/except."""
+    if not isinstance(row, dict):
+        return 0
+    value = row.get("repairs")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
 def _on_stage_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Multi-stage eval pipeline (Phase 1): one stage of a node's declared pipeline finished.
     # Last-wins by stage name so a stage-scoped RE-RUN (Phase 2) replaces the prior outcome
     # rather than appending a duplicate.
     n = _node_for_event(st, d)
     if n is not None and n.id not in st.aborted_nodes and _generation_matches(n, d):
+        # `repairs` is the REPAIR EPOCH this row was recorded in — see `_on_node_repaired` above
+        # and `core/models.py::Node.stages`. It is the fold's own counter and NOT read off the
+        # event, which carries no such key: the engine appends one `stage_finished` per stage per
+        # ATTEMPT of the inline-repair loop and this fold keeps them last-wins BY NAME, so without
+        # it the surviving rows are indistinguishable from the current attempt's and every surface
+        # renders a superseded failure as the node's live state (measured: v9 node 5, 177 minutes).
         rec = {"name": d.get("name"), "status": d.get("status"),
-               "exit_code": d.get("exit_code"), "seconds": d.get("seconds")}
+               "exit_code": d.get("exit_code"), "seconds": d.get("seconds"),
+               "repairs": n.repairs}
         for i, s in enumerate(n.stages):
             if s.get("name") == rec["name"]:
                 # A "reused" marker means a re-eval SKIPPED this stage (an earlier attempt already
                 # ran it) — it must NOT clobber that attempt's REAL completion record (its true
                 # exit_code/seconds), else the node reads as if it trained in 0s. Keep the
                 # informative record. Order-tolerant: a real record still replaces a prior reused.
+                #
+                # THE EPOCH STILL ADVANCES, and that is what makes `repairs` mean the right thing.
+                # A reuse is the LATER attempt's own statement that this stage's result stands, so
+                # the record is that attempt's truth even though the bytes came from an earlier
+                # one. Without this, "recorded before the current repair" would convict every
+                # deliberately-reused success: measured over `runs/`, three of the seven nodes
+                # whose stage rows end at an older epoch are exactly that shape — `rubertlite-dr-
+                # unified-v8` node 3 (`mine ok` reused twice, then an evaluated node) and node 10,
+                # and `rubertlite-dense-retrieval` node 1 — and none of them is stale.
                 if rec["status"] == "reused" and s.get("status") not in (None, "reused"):
+                    s["repairs"] = max(_stage_epoch(s), rec["repairs"])
                     break
+                # MAX on replacement for the same reason, in the direction order-tolerance needs:
+                # a real record arriving AFTER the reused marker that already vouched for it at a
+                # newer epoch must not roll the epoch back to the attempt that produced the bytes.
+                rec["repairs"] = max(rec["repairs"], _stage_epoch(s))
                 n.stages[i] = rec
                 break
         else:

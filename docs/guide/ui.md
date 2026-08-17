@@ -369,6 +369,25 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   written* — consolidation keeps no redirect to a descendant — and a truncated read window degrades
   to *standing unknown* rather than claiming absence. Run-end reflection lessons carry no
   per-experiment evidence and are named as out of scope instead of being silently omitted.
+- **The eval-pipeline strip says which attempt each chip is about** — the Overview's clickable
+  `mine ✓ → train ✗` strip is folded state, and folded stage rows are last-wins BY STAGE NAME while
+  an inline repair does not bump the lifecycle generation. So after a repair the strip went on
+  drawing the superseded attempt's chips as the node's live state. Measured on
+  `runs/rubertlite-dr-unified-v9` at 2026-08-17 12:48 UTC: experiment #5 had NINE `vectorsearch
+  .train` processes alive in its workdir and had been running under repair #3 for 177 minutes, and
+  its strip read `✗ mine → ✗ train` — statements from repair cycles 2 and 1. Over the four runs
+  whose stage rows are written inside the attempt loop there are 44 such windows, MEDIAN 66.1
+  minutes. A superseded chip now keeps its own glyph (the row still records what that attempt did),
+  takes the muted tone with a DASHED border, and a `role="status"` line above the strip names both
+  epochs — *"2 of 2 stage results are from an earlier attempt — repair 3 was applied after them and
+  this experiment has not been scored since."* It says exactly that and no more: the fold proves a
+  repair landed after those rows and that no terminal followed, never that a process is alive
+  (`narration.js::pendingWork` draws the same line). A node whose rows ARE its state renders exactly
+  as before, banner absent — including every unrepaired node and every projection with no `repairs`
+  key, where absent is no claim rather than zero. The rule lives once, in `ui/src/stageAttribution
+  .js::stageRowSuperseded` mirroring `core/models.py::stage_row_superseded`; the Inspector's TRACE
+  tab was always right about the same node because it reads a different source — the `stage_started`
+  SPAN in `spans.jsonl`, which has no event counterpart.
 - **A research memo reads as a memo, not a wall** — the collapsed header carries a scannable LEAD
   (its first sentence, bounded), and the full conclusion lives in the body's Conclusion section where
   a paragraph belongs. A real memo's summary is ~1,600 characters, so rendering it verbatim in the

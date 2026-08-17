@@ -2740,6 +2740,100 @@ seeded from node 0, which would stop it being self-confirming for the NEXT run's
 done: `run_base_concepts` is an inheritance source the fold reads, so changing what is written to it is a
 writer change with replay consequences, and the reader-side split makes it unnecessary for the operator's
 view. Recorded so the self-confirming property is not rediscovered.
+### §0.12 A red stage chip about an attempt that ended 177 minutes ago, over a node that was training (2026-08-17)
+
+Reported by the operator: the Inspector's TRACE showed experiments #5 and #6 of the live
+`rubertlite-dr-unified-v9` **training**, while the Overview's eval-pipeline chips showed them
+**failed**, and the node graph gave no sign either way.
+
+**MEASURED AT 12:48 UTC, on the live run.** Both nodes fold to `status=pending`,
+`eval_started=True`, with **nine** and **five** live `vectorsearch.train` processes in their
+workdirs. Their event history, and the whole defect is in the last line of each:
+
+    #5  seq 2842/2843  stage_finished mine ok · stage_finished train fail
+        seq 2889       node_repaired attempt=1 crash
+        seq 2894/2895  stage_finished mine reused · stage_finished train fail
+        seq 2938       node_repaired attempt=2 crash
+        seq 2943       stage_finished mine expect_failed
+        seq 2976       node_repaired attempt=3 expect_failed   → then NOTHING, for 177 minutes
+    #6  seq 3153/3154  stage_finished mine ok · stage_finished train fail
+        seq 3194       node_repaired attempt=1 crash            → then NOTHING, for 56 minutes
+
+So the folded strip read `✗ mine (expect_failed)` and `✗ train (fail)` — statements from repair
+cycles **2** and **1** — while cycle 3 trained. The chips are `Inspector.jsx::StagePipeline` over
+`Node.stages`, which is `events/replay.py::_on_stage_finished`, last-wins BY STAGE NAME; the trace
+is `events/traceview.py` over `spans.jsonl`. **Two sources, and only one of them had the answer.**
+
+**BOTH HALVES OF THE ROOT CONFIRMED.** (1) There is no stage-START event: `events/types.py`
+registers `EV_STAGE_FINISHED` and no counterpart, and v9's log holds 21 `stage_finished` and
+nothing else matching `stage` — while `spans.jsonl` holds **24** `stage_started` spans
+(`runtime/command_eval.py:2441`), which is exactly why the trace was right. (2) `stage_finished`
+carries `{node_id, name, status, exit_code, seconds, generation}` and no repair counter, while
+`node_repaired` carries `{attempt, generation, reason, verified}` — and an inline repair bumps
+`attempt` (the repair ordinal) and NOT `generation`, so rows from either side of a repair are
+indistinguishable in the fold. **One correction to the report**: the NODE GRAPH does not show these
+nodes as failed. `util.js::nodeClass` paints `s-pending` from `node.status`, which is `pending` —
+the complaint's accurate half is its second sentence, that the visual gives no sign of training.
+
+**HOW BIG, AND IT IS NOT COSMETIC.** Walking every log for windows where the folded strip held a
+failing row and a `node_repaired` had landed after it: **44 windows**, **median 66.1 minutes**, p75
+191.9 min, max 560.8 min, **99.7 hours in total**, 26 of them over an hour, across **18 distinct
+node lifecycles**. Restricted to the statuses the strip paints RED (excluding `timeout`, which it
+paints amber): 41 windows, median 61.1 min, 89.8 h. That is a LOWER bound — a window is closed as
+soon as ANY stage speaks again, even though the other stages' rows stay stale. All of it is in
+**v6-v9**: a pre-2026-08-07 log wrote every stage row at the TERMINAL, after all repairs, so it
+cannot express this shape at all (`rubertlite-dense-retrieval` has 184 stage rows and 33 repairs and
+zero windows). The defect is a consequence of moving the rows into the attempt loop — which was
+itself a fix, and the right one.
+
+**FIXED BY DERIVING THE ATTRIBUTION FROM THE LOG'S ORDER, adding no event and no event field.** The
+fold sees `node_repaired` and `stage_finished` in order, so it can stamp each stage row with the
+repair epoch it was recorded in (`Node.stages[].repairs`) beside the node's current one
+(`Node.repairs`); a row whose epoch is smaller is one no later attempt has spoken about
+(`core/models.py::stage_row_superseded`). A `reused` marker ADVANCES the epoch of the record it
+declines to clobber, because a reuse is the later attempt's own statement that the result stands —
+without that clause the rule convicts three genuinely-current nodes (v8 #3, v8 #10,
+dense-retrieval #1, whose `mine` rows are older only because every later attempt reused them).
+Replayed over all 41 preserved event logs the fold is **byte-identical** once the two new keys are
+stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and nothing else.
+
+**THE ALTERNATIVES, AND WHY EACH LOSES TO THIS ONE.**
+
+1. **Add the repair counter to `stage_finished`** (additive, reader-side default). Correct in
+   principle and INSUFFICIENT in practice: a writer-side column answers only for rows written after
+   the change, so v9 #5 and #6 — the nodes the operator was looking at — stay unattributable, along
+   with all 44 measured windows. It also needs `Node.repairs` anyway (a row's epoch means nothing
+   without the node's current one), i.e. it is this fix plus a schema change plus a blind spot.
+2. **A stage-START event.** Doubles the folded stage rows on the append path (21 → 42 on v9,
+   bounded by attempts × stages) — and `engine/evaluate.py` states at that very append site that
+   these rows can move `speculation.py::_proposal_authority_seq` and discard a paid proposal under
+   `eval_parallel > 1`. Making it DIAGNOSTIC dodges that (the fence excludes `DIAGNOSTIC_EVENTS`
+   wholesale) but then the fold — the authoritative state — still cannot answer, which is defect
+   (3). `phase_progress` is already the general beacon for this and deliberately covers only
+   `build`; its own comment says a stage added there needs its own append site. And it fixes
+   nothing retroactively.
+3. **Have the UI read the `stage_started` SPAN.** Cheapest to write and wrong at the boundary:
+   `spans.jsonl` is an explicit sidecar that replay does not rebuild (CLAUDE.md's opening
+   paragraph), so History, `looplab replay`, the report exporters and the reviewer scope would keep
+   answering the old way while the live tab answered the new one; `serve/trace_clear.py` can delete
+   the evidence outright; and a trace read costs 3.4 ms/span plus the absent-fence probes. The chips
+   are folded state and must be answered from the fold.
+4. **Say "superseded" from what the fold knows today, with no new field at all.** This is what
+   shipped, with ONE correction to the premise: the fold did NOT already know a `node_repaired` came
+   after the last stage row. `_on_node_repaired` mutates `code`/`files` and nothing else — the repair
+   ledger lives in `engine/evaluate.py::_durable_repair_ledger`, which re-reads the raw log — so
+   `RunState` carried no repair count anywhere. The two integers ARE the "no new data" fix: they are
+   derived, not carried, and they cost one `max()` per repair row.
+
+**STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
+workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
+that an evaluation was announced — is `exclude=True`, so it never reaches the wire
+(`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
+at the measured instant that made node **7** the "working" node, which had not begun, while #5 and
+#6 held fourteen live training processes between them. Recorded rather than fixed here: it is a
+change to the state payload's field set and to a heuristic three surfaces read, it wants its own
+measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
+had.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 

@@ -969,11 +969,39 @@ class Node(BaseModel):
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,
     # no marker needed.) Not persisted meaningfully — always None on a settled node.
     rerun_from: Optional[str] = None
-    # Multi-stage eval pipeline (Phase 1): per-stage outcomes [{name, status, exit_code, seconds}] in run
-    # order (from stage_finished events); `failed_stage` names the stage that broke a failed node. Both
-    # empty/None on the classic single-command eval.
+    # Multi-stage eval pipeline (Phase 1): per-stage outcomes
+    # [{name, status, exit_code, seconds, repairs}] in run order (from stage_finished events);
+    # `failed_stage` names the stage that broke a failed node. Both empty/None on the classic
+    # single-command eval.
+    #
+    # `repairs` is the REPAIR EPOCH the row was recorded in, and it is what makes a stage row
+    # ATTRIBUTABLE. `stage_finished` is appended once per ATTEMPT of the inline-repair loop
+    # (`engine/evaluate.py`) and the fold keeps it last-wins BY STAGE NAME, so after a repair the
+    # surviving rows still describe the attempt the repair superseded — with nothing in them saying
+    # so. Measured on `runs/rubertlite-dr-unified-v9` 2026-08-17: node 5 had trained for 177
+    # minutes under repair #3 while its newest recorded stage statements were `mine expect_failed`
+    # (epoch 2) and `train fail` (epoch 1), which every surface renders as a red ✗. Over the four
+    # runs whose stage rows are written inside the attempt loop (v6-v9; a pre-2026-08-07 log wrote
+    # them all at the terminal, after every repair, so it cannot express this) there are 44 such
+    # windows, MEDIAN 66.1 minutes and 99.7 hours in total.
+    #
+    # DERIVED BY THE FOLD FROM LOG ORDER, not carried on the event — deliberately, because the
+    # event carries no such field and never has, so a writer-side column would leave every row
+    # already on disk unattributable while the ORDER that answers it is right there in the log.
+    # `repairs` below is the same counter's current value; a row whose `repairs` is SMALLER
+    # describes a superseded attempt (`stage_row_superseded`).
     stages: list = Field(default_factory=list)
     failed_stage: Optional[str] = None
+    # Inline repairs applied to THIS lifecycle generation — the count of folded `node_repaired`
+    # rows, which is `engine/evaluate.py::_durable_repair_ledger`'s `attempt` seen from the fold
+    # side (a `salvage_cause_fix` row re-states the ordinal it FOLLOWS rather than opening a new
+    # one, and taking the MAX keeps that row from charging an attempt here either). Reset to 0 by
+    # `node_reset`, which opens a new lifecycle whose repair budget genuinely starts fresh.
+    # Absent in old logs -> 0, and a log with no `node_repaired` rows folds to 0 exactly as before.
+    # This is NOT `attempt`: that is the lifecycle GENERATION, bumped only by `node_reset`, and the
+    # two spellings are cross-referenced here and on `attempt` below because merging them would
+    # make an inline repair look like a reset to every reader of either.
+    repairs: int = 0
     # Phase 2 stage-scoped re-run: the pipeline stage a reset asked to RESTART from (skip earlier stages,
     # reuse their artifacts). Transient — set by node_reset, cleared on the next terminal.
     rerun_stage: Optional[str] = None
@@ -1051,6 +1079,55 @@ class Node(BaseModel):
         @property (not a pydantic field/computed_field): excluded from model_dump, so event/snapshot
         serialization is byte-identical."""
         return self.confirmed_mean if self.confirmed_mean is not None else self.metric
+
+
+def stage_row_superseded(row, repairs) -> bool:
+    """Does this stage row describe an attempt a LATER inline repair has already replaced?
+
+    THE ONE SPELLING of the comparison, because it is the whole content of the fix and its two
+    readers are in different languages: `serve/` hands the row and `Node.repairs` to the browser
+    (`ui/src/stageAttribution.js::stageRowSuperseded` is the mirror) and `looplab inspect`/any
+    python reader asks it here. Hoisted rather than inlined for the reason CLAUDE.md's guard-test
+    ladder gives at tier 2 — a rule buried in a render expression is a rule no test can state.
+
+    STRICTLY LESS-THAN, and each of the three ways that matters:
+      * EQUAL is the current attempt and must read exactly as it does today. This is the negative
+        control: a node whose last stage row IS its state (`repairs == Node.repairs`, including
+        both being 0, which is every node that was never repaired and every pre-2026-08-07 log)
+        answers False and nothing about its rendering moves.
+      * GREATER happens after a `node_reset`, which resets `Node.repairs` to 0 while an eval-type
+        reset RETAINS the stage rows strictly before its restart boundary. Those retained rows are
+        the new lifecycle's own starting truth — their artifacts are what it reuses — so they are
+        not superseded, and `_on_node_reset` re-stamps them to the fresh epoch so the number a
+        surface prints beside them is not from a generation that no longer exists.
+      * ABSENT (`None`) on either side answers False. An old projection carries no `repairs` key at
+        all, and "I cannot tell" must render as the historical view rather than as a claim that a
+        real result is stale — the same absent-is-not-zero rule `ui/src/traceProjection.js` states
+        for omitted-span counters.
+    """
+    if not isinstance(row, dict):
+        return False
+    row_repairs = row.get("repairs")
+    # `bool` is an `int` in python and would compare as 0/1; a hand-edited or foreign row carrying
+    # `repairs: true` is a corrupt stamp, not epoch 1, and must not convict a real result.
+    if isinstance(row_repairs, bool) or isinstance(repairs, bool):
+        return False
+    if not isinstance(row_repairs, int) or not isinstance(repairs, int):
+        return False
+    return row_repairs < repairs
+
+
+def superseded_stage_rows(node) -> list:
+    """The rows of `node.stages` that a later repair has superseded, in pipeline order.
+
+    Empty for every node whose recorded stages describe its current attempt — which is what makes
+    "is this node's stage strip stale?" a question a caller can ask without re-deriving the rule.
+    """
+    repairs = getattr(node, "repairs", None)
+    if repairs is None and isinstance(node, dict):
+        repairs = node.get("repairs")
+    rows = (getattr(node, "stages", None) if not isinstance(node, dict) else node.get("stages")) or []
+    return [r for r in rows if stage_row_superseded(r, repairs)]
 
 
 def run_setup_key(command) -> str:

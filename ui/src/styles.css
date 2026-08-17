@@ -1027,6 +1027,12 @@ table.tbl tr.xr-group th { position: static; color: var(--fg); font-weight: 650;
 .eval-pipeline-step { padding: 2px 7px; border: 1px solid var(--stage-tone); border-radius: 4px;
   background: transparent; color: var(--stage-tone); font-size: 11px; cursor: default; }
 button.eval-pipeline-step { cursor: pointer; }
+/* A superseded row keeps its own outcome glyph and gets the muted `--stage-tone` the model hands
+   it, plus a DASHED border — colour alone must not carry the distinction (the same rule Dag.jsx
+   states for its status dots), and a muted-but-solid chip is indistinguishable from `reused`. */
+.eval-pipeline-step.superseded { border-style: dashed; }
+.eval-pipeline-superseded { display: flex; flex-wrap: wrap; gap: 5px; align-items: baseline;
+  margin-bottom: 4px; font-size: 10px; color: var(--fg-mut); }
 .eval-pipeline-arrow { font-size: 10px; }
 .disclosure-button { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .disclosure-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
