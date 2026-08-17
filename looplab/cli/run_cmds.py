@@ -1263,3 +1263,59 @@ def init(
         raise typer.BadParameter(f"unknown task kind {kind!r}; choose one of: {', '.join(_TASK_KINDS)}")
     atomic_write_text(out, appconfig.render_template(kind))
     typer.echo(f"wrote {out} — edit it, then: looplab run {out}")
+
+
+@app.command(name="reap-service-files")
+def reap_service_files_cmd(
+    runs_root: Path = typer.Argument(Path("runs"), help="The run root that holds the service files."),
+    apply: bool = typer.Option(False, "--apply", help="Actually unlink. Without it, nothing is removed."),
+    # 24 h, spelled as a literal rather than imported from `service_reaper`: a Typer default is
+    # evaluated at MODULE IMPORT, and that module reaches `serve.appstate`, which imports fastapi —
+    # so importing the constant here would make the whole CLI refuse to start without the `[ui]`
+    # extra. `tests/test_service_reaper.py` asserts the two agree, so the duplication cannot drift.
+    grace_hours: float = typer.Option(
+        24.0, "--grace-hours",
+        help="Only remove files older than this. 0 disables the grace period — do that only when "
+             "no deletion, reset or resume is in flight."),
+    show_kept: bool = typer.Option(False, "--show-kept", help="Also list what is being kept, and why."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the whole plan as JSON."),
+):
+    """Report — and only with `--apply`, remove — the service files a FINISHED destructive operation
+    left in the run root.
+
+    Every whole-run deletion parks a receipt and an identity sidecar beside the runs and takes a
+    lifecycle lock; nothing has ever removed one, so they accumulate for the life of the deployment.
+    This reports what would go and the rule that decided each file BEFORE anything goes, because a
+    sweep whose effect you can only read afterwards is one nobody consented to.
+
+    What it refuses is the point, and it refuses by rule rather than by age alone: a receipt whose
+    deletion has not SUCCEEDED (a retry resumes it), a `quarantine_ambiguous` receipt at any age (an
+    absorbing state whose receipt is the only record a human still owes that run a look), an
+    unfinished reset, a lifecycle lock whose run directory still exists (unlinking a held flock
+    silently destroys the mutual exclusion it provides), a live fence, and a quarantine holding a
+    run's own bytes. See `looplab/serve/service_reaper.py` for the four rules in full.
+    """
+    from looplab.serve.service_reaper import apply_service_file_reap, plan_service_file_reap
+
+    plan = plan_service_file_reap(runs_root, grace_s=max(0.0, grace_hours) * 3600.0)
+    if as_json and not apply:
+        typer.echo(json.dumps(plan, indent=2, default=str))
+        raise typer.Exit(0)
+    typer.echo(f"{plan['root']}: {plan['total']} service files, "
+               f"{plan['removable']} removable, {plan['kept']} kept "
+               f"(grace {grace_hours:g}h)")
+    for category in sorted(plan["counts"]):
+        counts = plan["counts"][category]
+        typer.echo(f"  {category:<18} remove {counts['remove']:>3}   keep {counts['keep']:>3}")
+    if show_kept:
+        typer.echo("\nKEPT:")
+        for record in plan["keep"]:
+            typer.echo(f"  {record['name'][:72]:<72} {record['rule']}")
+    if not apply:
+        typer.echo(f"\nNothing was removed. Re-run with --apply to remove {plan['removable']} file(s).")
+        raise typer.Exit(0)
+    outcome = apply_service_file_reap(plan)
+    typer.echo(f"\nremoved {outcome['removed_count']} file(s); {outcome['failed_count']} failure(s)")
+    for failure in outcome["failures"]:
+        typer.echo(f"  FAILED {failure['name']}: {failure['error']}")
+    raise typer.Exit(1 if outcome["failures"] else 0)

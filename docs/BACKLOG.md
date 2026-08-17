@@ -2418,6 +2418,116 @@ ever spend LESS GPU time than the behaviour it replaces.
 3. The veto rescues the WHOLE verdict, not only its epoch clause. Bounded by (f) above rather than
    closed, and stated in `epoch_floor_acquits`' own docstring.
 
+### §0.10 A cascade that could not have matched a row reported success, and nothing ever reaped a finished deletion (2026-08-17)
+
+Reported as three defects sharing one root cause — "the memory was never purged", "the identity file
+records an empty key", "nothing reaps the service files". **Two of the three framings are wrong, and
+the root cause is not shared.** Re-derived from the artifacts, not from the report.
+
+**(A) THE STALE ROWS ARE NOT RESIDUE OF THE DELETIONS.** `~/.looplab/memory` holds **216** cascadable
+rows (10 lessons, 70 notes, 68 cases, 68 claims; `concept_capsules.jsonl` does not exist there), all
+`task_id: toy_quadratic`. Their `run_id`s are `run` (175), `vis-demo` (6), `f1d-e2e`/`f1d-v7`/`toy`/
+`f1d-run`/`f1d-run3` (4 each), `disp-smoke-*`/`prov-impl-demo`/`f1-smoke-run`/`eng-hunt-smoke1` (3
+each). The **52** (in fact **54**) parked deletion identities name 46 distinct runs — `rubert-dr-0804`,
+`smoke_0803`, `live-deps5-0804`, `sim-periodic`, … — and **the two sets are disjoint: 0 of the 216
+rows names any deleted run.** Those rows are the droppings of throwaway `--out runs/demo`-style
+smokes in worktrees and temp dirs, removed with `rm -rf` and never through a deletion at all. A
+cascade only ever runs as part of a deletion, so nothing had ever *offered* to purge them. They ARE
+orphaned — 216/216 belong to no run on disk — but "the cascade failed" is the wrong diagnosis, and
+the fix is a deliberate sweep, not a repair.
+
+Two more corrections to the report: the identity files are **not** all `rubert-dr-0804` (that is
+merely the first alphabetically), and `memory_dir` is **not** a single value — it varies across 8
+(`~/.looplab/memory` 25, `/home/jovyan/data/looplab-memory` 21, five vanished pytest temp dirs, one
+run-local `runs/livetest-p0/mem`). That variation is the proof the per-run `config.snapshot.json`
+read *worked*. Also, `claim_curation_log.jsonl`'s 21 rows carry **no** `run_uid` — and it is a
+PRESERVED tier the cascade must never touch, being an append-only governance audit.
+
+**(B) THE READER IS CORRECT; THE RUNS GENUINELY PREDATE THE FIELD.** `run_memory_identity` reads
+`data.run_uid` off `run_started`, which is exactly where `orchestrator.py:3159` writes it. That
+writer landed in **`ab328ee4`, 2026-08-11 23:17**. Every deleted run is of the 0803–0811 generation,
+and **14 of the 18 runs still on disk have no `run_uid` either**. So "the reader looks in the wrong
+place" is refuted: this is the legacy case, and for a genuinely pre-uid run — whose rows are pre-uid
+too — name matching is the only identity either side has and is **correct**.
+
+**WHICH LEAVES THE REAL DEFECT, and it is neither "refused safely" nor "silently no-opped" as posed:
+it SILENTLY NO-OPPED WHILE REPORTING SUCCESS, and could not have done otherwise.** With
+`run_uid == ""`, `RunIdentity.owns` meets a row that HAS a uid, takes its `if row_uid:` branch, which
+requires the *caller's* uid, and returns False **without ever comparing a name**. It does not refuse;
+it answers `{"ok": true, "deleted": 0, "kept": 0, "identity": "run_id"}` — a clean success asserting a
+name keying that never happened, indistinguishable from "this run contributed nothing". Since all 216
+rows in that store carry a uid and all 54 sidecars carry none, **every one of those purges was
+structurally incapable of matching a row and every one reported success.**
+
+Measured with the real predicates against copies of both stores: **0 of 52 deletions have a single
+deletable row today.** That number is CORRECT, not broken — and the four rows that *do* name a
+deleted run in `/home/jovyan/data/looplab-memory` are kept by the conservative predicates working
+exactly as designed (`rubert-dr-0807`: 2 lessons at `evidence_count: 2`, 1 capsule whose concepts
+governance merged; `live-deps4-0804`: 1 merged-concept capsule). Two rows for `rubert-dr-0805` sit in
+a store its own identity sidecar does not name, so they were never in that cascade's scope.
+
+**(C) CONFIRMED, SHARPER THAN REPORTED, AND NOT ONE POPULATION.** **152** service entries (not 149 —
+the count is live; the deletions ran at 07:23–07:45 *today* and the server is still writing): 54
+identity sidecars, 47 delete receipts (all `succeeded`), 50 lifecycle locks, 1 reset receipt. Nothing
+removes any of them. But the sharpest finding is the **unbounded leak**: `save_deletion_identity`
+runs *before* the transaction can refuse, so **10 of the 54 sidecars have no receipt at all and
+belong to two runs that STILL EXIST** — `live-cards-0804` (6) and `live-deps4-0804` (4), whose
+deletions were refused (the first holds a reset receipt parked in `archiving`) and re-pressed. Every
+press leaks one, forever. The lifecycle files are not deletion residue at all: they are
+`engine_proc`'s flock targets, and 49 of 50 fence runs that no longer exist.
+
+**MEASUREMENT OF THE SAFETY MARGIN** (the number any fix must leave untouched): of 473 cascadable
+rows across both stores, **301 belong to runs that are gone** (216 + 85) and **172 belong to runs that
+still exist**, all in `/home/jovyan/data/looplab-memory`. The 216 decompose into dozens of *distinct*
+`run_uid`s all sharing the directory name `run` — the exact name-reuse hazard the uid key exists for,
+and the reason a name-keyed sweep is not an option.
+
+**SHIPPED.** `unmatchable` + `advisory` on both the survey and the purge receipt, held OUT of `kept`
+(a row nobody could form an opinion about is not a judgement a rule made); `run_uid_source`
+(`run_started` | `pre_uid_run` | `no_run_started` | `unreadable`) persisted on the sidecar, the
+version deliberately NOT bumped so the 54 existing files keep loading and keep their `memory_dir`;
+`serve/service_reaper.py` + `looplab reap-service-files`; `memory_cascade.orphan_survey` + `looplab
+memory-orphans`. Both CLIs report before they write and neither runs automatically.
+`tests/test_service_reaper.py` (29 tests) drives all of it against real artifacts.
+
+**ALTERNATIVES REJECTED.**
+
+1. **Purge the stale rows automatically when a cascade finds nothing.** Refused outright. The stores
+   are shared and `purge_attributable_memory` is irreversible; the rows in question belong to *other
+   checkouts'* runs, and the operator asked for a deletion, not a sweep of a store they did not name.
+2. **Make the legacy fallback also match a uid-carrying row on its `run_id`.** This is the one-line
+   "fix" that closes the reported symptom, and it is the exact bug `RunIdentity` was written to
+   prevent: on a corpus where dozens of live incarnations share the name `run`, it would delete a
+   different, still-existing run's rows. The measurement above is what makes the cost concrete.
+3. **Fill the empty `run_uid` from the run directory name.** Guessing an identity is the one thing
+   this cascade exists not to do, and it would make the receipt's `identity: "run_uid"` a lie rather
+   than merely an over-claim.
+4. **A fourth `identity` label instead of a separate `unmatchable` field.** `identity` answers "what
+   was this keyed on"; the blind spot is "what could not be reached either way". Folding them would
+   have made the UI's three-way read (`run_id` / `mixed` / `run_uid`) a four-way one for a fact that
+   is a count, not a keying.
+5. **Reap service files by age alone.** Would have removed a `quarantine_ambiguous` receipt (the
+   absorbing state whose receipt is the only record a human still owes that run a look, and whose
+   removal frees the run identity for reuse), a pending receipt a retry RESUMES from, and — worst —
+   a lifecycle lock a live process holds. `flock` is per-inode: unlinking a held lock does not fail,
+   it lets the next process create a fresh inode at the same path and hold the "same" lock at the
+   same time. Hence four rules, not one.
+6. **Reap a succeeded receipt immediately.** It still answers a retry idempotently; without it the
+   same `operation_id` re-enters as a fresh deletion of a vanished run and gets `404 run_not_found`.
+   Hence the 24 h grace, which is also why only **23** of the 152 files are removable right now.
+7. **Import `DEFAULT_GRACE_S` into the CLI.** A Typer default is evaluated at module import and
+   `service_reaper` reaches `serve/appstate`, which imports fastapi — the whole CLI would refuse to
+   start without the `[ui]` extra. The literal is duplicated and pinned by a test instead.
+8. **Delete every orphaned row in one pass.** Would destroy shared corroboration whose *writer* is
+   gone but whose *row* survives for other runs. `memory-orphans` goes back through
+   `purge_attributable_memory` once per contributing run so every tier predicate still applies.
+
+**STILL OPEN.** ⬜ The leak's *source* is untouched: `save_deletion_identity` still runs before the
+transaction can refuse, so a refused deletion still parks a sidecar and the reaper only collects them
+afterwards. Writing it after the fence is taken would end the leak rather than sweep it, but the
+sidecar exists precisely to survive a crash *between* those points, so the honest fix is to write it
+under the fence and not before — a change to the deletion transaction's ordering, not to the reaper.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in

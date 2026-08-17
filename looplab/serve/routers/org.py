@@ -386,9 +386,21 @@ def build_router(srv) -> APIRouter:
                     f"one; POST /api/runs/{run_id}/memory-purge with the run_uid and memory_dir "
                     "from this run's records")}
             else:
-                result = {**result, "memory": await anyio.to_thread.run_sync(
+                memory = await anyio.to_thread.run_sync(
                     lambda: purge_attributable_memory(
-                        identity["memory_dir"], identity["run_id"], identity["run_uid"]))}
+                        identity["memory_dir"], identity["run_id"], identity["run_uid"]))
+                # WHERE the two identity facts came from, echoed onto the receipt. `deleted: 0` has
+                # several very different causes and the receipt could not tell them apart: a run that
+                # contributed nothing, a uid-less run against a uid-keyed store (`unmatchable`), and
+                # a purge aimed at the SERVER's global store rather than the run's own. The last is
+                # the one an operator cannot check afterwards — `memory_dir` is a per-run setting and
+                # the run directory is gone by the time they read this — so the answer is carried
+                # from the only moment it was knowable rather than inferred later from a path that
+                # merely looks plausible.
+                result = {**result, "memory": {
+                    **memory,
+                    "run_uid_source": identity.get("run_uid_source", "unknown"),
+                    "memory_dir_source": identity.get("memory_dir_source", "unknown")}}
         return JSONResponse(
             status_code=200 if result.get("status") == "succeeded" else 202,
             content=result)

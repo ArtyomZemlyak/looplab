@@ -89,6 +89,17 @@ def save_deletion_identity(srv, rd: Path, operation_id: str, identity: dict) -> 
             "run_id": str(identity.get("run_id") or ""),
             "run_uid": str(identity.get("run_uid") or ""),
             "memory_dir": str(identity.get("memory_dir") or ""),
+            # WHY the uid is what it is. An empty `run_uid` has four meanings that a retry, arriving
+            # after the run directory is gone, can no longer tell apart — see
+            # `memory_cascade.run_memory_identity`. The version is NOT bumped for it: the loader
+            # below reads the field with a default, so the 54 sidecars already on disk keep loading
+            # and simply report `unknown`, where bumping would have silently discarded every one of
+            # them and taken the `memory_dir` they carry with it.
+            "run_uid_source": str(identity.get("run_uid_source") or "unknown"),
+            # Whether `memory_dir` above is the RUN's own per-run setting or the server's current
+            # global. A purge against a defaulted store may be a purge against a directory the run
+            # never wrote to, and after the run is gone nothing else can say which it was.
+            "memory_dir_source": str(identity.get("memory_dir_source") or "unknown"),
         }, ensure_ascii=False))
     except Exception:  # noqa: BLE001
         pass
@@ -108,7 +119,16 @@ def load_deletion_identity(srv, rd: Path, operation_id: str) -> dict:
     memory_dir = data.get("memory_dir")
     if not all(isinstance(v, str) for v in (run_id, run_uid, memory_dir)) or not run_id:
         return {}
-    return {"run_id": run_id, "run_uid": run_uid, "memory_dir": memory_dir}
+    def _source(key: str) -> str:
+        # DEFAULTED, not required: a sidecar written before these fields existed is still a
+        # perfectly good parked identity, and refusing it would lose the `memory_dir` that is the
+        # whole reason the sidecar exists.
+        value = data.get(key)
+        return value if isinstance(value, str) and value else "unknown"
+
+    return {"run_id": run_id, "run_uid": run_uid, "memory_dir": memory_dir,
+            "run_uid_source": _source("run_uid_source"),
+            "memory_dir_source": _source("memory_dir_source")}
 
 
 def deletion_quarantine_path(srv, rd: Path, operation_id: str) -> Path:
