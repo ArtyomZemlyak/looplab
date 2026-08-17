@@ -45,6 +45,92 @@ export const episodeLabel = label => (label == null || label === ''
 
 const safeCount = value => (Number.isSafeInteger(value) && value >= 0 ? value : 0)
 const anchored = episode => typeof episode?.anchor === 'string' && episode.anchor !== ''
+const pageState = payload => {
+  const page = payload?.page
+  const snapshot = typeof page?.snapshot === 'string' && page.snapshot ? page.snapshot : null
+  const nextBefore = typeof page?.next_before === 'string' && page.next_before
+    ? page.next_before : null
+  return {
+    snapshot,
+    nextBefore,
+    hasOlder: page?.has_older === true && nextBefore !== null,
+    older: safeCount(page?.older_episodes),
+    newer: safeCount(page?.newer_episodes),
+  }
+}
+
+const episodeIdentity = row => {
+  if (anchored(row)) return `anchor:${row.anchor}`
+  if (typeof row?.band === 'string' && row.band) return `band:${row.band}`
+  return null
+}
+
+const episodeTotal = payload => {
+  const rows = Array.isArray(payload?.episodes) ? payload.episodes.length : 0
+  return Math.max(rows + safeCount(payload?.projection?.omitted_episodes),
+    safeCount(payload?.projection?.total_episodes))
+}
+
+/**
+ * Prepend one exclusive-cursor page to an aggregate that started at the newest tail.
+ *
+ * Returns null on any identity/cursor disagreement. A late response from another lifecycle is not
+ * an older page of the map on screen, and quietly merging it would create seek controls whose labels
+ * and anchors describe different traces. Rows are de-duplicated defensively even though the server's
+ * exclusive cursor already guarantees no overlap.
+ */
+export const mergeEpisodePagePayload = (current, older) => {
+  if (!current || typeof current !== 'object' || !older || typeof older !== 'object') return null
+  if (String(current.node_id) !== String(older.node_id)
+      || current.schema !== older.schema
+      || current.attempt !== older.attempt
+      || current.run_generation !== older.run_generation
+      || current.projection?.unavailable === true
+      || older.projection?.unavailable === true) return null
+  const cursor = current.page?.next_before
+  const snapshot = current.page?.snapshot
+  if (typeof cursor !== 'string' || !cursor || older.page?.before !== cursor
+      || typeof snapshot !== 'string' || !snapshot || older.page?.snapshot !== snapshot
+      || episodeTotal(current) !== episodeTotal(older)) return null
+
+  const currentRows = Array.isArray(current.episodes) ? current.episodes : []
+  const olderRows = Array.isArray(older.episodes) ? older.episodes : []
+  const seen = new Set()
+  const episodes = []
+  for (const row of [...olderRows, ...currentRows]) {
+    const identity = episodeIdentity(row)
+    if (identity && seen.has(identity)) continue
+    if (identity) seen.add(identity)
+    episodes.push(row)
+  }
+  const total = Math.max(episodes.length, episodeTotal(current))
+  const omitted = Math.max(0, total - episodes.length)
+  const nextBefore = typeof older.page?.next_before === 'string' && older.page.next_before
+    ? older.page.next_before : null
+  const hasOlder = older.page?.has_older === true && nextBefore !== null
+  const projection = {
+    ...(current.projection || {}),
+    total_episodes: total,
+    visible_episodes: episodes.length,
+    omitted_episodes: omitted,
+    truncated: omitted > 0 || safeCount(current.projection?.omitted_spans) > 0
+      || safeCount(current.projection?.truncated_spans) > 0,
+  }
+  return {
+    ...current,
+    episodes,
+    page: {
+      ...(current.page || {}),
+      next_before: nextBefore,
+      has_older: hasOlder,
+      older_episodes: safeCount(older.page?.older_episodes),
+      // The aggregate still ends at the same newest edge as its first page. This is normally zero,
+      // but carrying it makes the helper honest for a caller that deliberately began mid-history.
+      newer_episodes: safeCount(current.page?.newer_episodes),
+    },
+    projection,
+  }
+}
 
 /**
  * Fold one `/nodes/{n}/episodes` payload into what a picker can offer.
@@ -65,8 +151,9 @@ const anchored = episode => typeof episode?.anchor === 'string' && episode.ancho
  *                 history" lie the other three outcomes were written to prevent, arriving through
  *                 the one branch that had no way to say what it knew.
  *   ready       — kinds to choose from.
- * `partial` rides alongside all four: the server's map has its own ceiling, and a map that stops
- * short must say so rather than let its oldest row read as the node's beginning.
+ * `partial` rides alongside all four: one server page has a ceiling, and an aggregate that has not
+ * loaded its older cursor pages yet must say so rather than let its oldest row read as the node's
+ * beginning.
  *
  * An episode with no usable `anchor` is dropped, not disabled: the anchor IS the seek, so a row
  * without one is a choice that cannot be made, and a picker offering it would be a dead control.
@@ -76,10 +163,12 @@ const anchored = episode => typeof episode?.anchor === 'string' && episode.ancho
  */
 export const buildEpisodeMap = payload => {
   if (!payload || typeof payload !== 'object' || payload.projection?.unavailable === true) {
-    return { status: 'unavailable', kinds: [], total: 0, omitted: 0, dropped: 0, partial: true }
+    return { status: 'unavailable', kinds: [], total: 0, omitted: 0, dropped: 0, partial: true,
+      snapshot: null, nextBefore: null, hasOlder: false, older: 0, newer: 0 }
   }
   const rows = Array.isArray(payload.episodes) ? payload.episodes : []
   const omitted = safeCount(payload.projection?.omitted_episodes)
+  const page = pageState(payload)
   let dropped = 0
   const kinds = []
   const byLabel = new Map()
@@ -103,7 +192,8 @@ export const buildEpisodeMap = payload => {
   // steps are. Neither is a failed read, which is the distinction the `unavailable` branch keeps.
   if (!kinds.length) {
     const status = omitted > 0 || dropped > 0 ? 'unseekable' : 'empty'
-    return { status, kinds: [], total: 0, omitted, dropped, partial: omitted > 0 || dropped > 0 }
+    return { status, kinds: [], total: 0, omitted, dropped, partial: omitted > 0 || dropped > 0,
+      ...page }
   }
   return {
     status: 'ready',
@@ -112,6 +202,7 @@ export const buildEpisodeMap = payload => {
     omitted,
     dropped,
     partial: omitted > 0 || dropped > 0,
+    ...page,
   }
 }
 

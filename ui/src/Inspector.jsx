@@ -27,6 +27,7 @@ import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTra
 import {
   EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, clampEpisodeIndex, episodeAnchor,
   episodeAt, episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
+  mergeEpisodePagePayload,
 } from './traceEpisodeModel.js'
 import {
   TRACE_SURFACE_VIEWS, TRACE_SURFACE_VIEW_LABELS,
@@ -2114,20 +2115,31 @@ export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
 //
 // VISIBLE, always, whenever this node HAS a bounded trace — the same rule `TraceReach` learned the
 // hard way (a control that appears only on focus does not exist to a pointer user, reported twice).
-// The map itself loads when the control is opened: it is a one-shot read that costs the server no
-// spans.jsonl bytes at all, but it is 7,048 rows on that node and nobody should pay for it while
-// reading a two-band one.
+// The newest map page loads when the control is opened and older pages only on demand. Derivation
+// costs the server no spans.jsonl bytes at all, but it is 7,048 rows on the measured node and nobody
+// should pay for it while reading a two-band one.
 function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onSeek, nonce = 0 }) {
   const [open, setOpen] = useState(false)
-  const [map, setMap] = useState(null)          // null = not read yet
+  // `undefined` = not read yet, `null` = failed. Keep the wire payload so an older cursor page can
+  // be merged with its projection receipt before the pure model folds it into picker kinds.
+  const [payload, setPayload] = useState(undefined)
+  const [olderStatus, setOlderStatus] = useState('idle')
   const [kind, setKind] = useState(null)        // the label the operator is stepping through
   const [draft, setDraft] = useState(1)         // the 1-based ordinal in the number field
+  const pageRequest = useRef(null)
   const pickerId = useId()
+  const map = useMemo(
+    () => payload === undefined ? null : buildEpisodeMap(payload), [payload])
   // A new node, lifecycle or trace clear invalidates every anchor in hand.
-  useEffect(() => { setMap(null); setKind(null); setOpen(false) },
-    [nodeId, attempt, expectedGeneration, nonce])
   useEffect(() => {
-    if (!open || map !== null || !runId) return undefined
+    setPayload(undefined); setOlderStatus('idle'); setKind(null); setOpen(false)
+    return () => {
+      pageRequest.current?.controller.abort()
+      pageRequest.current = null
+    }
+  }, [nodeId, attempt, expectedGeneration, nonce])
+  useEffect(() => {
+    if (!open || payload !== undefined || !runId) return undefined
     let alive = true
     // `deadlineGet` returns a HANDLE, not a promise. The map is index-only work, but it shares the
     // absent-fence probes every trace route pays on a geesefs mount, so it gets the same deadline
@@ -2136,12 +2148,48 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
       runNodeApiPath(runId, nodeId, `/episodes${traceReadQuery(expectedGeneration, attempt)}`),
       traceReadDeadlineMs(0))
     request.promise
-      .then(d => { if (alive) setMap(buildEpisodeMap(d)) })
+      .then(d => {
+        if (String(d?.node_id) !== String(nodeId) || d?.attempt !== attempt
+            || !traceGenerationMatches(d, expectedGeneration)) throw new Error('stale episode map')
+        if (alive) setPayload(d)
+      })
       // A failed read is not an absent history: the model's `unavailable` says so and the control
       // prints it, rather than rendering an empty picker that reads as "no earlier steps".
-      .catch(() => { if (alive) setMap(buildEpisodeMap(null)) })
+      .catch(() => { if (alive) setPayload(null) })
     return () => { alive = false; request.controller.abort() }
-  }, [open, map, runId, nodeId, attempt, expectedGeneration])
+  }, [open, payload, runId, nodeId, attempt, expectedGeneration])
+  const loadEarlier = () => {
+    const cursor = map?.nextBefore
+    const snapshot = payload?.page?.snapshot
+    if (!cursor || !snapshot || olderStatus === 'loading' || !payload || !runId) return
+    const base = payload
+    const token = Symbol('episode-page')
+    const request = deadlineGet(
+      runNodeApiPath(runId, nodeId,
+        `/episodes${traceReadQuery(expectedGeneration, attempt, null, cursor, snapshot)}`),
+      traceReadDeadlineMs(0))
+    pageRequest.current?.controller.abort()
+    pageRequest.current = { token, controller: request.controller }
+    setOlderStatus('loading')
+    request.promise.then(d => {
+      if (pageRequest.current?.token !== token) return
+      if (String(d?.node_id) !== String(nodeId) || d?.attempt !== attempt
+          || !traceGenerationMatches(d, expectedGeneration)) throw new Error('stale episode page')
+      const merged = mergeEpisodePagePayload(base, d)
+      if (!merged) throw new Error('episode page cursor mismatch')
+      setPayload(current => current === base ? merged : current)
+      setOlderStatus('idle')
+    }).catch(() => {
+      if (pageRequest.current?.token === token) setOlderStatus('error')
+    }).finally(() => {
+      if (pageRequest.current?.token === token) pageRequest.current = null
+    })
+  }
+  const reloadEpisodes = () => {
+    pageRequest.current?.controller.abort()
+    pageRequest.current = null
+    setPayload(undefined); setOlderStatus('idle'); setKind(null)
+  }
   const kinds = map?.status === 'ready' ? episodeKindOptions(map) : []
   // The anchor RENDERING is the one the surface is fenced on (`traceSubjectMatches` refuses a
   // payload for any other), so the requested anchor and the shown one cannot disagree on screen.
@@ -2208,6 +2256,14 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
           disabled={!active || index >= active.count - 1}
           onClick={() => seek((active?.count || 1) - 1)}>»</button>
         <button type="button" className="btn xs" onClick={() => seek(index)}>show</button>
+        {map.hasOlder && <button type="button" className="btn xs ghost trace-episodes-earlier"
+          disabled={olderStatus === 'loading'}
+          onClick={olderStatus === 'error' ? reloadEpisodes : loadEarlier}
+          title="Load the preceding page of this experiment’s steps">
+          {olderStatus === 'loading' ? 'loading earlier steps…'
+            : olderStatus === 'error' ? 'reload steps' : 'load earlier steps'}</button>}
+        {olderStatus === 'error' && <span className="muted" role="alert">
+          The steps changed or could not be loaded. Reload and try again.</span>}
         {here && <span className="muted trace-episode-sum">
           {episodeSummary(here.episode, here.index)}</span>}
         {map.partial && <span className="muted">{episodeMapNotice(map)}</span>}

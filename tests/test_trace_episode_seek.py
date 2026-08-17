@@ -120,6 +120,112 @@ def test_the_map_names_every_repair_and_its_seek_key(tmp_path):
     assert any(row.get("reason") == "crash" for row in episodes)
 
 
+def test_episode_pages_reach_the_beginning_without_overlap(tmp_path):
+    """The map's response cap is a page size, not a permanent cut through old history."""
+    pytest.importorskip("fastapi")
+    client, _spans = _repaired_node(tmp_path, repairs=SMALL_REPAIRS)
+
+    whole = client.get("/api/runs/demo/nodes/0/episodes").json()["episodes"]
+    combined = []
+    cursor = None
+    snapshot = None
+    previous_older = None
+    while True:
+        params = {"limit": 7}
+        if cursor is not None:
+            params["before"] = cursor
+            params["snapshot"] = snapshot
+        response = client.get("/api/runs/demo/nodes/0/episodes", params=params)
+        assert response.status_code == 200
+        payload = response.json()
+        rows = payload["episodes"]
+        page = payload["page"]
+
+        assert 0 < len(rows) <= 7
+        assert page["before"] == cursor
+        snapshot = snapshot or page["snapshot"]
+        assert page["snapshot"] == snapshot
+        assert not ({row["anchor"] for row in rows}
+                    & {row["anchor"] for row in combined})
+        combined = rows + combined
+        if previous_older is not None:
+            assert page["older_episodes"] < previous_older
+        previous_older = page["older_episodes"]
+
+        if not page["has_older"]:
+            assert page["next_before"] is None
+            assert page["older_episodes"] == 0
+            break
+        assert page["next_before"] == rows[0]["anchor"]
+        cursor = page["next_before"]
+
+    assert combined == whole
+    first_repair = next(row for row in combined
+                        if row["label"] == "inline_repair" and row["ordinal"] == 1)
+    seeked = client.get("/api/runs/demo/nodes/0/conversation",
+                        params={"before": first_repair["anchor"]})
+    assert seeked.status_code == 200
+    assert seeked.json()["stages"][-1]["ordinal"] == 1
+
+
+def test_episode_page_snapshot_excludes_a_new_live_tail(tmp_path):
+    """A live append after page one must not move page two under the operator."""
+    pytest.importorskip("fastapi")
+    client, _spans = _repaired_node(tmp_path, repairs=SMALL_REPAIRS)
+    first = client.get("/api/runs/demo/nodes/0/episodes", params={"limit": 7}).json()
+    page = first["page"]
+
+    late = [
+        {"trace_id": "t", "span_id": "late-repair-gen", "parent_id": "late-repair",
+         "run_id": "demo", "name": "generation", "kind": "generation", "start": 999_001.0,
+         "duration_s": 1.0, "status": "OK",
+         "attributes": {"node_id": 0, "phase": "inline_repair",
+                        "phase_span": "late-repair", "output": "late"}, "events": []},
+        {"trace_id": "t", "span_id": "late-repair", "parent_id": "root", "run_id": "demo",
+         "name": "inline_repair", "kind": "operation", "start": 999_000.0,
+         "duration_s": 2.0, "status": "OK",
+         "attributes": {"node_id": 0, "attempt": SMALL_REPAIRS + 1}, "events": []},
+    ]
+    with (tmp_path / "demo" / "spans.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write("".join(json.dumps(row) + "\n" for row in late))
+
+    older = client.get("/api/runs/demo/nodes/0/episodes", params={
+        "limit": 7, "before": page["next_before"], "snapshot": page["snapshot"],
+    })
+    assert older.status_code == 200
+    body = older.json()
+    assert body["page"]["snapshot"] == page["snapshot"]
+    assert body["projection"]["total_episodes"] == first["projection"]["total_episodes"]
+    assert "late-repair" not in {row["anchor"] for row in body["episodes"]}
+
+
+def test_episode_page_cursor_is_scoped_to_an_episode_of_that_node_lifecycle(tmp_path):
+    pytest.importorskip("fastapi")
+    client, _spans = _repaired_node(tmp_path, repairs=SMALL_REPAIRS)
+    first_page = client.get("/api/runs/demo/nodes/0/episodes", params={"limit": 7}).json()
+    snapshot = first_page["page"]["snapshot"]
+
+    # `implement-gen` is a real indexed span in this node and lifecycle, but not an episode boundary.
+    # A run-global index check would accept it and return a plausible wrong page; the episode map must
+    # validate the cursor against the exact stage population it is paging.
+    for cursor in ("implement-gen", "no-such-span", "x" * 500):
+        response = client.get("/api/runs/demo/nodes/0/episodes",
+                              params={"limit": 7, "before": cursor, "snapshot": snapshot})
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == "trace_episode_cursor_unknown"
+        assert response.json()["detail"]["cursor_field"] == "before"
+
+    response = client.get("/api/runs/demo/nodes/0/episodes",
+                          params={"limit": 7, "before": first_page["page"]["next_before"],
+                                  "snapshot": "implement-gen"})
+    assert response.status_code == 409
+    assert response.json()["detail"]["cursor_field"] == "snapshot"
+
+    for limit in (0, 10001):
+        assert client.get("/api/runs/demo/nodes/0/episodes",
+                          params={"limit": limit}).status_code == 422
+
+
 def test_the_first_repair_is_unreachable_by_widening_and_reachable_by_anchoring(tmp_path):
     """The defect and its fix, in one test, on one node.
 

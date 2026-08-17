@@ -642,19 +642,22 @@ class AppState:
             # tree tab showing nothing for a window it had just selected for that node.
             claimed_traces=idx.node_build_traces(nid, generation=generation))
 
-    def node_episode_map(self, rd: Path, nid, generation: Optional[int] = None) -> dict:
+    def node_episode_map(self, rd: Path, nid, generation: Optional[int] = None, *,
+                         cap: Optional[int] = None, before: Optional[str] = None,
+                         snapshot: Optional[str] = None) -> dict:
         """The node's EPISODE MAP — every band of its trace, with no band's contents.
 
         Sits beside `node_trace_view` because it is the control that makes that view's window
         usable: the window is bounded and a heavily-repaired node is far larger than any window the
         server can afford, so the operator needs somewhere to point it (`?before=`). Reads only the
-        in-memory light index — no spans.jsonl bytes at all — which is why a map of ALL of a node's
-        episodes can be a plain one-shot read beside a bounded one (measured 82 ms for the 7,048
-        bands of rubert-dr-0804 node 1). An unreadable/absent index degrades to the same explicit
-        unavailable receipt every other trace surface uses, never to an empty map.
+        in-memory light index — no spans.jsonl bytes at all — so a bounded episode page can sit beside
+        a bounded span read (measured 82 ms to derive the 7,048 bands of rubert-dr-0804 node 1).
+        An unreadable/absent index degrades to the same explicit unavailable receipt every other
+        trace surface uses, never to an empty map.
         """
         from looplab.events.span_index import get_index
-        from looplab.events.traceview import node_episodes, unavailable_projection
+        from looplab.events.traceview import (TRACE_NODE_EPISODE_CAP, node_episodes,
+                                              unavailable_projection)
         idx = get_index(rd / "spans.jsonl")
         if idx is None:
             return {"node_id": str(nid), "episodes": [],
@@ -662,6 +665,9 @@ class AppState:
         return node_episodes(
             idx.light_spans_for_node(nid, None, generation=generation), nid,
             total_spans=idx.node_span_count(nid, generation=generation),
+            cap=TRACE_NODE_EPISODE_CAP if cap is None else cap,
+            before=before,
+            snapshot=snapshot,
             # Both the light rows and their counts come from the index, which normalized them when
             # it built them; re-running the redaction/entropy scan over a whole 14,507-span node on
             # every open is the same pure work `build_conversation` documents skipping.

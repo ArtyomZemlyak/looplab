@@ -93,8 +93,9 @@ test('expanded node trace polls only its exact live lifecycle and refreshes once
     /traceDeadlineGet\(runNodeApiPath\(runId, traceNid, '\/trace'\),[\s\S]*?expectedTraceGeneration, traceGeneration, nodeTraceLimit,[\s\S]*?traceReadDeadlineMs\(nodeTraceLimit\)\)/)
   // DRIVEN, not pinned as source text. This assertion used to be a regex over `api.js` naming
   // `traceReadQuery`'s exact three-parameter signature, and the trace-episode-seek merge added a
-  // fourth (`before`, the window anchor) — so the regex stopped matching a function whose contract
-  // was intact, and the whole test went red for a change that broke nothing. A pin that fails on a
+  // fourth (`before`, the window anchor; episode maps may also add a fifth snapshot) — so the regex
+  // stopped matching a function whose contract was intact, and the whole test went red for a change
+  // that broke nothing. A pin that fails on a
   // compatible change is the same defect as one that passes on a breaking change: it stops
   // reporting on the property. Calling it reports on the property.
   const { traceReadQuery } = await import('../src/api.js')
@@ -110,6 +111,10 @@ test('expanded node trace polls only its exact live lifecycle and refreshes once
     assert.equal(anchored.get(key), query.get(key))
   }
   assert.equal(query.get('before'), null)
+  const paged = new URLSearchParams(
+    traceReadQuery('gen-abc', 3, null, 'span-7', 'tail-span').slice(1))
+  assert.equal(paged.get('before'), 'span-7')
+  assert.equal(paged.get('snapshot'), 'tail-span')
   // An empty read names nothing rather than sending a bare `?`.
   assert.equal(traceReadQuery(null, null, 0), '')
   assert.match(dock,
