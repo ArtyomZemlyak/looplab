@@ -729,6 +729,17 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   `stage_finished` rows and the fold keeps the informative one, so `train ok / 6900 s` still reads as
   a train that happened. (Before 2026-08-07 only the LAST attempt's rows were written, so a reused
   stage folded to `reused / exit 0 / 0.0 s` and replay could not tell it from a stage that never ran.)
+- **Every stage row says which attempt wrote it** (2026-08-17). Because the rows are last-wins by
+  stage NAME and an inline repair does not bump the lifecycle generation, a repair leaves the
+  previous attempt's rows standing — so `node.stages` could show `train ✗` for hours while a
+  repaired attempt was training. The fold now stamps each row with `repairs`, the count of inline
+  repairs applied when it was recorded, beside `node.repairs`, the current count: a row whose
+  `repairs` is SMALLER is one no later attempt has spoken about, and the UI's strip mutes it and
+  says so instead of drawing a live failure (`core/models.py::stage_row_superseded`). A `reused`
+  marker ADVANCES the epoch of the record it declines to clobber — a reuse is the later attempt's
+  own statement that the result stands — so a deliberately-reused success is never called stale.
+  Both numbers are derived by the fold from the log's ORDER, so no event gained a field and runs
+  already on disk are attributed retroactively.
 - **Optional inter-stage verify** — a stage flagged `"check": true` hands its output to an agentic
   checker (Researcher/Developer) before the next stage runs, so a diverged train can't silently feed
   eval. Since 2026-08-13 the checker answers a **verdict**, not a concern string: a stage dies only

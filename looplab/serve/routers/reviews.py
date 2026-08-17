@@ -91,6 +91,15 @@ _REVIEW_NODE_KEYS = {
     # of the disclosure questions `origin` does.
     "extra_metrics_provenance",
     "violations", "feasible", "stages",
+    # `repairs` rides with `stages` for the SAME reason `extra_metrics_provenance` rides with
+    # `extra_metrics`, one paragraph up: each stage row carries the repair epoch it was recorded in,
+    # and without the node's CURRENT epoch to compare against, a reviewer sees a red `train ✗` and
+    # cannot tell a live failure from one a later repair already superseded (`core/models.py::
+    # stage_row_superseded`). Withholding it presents stale evidence as current, which is the
+    # direction this scope may never fail in. It is a within-run count about THIS node — the same
+    # category as `attempt` below — and names no sibling run, so it raises none of `origin`'s
+    # disclosure questions.
+    "repairs",
     # `origin` is deliberately ABSENT: it names a sibling run (see `_SUMMARY_OMIT_KEYS`), and this
     # route's closing `_scrub_json` carries no omit set, so allow-listing it here would disclose the
     # portfolio through the evidence scope even though the summary scope denies it.

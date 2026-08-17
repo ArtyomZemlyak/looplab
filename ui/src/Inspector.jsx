@@ -24,6 +24,7 @@ import {
   traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
 import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
+import { stagePipelineView } from './stageAttribution.js'
 import {
   EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, clampEpisodeIndex, episodeAnchor,
   episodeAt, episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
@@ -532,12 +533,14 @@ export function GroupSummary({
 // Phase 1: the node's declared eval pipeline as a coloured strip (data_prep ✓ → train ✓ → eval ✗), so a
 // crash is pinpointed to its stage instead of hiding behind one opaque "evaluate". Empty on single-command
 // evals. The failed stage is tinted red; a still-pending tail (not yet reached) shows muted.
-function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
+//
+// Every DECISION lives in `stageAttribution.js` (tone, glyph, title, which rows a later repair has
+// superseded and the sentence that says so) — see that module's header for the measurement. This
+// half keeps only the choreography: the re-run submit and its pending lock.
+function StagePipeline({ node, runId, id, generation, onToast }) {
   const [pendingStage, setPendingStage] = useState(null)
-  if (!stages || !stages.length) return null
-  const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
-    : s.status === 'reused' ? 'var(--fg-mut)' : 'var(--fail)'
-  const ic = (s) => s.status === 'ok' ? '✓' : s.status === 'timeout' ? '⧗' : s.status === 'reused' ? '↺' : '✗'
+  const { rows, notice, failedStage } = stagePipelineView(node)
+  if (!rows.length) return null
   const rerun = async (name) => {
     if (!runId || pendingStage) return
     setPendingStage(name)
@@ -552,17 +555,25 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
   }
   return <div className="eval-pipeline">
     <div className="muted eval-pipeline-label">
-      eval pipeline{failed ? ` — failed at ${failed}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
+      eval pipeline{failedStage ? ` — failed at ${failedStage}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
+    {/* The supersession notice sits ABOVE the chips and is `role="status"`, not a title: what an
+        operator asked for is a sign that a red strip is not about the attempt that is running, and
+        a tooltip is not a sign. It is absent entirely when nothing is superseded, so an unrepaired
+        node's strip is exactly the historical one. */}
+    {notice && <div className="eval-pipeline-superseded" role="status">
+      <span className="badge reason" title={notice.text}>superseded</span>
+      <span> {notice.text}{notice.failureText ? ` ${notice.failureText}` : ''}</span>
+    </div>}
     <div className="eval-pipeline-stages">
-      {stages.map((s, i) => <React.Fragment key={i}>
-        {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(s.name)}
-          className="eval-pipeline-step" style={{ '--stage-tone': tone(s) }}
-          title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
-          {ic(s)} {s.name}</button> : <span
-          className="eval-pipeline-step" style={{ '--stage-tone': tone(s) }}
-          title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} · historical result`}>
-          {ic(s)} {s.name}</span>}
-        {i < stages.length - 1 && <span className="muted eval-pipeline-arrow">→</span>}
+      {rows.map((v, i) => <React.Fragment key={i}>
+        {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(v.name)}
+          className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
+          title={`${v.title} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
+          {v.icon} {v.name}</button> : <span
+          className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
+          title={`${v.title} · historical result`}>
+          {v.icon} {v.name}</span>}
+        {i < rows.length - 1 && <span className="muted eval-pipeline-arrow">→</span>}
       </React.Fragment>)}
     </div>
   </div>
@@ -1011,7 +1022,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
       <div className="muted">Concepts its work item carries that this attempt does not
         {lanes.cardTagOrigin ? ` (card tags derived from: ${lanes.cardTagOrigin})` : ''}.</div>
     </>}
-    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
+    <StagePipeline node={n} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>

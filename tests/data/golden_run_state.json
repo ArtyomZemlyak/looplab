@@ -333,6 +333,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
@@ -388,6 +389,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
@@ -443,6 +445,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": {
@@ -503,6 +506,7 @@
       "parent_ids": [
         2
       ],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": {
@@ -563,6 +567,7 @@
       "parent_ids": [
         2
       ],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
@@ -620,6 +625,7 @@
       "parent_ids": [
         2
       ],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": {
@@ -681,6 +687,7 @@
         5,
         2
       ],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": {
@@ -741,6 +748,7 @@
       "parent_ids": [
         5
       ],
+      "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
       "research_origin": null,
