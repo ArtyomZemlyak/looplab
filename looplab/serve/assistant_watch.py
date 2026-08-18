@@ -1272,6 +1272,17 @@ class WatchService:
         The claim is what makes concurrent ticks safe: two threads reaching the same due record
         cannot both spend a model call on it, because only one `armed -> waking` write wins.
         """
+        # REVIEW 2026-08-18 (correctness): a claim is unrecoverable within a live process. Every
+        # settling write AFTER this claim (`store.update`/`_retire` -> `_write` -> atomic_write_text,
+        # which has NO containment; also `wakeup_instruction` below, outside the try) can raise —
+        # e.g. a transient OSError on the geesefs mount — and the escape is swallowed by `_loop`'s
+        # per-tick containment, leaving the record `waking` on disk. `due()` returns only `armed`
+        # records and `claimed_at` is written here and read NOWHERE, so no staleness recovery exists:
+        # the watch is silently dead monitoring that still counts against the session's active cap
+        # until a server restart, whose `reconcile_on_start` then settles a mutating watch whose turn
+        # actually COMPLETED as `interrupted`. Fix direction: settle the claim in a try/finally
+        # around the post-claim path, or teach `due()` to reclaim `waking` records with a stale
+        # `claimed_at` under `reconcile_on_start`'s own plan-rearm/mutating-interrupt rule.
         claimed = self.store.claim(record["id"], now=now)
         if claimed is None:
             return None
