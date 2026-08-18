@@ -596,6 +596,12 @@ site that proves it is open.
   `--n_epochs 10` so the completed `mine` stage stays reusable"). Rejected anyway: it is the one change
   here that would let something the agent WRITES decide whether a stale checkpoint is scored, for
   2,349.6 s of `mine` on one corpus row, against the failure class that has cost this project the most.
+  **REVISITED AND SHIPPED 2026-08-18 as §0.14, with that hazard answered rather than accepted**: the
+  narrowing compares the two manifests the ENGINE committed (`node.files` off the fold, never the copy
+  on disk the eval can rewrite), per stage ENTRY and only STRICTLY AFTER the reuse point, so an edit
+  to the reused stage's own entry — or its order, its name, or a stage inserted/removed in front of it
+  — still forfeits. The agent gains no new sentence; it can only say "I changed a later stage", which
+  is true. Measured yield: 2 rows across two runs, 5,966 s, 0 wrong where the corpus can tell.
   (4) *Build nothing and state the residue.* Legitimate for (1)–(3); not for a sentence in a CONTRACT
   that is false, that both roles read, and that is demonstrably what the roles did.
   **RESIDUE LEFT OPEN, deliberately.** (a0) **Every population figure here is dated and
@@ -610,7 +616,11 @@ site that proves it is open.
   one-shot judge correctly answers `NOT_FINISHING` at 73 %. (c) **Raising a ceiling still costs a full
   re-run** through the manifest clause of `_safe_reuse_start`, so the note asks for a move the engine
   charges for; a timeout-ONLY manifest edit provably rewrites no argv and could be exempted, but that
-  is a change on the reuse decision and wants its own measurement and its own entry. (d) Nothing
+  is a change on the reuse decision and wants its own measurement and its own entry. **That entry is
+  §0.14 (2026-08-18)** and it answers this HALF-way, which is the honest description: raising the
+  ceiling of the stage that FAILED is now free, because the clause compares stage ENTRIES and only
+  before the reuse point — raising an EARLIER stage's still forfeits it, and the `timeout`-only carve-
+  out is deliberately left closed there. (d) Nothing
   reconciles the OPERATOR's intent with the implementation: `eval.timeout` reads as a per-eval budget
   and behaves as a per-stage one, which is why 51 rows outspend it silently. Making it a real
   pipeline-wide bound is a defensible design and is NOT what this entry did — it would refuse manifests
@@ -2912,6 +2922,151 @@ at the measured instant that made node **7** the "working" node, which had not b
 change to the state payload's field set and to a heuristic three surfaces read, it wants its own
 measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
 had.
+
+### §0.14 A repair that retuned `train` forfeited a 61-minute `mine` it provably could not reach (2026-08-18)
+
+Reported against the live `e5small-dr-unified-v2`. Node 0's whole history, four repairs, every
+failure a CUDA OOM inside `train`:
+
+    stage mine ok    · stage train fail · repair changed ['looplab_stages.json']                   -> mine RECOMPUTED
+    stage mine ok    · stage train fail · repair changed []                                        -> mine REUSED
+    stage mine reused· stage train fail · repair changed ['looplab_stages.json','config.yaml']     -> mine RECOMPUTED
+    stage mine ok    · stage train fail · repair changed ['looplab_stages.json','config.yaml']     -> mine RECOMPUTED
+
+Reuse fired exactly once, on the one repair whose change set was EMPTY. **`mine`'s manifest entry is
+byte-identical across all five manifests the engine committed** — re-derived by digesting each
+`materialized_stages` entry out of `node_created.files`/`node_repaired.files`: `mine` is
+`1aa54dcf9de9ed9c` five times over, while `train` goes `347cf4d7` → `fc8a3f40` → `fc8a3f40` →
+`d0023327` → `64d932b9` (argv 17 → 14 tokens, then its `expect.assert` from 15 epochs to 10). The
+mining never had anything to do with the failure, and it cost 3,593 / 3,667 / 3,662 s each time.
+
+**WHAT THE CLAUSE ACTUALLY COMPARED.** `_safe_reuse_start` asked *"is `looplab_stages.json` in the
+change set?"* — a question about a FILE. The manifest carries every stage's argv, so the answer is
+yes for any repair that retunes the stage that just failed, which is what a repair for an OOM *is*.
+
+**THE ONE COST FIGURE IN THE REPORT IS WRONG AND THE CORRECTION IS THE POINT.** The report charged
+all three re-mines (~3 GPU-h) to this clause. Only ONE is: repairs 3 and 4 also rewrote
+`vectorsearch/configs/config.yaml`, and the **non-`.py` clause forfeits those independently. That
+clause is deliberately not touched** — its `needs` widening was examined and refused on 2026-08-14
+(a `needs` is a precondition, not a bound, and 2 of 129 corpus stages declare one at all), and
+`engine/champion_caveats.py` records what leaning on it costs.
+
+**MEASURED over every `node_repaired` row in `runs/`** — 85 rows, 6 runs:
+
+| | rows |
+|---|---|
+| had a completed earlier stage to forfeit | 21 |
+| …of those, changed the manifest | 7 |
+| …of those, confined STRICTLY AFTER the reuse point | 6 |
+| …not confined (`rubertlite-dr-unified-v8` node 0 attempt 4 — its `mine` entry really moved) | 1 |
+| …confined but ALSO changed `config.yaml`, still refused by the non-`.py` clause | 4 |
+| **newly admitted** | **2**, across 2 runs |
+
+Replayed through the SHIPPED `manifest_prefix_unchanged` and not a copy of it, which is what caught
+a first pass of this table over-counting the admitted rows at three: `e5small-dr-unified-v2` node 1
+attempt 3 is confined, and it also rewrote `config.yaml`. The two that remain are worth **5,966 s
+(1.66 h) of re-run stage time** — `e5small-dr-unified-v2` node 0 attempt 1 (3,667 s) and
+`rubertlite-dr-unified-v8` node 9 attempt 2 (2,300 s), both settled. **This is a small population
+and is stated as one**; the case for the change is as much the incentive it removes as the hours.
+The earlier reading — "all 3 rows with a completed stage also changed `looplab_stages.json`, so the
+widening buys ZERO reuse" — is TRUE about the file and false about the entry, and it is the sentence
+this entry splits.
+
+**AND ZERO WOULD HAVE BEEN WRONG**, on evidence from both directions. Directly:
+`stage_outputs` (shipped 2026-08-17) records each declared artifact's sha256, and node 0 mined THREE
+times, writing the same `01627a8c47f66efb…` / 218,707,487 bytes every time — the artifact a recompute
+produced is the artifact the reuse would have kept. Indirectly for v8, which predates that field:
+node 9's two `mine` runs are separated by a change set of `looplab_stages.json` + `train.py`, and
+`train.py` is not in `mine`'s import closure (`mine_stage.py`, `vectorsearch/{__init__,config,utils}
+.py`, `vectorsearch/data/{__init__,mine_negatives,preprocess}.py`), so every input the predicate can
+name is identical; and that miner is demonstrably reproducible — the preserved `hard_negatives
+.parquet` of nodes **3, 9 and 10** are all `13db44775c306253…` / 79,586,058 bytes, produced by
+miners whose own closures and `config.yaml`s genuinely differed (§0.12), across four `mine` runs on
+node 3 alone. Note the CONTENT key does not already answer this — node 0's three
+`mine` rows carry three DIFFERENT `stage_input_key`s (`41ac8c21…`/`4aa0789c…`/`3739ed81…`) for
+identical output, because `stage_identity` digests every non-`.py` workdir file and the manifest is
+one. It refuses here for exactly the reason the old clause did (§0.12).
+
+**FIXED as a PREFIX rule, `eval_stages.py::manifest_prefix_unchanged`** — hoisted to module level so
+the rule has a truth table a test can reach. It is TRUE only when both manifests resolve through
+`materialized_stages`, the failed stage sits at the SAME INDEX in both, and every entry before that
+index is equal as canonical JSON. The clean entry's key set is CLOSED (`name`, `command`, `timeout`,
+`check`, `expect`, `needs`, `env`), so the compare covers the stage's argv, its declared artifacts
+AND their `assert` sentence, its declared inputs, its environment and its leash, and prefix equality
+subsumes every reorder and rename. The index check is the clause that cannot be dropped: a manifest
+that only **shrinks** — a completed `prep` removed — leaves `prep`'s outputs on disk, and reusing
+across it would feed `train` an artifact a full re-run provably would not have produced. Acquitting
+the manifest REMOVES it from the change set and nothing else: the deletion, non-`.py`, `cwd`, opaque
+and reachability clauses all then run over what is left.
+
+**WHY "STRICTLY AFTER" IS SUFFICIENT, re-derived rather than assumed.** Stages run in pipeline order
+in one workdir, so nothing declared at index > i is read by the process at index i: `_run_stages`
+resolves `env` PER STAGE onto `ex.env` rather than accumulating it, there is no per-stage `cwd` to
+re-base an earlier one, `needs` is checked before its own command and `expect` after it, and the
+protected `score` stage is built from the operator's `EvalSpec` and never from the manifest. There is
+no field by which a later entry reaches backwards. A later edit CAN make the earlier artifact the
+wrong INPUT for the new later stage — and that is answered by the later stage's own `needs` check and
+by it running and failing loudly, not by silently scoring a checkpoint nobody trained.
+
+**THE PREVIOUS MANIFEST IS READ OFF THE FOLD, NEVER OFF DISK, and that is the trust model.** The
+2026-08-17 rejection of this loosening (§0.9 residue (c)) was right about the hazard — "the one
+change that would let something the agent WRITES decide whether a stale checkpoint is scored" — and
+it is answered by WHERE the bytes come from: `prev_files` is `node.files` off the event log,
+snapshotted above the repair call, i.e. what the ENGINE committed and materialized. The workdir is
+the candidate's and an eval can rewrite its own manifest while it runs; a predicate that read the
+pre-repair chain from disk would let a stage that rewrote the manifest at the end of its own run
+declare its output still valid. Both sides of this compare are engine-authenticated. Nor does the
+narrowing hand the agent a new lever: any edit to the reused stage's own entry still forfeits, so
+"only later stages changed" is the one thing it can express — which is the true statement.
+`attempt_freshness_floor` is untouched, so `verify_stage_artifacts` still holds every stage that RAN
+to its own start and the "skip if the file already exists" shape stays caught.
+
+**THE INCENTIVE MAY BE THE BIGGER HALF, and `rubertlite-dr-unified-v8` node 9 is BOTH of its
+halves in two consecutive repairs.** Attempt 1 changed `vectorsearch/train.py` alone and its
+committed bytes say why, in the agent's own words:
+
+    # train.py-only change (no config.yaml edit) that leaves the completed `mine` stage reusable.
+    # change (overrides the CLI --n_epochs 10) so the completed `mine` stage stays reusable.
+    config.train.training.n_epochs = 6
+
+That is the `params_overridden` mechanism exactly — the running code at a coordinate no declaration
+carries, which is the run's only champion caveat (node 3, `batch_size` 8192/2 declared and 4096/4
+run) — and it is the engine's own price list being read back to it. Attempt 2 then did the HONEST
+thing: it deleted that override (`# n_epochs comes from the CLI … and is NOT overridden here`) and
+edited the manifest's `train` argv instead — **and paid 2,300 s of re-`mine` for it**. So the old
+clause charged an agent for editing the DECLARATION and charged it nothing for hiding the same
+change in a `.py`, and this corpus contains the agent taking both options one attempt apart. That
+2,300 s is one of the two rows this change recovers.
+
+**Driven by `tests/test_stage_reuse_manifest_prefix.py`** (25 tests, tier 1 throughout, and the
+suite never reads `runs/` — node 0's five real manifests are copied into
+`tests/fixtures/stage_manifest_prefix_corpus.json`). The predicate half runs the real
+`_safe_reuse_start` over a real workdir: later-stage-only edit reuses; an edit to the reused stage's
+own entry, to its `expect.files`, to its `expect.assert`, a reorder, a rename, an insertion, a
+REMOVAL, a `score`-stage failure, a deletion, a non-default `cwd`, a nested `looplab_stages.json`, a
+`config.yaml` beside the manifest and a reachable `.py` beside it all still forfeit; and the
+keyword's ABSENT value reproduces the historical answer byte for byte. **The last two drive the REAL
+repair loop** (a real `Engine`, a real `RepoTask`, `run_command_eval` stubbed only so the test can
+read back the `start_stage` the engine CHOSE) and observe the EFFECT rather than the predicate's
+answer: a Developer that rewrites only the failed stage's argv yields `start_stage` `[None, "train"]`
+and charges the re-train cap nothing, and the same Developer pointed at `mine`'s own argv yields
+`[None, None]` and one `full_retrain_charged`. Under the historical clause the first of those reads
+`[None, None]` — the defect, reproduced end to end. **EIGHT MUTATIONS on a throwaway
+copy of the tree, each going red**: drop the reuse-point index equality (1 test); compare stage NAMES
+instead of whole entries (3); leave the acquitted manifest in the change set (3); make the rule
+always true (14); stop expanding `%params%` on the previous side (1); let the failed stage be absent
+from the previous manifest (1); acquit by BASENAME instead of exact path (1) — the old clause matched
+`looplab_stages.json` anywhere in the tree, which is right when the answer is always "forfeit" and
+exactly wrong when it can be "acquit": `_resolve_stages` reads only `<workdir>/looplab_stages.json`,
+so clearing a nested one out of the change set would walk a non-`.py` the predicate never examined
+straight past the clause that would otherwise have refused it; and restore the historical per-FILE
+forfeit outright (4, including the end-to-end one, which then reads `[None, None]`).
+
+**STILL OPEN.** ⬜ **The `timeout`-only manifest edit** §0.9 residue (c) also asked for is NOT
+exempted. A stage's `timeout` is a leash and not an input — `stage_identity` already excludes it from
+`stage_input_key` for that reason — so raising the FAILED stage's ceiling is now free, but raising an
+EARLIER stage's still forfeits it. Left closed deliberately: no corpus row asks for it, and a field
+carved out of an entry compare is a hole that has to be re-argued every time the entry gains a key.
 
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
