@@ -36,6 +36,101 @@ _STAGE_CHECK_REPLY_RE = re.compile(
     re.IGNORECASE | re.DOTALL)
 
 
+STAGE_MANIFEST_NAME = "looplab_stages.json"
+
+
+def manifest_prefix_unchanged(prev_manifest: object, stages: list, failed_stage: str,
+                              params: object = None) -> bool:
+    """Does a stage-manifest edit leave the stages BEFORE `failed_stage` byte-identical?
+
+    The one narrowing of `_safe_reuse_start`'s manifest clause, hoisted out of it so the rule has a
+    truth table a test can reach rather than living inside a predicate no caller can address. It
+    answers ONLY the manifest question; every other clause of that predicate still runs afterwards,
+    over a change set this function's `True` merely removes the manifest FROM.
+
+    `prev_manifest` is the manifest TEXT of the node as the ENGINE last committed it —
+    `node.files["looplab_stages.json"]` off the fold, never the copy on disk. That distinction is
+    the trust model and not a convenience: the workdir is the candidate's, an eval can rewrite its
+    own manifest while it runs, and a predicate that read the pre-repair chain off disk would let a
+    stage that rewrote the manifest at the end of its own run declare its output still valid. What
+    is compared here is bytes the engine authenticated on both sides — what it committed last
+    attempt against `stages`, the chain it resolved from what it committed this attempt.
+
+    TRUE requires ALL of:
+      • both manifests RESOLVE (`materialized_stages` — the same validator the pipeline is built by);
+      • `failed_stage` is at the SAME INDEX in both. This is the clause that cannot be dropped: it
+        is what forbids a stage being INSERTED into or REMOVED from the region that already ran. A
+        removed `prep` leaves its outputs on disk, and a reuse would then feed `train` an artifact a
+        full re-run provably would not have produced — the silent stale input this whole predicate
+        exists to prevent, arriving through a manifest that only "shrank".
+      • every entry before that index is EQUAL as canonical JSON. The entry is `validate_stages`'
+        clean form and its key set is CLOSED (`name`, `command`, `timeout`, `check`, `expect`,
+        `needs`, `env`), so this covers the stage's name, its argv, its declared artifacts AND their
+        `assert` sentence, its declared inputs, its declared environment and its leash — there is no
+        field of a stage a change to which this compare can miss. Equality of the whole prefix also
+        subsumes ORDER and every RENAME.
+      • `failed_stage` is IN the previous manifest. It is absent exactly when the failure was in the
+        engine-appended protected `score` stage, in which case the whole manifest is the prefix and
+        no manifest edit can be "after" it — the fail-closed answer, and a real corpus row
+        (`rubertlite-dr-unified-v8` node 0 attempt 4, whose `mine` entry had genuinely changed).
+
+    WHAT MAKES "STRICTLY AFTER" SUFFICIENT, stated because it is the whole argument. A stage runs in
+    the pipeline's own order in one workdir, so nothing declared at index > i is read by the process
+    at index i — `_run_stages` resolves `env` PER STAGE onto `ex.env` rather than accumulating it,
+    there is no per-stage `cwd` to re-base an earlier one, `needs` is checked before its OWN command
+    and `expect` after it, and the appended `score` stage is built from the operator's EvalSpec and
+    never from the manifest. There is no field by which a later entry reaches backwards. What a
+    later edit CAN invalidate is whether the earlier artifact is the right INPUT for the new later
+    stage — and that is not a question about the artifact's freshness at all: it is answered by the
+    later stage's own `needs` check and by its running and failing loudly, not by silently scoring a
+    checkpoint nobody trained.
+
+    `params` is the node's `idea.params`, applied to BOTH sides through the same `expand_params`
+    `_resolve_stages` uses, so a prefix entry carrying a `%params%` token compares expanded-to-
+    expanded. A repair never writes `idea.params`, so the two sides are expanded identically.
+
+    FALSE on anything it cannot resolve, and that is the default: with no `prev_manifest` (the
+    keyword's absent value at every call site that has not been taught to pass one) this returns
+    False and the caller forfeits exactly as it did before this function existed.
+    """
+    import json
+    from looplab.core.jsonutil import canonical_json
+    from looplab.runtime import command_eval
+
+    def _entries(text):
+        if not isinstance(text, str) or not text.strip():
+            return None
+        try:
+            clean = command_eval.materialized_stages(json.loads(text))
+        except Exception:  # noqa: BLE001 — an unresolvable manifest proves nothing; forfeit
+            return None
+        if not clean:
+            return None
+        return [dict(s, command=command_eval.expand_params(list(s["command"]), params))
+                for s in clean]
+
+    prev = _entries(prev_manifest)
+    if prev is None or not stages or not failed_stage:
+        return False
+    # UNFILTERED, deliberately: `_safe_reuse_start` derives its own `fi` from exactly this
+    # expression, and dropping a non-dict here would index a filtered list while slicing an
+    # unfiltered one — two stage lists that agree on every name and disagree about where the
+    # reuse point is. The entry compare below still refuses anything that is not a dict.
+    names = [str(s.get("name")) if isinstance(s, dict) else object() for s in stages]
+    prev_names = [str(s.get("name")) for s in prev]
+    if failed_stage not in names or failed_stage not in prev_names:
+        return False
+    fi = names.index(failed_stage)
+    if fi == 0 or prev_names.index(failed_stage) != fi:
+        return False
+    if len(prev) < fi or len(stages) < fi:
+        return False
+    for old, new in zip(prev[:fi], stages[:fi]):
+        if not isinstance(new, dict) or canonical_json(old) != canonical_json(new):
+            return False
+    return True
+
+
 def parse_stage_check_reply(text: str, *, declared: bool):
     """The checker's reply -> `StageCheckVerdict | None` (None = the stage passed). Pure and TOTAL.
 
@@ -617,7 +712,7 @@ class EvalStagesMixin:
         return _key
 
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
-                          deleted=None, cwd=None):
+                          deleted=None, cwd=None, prev_manifest=None, params=None):
         """The stage to RESTART from so a repaired node reuses the completed EARLIER stages (e.g. skip
         re-`train` when only the `score` script was fixed) — or None to re-run the FULL pipeline (the
         safe default that preserves the 'each node trains a FRESH model' invariant).
@@ -632,6 +727,12 @@ class EvalStagesMixin:
             or a `python -m` naming installed code — see `_stage_reachable_files`);
           • the repair DELETED any file (`deleted`) — the closure can't see vanished modules;
           • any changed file is not a `.py` (config/data inputs are invisible to import reachability);
+          • the stage MANIFEST changed anywhere AT OR BEFORE the reuse point — the entries that
+            already ran, their order, their names, their `expect`/`needs`/`env`/`timeout`. Narrowed
+            2026-08-18 from "the manifest file changed at all" to that per-ENTRY compare; the rule,
+            the argument for why "strictly after" is sufficient, and the reason the previous
+            manifest must be read off the FOLD rather than off disk are in
+            `manifest_prefix_unchanged`, and the measurement is at the clause below.
           • the eval runs under a non-default `cwd` (changed-file keys and stage-script paths resolve
             against different bases, so the intersection proves nothing).
         A false negative just re-trains (no worse than a full re-run); a false positive is a silent
@@ -707,14 +808,73 @@ class EvalStagesMixin:
             return None
         changed = {(f[2:] if isinstance(f, str) and f.startswith("./") else f) for f in (changed_files or [])}
         # A change to the stage MANIFEST rewrites the pipeline's argv (e.g. train hyperparams), so the
-        # completed checkpoint no longer matches the declared command — never reuse across it.
-        if any(str(c).rsplit("/", 1)[-1] == "looplab_stages.json" for c in changed):
-            return None
+        # completed checkpoint no longer matches the declared command — never reuse across it, UNLESS
+        # the edit is confined STRICTLY AFTER the reuse point (`manifest_prefix_unchanged`, whose
+        # docstring holds the rule and the argument for why "after" is sufficient). The narrowing is
+        # NOT a loosening of what the clause protects: it is the same compare done per ENTRY instead
+        # of per FILE. The old test asked "did the manifest file's bytes move?" and a repair that
+        # retunes `train`'s argv answers yes, which forfeits `mine` — a stage whose own entry, whose
+        # `expect`, whose `needs` and whose position the same manifest proves untouched.
+        #
+        # MEASURED by replaying this very function over every `node_repaired` row in `runs/` (85
+        # rows, 6 runs): 21 had a completed earlier stage to forfeit and 7 of those changed the
+        # manifest. SIX are confined after the reuse point and ONE is not — `rubertlite-dr-unified
+        # -v8` node 0 attempt 4, whose `mine` entry genuinely changed, and which this clause still
+        # refuses. Of the six, FOUR also change `config.yaml` and are still refused by the non-`.py`
+        # clause below, which is deliberately NOT touched (see the `needs` refusal above, and
+        # `engine/champion_caveats.py`). So the narrowing newly admits exactly TWO rows, across two
+        # runs, worth 5,966 s of re-run stage time — `e5small-dr-unified-v2` node 0 attempt 1
+        # (3,667 s) and `rubertlite-dr-unified-v8` node 9 attempt 2 (2,300 s). It is a SMALL
+        # population and that is stated rather than rounded up; the case for it is as much the
+        # INCENTIVE it removes, and v8 node 9 is both halves of that in two consecutive repairs.
+        # Attempt 1 changed `train.py` alone, and its committed bytes say why in the agent's own
+        # words — "train.py-only change (no config.yaml edit) that leaves the completed `mine` stage
+        # reusable", "overrides the CLI --n_epochs 10", `config.train.training.n_epochs = 6` — which
+        # is `engine/champion_caveats.py`'s `params_overridden` mechanism exactly, the running code
+        # at a coordinate no declaration carries. Attempt 2 deleted that override and edited the
+        # manifest's `train` argv instead, and paid 2,300 s of re-`mine` for being honest. The old
+        # clause charged an agent for editing the DECLARATION and nothing for hiding the same change
+        # in a `.py`, and the corpus holds it taking both options one attempt apart. The earlier
+        # reading that "all 3 rows with a completed stage also changed the manifest" was right about
+        # the FILE and wrong about the ENTRY.
+        #
+        # ZERO of them would have been WRONG, and that is the number that decides whether this ships.
+        # `e5small-dr-unified-v2` node 0 mined THREE times and every run recorded the same
+        # `stage_outputs` digest (`01627a8c…`, 218,707,487 bytes), so the artifact a recompute
+        # produced is the artifact the reuse would have kept. v8 predates `stage_outputs`, so its row
+        # is argued from the preserved workdirs instead: node 9's two `mine` runs are separated by a
+        # change set of manifest + `train.py`, and `train.py` is in no part of `mine`'s import
+        # closure — while nodes 3, 9 and 10 all hold the SAME `13db4477…` / 79,586,058-byte parquet
+        # from miners whose closures and configs genuinely differed (docs/BACKLOG.md §0.12).
+        #
+        # A CONTENT KEY DOES NOT ALREADY DO THIS and that is worth knowing before reaching for one:
+        # `stage_input_key` digests every non-`.py` workdir file, the manifest included, so all three
+        # of node 0's `mine` runs carry DIFFERENT keys (`41ac8c21…`/`4aa0789c…`/`3739ed81…`) for
+        # identical output. It refuses here for exactly the reason this clause did.
+        #
+        # ONLY THE PIPELINE'S OWN MANIFEST MAY BE ACQUITTED, and the exact-path test is the reason
+        # this is not a one-line change to the predicate above. The old clause matched by BASENAME,
+        # which was right when the answer was always "forfeit" — every `looplab_stages.json`
+        # anywhere in the tree refused, and a nested one is at worst an over-refusal. Acquitting on
+        # a basename would be the opposite mistake: `_resolve_stages` reads exactly
+        # `<workdir>/looplab_stages.json`, so `prev_manifest` and `stages` say nothing whatever about
+        # a `sub/looplab_stages.json`, and clearing that file out of the change set would walk a
+        # non-`.py` the predicate never examined straight past the clause below. Anything else
+        # wearing the name keeps the historical refusal, through that very clause.
+        _manifest = {c for c in changed if str(c) == STAGE_MANIFEST_NAME}
+        if _manifest:
+            if not manifest_prefix_unchanged(prev_manifest, stages, failed_stage, params):
+                return None
+            # ACQUITTED — and therefore taken OUT of the change set, so the clauses below judge what
+            # is left rather than re-refusing on the same file (the non-`.py` clause catches the
+            # manifest too, being a `.json`; that is why the removal is not cosmetic).
+            changed = changed - _manifest
         # Reachability only bounds PYTHON imports: a changed non-.py file (config.yaml, a params
         # file, a writable data copy the train stage reads) can alter what an earlier stage produced
         # without ever appearing in the import closure. Its effect can't be proven absent, so any
-        # non-.py change forces a full re-run (the manifest case above is the named instance of the
-        # same blind spot; this catches every other one).
+        # non-.py change forces a full re-run. It is also what still refuses the MANIFEST in every
+        # case the clause above did not acquit — a nested one, or a root one whose prefix moved
+        # (that branch returns early, so this is the belt beside the braces, not the only rung).
         if any(not str(c).endswith(".py") for c in changed):
             return None
         reachable = self._stage_reachable_files(stages[:fi], workdir)

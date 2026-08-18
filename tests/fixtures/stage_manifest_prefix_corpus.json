@@ -1,0 +1,43 @@
+{
+ "source": "runs/e5small-dr-unified-v2 node 0 \u2014 the five manifests the engine committed, verbatim from node_created.files/node_repaired.files in its event log",
+ "manifests": [
+  {
+   "event": "node_created",
+   "attempt": null,
+   "changed": [],
+   "looplab_stages.json": "{\n \"stages\": [\n  {\n   \"name\": \"mine\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.data.mine_negatives\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n    ],\n    \"assert\": \"hard negatives mined for at least 90% of the training queries and saved to negatives.parquet\"\n   }\n  },\n  {\n   \"name\": \"train\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.train\",\n    \"--train.base_model=/home/jovyan/data/embedder/d0rj/e5-small-en-ru\",\n    \"--train.loss.type=nll_cos\",\n    \"--train.loss.temperature=0.05\",\n    \"--train.loss.thr=0.1\",\n    \"--train.loss.uniformity_weight=0.0\",\n    \"--train.loss.use_batch_centering=false\",\n    \"--train.loss.rdrop_alpha=0.5\",\n    \"--train.training.n_epochs=15\",\n    \"--train.training.batch_size=8192\",\n    \"--train.training.gradient_accumulation_steps=2\",\n    \"--train.training.learning_rate=0.001\",\n    \"--train.training.warmup_ratio=0.2\",\n    \"--train.training.weight_decay=0.1\",\n    \"--train.negatives.n_negatives=2\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/final/model.safetensors\"\n    ],\n    \"assert\": \"all 15 epochs completed and final model saved under final/model.safetensors\"\n   },\n   \"needs\": [\n    \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n   ]\n  }\n ]\n}"
+  },
+  {
+   "event": "node_repaired",
+   "attempt": 1,
+   "changed": [
+    "looplab_stages.json"
+   ],
+   "looplab_stages.json": "{\n \"stages\": [\n  {\n   \"name\": \"mine\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.data.mine_negatives\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n    ],\n    \"assert\": \"hard negatives mined for at least 90% of the training queries and saved to negatives.parquet\"\n   }\n  },\n  {\n   \"name\": \"train\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.train\",\n    \"--train.base_model=/home/jovyan/data/embedder/d0rj/e5-small-en-ru\",\n    \"--train.loss.type=nll_cos\",\n    \"--train.loss.temperature=0.05\",\n    \"--train.loss.thr=0.1\",\n    \"--train.loss.uniformity_weight=0.0\",\n    \"--train.loss.use_batch_centering=false\",\n    \"--train.loss.rdrop_alpha=0.5\",\n    \"--train.training.n_epochs=15\",\n    \"--train.training.batch_size=8192\",\n    \"--train.training.learning_rate=0.001\",\n    \"--train.training.warmup_ratio=0.2\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/final/model.safetensors\"\n    ],\n    \"assert\": \"all 15 epochs completed and final model saved under final/model.safetensors\"\n   },\n   \"needs\": [\n    \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n   ]\n  }\n ]\n}"
+  },
+  {
+   "event": "node_repaired",
+   "attempt": 2,
+   "changed": [],
+   "looplab_stages.json": "{\n \"stages\": [\n  {\n   \"name\": \"mine\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.data.mine_negatives\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n    ],\n    \"assert\": \"hard negatives mined for at least 90% of the training queries and saved to negatives.parquet\"\n   }\n  },\n  {\n   \"name\": \"train\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.train\",\n    \"--train.base_model=/home/jovyan/data/embedder/d0rj/e5-small-en-ru\",\n    \"--train.loss.type=nll_cos\",\n    \"--train.loss.temperature=0.05\",\n    \"--train.loss.thr=0.1\",\n    \"--train.loss.uniformity_weight=0.0\",\n    \"--train.loss.use_batch_centering=false\",\n    \"--train.loss.rdrop_alpha=0.5\",\n    \"--train.training.n_epochs=15\",\n    \"--train.training.batch_size=8192\",\n    \"--train.training.learning_rate=0.001\",\n    \"--train.training.warmup_ratio=0.2\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/final/model.safetensors\"\n    ],\n    \"assert\": \"all 15 epochs completed and final model saved under final/model.safetensors\"\n   },\n   \"needs\": [\n    \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n   ]\n  }\n ]\n}"
+  },
+  {
+   "event": "node_repaired",
+   "attempt": 3,
+   "changed": [
+    "looplab_stages.json",
+    "vectorsearch/configs/config.yaml"
+   ],
+   "looplab_stages.json": "{\n \"stages\": [\n  {\n   \"name\": \"mine\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.data.mine_negatives\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n    ],\n    \"assert\": \"hard negatives mined for at least 90% of the training queries and saved to negatives.parquet\"\n   }\n  },\n  {\n   \"name\": \"train\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.train\",\n    \"--train.base_model=/home/jovyan/data/embedder/d0rj/e5-small-en-ru\",\n    \"--train.loss.type=nll_cos\",\n    \"--train.loss.temperature=0.05\",\n    \"--train.loss.thr=0.1\",\n    \"--train.loss.uniformity_weight=0.0\",\n    \"--train.loss.use_batch_centering=false\",\n    \"--train.loss.rdrop_alpha=0.5\",\n    \"--train.training.n_epochs=10\",\n    \"--train.training.batch_size=2048\",\n    \"--train.training.learning_rate=0.001\",\n    \"--train.training.warmup_ratio=0.2\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/final/model.safetensors\"\n    ],\n    \"assert\": \"all 10 epochs completed and final model saved under final/model.safetensors\"\n   },\n   \"needs\": [\n    \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n   ]\n  }\n ]\n}"
+  },
+  {
+   "event": "node_repaired",
+   "attempt": 4,
+   "changed": [
+    "looplab_stages.json",
+    "vectorsearch/configs/config.yaml"
+   ],
+   "looplab_stages.json": "{\n \"stages\": [\n  {\n   \"name\": \"mine\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.data.mine_negatives\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n    ],\n    \"assert\": \"hard negatives mined for at least 90% of the training queries and saved to negatives.parquet\"\n   }\n  },\n  {\n   \"name\": \"train\",\n   \"command\": [\n    \"python\",\n    \"-m\",\n    \"vectorsearch.train\",\n    \"--train.base_model=/home/jovyan/data/embedder/d0rj/e5-small-en-ru\",\n    \"--train.loss.type=nll_cos\",\n    \"--train.loss.temperature=0.05\",\n    \"--train.loss.thr=0.1\",\n    \"--train.loss.uniformity_weight=0.0\",\n    \"--train.loss.use_batch_centering=false\",\n    \"--train.loss.rdrop_alpha=0.5\",\n    \"--train.training.n_epochs=10\",\n    \"--train.training.batch_size=512\",\n    \"--train.training.gradient_accumulation_steps=8\",\n    \"--train.training.learning_rate=0.001\",\n    \"--train.training.warmup_ratio=0.2\"\n   ],\n   \"timeout\": 36000.0,\n   \"check\": true,\n   \"expect\": {\n    \"files\": [\n     \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/final/model.safetensors\"\n    ],\n    \"assert\": \"all 10 epochs completed and final model saved under final/model.safetensors\"\n   },\n   \"needs\": [\n    \"vectorsearch/experiments/unified-baseline_e5-small-en-ru/negatives.parquet\"\n   ]\n  }\n ]\n}"
+  }
+ ]
+}

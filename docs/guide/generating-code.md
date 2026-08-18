@@ -241,6 +241,14 @@ stages' inputs are unchanged, so a repair that **deletes** any file, changes any
 `python -m <module>` naming code the engine cannot find inside the workdir. A `python -m pkg.mod`
 whose module DOES resolve to a workdir file is bounded like any other script (its entry file, its
 package `__main__.py`, and everything they import), so it no longer blocks reuse on its own.
+A change to the **stage manifest** (`looplab_stages.json`) forces a full re-run when it touches the
+pipeline at or before the reuse point — the entries that already ran, their order, their names, or
+their declared `expect`/`needs`/`env`/`timeout`. Since 2026-08-18 it does *not* when the edit is
+confined **strictly after** it: retuning the failed `train` stage's argv cannot alter what the
+completed `mine` stage produced, and the two manifests the engine itself committed prove that entry
+byte-identical. The compare is over the stage ENTRY, not the file: it subsumes reorders and renames,
+and inserting or removing a stage in front of the failed one still forfeits (a removed stage leaves
+its outputs on disk, which is precisely the stale input this check exists to refuse).
 `inline_repair_retrain_cap` bounds how many full re-trains a repair loop
 may burn before abandoning the node. (It used to abandon *to* the inter-node debug operator; that
 operator was removed on 2026-08-13 — a failure is repaired inside the node that failed, for as long

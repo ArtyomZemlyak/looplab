@@ -47,6 +47,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
+from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
                                            declaration_actually_corrected,
@@ -2594,9 +2595,18 @@ class EvaluateMixin:
                 # unlinked by _write_node_files above), and a non-default cwd re-bases the stage
                 # scripts so the changed-vs-reachable intersection would prove nothing.
                 _cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
+                # `prev_manifest` is the PRE-repair stage manifest as the engine last COMMITTED it —
+                # `prev_files` off the fold, snapshotted above the repair call, never the copy on
+                # disk. It is what lets the predicate narrow its manifest clause to the entries at
+                # or before the reuse point instead of forfeiting on the whole file; reading it from
+                # the workdir instead would hand that decision to a stage that can rewrite its own
+                # manifest while it runs. `params` expands `%params%` on both sides through the same
+                # rule `_resolve_stages` used, and a repair never writes `idea.params`.
                 next_start = self._safe_reuse_start(
                     _stages, res.failed_stage, changed, workdir,
-                    deleted=new_deleted, cwd=_cwd)
+                    deleted=new_deleted, cwd=_cwd,
+                    prev_manifest=prev_files.get(STAGE_MANIFEST_NAME),
+                    params=node.idea.params)
                 # ROLLBACK, asked only when the Developer named a suspect. It OVERRIDES `next_start`
                 # in the one direction the reuse predicate structurally cannot express: backwards,
                 # onto a stage that already completed. Consulted AFTER `_safe_reuse_start` and never
