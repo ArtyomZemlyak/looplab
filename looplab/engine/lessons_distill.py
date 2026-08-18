@@ -268,10 +268,13 @@ class LessonDistillMixin:
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
-        from looplab.engine.memory import (promotable_skill_statement, unreliable_metric_ids,
+        from looplab.engine.memory import (SKILL_PREFILTER_VERSION, assess_skill_statement,
+                                           classify_skill_candidate,
+                                           promotable_skill_statement, unreliable_metric_ids,
                                            write_auto_skill)
         sk_dir = base / "skills"
         skills: list[str] = []
+        skill_candidates: list[dict] = []
         # A SKILL CARD IS A CROSS-RUN CLAIM TOO, and its evidence list is the one place a card's own
         # feasibility filter does not reach. `_evidence_verdict` (events/card_ledger.py) already
         # requires `n.feasible` to make a card `supported` with a positive Δ, so a salvaged node
@@ -287,19 +290,73 @@ class LessonDistillMixin:
         # agent-consolidated text (replay.py `merged_stmt`) exactly as the old Hypothesis.statement did,
         # while `seed_statement` stays the raw first-member seed — so `statement` is the behaviour-equal
         # belief text here. The `h.statement` guard mirrors the fold's old empty-statement skip.
-        # …and it must be a TECHNIQUE. The three conditions below asked whether the claim was
-        # supported, whether it moved the metric, and whether it was non-empty — never whether a
-        # different run could act on it. Every one of the 27 auto-skills in the shipped store was
-        # instance-specific as a result ("perturb best node 8 (metric=5.4404437)"), including the
-        # same operation five times under five node numbers. See `promotable_skill_statement`.
+        # …and it must be a TECHNIQUE. The old four-regex boolean stopped the measured ``node 8``
+        # corpus but accepted semantic junk and had no explanation/canonical identity. The hybrid
+        # gate now does a free deterministic portability pass, then (when a reflection client exists)
+        # a closed seven-axis rubric grounded in the real experiments. Code derives acceptance; the
+        # model cannot mint it with one bool. A canonical title/key lets independently worded evidence
+        # on another task confirm the same technique. Candidate receipts below make every skip visible.
+        classifier_client = self._e._reflect_client()
+        _, classifier_parser = self._merge_prompt_opts()
+        classifier_tools = None
+        classifier_loop_opts = None
+        if classifier_client is not None:
+            try:
+                classifier_tools = self._reflect_tools(final)
+                # This runs once per positive card. Four turns permit inspect → inspect → emit while
+                # preventing a card batch from multiplying the general reflection's 15-turn ceiling.
+                classifier_loop_opts = self._reflect_loop_opts().replace(max_turns=4)
+            except Exception:  # noqa: BLE001 — a plain structured rubric remains available
+                classifier_tools = None
+                classifier_loop_opts = None
         for h in final.research_cards():
-            if (h.verdict == "supported" and (h.best_delta or 0) > 0
-                    and promotable_skill_statement(h.statement)):
-                ev = [final.nodes[i] for i in h.evidence
-                      if i in final.nodes and i not in skill_unreliable]
-                write_auto_skill(sk_dir, h.statement,
-                                 self._e._distill_skill_body(final, h, ev), fp, final.task_id)
-                skills.append(h.statement)
+            if not (h.verdict == "supported" and (h.best_delta or 0) > 0):
+                continue
+            source = str(h.statement or "")
+            source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            if not promotable_skill_statement(h.statement):
+                local = assess_skill_statement(h.statement)
+                skill_candidates.append({
+                    "source_sha256": source_digest, "accepted": False,
+                    "reason": local.reason, "classifier": SKILL_PREFILTER_VERSION,
+                })
+                continue
+            ev = [final.nodes[i] for i in h.evidence
+                  if i in final.nodes and i not in skill_unreliable]
+            evidence = [{
+                "node_id": n.id,
+                "operator": n.operator,
+                "rationale": getattr(n.idea, "rationale", ""),
+                "parameter_names": sorted(
+                    str(key) for key in (getattr(n.idea, "params", {}) or {})),
+                "measured": n.metric is not None,
+            } for n in ev[:8]]
+            assessment = classify_skill_candidate(
+                h.statement, client=classifier_client, task_goal=final.goal,
+                task_kind=getattr(getattr(self._e, "task", None), "kind", ""), evidence=evidence,
+                best_delta=h.best_delta, parser=classifier_parser, tools=classifier_tools,
+                loop_opts=classifier_loop_opts)
+            receipt = {
+                "source_sha256": source_digest, "accepted": assessment.promotable,
+                "reason": assessment.reason, "classifier": assessment.classifier_version,
+                "explanation": assessment.explanation[:400],
+            }
+            if assessment.canonical_statement:
+                receipt["canonical_statement"] = assessment.canonical_statement[:240]
+            skill_candidates.append(receipt)
+            if not assessment.promotable:
+                continue
+            written = write_auto_skill(
+                sk_dir, assessment.canonical_statement,
+                self._e._distill_skill_body(final, h, ev), fp, final.task_id,
+                identity_claim=assessment.identity_claim,
+                classifier_version=assessment.classifier_version,
+                source_statement=source)
+            if written is not None:
+                skills.append(assessment.canonical_statement)
+            else:
+                receipt["accepted"] = False
+                receipt["reason"] = "write_failed"
 
         # Audit the run-end distillation in the event log (diagnostic sidecar — fold ignores it). These
         # LLM artifacts (the causal note, the generalizable lessons, the auto-promoted skills) shape
@@ -311,11 +368,12 @@ class LessonDistillMixin:
             "at_nodes": len(final.nodes),      # coverage watermark: re-reflect only if a reopen grows past it
             "coverage_digest": coverage_digest,
             "n_lessons": len(lessons), "n_skills": len(skills),
+            "n_skill_candidates": len(skill_candidates),
             "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
                          "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
                         for lz in lessons[:12]],
-            "skills": skills[:8]})
+            "skills": skills[:8], "skill_candidates": skill_candidates[:12]})
 
     def _reflect_tools(self, state: RunState):
         """Read-only run-introspection tools so reflection / distillation READS the real experiments
