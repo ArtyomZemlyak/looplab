@@ -43,7 +43,7 @@ Each type is deliberately different — they are **not** interchangeable:
 | **Meta-notes** (`meta_notes.jsonl`) | *Why it may have won* — a short, LLM-distilled explanatory hypothesis over the observed run (not the raw config — that's the case, and not causal proof). | `{task_id, note}` (model-authored explanatory prose) | cross-run (per task) | run-end (LLM; falls back to a stats line) | exact warm-start, `recall_notes` |
 | **Lessons** (`lessons.jsonl`) | *Generalizable good **and** bad findings* — higher-level claims ("larger batch tends to help") with a verdict and a count of agreeing recorded observations, not independent verification. **Split by `role`** (see below). | `{statement, outcome: supported/tested/abandoned/failed/refuted/noted (action guidance; noted is neutral), claim_stance: support/oppose/neutral (relation of evidence to the literal statement on new rows), delta, confidence, evidence, evidence_sig (each evidence node's outcome signature at write time — the reconciliation provenance), evidence_count, fingerprint, role: researcher/developer (absent = shared)}` | cross-run (task-fingerprint matched) | run-end — **LLM-authored only**: the reflection consolidates the run (worked/failed nodes + resolved hypotheses + failure themes) into one lesson per theme, plus M6 comparative code-fix pairs (offline/toy path: a deterministic winner record); also **re-derived when a re-eval flips a cited node** | prompt injection (role-routed, fingerprint-matched), `search_lessons` |
 | **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**; root Markdown is editable and nested `**/SKILL.md` packages are review-only in Lab → Authoring → skills | `list_skills`, `use_skill` |
-| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0. | as above, plus `status (candidate/promoted)`, `provenance`, `claim_sha256`, `source_task`, `fingerprints`; the skill reader parses the trust fields | cross-run | run-end (supported hypothesis, Δ>0) | A one-run *candidate* stays on disk but is hidden from the production `list_skills` / `use_skill` surface. Promotion evidence is keyed by the full normalized-claim SHA-256 (the readable prefix is not identity); a later sufficiently different task fingerprint (Jaccard similarity `< 0.6` to stored evidence) promotes it. A subsequently constructed toolset lists/loads it with `UNTRUSTED_MEMORY_AUTO_SKILL` provenance |
+| **Skills** — auto-distilled (`<memory_dir>/skills/auto-*.md`) | The same tool surface, filled by the run itself from a card that was supported with Δ>0 and passed the portability classifier. | as above, plus `status (candidate/promoted)`, `provenance`, `claim_sha256`, `classifier_version`, `source_statement_sha256`, `source_task`, `fingerprints`; the skill reader parses the trust fields | cross-run | run-end (supported hypothesis, Δ>0) | A one-run *candidate* stays on disk but is hidden from the production `list_skills` / `use_skill` surface. Agentic classification binds promotion evidence to a validated canonical technique key; the offline/legacy path uses the full normalized claim. The readable prefix is never identity. A later sufficiently different task fingerprint (Jaccard similarity `< 0.6` to stored evidence) promotes it. A subsequently constructed toolset lists/loads it with `UNTRUSTED_MEMORY_AUTO_SKILL` provenance |
 | **Knowledge base** (`knowledge/*.md`) | *Anything worth keeping* — free-form notes, hand- or agent-authored (the assistant's `remember` tool). The one kind **both** you and the agents write. | markdown notes | cross-run | assistant `remember`, or Lab → Authoring → knowledge | `kb_search`, `list_notes`, `read_note` |
 | **Prompts** (`<prompt_dir>/<key>.md`) | *What registered prompt consumers are told* — an override that REPLACES a matching built-in system prompt and is re-read when that call site renders it. Not learned and never written by a run: operator configuration that happens to live on disk. | one Markdown body per key in `core/prompts.py::PROMPT_KEYS` | global (a flat `Settings` field) | **by you**, in Lab → Authoring → prompts | registered `render(prompts, key, default)` call sites only; several assistant/report/monitor families still have separate prompt governance |
 | **Cards** (work-item + belief board, in-run; one belief may have several cards) | *What's worth testing* — accepted work items with a live **verdict** (open → testing → supported/tested/abandoned) and accumulating evidence. `belief_id` is the full normalized `seed_statement` digest; the Researcher and foresight collapse open, untested cards by that identity so duplicate work items do not become duplicate beliefs. Agentic paraphrase merges (`hypothesis_merged`) remain a separate, durable relation. | `{id, belief_id, seed_statement, statement, verdict, evidence, best_delta, source, retry_of}` per card | one run (derived from the event log) | Researcher (`idea.hypothesis`) + `hypothesis_added` | one representative per open, untested belief is injected into the proposal prompt |
@@ -180,11 +180,30 @@ a human writes them. Three concrete facts sit behind "why aren't they there":
    accumulated, **every one was instance-specific**: `perturb best node 8 (metric=5.4404437)`,
    `perturb node 9 (params={'x': 3.7898})`, `mean-merge of nodes 0,1` — the same operation five
    times under five node numbers, as five separate "skills".
-   `memory.py::promotable_skill_statement` now refuses a statement that names a node id, embeds a
-   metric value, or embeds a parameter literal. It is deliberately conservative and shaped by that
-   corpus rather than by taste: a false negative silently loses procedural memory, which is the
-   whole point of the tier. Refusing a SKILL never refuses the LESSON — the claim keeps its row and
-   its evidence; only the procedural tier is gated.
+   The replacement is a hybrid quality gate:
+
+   * a bounded, NFKC-normalized deterministic prefilter rejects local node/trial references,
+     measurements, parameter literals, local/vague pointers and content-free advice. It returns a
+     stable reason code and avoids a paid call for impossible candidates;
+   * when a reflection client exists, a structured rubric independently scores seven closed axes:
+     procedural, actionable, non-obvious, evidence-grounded, transferable, single-technique and
+     instance-detail-free. The model never emits the acceptance decision — code derives it from all
+     seven fields and fails closed on a missing or malformed rubric;
+   * an accepted rubric must produce a portable title and a compact canonical technique key. Code
+     re-runs the prefilter, checks that the title still shares the evidenced subject, and binds most
+     key vocabulary to that title before the key can become lifecycle identity. That lets two honest
+     paraphrases confirm one technique without giving fuzzy text similarity promotion authority;
+   * a client-less/offline run retains the strict deterministic path for compatibility. A configured
+     classifier failure skips the skill safely because the underlying lesson has already been
+     retained. Every considered positive card gets a versioned accept/reject receipt and reason in
+     the run's `reflection_note` event; source text is represented in frontmatter by SHA-256 only.
+
+   This induction/verification split follows the direction of
+   [MIND-Skill](https://arxiv.org/abs/2605.08670) (separate reusable procedure from instance leakage)
+   and [Skill-DisCo](https://arxiv.org/abs/2606.26669) (normalize a reusable procedure before a
+   separate verification stage). LoopLab's verification stage remains its existing independent
+   confirmation on a sufficiently different task fingerprint; it does not claim held-out benchmark
+   execution. Refusing a SKILL never refuses the LESSON — only the procedural tier is gated.
 4. **Auto-distilled skills have no first-party review surface** (see above). Their read path does
    enforce the promotion lifecycle: `write_auto_skill` keeps a candidate on disk and accumulates
    task fingerprints under an interprocess lock; production `SkillTools` hides that candidate until
