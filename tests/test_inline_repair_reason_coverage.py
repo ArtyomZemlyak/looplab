@@ -24,20 +24,31 @@ import inspect
 from looplab.core.config import Settings
 from looplab.core.models import FAILURE_REASONS
 from looplab.engine import triage
+from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
 from looplab.engine.options import EngineOptions
 
 
-def test_every_reason_the_classifier_can_return_is_in_the_registry():
-    """Derived from the classifier's own source, not from a second hand-written list. A reason added
-    to `_failure_reason` and forgotten here is exactly the shape of the original defect."""
+def test_every_reason_anything_can_produce_is_in_the_registry():
+    """Derived from the PRODUCERS' own source, not from a second hand-written list. A reason a
+    producer can emit and this registry has forgotten is exactly the shape of the original defect.
+
+    There are TWO producers since 2026-08-18, and the second is why this is no longer phrased about
+    "the classifier". `_failure_reason` reads a finished process's exit code and signals; the live
+    training watchdog names `train_monitor.MONITOR_REPAIR_REASON` on a stage it stopped MID-RUN
+    because the judge attributed the fault to the implementation. Nothing about that reason can come
+    out of an exit code — the process it describes was killed by us and exits like every other kill
+    — so demanding that `_failure_reason` return it would mean inventing a signal for a fact the
+    engine already knows out of band, which is the defect `test_watchdog_kill_is_not_an_oom.py`
+    exists to prevent. The invariant is unchanged and still total: producible <=> selectable."""
     source = inspect.getsource(triage._failure_reason)
     returned = {line.split('return', 1)[1].split('#')[0].strip().strip('"\'')
                 for line in source.splitlines() if line.strip().startswith('return ')}
     assert returned, "the classifier stopped returning literals; re-derive this test"
-    assert returned <= set(FAILURE_REASONS), (
-        f"classifier can return {returned - set(FAILURE_REASONS)}, which no setting can select")
-    assert set(FAILURE_REASONS) == returned, (
-        f"registry names {set(FAILURE_REASONS) - returned}, which the classifier never returns")
+    producible = returned | {MONITOR_REPAIR_REASON}
+    assert producible <= set(FAILURE_REASONS), (
+        f"a producer can emit {producible - set(FAILURE_REASONS)}, which no setting can select")
+    assert set(FAILURE_REASONS) == producible, (
+        f"registry names {set(FAILURE_REASONS) - producible}, which no producer ever emits")
 
 
 def test_the_shipped_default_repairs_every_one_of_them():

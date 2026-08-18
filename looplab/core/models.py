@@ -788,9 +788,17 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # then NaN, the classifier called it `oom`, and the Developer spent three repair rounds halving the
 # batch size (8192 -> 2048 -> 512 -> 256) at ~3 GPU-minutes each while the actual instability went
 # untouched. "Reduce memory" and "stabilise the numerics" are opposite directives.
+# `not_learning` is `diverged`'s twin and had to be its own word for the reason the paragraph above
+# gives about `oom`: a FINITE loss that stopped descending and a NON-FINITE one need opposite
+# directives ("the model is not learning what you told it to" vs "stabilise the numerics"), and the
+# deterministic diverge watchdog cannot see the first at all — 8.8534 forever is a perfectly finite
+# number. It is what the live judge names when the fault is the IMPLEMENTATION rather than the idea,
+# and being in this tuple is exactly what buys the Developer a look at its own code instead of a
+# terminal verdict against a hypothesis that was never tested. Like `needs_failed`, it needs no
+# legacy row: no pre-field node could produce it, so there is no historical treatment to preserve.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "expect_failed", "check_failed", "diverged", "stalled",
-                                    "needs_failed")
+                                    "needs_failed", "not_learning")
 
 
 def is_developer_error(code) -> bool:

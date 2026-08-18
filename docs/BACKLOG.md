@@ -4387,3 +4387,59 @@ deliberately deferred, with rationale:
   over both monitor loops — a threaded call either draws on the pool or is the deliberately
   un-abandonable provider call — and the mutation that removes the limiter names the offending
   call instead of printing a window of source.]
+
+## A watchdog that can only condemn cannot tell a bug from a bad idea
+
+  **[2026-08-18 — the question underneath the role gate.** The gate answered "may this stage be
+  stopped". It could not answer *stopped as what*. `monitor_broken` is not in `FAILURE_REASONS`,
+  so a kill was terminal — no repair, no retry, no refunded slot — while the deterministic diverge
+  watchdog one layer down fails a stage with `diverged`, which IS repairable and on this very run
+  bought node 5 a Developer repair. Same illness, two outcomes: a NON-finite loss read as
+  "probably a bug, go fix it", a loss frozen at a perfectly finite 8.8534 read as "the idea
+  failed". And node 2 was not even stopped — it ran to completion and recorded **metric 0.0 as the
+  result of its hypothesis**, which is the worst version of the same error: a verdict about an idea
+  whose implementation was never checked, handed to the Strategist as evidence.
+
+  `TrainingVerdict` now carries `fault` — implementation / hypothesis / environment / unknown, with
+  `unknown` named in the schema as the safe answer and the two costs stated ("a hypothesis wrongly
+  called a bug costs a repair round; a bug wrongly called a hypothesis records a verdict about an
+  idea that was never actually tested"). `should_monitor_repair` stops the stage with
+  `MONITOR_REPAIR_REASON = "not_learning"`, which is in `FAILURE_REASONS`, therefore in the default
+  `inline_repair_reasons`, therefore picked up by the inline repair loop with no new machinery: the
+  only plumbing is `_evaluate`'s watchdog branch falling through instead of returning when the
+  reason is one the operator's setting selects. `cancel` and `kill_signal` are built per ATTEMPT
+  inside that loop, so the retry starts from a clean signal, and the repair critic, the attempt cap
+  and the redone-work floor bound it exactly as they bound a crash. A `hypothesis` verdict still
+  terminalizes — a sound implementation of a bad idea is a real finding and must not be repaired
+  away.
+
+  `not_learning` is its OWN word for the reason `oom` and `diverged` are. Three directives, three
+  different fixes: "reduce memory", "stabilise the numerics", "make the objective able to descend"
+  — and `diverged`'s first move (lower the learning rate) is if anything backwards for a model that
+  is not learning at all. Its directive names the mechanical causes a frozen loss usually has (a
+  reduction over the wrong axis, inconsistent normalization between towers, a temperature that
+  makes every pair identical, a loader yielding one batch, a schedule that drove the LR to ~0, a
+  regulariser whose minimum is a constant embedding) and ends by telling the Developer to say so
+  plainly if it concludes the code is right — a real negative result is worth more than a repair
+  that hides it.
+
+  **AND THIS IS WHY THE ROLE GATE CAN OPEN.** `should_monitor_repair` admits every JUDGED role,
+  `LOG_ROLE_WORK` included. What made the role necessary was that the only available action was
+  terminal; the cost of being wrong about a repair-stop is one restart of a run the judge has
+  already called wasted. A `mine` stage feeding empty negatives, a post-train stage exporting a
+  broken checkpoint and a five-stage pipeline's third stage are all things the code can be wrong
+  about, and refusing to act on them was never a judgement that they are healthy. The arithmetic
+  conjuncts are unchanged — same confidence bar, same repeated-verdict requirement, same measured
+  trajectory veto — `_NON_TRAINING_ROLES` still cannot reach it because they are never judged at
+  all, and the terminal kill keeps the narrow gate it had. The `fault` lands on the durable alert
+  row whether or not it led anywhere, because "the code is wrong" and "the idea is wrong" are what
+  the search must tell apart afterwards.
+
+  STILL OPEN: the judge attributes the fault from the LOG alone. It can already read the whole log
+  and search it for a traceback (`_LOOK_INVITATION`, `read_log`, `metric_series`), and a run's own
+  log is where its parameters, its device and its data shapes are echoed — but it cannot read the
+  CODE. Giving it a bounded read of the node's own authored files would make `implementation` a
+  much better-evidenced answer than it is today. The fence question is answerable (the node
+  workspace is the one region that provably holds only what this node produced, which
+  `monitor_log_sources` already relies on), and the direction of harm is favourable — reading the
+  candidate's code can only ever route a stop toward the cheap action.]

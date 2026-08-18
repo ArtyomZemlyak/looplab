@@ -59,7 +59,13 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #   2026-08-15  redact_output False -> True  (intentional SECURITY-default change; field set
 #               unchanged, but the complete settings envelope and therefore old receipts genuinely
 #               changed). See the second history block below.
-_EXPECTED_DIGEST = "sha256:044ee80b84a6b6f0102a074c227bc33b1ad8677e1e70434ddf5f070df22c9abc"
+#   2026-08-18  inline_repair_reasons + not_learning  (intentional BEHAVIOUR-default change; field
+#               set unchanged, third cause — see the message below. The live training watchdog can
+#               now stop a stage whose fault its judge attributed to the IMPLEMENTATION, and that
+#               stop terminalizes with `not_learning`, which this default is what makes repairable.
+#               A replicate calibrated before it would abandon a class of node this one repairs, so
+#               the envelope genuinely moved and old receipts SHOULD stop verifying.)
+_EXPECTED_DIGEST = "sha256:029b3df6194c48d98b6bac7245f5f3bceaa6cbcbe86266d227b370f4f633315d"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -290,8 +296,10 @@ def test_the_digest_did_not_change_when_the_profile_moved():
     legitimately calibrated — with no error that says why.
 
     Pinning the digest AND the field set separates the two causes:
-      * field set unchanged, digest moved -> a refactor changed the DERIVATION. That is the bug this
-        test exists for, and no already-issued receipt would verify again.
+      * field set unchanged, digest moved -> EITHER a refactor changed the DERIVATION (the bug this
+        test exists for: no already-issued receipt would verify again, for nothing), OR a default
+        VALUE moved deliberately. The digest binds the complete settings map, so the second is a
+        real envelope change and is resolved by re-pinning WITH a history line, not by hunting.
       * field set changed too              -> `Settings` legitimately grew or shrank; the calibration
         envelope really is different, old receipts SHOULD be invalidated, and both pins get re-set
         deliberately with a line in the history above.
@@ -306,8 +314,15 @@ def test_the_digest_did_not_change_when_the_profile_moved():
            f"{len(SPECULATION_CALIBRATION_PROFILE_SETTINGS)}), so this is real schema growth: re-pin "
            "BOTH constants above and add a line to the field-set history."
            if schema_changed else
-           "The field set is UNCHANGED, so a refactor changed the DERIVATION — that silently "
-           "invalidates every already-issued speculation receipt. Do not re-pin; find the change."))
+           "The field set is UNCHANGED, so one of TWO things happened and they need opposite "
+           "answers. (1) A refactor changed the DERIVATION — that silently invalidates every "
+           "already-issued speculation receipt for no reason at all. Do not re-pin; find the "
+           "change. (2) A DEFAULT VALUE moved on purpose — the digest binds the complete "
+           "non-variant settings map, not just its field NAMES, so a deliberate default change "
+           "really does move the envelope and old receipts SHOULD stop verifying. Three are "
+           "already recorded in the history above (concept_retag_every, redact_output, "
+           "inline_repair_reasons). If yours is (2), re-pin and add a line saying WHICH default "
+           "moved and why a replicate calibrated before it is genuinely different."))
 
 
 def test_the_engine_still_re_exports_the_identity_it_no_longer_derives():

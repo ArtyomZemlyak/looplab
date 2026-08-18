@@ -482,13 +482,16 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     # was stopped by a resource or health rule, not by a mistaken idea, so the deterministic path can
     # safely say "repair" without a judge. Each carries its OWN rationale — the whole reason they are
     # separate reasons is that "reduce memory" is the wrong instruction for both.
-    if reason in ("timeout", "oom", "diverged", "stalled") and attempt <= max_attempts:
+    if reason in ("timeout", "oom", "diverged", "stalled", "not_learning") and attempt <= max_attempts:
         why = {"timeout": "timeout — reduce compute to fit the budget (rule-based)",
                "oom": "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)",
                "diverged": "health-check killed it — the loss/grad_norm went non-finite; stabilise the "
                            "objective (LR, warmup, grad clipping, epsilons), do NOT cut memory (rule-based)",
                "stalled": "stall watchdog killed it — the stage was alive and silent; remove the hang or "
-                          "emit a heartbeat, do NOT cut memory (rule-based)"}[reason]
+                          "emit a heartbeat, do NOT cut memory (rule-based)",
+               "not_learning": "training watchdog killed it — the loss stopped moving and the judge "
+                               "named the implementation; make the objective able to descend, do NOT "
+                               "cut memory (rule-based)"}[reason]
         return {"action": "repair", "rationale": why}
     mechanical = any(s in err for s in _MECHANICAL_MARKERS)
     if reason == "crash" and mechanical and attempt <= max_attempts:

@@ -35,13 +35,16 @@ from __future__ import annotations
 import pytest
 
 from looplab.engine.train_monitor import (
+    MONITOR_REPAIR_REASON,
     LOG_ROLE_SCORE,
+    LOG_ROLE_SETUP,
     LOG_ROLE_TRAINING,
     LOG_ROLE_WORK,
     TrainingVerdict,
     eval_log_plan,
     resolve_stage_log,
     should_monitor_kill,
+    should_monitor_repair,
     training_authority_spent,
 )
 from looplab.events.types import EV_TRAIN_MONITOR_ALERT
@@ -304,3 +307,188 @@ def test_d3_a_verdict_that_would_not_have_killed_anyway_claims_nothing(tmp_path)
         {"status": "watch", "confidence": 0.99, "reason": "slow but descending"}))
     _drive_growing(host, wd, plan, [_COLLAPSED_TAIL] * 4, rows_needed=3)
     assert all("kill_role_withheld" not in r for r in host.store.rows(EV_TRAIN_MONITOR_ALERT))
+
+
+# ==================================================================== F: bug or hypothesis?
+#
+# The role gate answered "may this stage be stopped". It could not answer the question underneath:
+# stopped AS WHAT. `monitor_broken` is not in `FAILURE_REASONS`, so a kill was terminal — no repair,
+# no retry — while the deterministic diverge watchdog one layer down fails a stage with `diverged`,
+# which IS repairable and on this very run bought node 5 a Developer repair. Same illness, two
+# outcomes: a NON-finite loss read as "probably a bug, go fix it", a loss frozen at a perfectly
+# finite 8.8534 read as "the idea failed". A collapse is at least as often a wrong reduction, a
+# wrong axis, an unshuffled loader or a schedule bug as it is a refuted hypothesis — and a verdict
+# recorded against an idea that was never actually tested teaches the search the wrong lesson.
+#
+# So the verdict now carries WHOSE fault it is, and the two faults get opposite treatments.
+
+_BUG = {"status": "broken", "confidence": 0.9, "fault": "implementation",
+        "reason": "the log echoes normalize=False on the query tower while the loss is cosine — "
+                  "every embedding lands on a different scale and the loss cannot descend"}
+_IDEA = {"status": "broken", "confidence": 0.9, "fault": "hypothesis",
+         "reason": "the recipe is applied exactly as written and this backbone simply collapses "
+                   "under it — the loss is frozen and there is nothing in the code to change"}
+
+
+def test_f_a_named_bug_stops_for_repair_on_any_judged_stage(tmp_path):
+    """THE UNIVERSAL HALF. `mine` is not the training loop and never will be, but the code can be
+    just as wrong about it — and a five-stage pipeline has four more like it. What made the role
+    gate necessary was that the only available action was terminal; a repair-stop costs one restart
+    of a run the judge has already called wasted, so it is admissible everywhere the judge reads."""
+    for role in (LOG_ROLE_WORK, LOG_ROLE_TRAINING):
+        assert should_monitor_repair(TrainingVerdict(**_BUG), enabled=True, threshold=0.8,
+                                     log_role=role, broken_streak=2) is True
+    # ...and it is what a KILL would have refused on the non-training stage.
+    assert should_monitor_kill(TrainingVerdict(**_BUG), enabled=True, threshold=0.8,
+                               log_role=LOG_ROLE_WORK, broken_streak=2) is False
+
+
+def test_f_a_refuted_idea_is_never_repaired_away(tmp_path):
+    """The other direction, and the one that protects the RECORD: a sound implementation of a bad
+    idea is a real finding. It terminates (where the role allows) and is never handed back to be
+    'fixed' into a different experiment."""
+    assert should_monitor_repair(TrainingVerdict(**_IDEA), enabled=True, threshold=0.8,
+                                 log_role=LOG_ROLE_TRAINING, broken_streak=9) is False
+    assert should_monitor_kill(TrainingVerdict(**_IDEA), enabled=True, threshold=0.8,
+                               log_role=LOG_ROLE_TRAINING, broken_streak=2) is True
+
+
+@pytest.mark.parametrize("fault", ["unknown", "environment", "hypothesis"])
+def test_f_only_a_named_bug_buys_a_repair(fault):
+    """`unknown` is the schema's stated safe answer, and it must BE safe: anything the judge will
+    not attribute to the code leaves the repair path shut."""
+    verdict = TrainingVerdict(status="broken", reason="x", confidence=0.99, fault=fault)
+    assert should_monitor_repair(verdict, enabled=True, threshold=0.8,
+                                 log_role=LOG_ROLE_TRAINING, broken_streak=9) is False
+
+
+def test_f_a_repair_stop_keeps_every_arithmetic_conjunct_the_kill_has():
+    """Cheaper to be wrong is not free to be wrong. The confidence bar, the repeated verdict and the
+    measured-trajectory veto are the same — only the role gate differs, and only because the cost
+    it is proportioned to is different."""
+    bug = TrainingVerdict(**_BUG)
+    assert should_monitor_repair(bug, enabled=False, threshold=0.8,
+                                 log_role=LOG_ROLE_WORK, broken_streak=9) is False
+    assert should_monitor_repair(bug, enabled=True, threshold=0.95,
+                                 log_role=LOG_ROLE_WORK, broken_streak=9) is False
+    assert should_monitor_repair(bug, enabled=True, threshold=0.8,
+                                 log_role=LOG_ROLE_WORK, broken_streak=1) is False
+    for role in (LOG_ROLE_SCORE, LOG_ROLE_SETUP):
+        assert should_monitor_repair(bug, enabled=True, threshold=0.8,
+                                     log_role=role, broken_streak=9) is False
+
+
+def test_f_the_repair_reason_is_repairable_and_not_the_diverge_word():
+    """It has to be its own word. `diverged` means a NON-finite loss and the opposite directive
+    ('stabilise the numerics'); this one means a finite loss that stopped descending. The repo has
+    already paid for that conflation once — three repair rounds halving a batch size at ~3
+    GPU-minutes each while the real instability went untouched."""
+    from looplab.core.models import FAILURE_REASONS
+    from looplab.core.config import Settings
+
+    assert MONITOR_REPAIR_REASON == "not_learning"
+    assert MONITOR_REPAIR_REASON in FAILURE_REASONS         # therefore repairable by default
+    assert MONITOR_REPAIR_REASON != "diverged"
+    assert MONITOR_REPAIR_REASON in Settings().inline_repair_reasons
+    # ...and an operator who narrows the setting gets the same answer here as for any other class.
+    assert MONITOR_REPAIR_REASON not in Settings(inline_repair_reasons=("crash",)).inline_repair_reasons
+
+
+def test_f_the_bug_stop_actually_names_the_repairable_terminal(tmp_path):
+    """End to end through the real loop: the claim the watchdog files is what `_evaluate` reads to
+    decide between a terminal and a repair, so the reason must arrive on the signal itself."""
+    wd = _one_log_workdir(tmp_path, "train.log", _COLLAPSED_TAIL)
+    host = _Host(tmp_path, client=_ScriptedClient(_BUG), asha_kill=False)
+    _drive_growing(host, wd, eval_log_plan(_V2_STAGES), [_COLLAPSED_TAIL] * 4, rows_needed=4)
+
+    assert host.kill_signal.get("kill") is True             # stopped, on a WORK stage
+    assert host.kill_signal.get("terminal_reason") == MONITOR_REPAIR_REASON
+    row = host.store.rows(EV_TRAIN_MONITOR_ALERT)[-1]
+    assert row["fault"] == "implementation" and row["repair_decided"] is True
+    assert row["log_role"] == LOG_ROLE_WORK                 # ...which a kill could never have used
+
+
+def test_f_the_attribution_is_recorded_even_when_it_leads_nowhere(tmp_path):
+    """"The code is wrong" and "the idea is wrong" are what the search must tell apart afterwards.
+    A run that recorded only the second learned the wrong lesson from every bug — so the fault lands
+    on the durable row whether or not the gate acted on it."""
+    wd = _one_log_workdir(tmp_path, "train.log", _COLLAPSED_TAIL)
+    host = _Host(tmp_path, client=_ScriptedClient(_IDEA), asha_kill=False)
+    _drive_growing(host, wd, eval_log_plan(_V2_STAGES), [_COLLAPSED_TAIL] * 4, rows_needed=3)
+
+    rows = host.store.rows(EV_TRAIN_MONITOR_ALERT)
+    assert host.kill_signal == {}                           # a WORK stage, an idea: nothing acts
+    assert rows[-1]["fault"] == "hypothesis"
+    assert "repair_decided" not in rows[-1]
+    assert rows[-1]["kill_role_withheld"] == LOG_ROLE_WORK
+
+
+def test_f_repair_wins_over_the_terminal_kill_on_the_training_stage(tmp_path):
+    """Precedence, on the one stage where both are available. A bug the judge can point at is a
+    thing to fix; only an implementation it will NOT blame reaches the gun."""
+    wd = _one_log_workdir(tmp_path, "train.log", _COLLAPSED_TAIL)
+    host = _Host(tmp_path, client=_ScriptedClient(_BUG), asha_kill=False)
+    _drive_growing(host, wd, eval_log_plan(_declared(_V2_STAGES)),
+                   [_COLLAPSED_TAIL] * 4, rows_needed=4)
+    assert host.kill_signal.get("terminal_reason") == MONITOR_REPAIR_REASON
+
+    other = tmp_path / "idea"
+    other.mkdir()
+    wd2 = _one_log_workdir(other, "train.log", _COLLAPSED_TAIL, dirname="node_1")
+    host2 = _Host(other, client=_ScriptedClient(_IDEA), asha_kill=False)
+    _drive_growing(host2, wd2, eval_log_plan(_declared(_V2_STAGES)),
+                   [_COLLAPSED_TAIL] * 4, rows_needed=4)
+    assert host2.kill_signal.get("terminal_reason") == "monitor_broken"
+
+
+def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
+    """THE PLUMBING, pinned on control flow rather than on text.
+
+    `_evaluate`'s watchdog branch used to `return` unconditionally after appending `node_failed`,
+    which is why a kill could never become a repair however it was classified: the inline-repair
+    gate lives further down the same loop and the early return jumped over it. The property is a
+    fact about the branch — a reason the operator's `inline_repair_reasons` selects must FALL
+    THROUGH, and only an unselected one may take the terminal — so it is read off the tree.
+
+    Driving it instead would mean standing up a whole engine, a sandbox and a real subprocess kill
+    for one boolean; the AST is rung 3 of the ladder and this is what it is for. The behaviour on
+    either side of the branch is driven for real above (`should_monitor_repair`, the claim, the
+    reason on the signal) and below it by the existing repair suites.
+    """
+    import ast
+
+    from _source_scan import function_tree
+    from looplab.engine.evaluate import EvaluateMixin
+
+    tree = function_tree(EvaluateMixin._evaluate)
+    branches = [node for node in ast.walk(tree)
+                if isinstance(node, ast.If) and "kill_signal.get('kill')" in ast.unparse(node.test)]
+    assert len(branches) == 1, "the watchdog-kill branch is no longer unique; re-derive this test"
+    branch = branches[0]
+
+    gates = [node for node in branch.body
+             if isinstance(node, ast.If) and "_inline_repair_reasons" in ast.unparse(node.test)]
+    assert len(gates) == 1, (
+        "the watchdog branch must ASK whether the reason is repairable before terminalizing; "
+        f"found {len(gates)} such gates in {ast.unparse(branch)[:400]}")
+    gate = gates[0]
+
+    # The repairable side falls through: no return, and no terminal event appended.
+    repairable = ast.unparse(ast.Module(body=gate.body, type_ignores=[]))
+    assert "return" not in repairable, "a repairable watchdog stop must not end the node here"
+    assert "EV_NODE_FAILED" not in repairable, (
+        "...and must not write the node's terminal either — the attempt loop owns it (invariant #2)")
+    # The unselected side still terminalizes exactly as before.
+    unrepairable = ast.unparse(ast.Module(body=gate.orelse, type_ignores=[]))
+    assert "EV_NODE_FAILED" in unrepairable and "return" in unrepairable
+
+    # ...and the reason that reaches the repair loop is the WATCHDOG's, not the exit code's.
+    assigns = [node for node in ast.walk(tree)
+               if isinstance(node, ast.Assign)
+               and any(getattr(t, "id", None) == "reason" for t in node.targets)
+               and "_failure_reason" in ast.unparse(node.value)]
+    assert assigns and all(isinstance(a.value, ast.BoolOp) and isinstance(a.value.op, ast.Or)
+                           and "watchdog_reason" in ast.unparse(a.value.values[0])
+                           for a in assigns), (
+        "a tree-killed process exits -9 with no traceback, which `_failure_reason` reads as "
+        "oom/crash — the watchdog's own reason must win when it stopped this attempt")

@@ -1867,6 +1867,9 @@ class EvaluateMixin:
                             "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
+                # Set only by a REPAIRABLE watchdog stop (see just below); `None` on every other
+                # path, including the terminal kill, which returns before anything reads it.
+                watchdog_reason, watchdog_err = None, ""
                 if kill_signal.get("kill") and not ok:       # a live watchdog tree-killed the run early
                     # ONE terminal event; the watchdog names the reason so the fold/failure-reflection
                     # knows WHY: the training monitor leaves it default ('monitor_broken'), the ASHA
@@ -1874,14 +1877,29 @@ class EvaluateMixin:
                     # (EV_TRAIN_MONITOR_ALERT / EV_ASHA_RANK) already ran live; replay reconstructs the
                     # node from this terminal and never re-invokes the watchdog.
                     _kreason = str(kill_signal.get("terminal_reason") or "monitor_broken")
-                    async with self._write_lock:
-                        self.store.append(EV_NODE_FAILED, {
-                            "node_id": node_id, "generation": generation,
-                            "error": ("live watchdog stopped the run early: "
-                                      + str(kill_signal.get("reason", ""))[:400]),
-                            "reason": _kreason, "eval_seconds": total_eval})
-                        self._maybe_crash()
-                    return
+                    if _kreason in self._inline_repair_reasons:
+                        # A stop the watchdog attributed to the IMPLEMENTATION, not to the idea.
+                        # It does NOT terminalize here: it falls through into the same failure
+                        # handling every other repairable reason takes, so the Developer gets its
+                        # own code back with the diagnosis attached and the experiment is retried
+                        # once the bug is fixed. Nothing about the repair machinery needed to
+                        # change — `cancel` and `kill_signal` are per-ATTEMPT (built inside this
+                        # loop), so the retry starts from a clean signal, and the repair critic,
+                        # the attempt cap and the redone-work floor all bound it exactly as they
+                        # bound a crash. A reason the operator has narrowed OUT of
+                        # `inline_repair_reasons` lands in the terminal below instead, which is the
+                        # same answer that setting gives every other failure class.
+                        watchdog_reason = _kreason
+                        watchdog_err = str(kill_signal.get("reason", ""))[:400]
+                    else:
+                        async with self._write_lock:
+                            self.store.append(EV_NODE_FAILED, {
+                                "node_id": node_id, "generation": generation,
+                                "error": ("live watchdog stopped the run early: "
+                                          + str(kill_signal.get("reason", ""))[:400]),
+                                "reason": _kreason, "eval_seconds": total_eval})
+                            self._maybe_crash()
+                        return
                 # THE PIPELINE RECORD, ONCE PER ATTEMPT — not once per NODE. Multi-stage eval
                 # (Phase 1): each stage's pass/fail lands BEFORE the terminal so the fold + trace show
                 # mine ✓ / train ✗, and a later stage-scoped re-run knows which stages already passed.
@@ -1920,10 +1938,21 @@ class EvaluateMixin:
                                           {"node_id": node_id, **_st, "generation": generation})
                 if ok:
                     break
-                reason = _failure_reason(res)
+                # The WATCHDOG's reason wins over the exit-code classifier when it stopped this
+                # attempt: `res` is a tree-killed process (exit -9, no traceback), which
+                # `_failure_reason` reads as `oom`/`crash` — the exact conflation `FAILURE_REASONS`
+                # documents, and it would send the Developer to halve a batch size that was never
+                # the problem.
+                reason = watchdog_reason or _failure_reason(res)
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
+                if watchdog_reason:
+                    # The diagnosis FIRST: it is the only part of this text that says what to
+                    # change, and the killed process's own tail says only that it was killed.
+                    err = (f"The live training watchdog stopped this run: {watchdog_err}\n"
+                           "It judged the cause to be the IMPLEMENTATION rather than the idea, so "
+                           "this is a repair, not a result. Fix what it named.\n\n" + err)
                 # METRIC SALVAGE. Asked HERE — after the eval has failed, before any repair is
                 # considered and long before the terminal — because this is the only point at which
                 # the answer can still change which terminal the node gets. `engine/metric_salvage.py`

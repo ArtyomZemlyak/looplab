@@ -529,6 +529,34 @@ class CrashRepairMixin:
                     "`num_workers=0` / no fork under a multithreaded runtime, no lock held across a "
                     "collective) or makes progress observable — print or flush a heartbeat line at "
                     "least once per inner loop so the next run reports WHERE it stopped.")
+        if reason == "not_learning":
+            # The THIRD member of this family, and the one whose negative directive has to be
+            # widest: this kill looks like nothing. No traceback, no non-finite number, no silence
+            # — a healthy-looking process printing a loss that simply never moves. The live judge
+            # named the IMPLEMENTATION, and its sentence is already at the head of `error`; what
+            # this adds is the shape of the fix, which is neither `oom`'s nor `diverged`'s. Cutting
+            # memory changes nothing, and lowering the learning rate — `diverged`'s first move — is
+            # if anything the wrong direction for a model that is not learning at all.
+            return ("[failure kind: not_learning]\n" + error + "\n"
+                    "LoopLab's live training watchdog KILLED this stage: the loss stopped moving "
+                    "(frozen or flat well above where it should be) while the run reported itself "
+                    "healthy, so the remaining budget would have trained a model that cannot "
+                    "retrieve anything. This is NOT an out-of-memory kill, NOT a timeout and NOT a "
+                    "numeric divergence — nothing was non-finite, and reducing batch or model size "
+                    "does not make a frozen objective move. Treat it as a BUG until you have "
+                    "checked otherwise, and check the specific thing the watchdog named above "
+                    "first. The usual causes are mechanical: the loss reduced over the wrong axis "
+                    "or with the wrong sign, embeddings normalized (or not) inconsistently between "
+                    "the two towers, a temperature or margin that makes every pair identical, "
+                    "labels or positives misaligned with their inputs, a dataloader yielding the "
+                    "same batch every step, a scheduler that drove the learning rate to ~0, a "
+                    "frozen/detached parameter set that leaves nothing to update, or a "
+                    "regularisation term whose minimum is a constant embedding. Return a corrected, "
+                    "complete change that makes the objective ABLE to descend, and print enough per "
+                    "step (loss AND grad_norm AND lr) that the next run shows whether it did. If "
+                    "after looking you conclude the code is right and the IDEA is simply wrong for "
+                    "this setup, say so plainly instead of changing something at random — a real "
+                    "negative result is worth more than a repair that hides it.")
         if reason == "needs_failed":
             # The one directive that must NOT say "diagnose the crash": there was no crash. The stage
             # was refused before it started, so its code is not evidence of anything yet, and the two

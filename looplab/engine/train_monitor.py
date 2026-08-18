@@ -84,6 +84,22 @@ class TrainingVerdict(BaseModel):
                     "broken = clear evidence the run is WASTED and cannot recover — diverged loss, a silent "
                     "CPU fallback while a GPU was expected, data-loader errors repeating in the loop, loss "
                     "stuck at its initialization value (not learning), or an uncaught exception.")
+    fault: Literal["implementation", "hypothesis", "environment", "unknown"] = Field(
+        default="unknown",
+        description="Only meaningful when status is 'broken': WHOSE fault it is, because the two get "
+                    "opposite treatments. 'implementation' = the code or its configuration is wrong "
+                    "and a fix is available — a parameter set to a value the log itself shows is "
+                    "absurd, a loss that cannot descend as written, a normalization or reduction "
+                    "applied to the wrong axis, a data loader feeding the same batch, a checkpoint "
+                    "never saved. This STOPS the run and hands it back for REPAIR, so the experiment "
+                    "is retried once the bug is fixed. 'hypothesis' = the code is doing exactly what "
+                    "it was told and the IDEA is what failed; the run's poor result is a real "
+                    "finding and must be recorded as one, not fixed away. 'environment' = neither "
+                    "(a missing device, a broken mount, an OOM). 'unknown' = you cannot tell from "
+                    "the evidence — say that rather than guessing, it is the safe answer. Prefer "
+                    "'implementation' ONLY when you can name the specific thing to change; a "
+                    "hypothesis wrongly called a bug costs a repair round, a bug wrongly called a "
+                    "hypothesis records a verdict about an idea that was never actually tested.")
     reason: str = Field(description="One short sentence naming the SPECIFIC log evidence for the status.")
     confidence: float = Field(default=0.5, description="Confidence in the status, 0.0 to 1.0.")
     recheck_after_s: Optional[float] = Field(
@@ -102,7 +118,11 @@ _MONITOR_SYSTEM = (
     "catch a wasted run EARLY — before its whole (often multi-hour) time budget is spent. Judge ONLY from "
     "the log evidence; the final metric is not known yet, so do not guess it. A run that is merely slow or "
     "plateauing but still progressing is 'watch', not 'broken' — reserve 'broken' for clear, cannot-recover "
-    "evidence. Be concise and specific about the evidence you saw.")
+    "evidence. Be concise and specific about the evidence you saw. When you do call something broken, "
+    "also say WHOSE fault it is (`fault`): a bug in the code or its configuration is REPAIRED and "
+    "retried, while a sound implementation of a bad idea is a real result and is recorded as one. "
+    "Look before you attribute — the run's own log is where its parameters, its device and its data "
+    "shapes were echoed.")
 
 
 # The sentence that tells the judge the tail is not all it may have. Spliced ONLY when tools are
@@ -713,6 +733,58 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
     if not enabled or verdict is None or verdict.status != "broken":
         return False
     if log_role not in _KILL_ELIGIBLE_ROLES:
+        return False
+    if trajectory_vetoes_kill(trajectory):
+        return False
+    try:
+        needed = int(confirm_ticks)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if broken_streak < max(1, needed):
+        return False
+    confidence, confidence_valid = _normalize_monitor_confidence(verdict.confidence)
+    return confidence_valid and confidence >= threshold
+
+
+# What a repair-stop terminalizes as. In `FAILURE_REASONS`, therefore in the default
+# `inline_repair_reasons`, therefore picked up by the inline repair loop with no new plumbing —
+# which is the whole design: the engine already knows how to hand a failed node back to its
+# Developer, and this only decides WHICH failures deserve that instead of a verdict.
+MONITOR_REPAIR_REASON = "not_learning"
+
+
+def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float,
+                          log_role: str = LOG_ROLE_UNKNOWN, broken_streak: int = 0,
+                          confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS,
+                          trajectory: Optional["LossTrajectory"] = None) -> bool:
+    """Whether a verdict warrants stopping this stage FOR REPAIR. Pure/deterministic.
+
+    The sibling of `should_monitor_kill`, and the reason the role gate can finally open. Every
+    conjunct there is about ONE cost: a kill discards a multi-hour training with no repair, no retry
+    and no refunded `max_nodes` slot, so the monitor must not hold that gun over a stage it cannot
+    identify. A repair-stop costs something else entirely — one restart of a run the judge has just
+    said is wasted, with the diagnosis attached — so being wrong here is recoverable in the way
+    being wrong there is not. That is why this admits EVERY role the judge is allowed to read:
+
+    - a `mine` stage feeding empty negatives, a post-train stage exporting a broken checkpoint and a
+      five-stage pipeline's third stage are all things the code can be wrong about, and none of them
+      is the training loop. Refusing to act on them was never a judgement that they are healthy; it
+      was a judgement that the only available action was too expensive to risk.
+    - `_NON_TRAINING_ROLES` still cannot reach here, because they are not judged at all
+      (`active_training_log` returns None for the dep install, the scorer and an unattributable
+      filename), so there is no verdict about them to act on.
+
+    `fault == "implementation"` is the load-bearing conjunct and it is the model's own attribution:
+    the schema tells it that a bug is repaired and a bad idea is recorded, and that `unknown` is the
+    safe answer. Everything else is the kill gate's arithmetic unchanged — the same confidence bar,
+    the same repeated-verdict requirement, and the same measured-trajectory veto, because a curve
+    that is still descending is not evidence of anything being wrong with the code either.
+    """
+    if not enabled or verdict is None or verdict.status != "broken":
+        return False
+    if getattr(verdict, "fault", "unknown") != "implementation":
+        return False
+    if log_role in _NON_TRAINING_ROLES:
         return False
     if trajectory_vetoes_kill(trajectory):
         return False
@@ -1840,10 +1912,21 @@ class TrainingMonitorMixin:
                         _kc = getattr(self, "_train_monitor_kill_confidence", 0.8)
                         threshold = (float(_kc) if isinstance(_kc, (int, float))
                                      and not isinstance(_kc, bool) else 0.8)
-                        stop_decided = kill_signal is not None and should_monitor_kill(
+                        # REPAIR FIRST, and on every judged stage. A named bug is a thing to fix,
+                        # not a verdict about an idea — so this is asked before the terminal kill
+                        # and wins it: a collapsed training whose cause the judge can point at goes
+                        # back to its Developer, and only an implementation the judge will NOT
+                        # blame reaches the gun. See `should_monitor_repair` for why the role gate
+                        # that guards the kill does not guard this.
+                        repair_decided = kill_signal is not None and should_monitor_repair(
                             verdict, enabled=getattr(self, "_train_monitor_kill", False),
                             threshold=threshold, log_role=log_role, broken_streak=broken_streak,
                             trajectory=trajectory)
+                        stop_decided = (not repair_decided) and kill_signal is not None \
+                            and should_monitor_kill(
+                                verdict, enabled=getattr(self, "_train_monitor_kill", False),
+                                threshold=threshold, log_role=log_role,
+                                broken_streak=broken_streak, trajectory=trajectory)
                         # The COUNTERFACTUAL, evaluated only when the measurement is what refused.
                         # Pure and cheap, and it is what makes "the monitor would have ended this
                         # node but for the curve it measured" a durable fact rather than something
@@ -1879,11 +1962,16 @@ class TrainingMonitorMixin:
                         # and only one of them owns the node's terminal — so the alert must state what
                         # actually happened to the node, not what this monitor wanted. The guard->update
                         # inside `claim_watchdog_kill` is await-free, so the answer is exact.
-                        claimed = stop_decided and claim_watchdog_kill(
-                            kill_signal, cancel, reason=reason, terminal_reason="monitor_broken",
+                        claimed = (stop_decided or repair_decided) and claim_watchdog_kill(
+                            kill_signal, cancel, reason=reason,
+                            terminal_reason=(MONITOR_REPAIR_REASON if repair_decided
+                                             else "monitor_broken"),
                             confidence=round(conf, 3))
-                        if stop_decided:
-                            sp.set_many(stop_decided=True, kill=bool(claimed))
+                        if stop_decided or repair_decided:
+                            sp.set_many(stop_decided=True, kill=bool(claimed),
+                                        fault=str(getattr(verdict, "fault", "unknown")))
+                        if repair_decided:
+                            sp.set("repair_decided", True)
                         elif (verdict.status == "broken" and broken_streak == 1
                               and log_role in _KILL_ELIGIBLE_ROLES and kill_signal is not None
                               and getattr(self, "_train_monitor_kill", False)
@@ -1941,7 +2029,16 @@ class TrainingMonitorMixin:
                                 alert["kill_role_withheld"] = str(log_role)[:32]
                             if not confidence_valid:
                                 alert["confidence_valid"] = False
-                            if stop_decided:
+                            if verdict.status == "broken":
+                                # The judge's own attribution, on the durable row whether or not it
+                                # led anywhere: "the code is wrong" and "the idea is wrong" are the
+                                # two answers the search must be able to tell apart afterwards, and
+                                # a run that recorded only the second learned the wrong lesson from
+                                # every bug. Additive and fold-ignored; absent reads as "unknown".
+                                alert["fault"] = str(getattr(verdict, "fault", "unknown"))[:16]
+                            if repair_decided:
+                                alert["repair_decided"] = True
+                            if stop_decided or repair_decided:
                                 # Attribution, additive and fold-ignored, using the SAME vocabulary as
                                 # the sibling EV_ASHA_VERDICT row: `stop_decided` is what this monitor
                                 # decided, `kill` whether it then WON the shared per-eval claim. Neither
@@ -1958,7 +2055,7 @@ class TrainingMonitorMixin:
                             # the next checkpoint, so an unshielded append would be preempted and the
                             # kill would leave NO diagnostic behind. Bounded (one append), and the same
                             # shielding `_evaluate` uses for its own promised terminal.
-                            with anyio.CancelScope(shield=stop_decided):
+                            with anyio.CancelScope(shield=stop_decided or repair_decided):
                                 async with self._write_lock:
                                     self.store.append(EV_TRAIN_MONITOR_ALERT, alert)
                         last_event_status = verdict.status
@@ -1971,8 +2068,8 @@ class TrainingMonitorMixin:
                         # the same digest itself, so an endpoint that never answers stops re-sending a
                         # byte-identical prompt every cadence.
                         last_digest = tail
-                        if stop_decided:
-                            return           # won or lost, this node is ending — stop watching it
+                        if stop_decided or repair_decided:
+                            return           # won or lost, this attempt is ending — stop watching it
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation — must propagate, never be swallowed
             except Exception:  # noqa: BLE001 — a transient per-tick hiccup (disk/LLM/tracer) SKIPS this tick;
