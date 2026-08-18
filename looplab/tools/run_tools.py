@@ -791,6 +791,14 @@ class RunTools:
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
         if findings:
             parts.append("Findings:\n" + "\n".join(f"  - {f}" for f in findings[:12]))
+        # REVIEW 2026-08-18 (correctness): this truthy-`statement` filter is a THIRD population
+        # beside the two the verdict join already has — `memo_verification_view` drops claims whose
+        # statement is blank AFTER strip, and the sanitizer preserves a whitespace-only statement
+        # verbatim (`redact_persisted_text(" ") == " "`) — so such a claim is kept here, dropped
+        # there, and the positional `verdict_rows[index]` read in `_cite` below then tags every
+        # later claim with its NEIGHBOUR's verdict row and note (driven: claims [" ", "A", "B"]
+        # render "A" under "B"'s row and "B" untagged). Fix: filter with the view's own rule
+        # (strip), or render the view's `rows` directly so one population feeds both halves.
         claims = [c for c in (m.get("claims") or []) if isinstance(c, dict) and c.get("statement")]
         if claims:
             verdict_rows = view.get("rows") or []

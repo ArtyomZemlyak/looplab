@@ -908,8 +908,25 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
     # "just the hits") is a legitimate ask that costs nothing here.
     recent: deque = deque(maxlen=max(0, context))
     hits = 0                     # EVERY match in [lo, hi) — the answer's count, not the render's
+    # REVIEW 2026-08-18 (correctness): hit numbers are minted 1-based from `lo`, but the tool spec's
+    # `start` text promises hit numbers are "counted from this attempt's start" and "go straight in"
+    # to mode="range", whose `_record_range_scan` always counts from the FLOOR — so every hit number
+    # a from_byte-resumed sweep reports resolves to the WRONG record in range mode, with no warning
+    # (driven: a resumed sweep reported its hit at record 30; range start=30 returned an unrelated
+    # head record, the real hit being record 51 from the floor). Fix: seed `index` with the resume
+    # point's floor-based record count, or state in the resumed answer that its numbers are
+    # lo-relative and do not address mode="range".
     index = 0                    # record number, 1-based from `lo`
     clipped = 0                  # records whose match input hit `_MAX_MATCH_CHARS`
+    # REVIEW 2026-08-18 (correctness): every byte a receipt names as `from_byte=` is a record
+    # BOUNDARY (`hi = buf_start + cut` lands just past a delimiter; a deadline's `buf_start` is the
+    # carried record's start), so a receipt-resumed sweep's first record is COMPLETE — yet
+    # `lo > floor` calls it torn and the `first`/`continue` below drops it unmatched. A `Traceback`
+    # in the record starting at the ceiling stop is counted by NEITHER sweep, while the resumed one
+    # still reports "reached the END of the log, so the count above is a TOTAL" (driven: sweep 1's
+    # ceiling receipt names byte N, a match starts at N, the resumed sweep reaches EOF with 0 hits).
+    # Fix: treat `lo` as torn only when the byte before it is not a record delimiter (one 1-byte
+    # read), so a boundary resume keeps its first record.
     torn = lo > floor            # the first record at a mid-file seek is half a record
     first = True
     stopped = ""
@@ -932,6 +949,15 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
                 # BETWEEN records, never inside one — `re` cannot be interrupted mid-match, so this
                 # is checked before a match is started and not after. See `_SEARCH_DEADLINE_S`.
                 if deadline is not None and time.monotonic() >= deadline:
+                    # REVIEW 2026-08-18 (correctness): when the deadline fires inside the FIRST
+                    # batch, `batch.buf_start == lo`, so the receipt's remedy "Continue with
+                    # from_byte={hi}" names the byte this caller already started at — a
+                    # non-progressing remedy (the module's own rule: a remedy must be one the
+                    # caller has not already spent), looping any caller whose pattern is slow
+                    # enough to spend the whole deadline on one batch's records (driven: deadline
+                    # in batch 1 yields hi == lo). Fix: name the last record boundary actually
+                    # consumed, or when hi == lo drop the from_byte remedy and offer only the
+                    # cheaper-pattern one.
                     stopped, hi = "deadline", batch.buf_start
                     break
                 index += 1
@@ -1493,6 +1519,13 @@ class LogQueryTools:
         body = [self._render(record, raw_mode) for record in chosen]
         # `seen` is a floor once the seek stopped early with what it was asked for — it counted the
         # records up to the answer and no further, which is the point of stopping. Say which it is.
+        # REVIEW 2026-08-18 (correctness): "enough" is not the only early stop — a seek that
+        # returned SOME records and then hit the byte ceiling arrives here with stopped ==
+        # "ceiling" and renders `of {seen}` with no "+", presenting a floor as an exact total
+        # while the log holds an unknown number of further records and the requested tail of the
+        # range was never reached (driven: 100-record log, ceiling at record 45, answer reads
+        # "records 40-45 of 45 from this attempt's start"). Fix: suffix "+" for ANY non-empty
+        # `stopped`, and let the ceiling case state the stop in the receipt as search does.
         total = (f"{seen:,}+" if stopped == "enough" else f"{seen:,}")
         receipt = self._reach_receipt("range", lo, hi, size, seen, start, False,
                                       floor=max(0, min(int(source.floor or 0), size)))
