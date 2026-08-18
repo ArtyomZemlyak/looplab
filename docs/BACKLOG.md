@@ -4316,3 +4316,74 @@ deliberately deferred, with rationale:
   flagged by both, which is a uniform frozen-asset policy rather than one detector re-raising what
   another waived. Giving it a waiver would need an explicit host-side "this asset is writable"
   declaration (assets carry none today), never an inference from what the candidate did.]
+
+## The training watchdog's kill path was unreachable for every real pipeline
+
+  `should_monitor_kill` needs `LOG_ROLE_TRAINING`, and `eval_log_plan` grants that only to a log
+  that is provably the WHOLE eval — a single-command eval, or a one-stage pipeline. Every real
+  task on this box resolves a multi-stage pipeline (`mine -> train -> score`), so every stage of
+  it is `LOG_ROLE_WORK`: judged, alerted, narrated, advisory. The narrowing was correct about the
+  danger it names (a `data_prep` stage printing a flat `loss: 0.6931` drew `broken` at 0.9 and
+  armed the gate) and unbounded in reach: the early stop had never once been reachable on a real
+  run, and nothing in the record said so.
+
+  **[2026-08-18 — MEASURED, then FIXED.** `e5small-dr-unified-v2` node 2: 31 `train_monitor_alert`
+  rows with `status: broken` at confidence 0.85-0.95 over 7.3 hours — *"Loss descended to ~5.04
+  then jumped to 8.8534 and stayed perfectly flat (iqr=0, min=max=8.8534) for the final 4+ hours,
+  grad_norm collapsed to ~0.0002"* — the node ran all 57,600 steps and scored
+  `RECALL@100: 0.000000`, every nDCG and MRR at every k also exactly 0.00 (representation
+  collapse: a constant embedding retrieves nothing). Node 4 repeated it live, 17 broken rows in
+  3.1 hours at a loss pinned to 4.88. The other four conjuncts all cleared — `train_monitor_kill`
+  on, threshold 0.8, confidence to 0.95, streak far past 2, and the stamped trajectory reads
+  `direction: rising`, which `trajectory_vetoes_kill` never refuses on. The role was the whole of
+  it, on all 46 alerts of the run: `('work', 'broken'): 31`, and never once `training`.
+
+  THE FIX is a declaration, not a better guess. A stage manifest may carry `role: "training"` on
+  exactly one stage, validated by `command_eval.validate_stages` — the single definition of a
+  valid stage, so the three declaring sites cannot drift — and `eval_log_plan` grants that stage
+  `LOG_ROLE_TRAINING`. A stage NAME proves nothing and still proves nothing; what makes a
+  declaration admissible is that it can only ever be spent in ONE direction. A kill carries no
+  repair, no retry and no refunded `max_nodes` slot, so the only thing `role: "training"` buys its
+  declarer is the power to have its own stage stopped; omit it and the stage keeps precisely the
+  advisory role it has today. There is no spelling of the key that makes a stage LESS killable.
+
+  REJECTED: admitting `LOG_ROLE_WORK` to the kill set whenever the measured trajectory
+  corroborates (here, frozen at iqr=0 with a collapsed grad_norm). It fails on the original worked
+  example — a `data_prep` stage printing a flat `loss: 0.6931` IS a frozen curve, so the
+  corroboration fires hardest on exactly the false positive it was meant to filter — and it would
+  promote the deterministic half from VETO to CONFIRM, a widening of authority over text the
+  candidate's own script wrote (docs/36: a wider action space, never a wider trusted set).
+
+  THE PRICE, paid in the same currency: this run's `train` stage does not only train. Its log ends
+  with the retrieval evaluation it runs in-process (`RECALL@100: 0.793344` is a line in
+  `train.log`), which is the H-1 defect — a judge holding kill authority reading scorer output —
+  moved INSIDE one stage, where no plan can split it by filename. So the authority is SPENT the
+  moment the stage's declared `expect.files` artifact exists (`training_authority_spent`): after
+  that the role falls back to `LOG_ROLE_WORK` and the verdict is advisory again. That is the
+  manifest's own output contract and an exact filesystem fact, not a reading of the text, and it
+  fails closed — a stat that cannot be taken counts as spent.
+
+  AND THE RECORD. When the role is what refused an otherwise-complete kill, the alert row now
+  carries `kill_role_withheld` (additive, fold-ignored, mirroring the existing `trajectory_veto`
+  counterfactual). 31 rows over 7.3 hours read as ordinary `broken` verdicts, indistinguishable
+  from ones the gate had simply not confirmed yet; that is why the unreachability survived three
+  runs. Driven in `tests/test_watchdog_declared_training_stage.py` against the real tails — the
+  collapsed node becomes stoppable, v7 node 1's descending curve is still vetoed even when
+  declared, an undeclared pipeline is byte-for-byte what it was, and the positional scorer can
+  never buy the role.]
+
+  **[2026-08-18 — TEETH, because a permission nobody exercises is worth nothing.** The declaration
+  makes the kill REACHABLE; it does not make it happen. Three things now carry it: the STAGES phase
+  prompt asks for it directly, naming what it costs to omit (a node that ran all 57,600 steps after
+  its loss froze while the watchdog said `broken` thirty-one times); the `declare_stages` schema
+  describes the key where a model reliably reads a field's shape, in both the authoring spec and
+  the repair tool; and every `train_monitor` span of a pipeline that declared nothing carries
+  `kill_reachable: false` from its FIRST tick — the role gate is a property of the resolved
+  pipeline, not of the run's health, so "nothing here can be stopped" is knowable before any
+  verdict exists rather than after the hours it takes for one to matter. Also raised a rung on the
+  ladder that this change broke: `test_config.py::test_watchdog_ticks_do_not_share_the_thread_pool`
+  pinned the dedicated watch pool by looking 200 characters past one call marker, and moving the
+  log read two lines down turned it RED for a property that never changed. It is now AST and TOTAL
+  over both monitor loops — a threaded call either draws on the pool or is the deliberately
+  un-abandonable provider call — and the mutation that removes the limiter names the offending
+  call instead of printing a window of source.]

@@ -568,16 +568,32 @@ def test_watchdog_ticks_do_not_share_the_thread_pool_the_evals_pin():
     # The ceiling this protects against is real: eval_parallel is allowed far past the shared pool.
     assert Settings(eval_parallel=1024).eval_parallel == 1024
 
-    # Every periodic tick that can deliver an intervention or a kill goes through it.
-    for source, marker in (
-        (inspect.getsource(train_monitor.TrainingMonitorMixin._monitor_training),
-         "read_training_tail(workdir"),
-        (inspect.getsource(asha_monitor.AshaMonitorMixin._monitor_asha),
-         "read_training_tail_raw(workdir"),
-    ):
-        assert marker in source, marker
-        tick = source.split(marker, 1)[1][:200]
-        assert "_watch_limiter()" in tick, (marker, tick)
+    # Every periodic tick that can deliver an intervention or a kill goes through it — pinned on the
+    # AST and TOTAL over each loop, not on a 200-character window after one call. That window was
+    # rung 1 of the ladder and it broke the way substring pins break: on 2026-08-18 the log read
+    # moved two lines down inside `_observe_log` (to check the training stage's declared artifact on
+    # the same worker thread) and the marker's tail no longer reached `_watch_limiter()` — a RED
+    # test for a property that never changed. The rule is statable instead: in these two loops a
+    # threaded call either draws on the dedicated pool, or it is the deliberately un-abandonable
+    # provider call, which is a different thing with its own reason (`abandon_on_cancel=False`, so
+    # a kill decision is never left half-made). Nothing else may reach a thread.
+    for fn in (train_monitor.TrainingMonitorMixin._monitor_training,
+               asha_monitor.AshaMonitorMixin._monitor_asha):
+        threaded = [node for node in ast.walk(function_tree(fn))
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "run_sync"]
+        assert threaded, fn.__qualname__
+        for call in threaded:
+            kwargs = {keyword.arg: keyword.value for keyword in call.keywords}
+            if "abandon_on_cancel" in kwargs:            # the paid judge; never the shared default
+                assert ast.unparse(kwargs["abandon_on_cancel"]) == "False", ast.unparse(call)
+                assert "limiter" not in kwargs, ast.unparse(call)
+                continue
+            pool = kwargs.get("limiter")
+            assert pool is not None and isinstance(pool, ast.Call) \
+                and getattr(pool.func, "id", None) == "_watch_limiter", (
+                    f"{fn.__qualname__} reaches a thread without the dedicated watch pool: "
+                    f"{ast.unparse(call)}")
 
     # The intervention tick is the third, and it is pinned on the AST rather than on a substring.
     # Since 2026-08-05 (doc 25 ES-03) it is its own method, `_watch_for_intervention`, whose whole

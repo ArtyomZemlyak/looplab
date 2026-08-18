@@ -833,7 +833,7 @@ class LLMRepoDeveloper:
         return fn_spec("declare_stages",
                         "Declare the ORDERED pipeline stages for this experiment and finish the stages "
                         "phase. Each stage is {name, command:[argv...], timeout?, check?, needs?, "
-                        "expect?}; they "
+                        "expect?, role?}; they "
                         "run IN ORDER in the same workdir so artifacts (a trained checkpoint, prepared "
                         "data) persist to later stages. Put `%params%` in a command to inject THIS node's "
                         "hyperparameters as `--key value`, or bake the values into the argv yourself. "
@@ -845,6 +845,20 @@ class LLMRepoDeveloper:
                             "name": {"type": "string"},
                             "command": {"type": "array", "items": {"type": "string"}},
                             "timeout": {"type": "number"}, "check": {"type": "boolean"},
+                            # WHICH stage is the training loop. Described in the schema for the same
+                            # reason `needs`/`expect` are — this is where a model reliably reads a
+                            # field's shape — and phrased as what it BUYS the declarer, because the
+                            # only thing it can buy is being stopped.
+                            "role": {"type": "string", "enum": ["training"], "description":
+                                     "Set to 'training' on the ONE stage that runs the training loop "
+                                     "(omit it everywhere else, and omit it entirely if no stage "
+                                     "does). It lets the live watchdog END that stage early when it "
+                                     "is provably broken — a frozen loss, a collapsed gradient, a "
+                                     "diverged run — instead of burning the whole timeout on a model "
+                                     "that has stopped learning. Without it the watchdog still reads "
+                                     "and reports, but cannot stop anything. Declare it only where "
+                                     "it is true: it is read as YOUR statement about which stage's "
+                                     "loss curve means something."},
                             # The INPUT half of the contract, described here for the same reason
                             # `expect` is: the schema is where a model reliably reads a field's shape.
                             "needs": {"type": "array", "items": {"type": "string"}, "description":
@@ -1197,6 +1211,16 @@ class LLMRepoDeveloper:
             "you can, and especially for any stage whose script you will NOT be able to edit later "
             "because the operator protected it — there, the manifest is the only place its success "
             "condition can be stated at all.\n\n"
+            "MARK THE TRAINING STAGE. Put `\"role\": \"training\"` on the ONE stage that runs the "
+            "training loop — the stage whose loss curve means something — and omit it everywhere "
+            "else (omit it entirely if no stage trains). It is what lets the live watchdog END that "
+            "stage early when it is provably broken: a loss frozen for hours, a collapsed gradient, "
+            "a diverged run. Without it the watchdog still reads the log and still reports, but "
+            "cannot stop anything, and a model that stopped learning in its first hour burns the "
+            "whole timeout and scores zero — which is exactly what happened to a node that ran all "
+            "57,600 steps after its loss froze, while the watchdog said 'broken' thirty-one times. "
+            "Nothing else changes for you: it does not alter how the stage runs, and it is spent "
+            "only against your own stage.\n\n"
             "Then call `declare_stages` once. You are NOT "
             "writing code yet — the plan + implement phases come next.")
 

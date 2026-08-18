@@ -61,6 +61,20 @@ from looplab.runtime.sandbox import (RunResult, _to_float, docker_gpu_argv,
 # in a log filename and trace/span attributes). `\Z` anchors the true end of string.
 _STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_STAGE_COUNT = 16
+# The ONE value a stage manifest may put in `role`, and it exists to be CLAIMED, never withheld.
+# `train_monitor.eval_log_plan` grants kill authority only to a log it can prove is the run's own
+# training; a multi-stage pipeline carries no such proof, so every stage of one is advisory
+# (`LOG_ROLE_WORK`) and the early-stop path is UNREACHABLE for the pipelines this engine actually
+# runs. Measured: `e5small-dr-unified-v2` node 2 drew 31 `broken` verdicts at confidence 0.85-0.95
+# ("loss frozen at exactly 8.8534, IQR=0, ~46k steps, grad_norm ~4e-4"), ran all 57,600 steps and
+# scored RECALL@100 = 0.000000 — the judge was right every time and had no authority any tick.
+# A declaration closes that gap without reopening what the role rule was built to stop, because it
+# only ever moves a stage TOWARD liability: a manifest that says nothing keeps exactly today's
+# advisory role, and the only thing `role: "training"` can buy its declarer is the power to have
+# its own stage killed. There is no spelling of this key that makes a stage LESS killable, so it
+# is not a lever a candidate can pull in its own favour.
+STAGE_ROLE_TRAINING = "training"
+
 
 # --- The per-stage SUCCESS CONTRACT (`expect`) --------------------------------------------------
 # WHAT A STAGE'S SUCCESS MEANS, declared by whoever declared the stage. Exit 0 is not an answer:
@@ -961,7 +975,7 @@ def cap_gpu_flags(argv: list) -> list:
 
 def validate_stages(stages, *, reserved: tuple = (),
                     allow_env: bool = False) -> tuple[Optional[list], Optional[str]]:
-    """Validate a stage list ({name, command:[argv...], timeout?, check?}) into its canonical clean
+    """Validate a stage list ({name, command:[argv...], timeout?, check?, role?}) into its canonical clean
     form: (clean, None) on success, (None, reason) on the first problem. This is the SINGLE
     definition of "a valid stage", shared by the Developer's `declare_stages` tool (authoring time),
     `EvalSpec.stages` (the operator's cmd pipeline, submit time) and the engine's `_resolve_stages`
@@ -979,6 +993,7 @@ def validate_stages(stages, *, reserved: tuple = (),
     if len(stages) > MAX_STAGE_COUNT:
         return None, f"`stages` may contain at most {MAX_STAGE_COUNT} entries."
     seen, clean = set(), []
+    training_stage: Optional[str] = None
     for i, s in enumerate(stages):
         if not isinstance(s, dict):
             return None, f"stage {i} is not an object — expected {{name, command:[...]}}."
@@ -1014,6 +1029,25 @@ def validate_stages(stages, *, reserved: tuple = (),
             st["timeout"] = _t
         if s.get("check"):
             st["check"] = True
+        if s.get("role") is not None:
+            # Opt-in kill eligibility (see `STAGE_ROLE_TRAINING`). REFUSED rather than dropped when
+            # it is unusable, for the reason `env` is refused: a manifest that reads as if a stage
+            # carries a role nothing applies is the failure the closed key sets exist to end.
+            role = str(s.get("role") or "").strip().lower()
+            if role != STAGE_ROLE_TRAINING:
+                return None, (f"stage {nm!r} `role` must be {STAGE_ROLE_TRAINING!r} (the only "
+                              "declarable role) or omitted — it marks WHICH stage is the training "
+                              "loop, so the training watchdog may stop that stage early when it is "
+                              "provably broken. Omitting it leaves the stage advisory-only.")
+            if training_stage is not None:
+                # Two training stages is the old rule ("every stage that is not `score` is
+                # training") wearing a declaration, and it is the rule that let a `data_prep` log
+                # hold a gun. The manifest must name ONE.
+                return None, (f"stage {nm!r} declares role {STAGE_ROLE_TRAINING!r} but stage "
+                              f"{training_stage!r} already does — exactly one stage may be the "
+                              "training loop.")
+            training_stage = nm
+            st["role"] = STAGE_ROLE_TRAINING
         if s.get("expect") is not None:
             # The per-stage SUCCESS CONTRACT (see `_validate_expect` and the block above it). Shared
             # here rather than at each declaring site for the same reason every other stage rule is:

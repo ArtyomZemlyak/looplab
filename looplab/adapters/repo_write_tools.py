@@ -389,7 +389,9 @@ class RepoWriteTools:
                      {"stages": {"type": "array", "description":
                                  "ordered preceding stages, each {name, command:[argv...], timeout?, "
                                  "check?, needs?:[input paths this stage READS], "
-                                 "expect?:{files:[output paths this stage WRITES], assert?}}"}},
+                                 "expect?:{files:[output paths this stage WRITES], assert?}, "
+                                 "role?:'training' on the ONE stage that runs the training loop, "
+                                 "which lets the watchdog stop it early when it is provably broken}"}},
                      ["stages"]),
         ]
 

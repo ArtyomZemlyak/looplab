@@ -59,6 +59,12 @@ from looplab.core.numeric import median as _median
 # name a role without importing the engine (layering: `events` imports only `core`). Imported here
 # and re-exported, because `train_monitor.LOG_ROLE_*` is the spelling engine code and tests use.
 # `events.types` imports nothing, so this module-level import cannot become a cycle.
+# The MANIFEST vocabulary (what a stage may declare) is defined once beside the validator that is
+# the single definition of a valid stage; this module maps it to the LOG-ROLE vocabulary above.
+# Two names deliberately, not one shared constant: the manifest key is a contract with the agent
+# and the operator, the log role is a contract with every reader of the durable alert row, and a
+# test pins that they still agree. `engine` imports `runtime` throughout, never the reverse.
+from looplab.runtime.command_eval import STAGE_ROLE_TRAINING
 from looplab.events.types import (
     LOG_ROLE_AMBIGUOUS,
     LOG_ROLE_SCORE,
@@ -681,7 +687,9 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
     - a `broken` verdict at confidence >= `threshold`. The prompt makes a slow/plateauing-but-progressing
       run 'watch', never 'broken'; 'watch'/'healthy' stay advisory.
     - `log_role` is in `_KILL_ELIGIBLE_ROLES`, i.e. `LOG_ROLE_TRAINING`: the tail is provably the run's
-      own training (`eval_log_plan` grants that role only to a log that is the WHOLE eval). A verdict
+      own training — `eval_log_plan` grants that role to a log that is the WHOLE eval, or to the one
+      stage a manifest DECLARES is the training loop (see that function on why a declaration is
+      admissible where a stage name is not). A verdict
       about `setup.log`, the pipeline's scorer, an unattributable filename, a pipeline WORK stage
       (`LOG_ROLE_WORK` — judged, but the plan cannot prove it is the training step) or a log nothing
       could attribute at all (`LOG_ROLE_UNKNOWN`, the default) is advisory evidence and never
@@ -827,6 +835,11 @@ class EvalLogPlan:
 
     roles: dict                  # case-folded basename -> (stage name or None, LOG_ROLE_*)
     stage_names: tuple = ()      # the resolved pipeline order; () for a single-command eval
+    # The DECLARED outputs of the stage that declared itself the training loop — the evidence
+    # `training_authority_spent` uses to notice that training is already over. () whenever the
+    # training role was not bought by a declaration (single command, one-stage pipeline), so that
+    # path keeps its behaviour byte-for-byte.
+    training_artifacts: tuple = ()
 
 
 def eval_log_plan(stages) -> EvalLogPlan:
@@ -846,8 +859,25 @@ def eval_log_plan(stages) -> EvalLogPlan:
       one process, often multi-hour)" — and it is also the only path the runtime leaves WITHOUT its
       own deterministic divergence kill (`health_check=True` is passed for every declared stage and
       omitted here), so the LLM watchdog is that path's only early stop;
+    - a stage the MANIFEST declares as the training loop (`role: "training"`, validated by
+      `command_eval.validate_stages`, at most one per pipeline, never the positional scorer);
     - every other pipeline stage is `LOG_ROLE_WORK`: still read, still judged, still alerting — but
       ADVISORY.
+
+    WHY A DECLARATION IS ADMISSIBLE EVIDENCE. Everything below argues that a stage NAME proves
+    nothing, and none of that changed — `train` is still just a slug. What the declaration adds is
+    not a better guess but a different KIND of fact: the manifest is the same authenticated
+    artifact the engine already trusts to say what runs, in what order, with what timeout and what
+    output contract, and it can only ever be spent in one direction. Omit `role` and the stage
+    keeps precisely the advisory role it has today; write it and the only thing bought is the power
+    to have YOUR OWN stage stopped — a kill carries no repair, no retry and no refunded slot, so
+    there is no reading under which a declarer profits. Compare the alternative that was rejected:
+    admitting `LOG_ROLE_WORK` to the kill set whenever the measured trajectory corroborates. That
+    fails on this function's own worked example — the `data_prep` stage printing a flat
+    `loss: 0.6931` is exactly a frozen curve, so the corroboration fires hardest on the false
+    positive it was meant to filter, and it would promote the deterministic half from VETO to
+    CONFIRM, which is a widening of authority docs/36 reserves for evidence the record can
+    authenticate.
 
     That last line is the substantive narrowing, and it is deliberate. The previous rule — "every
     stage whose name is not the exact string `score` is training" — was justified in this docstring by
@@ -878,6 +908,14 @@ def eval_log_plan(stages) -> EvalLogPlan:
     raw = list(stages or [])
     names = tuple(str(s.get("name")) for s in raw
                   if isinstance(s, dict) and s.get("name") is not None)
+    # The manifest's own answer to "which stage is the training loop", when it gave one.
+    # `validate_stages` is the single definition of a valid stage and admits exactly one such
+    # declaration, so this reads at most one name; anything else is a manifest that never reached
+    # here. Read from the CLEANED dicts the engine resolved, never from raw operator/agent text.
+    declared_training = frozenset(
+        str(s.get("name")) for s in raw
+        if isinstance(s, dict) and s.get("name") is not None
+        and str(s.get("role") or "").strip().lower() == STAGE_ROLE_TRAINING)
     # A row this cannot name is a broken resolved pipeline (`_resolve_stages` only ever returns
     # `validate_stages`-cleaned dicts), and dropping it would RENUMBER the rest: a 3-stage list with
     # two unusable rows would otherwise collapse to a "one-stage pipeline" and hand the survivor kill
@@ -894,15 +932,64 @@ def eval_log_plan(stages) -> EvalLogPlan:
     if names:
         for index, name in enumerate(names):
             if _is_scorer_stage(name, index=index, total=len(names)):
+                # POSITION FIRST, always. The scorer is the operator's protected final stage and a
+                # `score.log` verdict once killed a training that had just SUCCEEDED; a manifest
+                # must not be able to buy that back by writing `role` on it.
                 role = LOG_ROLE_SCORE
             elif len(names) == 1 and complete:
                 role = LOG_ROLE_TRAINING     # a one-stage pipeline IS the single-command shape
+            elif name in declared_training and complete:
+                # DECLARED, not guessed. `complete` for the same reason the one-stage grant needs
+                # it: a pipeline this cannot fully name is a broken resolution, and a broken
+                # resolution must not hand out the one role that ends nodes.
+                role = LOG_ROLE_TRAINING
             else:
                 role = LOG_ROLE_WORK
             _claim(_log_name_key(f"{name}.log"), (name, role))
     else:
         _claim(_log_name_key(_SINGLE_COMMAND_LOG), (None, LOG_ROLE_TRAINING))
-    return EvalLogPlan(roles=roles, stage_names=names)
+    artifacts: tuple = ()
+    if declared_training:
+        for stage in raw:
+            if (isinstance(stage, dict) and str(stage.get("name")) in declared_training
+                    and roles.get(_log_name_key(f"{stage.get('name')}.log"), (None, None))[1]
+                    == LOG_ROLE_TRAINING):
+                expect = stage.get("expect") or {}
+                files = expect.get("files") if isinstance(expect, dict) else None
+                artifacts = tuple(str(f) for f in (files or []) if isinstance(f, str))
+    return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts)
+
+
+def training_authority_spent(workdir, plan: Optional[EvalLogPlan]) -> bool:
+    """Whether a DECLARED training stage has already written what it promised — i.e. whether the
+    thing a kill would now destroy is a finished training rather than a running one.
+
+    This is the price of admitting a declaration, paid in the same currency the rest of the file
+    uses. `e5small-dr-unified-v2`'s `train` stage does not only train: its own log ends with the
+    retrieval evaluation it runs in-process (`RECALL@100: 0.793344` is a line in `train.log`), which
+    is the H-1 shape — a judge holding kill authority reading scorer output — moved INSIDE one
+    stage, where no plan can split it by filename. A stage that declares `role: "training"` cannot
+    be taken at its word about a phase it does not distinguish, so the authority is spent the moment
+    its declared artifact exists: after that the verdict is advisory again, exactly as if the stage
+    had never declared anything. Not a heuristic about the text — `expect.files` is the manifest's
+    own output contract and the file is an exact filesystem fact.
+
+    Fail-closed on I/O trouble: unreadable means the authority is treated as spent (advisory), never
+    as live. `()` artifacts — every path that did not buy the role with a declaration — can never
+    spend it, so the single-command and one-stage evals are untouched.
+    """
+    if plan is None or not plan.training_artifacts:
+        return False
+    for rel in plan.training_artifacts:
+        try:
+            if (Path(workdir) / rel).exists():
+                return True
+        except (OSError, ValueError):
+            # ValueError is not hypothetical: an embedded NUL in a path raises it before any
+            # syscall, so a `Path` this cannot even form must land on the same side as one it
+            # cannot stat.
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -1570,12 +1657,23 @@ class TrainingMonitorMixin:
                     what produced a confident wrong verdict."""
                     resolved = resolve_stage_log(workdir, log_plan)
                     if resolved is None or resolved.role in _NON_TRAINING_ROLES:
-                        return resolved, ""
-                    return resolved, read_training_tail(workdir, snapshot=log_snapshot, plan=log_plan)
+                        return resolved, "", False
+                    # Same thread as the rest of this tick's I/O, so the stat never touches the
+                    # event loop. Read EVERY tick, not once: the artifact appears mid-eval, and it
+                    # is the appearance that spends the authority.
+                    spent = training_authority_spent(workdir, log_plan)
+                    return (resolved,
+                            read_training_tail(workdir, snapshot=log_snapshot, plan=log_plan),
+                            spent)
 
-                resolved, tail = await anyio.to_thread.run_sync(
+                resolved, tail, authority_spent = await anyio.to_thread.run_sync(
                     _observe_log, limiter=_watch_limiter())
                 log_role = resolved.role if resolved is not None else LOG_ROLE_UNKNOWN
+                if authority_spent and log_role == LOG_ROLE_TRAINING:
+                    # The declaration bought authority over the TRAINING; the training is over.
+                    # Downgrading to the advisory role rather than going silent keeps the verdict,
+                    # the alert row and the narration — only the gun is handed back.
+                    log_role = LOG_ROLE_WORK
                 log_key = _log_path_key(resolved.path) if resolved is not None else None
                 if log_key != armed_key:
                     armed_key = log_key
@@ -1619,6 +1717,13 @@ class TrainingMonitorMixin:
                 # Open the span BEFORE the LLM call so the observer's LLM turn bands under `train_monitor`
                 # (not the enclosing `evaluate`) — the same trace-attribution fix `_triage_crash` uses.
                 with self.tracer.span("train_monitor", node_id=node_id) as sp:
+                    # WHETHER A KILL IS REACHABLE AT ALL for this eval, on every tick's span. The
+                    # role gate is a property of the resolved PIPELINE, not of the run's health, so
+                    # a pipeline that declared no training stage can be read as unstoppable from
+                    # its first tick instead of after the hours it takes for a verdict to matter.
+                    if log_plan is not None and LOG_ROLE_TRAINING not in {
+                            role for _stage, role in log_plan.roles.values()}:
+                        sp.set("kill_reachable", False)
                     sp.set_many(generation=generation, log_role=log_role,
                                 digest_lines=tail.count("\n") + 1, digest_chars=len(tail))
                     if resolved is not None and resolved.stage:
@@ -1752,6 +1857,24 @@ class TrainingMonitorMixin:
                                                broken_streak=broken_streak))
                         if trajectory_veto:
                             sp.set("trajectory_veto", True)
+                        # The OTHER counterfactual, and the one that cost the most: every conjunct
+                        # cleared except the role. `e5small-dr-unified-v2` node 2 sat in exactly
+                        # this state 31 times over 7.3 hours and NOTHING said so — the alert rows
+                        # read as ordinary `broken` verdicts, indistinguishable from ones the kill
+                        # path had simply not confirmed yet, so the unreachability of the early
+                        # stop for multi-stage pipelines stayed invisible until a node scored 0.0.
+                        # Pure, cheap, and evaluated only when the role is what refused; asking the
+                        # SAME predicate with the role swapped is what makes this a fact about the
+                        # gate rather than a second opinion about the run.
+                        role_withheld = (not stop_decided and kill_signal is not None
+                                         and log_role not in _KILL_ELIGIBLE_ROLES
+                                         and should_monitor_kill(
+                                             verdict,
+                                             enabled=getattr(self, "_train_monitor_kill", False),
+                                             threshold=threshold, log_role=LOG_ROLE_TRAINING,
+                                             broken_streak=broken_streak, trajectory=trajectory))
+                        if role_withheld:
+                            sp.set("kill_role_withheld", log_role)
                         # CLAIM BEFORE RECORDING. The sibling ASHA watchdog can decide on the same tick,
                         # and only one of them owns the node's terminal — so the alert must state what
                         # actually happened to the node, not what this monitor wanted. The guard->update
@@ -1810,6 +1933,12 @@ class TrainingMonitorMixin:
                                 alert["trajectory"] = measured
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
+                            if role_withheld:
+                                # Additive and fold-ignored; readers default its absence to "the
+                                # role was not what refused". It names the role that HELD, so the
+                                # operator reads "this stage was never kill-eligible" instead of
+                                # re-deriving it from a manifest that may since have changed.
+                                alert["kill_role_withheld"] = str(log_role)[:32]
                             if not confidence_valid:
                                 alert["confidence_valid"] = False
                             if stop_decided:
