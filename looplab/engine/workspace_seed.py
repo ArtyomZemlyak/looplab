@@ -146,4 +146,14 @@ def link_input(src, dst) -> None:
     try:
         os.symlink(src, dst, target_is_directory=src.is_dir())
     except OSError:
+        # REVIEW 2026-08-18 (correctness/seam): before the extraction out of `workspace.py`, this
+        # fallback was `self.copy_input(src, dst)` — instance dispatch through `WorkspaceSeeder`, so
+        # a subclass override or monkeypatch of `WorkspaceSeeder.copy_input` covered it. Now it is a
+        # direct module-level call: such a patch still intercepts the `mount:false` copy branch in
+        # `seed_workspace` but silently no longer reaches the symlink-failure fallback — the "patch
+        # resolves but reaches nothing" shape the repo's seam rules (CLAUDE.md, `_CompatLoader`)
+        # exist to prevent, and the divergence is invisible until symlinking fails at runtime.
+        # Fix direction: route the fallback through the caller-supplied seam (e.g. take a
+        # `copy_fallback` callable defaulting to `copy_input`, with `WorkspaceSeeder.link_input`
+        # passing `self.copy_input`), or document HERE that copy_input is not patchable for this path.
         copy_input(src, dst)

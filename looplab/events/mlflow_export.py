@@ -68,6 +68,13 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
                     # export exists for. `unknown` is exported too, and says so — silence there
                     # would read as "declared" to exactly the reader this is for. Same containment
                     # as the metric above: a key MLflow's tag charset refuses must not abort the run.
+                    # REVIEW 2026-08-18 (correctness): this tag is set whenever `v is not None`, but
+                    # the `log_metric` above it is inside its own try/except — a non-numeric extra
+                    # value (float() raising TypeError/ValueError, the exact case that containment
+                    # exists for) skips the metric and still publishes
+                    # `looplab.extra_metric_channel.<k>`, i.e. provenance for a metric that does not
+                    # exist in the run's metric table. Fix direction: move this set_tag into the
+                    # log_metric success path (after the float() call succeeds).
                     try:
                         mlflow.set_tag(f"looplab.extra_metric_channel.{k}",
                                        extra_metric_channel(_channels, k))

@@ -107,6 +107,16 @@ def _split_operation(name: str, prefix: str) -> Optional[tuple[str, str]]:
     return key, operation
 
 
+# REVIEW 2026-08-18 (correctness): this helper fails OPEN on the exact error class `_age_ok` above
+# fails CLOSED on. A transient OSError — `root.iterdir()` raising mid-iteration, or one live run's
+# `resolve()`/`is_dir()` raising (ESTALE/EIO on the geesefs mounts run roots live on) — silently
+# drops that run's digest from the allow-list, and the plan then marks its lifecycle lock "fences no
+# surviving run directory and is cold" (lock mtime is creation time; the `a+` open on acquire never
+# bumps it, so any day-old run qualifies). `--apply` then unlinks a lock a live engine HOLDS via
+# flock, enabling the per-inode fresh-lock race the module header documents as the one failure this
+# category exists to prevent. Nothing downstream can tell "run absent" from "digest set incomplete"
+# — the plan carries no such flag. Fix direction: on any OSError here, return a sentinel ("blind")
+# that makes every lifecycle-lock entry a KEEP with a stated reason, mirroring `_age_ok`'s rule.
 def _live_lifecycle_digests(root: Path) -> set[str]:
     """The lifecycle-lock digest of every run directory that still exists.
 

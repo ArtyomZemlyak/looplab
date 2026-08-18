@@ -84,6 +84,15 @@ export default function ForkFromSeqPanel({
   }, [outcome])
 
   const params = parseForkParams(paramsText)
+  // REVIEW 2026-08-18 (correctness): the draft ALWAYS carries a `rationale` key (seeded '' above
+  // when the idea has none), while `forkIdeaFromSnapshot` OMITS absent fields from `base` — so for
+  // a rationale-less snapshot idea `forkIdeaEdited` compares '""' against "null" and reports the
+  // untouched form as edited (driven: base {operator,params} vs draft {…, rationale: ''} →
+  // edited=true, decision ok). The `unedited: "an unchanged copy is not a new experiment"` refusal
+  // never fires, the submit is live on a byte-for-byte copy, and the server stamps
+  // `changed_fields: ['rationale']` for a field the operator never touched. Fix direction: drop
+  // `rationale` from the draft when it is '' and `base` has none (mirroring how empty `params` is
+  // deleted two lines down), or seed `base.rationale` to '' in the model.
   const draft = useMemo(() => {
     const next = { ...base, operator: operator.trim() || 'manual', rationale }
     if (params.ok && params.value !== undefined) next.params = params.value

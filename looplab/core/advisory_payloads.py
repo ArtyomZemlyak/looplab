@@ -603,6 +603,15 @@ def memo_verification_view(memo) -> dict:
     if not isinstance(memo, dict):
         return {"status": "absent", "method": "", "counts": {}, "rows": []}
     block = memo.get("verification")
+    # REVIEW 2026-08-18 (correctness): this strip-filter pairs a FILTERED claim list positionally
+    # with verdict rows the writer (`trust/memo_verify.py::_check_claims`) emits for the UNFILTERED
+    # sanitized list — `sanitize_research_memo_payload` retains blank/whitespace statements
+    # (`redact_persisted_text(" ") == " "`) and the writer emits a row per claim, no filter — so one
+    # such claim shifts the join and every LATER claim reads `unverified`/"verification alignment
+    # mismatch" while its real verdict is counted as an unmatched row (driven: claims [" ", "A", "B"]
+    # -> both real claims `unverified`, `unmatched_verdicts` 1), pushing a false tally into
+    # `verdict_tally`/`memo_verdict_cue` prompts. Fix: enumerate the same unfiltered dict-coerced
+    # population the writer enumerates, filtering blanks only for display.
     claims = [c for c in (memo.get("claims") or [])
               if isinstance(c, dict) and str(c.get("statement") or "").strip()]
     if block is None:

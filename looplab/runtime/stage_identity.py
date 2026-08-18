@@ -329,6 +329,14 @@ def stage_input_key(stages: list, index: int, workdir, *, scope: str, reachable,
         return None, "non_default_cwd"
     if reachable is None:
         return None, "opaque_entry"
+    # REVIEW 2026-08-18 (efficiency): the full-tree digest runs BEFORE the `unresolved_entry` check
+    # below, which depends only on `reachable` and a handful of `exists()` probes — so the wrapper
+    # shape that check exists for (`sh -c "python mine.py"`, 10 of the 39 corpus rows per the comment
+    # below) pays the multi-second `workdir_content` walk on every stage of every attempt only to be
+    # refused unconditionally afterwards. Hoisting the reachable-only existence probe above this call
+    # skips the digest for the always-refused shape and costs a normal stage one short-circuiting
+    # `exists()`; keep it `exists()`-based rather than content-map membership, since the map excludes
+    # declared outputs/sidecars and would mis-answer for an entry the map deliberately omits.
     content, why = workdir_content(workdir, exclude=declared_outputs(stages, at=index))
     if content is None:
         return None, why

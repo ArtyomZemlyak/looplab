@@ -1781,6 +1781,16 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
             raise TraceEpisodeCursorUnknown(snapshot, field="snapshot") from exc
         stages = stages[:snapshot_end]
     elif stages:
+        # REVIEW 2026-08-18 (correctness): the snapshot cursor minted here is the newest band's
+        # `anchor`, but an OPEN (live) band has no flushed operation span, so its anchor is the
+        # `grp[-1]` content-span fallback (`_conversation_bands`) — which moves on every append, and
+        # becomes the op span id once the band closes. Either way the anchor echoed back on page 2 no
+        # longer matches ANY band, the `next(...)` above hits StopIteration, and backward paging on a
+        # live node — this feature's motivating case — 409s with `trace_episode_cursor_unknown` on
+        # every walk (reproduced: append-to-open-band AND band-close both invalidate the snapshot).
+        # Fix direction: mint the snapshot from the newest band whose anchor is STABLE (a closed op
+        # span present in the population), or match the snapshot by band identity (`band` id) rather
+        # than by the anchor spelling.
         snapshot = stages[-1].get("anchor")
 
     total_episodes = len(stages)

@@ -1098,6 +1098,16 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # charges no epoch here either. A row with no `attempt` (or a non-int/bool one — `True` is
         # an `int` in python and would read as epoch 1) falls back to advancing by one, which is
         # what a log written before the ordinal existed can support.
+        # REVIEW 2026-08-18 (correctness): `max` plateaus on the legacy multi-resume ordinal shape
+        # this change claims to attribute retroactively. Before `_durable_repair_ledger` the engine
+        # restarted `attempt` per PROCESS — that function's own measured corpus is eight durable
+        # rows at attempts [1,2,1,2,1,2,1,2] — and driven through this fold that log ends at
+        # `repairs == 2` after 8 repairs: rows 3..8 advance the epoch by 0, the last failed stage
+        # row carries epoch 2 == Node.repairs, and `stage_row_superseded` answers False where the
+        # monotone [1..8] control answers True — the stale-row defect reappears on exactly the
+        # historical logs the retroactive derivation exists for. Fix direction: when a
+        # non-`salvage_cause_fix` row's ordinal does not EXCEED the counter, treat it as a
+        # per-process restart and advance by one instead of max-ing.
         _ordinal = d.get("attempt")
         if isinstance(_ordinal, int) and not isinstance(_ordinal, bool):
             n.repairs = max(n.repairs, _ordinal)

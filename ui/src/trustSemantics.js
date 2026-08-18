@@ -293,6 +293,16 @@ export function objectiveMetricSource(node) {
 export function objectiveSourceHelp(source) {
   const base = OBJECTIVE_SOURCE_HELP[source?.channel] || OBJECTIVE_SOURCE_HELP[OBJECTIVE_MEASURED]
   if (source?.channel === OBJECTIVE_SALVAGED) {
+    // REVIEW 2026-08-18 (correctness): `admitted` is `violations.length === 0`, i.e. "SOME row
+    // exists", not "the salvage rung excluded it" — and the non-admitted sentence below attributes
+    // the exclusion to the salvage rung regardless. A node salvaged-and-ADMITTED under
+    // `metric_salvage: "select"` (which mints no salvage row; the salvage branch is entered via
+    // `metric_provenance` alone) that carries any OTHER violation — e.g. a breached constraint
+    // bound, a state `nodeFeasibilityStatus` above handles explicitly — reads "It is excluded …
+    // until metric_salvage is set to “select”": a prescription already applied, while the real
+    // exclusion (the bound) goes unnamed. Fix direction: reserve this sentence for the case where a
+    // salvage-PROPER row exists; when the salvage came from provenance alone, say the exclusion is
+    // for a different recorded violation.
     return base
       + `${source.stage ? ` after stage “${source.stage}” failed its contract` : ''}`
       + (source.admitted

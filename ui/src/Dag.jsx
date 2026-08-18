@@ -239,6 +239,12 @@ function ExpNode({ data }) {
   // and the expander still lists them all — and the run-wide ones are marked so the strip cannot be
   // re-read as "this experiment is about ESCI". Empty (hence today's order) whenever the split cannot
   // be made over every experiment: see nodeProjection.js::runConstantConcepts.
+  // REVIEW 2026-08-18 (efficiency): a RUN-level fact derived inside the per-NODE component — every
+  // ExpNode computes `runConstantConcepts(state, …)`, an intersection over ALL active experiments'
+  // canonicalized memberships, in its own useMemo whose deps (`state.node_concepts`, `state.nodes`,
+  // …) get fresh identities on every poll of a live run, so an N-node canvas does N × O(N·|tags|)
+  // identical work per tick for a value that is the same in every component. Fix direction: compute
+  // once in Dag (or the canvas/layout memo) and pass the Set through node `data`.
   const runConstant = useMemo(() => runConstantConcepts(
     state, (ids, key) => nodeCanonicalConcepts(state.node_concepts, key, state.concept_consolidation || {})),
     [state.node_concepts, state.nodes, state.aborted_nodes, state.concept_consolidation,

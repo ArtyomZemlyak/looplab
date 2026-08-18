@@ -1125,6 +1125,13 @@ def stage_row_superseded(row, repairs) -> bool:
     return row_repairs < repairs
 
 
+# REVIEW 2026-08-18 (dead-code): zero production callers — only tests/test_superseded_stage_rows.py
+# exercises this wrapper (grepped looplab/ and ui/ on 2026-08-18). The rule it wraps,
+# `stage_row_superseded`, is the deliberate one-spelling whose production reader is the browser via
+# `ui/src/stageAttribution.js`; this list comprehension has no asker, so "a question a caller can
+# ask" below is aspirational and a drift here is visible only to the test restating it. Fix: wire it
+# into the python reader it was written for (`looplab inspect` / a serve projection) or delete the
+# wrapper and keep the rule.
 def superseded_stage_rows(node) -> list:
     """The rows of `node.stages` that a later repair has superseded, in pipeline order.
 
