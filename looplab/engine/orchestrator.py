@@ -586,6 +586,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         eval_env = _opt("eval_env")
         confirm_seed_base = _opt("confirm_seed_base")
         coverage_context = _opt("coverage_context")
+        cadence_while_evaluating = _opt("cadence_while_evaluating")
         concept_pivot = _opt("concept_pivot")
         graded_novelty = _opt("graded_novelty")
         capability_expansion = _opt("capability_expansion")
@@ -866,6 +867,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # process-wide `set_llm_capture` default decide, exactly as before this knob existed.
         self._trace_llm_io = None if trace_llm_io is None else bool(trace_llm_io)
         self._coverage_context = bool(coverage_context)
+        self._cadence_while_evaluating = bool(cadence_while_evaluating)
         self._concept_pivot = bool(concept_pivot)
         self._graded_novelty = bool(graded_novelty)
         self._capability_expansion = bool(capability_expansion)
@@ -4288,6 +4290,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # an abandoned merge worker could append EV_HYPOTHESIS_MERGED (and set _last_hyp_merge_n)
                 # AFTER _dispatch_evals returns, concurrently with the main task's serial merge, which
                 # is exactly the race the "background joined before _run_cadences" argument rules out.
+                # READ THAT ARGUMENT NARROWLY: since F1f the eval task group is RUN-scoped, so a
+                # session returns while its evals burn and `_run_cadences` genuinely does turn beside
+                # a live evaluation — the premise "a join precedes every cadence turn" is no longer
+                # true of the outer loop. What still holds is the only thing this comment needs: THIS
+                # overlap loop lives in `_dispatch_evals`'s own group and is cancelled when the evals
+                # it accompanies join, so the serial merge it must not race is still on the far side
+                # of that join. F1i widened WHICH cadences may fire mid-eval and deliberately left the
+                # hypothesis merge alone, precisely because its safety rests on this join and not on
+                # the node-count gate.
                 # So eval-join WAITS for an in-flight consolidate — one hybrid-retrieval + one
                 # merge-decision LLM call, bounded by the endpoint timeout (comparable to the record
                 # thread, not shorter). The self-gate keeps this rare: a converged tick whose board did
@@ -4471,7 +4482,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # runs); the checkpoint only happens on the genuine refill wait.
                     #
                     # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
-                    # `bg_tg`'s lifecycle and every `pending_nodes()`-keyed guarantee are unchanged.
+                    # `bg_tg`'s lifecycle is unchanged. It no longer says anything about a
+                    # "`pending_nodes()`-keyed guarantee", and that clause was stale from F1f: the
+                    # run-scoped eval group means a node stays `pending` across outer-loop turns this
+                    # barrier never sees, and since F1i the node-count cadences no longer key on that
+                    # predicate at all (`engine/cadence.py::at_creation_boundary`).
                     # CAPTURE the width beside the semaphore. `anyio.Semaphore` cannot be resized, so
                     # its token TOTAL is this batch's real concurrency for the batch's whole life —
                     # while `self._eval_parallel` is live and has three writers that move it mid-batch

@@ -100,7 +100,17 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 180
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 181
+    # 213 -> 214 Settings and 180 -> 181 catalogued rows on 2026-08-18: `cadence_while_evaluating`,
+    # whether the node-count cadences may fire at a creation decision point that still has an
+    # evaluation in flight (backlog F1i). A row rather than an uncurated omission on both of this
+    # list's usual grounds: OFF is the HISTORICAL behaviour and an operator must be able to get it
+    # back, and what ON enables is PAID cadence work beside a running GPU. Measured over `runs/`,
+    # the guard it replaces has been false for the whole life of every GPU run since 2026-08-13 —
+    # `rubertlite-dr-unified-v7`, `-v9` and the live `e5small-dr-unified-v2` recorded zero
+    # `strategy_decision`, zero `coverage_snapshot` and zero classifier `node_concepts` between
+    # them. It buys no extra passes per node count and its output is fenced out of the
+    # graded-novelty evidence channel, so nothing it enables can reach selection.
     # 212 -> 213 Settings and 179 -> 180 catalogued rows on 2026-08-16: `memo_verdict_cue`,
     # whether the deep-research takeaway PUSHED into every Researcher / crash-triage /
     # repair-critic prompt carries the memo's own verifier tally. A row rather than an
@@ -141,7 +151,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 213
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 214
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

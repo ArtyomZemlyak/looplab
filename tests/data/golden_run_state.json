@@ -288,6 +288,7 @@
   "node_concept_materialization_receipts": {},
   "node_concept_provenance": {},
   "node_concepts": {},
+  "node_concepts_at_pending": {},
   "node_concepts_at_vocab": {},
   "nodes": {
     "0": {

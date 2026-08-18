@@ -88,6 +88,62 @@ called, and it would both close the node-count window for a full `every` nodes a
 rather than the durable `node_eval_started` boundary, so a freshly resumed process sees occupancy 0,
 takes the ordinary create turn, and is right to.
 
+### …and one PRECONDITION both of them share
+
+There is still no third pace, and the reason is worth reading before anyone proposes one. What
+broke in August 2026 was not a pace at all: it was the *precondition* every node-count consumer
+shared. Five of them opened with
+
+```python
+if state.pending_nodes():
+    return False
+```
+
+under one six-word docstring clause, written once in June 2026 and copied by imitation four times:
+**"only at a creation decision point (no pending evals)"**. Under serial evaluation those two things
+coincided, so one test served for both. When the eval task group was hoisted to run scope
+(2026-08-13) a node stayed `pending` across outer-loop turns, and the observable became false for
+the whole life of any evaluation while the requirement — *is the loop at its creation decision
+point?* — stayed true. Measured over the runs on this box, prefixes with nodes and none pending:
+
+| run | quiescent prefixes | what the family recorded |
+|---|---|---|
+| `rubertlite-dr-unified-v6` (to 08-13) | 850, in 5 mid-run windows | fired |
+| `rubertlite-dr-unified-v7` | **0** | nothing, ever |
+| `rubertlite-dr-unified-v8` | 148, in **one** window | one firing, in the last 8.1 min of 47.6 h |
+| `rubertlite-dr-unified-v9` | **0** | nothing, ever |
+| `e5small-dr-unified-v2` (live) | **0** | nothing, ever |
+
+v8 is not an older baseline — it started after every commit in that change and its configuration is
+byte-identical to v9's — so the difference between them is **run shape**: the family now fires at
+most once per run, in the end-of-run drain, and not at all in a run that ends with an evaluation
+still going. The blast radius was never only concepts: `strategy_decision` shares the gate, so the
+Strategist has adapted nothing since v8, and so do `coverage_snapshot`, `lessons_distilled` and the
+serial deep-research and report refreshes.
+
+`cadence.at_creation_boundary(pending, while_evaluating=…)` is the fix, and it is deliberately *not*
+a pace: it reads no `n`, no `last` and no `every`, and it records nothing. The interval and the
+`at_node` idempotence are untouched, so the number of paid passes per node count is unchanged — the
+only new cost would have been the outer loop reaching a gate many times at the *same* `n`, which the
+two consumers that record no mark on their "nothing changed" path bound with an in-process
+attempted-at-`n` memo. `Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pinning it `false` for a run resumed from a snapshot written
+before the field existed — re-entry must not silently add paid calls to a run whose first half
+bought none, and "the new behaviour is better" is the argument that rule exists to refuse.
+
+**What the mid-eval classifier may and may not do.** A concept tag produced beside a running
+evaluation is a strictly wider producer than the quiescent-only one the evidence channel was
+reviewed against, so it is recorded with an `at_pending` stamp and
+`core/models.py::classifier_verified_node_concepts` refuses it. It is a first-class **read-model**
+tag — that is the point, since an experiment whose whole authored membership is the run constant
+has nothing of its own until the classifier speaks — but it never enters the `graded_novelty`
+admission precheck, so no concept can reach selectability. An in-flight pass also records **no**
+`concept_consolidation` rename: a rename is the one output of this cadence that is retroactive and
+run-wide (the fold applies it backwards to every authored-delta node's membership and every read
+surface resolves ids through it), and a per-row stamp cannot express that. Once the run drains, a
+quiescent pass re-tags what the in-flight one wrote — bounded by the existing `_RETAG_CAP` — so a
+run that reaches a quiet moment ends with exactly the evidence it would have had before.
+
 ## Event log = canonical replay state
 
 `events.jsonl` is the append-only source of truth for the **replayable run state**: nodes, metrics,

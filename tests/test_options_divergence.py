@@ -98,6 +98,17 @@ EXPECTED = {
     # read-only retrieval, and proposal-only governance — and some can add paid model work.
     # Product-on is an explicit experimental owner decision, not an inferred validation result.
     "concept_pivot": (True, False),
+    # F1i. The product surface lets the node-count cadences fire at a creation decision point that
+    # still has evaluations IN FLIGHT; a bare `Engine(...)` keeps the historical predicate. It is on
+    # this table for the ordinary reason — the product is the more aggressive side — and the
+    # aggression is real: what it enables is PAID cadence work (a Strategist consult, a classifier
+    # tagging pass) beside a running GPU. The product must have it because the predicate it replaces
+    # has been false for the whole life of every GPU run here since 2026-08-13 (`rubertlite-dr-unified-v7`,
+    # `-v9` and the live `e5small-dr-unified-v2` each recorded ZERO `strategy_decision`, ZERO
+    # `coverage_snapshot` and ZERO classifier `node_concepts`), and the bare library must not, because
+    # a direct `Engine(...)` may never gain unasked paid work. The pace is unchanged either way, so
+    # neither side gains a firing per node count.
+    "cadence_while_evaluating": (True, False),
     "graded_novelty": (True, False),
     "cross_run_concepts": (True, False),
     "concept_run_base": (True, False),

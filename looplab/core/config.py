@@ -1209,6 +1209,29 @@ class Settings(BaseSettings):
     # Deterministic, cheap, and purely additive context — no search-behavior change on its own. On by
     # default (like the rest of the always-on situational context). See search/coverage.py.
     coverage_context: bool = True
+    # F1i — whether the node-count cadences may fire at a creation decision point that still has
+    # evaluations IN FLIGHT. ON, and the default is the fix rather than the historical behaviour:
+    # `false` restores a predicate that measurably never became true again. `_should_consult` (the
+    # Strategist consult + the coverage snapshot) and `_should_consult_concepts` (the classifier
+    # re-tag / consolidation / edge / hypothesis-tag / concept-coverage pass) both opened with
+    # `if state.pending_nodes(): return False`, which since backlog F1f made evaluation children
+    # outlive the turn that admitted them is a state a GPU run reaches only after its LAST evaluation
+    # terminates. Measured over `runs/` 2026-08-18: `rubertlite-dr-unified-v7`, `-v9` and the live
+    # `e5small-dr-unified-v2` have ZERO prefixes with nodes and no pending node, and between them
+    # recorded zero `strategy_decision`, zero `coverage_snapshot`, zero `concept_coverage_snapshot`
+    # and zero classifier `node_concepts`; `-v8`'s single 148-prefix window is the last 8.1 minutes of
+    # a 47.6-hour run and holds every cadence firing that run ever made.
+    # It costs no extra paid passes: the PACE is unchanged (`cadence_due` + each consumer's `at_node`
+    # idempotence still admit one firing per node count) and the two consumers that record no mark on
+    # their "nothing changed" path carry an in-process attempted-at-n memo. It reaches no record: the
+    # in-flight classifier rows are stamped `at_pending` and `core/models.py::
+    # classifier_verified_node_concepts` refuses them, so no mid-eval tag enters graded-novelty
+    # admission or any other evidence channel (docs/36). Deliberately NOT in
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`: the fold never reads it, so an already-recorded run replays
+    # identically under either value, and pinning a resumed run to `false` would preserve the defect
+    # for exactly the multi-hour runs it costs the most. `EngineOptions` keeps it OFF, like every
+    # other Part IV/V knob, so a bare `Engine(...)` gains no unasked work.
+    cadence_while_evaluating: bool = True
     # PART IV Phase 2a live steering (§21.11/§21.13). When on, the `concept_retag_every` cadence (NOT
     # `strategist_every` — the producer gates on `_should_consult_concepts`, which uses the seed boundary
     # + `concept_retag_every`, default 5) records a
@@ -2489,6 +2512,24 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # NOT the "magnitudes stay out" case: 0 here is a real OFF, not a disabled magnitude, which is
     # the same distinction that admits `inline_repair_attempts` and `deep_research_every`.
     "repair_critic_after": 0,
+    # THE CADENCE PRECONDITION, added 2026-08-18 defaulting to True (backlog F1i). All three
+    # conditions hold and (b) is the one that decides it. (a): the field did not exist before, so a
+    # pre-field snapshot cannot have expressed a preference. (b): with it on, a resumed run's outer
+    # loop reaches the Strategist consult and the concept classifier pass while an evaluation is
+    # RUNNING, which is paid work at moments the original half of that run never bought any — and it
+    # is an intervention too, since a `strategy_decision` re-wires policy/operators/fidelity/widths
+    # for everything proposed after it. (c) is `False`, and it is POINTABLE rather than guessed: it
+    # is the literal `if state.pending_nodes(): return False` every one of these consumers carried
+    # from 2026-06-24 until this commit, so `false` reproduces the resumed run's own first half
+    # exactly.
+    # THIS ROW COSTS SOMETHING AND THE COST IS THE POINT. A run resumed from a snapshot written
+    # before this field keeps the dead cadence — which on this box is v9's and the live e5small's
+    # shape, i.e. exactly the runs the fix exists for. That is deliberate: this map's rule is that
+    # re-entry must not silently add paid calls to an old run, and "the new behaviour is better" is
+    # the argument it exists to refuse. An operator who wants the fix on a resumed run says so, by
+    # setting `cadence_while_evaluating` explicitly (CLI/env/config) — which wins over the snapshot's
+    # missing-field default. Every NEW run gets it without asking.
+    "cadence_while_evaluating": False,
     # WHAT THIS MAP IS NOT. It is a hand-maintained list of FEATURE switches whose before-the-field
     # value is unambiguous, not a complete partition of `Settings`. Two classes stay out on purpose,
     # because for them a wrong entry is worse than a missing one — it would silently REMOVE behaviour

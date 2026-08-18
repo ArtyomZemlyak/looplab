@@ -81,7 +81,15 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   consecutive time. Verified as the paragraph prescribes rather than by bumping the
   //   number: the catalogue was 180 keys and removing exactly `memo_verdict_cue` gave back
   //   179, so this is one real addition with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 180)
+  //   180 -> 181 (2026-08-18): `cadence_while_evaluating` — whether the node-count cadences may
+  //   fire at a creation decision point that still has an evaluation IN FLIGHT (backlog F1i).
+  //   ELEVENTH occurrence, and the Python guard caught it first for the seventh consecutive
+  //   time. Verified as the paragraph prescribes rather than by bumping the number: the
+  //   catalogue was 181 keys and removing exactly `cadence_while_evaluating` gave back 180, so
+  //   this is one real addition with nothing renamed away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 181)
+  assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')
+  assert.equal(schema.fieldByKey.cadence_while_evaluating.default, true)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')
   assert.equal(schema.fieldByKey.speculation_depth.minimum, 0)
   assert.equal(schema.fieldByKey.speculation_depth.maximum, 64)
