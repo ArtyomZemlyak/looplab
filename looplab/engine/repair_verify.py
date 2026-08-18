@@ -387,6 +387,13 @@ _CITATION_RE = re.compile(
     r"|\bnode-\d+"
     r"|\bthe\s+(?:previous|prior|last|earlier)\s+(?:repair|attempt|fix|change|run|node)\b",
     re.IGNORECASE)
+# REVIEW 2026-08-18 (correctness): the `.` in _CLAUSE_ENDS also matches the decimal point of a
+# number, so a citation clause that quotes a value ends INSIDE it and every cited token after the
+# number falls outside the span — driven: "Node 1 used lr 0.5 and nll_cos throughout its training"
+# over a diff without `nll_cos` yields `_citation_clauses` == [(0, 16)] (the clause dies at the '.'
+# in `0.5`) and `verify_repair` returns REPAIR_UNMET ('nll_cos',), the citation false-positive
+# class the demotion shipped to remove; the same text minus the decimal answers `unstated`. Fix
+# direction: only treat `.` as a clause end when it is not between two digits.
 _CLAUSE_ENDS = ";.\n"
 
 # --- An abbreviated identifier -------------------------------------------------------------------
@@ -776,6 +783,14 @@ def _assigned_numeric_paths(source: str) -> dict:
             continue
         found.append((getattr(node, "lineno", 0), getattr(node, "col_offset", 0), targets, val))
     out: dict = {}
+    # REVIEW 2026-08-18 (correctness): textual (lineno, col) order still lets DEAD code win — the
+    # adversarial decoy the docstring's fix narrative reads as closed is only RELOCATED: a
+    # never-called helper placed AFTER the real assignment outranks it. Driven: module-level
+    # `config.train.training.batch_size = 8192` followed by `def _unused(): ... = 1024` reports
+    # 1024, so `declared_param_overrides` mints a false `params_overridden` caveat on a champion
+    # whose running code agrees with its declaration — and a trailing decoy EQUAL to the declared
+    # value suppresses a real module-level override. Fix direction: prefer the shallowest enclosing
+    # scope (module level first) and fall back to textual order only within one depth.
     # A stable sort on the position the source really has; `ast.walk`'s own order is BFS and is the
     # one thing this dict may not inherit (see the docstring).
     for lineno, _col, targets, val in sorted(found, key=lambda f: (f[0], f[1])):

@@ -2103,6 +2103,16 @@ class EvaluateMixin:
                         self._resolved_stages(node, workdir),
                         eval_spec_time_budget(self._eval_spec)
                         if isinstance(self._eval_spec, dict) else None)
+                    # REVIEW 2026-08-18 (correctness): the spend and the license are priced under
+                    # DIFFERENT declarations — `chain_seconds` includes wall-clock spent under the
+                    # PRE-repair manifest while `_pipeline_s` is re-resolved from the POST-repair
+                    # one, so a repair that SHRINKS declared stage timeouts (right-sizing after an
+                    # epoch cut) retroactively re-prices seconds that were inside the license when
+                    # they were spent: the fix gets exactly ONE eval, and if that attempt fails for
+                    # anything the chain is abandoned against `(cap+1) * <the new, cheaper
+                    # pipeline>` with a terminal that charges old-declaration work at the new rate.
+                    # Fix direction: charge each attempt against the pipeline declared when it ran
+                    # (or license against the largest declaration the chain has seen).
                     floor_stop = repair_redone_work_stop(
                         chain_seconds=prior_repair_seconds + total_eval,
                         pipeline_seconds=_pipeline_s,
