@@ -121,6 +121,10 @@ export const FORK_IDEA_FIELDS = Object.freeze([
 
 // The fields the operator may edit in the branch form. `operator` is the search operator name and is
 // editable because a branch often IS a different operator applied to the same parent.
+// REVIEW 2026-08-18 (simplification/dead-export): referenced nowhere — not by `ForkFromSeqPanel.jsx`
+// (which hardcodes the same three fields as separate useState hooks) and not by any test — so this
+// is a second, unread statement of the rule that can silently drift from the form. Fix direction:
+// either drive the panel's fields from it (and pin it in the panel test) or delete the export.
 export const FORK_EDITABLE_FIELDS = Object.freeze(['operator', 'rationale', 'params'])
 
 /** The idea a branch starts from: the snapshot node's own idea, narrowed to `FORK_IDEA_FIELDS`. */

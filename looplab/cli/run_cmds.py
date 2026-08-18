@@ -1298,6 +1298,12 @@ def reap_service_files_cmd(
     from looplab.serve.service_reaper import apply_service_file_reap, plan_service_file_reap
 
     plan = plan_service_file_reap(runs_root, grace_s=max(0.0, grace_hours) * 3600.0)
+    # REVIEW 2026-08-18 (correctness): `--json --apply` falls through this branch and silently
+    # ignores --json — the apply outcome is only ever printed as prose, so a scripted caller asking
+    # for JSON gets neither the plan nor a JSON receipt, with no refusal. (Related silence: a
+    # missing/typo'd runs_root is swallowed by `plan_service_file_reap`'s iterdir OSError catch and
+    # reports "0 service files" with exit 0 in BOTH modes.) Fix: emit the apply receipt as JSON, or
+    # refuse the --json/--apply combination out loud.
     if as_json and not apply:
         typer.echo(json.dumps(plan, indent=2, default=str))
         raise typer.Exit(0)

@@ -14,6 +14,14 @@ operator says `--apply`, and every rule it obeys (attribution by `run_uid` then 
 predicates that keep shared evidence, the `blind` refusal) belongs to `serve/memory_cascade.py`
 rather than to this file.
 """
+# REVIEW 2026-08-18 (conventions): `--apply` below calls `purge_orphan_identities`, which REWRITES
+# the shared cross-run stores — a command that WRITES cross-run memory living outside
+# `governance_cmds`, while CLAUDE.md's cli row still reads "everything that WRITES cross-run memory
+# or spends money on a steward is `governance_cmds`" and enumerates six groups without this module.
+# The docstring above argues the domain split, but the CLAUDE.md sentence did not move in the SAME
+# change (CLAUDE.md's own docs-in-sync rule), so the package map now contradicts the code. Fix:
+# amend CLAUDE.md's cli row (name `memory_cmds` and scope the governance sentence) — or move the
+# command.
 from __future__ import annotations
 
 from pathlib import Path
@@ -48,6 +56,13 @@ def memory_orphans_cmd(
                                               render_orphan_survey)
 
     survey = orphan_survey(memory_dir, runs_root)
+    # REVIEW 2026-08-18 (correctness): this JSON branch exits 0 BEFORE the `survey["available"]`
+    # check below it, so a missing/typo'd memory_dir prints `{"available": false, ...}` and exits 0
+    # in --json mode while the human-readable path exits 1 — a scripted health check keyed on the
+    # exit code reads a misconfigured store as healthy. And `--json --apply` falls through this
+    # branch entirely, silently ignoring --json (the purge receipt is only ever printed as prose).
+    # Fix: hoist the availability check above this branch (exit 1, JSON body kept), and either honor
+    # --json on the apply path or refuse the flag combination out loud.
     if as_json and not apply:
         typer.echo(orjson.dumps(survey, option=orjson.OPT_INDENT_2).decode())
         raise typer.Exit(0)

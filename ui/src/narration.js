@@ -603,6 +603,19 @@ export function pendingWork(live, log = []) {
   // alive". A node between stages, waiting on the GPU lease, or being repaired all read as STARTED,
   // which is right — the evaluation owns them — and none of them is proof of a running process.
   const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending')
+  // REVIEW 2026-08-18 (correctness): two defects in the announcement scan. (1) The one call site
+  // (`Dock.jsx::agentStatus`) passes `timeline.rows` — a BOUNDED tail window (200-row initial page,
+  // 5,000 retained, `timelineModel.js`), while `node_eval_started` fires ONCE per node at dispatch
+  // and a live run appends rows continuously (163 `llm_usage` in one 40-minute stage, per the
+  // STATUS_NOISE comment above). The announcement scrolls out of the window within minutes and
+  // `Node.eval_started` is exclude=True on the wire, so a node hours into training renders
+  // "Experiment #N queued…" on page load — the inverse of the misstatement this split was built to
+  // fix. (2) The match is by node id ONLY: after an eval-type `node_reset` the stale generation's
+  // row still counts as announced (`data.generation` vs `n.attempt` is never compared), so a
+  // re-queued node narrates as "evaluating" while nothing runs — the fold-side readers key on
+  // (node_id, generation) precisely to avoid this. Fix direction: serve the eval-start boundary on
+  // the live node payload (or scan an unbounded source), and count a row only when its generation
+  // matches the node's current attempt.
   const announced = new Set()
   for (const event of log) {
     if (event?.type !== 'node_eval_started') continue

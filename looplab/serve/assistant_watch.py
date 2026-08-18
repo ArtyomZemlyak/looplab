@@ -641,6 +641,15 @@ class WatchStore:
         out.sort(key=lambda r: r.get("created", 0))
         return out
 
+    # REVIEW 2026-08-18 (efficiency): the `_settled` memo stops at TERMINAL records — an ARMED watch
+    # is still read + json-parsed + fully re-validated (`_valid` re-runs `_normalize_trigger`) on
+    # every 2 s tick even when its own `next_due` is minutes away, so a watch backed off at the 60 s
+    # ceiling costs 30 reads/min off the runs-root mount just to learn it is not due (measured: 30
+    # reads over 30 ticks). A per-id (file stat identity, next_due) hint — invalidated the way
+    # `reuse_refusal` already trusts stat tuples — keeps the "another process armed one behind our
+    # back" property while reducing a steady-state tick to one scandir plus stats. Separately, the
+    # scheduler thread has no production `stop()` caller and `_loop` never exits on its own, so once
+    # `ensure_started` fires the process ticks forever even after the last watch settles.
     def due(self, *, now: Optional[float] = None) -> list[dict]:
         """Armed watches whose next check has come round, oldest-due first (fair under a cap).
 
@@ -829,6 +838,12 @@ WORK_PREAMBLE = (
 )
 
 
+# REVIEW 2026-08-18 (simplification): `json.dumps(observation, sort_keys=True, default=str)[:1500]`
+# is spelled out verbatim in BOTH branches below, and the 1500 is a bare literal while every sibling
+# cap in this file is a named constant (`_MAX_CHECKPOINT_SUMMARY_CHARS`, `_MAX_TODOS_JSON_CHARS`,
+# `_MAX_INSTRUCTION_CHARS`); `routers/assistant.py` additionally hand-quotes "1,500 chars" in a
+# docstring, so one rule is stated in three places that can drift independently. Hoist a single
+# `observation_json` local bounded by a `_MAX_OBSERVATION_CHARS` constant the docstring can name.
 def wakeup_instruction(record: dict, observation) -> str:
     """The full model-facing instruction for one wake-up — the record's own sentence, in context."""
     if (record.get("trigger") or {}).get("kind") == "work":

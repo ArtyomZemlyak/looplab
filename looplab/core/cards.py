@@ -1010,6 +1010,14 @@ class Card(BaseModel):
     # RECORD of a loss the board would otherwise launder: an idea that was never executed is not
     # evidence of anything, so those ids are removed from `evidence` (see that function for the
     # once-per-card bound and why `gated` stays unreachable), and this is where they go instead.
+    # REVIEW 2026-08-18 (load-bearing-comment): the disjointness claim below is FALSE for two of the
+    # three cases — `_apply_unexecuted_discards` stamps `discarded_nodes` UNCONDITIONALLY but empties
+    # `evidence` only when the single discard IS the whole evidence set (deliberately, per its own
+    # docstring: a mixed set keeps the discard in `evidence` so `gated` stays unreachable, and the
+    # two-discard retirement keeps both). So mixed-evidence and two-discard cards hold the same node
+    # id in BOTH lists, and a reader summing or set-differencing them on this promise miscounts.
+    # Fix: restate the invariant as "disjoint only in the returned single-discard case; otherwise
+    # `discarded_nodes` may overlap `evidence`".
     # NOT a second `evidence` list and never a superset of one — the two are disjoint by construction,
     # and an operator auditing "what did this run pay a Developer call for and throw away" reads THIS.
     # The same predicate already refunds the node-budget slot (`node_counts_toward_card_budget`); the

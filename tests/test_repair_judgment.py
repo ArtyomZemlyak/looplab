@@ -424,6 +424,12 @@ def test_the_verdict_row_is_diagnostic_and_its_vocabularies_collide_with_nothing
     # And the partition test in tests/test_event_types.py covers the other half (registered + not
     # folded); this pins the membership the append site asserts.
     from looplab.engine import evaluate as ev_mod
+    # REVIEW 2026-08-18 (guard-test): a POSITIVE SUBSTRING pin — the exact residue class CLAUDE.md's
+    # guard-test ladder sends to tier 3, because it is satisfied by deleting the in-code assert in
+    # `evaluate.py::_evaluate` and leaving a comment carrying the literal. The next test down already
+    # uses tests/_source_scan.py; use its AST helpers here too (e.g. `names_read` on `_evaluate`, or
+    # walk `function_tree` for a real ast.Assert reading both names) so a commented-out copy of the
+    # membership assert cannot keep this green.
     assert "assert EV_REPAIR_CRITIC_VERDICT in DIAGNOSTIC_EVENTS" in inspect.getsource(
         ev_mod.EvaluateMixin._evaluate)
 

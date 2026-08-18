@@ -313,6 +313,12 @@ class LessonDistillMixin:
             if not (h.verdict == "supported" and (h.best_delta or 0) > 0):
                 continue
             source = str(h.statement or "")
+            # REVIEW 2026-08-18 (reuse): this sha256(source) and `engine/memory.py::write_auto_skill`'s
+            # `source_statement_sha256` (memory.py ~819) hash the SAME string twice, in two files,
+            # under two field names — the candidate receipt and the durable skill card are meant to
+            # name one claim, so a cap/normalization added to either side breaks the audit join
+            # silently, and no test compares the two. Fix: hoist one named digest helper both sides
+            # call, or have the receipt carry the digest `write_auto_skill` itself computed.
             source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
             if not promotable_skill_statement(h.statement):
                 local = assess_skill_statement(h.statement)

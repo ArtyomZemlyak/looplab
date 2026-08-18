@@ -2629,6 +2629,15 @@ export function Metrics({ n, detail, state, runId }) {
   // row reading `salvaged | 0.74 | 0.81` must not leave the second number looking like the measured
   // one by contrast.
   const champObjective = champ ? objectiveMetricSource(champ) : null
+  // REVIEW 2026-08-18 (correctness): `extraKeys` is the UNION over ALL nodes, but each extras row's
+  // `channel` is read from THIS node only — a key this node never reported still gets
+  // `extraMetricChannel(n, k)` = 'unknown', rendering a warn "provenance unknown" label beside an
+  // empty cell (a caveat about a value that does not exist, the invented-caveat shape
+  // `objectiveMetricSource` forbids). And the champion's extras value in the `best #N` column
+  // carries no channel read of its own — only the ★ row reads `champObjective` — so a self-reported
+  // champ value sits unlabeled beside this node's labeled one, the exact by-contrast misread the ★
+  // cell's comment above warns about. Fix direction: label only cells that hold a value, each from
+  // its own node's record (`extraMetricChannel(champ, k)` for the best column).
   const rows = [
     { k: 'objective', mine: n.confirmed_mean ?? n.metric, best: champ ? (champ.confirmed_mean ?? champ.metric) : null, star: true },
     ...extraKeys.map(k => ({
