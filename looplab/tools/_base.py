@@ -205,6 +205,12 @@ def capability_manifest(specs, capabilities=()) -> tuple[dict, str]:
         rows.append({"spec": spec, "capability": cap.as_dict()})
     rows.sort(key=lambda row: row["capability"]["name"])
     raw_manifest = {"schema": 1, "tools": rows}
+    # REVIEW 2026-08-18 (reuse): this inlines core/jsonutil.canonical_json byte-for-byte (the same
+    # four strict options) and hashes it to mint the `capability_manifest_sha256` stamped on every
+    # tool observation (agents/tool_loop.py) — a private re-spelling of the one canonical-JSON
+    # contract jsonutil exists to keep singular (doc 25 SE-08: a drifted copy is two digests for one
+    # value, with nothing to say why). tools/ already imports core.jsonutil (write_tools.py), so
+    # `encoded = canonical_json(raw_manifest)` serves directly with no layering cost.
     encoded = json.dumps(raw_manifest, ensure_ascii=False, sort_keys=True, allow_nan=False,
                          separators=(",", ":")).encode("utf-8")
     # Detach the retained manifest from provider-owned spec dicts. Without the round-trip a provider

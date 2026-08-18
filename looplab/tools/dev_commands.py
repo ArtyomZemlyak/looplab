@@ -69,6 +69,13 @@ class DeveloperCommandRuntime:
             eval_env=getattr(settings, "eval_env", {}) or {})
 
 
+# REVIEW 2026-08-18 (reuse): re-implements core/jsonutil.canonical_json_digest (identical dump
+# options) plus `default=str`, and names the LENIENT result "canonical" — the exact naming hazard
+# jsonutil's own docstring warns about (the deliberate lenient sibling in serve/launch.py is named
+# `_lenient_json_bytes` for that reason). `default=str` digests a fallback rendering the canonical
+# contract refuses, so two distinct values (e.g. Path('/x') vs '/x') would mint ONE receipt digest.
+# Command specs are plain-JSON operator config, so canonical_json_digest (or canonical_json +
+# sha256 to keep raising) serves directly; if leniency is truly wanted, name it lenient.
 def _canonical_digest(value: Any) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False,
                          separators=(",", ":"), default=str).encode("utf-8")
@@ -212,6 +219,13 @@ class DevCommandTools:
         raw_out = raw_err = ""
         try:
             work = root / "work"
+            # REVIEW 2026-08-18 (efficiency): every run_dev_command call rebuilds the whole candidate
+            # from the operator's SOURCE — `git ls-files` + per-file copy2 of the entire tracked tree
+            # (network-mount reads in this deployment) plus copy_input deep copies for every
+            # copy-mode data spec — for a tool whose intended use is a repeated compile→fix→test loop
+            # over a seed that does not change between calls. Seed ONCE into a provider-local cache
+            # (invalidated via workspace_fingerprint/mtime) and clone locally per call; the
+            # disposable-workspace isolation property is unchanged.
             notes, binds = self._materialize(work)
             cwd = (work / str(spec.get("cwd") or ".")).resolve()
             if not _inside(work, cwd) or not cwd.is_dir():
@@ -278,6 +292,16 @@ class DevCommandTools:
                           provenance={"source": "task.developer_commands",
                                       "command": command_name}, receipt=receipt)
 
+    # REVIEW 2026-08-18 (altitude): a second hand-written copy of WorkspaceSeeder.seed_workspace's
+    # ORCHESTRATION, not just its primitives — the root-editable mount-collision rule, the
+    # protected-files placement BETWEEN the shadow guard and the mounts (the ordering
+    # engine/workspace.py's comment calls "the safety argument": earlier -> false collisions abort
+    # valid tasks, later -> a protect entry writes THROUGH a read-only mount symlink into the
+    # operator's original data), and the DataSpec mount/copy split, all re-derived above the shared
+    # workspace_seed primitives. No shared function or cross-check test holds the two orchestrations
+    # together (tests/test_dev_commands.py pins only the seed_repo_tree passthrough), so the next
+    # ordering fix to seed_workspace lands in one body only. Extract the pure ordering into
+    # workspace_seed (the engine keeping tracing/eventing) or pin the two with a cross-check test.
     def _materialize(self, work: Path) -> tuple[list[str], list[tuple[str, bool]]]:
         work.mkdir(parents=True, exist_ok=True)
         ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
