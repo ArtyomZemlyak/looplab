@@ -4443,3 +4443,23 @@ deliberately deferred, with rationale:
   workspace is the one region that provably holds only what this node produced, which
   `monitor_log_sources` already relies on), and the direction of harm is favourable — reading the
   candidate's code can only ever route a stop toward the cheap action.]
+
+  **[2026-08-18 — CLOSED, same day. The judge reads the code.** `monitor_code_tools` gives the live
+  judge the same read-only scouts every other agent has — `read_file` / `grep` / `find_files` /
+  `list_dir` via `RepoScoutTools` — composed with the log tools by `monitor_tools` and rooted at
+  the NODE WORKDIR. The root is the whole argument, twice over: it is the code that is ACTUALLY
+  RUNNING (the Developer's scouts are rooted at the editable SOURCE, which is a different
+  filesystem — the distinction that cost `runs/rubert-dr-0807` node 2 a repair loop with no move
+  left), and it is the one region that provably holds only this node's own product, which
+  `monitor_log_sources` already relies on and `read_allowlist`/`read_fence` already grant. Reused
+  rather than re-derived because `RepoScoutTools` is already the right shape for this mount:
+  path-safe, secret-filtered, bounded per page and per walk, and already skipping the gigabyte
+  directories a trainer workdir carries (`ckpt`, `checkpoints`, `wandb`, `lightning_logs`), which
+  on geesefs is the difference between a grep and a stall. `_MONITOR_LOOK_TURNS` 6 -> 9: a fault
+  attribution costs a `grep` plus a `read_file` on top of the curve work, and a budget that forces
+  the judge to choose between looking at the curve and looking at the code produces exactly the
+  guess the attribution exists to replace. Driven in `tests/test_watchdog_declared_training_stage.py`
+  section G — a symbol the log never mentions is findable, three escape shapes are refused, both
+  halves fail closed, the two name sets are disjoint (pinned as disjointness, not as an
+  unfalsifiable ordering claim), and the OFF path is the historical one-shot call with the
+  invitation absent.]

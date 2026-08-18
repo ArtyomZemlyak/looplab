@@ -492,3 +492,145 @@ def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
                            for a in assigns), (
         "a tree-killed process exits -9 with no traceback, which `_failure_reason` reads as "
         "oom/crash — the watchdog's own reason must win when it stopped this attempt")
+
+
+# ============================================================ G: the judge may read the code
+#
+# `fault` asks a question the log alone often cannot answer. A frozen loss looks identical whether
+# the objective cannot descend AS WRITTEN or the idea simply does not work, and only the source
+# says which — so a judge that can read every byte of the log and not one line of the program that
+# wrote it is guessing at exactly the attribution that decides between a repair and a verdict.
+# It now gets the same read-only scouts every other agent has, rooted at the NODE WORKDIR.
+
+def _looking_host(tmp_path, **kw):
+    """A host with the LOOK tools on. `_Host` mirrors `_evaluate`'s wiring and does not set
+    `train_monitor_tools`, so the shared harness runs with them off — which is the historical
+    one-shot path and exactly what the last test here pins. Everything about looking needs the
+    other state."""
+    host = _Host(tmp_path, **kw)
+    host._train_monitor_tools = True
+    return host
+
+
+def _workdir_with_code(tmp_path, name="node_0"):
+    wd = tmp_path / name
+    (wd / "vectorsearch").mkdir(parents=True)
+    (wd / "train.log").write_text(_COLLAPSED_TAIL, encoding="utf-8")
+    (wd / "vectorsearch" / "loss.py").write_text(
+        "def nll_cos(q, d, temperature=0.05):\n"
+        "    # normalize is never applied to the document tower\n"
+        "    q = torch.nn.functional.normalize(q, dim=-1)\n"
+        "    return (q @ d.T / temperature).logsumexp(-1).mean()\n", encoding="utf-8")
+    return wd
+
+
+def test_g_the_judge_can_read_the_code_that_is_running(tmp_path):
+    """The whole point, driven through the real provider: a symbol the LOG never mentions is
+    findable, and it is found in the workdir the eval is actually executing."""
+    from looplab.engine.train_monitor import monitor_code_tools
+
+    wd = _workdir_with_code(tmp_path)
+    tools = monitor_code_tools(_looking_host(tmp_path), wd)
+    assert sorted(s["function"]["name"] for s in tools.specs()) == [
+        "find_files", "grep", "list_dir", "read_file"]
+
+    hit = tools.execute("grep", {"pattern": "normalize"})
+    assert "loss.py" in hit and "document tower" in hit, hit
+    assert "temperature=0.05" in tools.execute("read_file", {"path": "vectorsearch/loss.py"})
+
+
+def test_g_the_scouts_are_rooted_at_the_workdir_and_cannot_leave_it(tmp_path):
+    """Rooted at the WORKDIR, not at the editable source — the code on trial is the code that is
+    running, and the two are different filesystems (a distinction that already cost a run). That
+    root is also the containment: it is the one region that provably holds only what THIS node
+    produced, which is what `monitor_log_sources` already relies on."""
+    from looplab.engine.train_monitor import monitor_code_tools
+
+    wd = _workdir_with_code(tmp_path)
+    (tmp_path / "secret.txt").write_text("operator-only material", encoding="utf-8")
+    tools = monitor_code_tools(_looking_host(tmp_path), wd)
+
+    # asserted on the FILE, not on the pattern: a miss echoes the pattern back in its own answer.
+    assert "secret.txt" not in tools.execute("grep", {"pattern": "material"})
+    assert "secret.txt" not in tools.execute("find_files", {"root": ".", "pattern": "*.txt"})
+    for escape in ("../secret.txt", "/etc/hostname", "../../etc/hostname"):
+        answer = tools.execute("read_file", {"path": escape})
+        assert "operator-only" not in answer and "localhost" not in answer, (escape, answer[:200])
+
+
+def test_g_no_workdir_and_no_tools_both_answer_none(tmp_path):
+    """Fail-closed on both halves, and the OFF path must stay the historical one-shot call."""
+    from looplab.engine.train_monitor import monitor_code_tools, monitor_tools
+
+    class _Off:
+        _train_monitor_tools = False
+
+    wd = _workdir_with_code(tmp_path)
+    assert monitor_code_tools(_Off(), wd) is None
+    assert monitor_tools(_Off(), wd, eval_log_plan(_V2_STAGES)) is None
+    assert monitor_code_tools(_looking_host(tmp_path), tmp_path / "does-not-exist") is None
+
+
+def test_g_the_two_providers_cannot_shadow_each_other(tmp_path):
+    """`CompositeTools` de-dups by NAME with the FIRST provider winning, so a collision here would
+    be silent: a general file reader taking over `read_log` would answer without this attempt's
+    byte floor and hand the judge a dead attempt's curve.
+
+    Today nothing collides, which makes the ORDER unfalsifiable and is why this pins the property
+    that actually holds — the two name sets are DISJOINT — rather than asserting an order no
+    mutation can break. It stays a live guard: the day either provider grows a name the other has,
+    `collisions` fills and this fails, which is the moment the order stops being cosmetic."""
+    from looplab.engine.train_monitor import (monitor_code_tools, monitor_log_tools,
+                                              monitor_tools)
+
+    wd = _workdir_with_code(tmp_path)
+    host, plan = _looking_host(tmp_path), eval_log_plan(_declared(_V2_STAGES))
+    logs = {s["function"]["name"] for s in monitor_log_tools(host, wd, plan).specs()}
+    code = {s["function"]["name"] for s in monitor_code_tools(host, wd).specs()}
+    assert not (logs & code), f"a shadowing collision is now possible: {sorted(logs & code)}"
+
+    tools = monitor_tools(host, wd, plan)
+    assert sorted(s["function"]["name"] for s in tools.specs()) == sorted(logs | code)
+    assert not getattr(tools, "collisions", []), tools.collisions
+    # ...and each half still answers its own kind of question through the composed set.
+    assert "8.8534" in tools.execute("read_log", {"log": "train.log"})
+    assert "temperature=0.05" in tools.execute("read_file", {"path": "vectorsearch/loss.py"})
+
+
+def test_g_the_invitation_names_the_code_only_when_the_tools_are_wired(tmp_path):
+    """Prompt text is a contract: with tools off the message must be byte-identical to the one this
+    feature found, and with them on it must actually say the code is readable — a tool the model is
+    never told about is a tool it does not use."""
+    from looplab.engine.train_monitor import _LOOK_INVITATION
+
+    for probe in ("read_file", "grep", "fault"):
+        assert probe in _LOOK_INVITATION, probe
+
+    wd = _workdir_with_code(tmp_path)
+    seen = {}
+
+    class _Recorder(_ScriptedClient):
+        def complete_tool(self, messages, schema):
+            seen.setdefault("with", messages[-1]["content"])
+            return super().complete_tool(messages, schema)
+
+    host = _looking_host(tmp_path, client=_Recorder(_COLLAPSED), asha_kill=False)
+    _drive_train(host, wd, plan=eval_log_plan(_V2_STAGES),
+                 until=lambda h: len(h.store.rows(EV_TRAIN_MONITOR_ALERT)) >= 1)
+    assert _LOOK_INVITATION in seen["with"]
+
+    other = tmp_path / "off"
+    other.mkdir()
+    wd2 = _workdir_with_code(other, name="node_1")
+    seen2 = {}
+
+    class _Recorder2(_ScriptedClient):
+        def complete_tool(self, messages, schema):
+            seen2.setdefault("without", messages[-1]["content"])
+            return super().complete_tool(messages, schema)
+
+    host2 = _Host(other, client=_Recorder2(_COLLAPSED), asha_kill=False)
+    host2._train_monitor_tools = False
+    _drive_train(host2, wd2, plan=eval_log_plan(_V2_STAGES),
+                 until=lambda h: len(h.store.rows(EV_TRAIN_MONITOR_ALERT)) >= 1)
+    assert _LOOK_INVITATION not in seen2["without"]

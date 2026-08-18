@@ -141,14 +141,26 @@ _LOOK_INVITATION = (
     "Before you call anything broken, USE YOUR TOOLS: `metric_series` for what the loss has actually "
     "done over the whole run at a granularity you choose, and `read_log` to tail further back, read "
     "the run's start, or search for a traceback. If the tools disagree with the tail, the tools have "
-    "more evidence.")
+    "more evidence. You can also READ THE CODE this run is executing — `list_dir`/`find_files` to "
+    "see what is in the workdir, `read_file` for a whole file, `grep` to find where a symbol, flag "
+    "or config key is set. That is what tells a BUG from a bad idea: a loss that is frozen because "
+    "the objective cannot descend as written looks exactly like one frozen because the idea does "
+    "not work, and only the source says which. Read before you attribute `fault`, and name what "
+    "you found.")
 
 # The tool-loop turn budget for ONE monitor tick. Deliberately well below `trust.judge.JUDGE_MAX_TURNS`
 # (15): this judge fires up to `_MAX_MONITOR_LLM_CALLS` times per node on a timer, so a turn budget is
-# multiplied by ~200 in a way the two one-shot verifiers' never is. Six is enough for the shape the
-# invitation asks for — a whole-run series, a narrower one, a search, and the emit — and a loop that
-# spends it degrades to `parse_structured` on the same messages rather than to nothing.
-_MONITOR_LOOK_TURNS = 6
+# multiplied by ~200 in a way the two one-shot verifiers' never is. Six was enough for the shape the
+# invitation asked for when it was logs only — a whole-run series, a narrower one, a search, and
+# the emit — and a loop that spends it degrades to `parse_structured` on the same messages rather
+# than to nothing. NINE since 2026-08-18, because the invitation now asks for one more THING and
+# that thing takes more than one turn: attributing `fault` means locating the file that sets the
+# parameter (a `grep`), reading it (a `read_file`, possibly a second page), and doing that WITHOUT
+# giving up the log evidence the verdict is primarily about. A budget that forces the judge to
+# choose between looking at the curve and looking at the code produces exactly the guess the
+# attribution exists to replace. Still far below `trust.judge.JUDGE_MAX_TURNS` (15) and still
+# multiplied by ~200 ticks per node, which is why it moved by three and not by ten.
+_MONITOR_LOOK_TURNS = 9
 
 
 def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000) -> str:
@@ -1460,6 +1472,79 @@ def _log_query_tools(workdir, log_plan, log_snapshot):
     return LogQueryTools(resolve)
 
 
+def monitor_tools(engine, workdir, log_plan=None, log_snapshot=None):
+    """Everything this tick's judge may look with: the eval's own logs AND the code that wrote
+    them. None when neither is available, which is what `structured_judge` reads as "no tools" and
+    is the historical one-shot call byte for byte.
+
+    Composed here rather than at the call site so the two watchdogs cannot come to disagree about
+    what looking means — the same reason `_log_query_tools` exists as one function. `CompositeTools`
+    de-dups by tool NAME with the first provider winning, and the logs go first deliberately: they
+    are the evidence the verdict is primarily about, and a name collision must never silently
+    shadow `read_log` with a general file reader that knows nothing about attempt floors.
+    """
+    providers = [p for p in (monitor_log_tools(engine, workdir, log_plan, log_snapshot),
+                             monitor_code_tools(engine, workdir)) if p is not None]
+    if not providers:
+        return None
+    if len(providers) == 1:
+        return providers[0]
+    from looplab.agents.tool_loop import CompositeTools
+    return CompositeTools(providers)
+
+
+def monitor_code_tools(engine, workdir):
+    """The read-only CODE scouts the live judge may look with, rooted at the NODE WORKDIR — or None
+    when the tools are off or there is no workdir to root them at.
+
+    WHY THE JUDGE NEEDS THEM. It is asked a question the log alone often cannot answer. `fault`
+    splits a `broken` verdict into "the code is wrong" and "the idea is wrong", and those get
+    opposite treatments — one is repaired and retried, the other is recorded as a real negative
+    result. A frozen loss looks identical either way from the outside; what tells them apart is
+    whether something in the running code cannot work as written. Measured on
+    `e5small-dr-unified-v2`: nodes 2 and 4 spent ~10 GPU-hours reaching 0.0 and 2e-05 under 48
+    `broken` verdicts between them, every one correct about the symptom and none able to say
+    whether a reduction, a normalization or the hypothesis was at fault — because the judge could
+    read every byte of the log and not one line of the program that wrote it.
+
+    ROOTED AT THE WORKDIR, and that is the whole safety argument as well as the accuracy one:
+
+    - it is the code that is ACTUALLY RUNNING. The Developer's own scouts are rooted at the
+      editable SOURCE, which is a different filesystem from the one the eval sees — a distinction
+      that already cost a run (`runs/rubert-dr-0807` node 2 died on a missing
+      `<workdir>/looplab_eval.py` while the repair session's `read_file` cheerfully returned it).
+      A judge reading the source tree would be answering about a program that is not the one on
+      trial.
+    - it is the one region that provably holds only what THIS node produced, which is what
+      `monitor_log_sources` already relies on and what `read_allowlist`/`read_fence` already grant.
+      No other node's workspace, no operator secret outside it, and no engine source.
+    - the direction of harm is favourable. Everything the judge reads here is the candidate's own
+      text, exactly like the log it has always read — and the widest thing that text can now buy is
+      the CHEAP action: `fault="implementation"` routes to a repair-stop, whose cost when wrong is
+      one restart. It cannot mint a metric, a champion, a violation or a selection; the terminal
+      kill keeps its own narrow gate, and `hypothesis` — the answer that ends a node — is the one
+      the code cannot argue itself into, because refusing to blame the implementation is what
+      leaves it standing.
+
+    `RepoScoutTools` is reused rather than re-derived for the reason `_log_query_tools` gives about
+    its own single construction: two answers to "what is readable" is how two roles come to
+    disagree. It is already the right shape for this mount — path-safe, secret-filtered, bounded
+    per page and per walk, and it already skips the gigabyte directories a trainer workdir carries
+    (`ckpt`, `checkpoints`, `wandb`, `lightning_logs`), which on geesefs is the difference between
+    a grep and a stall.
+    """
+    if not getattr(engine, "_train_monitor_tools", False):
+        return None
+    try:
+        root = Path(workdir)
+        if not root.is_dir():
+            return None
+    except OSError:
+        return None
+    from looplab.tools.reposcout import RepoScoutTools
+    return RepoScoutTools(roots=[str(root)], default_root=str(root))
+
+
 def monitor_log_tools(engine, workdir, log_plan=None, log_snapshot=None):
     """The log tools this tick's judge may LOOK with, or None to keep the historical one-shot call.
 
@@ -1853,7 +1938,7 @@ class TrainingMonitorMixin:
                             """
                             return self._training_verdict(
                                 tail, context, stage_text, trajectory_text,
-                                monitor_log_tools(self, workdir, log_plan, log_snapshot))
+                                monitor_tools(self, workdir, log_plan, log_snapshot))
 
                         verdict = await anyio.to_thread.run_sync(
                             _judge, abandon_on_cancel=False)

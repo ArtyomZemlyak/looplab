@@ -135,16 +135,35 @@ def test_the_setting_off_yields_no_tools_at_all(tmp_path):
     assert tm.monitor_log_tools(_Engine(tools_on=True), tmp_path, plan) is not None
 
 
-def test_both_watchdogs_build_their_provider_through_the_one_switch():
-    """`monitor_log_tools` is the single place either watchdog gets a provider, so a run cannot end up
-    with a looking training monitor and a blind ASHA judge (or the reverse)."""
+def test_both_watchdogs_reach_the_log_tools_through_the_one_switch():
+    """`monitor_log_tools` is the single place either watchdog gets its LOG provider, so a run
+    cannot end up with a looking training monitor and a blind ASHA judge (or the reverse). Since
+    2026-08-18 the training monitor reaches it through `monitor_tools`, which composes it with the
+    CODE scouts — so the reach is asserted transitively rather than by loosening it to a name."""
     from tests._source_scan import called_names
-    for fn in (tm.TrainingMonitorMixin._monitor_training, am.AshaMonitorMixin._monitor_asha):
-        assert "monitor_log_tools" in called_names(fn)
+    assert "monitor_tools" in called_names(tm.TrainingMonitorMixin._monitor_training)
+    assert "monitor_log_tools" in called_names(tm.monitor_tools)
+    assert "monitor_log_tools" in called_names(am.AshaMonitorMixin._monitor_asha)
     # The provider is built at the LOOP, not inside the verdict: the verdict method takes it as an
     # argument, which is what lets the off path (`tools=None`) be the historical call.
-    assert "monitor_log_tools" not in called_names(am.AshaMonitorMixin._asha_verdict)
-    assert "monitor_log_tools" not in called_names(tm.TrainingMonitorMixin._training_verdict)
+    for fn in (am.AshaMonitorMixin._asha_verdict, tm.TrainingMonitorMixin._training_verdict):
+        assert not ({"monitor_log_tools", "monitor_tools"} & set(called_names(fn)))
+
+
+def test_only_the_training_judge_may_read_the_code_and_that_asymmetry_is_deliberate():
+    """The two watchdogs are symmetric about LOGS and deliberately NOT about SOURCE.
+
+    The training judge is the one asked `fault` — "is the code wrong, or is the idea wrong" — and
+    its `implementation` answer routes to a repair-stop, whose cost when wrong is one restart. The
+    ASHA judge answers a different question (is this node underperforming its siblings) and its
+    action is a TERMINAL kill. Handing the candidate's own source to a judge whose only verdict
+    ends nodes would widen what that text can buy toward the expensive action, which is the one
+    thing the whole fault split exists to avoid. If ASHA ever needs to look at code, it needs a
+    cheap action first."""
+    from tests._source_scan import called_names
+    assert "monitor_code_tools" not in called_names(am.AshaMonitorMixin._monitor_asha)
+    assert "monitor_code_tools" not in called_names(am.AshaMonitorMixin._asha_verdict)
+    assert "monitor_code_tools" in called_names(tm.monitor_tools)
 
 
 def test_the_builder_is_a_free_function_and_not_a_mixin_method():
