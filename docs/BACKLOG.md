@@ -3399,6 +3399,34 @@ separate questions to settle on the next finished run — is the classifier over
 phase whose whole value is cross-run survive being reachable only from a clean finish, when three of
 the last four runs on this box were stopped mid-flight.
 
+### §0.17 The truncation cuts the END, and we put the answer at the end (2026-08-19)
+
+Two independent fixes today turned out to be one habit, and the habit is worth its own entry because
+neither fix generalises on its own.
+
+**Deep-research memos** were rendered through a blind head cut: median 9,083 chars against a
+4,000-char keep, 89 of 90 memos over it, and `Recommended directions` — the section the whole
+pipeline exists to produce — past the cut in **89 of 89**, in 194 of 212 real tool calls.
+
+**Cases** had a reader all along, and it delivered nothing: a `kb_search` hit is clipped at 600
+chars and the record led with the task goal, so `best params=` began at char **691** of 1,610. Of
+the 7 `PAST CASE` blocks ever delivered in the corpus, 4 were from an unrelated task and the 3
+exact-task ones were cut mid-goal. The store was written, kept, matched and delivered — and the
+reader received a restatement of its own prompt every time.
+
+Same shape both times: the mechanism is intact end to end, the bound cuts the TAIL, and the payload
+is at the tail. A bound that removes the answer is worse than no answer, because the caller cannot
+tell a short record from a truncated one.
+
+OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/tools/_base.py
+
+  Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
+  establishes the general rule, which is what this entry is for — every bounded surface in the tree
+  should be checked for the same shape (does the FIRST thing the caller needs survive the bound?),
+  and the module rule "a bounded answer names what it did not cover, beside the call that returns
+  it" (`tools/log_tools.py`, rule 3) should be the ceiling everywhere rather than in the two places
+  that happened to be measured.
+
 ### §0.16 Two costs measured and deliberately NOT paid down (2026-08-19)
 
 *(Numbered after §0.15 rather than merged into it: that section is a LIVENESS
