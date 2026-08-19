@@ -136,6 +136,31 @@ so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without appr
 campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
 `config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
 
+### Bound `baseline_timeout`, or one bad candidate eats the campaign
+
+Shipped default 60 s per instance. Measured 2026-08-19: after its 14th message, one arm-A run spent
+**87 minutes on a single candidate** — 69 isolated benchmark runs, **zero problems completed** —
+because a solver that times out costs 60 s × ~100 instances, i.e. up to 100 minutes for ONE
+evaluation. That run was then cut by the campaign's wall-clock net and wrote **no `final_speedup` at
+all**, so the pathological case does not merely slow a campaign, it empties it.
+
+The campaign sets `benchmark.baseline_timeout: 10000`. It applies to **both** arms (both evaluate
+through this harness), so it is parity-preserving, and it cannot flatter either one: a solver slower
+than 10 s per instance on a task whose target is `oracle_time_limit: 100` ms is already 100x off and
+scores 0 either way.
+
+**Corollary for the wall-clock net:** it must sit far ABOVE what a task-arm needs. A run cut by the
+clock writes nothing, so a binding net does not shorten the campaign — it deletes rows from it. The
+campaign uses 4 h purely as a hung-process guard.
+
+### The first eval of a task downloads its dataset
+
+`evaluate_results.py` fetches from HuggingFace into `.hf_datasets/` (19 GB for the whole repo is not
+unusual — `base64_encoding` alone is 19 GB, while `svm` is 24 MB and `discrete_log` is 28 KB). This
+is a once-per-machine, per-task cost, but it means the first eval of a task can look hung. If you
+are validating the bridge, **pick a small task**: an hour spent thinking the pipeline was broken here
+was really just base64_encoding being enormous.
+
 ### Two parity choices that cost LoopLab something, on purpose
 
 * **Reasoning effort `medium` on both arms.** Measured: medium 21.5 s/call, high 111.3 s/call, with

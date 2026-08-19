@@ -893,6 +893,25 @@ Measured on this endpoint: `medium` 21.5 s/call, `high` 111.3 s/call — 5x — 
 comparison becomes one of two truncated runs. Both arms are pinned to `medium`; parity is what the
 shared value buys, not the level itself.
 
+### Sizing the campaign: three things the first run taught, all of them cost-shaped
+
+**1. A wall-clock net that BINDS deletes rows.** Arm A on `svm` reached $0.0182 of its $0.02 in
+1 h 59 m and was cut by a 2 h net — writing **no `final_speedup` at all**. A cut run is not a shorter
+run, it is a missing one. The net is now 4 h and exists only to catch a hung process.
+
+**2. One timing-out candidate can cost 87 minutes.** After its 14th message that run made 69 isolated
+benchmark runs and completed ZERO problems: `baseline_timeout` is 60 s and a task has ~100 instances,
+so a single bad candidate is up to 100 minutes of pure timeout. Set to **10 s for both arms** — same
+harness, so parity-preserving, and a solver 100x over a 100 ms target scores 0 either way.
+
+**3. The first evaluation of a task downloads its dataset.** `evaluate_results.py` pulls from
+HuggingFace into `.hf_datasets/`. Sizes are wildly uneven — `discrete_log` 28 KB, `svm` 24 MB,
+`base64_encoding` **19 GB** — and an hour was lost concluding the bridge was broken when it was
+really that one enormous dataset. Validate a bridge on a SMALL task.
+
+None of the three is a property of either agent loop; all three are properties of the arena, and all
+three were invisible until a real campaign ran.
+
 ## 5g. Wasted tool calls — measured, then closed on both sides
 
 Running LoopLab against an EXTERNAL arena exposed something the internal runs never made visible: a
