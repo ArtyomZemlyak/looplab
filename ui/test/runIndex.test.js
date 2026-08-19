@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  ALL_RUNS, UNASSIGNED_RUNS, dagEmptyPresentation, effectiveRunStatus, filterRuns, finalizationIncomplete,
+  ALL_RUNS, UNASSIGNED_RUNS, authoringElapsed, dagEmptyPresentation, effectiveRunStatus,
+  filterRuns, finalizationIncomplete, firstAuthoringHead,
   finalizeRecoveryCommand, indexProjects, lifecyclePhaseLabel, metricComparable,
   pendingFinalizeIntent, projectAncestorCollapsed, projectDepth,
   runLifecycle, scopeRuns, sortRuns, stalledFinalizationRemedy, terminalReady,
@@ -331,4 +332,87 @@ test('cross-run ranking is direction-aware and refuses incomparable sets', () =>
   // Mixed tasks or mixed objectives are not rankable at all — the caller must present them unranked.
   assert.equal(metricComparable([...minRuns, { run_id: 'x', task_id: 'other', direction: 'min', best_metric: 0 }]), false)
   assert.equal(metricComparable([minRuns[0], { ...minRuns[1], direction: 'max' }]), false)
+})
+
+// ------------------------------------- the empty canvas during a speculative card build
+//
+// "При старте рана очень долго висит 'еще билдится' хотя можно было ноду показать и как она
+// собирается" — at run start the canvas printed one sentence, "The engine is active", for the whole
+// window before the first experiment. Measured on the live `runs/e5small-dr-unified-v2`
+// (2026-08-19): `run_started` → first `node_created` is 4,216.5 s, of which 2,815.9 s carries no
+// open `phase_progress` beacon at all, and the node was on the board for 0.1 s before it existed.
+//
+// The wire DOES carry the answer for that window — `state.card_authoring`, the open card-build head
+// (`events/authoring_projection.py`) — and the Cards board already renders it. These fixtures are
+// that run's own shape: one `building` head on `card-0`, started 2,815 s before the read.
+const E5_NOW = 1787100000000
+const authoringState = (overrides = {}) => ({
+  nodes: {}, phase: 'search', engine_running: true,
+  card_authoring: [{ card_id: 'card-0', generation: 0, index: 0, phase: 'building',
+    started: E5_NOW / 1000 - 2815, folded_status: 'proposed' }],
+  ...overrides,
+})
+
+test('the pre-first-experiment canvas names the build it is waiting on, and why no node exists', () => {
+  const value = dagEmptyPresentation({ displayed: authoringState(), nowMs: E5_NOW })
+  assert.equal(value.kind, 'preparing')
+  assert.match(value.title, /Writing the first experiment/)
+  assert.match(value.body, /card-0/, 'the card being built is nameable and must be named')
+  assert.match(value.body, /for 47 min/, 'elapsed comes from the build receipt’s own timestamp')
+  // The "explain it rather than pretend" half: there is genuinely no node to show, because a
+  // speculative build runs before an experiment id is reserved and may mint no node at all.
+  assert.match(value.body, /before an experiment id is reserved/)
+  // …and it points at the surface that DOES show the build, instead of only offering Events.
+  assert.deepEqual(value.actions.map(a => a.id), ['cards', 'events'])
+})
+
+test('a queued head is not described as code being written', () => {
+  const value = dagEmptyPresentation({
+    displayed: authoringState({ card_authoring: [{ card_id: 'card-0', phase: 'speculating',
+      started: E5_NOW / 1000 - 30 }] }), nowMs: E5_NOW })
+  assert.match(value.title, /Choosing the first experiment/)
+  assert.match(value.body, /queued for its build for 30s/)
+})
+
+test('a head this build has no words for is dropped, never given an invented sentence', () => {
+  // Mirrors cardBoardModel.js::cardAuthoring: an unknown phase is a newer server naming a lane this
+  // client does not have, and the honest answer is the generic card, not a made-up label.
+  for (const row of [{ card_id: 'card-0', phase: 'polishing', started: E5_NOW / 1000 - 60 },
+    { phase: 'building', started: E5_NOW / 1000 - 60 }, { card_id: '', phase: 'building' }, null]) {
+    const value = dagEmptyPresentation({
+      displayed: authoringState({ card_authoring: [row] }), nowMs: E5_NOW })
+    assert.equal(value.title, 'Preparing the first experiment…')
+    assert.deepEqual(value.actions.map(a => a.id), ['events'])
+  }
+  assert.equal(firstAuthoringHead({ card_authoring: 'not-a-list' }), null)
+  assert.equal(firstAuthoringHead(null), null)
+})
+
+test('an unreadable build clock prints no elapsed time rather than "0s"', () => {
+  // A build that claims to have started "0s ago" for 47 minutes is the frozen chip one file over.
+  assert.equal(authoringElapsed({ started: Number.NaN }, E5_NOW), '')
+  assert.equal(authoringElapsed({ started: 0 }, E5_NOW), '')
+  assert.equal(authoringElapsed({ started: E5_NOW / 1000 + 60 }, E5_NOW), '')
+  assert.equal(authoringElapsed({ started: E5_NOW / 1000 - 20 }, E5_NOW), ' for 20s')
+  const value = dagEmptyPresentation({
+    displayed: authoringState({ card_authoring: [{ card_id: 'card-0', phase: 'building' }] }),
+    nowMs: E5_NOW })
+  assert.match(value.body, /writing the code for card-0\. /)
+})
+
+test('the head only speaks for the canvas the engine is actually preparing', () => {
+  // Every other lifecycle answer outranks it — an authoring head on a paused/stalled/finished run
+  // must not turn a recovery card into a progress card.
+  for (const [overrides, kind] of [
+    [{ engine_running: false, paused: true }, 'paused'],
+    [{ engine_running: false }, 'stalled'],
+    [{ engine_running: false, finished: true }, 'finished'],
+  ]) {
+    const value = dagEmptyPresentation({ displayed: authoringState(overrides), nowMs: E5_NOW })
+    assert.equal(value.kind, kind)
+    assert.doesNotMatch(value.body, /card-0/)
+  }
+  // …and a run with an active experiment has no empty state at all, head or no head.
+  assert.equal(dagEmptyPresentation({
+    displayed: authoringState({ nodes: { 0: { id: 0 } } }), nowMs: E5_NOW }), null)
 })

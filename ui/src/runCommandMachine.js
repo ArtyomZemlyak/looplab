@@ -106,6 +106,63 @@ export function restoredCommandRecord(saved) {
 // is null and the surface says the wait is not observable, which is itself actionable.
 export const COMMAND_STALL_NOTICE_MS = 15000
 
+// THE FOREIGN LOCK MUST HAVE AN EXIT, and until 2026-08-19 it was the one transport branch with no
+// affordance at all — no button, no elapsed time, no remedy, no dismiss.
+//
+// The operator's report is verbatim: pressing pause left `/stop is pending in Assistant · cmd_…`
+// standing in place of Stop/Finalize/Resume/Start over, and it never cleared. Everything else about
+// the lifecycle is sound — the server's terminal set is complete, the Dock's OWN pending chip clears
+// on a terminal record, and a pause succeeds when the pause folds. What has no exit is the SHARED
+// per-run lock: `Dock.jsx` hides every run control while a lock owned by the Assistant exists, the
+// lock lives in `sessionStorage` and outlives any surface, `clearRunCommandLock` demands an exact
+// identity the Dock never held, and only a mounted `AssistantBar` bound to that same run ever
+// cleared it. So an Assistant poll that gave up, a surface that unmounted, or an operator who
+// navigated to another run leaves the Dock frozen for the life of the tab.
+//
+// The identity IS recoverable — it is written on the lock itself — so this rebuilds it rather than
+// inventing a weaker clear. It deliberately does NOT expire the lock on a timer: the Assistant
+// refreshes `updatedAt` on its own settle path and not on a fixed cadence, so an age threshold
+// would release a genuinely in-flight command as readily as an orphan. The gate stays until the
+// operator releases it, and what changes is that they CAN.
+//
+// What a release does and does not do is the whole copy problem: it frees THIS tab's controls. The
+// durable command is server-side and is not touched — releasing does not cancel it, and the run
+// timeline remains the record of what happened to it.
+export const FOREIGN_LOCK_ACCOUNT_MS = COMMAND_STALL_NOTICE_MS
+
+export function foreignCommandLockView(lock, source, nowMs = Date.now()) {
+  if (!foreignCommandLock(lock, source)) return null
+  const owner = lock.source === 'assistant' ? 'Assistant' : 'the run controls'
+  const updated = Number(lock.updatedAt)
+  const ageMs = Number.isFinite(updated) && updated > 0 ? Math.max(0, nowMs - updated) : null
+  // Absent/garbage `updatedAt` is reported as an unknown age, never as zero: "just now" about a
+  // lock whose clock we cannot read is the same false reassurance the bare chip already was.
+  const accountable = ageMs === null || ageMs >= FOREIGN_LOCK_ACCOUNT_MS
+  return {
+    action: lock.action, commandId: lock.commandId || null, owner, ageMs,
+    // The account is withheld for the first few seconds so a command that lands promptly does not
+    // flash an escape hatch — the same threshold `pendingCommandRemedy` uses, for the same reason.
+    accountable,
+    text: `This surface cannot observe ${owner}'s command, so it cannot tell you when it ends.`,
+    releaseHint: 'Releasing frees these controls in this tab only. It does not cancel the command —'
+      + ' the run timeline stays the record of what happened to it.',
+    // Exactly what `clearRunCommandLock` demands, rebuilt from the lock itself so this surface can
+    // clear a lock it never wrote without weakening the identity rule that protects a live one.
+    releaseIdentity: {
+      source: lock.source, idempotencyKey: lock.idempotencyKey, action: lock.action,
+      expectedGeneration: lock.expectedGeneration, commandId: lock.commandId || '',
+    },
+  }
+}
+
+// A human age for the account above. Null age is SAID, not rounded to zero.
+export const foreignCommandLockAge = (ageMs) => {
+  if (!Number.isFinite(ageMs) || ageMs < 0) return 'for an unknown length of time'
+  const secs = Math.round(ageMs / 1000)
+  if (secs < 90) return `for ${Math.max(1, secs)}s`
+  return `for ${Math.round(secs / 60)} min`
+}
+
 // What a still-pending command owes the operator once it stops looking instantaneous. `null` while
 // it still does: a stop that lands in 300 ms must not flash a stall notice.
 //

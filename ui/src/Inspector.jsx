@@ -20,7 +20,8 @@ import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import {
   NODE_TRACE_SPAN_WINDOW, TRACE_PARTIAL_EMPTY_NOTICE, attemptReadRequired, conversationWindow,
-  conversationWindowNotice, nodeAttemptOptions, spansOmitted, traceDetailState, traceForAttempt,
+  conversationWindowNotice, nodeAttemptOptions, spansOmitted, stageLogAttribution,
+  traceDetailState, traceForAttempt,
   traceUnavailable, traceWindow, traceWindowNotice, unavailableTraceDetail,
 } from './traceProjection.js'
 import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
@@ -565,14 +566,17 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
       <span> {notice.text}{notice.failureText ? ` ${notice.failureText}` : ''}</span>
     </div>}
     <div className="eval-pipeline-stages">
+      {/* A superseded row's glyph no longer names its own outcome (stageAttribution.js:
+          STAGE_SUPERSEDED_ICON), so it — and only it — carries the status as sr-only text. Every
+          other row's markup is unchanged, which is what keeps the unrepaired strip byte-identical. */}
       {rows.map((v, i) => <React.Fragment key={i}>
         {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(v.name)}
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
           title={`${v.title} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
-          {v.icon} {v.name}</button> : <span
+          {v.icon}{v.iconLabel && <span className="sr-only"> {v.iconLabel}</span>} {v.name}</button> : <span
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
           title={`${v.title} · historical result`}>
-          {v.icon} {v.name}</span>}
+          {v.icon}{v.iconLabel && <span className="sr-only"> {v.iconLabel}</span>} {v.name}</span>}
         {i < rows.length - 1 && <span className="muted eval-pipeline-arrow">→</span>}
       </React.Fragment>)}
     </div>
@@ -1602,7 +1606,7 @@ function StageLog({ text, live }) {
   </div>
 }
 
-function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
+function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = false }) {
   const [icon, role, desc, tone] = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
   const [allTurns, setAllTurns] = useState(false)
@@ -1636,6 +1640,8 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
           : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
       {!allTurns && (st.turns || []).length > CONVERSATION_TURN_CAP && <button className="span-more"
         onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - CONVERSATION_TURN_CAP} more turns</button>}
+      {log && logShare ? <div className="muted trace-small stage-log-share" role="note">
+        {logShare.note}</div> : null}
       {log ? <StageLog text={log} live={live} /> : null}
     </div>}
   </div>
@@ -1722,7 +1728,7 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
         : (previous?.lifecycleScope === lifecycleScope ? previous.failures || 0 : 0) + 1
       if (settled.unavailable) {
         setRead({ lifecycleScope, payload: { stages: [], projection: { unavailable: true } },
-          window: spanLimit, visible: 0, failures, failure })
+          window: spanLimit, before: subjectBefore || null, visible: 0, failures, failure })
         return
       }
       // A kept payload keeps its OWN window: recording the window we failed to reach would read as
@@ -1733,7 +1739,11 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
         return
       }
       const visible = settled.payload?.projection?.visible_turns
+      // The ANCHOR travels on the record because `traceWidenStalled` is scoped to it: a widen that
+      // bought nothing at one `?before=` says nothing about the next episode the operator seeks to,
+      // and carrying it there is what silently retired the "load earlier steps" control.
       const next = { lifecycleScope, payload: settled.payload, window: spanLimit,
+        before: subjectBefore || null,
         visible: Number.isSafeInteger(visible) && visible >= 0 ? visible : 0,
         scope, etag, failures: 0 }
       setRead({ ...next, stalled: traceWidenStalled(previous, next) })
@@ -1830,6 +1840,11 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   // (propose/implement/…) has no subprocess log.
   const logFor = (label) => (logs.stages && logs.stages[label])
     || ({ setup: logs.setup, evaluate: logs.eval, command: logs.eval }[label]) || ''
+  // …and WHOSE log it is. `logFor` is keyed by stage LABEL, and a repaired node has one band per
+  // attempt under the same label, so several bands legitimately resolve to one file's tail. Say so
+  // on the bands where it happens (traceProjection.js::stageLogAttribution) rather than letting each
+  // band present the shared text as its own attempt's.
+  const logShare = stageLogAttribution(stages)
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
@@ -1840,7 +1855,8 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   // top for the same reason.)
   return <div className="conv">{staleNotice}{reach}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
-                                      st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
+                                      st={st} defaultOpen={allOpen} log={logFor(st.label)}
+                                      logShare={logShare[i]} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
   </div>
 }

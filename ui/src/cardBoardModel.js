@@ -96,6 +96,25 @@ const BLOCKER_FAULT = {
 const BELIEF_ONLY_BLOCKERS = new Set(
   ['identity_not_native', 'action_owner_missing', 'freshness_unknown'])
 
+// ONE BLOCKER, TWO TRUTHS — and the board was telling both at once, on one card, on one screen.
+//
+// `work_in_flight` means the card is owned by an experiment that has not reached a terminal. That
+// covers two lifecycle states and they are opposites to an operator: an experiment that is RUNNING,
+// and one that has been built and admitted but not dispatched. `card_ledger.py::_apply_card_status`
+// split those on the durable eval-start boundary on 2026-08-14 (`coded` stopped being a reserved
+// lane and became real); this table did not move with it. Measured on the live board 2026-08-19,
+// `runs/e5small-dr-unified-v2` card-10: `status: "coded"`, `selection_blockers: ["work_in_flight"]`,
+// `selection_provenance.owner_state: "in_flight"`, and node 10 `pending` with `eval_started` false
+// — so the lane hint read "an experiment is built and waiting to run — it has NOT started" while
+// the chip on that same card read "an experiment is running".
+//
+// The override is keyed on the CARD'S OWN STATUS rather than on the provenance owner state, because
+// the lane hint the chip must agree with is keyed on exactly that. A status with no row here falls
+// through to the plain wording, so a lane this build does not know cannot mint a sentence.
+const BLOCKER_LIFECYCLE_BY_STATUS = {
+  work_in_flight: { coded: 'its experiment is built and has not started' },
+}
+
 /**
  * The chip for a card the queue will not pick up: `{tone, label, title}`, or null when it will.
  *
@@ -119,7 +138,9 @@ export function cardSelectionBlock(card) {
     return { tone: 'fault', label: BLOCKER_FAULT[faults[0]], title: detail }
   }
   if (lifecycle.length) {
-    return { tone: 'lifecycle', label: BLOCKER_LIFECYCLE[lifecycle[0]], title: detail }
+    const name = lifecycle[0]
+    const label = BLOCKER_LIFECYCLE_BY_STATUS[name]?.[cardStatus(card)] || BLOCKER_LIFECYCLE[name]
+    return { tone: 'lifecycle', label, title: detail }
   }
   // No reason, or only reasons this build does not know: say the honest minimum rather than
   // inventing one. An unknown blocker is a FAULT — a card the queue refuses for a reason nothing can

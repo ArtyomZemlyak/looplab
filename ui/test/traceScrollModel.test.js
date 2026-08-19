@@ -13,6 +13,7 @@ import {
   TRACE_READ_DEADLINE_MS, TRACE_READ_FIXED_MS, TRACE_READ_WINDOW_MS, TRACE_RETRY_MAX, TRACE_RETRY_MS,
   TRACE_SCROLL_BOUNDED, TRACE_SCROLL_LOADING, TRACE_SCROLL_REACHABLE, TRACE_SCROLL_SETTLED,
   armTraceScroll, settleTraceRead, shouldWidenOnReach, traceFailureIsRetryable, traceFailureLabel,
+  traceReadSameAnchor,
   traceReadDeadlineMs, traceRetryMs, traceScrollState, traceWidenProgressed, traceWidenStalled,
   traceWindowCanGrow,
 } from '../src/traceScrollModel.js'
@@ -101,6 +102,43 @@ test('the auto-loader terminates: a widen that buys nothing stops it', () => {
   assert.equal(traceWidenStalled({ window: 512, visible: 256 }, { window: 1024, visible: 999 }),
     false, 'a widen that DID buy rows clears the stall')
   assert.equal(traceWidenStalled(null, { window: 512, visible: 5 }), false)
+})
+
+test('a stall belongs to ONE anchor, so seeking to another episode restores the control', () => {
+  // The operator's "кнопка ушла ОПЯТЬ": TRACE_SCROLL_BOUNDED is the only state that renders no
+  // control at all, `stalled` forces it, and nothing but a node/attempt/generation change cleared
+  // it — so one unproductive widen retired the affordance for the rest of the visit.
+  const stalledAtTail = { window: 1024, visible: 256, before: null, stalled: true }
+  // Same place, poll tick: the finding still stands. (The termination property is untouched.)
+  assert.equal(traceWidenStalled(stalledAtTail, { window: 1024, visible: 256, before: null }), true)
+  // A DIFFERENT anchor is a different question. An anchored window selects the `limit` rows ENDING
+  // at the anchor, so a widen near the beginning of a node legitimately buys nothing — that is a
+  // short episode, not a surface with nowhere to go, and it must not answer for the next one.
+  assert.equal(traceWidenStalled(stalledAtTail, { window: 1024, visible: 256, before: 'span-42' }),
+    false, 'seeking to an episode must not inherit the tail read’s stall')
+  // …and back again: leaving an anchor for the tail is equally a new question.
+  const stalledAtEpisode = { window: 1024, visible: 12, before: 'span-42', stalled: true }
+  assert.equal(traceWidenStalled(stalledAtEpisode, { window: 1024, visible: 12, before: null }),
+    false)
+  // Within ONE anchor the auto-loader still terminates — this is the rule the stall exists for.
+  assert.equal(
+    traceWidenStalled({ window: 512, visible: 12, before: 'span-42' },
+      { window: 1024, visible: 12, before: 'span-42' }), true)
+  assert.equal(
+    traceWidenStalled({ window: 512, visible: 12, before: 'span-42' },
+      { window: 1024, visible: 30, before: 'span-42' }), false)
+})
+
+test('the anchor comparison treats every spelling of "the tail" as one place', () => {
+  // The record is built from `traceSubjectBefore`, which yields undefined for an unanchored subject
+  // and a span id otherwise; a blank string must never read as a third place.
+  assert.equal(traceReadSameAnchor({}, { before: null }), true)
+  assert.equal(traceReadSameAnchor({ before: undefined }, { before: '' }), true)
+  assert.equal(traceReadSameAnchor({ before: 'a' }, { before: 'a' }), true)
+  assert.equal(traceReadSameAnchor({ before: 'a' }, { before: 'b' }), false)
+  assert.equal(traceReadSameAnchor(null, { before: null }), true)
+  // A non-string anchor is not an anchor: it must degrade to the tail, never to a distinct place.
+  assert.equal(traceReadSameAnchor({ before: 7 }, { before: null }), true)
 })
 
 test('one automatic widen per operator gesture', () => {

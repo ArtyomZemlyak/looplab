@@ -350,10 +350,22 @@ function _CardKanbanCard({
         title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
       {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
       {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
+      {/* THE SAME CHIP AS THE LANE CARD, and it has to be: this is the DETAIL PANE (and the whole
+          `HypothesisBoard`), i.e. what opens when the operator clicks the card whose lane chip they
+          just read. It kept the retired binary chip after the lifecycle/fault split landed one
+          branch over, so on the live board every one of the 15 cards showed a quiet, explained
+          lifecycle chip in the lane and an amber unexplained one here — the exact "I thought
+          `blocked` was some kind of status" confusion, still on screen, one click away. The retired
+          wording is a NEGATIVE pin in cardSelectionBlockers.test.js, so it may not be respelled
+          here either: a commented-out copy is the same drift risk as a live one. */}
       {card.selection_ready === true
         ? <span className="chip xs ok" title="eligible for Card-driven selection">selection ready</span>
         : card.selection_ready === false
-          ? <span className="chip xs warn" title="not eligible for Card-driven selection">not selection ready</span>
+          ? (() => {
+            const block = cardSelectionBlock(card)
+            return block && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
+              title={block.title}>{block.label}</span>
+          })()
           : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
       {receipt && receipt.complete !== true && <span className="chip xs warn"
         title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>

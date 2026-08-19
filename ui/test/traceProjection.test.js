@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import {
   NODE_TRACE_SPAN_WINDOW, NODE_TRACE_SPAN_WINDOW_MAX, TRACE_PARTIAL_NOTICE,
   conversationWindow, conversationWindowNotice, nextNodeSpanWindow,
-  spansOmitted,
+  spansOmitted, stageLogAttribution,
   traceDetailState, tracePartial, traceUnavailable, traceWindow, traceWindowNotice,
   unavailableTraceDetail,
 } from '../src/traceProjection.js'
@@ -321,4 +321,44 @@ test('an unstated conversation counter stays absent, and hidden-ness never depen
   assert.equal(deferred.kind, 'pageable')
   assert.equal(deferred.omittedStages, null)
   assert.equal(deferred.omittedTurns, null)
+})
+
+// ------------------------------------------------- one stage log, several attempts (defect 5)
+
+test('bands that share one stage log say so, with the real node 0 shape', () => {
+  // runs/e5small-dr-unified-v2 node 0: four `train` stage rows and four `mine` rows, ONE train.log
+  // (83,217 bytes, three tracebacks = four concatenated attempts) and ONE mine.log. The route serves
+  // the file by NAME and the conversation keys the log by stage LABEL, so four bands rendered one
+  // string and each presented it as its own attempt's.
+  const bands = [
+    { label: 'mine' }, { label: 'train' }, { label: 'triage' }, { label: 'inline_repair' },
+    { label: 'mine' }, { label: 'train' }, { label: 'mine' }, { label: 'train' },
+    { label: 'mine' }, { label: 'train' }, { label: 'score' },
+  ]
+  const share = stageLogAttribution(bands)
+  assert.equal(share.length, bands.length)
+  // A label that appears once is exactly this attempt's log and gets no note at all — the negative
+  // control, and what keeps an unrepaired node's thread byte-identical.
+  assert.equal(share[2], null, 'triage ran once')
+  assert.equal(share[10], null, 'score ran once')
+  // A repeated label gets its ordinal and the total, on every one of its bands.
+  assert.deepEqual(share.filter(Boolean).map(row => `${row.label} ${row.ordinal}/${row.total}`),
+    ['mine 1/4', 'train 1/4', 'mine 2/4', 'train 2/4', 'mine 3/4', 'train 3/4', 'mine 4/4', 'train 4/4'])
+  // It says what the text IS. A band that only denied being this attempt's log would leave the
+  // operator with no idea what they are reading.
+  assert.match(share[1].note, /all 4 train attempts into one train\.log/)
+  assert.match(share[1].note, /same bytes on all 4 bands/)
+  assert.match(share[1].note, /#1/)
+  // …and it does not promise a boundary nobody recorded: `attempt_byte_floor` is derived from an
+  // in-memory snapshot at eval start and is written to no event, so there is nothing to seek to.
+  assert.match(share[1].note, /no durable record of where one attempt ends/)
+})
+
+test('the shared-log note is withheld where there is nothing to disambiguate', () => {
+  assert.deepEqual(stageLogAttribution([{ label: 'train' }]), [null])
+  assert.deepEqual(stageLogAttribution([]), [])
+  assert.deepEqual(stageLogAttribution(null), [])
+  assert.deepEqual(stageLogAttribution('nope'), [])
+  // A band with no label resolves no log at all, so it can never be one of several sharing one.
+  assert.deepEqual(stageLogAttribution([{}, { label: '' }, { label: null }]), [null, null, null])
 })

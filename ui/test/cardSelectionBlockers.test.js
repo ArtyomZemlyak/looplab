@@ -14,7 +14,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { cardSelectionBlock } from '../src/cardBoardModel.js'
+import { readFile } from 'node:fs/promises'
+import { CARD_COLUMNS, cardSelectionBlock } from '../src/cardBoardModel.js'
 
 const card = (extra = {}) => ({ id: 'card-0', selection_ready: false, ...extra })
 
@@ -120,4 +121,45 @@ test('every blocker the engine can emit is mapped', () => {
   for (const name of emitted) {
     assert.ok(model.includes(`${name}:`), `blocker ${name} has no operator-facing wording`)
   }
+})
+
+// ------------------------------------------------- one blocker, two truths (the live card-10 case)
+
+test('a built-but-not-started card is not described as running', () => {
+  // runs/e5small-dr-unified-v2 card-10 on 2026-08-19, exactly as the wire carries it. The lane hint
+  // for `coded` reads "an experiment is built and waiting to run — it has NOT started"; the chip on
+  // that same card read "an experiment is running". Both come from this file.
+  const card10 = { id: 'card-10', status: 'coded', selection_ready: false,
+    selection_blockers: ['work_in_flight'] }
+  const block = cardSelectionBlock(card10)
+  assert.equal(block.tone, 'lifecycle')
+  assert.equal(block.label, 'its experiment is built and has not started')
+  assert.doesNotMatch(block.label, /running/)
+  // The lane hint and the chip must not contradict each other.
+  const codedHint = CARD_COLUMNS.find(([status]) => status === 'coded')[2]
+  assert.match(codedHint, /has NOT started/)
+  // The receipt still names the raw blocker, so the claim stays checkable.
+  assert.match(block.title, /work_in_flight/)
+})
+
+test('the same blocker on a running card keeps the running wording', () => {
+  const running = { id: 'card-9', status: 'running', selection_ready: false,
+    selection_blockers: ['work_in_flight'] }
+  assert.equal(cardSelectionBlock(running).label, 'an experiment is running')
+  // A status this build has no override for falls through rather than inventing a sentence.
+  assert.equal(cardSelectionBlock({ ...running, status: 'some-new-lane' }).label,
+    'an experiment is running')
+  assert.equal(cardSelectionBlock({ ...running, status: undefined }).label,
+    'an experiment is running')
+})
+
+test('the detail pane shows the SAME chip as the lane card, not the retired binary one', async () => {
+  // The pane is what opens when the operator clicks the card whose lane chip they just read; it kept
+  // the pre-split wording, so every non-ready card carried a quiet explained chip in the lane and an
+  // amber "not selection ready" one click away — 15 of 15 on the live board.
+  const board = await readFile(new URL('../src/CardBoard.jsx', import.meta.url), 'utf8')
+  assert.doesNotMatch(board, /not selection ready/,
+    'the retired binary wording must not come back on any render path')
+  // Both render paths resolve through the one model.
+  assert.equal((board.match(/const block = cardSelectionBlock\(card\)/g) || []).length, 2)
 })
