@@ -1941,21 +1941,27 @@ export function AuthoringPanel({
 // now the whole explanation for all four was a single shared "cross-run memory reused to guide
 // future runs" sentence. That sentence is true of exactly two of them.
 // Verified against the code, not the docs: `engine/lessons_priors.py::_scan_prior_context` reads
-// meta_notes.jsonl + lessons.jsonl and NOTHING else, so cases reach an agent only if it calls
-// `kb_search` (`agents/factory.py` passes cases.jsonl into KnowledgeTools' shared `kb` index).
+// meta_notes.jsonl + lessons.jsonl AND, since 2026-08-19, cases.jsonl — under the same
+// (task_id, direction) key and the same fail-closed LessonScope, rendered as one Researcher-only
+// line. Until then a case was injected into nothing and this copy said so; the kind was fixed
+// rather than deleted because the meta-note beside it carries the STORY and not the recipe
+// (docs/guide/memory.md measures that on the one real row in the shared store).
 const MEMORY_TAB_PURPOSE = {
   lessons: <><b>What generalizes.</b> One distilled claim per theme — a verdict
     (supported / tested / failed) plus the nodes it came from — written by the run's own reflection
     when the run ends. <b>This is the tier that changes the next run</b>: the best fingerprint
     matches are pasted straight into the next Researcher / Developer prompt.</>,
-  cases: <><b>The single best config per task.</b> The winning params, the metric they reached and
-    the rationale that proposed them. Upserted at run end and only when the metric BEATS the stored
-    one, so there is exactly one row per task — a leaderboard, not a history.{' '}
-    <b>Not pasted into any prompt</b>: an agent sees a case only if it calls <code>kb_search</code>,
+  cases: <><b>The winning run's exact configuration.</b> The parameter dict that produced the best
+    metric on this task, the metric itself, and the rationale that proposed them. Upserted at run end
+    and only when the metric BEATS the stored one, so there is exactly one active row per task and
+    objective — a leaderboard, not a history.{' '}
+    <b>Pasted into the next Researcher prompt for the SAME task</b>, one line beside the note below —
+    the note says why it won, this says what to set. Also readable through <code>kb_search</code>,
     where cases share one top-3 index with the knowledge notes.</>,
   notes: <><b>One line per finished run</b> — what won, and (when the model was reachable) why it may
-    have won. Injected verbatim into the next run of the <b>same</b> task, last 3. This is the prose
-    twin of a case: same win, written as a sentence instead of as params.</>,
+    have won. Injected verbatim into the next run of the <b>same</b> task, last 3. This is the CAUSAL
+    twin of a case: same win, written as the reason instead of as the recipe — and on a real run it
+    names one hyperparameter where the case carries all of them.</>,
   knowledge: <><b>Free-form Markdown</b> — the only tier a human writes directly. Edit it under
     Lab → Authoring → knowledge; the agents also write here through their own <code>remember</code>{' '}
     tool. Read back through <code>kb_search</code>, alongside cases.</>,

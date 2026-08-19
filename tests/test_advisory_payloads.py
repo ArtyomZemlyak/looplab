@@ -268,7 +268,10 @@ def test_the_rendered_memo_tags_each_claim_with_its_own_verdict():
 
     state = RunState()
     state.research = [_memo_with_a_blank_claim()]
-    text = RunTools(lambda: state)._research_memo(state)
+    # RE-POINTED 2026-08-19: the claims are their own addressable section since the memo render
+    # stopped being one over-cap string (`run_tools.py::_research_memo`). The population rule under
+    # test is unchanged and still lives one call away from the view it must agree with.
+    text = RunTools(lambda: state)._research_memo(state, "claims")
 
     claim_lines = [line.strip() for line in text.splitlines()
                    if line.strip().startswith("- ") and line.rstrip().endswith(("A", "B"))

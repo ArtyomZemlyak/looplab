@@ -589,7 +589,7 @@ but nothing injects it into a prompt"* — the same class the hint registry
 | **Watchdog signals** (train-monitor / ASHA rank) | *not folded* — DIAGNOSTIC events read from `store.read_all()` | Researcher | a watchdog-reflection line in the proposal hint (`digest.watchdog_reflection`), naming the eval PHASE the verdict was about (`log_role`/`stage` on the alert row) rather than calling every verdict "training" |
 | **Crash-triage verdict** | `Node.triage_rationale` | Researcher | the failure line in the experiments digest + the failure-reflection hint carry the LLM's *why*, not just the error kind |
 | **Foresight calibration** | `RunState.foresight_selected` | the world model | a track-record line in `_memory_brief` — "of your last N predict-before-execute picks, K beat the parent" (closes the predict→outcome loop) |
-| **Deep-research memo** | `RunState.research` | Researcher, crash-triage, repair-critic | a one-line takeaway in the state brief — **prefixed with the memo's own verifier tally** and with the fact that the verifier checks a memo's CLAIMS and never its summary (`Settings.memo_verdict_cue`, ON; `false` restores the historical line byte for byte) — **plus** a `read_research_memo` tool to pull the full findings/claims on demand, **each claim carrying the verdict this run's own verifier gave it** (`supported` / `unsupported` / `unclear` / `cited`, or `unverified` when the check was bounded away or its rows do not align with the claims) — the groundless ones LEAD the answer, above the memo's summary, because the agent layer keeps the first 4,000 chars and drops the rest; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
+| **Deep-research memo** | `RunState.research` | Researcher, crash-triage, repair-critic | a one-line takeaway in the state brief — **prefixed with the memo's own verifier tally** and with the fact that the verifier checks a memo's CLAIMS and never its summary (`Settings.memo_verdict_cue`, ON; `false` restores the historical line byte for byte) — **plus** a `read_research_memo` tool to pull the memo on demand ONE SECTION at a time (`section=` `overview` (default) / `directions` / `findings` / `claims` / `summary`), **each claim carrying the verdict this run's own verifier gave it** (`supported` / `unsupported` / `unclear` / `cited`, or `unverified` when the check was bounded away or its rows do not align with the claims) — the groundless ones LEAD every section, and the default overview carries the verifier block, the memo's **recommended directions in full** and a clipped summary, then names what it left out beside the call that returns it; the memo itself is produced from a lifecycle-aware coverage sample with an explicit omission receipt |
 | **Operator yields** | derived from the DAG | Strategist | a per-operator gain-per-second line in the strategist brief, so it tunes the operator mix from evidence, not priors |
 | **Operator directives** | `RunState.pending_hints` | Researcher, Strategist, pilot, crash-triage, **Developer** | one `render_hint_directives` helper — the engine also folds directives into the idea handed to `implement`, so a directive steers the **code**, not only the proposal |
 | **Run states** (paused / awaiting-approval / trust-flag / stuck-build) | `RunState` | boss / assistant | an "ATTENTION" block in the boss context, surfacing the states where human intervention is most valuable |
@@ -609,6 +609,30 @@ field nothing writes is a red test rather than a quiet one. What that does NOT c
 returns a string, so nothing here reaches a metric, a champion, a selectability decision or a
 violation (docs/36 — a wider CONTEXT must not widen the trusted set), and folding all 46 event logs
 in `runs/` gives a byte-identical corpus digest before and after.
+
+**A signal can also be delivered and then cut in the last 30 characters of the path.** Until
+2026-08-19 `read_research_memo` returned ONE string — verifier lead, summary, findings, claims,
+recommended directions — and the agent loop bounds every tool result at `RESULT_CAP = 4,000` chars
+**head-keep** (`agents/tool_loop.py::_cap_tool_result`). Replayed over all 90 memos in `runs/`: the
+render is a median **9,083** chars, **89 of 90 exceed the cap**, a median **5,180** chars are
+discarded, and the cut is not where the padding is — `Summary` and `Findings` survived every time,
+`Claims` began past the cut in **80 of 89** and **`Recommended directions` in 89 of 89**. In the real
+traces: **375** recorded `read_research_memo` calls, **362** over the cap, and of the 212 whose
+recorded render still shows a directions section, **194** have it starting past the cut. The run
+paid for a think-hard review and then discarded its conclusions on delivery.
+
+**The cap was not raised, and that is the point.** It is the tool loop's shared bounded-output
+contract, and a memo that merely fits is still the "портянка" the operator asked to be rid of. What
+changed is WHAT is kept. The memo is now ADDRESSABLE: an omitted `section` gives the OVERVIEW — the
+verifier block, the recommended directions **in full**, and a summary clipped to
+`_MEMO_OVERVIEW_SUMMARY` (600 chars; it is the one field of the memo nothing checks, and
+`_state_brief` already pushes its first 300 chars into every proposal prompt unasked) — and the
+overview ends by naming every section it left out **beside the exact call that returns it**, each of
+which gets the whole cap to itself. That is this repo's existing bounded-answer rule
+(`tools/log_tools.py` rule 3: say what you did not cover and name a remedy the caller has not already
+spent). Measured after the change over the same 90 memos: **0 of 90** answers are cut by the agent
+layer in any section, and the directions arrive complete in **86 of 89** default answers (the other
+3 name `read_research_memo(section="directions")`, which delivers all of them for **89 of 89**).
 
 **And a delivered signal has two channels, which can disagree about the same payload.** The row
 above is one signal with a PULL half (the tool) and a PUSH half (`roles.py::_state_brief`), and the

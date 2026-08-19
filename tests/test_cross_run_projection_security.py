@@ -196,6 +196,11 @@ def test_all_cross_run_prompt_pushes_share_the_redaction_contract(tmp_path):
         {"complete": True, "invalid": 0, "source": 2, "truncated": False,
          "unavailable": False, "notes_digest": "0" * 64,
          "lessons_digest": "1" * 64},
+        # The exact-task CASE joined this tier on 2026-08-19 and it is a cross-run row like the two
+        # above — a past run's own `params` dict, rendered into a live prompt. `_scan_prior_context`
+        # already puts it through `cross_run_text`, but a channel whose redaction depends only on
+        # where it was BUILT is one refactor from leaking, so the render boundary is pinned here too.
+        f"metric 1.0 (run earlier) with params {{'api_key': '{_SECRET}'}}",
     ), None)
 
     combined = proposal + strategy + prior

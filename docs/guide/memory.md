@@ -39,7 +39,7 @@ Each type is deliberately different — they are **not** interchangeable:
 
 | Type | Essence — what it's for | Stores | Scope | Written | Read |
 |---|---|---|---|---|---|
-| **Cases** (`cases.jsonl`) | *The list of the best* — the winning config per task, verbatim, retain-on-improvement. Exactly one row per `task_id`: a leaderboard, not a history. | `{task_id, goal, direction, params, metric, rationale}` | cross-run | run-end | **`kb_search` only** — a case is never injected into a prompt (see [What are cases for?](#what-are-cases-for)) |
+| **Cases** (`cases.jsonl`) | *The winning run's exact configuration* — the parameter dict that produced the best metric on this task, kept machine-readable so the next run can start from it instead of re-deriving it from prose. Exactly one active row per `(task_id, direction)`: a leaderboard, not a history. | `{task_id, goal, direction, params, metric, rationale}` | cross-run | run-end | **exact-task warm start** (one line in the Researcher prior, beside the meta-note) + `kb_search` (see [What are cases for?](#what-are-cases-for)) |
 | **Meta-notes** (`meta_notes.jsonl`) | *Why it may have won* — a short, LLM-distilled explanatory hypothesis over the observed run (not the raw config — that's the case, and not causal proof). | `{task_id, note}` (model-authored explanatory prose) | cross-run (per task) | run-end (LLM; falls back to a stats line) | exact warm-start, `recall_notes` |
 | **Lessons** (`lessons.jsonl`) | *Generalizable good **and** bad findings* — higher-level claims ("larger batch tends to help") with a verdict and a count of agreeing recorded observations, not independent verification. **Split by `role`** (see below). | `{statement, outcome: supported/tested/abandoned/failed/refuted/noted (action guidance; noted is neutral), claim_stance: support/oppose/neutral (relation of evidence to the literal statement on new rows), delta, confidence, evidence, evidence_sig (each evidence node's outcome signature at write time — the reconciliation provenance), evidence_count, fingerprint, role: researcher/developer (absent = shared)}` | cross-run (task-fingerprint matched) | run-end — **LLM-authored only**: the reflection consolidates the run (worked/failed nodes + resolved hypotheses + failure themes) into one lesson per theme, plus M6 comparative code-fix pairs (offline/toy path: a deterministic winner record); also **re-derived when a re-eval flips a cited node** | prompt injection (role-routed, fingerprint-matched), `search_lessons` |
 | **Skills** — hand-written (`skills_dir`) | *Best practices **with the script*** — a reusable technique + the code that implemented it, offered to the Researcher as a tool. | markdown: `name`, `description` frontmatter + the technique in the body | cross-run | **by you**; root Markdown is editable and nested `**/SKILL.md` packages are review-only in Lab → Authoring → skills | `list_skills`, `use_skill` |
@@ -72,15 +72,56 @@ be a deliberate placeholder — but each of these has cost somebody an afternoon
 
 ### What are cases for?
 
-Honestly: **less than the name suggests.** A case is the only place the winning **params** survive a
-run in structured form, and that is a real property. But trace the readers and the list is short:
+**In one line: a case is the winning run's exact configuration — the parameter dict that produced the
+best metric on this task, kept machine-readable so the next run can start from it instead of
+re-deriving it from prose.** That is the whole distinction from its neighbours: a *lesson* is a
+generalizable claim, a *meta-note* is the causal story of why a run won, and a *case* is the recipe.
 
-* `agents/factory.py` passes `cases.jsonl` into `KnowledgeTools`, which renders each row as a
-  `PAST CASE — task …` block and embeds it into the **same** `kb` index as the knowledge notes. So a
-  case reaches a model only when a tool-using role chooses to call `kb_search`, and then only if it
-  wins a top-3 semantic ranking against every knowledge note.
+**Until 2026-08-19 that was true of the FILE and of nothing else, and this section said so.** A case
+was written once per run and injected into nothing: `JsonlCaseLibrary.search()` and `.all()` had no
+production call sites at all, and the store's only reader was `KnowledgeTools`, which embeds a case
+into the same `kb` index as the knowledge notes — so a case reached a model only if a tool-using role
+called `kb_search` AND the row won a top-3 semantic ranking against every note. Two things were
+measured on 2026-08-19 and both are why the kind was fixed rather than deleted:
+
+* **The meta-note does not cover it.** On the shared store's 30 cases — 29 `toy_quadratic` and one
+  real row — the toy note genuinely IS the case's twin (`best metric 4.483 via op 'improve' params
+  {'x': 0.885, 'y': -0.9026}` carries both parameters inline), which is why folding cases into notes
+  looks right from that corpus. On the one real row it is not: `rubertlite-dr-unified-v8`'s note is a
+  causal narrative naming ONE hyperparameter (`R-Drop … at α=0.5 … lifted recall from 0.7384 to
+  0.762`), while its case carries fifteen — `loss.temperature 0.05`, `loss.thr 0.1`,
+  `train.negatives.mining_type 1`, `batch_size 8192`, `gradient_accumulation_steps 2`,
+  `learning_rate 0.001`, `max_grad_norm 1.0`, `n_epochs 15`, `warmup_ratio 0.2`,
+  `weight_decay 0.1` … — beside `metric 0.762048`. Deleting the kind deletes the only re-runnable
+  record of the only real run in the store.
+* **Even the one reader it had never delivered that payload.** A `kb_search` hit is head-clipped at
+  600 chars and the record used to lead with the `goal`, so on that same real case `best params=`
+  began at char **691** of a 1,610-char record and could not fit — and because the scope gate admits
+  a case only on an exact task id or a strict goal-fingerprint overlap, the 600 chars that did arrive
+  were the reader's own task prompt restated. The toy cases fit (two parameters), which is exactly
+  why this survived the life of the store.
+
+**What reads a case now.**
+
+* **The exact-task warm start** — `engine/lessons_priors.py::_scan_prior_context`, the loader that
+  already reads the meta-note out of the file next door, under the same `(task_id, direction)` key
+  and the same fail-closed `LessonScope` (exact task + compatible polarity + not this run's own row),
+  now reads the active case beside it and renders ONE line into the **Researcher** prior:
+  `Best known configuration for this task (the winning run's own parameters, not a recommendation):
+  metric … (run …) with params …`. Same role gate as the notes — the Developer never sees it, because
+  a hyperparameter set is research context. It withholds nothing and decides nothing: it is prompt
+  text, so no metric, champion, selectability decision or violation can move (docs/36).
+* **`kb_search`**, as before, but the record now leads with its payload — `PAST CASE (task,
+  objective) metric=…, run …: params=… why: … measured on this goal: …` — so the params survive the
+  hit clip, and the clip now says how much it cut instead of ending mid-recipe in silence.
 * `GET /api/memory` renders them on the Memory panel.
 * `JsonlCaseLibrary._reload` reads them back so `add` can keep the better metric.
+
+`JsonlCaseLibrary.search()` and `.all()` still have no production call sites, and that is now a
+statement about those two METHODS rather than about the kind: the readers above go through the same
+bounded-window scan (`core/memory_window.py`) every other cross-run reader uses. The
+vector/Memora-capable `CaseLibrary` in the same module remains explicitly unwired
+(`tests/test_case_store_wiring.py` holds that line).
 
 ### `GET /api/memory` and what it can honestly say about one experiment
 
@@ -123,24 +164,22 @@ experiment taught* section is built on it:
 * modern **knowledge notes** written by `remember` carry actor/surface/time provenance; legacy notes
   remain unattributed, and neither shape is joined to a run/node without explicit source refs.
 
-That is the complete list. No prompt injection, no warm start, no gate, no score, no selection.
-`JsonlCaseLibrary.search()` and `.all()` have **no production call sites at all**. The
-vector/Memora-capable `CaseLibrary` in the same module is explicitly unwired (`tests/test_case_store_wiring.py`
-holds that line).
+That is the complete list for PROVENANCE. It is not a statement about reach: a case now rides the
+exact-task warm start beside the meta-note (see [What are cases for?](#what-are-cases-for)), and it
+still carries no node id — what it carries is the configuration, not the experiment that produced it.
 
-Meanwhile the **meta-note** for the same finished run says the same thing in prose —
-`best metric 0.925 via op 'draft' params {'iters': 500.0, 'k_folds': 5.0}` — and *that* one **is**
-injected, verbatim, into the next run of the same task. So on the exact-task path the case is the
-structured twin of a note that already reaches the prompt, and on the similar-task path the case is
-keyed by `task_id` and cannot transfer at all (lessons and capsules carry the goal fingerprint that
-makes fuzzy transfer possible; a case does not).
+The case remains keyed by `task_id`, so on the similar-task path it cannot transfer at all (lessons
+and capsules carry the goal fingerprint that makes fuzzy transfer possible; a case does not), and
+`repo_task` is one task id across several repos — which is why the rendered line names the run it
+came from and the goal it was measured on, and calls itself the winning run's own parameters rather
+than a recommendation.
 
-**If the merge tempts you** — folding cases into meta-notes, or promoting the case into the prior the
-way notes are — the cost is: (1) `cases.jsonl` is unversioned by contract (`valid_case_record`
-quarantines any row carrying `v` or `record_kind`), so it cannot be migrated in place, only rewritten
-under a new filename; (2) `KnowledgeTools` would lose its only non-note corpus and `kb_search`'s
-behaviour would change for every existing memory dir; (3) the params are the one artifact a human can
-paste into a re-run, and prose is not a substitute. This is the operator's call, not a refactor.
+**If the merge still tempts you** — folding cases into meta-notes — the cost is: (1) `cases.jsonl` is
+unversioned by contract (`valid_case_record` quarantines any row carrying `v` or `record_kind`), so it
+cannot be migrated in place, only rewritten under a new filename; (2) `KnowledgeTools` would lose its
+only non-note corpus and `kb_search`'s behaviour would change for every existing memory dir; (3) the
+params are the one artifact a human can paste into a re-run, and prose is not a substitute — measured
+above on the one real row in the store, where the note names one hyperparameter of fifteen.
 
 ### Authoring vs Memory
 

@@ -18,7 +18,7 @@ from looplab.events import digest
 from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIFIED,
                                             memo_verification_view, verdict_tally)
 from looplab.core.models import NodeStatus, RunState, extra_metric_channel
-from looplab.tools._base import RESULT_CAP, clip, fn_spec
+from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 from looplab.tools._runcache import RunStateCache
 
 # How many groundless claims the memo render LEADS with, and how much of each it shows. Both are
@@ -34,6 +34,39 @@ from looplab.tools._runcache import RunStateCache
 _MEMO_LEAD_VERDICTS = 6
 _MEMO_LEAD_STATEMENT = 140
 _MEMO_LEAD_NOTE = 110
+
+#: The sections `read_research_memo` can be asked for. `overview` is what an omitted `section`
+#: means, and it is the one that had to change: over all 90 memos in `runs/` the whole-memo render
+#: is a median 9,083 chars against a 4,000-char HEAD cut, and `Recommended directions` — the memo's
+#: conclusion — began past that cut in 89 of the 89 memos it exists in. Sections are ADDRESSABLE
+#: rather than merely reordered because reordering only moves which section is silently amputated;
+#: an addressable one can be NAMED in the omission receipt as a call the caller has not yet spent
+#: (`_memo_elsewhere`), which is this repo's bounded-answer rule (`tools/log_tools.py`, rule 3).
+_MEMO_SECTIONS = ("overview", "directions", "findings", "claims", "summary")
+_MEMO_DEFAULT_SECTION = "overview"
+#: Per-section row caps, unchanged from the single-string render they came out of, so a section page
+#: shows exactly the population the whole-memo answer used to promise.
+_MEMO_FINDING_ROWS = 12
+_MEMO_CLAIM_ROWS = 12
+_MEMO_DIRECTION_ROWS = 8
+#: What the OVERVIEW spends on the summary. Measured: the summary is a median 1,395 chars (p90
+#: 1,620), the whole overview shares 4,000 with a verifier block of up to 1,827 and a directions
+#: section of up to 3,116, and the summary is the memo's LEAST load-bearing field on both counts
+#: that matter — `trust/memo_verify.py::verify_memo` never looks at it, so nothing checks it, and
+#: `agents/roles.py::_state_brief` already pushes its first 300 chars into every proposal prompt
+#: unasked, so a PULL that re-spends the window on it buys the least. 600 keeps roughly twice what
+#: the push channel already delivered and names the call that returns the rest.
+_MEMO_OVERVIEW_SUMMARY = 600
+_MEMO_SUMMARY_LABEL = "the memo's summary"
+#: Below this the clipped summary is not worth its own line — a 100-char head of a 1,400-char
+#: summary is a sentence fragment, and the receipt naming the whole section is more use than it.
+_MEMO_SUMMARY_FLOOR = 200
+_MEMO_SUMMARY_CLIPPED = '…[+{n} chars — read_research_memo(section="summary")]'
+#: The directions' own omission marker. `fit_rows` drops whole rows from the END and its default
+#: marker says only how many; here it must also name the call that returns them, and that call gets
+#: the WHOLE cap to itself — a remedy the caller has not already spent, unlike "ask again bigger".
+_MEMO_DIRECTIONS_OMITTED = ('... ({receipt}{n} more direction(s) dropped to fit the result cap — '
+                            'read_research_memo(section="directions") returns them all)')
 
 
 def _is_number(v: str) -> bool:
@@ -142,14 +175,19 @@ class RunTools:
                 "UNAVAILABLE, never as an empty delta.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_research_memo",
-                "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
-                "evidence-cited claims, EACH WITH THE VERDICT this run's own verifier gave it "
-                "(supported / unsupported / unclear), so you can tell a measured result from an "
-                "unsupported assertion before you build on it. The run periodically does a 'think hard' review over all "
-                "results (and the web); only its top recommended directions are pushed into your "
-                "context automatically — call this to pull the rest of the reasoning before "
-                "proposing, when you want the deeper analysis behind those directions.",
-                {}),
+                "Read the latest DEEP-RESEARCH memo, ONE SECTION at a time. The run periodically "
+                "does a 'think hard' review over all results (and the web); this is how you pull it. "
+                "With no argument you get the OVERVIEW: what this run's own verifier could NOT "
+                "ground, then the memo's recommended directions, then a clipped summary. The memo "
+                "does not fit one tool result, so the overview ends by naming what it left out and "
+                "the exact call that returns it. Ask for section='findings', 'claims' (every claim "
+                "with the verdict the verifier gave it — supported / unsupported / unclear, so you "
+                "can tell a measured result from an unsupported assertion before you build on it), "
+                "'directions' or 'summary' to read one of them in full.",
+                {"section": {"type": "string",
+                             "enum": list(_MEMO_SECTIONS),
+                             "description": ("Which part of the memo to read. Omit for the "
+                                             "overview, which names the rest.")}}),
         ]
 
     def execute(self, name: str, args: dict) -> str:
@@ -178,7 +216,7 @@ class RunTools:
             if name == "node_concept_delta":
                 return self._node_concept_delta_tool(st, int(args.get("node_id")))
             if name == "read_research_memo":
-                return self._research_memo(st)
+                return self._research_memo(st, str(args.get("section") or ""))
             return f"(unknown tool: {name})"
         # BROAD on purpose. The provider contract is that `execute` soft-fails and never raises,
         # and `drive_tool_loop` does NOT guard this call (cross_run_tools.py documents that
@@ -663,7 +701,7 @@ class RunTools:
             prefix = ""
         return f"#{nid} concept delta vs {base}: {prefix}{body}"
 
-    def _verifier_lead(self, view: dict) -> tuple[str, set[int]]:
+    def _verifier_lead(self, view: dict, *, spell_out: bool = True) -> tuple[str, set[int]]:
         """The memo's verifier result, rendered FIRST — counts, then the claims it could not ground.
 
         Returns the block and the claim INDEXES it already spelled out, so the `Claims` section below
@@ -746,7 +784,13 @@ class RunTools:
         bad = [(i, r) for i, r in enumerate(rows)
                if r.get("verdict") in ("unsupported", VERDICT_UNVERIFIED)]
         listed: set[int] = set()
-        if bad:
+        # `spell_out=False` keeps the HEAD — the tally, and the two receipts that stop a bounded or
+        # mismatched check reading as a complete one — and drops the per-claim block. Its one caller
+        # is a `section` page of `_research_memo` whose own rows already carry each verdict inline,
+        # or which is not about claims at all; there the block is the same sentence paid for twice
+        # out of a budget the page needs for its own content. The tally still says the check ran and
+        # what it found, so no page can read as "verified" when nothing was.
+        if bad and spell_out:
             lines.append("  These claims are NOT grounded — the run's own verifier could not tie "
                          "them to an experiment in THIS run or to a source it read. Do not carry "
                          "their numbers forward as measured results:")
@@ -757,72 +801,179 @@ class RunTools:
                 stmt = clip(str(row.get("statement") or "").strip(), _MEMO_LEAD_STATEMENT, note="…")
                 lines.append(f"  - [{label}: {note or 'no reason recorded'}] {stmt}")
             if len(bad) > _MEMO_LEAD_VERDICTS:
+                # Name the CALL, not a position. The claims used to be further down the same
+                # string; they are their own section now, and "below" would point at nothing.
                 lines.append(f"  - (+{len(bad) - _MEMO_LEAD_VERDICTS} more not grounded; every "
-                             "claim carries its verdict under Claims below.)")
+                             'claim carries its verdict under '
+                             'read_research_memo(section="claims").)')
         return "\n".join(lines), listed
 
-    def _research_memo(self, st: RunState) -> str:
-        """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top
-        `recommended_directions` are auto-pushed into the prompt; this returns the verifier's per-claim
-        verdicts, then the summary + findings + evidence-cited claims, so the agent can pull the
-        reasoning behind those directions instead of it being recorded-but-unread. Every claim is
-        rendered with the verdict the run's own verifier gave it (`_verifier_lead` documents why the
-        verdicts lead rather than trail, and what the previous renderer's dead `verification["summary"]`
-        branch cost on `rubertlite-dr-unified-v8`). Soft-fails to a plain note."""
+    def _memo_claim_rows(self, view: dict, claims: list, spelled_out: set) -> list:
+        """One row per claim, each carrying the verdict THIS run's verifier gave that claim.
+
+        Lifted out of `_research_memo` verbatim when the render became section-addressable, so the
+        positional join below has exactly one spelling. The population rule is the VIEW'S OWN, and
+        the reason is the join: `view["rows"]` is per claim in claim order, so a claim list that
+        differs from the view's by one row tags every later claim with its NEIGHBOUR's verdict.
+        A truthy test is not that rule — the sanitizer preserves a whitespace-only statement
+        verbatim (`redact_persisted_text(" ") == " "`), so `" "` is truthy here and blank there
+        (driven: claims [" ", "A", "B"] rendered "A" under "B"'s verdict and left "B" untagged).
+        """
+        verdict_rows = view.get("rows") or []
+        rows = []
+        for index, c in enumerate(claims[:_MEMO_CLAIM_ROWS]):
+            nodes = ", ".join(f"#{n}" for n in (c.get("node_ids") or []))
+            urls = ", ".join(str(u) for u in (c.get("urls") or []))
+            cite = "; ".join(x for x in (nodes, urls) if x)
+            row = verdict_rows[index] if index < len(verdict_rows) else {}
+            verdict = str(row.get("verdict") or "").strip()
+            # No verdict block at all leaves the claim untagged rather than tagged "unverified":
+            # the lead already said the check never ran, and repeating it on twelve rows spends
+            # the answer's remaining budget saying one thing many times.
+            tag = f"[{verdict.upper()}] " if verdict and view.get("status") == "present" else ""
+            # The lead already printed this claim's reason verbatim; repeat the LABEL so the
+            # row is self-describing, never the sentence.
+            note = "" if index in spelled_out else str(row.get("note") or "").strip()
+            reason = f"  [verifier: {clip(note, _MEMO_LEAD_NOTE, note='…')}]" if note else ""
+            rows.append(f"  - {tag}{str(c['statement']).strip()}"
+                        + (f"  [evidence: {cite}]" if cite else "") + reason)
+        return rows
+
+    @staticmethod
+    def _memo_elsewhere(missing: list) -> str:
+        """The omission receipt: what this answer does NOT carry, and the call that carries it.
+
+        Rule 3 of the bounded-answer contract this repo already applies to `log_tools.py`: a bounded
+        answer states what it did not cover AND names a call that covers it — and that call must be
+        one the caller has not already spent. Each `section` page below gets the WHOLE `RESULT_CAP`
+        to itself, so naming one is a real remedy and not the "raise max_bytes" told to a caller
+        already at the ceiling.
+        """
+        if not missing:
+            return ""
+        parts = [f'{label} — read_research_memo(section="{name}")' for name, label in missing]
+        return "NOT IN THIS ANSWER: " + "; ".join(parts) + "."
+
+    def _research_memo(self, st: RunState, section: str = "") -> str:
+        """Signal-delivery (§1): the latest deep-research memo, on demand, ONE SECTION AT A TIME.
+
+        WHY THIS IS SECTIONED AND NOT ONE STRING, measured over all 90 memos in `runs/` on
+        2026-08-19. The whole-memo render is a median 9,083 chars against the agent layer's
+        4,000-char `RESULT_CAP`, which is HEAD-keep (`agents/tool_loop.py::_cap_tool_result`), so
+        89 of the 90 were cut and a median 5,180 chars never reached the model. What the cut removed
+        was not the padding: `Summary` and `Findings` survived every time, `Claims` began past the
+        cut in 80 of 89 and **`Recommended directions` in 89 of 89** — i.e. the section a caller
+        ACTS ON was the one section that never arrived, on every memo in the corpus. Confirmed
+        against the real traces: of 375 recorded `read_research_memo` calls, 362 rendered over the
+        cap, and of the 212 whose recorded render still shows a directions section, 194 have it
+        starting past the cut. The run pays for a think-hard review and then discards its
+        conclusions in the last 30 characters of the delivery path.
+
+        RAISING THE CAP IS NOT THE FIX and was not done. The cap is the tool loop's bounded-output
+        contract, shared by every provider, and a memo that fits is still the "портянка" (wall of
+        text) the operator complained about — a bigger blob is a blob. What changed is WHAT is kept:
+        the answer is now ordered by what a reader must act on, bounded by this tool rather than by
+        a blind head cut, and everything it left out is NAMED beside the call that returns it
+        (`_memo_elsewhere`). Each section page gets the whole cap to itself.
+
+        THE ORDER, and why the overview holds these three. The verifier block LEADS — `_verifier_lead`
+        records what its absence cost on `rubertlite-dr-unified-v8` and why a refusal must arrive with
+        the number rather than after it. `Recommended directions` comes next because it is the memo's
+        conclusion and the only section a caller can act on without reading the rest. `Summary` is
+        third and is CLIPPED: it is the one field of the memo nothing checks
+        (`trust/memo_verify.py::verify_memo` verifies `memo["claims"]` and has never looked at
+        `summary`), and `agents/roles.py::_state_brief` already pushes its first 300 chars into every
+        proposal prompt unasked — so a PULL that re-spends the window on it buys the least of the
+        five. `Findings` and `Claims` are whole sections of their own, named in the receipt —
+        and `section="claims"` is where every claim arrives carrying the per-claim VERDICT this
+        run's verifier gave it, its population and its positional join unchanged
+        (`_memo_claim_rows`).
+
+        Soft-fails to a plain note; returns a string and decides nothing (docs/36)."""
         research = getattr(st, "research", None) or []
         if not research:
             return "(no deep-research memo yet — the run hasn't done a 'think hard' review)"
         m = research[-1]
         if not isinstance(m, dict):
             return "(research memo unavailable)"
+        want = str(section or _MEMO_DEFAULT_SECTION).strip().lower() or _MEMO_DEFAULT_SECTION
+        if want not in _MEMO_SECTIONS:
+            # A junk section is REFUSED by name rather than silently served the overview: a caller
+            # that asked for claims and got the overview would read "no claims" off an answer that
+            # was never about claims.
+            return (f"(unknown memo section {str(section)[:40]!r} — ask for one of: "
+                    + ", ".join(_MEMO_SECTIONS) + ")")
         # ONE derivation of the verdicts, from the module that WRITES them, used by both the lead
         # block and the per-claim tags — so the two halves of this answer cannot come to disagree
-        # about the same claim. `rows` is per CLAIM and in claim order, which is what makes the
-        # positional read below safe; a claim whose verdict is missing or misaligned reads
-        # `unverified` rather than borrowing its neighbour's.
+        # about the same claim.
         view = memo_verification_view(m)
-        lead, spelled_out = self._verifier_lead(view)
-        parts: list[str] = []
         at = m.get("at_node")
-        parts.append(f"Deep-research memo (at node {at}):" if at is not None else "Deep-research memo:")
-        parts.append(lead)
-        if m.get("summary"):
-            parts.append("Summary: " + str(m["summary"]).strip())
+        head = (f"Deep-research memo (at node {at}), section '{want}':" if at is not None
+                else f"Deep-research memo, section '{want}':")
+        summary = str(m.get("summary") or "").strip()
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
-        if findings:
-            parts.append("Findings:\n" + "\n".join(f"  - {f}" for f in findings[:12]))
-        # THE VIEW'S OWN RULE, spelled the same way, because `_cite` reads `view["rows"][index]`
-        # positionally and a population that differs by one row tags every later claim with its
-        # NEIGHBOUR's verdict. A truthy test is not that rule: the sanitizer preserves a
-        # whitespace-only statement verbatim (`redact_persisted_text(" ") == " "`), so `" "` is
-        # truthy here and blank there — driven, claims [" ", "A", "B"] rendered "A" under "B"'s
-        # verdict and left "B" untagged. Same cap too, so the two lists cannot diverge past it.
+        dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
+        # THE VIEW'S OWN population rule, spelled the same way — see `_memo_claim_rows`.
         claims = [c for c in (m.get("claims") or [])[:MAX_RESEARCH_CLAIMS]
                   if isinstance(c, dict) and str(c.get("statement") or "").strip()]
-        if claims:
-            verdict_rows = view.get("rows") or []
-            def _cite(index: int, c: dict) -> str:
-                nodes = ", ".join(f"#{n}" for n in (c.get("node_ids") or []))
-                urls = ", ".join(str(u) for u in (c.get("urls") or []))
-                cite = "; ".join(x for x in (nodes, urls) if x)
-                row = verdict_rows[index] if index < len(verdict_rows) else {}
-                verdict = str(row.get("verdict") or "").strip()
-                # No verdict block at all leaves the claim untagged rather than tagged "unverified":
-                # the lead already said the check never ran, and repeating it on twelve rows spends
-                # the answer's remaining budget saying one thing many times.
-                tag = f"[{verdict.upper()}] " if verdict and view.get("status") == "present" else ""
-                # The lead already printed this claim's reason verbatim; repeat the LABEL so the
-                # row is self-describing, never the sentence.
-                note = "" if index in spelled_out else str(row.get("note") or "").strip()
-                reason = f"  [verifier: {clip(note, _MEMO_LEAD_NOTE, note='…')}]" if note else ""
-                return (f"  - {tag}{str(c['statement']).strip()}"
-                        + (f"  [evidence: {cite}]" if cite else "") + reason)
-            parts.append("Claims (with evidence and verifier verdict):\n"
-                         + "\n".join(_cite(i, c) for i, c in enumerate(claims[:12])))
-        dirs = [str(d).strip() for d in (m.get("recommended_directions") or []) if str(d).strip()]
-        if dirs:
-            parts.append("Recommended directions:\n" + "\n".join(f"  - {d}" for d in dirs[:8]))
-        return "\n".join(parts)
+
+        # The spelled-out refusals ride the OVERVIEW only. Everywhere else the page's own rows carry
+        # their verdicts inline (`claims`) or are not claims at all (`findings`/`directions`/
+        # `summary`), so the block would be the same sentence paid for twice — the argument
+        # `_verifier_lead`'s own `spelled_out` return value already makes one level down.
+        lead, spelled_out = self._verifier_lead(view, spell_out=(want == _MEMO_DEFAULT_SECTION))
+
+        if want == "claims":
+            rows = self._memo_claim_rows(view, claims, spelled_out)
+            return fit_rows([head, lead, "Claims (with evidence and verifier verdict):"],
+                            rows or ["  (this memo makes no evidence-cited claims)"],
+                            cap=RESULT_CAP)
+        if want == "findings":
+            return fit_rows([head, lead, "Findings:"],
+                            [f"  - {f}" for f in findings[:_MEMO_FINDING_ROWS]]
+                            or ["  (this memo records no findings)"], cap=RESULT_CAP)
+        if want == "directions":
+            return fit_rows([head, lead, "Recommended directions:"],
+                            [f"  - {d}" for d in dirs[:_MEMO_DIRECTION_ROWS]]
+                            or ["  (this memo recommends no directions)"], cap=RESULT_CAP)
+        if want == "summary":
+            return fit_rows([head, lead, "Summary:"],
+                            [summary] if summary else ["  (this memo carries no summary)"],
+                            cap=RESULT_CAP)
+
+        # --- the overview -------------------------------------------------------------------
+        # Assembled against a BUDGET rather than concatenated and hoped for, and the ORDER of the
+        # reservations is the priority order: the refusal block, then the directions IN FULL, and
+        # the summary gets only what is left. Reserve the receipt at its LONGEST — as if the summary
+        # will also have to be named — before the directions are laid out, because a receipt sized
+        # after the fit decision is exactly what pushes it past the cap (`_base.fit_rows` makes the
+        # same reservation one layer down for the same reason).
+        missing = [(name, label) for name, label, rows in
+                   (("findings", f"{len(findings)} finding(s)", findings),
+                    ("claims", f"{len(claims)} claim(s) with their verdicts", claims)) if rows]
+        reserve = len(self._memo_elsewhere(missing + [("summary", _MEMO_SUMMARY_LABEL)])) + 1
+        # ONE named budget, derived from the loop cap — `tests/test_bounded_tool_results.py` holds
+        # every provider to deriving its bounds from `RESULT_CAP` rather than from a free-standing
+        # ~4000, and a derivation buried in a call argument is the shape that guard cannot see.
+        overview_budget = RESULT_CAP - reserve
+        rows = [f"  - {d}" for d in dirs[:_MEMO_DIRECTION_ROWS]]
+        body = fit_rows([head, lead] + (["Recommended directions:"] if rows else []), rows,
+                        cap=max(0, overview_budget), omitted=_MEMO_DIRECTIONS_OMITTED)
+        # What the directions did not spend goes to the summary, never the other way round: it is the
+        # memo's least load-bearing field (see `_MEMO_OVERVIEW_SUMMARY`) and the section a caller can
+        # act on must not lose a row to it. A summary that is cut carries its own remedy through
+        # `clip`; one that does not fit at all is named in the receipt, so it is never silently gone.
+        room = overview_budget - len(body) - len("\nSummary: ")
+        keep = min(len(summary), _MEMO_OVERVIEW_SUMMARY, max(0, room))
+        # The floor gates a CLIPPED summary only. Gating a WHOLE one on it too dropped every short
+        # summary out of the overview — caught by `tests/test_signal_delivery.py`, whose probe reads
+        # exactly that field, which is the point of having a delivery probe per signal.
+        if summary and (keep >= len(summary) or keep >= _MEMO_SUMMARY_FLOOR):
+            body += "\nSummary: " + clip(summary, keep, note=_MEMO_SUMMARY_CLIPPED, reserve=64)
+        elif summary:
+            missing.append(("summary", _MEMO_SUMMARY_LABEL))
+        receipt = self._memo_elsewhere(missing)
+        return body + (f"\n{receipt}" if receipt else "")
 
 
 class ForeignRunReader:

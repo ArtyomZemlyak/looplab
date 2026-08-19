@@ -148,11 +148,13 @@ export const MEMORY_TIER_BLURB = Object.freeze({
   lessons: 'What a run CONCLUDED — one transferable claim per row, distilled at the end of a run '
     + 'from its own experiments, with the evidence and confidence behind it. Written by the engine; '
     + 'read back into a later run’s Researcher prompt.',
-  cases: 'The best known SOLUTION for a task — one row per task, holding the winning parameters and '
-    + 'why they won. A later run on the SAME task starts from it instead of rediscovering it. That '
-    + 'is why there are so few: it is one per task, not one per experiment.',
-  notes: 'A run’s own closing summary — what it ended up with and how far it got. Context for '
-    + 'reading the lessons above, not a claim in itself.',
+  cases: 'The winning run’s exact CONFIGURATION — the parameter dict that produced the best metric '
+    + 'on this task, kept machine-readable. A later run on the SAME task is handed it in its '
+    + 'Researcher prompt instead of rediscovering it. That is why there are so few: it is one per '
+    + 'task and objective, not one per experiment.',
+  notes: 'A run’s own closing summary — what it ended up with and how far it got, in prose. The '
+    + 'CAUSE where a case is the recipe. Context for reading the lessons above, not a claim in '
+    + 'itself.',
   knowledge: 'What a HUMAN authored: prompts, skills and notes every run can read. Nothing here is '
     + 'written by a run — that is the whole difference between this tab and the three beside it.',
 })

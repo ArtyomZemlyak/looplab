@@ -16,12 +16,25 @@ from looplab.core.atomicio import atomic_write_text
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
-from looplab.tools._base import fn_spec
+from looplab.tools._base import clip, fn_spec
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
 from looplab.trust.cross_run import LessonScope
+
+#: How much of ONE `kb_search` hit is delivered. Unchanged from the bare `[:600]` it replaces — this
+#: is a bound on WHAT is kept, not on how much: `kb_search` returns up to `k` hits plus up to `k`
+#: anchor-expansions, and six 600-char hits plus the header already sit just under the tool loop's
+#: `RESULT_CAP`. What changed is that the cut now SAYS it cut (doc 25 TO-08 — five providers wrote
+#: their own silent clip; a hit that stops mid-recipe and looks whole is the case-params defect one
+#: layer up), and that each record orders itself so its payload is above the line.
+_KB_HIT_CHARS = 600
+
+
+def _kb_hit(text: str) -> str:
+    """One retrieved record, bounded and honest about it."""
+    return clip(str(text), _KB_HIT_CHARS, note="\n…[+{n} chars of this record not shown]")
 
 
 def _abstraction_of(payload: dict):
@@ -349,9 +362,21 @@ class KnowledgeTools:
                 # prevents identical goals with opposite min/max objectives from becoming equivalent
                 # semantic hits after consolidation.
                 params = redact_persisted_text(c.get("params"), max_chars=2000, single_line=True)
-                text = (f"PAST CASE — task {c.get('task_id')}; objective={c.get('direction')}: {goal}\n"
-                        f"best params={params} metric={c.get('metric')}\n"
-                        f"{rationale}")
+                # THE PAYLOAD LEADS. A hit is delivered head-clipped at `_KB_HIT_CHARS`, and the
+                # goal used to be first — so on the only real case in the shared store
+                # (`rubertlite-dr-unified-v8`) `best params=` began at char 691 of a 1,610-char
+                # record and NEVER fit: what a role received was 600 chars of the task prompt it was
+                # already holding, since the scope gate above admits a case only on an exact task id
+                # or a strict goal-fingerprint overlap. The toy cases fit (two parameters), which is
+                # exactly why nobody saw it. The params are the one thing a case holds that the
+                # meta-note beside it does not, so they go first and the goal — the discriminator
+                # that says WHICH problem this was measured on, which matters because `repo_task` is
+                # one task id over several repos — goes last, where a clip can take it.
+                text = (f"PAST CASE ({c.get('task_id')}, objective={c.get('direction')}) "
+                        f"metric={c.get('metric')}, run {c.get('run_id') or 'unknown'}:\n"
+                        f"params={params}\n"
+                        f"why: {rationale}\n"
+                        f"measured on this goal: {goal}")
                 recs.append((f"case:{i}", goal + " " + text,
                              {"path": f"case:{c.get('task_id')}", "text": text,
                               "source_kind": "case", "task_id": c.get("task_id"),
@@ -440,14 +465,14 @@ class KnowledgeTools:
                 out = [f"{Path(h.payload['path']).name}"
                        + (f" [members={','.join(h.payload.get('member_ids') or [h.id])}]"
                           if h.payload.get("member_ids") else "")
-                       + f":\n{h.payload['text'][:600]}" for h in hits]
+                       + f":\n{_kb_hit(h.payload['text'])}" for h in hits]
                 # Anchor-expansion (Memora): follow the top hits' cue anchors to related-but-not-
                 # similar notes the plain query missed. No-op on a legacy (no-anchor) index.
                 if self.expand and self.abstract is not None:
                     from looplab.tools.memora import expand_by_anchors
                     for h in expand_by_anchors(self._index, "kb", hits, self.embed, k=self.k):
                         out.append(f"[related via anchors] {Path(h.payload['path']).name}:\n"
-                                   f"{h.payload['text'][:600]}")
+                                   f"{_kb_hit(h.payload['text'])}")
                 mode = ("hash" if self.embed is hash_embed else "semantic")
                 header = (f"[KB_INDEX: revision={self._index_revision[:16]}; mode={mode}; "
                           f"scope={'run' if self._scope.bound else 'portfolio'}]")
