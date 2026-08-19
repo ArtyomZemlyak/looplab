@@ -485,6 +485,11 @@ event-sourced trust gate.
 looplab inspect RUN_DIR
 ```
 
+It closes with the run's **trust-scan summary** — how many evaluated nodes carry a `trust_scan`
+receipt, and what each bucket means. The unknown bucket is stated first and deliberately: a log
+written before 2026-08-19 has no receipts, and "no receipt" means *nobody can say whether anything
+looked*, never "clean". See [Evaluation rigor](concepts.md#trust-the-sandbox).
+
 ## `replay`
 
 Read-only: fold the event log into the current state and print it as JSON. This is the

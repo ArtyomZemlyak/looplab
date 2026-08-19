@@ -32,6 +32,7 @@ from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
+from looplab.trust.scan_receipt import trust_scan_summary
 from looplab.cli import (
     _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
 
@@ -373,7 +374,16 @@ def inspect(run_dir: Path = typer.Argument(...)):
         # log and called it the run's result.
         store = EventStore(events)
         _echo_log_integrity(store, run_dir)
-        _print_result(fold(store.read_all()))
+        all_events = store.read_all()
+        state = fold(all_events)
+        _print_result(state)
+        # WHAT THIS RUN'S LOG CAN AND CANNOT SAY ABOUT ITS TRUST SCANS. `looplab inspect` is where
+        # someone goes to ask what a run actually did, and until the `trust_scan` receipt existed the
+        # honest answer here was unobtainable: a clean scan wrote nothing, so silence covered
+        # "scanned, nothing found", "every detector was off" and "the call was deleted" alike. The
+        # summary states the UNKNOWN bucket first for exactly that reason — every log written before
+        # 2026-08-19, which is every log on this box, lands there and must not read as clean.
+        typer.echo(trust_scan_summary(all_events, [n.id for n in state.evaluated_nodes()]))
 
 
 @app.command()

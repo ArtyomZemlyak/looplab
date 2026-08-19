@@ -442,6 +442,33 @@ def _stored_skill_fingerprints(raw: str) -> list[list[str]]:
 # independently confirms the same canonical technique.
 SKILL_PREFILTER_VERSION = "skill-prefilter/v2"
 SKILL_CLASSIFIER_VERSION = "skill-rubric/v2"
+# 0. …AND A RUNG BEFORE BOTH OF THEM, which had no name and left no receipt until 2026-08-19.
+#
+# `lessons_distill.py` only ever offers rung 1 a card that is `supported` with a POSITIVE
+# `best_delta`; everything else is a bare `continue`. That is a defensible eligibility rule — a
+# technique's claim is "this improved the metric over its baseline" — but it is also the rung that
+# refuses most often on this box, and it refused SILENTLY, which made the whole promotion pipeline
+# undebuggable from the log. The `skill_candidates` receipt landed 2026-08-18 specifically to answer
+# "which statements were refused and why" and it could not see this rung at all.
+#
+# MEASURED 2026-08-19 by folding every preserved log under `runs/`. `n_skills: 0` on the only two
+# finished runs of the Card era, v7 and v8, is NOT rung 1 or rung 2 over-rejecting: **zero cards
+# reached them.** v7 has 0 evaluated nodes at all (11 cards: 3 `testing`, 8 `open`). v8 has 22 cards,
+# and its THREE `supported` ones all carry `best_delta = None` — they are RECORD SETTERS
+# (`card_ledger.py::_evidence_verdict` makes a card supported when a node sets the run's SOTA, and
+# leaves `best_delta` None when that node has no feasible evaluated parent to measure against), so
+# `(h.best_delta or 0) > 0` dropped all three before either classifier ran. The audit that filed this
+# item called the question "not currently decidable"; it is decidable, and this is the answer.
+#
+# The refusal now gets a receipt of its own, and only for a card the run ITSELF called `supported` —
+# a `tested`/`open`/`abandoned` card is not a candidate in any sense and a row per card would drown
+# the one population where "should this have been a skill?" is a real question (22 rows on v8, of
+# which 3 matter). The two reasons are separate because they mean different things and the corpus
+# holds only one of them: `no_measured_delta` is the record-setter with no baseline, `no_positive_
+# delta` is a measured non-improvement.
+SKILL_ELIGIBILITY_VERSION = "skill-eligibility/v1"
+SKILL_REFUSED_NO_MEASURED_DELTA = "no_measured_delta"
+SKILL_REFUSED_NO_POSITIVE_DELTA = "no_positive_delta"
 _MAX_SKILL_STATEMENT_CHARS = 600
 _MAX_CANONICAL_SKILL_CHARS = 240
 _MIN_CANONICAL_SKILL_WORDS = 5
