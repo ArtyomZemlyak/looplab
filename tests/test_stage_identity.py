@@ -44,6 +44,21 @@ _MINER = (
 )
 
 
+class _KeyOwner(EvalStagesMixin):
+    """The mixin's `_stage_key_fn` needs only `run_dir` and `task` off its engine — the closure that
+    owns the per-ATTEMPT digest memo is the unit under test, so it is built the way `eval_dispatch`
+    builds it rather than reimplemented here."""
+
+    def __init__(self, run_dir):
+        self.run_dir = run_dir
+        self.task = _StubTask()
+
+
+class _StubTask:
+    def model_dump(self, mode="json"):
+        return {"kind": "stub", "goal": "g"}
+
+
 def _stage_key(workdir, stages, index=0, scope="scope-A", cwd=None):
     reachable = EvalStagesMixin._stage_reachable_files(stages[:index + 1], workdir)
     return stage_input_key(stages, index, workdir, scope=scope, reachable=reachable, cwd=cwd)
@@ -598,3 +613,63 @@ def test_the_byte_ceiling_is_checked_before_the_digest_not_after(tmp_path, monke
     assert _stage_key(str(wd), _stages()) == (None, "too_many_bytes")
     assert not any(f.endswith("big.bin") for f in digested), (
         "the 200 KB file was digested despite blowing a 1 KB ceiling — the check is in the wrong place")
+
+
+# ---------------------------------------------------------------- what the instrument may cost
+
+def test_the_refused_wrapper_shape_never_reaches_the_digest(tmp_path, monkeypatch):
+    """A PROPERTY, not a duration: the shape this key refuses unconditionally must not pay for the
+    whole-tree sha256 sweep first.
+
+    `sh -c "python mine.py"` yields a closure of one phantom entry, so the answer is
+    `unresolved_entry` however the workdir looks — and the walk that used to run before that clause
+    is the multi-second half of the instrument (§0.12: 3.0-4.4 s per stage on a real workdir)."""
+    from looplab.runtime import stage_identity
+
+    walks = []
+    real = stage_identity.workdir_content
+    monkeypatch.setattr(stage_identity, "workdir_content",
+                        lambda *a, **k: (walks.append(a), real(*a, **k))[1])
+
+    wd = _make_workdir(tmp_path, "a")
+    wrapped = [{"name": "mine", "command": ["/bin/sh", "-c", "python mine.py"], "timeout": 60.0}]
+    key, reason = _stage_key(str(wd), wrapped)
+    assert (key, reason) == (None, "unresolved_entry")
+    assert walks == [], "the always-refused shape paid for the whole-workdir digest"
+
+    # …and the ordinary stage still walks, i.e. the probe above it is not a new refusal.
+    key, reason = _stage_key(str(wd), _stages())
+    assert key and reason == "" and len(walks) == 1
+
+
+def test_an_unchanged_file_is_re_stat_ed_but_not_re_hashed_across_the_attempts_stages(tmp_path,
+                                                                                      monkeypatch):
+    """`_run_stages` derives a key per STAGE, and the stages of one attempt share a workdir that
+    mostly does not move between them. Driven as a property — which files were hashed — because a
+    wall-clock assertion on this box measures the box."""
+    from looplab.runtime import stage_identity
+
+    hashed = []
+    real = stage_identity._sha256
+    monkeypatch.setattr(stage_identity, "_sha256",
+                        lambda path, size: (hashed.append(str(path)), real(path, size))[1])
+
+    wd = _make_workdir(tmp_path, "a", extra={"train.py": "print(1)\n", "loss.py": "x = 1\n"})
+    stages = [{"name": "mine", "command": [sys.executable, "mine.py"], "timeout": 60.0},
+              {"name": "train", "command": [sys.executable, "train.py"], "timeout": 60.0}]
+    key_fn = _KeyOwner(str(wd))._stage_key_fn(str(wd))
+
+    first, _ = key_fn(stages, 0)
+    assert first and len(hashed) >= 4                       # the whole keyable tree, once
+    hashed.clear()
+
+    second, _ = key_fn(stages, 1)
+    assert second and second != first                       # a different stage entry, a real key
+    assert hashed == [], "an unchanged workdir was hashed a second time"
+
+    # …and the memo is an IDENTITY fence, not a path set: touch one file and only that one is re-read.
+    time.sleep(0.01)
+    (wd / "config.json").write_text(json.dumps({"n_negatives": 9}))
+    third, _ = key_fn(stages, 1)
+    assert third != second
+    assert [os.path.basename(p) for p in hashed] == ["config.json"], hashed

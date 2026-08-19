@@ -1121,6 +1121,14 @@ def stage_row_superseded(row, repairs) -> bool:
         all, and "I cannot tell" must render as the historical view rather than as a claim that a
         real result is stale — the same absent-is-not-zero rule `ui/src/traceProjection.js` states
         for omitted-span counters.
+
+    THE ROW PREDICATE IS THE WHOLE PYTHON SURFACE, and that is deliberate. A
+    `superseded_stage_rows(node)` list wrapper sat beside this function until 2026-08-19 with zero
+    production callers — its only asker was the test restating it — because the surface that renders
+    a stage strip is the BROWSER, and `serve/routers/reviews.py` deliberately hands the client
+    `stages` PLUS `repairs` (see its `_REVIEW_NODE_KEYS` note) rather than a list somebody already
+    derived. A python caller that wants the set writes the one-line comprehension at its own call
+    site; what may never be written twice is the COMPARISON below, and that is what lives here.
     """
     if not isinstance(row, dict):
         return False
@@ -1132,26 +1140,6 @@ def stage_row_superseded(row, repairs) -> bool:
     if not isinstance(row_repairs, int) or not isinstance(repairs, int):
         return False
     return row_repairs < repairs
-
-
-# REVIEW 2026-08-18 (dead-code): zero production callers — only tests/test_superseded_stage_rows.py
-# exercises this wrapper (grepped looplab/ and ui/ on 2026-08-18). The rule it wraps,
-# `stage_row_superseded`, is the deliberate one-spelling whose production reader is the browser via
-# `ui/src/stageAttribution.js`; this list comprehension has no asker, so "a question a caller can
-# ask" below is aspirational and a drift here is visible only to the test restating it. Fix: wire it
-# into the python reader it was written for (`looplab inspect` / a serve projection) or delete the
-# wrapper and keep the rule.
-def superseded_stage_rows(node) -> list:
-    """The rows of `node.stages` that a later repair has superseded, in pipeline order.
-
-    Empty for every node whose recorded stages describe its current attempt — which is what makes
-    "is this node's stage strip stale?" a question a caller can ask without re-deriving the rule.
-    """
-    repairs = getattr(node, "repairs", None)
-    if repairs is None and isinstance(node, dict):
-        repairs = node.get("repairs")
-    rows = (getattr(node, "stages", None) if not isinstance(node, dict) else node.get("stages")) or []
-    return [r for r in rows if stage_row_superseded(r, repairs)]
 
 
 def run_setup_key(command) -> str:

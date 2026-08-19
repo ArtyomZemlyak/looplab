@@ -326,9 +326,10 @@ def watch_observe_run(srv, run_id: str):
     shape `observed_run_states` documents and `WatchService` stores. The state payload's `nodes`
     is the whole per-node MAP, and this row is written to the durable record as
     `last_observation` on every poll and echoed by `GET /api/assistant/watches` — but worse, it
-    is what `wakeup_instruction` truncates to 1,500 chars with `sort_keys=True`, so on any run
-    with more than a couple of nodes the model's wake-up context ended INSIDE `nodes` and never
-    reached `phase`, `run` or `states`: the observation it was woken for. (`best_metric` was
+    is what `wakeup_instruction` truncates to `assistant_watch._MAX_OBSERVATION_CHARS` with
+    `sort_keys=True` (the number lives THERE, once — this sentence used to hand-quote it), so on
+    any run with more than a couple of nodes the model's wake-up context ended INSIDE `nodes` and
+    never reached `phase`, `run` or `states`: the observation it was woken for. (`best_metric` was
     additionally always null there — the summary row is where that field lives.) The summary
     fold is the same `file_identity`-cached one the run list already pays for, and `only=`
     bounds it to this run rather than folding the whole workspace.

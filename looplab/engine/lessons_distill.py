@@ -268,6 +268,7 @@ class LessonDistillMixin:
         # M4 · auto-distilled skills (episodic → procedural memory): a supported hypothesis that
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
+        from looplab.engine import memory as _memory
         from looplab.engine.memory import (SKILL_PREFILTER_VERSION, assess_skill_statement,
                                            classify_skill_candidate,
                                            promotable_skill_statement, unreliable_metric_ids,
@@ -313,13 +314,12 @@ class LessonDistillMixin:
             if not (h.verdict == "supported" and (h.best_delta or 0) > 0):
                 continue
             source = str(h.statement or "")
-            # REVIEW 2026-08-18 (reuse): this sha256(source) and `engine/memory.py::write_auto_skill`'s
-            # `source_statement_sha256` (memory.py ~819) hash the SAME string twice, in two files,
-            # under two field names — the candidate receipt and the durable skill card are meant to
-            # name one claim, so a cap/normalization added to either side breaks the audit join
-            # silently, and no test compares the two. Fix: hoist one named digest helper both sides
-            # call, or have the receipt carry the digest `write_auto_skill` itself computed.
-            source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+            # The candidate receipt and the durable card name ONE claim, so they take their digest
+            # from one function (`memory.skill_source_digest`, which holds the reason). Reached
+            # through the module rather than by value: `write_auto_skill` calls the same name, and a
+            # test that moves the rule has to move it for BOTH writers or the join it guards is
+            # vacuous.
+            source_digest = _memory.skill_source_digest(source)
             if not promotable_skill_statement(h.statement):
                 local = assess_skill_statement(h.statement)
                 skill_candidates.append({

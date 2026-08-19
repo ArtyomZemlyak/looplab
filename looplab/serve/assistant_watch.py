@@ -129,7 +129,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, file_identity
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING,
     PHASE_PAUSED, PHASE_SEARCH, PHASE_SPEC_APPROVAL)
@@ -202,6 +202,15 @@ _MAX_CHECKPOINT_SUMMARY_CHARS = 4000
 _MAX_TODO_CHARS = 1000
 _MAX_TODOS = 100
 _MAX_TODOS_JSON_CHARS = 6000
+# The wake-up preamble's window onto WHAT THE SERVER SAW. A cap and not a promise: the observation is
+# the whole evidentiary basis of the turn (module docstring, property 1), so what has to be true is
+# that the model sees the fields the trigger fired on. `serve/routers/assistant.py::watch_observe_run`
+# is the other half of that rule — it hands over the run-list SUMMARY row rather than the `/state`
+# projection precisely because a payload carrying the per-node map ran out of budget INSIDE `nodes`
+# and never reached `phase`. Named rather than spelled in the two `wakeup_instruction` branches,
+# which is what let one rule be three literals (both branches plus a hand-quoted "1,500 chars" in
+# that route's docstring).
+_MAX_OBSERVATION_CHARS = 1500
 
 
 class WatchDeferred(Exception):
@@ -420,6 +429,19 @@ def observed_run_states(row: Optional[dict], *, engine_running: Optional[bool] =
     return frozenset(states)
 
 
+def _record_identity(path: Path):
+    """`atomicio.file_identity` of one watch file, or None when it will not `lstat`.
+
+    `lstat`, not `stat`: the identity is of the NAME the store writes through (`atomic_write_text`
+    replaces it, which is what makes the tuple move), and following a symlink here would let a
+    record's freshness be decided by a file the store does not own.
+    """
+    try:
+        return file_identity(path.lstat())
+    except OSError:
+        return None
+
+
 class WatchStore:
     """Durable watch records under `<run_root>/assistant/.watches/<id>.json`.
 
@@ -443,6 +465,18 @@ class WatchStore:
         # second process — or a test writing a record by hand — armed one behind our back. Unknown
         # ids are still read from disk, so anything new is still found.
         self._settled: set[str] = set()
+        # …and the SECOND fact a tick can settle without opening a file: an ARMED record whose own
+        # `next_due` has not arrived yet. `id -> (stat identity, next_due)`, and unlike `_settled`
+        # this one CAN go stale, so it is bound to `atomicio.file_identity` — the same "same file,
+        # unchanged?" tuple `runtime/stage_identity.py::reuse_refusal` already trusts — and a hint
+        # only ever skips a read while the file on disk is the one that produced it. That preserves
+        # the property `_settled`'s note above states: another process (or a test writing a record
+        # by hand) re-arming a watch behind our back REPLACES the file, so the hint stops matching
+        # and the record is read. Without it a watch backed off at the 60 s ceiling was read,
+        # json-parsed and fully re-validated (`_valid` re-runs `_normalize_trigger`) 30 times a
+        # minute only to learn it was not due — a tick whose cost grows with the watches a server
+        # holds rather than with the ones it can actually service.
+        self._not_due: dict[str, tuple] = {}
 
     # ---- paths / io -----------------------------------------------------------------------
     def _path(self, watch_id: str) -> Path:
@@ -641,37 +675,56 @@ class WatchStore:
         out.sort(key=lambda r: r.get("created", 0))
         return out
 
-    # REVIEW 2026-08-18 (efficiency): the `_settled` memo stops at TERMINAL records — an ARMED watch
-    # is still read + json-parsed + fully re-validated (`_valid` re-runs `_normalize_trigger`) on
-    # every 2 s tick even when its own `next_due` is minutes away, so a watch backed off at the 60 s
-    # ceiling costs 30 reads/min off the runs-root mount just to learn it is not due (measured: 30
-    # reads over 30 ticks). A per-id (file stat identity, next_due) hint — invalidated the way
-    # `reuse_refusal` already trusts stat tuples — keeps the "another process armed one behind our
-    # back" property while reducing a steady-state tick to one scandir plus stats. Separately, the
-    # scheduler thread has no production `stop()` caller and `_loop` never exits on its own, so once
-    # `ensure_started` fires the process ticks forever even after the last watch settles.
     def due(self, *, now: Optional[float] = None) -> list[dict]:
         """Armed watches whose next check has come round, oldest-due first (fair under a cap).
 
         This runs every `WatchService.interval_s` (2 s) for the life of the server, so it costs what
         a TICK costs — and it deliberately does not go through `list()`, which reads and parses every
-        record on disk. A terminal record is never serviced again and is only ever removed by a
-        session deletion, so the ones this server has already settled accumulate: `_settled` skips
-        them without opening the file. An id this process has not proven terminal is still read from
-        disk, so a watch armed by another process (or written by hand in a test) is still found.
+        record on disk. TWO memos keep a steady-state tick at one `scandir` plus one `lstat` per
+        record, and they are memos of DIFFERENT facts (see `__init__`): a terminal is final, so
+        `_settled` skips it forever without opening the file; a not-yet-due ARMED record is only
+        provisional, so `_not_due` skips it exactly while the file is unchanged.
+
+        THE `lstat` IS TAKEN BEFORE THE READ, and the order is load-bearing. Stat-then-read binds a
+        hint that is at worst OLDER than the bytes it names, so the next tick's stat differs and the
+        record is re-read. Read-then-stat would bind the NEW file's identity to the OLD record's
+        `next_due` — a watch re-armed to fire now would then be skipped for as long as nothing
+        touched it again, which is the failure this whole module exists to prevent.
+
+        An id this process has neither proven terminal nor holds a matching hint for is still read
+        from disk, so a watch armed by another process (or written by hand in a test) is found.
         """
         ts = time.time() if now is None else float(now)
-        ready = []
+        ready, seen = [], set()
         for path in self._entries():
             if path.suffix != ".json" or WATCH_ID_RE.fullmatch(path.stem) is None:
                 continue
             if path.stem in self._settled:
                 continue
+            seen.add(path.stem)
+            identity = _record_identity(path)
+            hint = self._not_due.get(path.stem)
+            if identity is not None and hint is not None and hint[0] == identity and hint[1] > ts:
+                continue
             record = self._read(path.stem)      # memoizes a terminal it finds, for the next tick
             if record is None or record.get("status") != "armed":
+                self._not_due.pop(path.stem, None)
                 continue
-            if float(record.get("next_due", 0) or 0) <= ts:
-                ready.append(record)
+            next_due = float(record.get("next_due", 0) or 0)
+            if next_due > ts:
+                # A hint is only worth holding when the identity is readable; an `lstat` that raised
+                # means the next tick has to look anyway.
+                if identity is not None:
+                    self._not_due[path.stem] = (identity, next_due)
+                continue
+            self._not_due.pop(path.stem, None)
+            ready.append(record)
+        # Forget hints for records that are no longer on disk, so the memo tracks the live directory
+        # rather than every watch this process has ever seen (`delete_for_session` unlinks, and a
+        # deleted file simply stops appearing above). Keyed on MEMBERSHIP and not on a size compare:
+        # one file deleted while another is armed leaves the count unchanged and the dead hint in.
+        if not self._not_due.keys() <= seen:
+            self._not_due = {k: v for k, v in self._not_due.items() if k in seen}
         ready.sort(key=lambda r: float(r.get("next_due", 0) or 0))
         return ready
 
@@ -838,12 +891,17 @@ WORK_PREAMBLE = (
 )
 
 
-# REVIEW 2026-08-18 (simplification): `json.dumps(observation, sort_keys=True, default=str)[:1500]`
-# is spelled out verbatim in BOTH branches below, and the 1500 is a bare literal while every sibling
-# cap in this file is a named constant (`_MAX_CHECKPOINT_SUMMARY_CHARS`, `_MAX_TODOS_JSON_CHARS`,
-# `_MAX_INSTRUCTION_CHARS`); `routers/assistant.py` additionally hand-quotes "1,500 chars" in a
-# docstring, so one rule is stated in three places that can drift independently. Hoist a single
-# `observation_json` local bounded by a `_MAX_OBSERVATION_CHARS` constant the docstring can name.
+def _observation_text(observation) -> str:
+    """The bounded, key-sorted rendering of what the server saw — ONE spelling for both preambles.
+
+    `default=str` is deliberate and is the opposite call from `core/jsonutil.canonical_json`'s: this
+    is PROSE FOR A MODEL, not a digest preimage, so a value with no JSON form must degrade to its
+    repr rather than raise inside a wake-up the operator is not watching. Sorted keys keep the same
+    observation reading the same way from one wake-up to the next.
+    """
+    return json.dumps(observation, sort_keys=True, default=str)[:_MAX_OBSERVATION_CHARS]
+
+
 def wakeup_instruction(record: dict, observation) -> str:
     """The full model-facing instruction for one wake-up — the record's own sentence, in context."""
     if (record.get("trigger") or {}).get("kind") == "work":
@@ -853,13 +911,13 @@ def wakeup_instruction(record: dict, observation) -> str:
             summary=str(checkpoint.get("summary") or "No prior checkpoint.")[:_MAX_CHECKPOINT_SUMMARY_CHARS],
             todos=json.dumps(checkpoint.get("todos") or [], ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"))[:_MAX_TODOS_JSON_CHARS],
-            observation=json.dumps(observation, sort_keys=True, default=str)[:1500],
+            observation=_observation_text(observation),
             wakeup=int(record.get("wakeups", 0)) + 1,
             max_wakeups=record.get("max_wakeups"),
         )
     return WAKEUP_PREAMBLE.format(
         waiting_for=record.get("waiting_for") or describe_trigger(record.get("trigger") or {}),
-        observation=json.dumps(observation, sort_keys=True, default=str)[:1500],
+        observation=_observation_text(observation),
         wakeup=int(record.get("wakeups", 0)) + 1,
         max_wakeups=record.get("max_wakeups"),
         instruction=record.get("instruction", ""))
@@ -1012,6 +1070,15 @@ class WatchService:
         self.ensure_started()
 
     def stop(self) -> None:
+        """Retire the scheduler thread. NOTHING IN PRODUCTION CALLS THIS, and that is the current
+        (stated, not accidental) shape: `bootstrap`/`ensure_started` start the thread when there is
+        work and `_loop` never exits on its own, so a server that has ever held one watch ticks
+        every 2 s for the rest of its life — including after the last watch settles. What a tick
+        costs is now bounded (see `WatchStore.due`: one `scandir` plus one `lstat` per record, no
+        file opened) rather than growing with the store, which is why this is residue and not a
+        defect. An idle-exit is NOT free — `ensure_started` would have to observe the thread's
+        retirement under `_start_lock` or a watch armed in that window would never be serviced —
+        so it is written down in `docs/BACKLOG.md` §0.15 instead of guessed at here."""
         self._stop.set()
 
     def _loop(self) -> None:

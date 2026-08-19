@@ -328,3 +328,62 @@ def test_classifier_metadata_cannot_inject_lifecycle_frontmatter(tmp_path):
     assert metadata["status"] == "candidate"
     assert "classifier_version" not in metadata
     assert metadata["source_statement_sha256"] == hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------- the audit join
+
+def test_the_candidate_receipt_and_the_card_take_their_digest_from_ONE_function(tmp_path, monkeypatch):
+    """`skill_candidates[].source_sha256` and the card's `source_statement_sha256` name ONE claim.
+
+    That pair is the whole path an audit walks from "this run considered this belief" to "…and here
+    is the card it wrote", and until 2026-08-19 it was two hand-written `hashlib.sha256(...)` calls
+    in two files under two field names, with nothing comparing them.
+
+    Driven by MOVING THE RULE rather than by comparing two equal digests — equal is what the defect
+    looked like too. `memory.skill_source_digest` is replaced with a marker and BOTH receipts have
+    to move with it; a cap or a normalization added to one inline copy is exactly this shape.
+    """
+    from pathlib import Path
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.models import Card
+    from looplab.engine import memory as memory_mod
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.replay import fold
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    statement = "Use hard-negative mining in contrastive retrieval training"
+    # `raising=False` so the PRE-FIX tree fails on the PROPERTY (two inline copies, both unmoved)
+    # rather than on the name being absent.
+    monkeypatch.setattr(memory_mod, "skill_source_digest",
+                        lambda text: "f" * 63 + ("1" if text == statement else "0"),
+                        raising=False)
+
+    mem = tmp_path / "mem"
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._causal_meta_note = lambda *_args: "note"        # type: ignore[method-assign]
+    eng._reflect_lessons = lambda *_args: []             # type: ignore[method-assign]
+    eng._comparative_lessons_on = False
+
+    state = fold(eng.store.read_all())
+    state.cards["c1"] = Card(id="c1", statement=statement, verdict="supported",
+                             best_delta=0.25, evidence=[0])
+    eng._write_reflection_note(state)
+
+    note = [e.data for e in eng.store.read_all() if e.type == "reflection_note"][-1]
+    receipt = note["skill_candidates"][0]
+    card = sorted((mem / "skills").glob("auto-*.md"))
+    assert receipt["accepted"] is True and note["n_skills"] == 1     # non-vacuity: the card was written
+    assert receipt["source_sha256"] == "f" * 63 + "1"
+    assert parse_skill_frontmatter(card[0].read_text(encoding="utf-8"))[
+        "source_statement_sha256"] == receipt["source_sha256"]

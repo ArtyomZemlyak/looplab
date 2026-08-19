@@ -137,80 +137,36 @@ class WorkspaceSeeder:
         tasks."""
         if not self._e._repo_spec:
             return
-        import shutil
+        from looplab.engine.workspace_seed import SeedOps, seed_candidate_workspace
         wd = Path(workdir)
-        wd.mkdir(parents=True, exist_ok=True)
-        ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
         sp = (self._e.tracer.span("seed_workspace") if self._e.tracer is not None
               else __import__("contextlib").nullcontext(None))
         with sp as _h:
+            # THE ORDER lives in `workspace_seed.seed_candidate_workspace` (its docstring holds the
+            # safety argument for it, and `MountCollision` the one for the guard), because the
+            # Developer's disposable candidate has to be materialized the same way and had a second
+            # hand-written copy of this sequence until 2026-08-19. What stays HERE is what only the
+            # engine has: the span, the domain event, and the seams — the primitives are passed as
+            # this seeder's own bound methods so `Engine._seed_repo_tree` / `_link_input` /
+            # `copy_input` remain the patch points they have always been.
+            rows = seed_candidate_workspace(
+                self._e._repo_spec, wd, seed_mode=(self._e._seed_mode or "auto"),
+                ops=SeedOps(seed_repo_tree=self._e._seed_repo_tree,
+                            seed_protected_files=self.seed_protected_files,
+                            link_input=self._e._link_input,
+                            copy_input=self.copy_input))
             seeded: list[str] = []
-            # Fail loud on a data/reference mount name that collides with a top-level entry of the ROOT
-            # editable (name "."/"" — seeded at the workspace root). The root repo is materialized FIRST,
-            # so the mount's dst (`wd/<name>`) is already occupied and link_input/copy_input silently skip
-            # it — their `dst.exists()` idempotency guard can't tell a repo file from a resumed mount — so
-            # the eval reads the repo's placeholder instead of the declared source AND the WORKSPACE_SEEDED
-            # record falsely claims the mount succeeded, silently invalidating the whole run's metrics.
-            # (Non-root editables mount at `wd/<name>`, already guarded against name collisions at task
-            # build.) The check runs AFTER the editables are seeded and reads the REAL workspace, not the
-            # source listdir, because only the materialized tree can actually shadow a mount. Reading the
-            # source instead produced two false RuntimeErrors that aborted every node of a valid task:
-            #   * `seed_mode="auto"` copies only git-TRACKED files, so a gitignored top-level `data/` —
-            #     the standard layout, datasets are never committed — was "shadowing" a `data:` mount that
-            #     in fact seeded fine;
-            #   * `_mounts` listed EVERY reference, but only `ref.get("mount")` ones are materialized
-            #     below, so a context-only reference collided with nothing yet still raised.
-            # Post-seed `dst.exists()` is exactly the condition link_input/copy_input silently skip on, so
-            # it has no false positives by construction and stays correct across resume.
-            for ed in self._e._repo_spec.get("editables", []):
-                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
-                mode = (ed.get("seed_mode") or self._e._seed_mode or "auto")
-                n = self._e._seed_repo_tree(ed["path"], dst, ignore, mode)
-                seeded.append(f"{ed['name']}[{mode}]:{'copytree' if n < 0 else str(n)+' tracked'}")
-            _mounts = [m for m in ([r["name"] for r in self._e._repo_spec.get("references", [])
-                                    if r.get("mount")]
-                                   + list(self._e._repo_spec.get("data", {}))) if m]
-            _root_ed = next((ed for ed in self._e._repo_spec.get("editables", [])
-                             if ed.get("name") in (".", "")), None)
-            if _root_ed:
-                _clash = next((m for m in _mounts if (wd / m).exists()), None)
-                if _clash is not None:
-                    raise RuntimeError(
-                        f"mount name {_clash!r} collides with a top-level entry of the root repo "
-                        f"({_root_ed['path']}): the repo is seeded at the workspace root first, so the "
-                        f"mount would be silently shadowed and the eval would read the repo's copy "
-                        f"instead of the declared source. Rename the mount or the repo entry.")
-            # The operator's PROTECTED files, materialized whatever the seed mode says (see
-            # `seed_protected_files`). This position between the shadow guard and the mounts IS the
-            # safety argument: BEFORE the guard, a protect entry like `datasets/labels.csv` would
-            # manufacture a top-level `datasets/` and raise a FALSE collision that aborts every node of
-            # a valid task; AFTER the mounts, the same entry would write THROUGH the read-only mount
-            # symlink into the operator's original data. `reserved_top` covers the residue for the ROOT
-            # editable (whose files land at the workspace root, where the mounts also live); a non-root
-            # editable mounts under its own subdir, which `_names_distinct_and_safe` already keeps
-            # disjoint from every mount name.
-            for ed in self._e._repo_spec.get("editables", []):
-                dst = wd if ed["name"] in (".", "") else wd / ed["name"]
-                prot = self.seed_protected_files(
-                    ed["path"], dst, ed.get("protect"),
-                    reserved_top=(set(_mounts) if ed.get("name") in (".", "") else set()))
-                if prot:
-                    seeded.append(f"{ed['name']}:protected[{len(prot)}]:" + ",".join(prot[:5]))
-            for ref in self._e._repo_spec.get("references", []):
-                if ref.get("mount"):             # runtime dependency -> symlink read-only input
-                    self._e._link_input(ref["path"], wd / ref["name"])
-                    seeded.append(f"ref:{ref['name']}->link")
-            for name, spec in self._e._repo_spec.get("data", {}).items():
-                # A DataSpec {path, mount, edit, …}; a bare string path is back-compat (all defaults).
-                src = spec["path"] if isinstance(spec, dict) else spec
-                mount = spec.get("mount", True) if isinstance(spec, dict) else True
-                dst = wd / name
-                if mount:
-                    self._e._link_input(src, dst)          # default: read-only symlink mount at ./<name>
-                    seeded.append(f"data:{name}->link")
-                else:                                       # copy INTO the workdir (editable if edit=true)
-                    self.copy_input(src, dst, ignore)
-                    seeded.append(f"data:{name}->copy")
+            for row in rows:
+                if row["kind"] == "editable":
+                    seeded.append(f"{row['name']}[{row['mode']}]:" + (
+                        "copytree" if row["count"] < 0 else f"{row['count']} tracked"))
+                elif row["kind"] == "protected":
+                    seeded.append(f"{row['name']}:protected[{len(row['files'])}]:"
+                                  + ",".join(row["files"][:5]))
+                elif row["kind"] == "reference":
+                    seeded.append(f"ref:{row['name']}->link")
+                else:
+                    seeded.append(f"data:{row['name']}->{row['action']}")
             if _h is not None:
                 _h.set_many(materialized=", ".join(seeded))
             # Observability: surface WHAT got materialized into this node's workdir (the "data setup"

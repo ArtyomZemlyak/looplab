@@ -129,3 +129,34 @@ def test_mcp_structured_only_result_keeps_a_model_facing_json_view():
     handle._session = _Session()
     result = asyncio.run(handle._call("lookup", {}))
     assert result.structured["value"] == 9 and result.content == '{"value":9}'
+
+
+def test_the_manifest_preimage_is_the_ONE_canonical_json_contract():
+    """`capability_manifest_sha256` is a digest, so its preimage is `core/jsonutil.canonical_json`
+    and not a private re-spelling of the same four options (doc 25 SE-08).
+
+    The two halves this pins are exactly the two a copy loses. (1) The BYTES: the digest is the
+    sha256 of `canonical_json(manifest)` — equal for every well-formed toolset, which is what makes
+    this a reuse and not a change. (2) The ANSWER FOR A VALUE WITH NO CANONICAL FORM: a spec the
+    strict contract cannot encode must raise the contract's own `ValueError` naming it, rather than
+    the bare `TypeError` a hand-written `json.dumps` let out of the router constructor.
+    """
+    import hashlib
+
+    from looplab.core.jsonutil import canonical_json
+    from looplab.tools._base import capability_manifest
+
+    manifest, digest = capability_manifest(CompositeTools([_Typed()]).specs())
+    assert digest == hashlib.sha256(canonical_json(manifest)).hexdigest()
+
+    class _Unencodable:
+        def specs(self):
+            return [{"type": "function", "function": {
+                "name": "weird", "description": "d",
+                "parameters": {"type": "object", "default": object()}}}]
+
+        def execute(self, name, args):
+            return ""
+
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        capability_manifest(_Unencodable().specs())

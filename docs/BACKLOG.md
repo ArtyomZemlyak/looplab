@@ -3362,6 +3362,48 @@ separate questions to settle on the next finished run — is the classifier over
 phase whose whole value is cross-run survive being reachable only from a clean finish, when three of
 the last four runs on this box were stopped mid-flight.
 
+### §0.16 Two costs measured and deliberately NOT paid down (2026-08-19)
+
+*(Numbered after §0.15 rather than merged into it: that section is a LIVENESS
+audit — what fired on a real run — and this one is two measured costs left
+unpaid. Two agents reached for the same number on the same day; keeping them
+apart keeps each answerable on its own terms.)*
+
+Both fell out of the `REVIEW 2026-08-18` efficiency sweep. Each is real, each is sized, and each is
+left open because the cheap version of the fix is weaker than the thing it would replace.
+
+⬜ **A `run_dev_command` rebuilds the candidate from the operator's source on every call.**
+Measured on this box, seeding the LoopLab tree itself (1,318 tracked files / 31.7 MB, `seed_mode:
+auto`) off the geesefs mount: **2.4-2.7 s**, against **0.12 s** to clone the same tree from a local
+copy and **0.09 s** to fingerprint the source (`git ls-files` + one `lstat` per file). So the
+proposed seed-once/clone-per-call cache is worth ~91 % of the setup of a tool whose intended use is
+a repeated compile→fix→test loop, and the disposable-candidate property is untouched by it — the
+cache would hold the operator's own source, never a candidate's output.
+
+What blocks it is not the saving. **The cache has to be invalidated against what `seed_repo_tree`
+actually copied, and that function publishes a COUNT.** `auto`/`tracked` copies the git-tracked set
+and falls back to a full `copytree` outside a worktree, so a fingerprint derived independently at
+the call site would be a SECOND definition of `seed_mode` — the exact thing `engine/workspace_seed.py`
+exists to prevent, one function away from the ordering that was just deduplicated — and it fails in
+the wrong direction: a file dropped from `git ls-files` while its bytes stay put keeps a stale
+candidate, and a stale candidate makes the Developer check its edit against bytes the eval will
+never run. That is the `rubertlite-dr-unified-v6` node 4 class of defect, produced by the tool built
+to catch it. **What a cache must publish first:** `seed_repo_tree` returning the SET it copied (not
+a count), so the fence is `atomicio.file_identity` over exactly those paths and nothing re-derives
+the mode. `tests/test_dev_commands.py::test_each_call_sees_the_operators_CURRENT_source` pins the
+property any such cache has to keep. Note the tool has never run in production here — no
+`task.snapshot.json` under `runs/` declares `developer_commands` — so the 2.4 s is a real cost of a
+surface with no measured load, which is the other half of why it is not paid down blind.
+
+⬜ **The watch scheduler thread never exits.** `WatchService.stop()` has no production caller and
+`_loop` has no self-terminating condition, so a server that has ever held one watch ticks every 2 s
+for the rest of its life, including after the last watch settles. What a tick COSTS is now bounded
+(`WatchStore.due`: one `scandir` plus one `lstat` per record, no file opened, both memos in
+`__init__`), which is why this is residue rather than a defect. The idle-exit is not free: the
+retirement has to be observed by `ensure_started` under `_start_lock`, or a watch armed in the
+window between "the loop decided to stop" and "the thread ended" is never serviced — a watch that
+silently does not watch, which is the failure the whole module exists to prevent.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
@@ -4915,3 +4957,50 @@ deliberately deferred, with rationale:
   depend on anything having flushed) and matched by `_cursor_matches` against BOTH spellings, so a
   cursor an older client still holds keeps working instead of becoming a 409 on the next click. An
   unplaceable cursor is still refused — the fix widens what MATCHES, never what is accepted.]
+
+  **[2026-08-19 — the last ten: efficiency, reuse, simplification, dead code, altitude.** Nothing
+  here changes what the engine decides; two of the ten changed what a REFUSAL says, and both are
+  stated at their call sites.
+  *One canonical JSON, three more callers.* `tools/_base.py::capability_manifest` and
+  `tools/dev_commands.py::_canonical_digest` each re-spelled `core/jsonutil`'s four strict options to
+  mint a durable identity. The manifest one is a pure reuse (`capability_manifest_sha256` is
+  byte-identical) whose only visible change is that an unencodable spec now raises the contract's
+  `ValueError` naming the value instead of a bare `TypeError` out of the router constructor. The
+  dev-command one was the hazard `_lenient_json_bytes` was renamed for: it added `default=str` and
+  called the result CANONICAL, so `Path('/x')` and `'/x'` — two different operator-pinned commands —
+  minted ONE `policy_sha256`; a value with no canonical form now yields NO digest.
+  *One digest for one claim.* `lessons_distill`'s candidate receipt (`source_sha256`) and
+  `write_auto_skill`'s card frontmatter (`source_statement_sha256`) hashed the same statement twice,
+  in two files, with nothing comparing them — the audit join from "this run considered this belief"
+  to "…and here is the card" would have broken silently on a cap added to either side.
+  `memory.skill_source_digest` is the one rule; the empty-statement case stays each caller's own and
+  says why. Driven by MOVING the rule, because two equal digests is what the defect looked like too.
+  *One ordering for one candidate.* `tools/dev_commands.py::_materialize` was a second hand-written
+  copy of `WorkspaceSeeder.seed_workspace`'s ORCHESTRATION — the shadow guard, the protected files
+  BETWEEN it and the mounts, the mount/copy split — and the ordering IS the safety argument, so the
+  next fix to it would have landed in one body. `workspace_seed.seed_candidate_workspace` now owns
+  the sequence and returns receipt ROWS; the engine keeps its span and its `workspace_seeded` event,
+  the tool keeps its Docker bind list (read off the RESULT, since `link_input` may have fallen back
+  to a copy) and its staged overlay, which the engine must not have. `SeedOps` leaves an unset
+  primitive UNSET rather than defaulting to the function object — a dataclass default captured
+  `seed_repo_tree` at import and made `monkeypatch.setattr(workspace_seed, …)` resolve and reach
+  nothing, the same "patch resolves but reaches nothing" shape `link_input`'s docstring records, and
+  the existing test caught it the moment the bundle was introduced.
+  *Two costs on the instrument path.* `stage_input_key` ran the whole-workdir sha256 walk BEFORE the
+  `unresolved_entry` clause, so the wrapper shape that clause exists to refuse (`sh -c "python
+  mine.py"`) paid multiple seconds per stage per attempt to be refused unconditionally afterwards;
+  the reachable-only `exists()` probe is now first, and when both would refuse the recorded reason
+  is the one that names something fixable. And `workdir_content` now takes a caller-owned
+  `{rel -> (file_identity, digest)}` memo that `_stage_key_fn` scopes to ONE eval attempt, so the N
+  stages of a pipeline re-`lstat` the tree but re-hash only what moved — each stage still keyed at
+  its own instant, the memo bound to the same stat tuple `reuse_refusal` trusts.
+  *Two named rules where there were literals, and one deletion.* The wake-up observation window is
+  `_MAX_OBSERVATION_CHARS`, spelled once instead of in both `wakeup_instruction` branches and a
+  route docstring; `WatchStore.due` gained a second memo so an ARMED watch backed off at the 60 s
+  ceiling is `lstat`ed rather than read, parsed and fully re-validated 30 times a minute (the stat
+  is taken BEFORE the read, which is what keeps a re-armed record from being skipped); and
+  `core/models.py::superseded_stage_rows` — a list wrapper with zero production callers, since the
+  stage strip is rendered by the browser and `routers/reviews.py` hands the client `stages` +
+  `repairs` on purpose — is gone, with the ROW predicate kept and a negative pin so it stays gone.
+  *Two findings NOT taken, both measured:* the `run_dev_command` seed cache and the watch
+  scheduler's endless tick — §0.15 holds the numbers and what each would have to prove first.]

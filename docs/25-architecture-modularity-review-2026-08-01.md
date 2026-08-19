@@ -5521,6 +5521,17 @@ because a caller minting a receipt must find out before the receipt exists.
 identity rather than a preimage. It is RENAMED to `_lenient_json_bytes`, which is the actual fix:
 sharing one name for two contracts is what made the difference invisible.
 
+*Amended (2026-08-19):* a review sweep found the same inline copy in TWO more places, both minting
+a durable identity, and both are now the shared call. `tools/_base.py::capability_manifest` dumped
+the manifest with the identical four strict options to mint `capability_manifest_sha256` — a pure
+reuse whose only visible change is the ANSWER for a spec with no canonical form (the contract's
+`ValueError` naming the value, instead of a bare `TypeError` out of the router constructor).
+`tools/dev_commands.py::_canonical_digest` was the harder one and is exactly the hazard the rename
+of `_lenient_json_bytes` was for: it added `default=str` and called the result CANONICAL, so
+`Path('/x')` and `'/x'` — two different operator-pinned commands — minted ONE `policy_sha256`.
+Command specs are pydantic-validated plain JSON, so `canonical_json_digest` serves directly and a
+value with no canonical form now yields NO digest rather than a digest over its `str()`.
+
 `core/fitness.py::finite_metric(value) -> float | None` sits next to `is_usable_metric`, whose rules
 it reuses verbatim, and both float-valued readers (`events/replay.py`,
 `search/speculation_quality.py`) now alias it — so they are the SAME object, not equal twins that

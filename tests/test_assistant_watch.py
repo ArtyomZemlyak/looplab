@@ -635,6 +635,33 @@ def test_the_wake_up_preamble_states_the_three_things_the_model_cannot_know(tmp_
     assert "wake-up 1 of at most" in text
 
 
+def test_the_observation_window_is_ONE_named_cap_for_BOTH_preambles(tmp_path, monkeypatch):
+    """What the model is shown of the observation is one rule, and it was three literals: both
+    branches of `wakeup_instruction` spelled the same `json.dumps(...)[:1500]` and
+    `routers/assistant.py`'s own docstring hand-quoted "1,500 chars".
+
+    Driven by MOVING the cap — a rule stated once moves in both preambles at once.
+    """
+    from looplab.serve import assistant_watch
+
+    monkeypatch.setattr(assistant_watch, "_MAX_OBSERVATION_CHARS", 40, raising=False)
+    observation = {"phase": "search", "nodes": {str(i): {"metric": i} for i in range(60)}}
+    store = _store(tmp_path)
+    watching = store.arm(session="s1", instruction="watch it",
+                         trigger={"kind": "run_state", "run": "demo", "until": ["finished"]})
+    working = store.arm(session="s1", instruction="get it done",
+                        trigger={"kind": "work", "every_s": 60})
+
+    for record in (watching, working):
+        text = wakeup_instruction(record, observation)
+        rendered = [line for line in text.splitlines() if line.startswith(
+            ("What the server observed: ", "Server observation that resumed this cycle: "))]
+        assert len(rendered) == 1, text
+        shown = rendered[0].split(": ", 1)[1]
+        assert len(shown) == 40, (len(shown), shown)
+        assert shown.startswith('{"nodes":')            # …sorted, and truncated rather than dropped
+
+
 def test_every_condition_can_state_itself_in_words():
     assert describe_trigger({"kind": "schedule", "every_s": 300}) == "every 5 min"
     assert describe_trigger({"kind": "schedule", "every_s": 7200}) == "every 2 h"
@@ -1139,6 +1166,36 @@ def test_a_tick_costs_what_the_ARMED_watches_cost_not_the_history(tmp_path):
     other = WatchStore(tmp_path).arm(session="elsewhere", instruction="x",
                                      trigger={"kind": "schedule", "every_s": 60})
     assert other["id"] in {r["id"] for r in store.due(now=time.time() + 3600)}
+
+
+def test_a_tick_does_not_re_read_an_armed_watch_that_is_not_due(tmp_path):
+    """The other half of the tick's cost. A `schedule` watch backed off to its interval is ARMED, so
+    `_settled` never covers it — it was read, json-parsed and fully re-validated (`_valid` re-runs
+    `_normalize_trigger`) on every 2 s tick just to learn its `next_due` had not arrived.
+
+    Driven as a PROPERTY, never as a duration: the file is stat'd, and it is not re-read."""
+    store = _store(tmp_path)
+    rec = store.arm(session="s1", instruction="x", trigger={"kind": "schedule", "every_s": 300})
+
+    reads = []
+    real_read = store._read
+    store._read = lambda wid: (reads.append(wid), real_read(wid))[1]
+
+    now = time.time()
+    assert store.due(now=now) == []                 # first tick: read once, and it is not due
+    assert reads == [rec["id"]]
+    for _ in range(30):                             # a minute of ticks at the 2 s cadence
+        assert store.due(now=now) == []
+    assert reads == [rec["id"]], reads              # …and not one more read
+
+    # THE PROPERTY THE MEMO MAY NOT COST: another process re-arms it to fire now, and this store
+    # has to see that. The hint is bound to the file's stat identity, so the write invalidates it.
+    other = WatchStore(tmp_path)
+    other.update(rec["id"], next_due=now - 1.0)
+    assert [r["id"] for r in store.due(now=now)] == [rec["id"]]
+
+    # …and a watch that HAS come due is not memoized either: it stays due until something moves it.
+    assert [r["id"] for r in store.due(now=now)] == [rec["id"]]
 
 
 def test_cancel_is_the_update_rule_and_not_a_second_copy_of_it(tmp_path):
