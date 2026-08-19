@@ -195,10 +195,17 @@ site that proves it is open.
    ability to ask for a backend at all (P2, S).**
    OPEN[strategist-developer-field] the LLM Strategist cannot propose a `developer` — the field is
    absent from `_StrategyOut` and `_normalize_set_strategy` rejects one, so the switch machinery
-   below it has no live producer. The proof is the OPERATOR half because it is the one whose file
-   does not contain the word at all today: `serve/control_validation.py` has zero occurrences of
-   `developer`, and a Strategist-selectable backend cannot ship without the operator being able to
-   name one too. proof:absent:developer@looplab/serve/control_validation.py
+   below it has no live producer. proof:absent:"developer"@looplab/serve/control_validation.py
+
+   The proof is the OPERATOR half, and it is the quoted ALLOW-LIST key rather than the bare word:
+   `_normalize_set_strategy`'s closed key set is what a settable field must join, so the quoted key
+   appearing there is what shipping looks like and nothing else writes it. The bare word was the
+   first spelling and it FALSELY fired on 2026-08-19 — an unrelated comment naming
+   `_finalize_developer_footprint` satisfied it within the hour. That is the substring-pin failure
+   mode this repo already tracks under the slug `review-guard-substring-pin`, reaching the index
+   itself: a proof whose literal is a common word is satisfiable by PROSE, so an `absent:` proof
+   must name a literal only the IMPLEMENTATION can write. (That slug is NAMED above, not marked —
+   writing a second marker for someone else's item is how one item silently becomes two.)
    **[2026-08-14 — the DISAGREEMENT half closed.]** The vocabulary has one home:
    `core/config.py::DEVELOPER_BACKENDS` + `DEVELOPER_BACKEND_ALIASES` (`llm` -> `default`, published
    as `developer_switch_names()`), which `_available_developers` derives from and
