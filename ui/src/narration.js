@@ -603,6 +603,8 @@ export function pendingWork(live, log = []) {
   // alive". A node between stages, waiting on the GPU lease, or being repaired all read as STARTED,
   // which is right — the evaluation owns them — and none of them is proof of a running process.
   const pending = Object.values(live?.nodes || {}).filter(n => n?.status === 'pending')
+  // OPEN[narration-announce-scan-bounded] a node hours into training renders as queued.
+  // proof:present:(correctness):@ui/src/narration.js
   // REVIEW 2026-08-18 (correctness): two defects in the announcement scan. (1) The one call site
   // (`Dock.jsx::agentStatus`) passes `timeline.rows` — a BOUNDED tail window (200-row initial page,
   // 5,000 retained, `timelineModel.js`), while `node_eval_started` fires ONCE per node at dispatch

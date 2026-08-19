@@ -2629,6 +2629,8 @@ export function Metrics({ n, detail, state, runId }) {
   // row reading `salvaged | 0.74 | 0.81` must not leave the second number looking like the measured
   // one by contrast.
   const champObjective = champ ? objectiveMetricSource(champ) : null
+  // OPEN[extras-channel-union-mislabel] a provenance caveat is rendered beside an empty cell.
+  // proof:present:(correctness):@ui/src/Inspector.jsx
   // REVIEW 2026-08-18 (correctness): `extraKeys` is the UNION over ALL nodes, but each extras row's
   // `channel` is read from THIS node only — a key this node never reported still gets
   // `extraMetricChannel(n, k)` = 'unknown', rendering a warn "provenance unknown" label beside an

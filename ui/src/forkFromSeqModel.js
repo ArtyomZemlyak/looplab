@@ -121,6 +121,8 @@ export const FORK_IDEA_FIELDS = Object.freeze([
 
 // The fields the operator may edit in the branch form. `operator` is the search operator name and is
 // editable because a branch often IS a different operator applied to the same parent.
+// OPEN[fork-editable-fields-dead-export] a second, unread statement of the form's field rule.
+// proof:present:FORK_EDITABLE_FIELDS@ui/src/forkFromSeqModel.js+absent:FORK_EDITABLE_FIELDS@ui/src/ForkFromSeqPanel.jsx
 // REVIEW 2026-08-18 (simplification/dead-export): referenced nowhere — not by `ForkFromSeqPanel.jsx`
 // (which hardcodes the same three fields as separate useState hooks) and not by any test — so this
 // is a second, unread statement of the rule that can silently drift from the form. Fix direction:

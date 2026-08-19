@@ -397,6 +397,98 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   every issued speculation-calibration receipt. That gate keeping `engine` is what made it usable at
   all beside calibration: keeping only `declared` stripped the four probe keys and made
   `_validate_cuda_probe_artifact`'s exact-schema check refuse the node.
+- **The open-item index: `OPEN[<slug>]` is the ONE key, and closing an item is a DELETION.**
+  Ask "what is still open?" and until 2026-08-19 there was no command that answered it. Measured on
+  that date: **B7** was recorded `⬜` in `docs/BACKLOG.md` §0 on 2026-08-14, its fix landed
+  2026-08-15, and the row was still open five days later because nothing connected the row to the
+  tree — and it is not one row. Re-derived against master, **four of the nineteen** §0.1 "what is
+  actually still open" rows are closed: rows 2 and 4 retract their own headlines twenty lines below
+  the headline, and rows 8 and 10 are false with no amendment at all, both closed on 2026-08-14,
+  *the day the list was written* (`tests/test_append_multiprocess_race.py` and
+  `ui/src/crossRunRank.js`). The other direction is the same size: **eight of 36** ★Shipped `✅`
+  rows are annotated "★Shipped's ✅ overstates it" and re-opened as PARTIAL. **A status marker
+  nobody re-derives is wrong in BOTH directions**, and the cost is that an agent told to work the
+  backlog must re-derive the whole tree before it can tell shipped from open.
+  Open work also hid in at least **thirteen** shapes, which is why the fix is one key rather than a
+  better glyph: `⬜`/`🟡`/`✅` rows; `**STILL OPEN**` prose blocks (24 in BACKLOG); 80 dated
+  `**[2026-08-14 — …]**` amendments that sometimes REVERSE a `✅`; a `SURVIVOR #N` ranking with 17
+  live numbers; four strikethrough reversals; doc 29's `BUILT`/`SHIPPED`/`DECLINED` heading statuses
+  — where **open is the ABSENCE of a status word**, i.e. ungreppable by construction; doc 25's
+  `#### XX-NN — **RESOLVED | PARTIALLY RESOLVED | DEFERRED**` ledger (39 PARTIAL + 2 DEFERRED =
+  **41 items** in a third status vocabulary); doc 27's table dispositions plus an out-of-band
+  "Status update" banner; doc 34's `D-01..D-05`; `docs/CODE_REVIEW.md`'s 22 `🟡` rows in a file
+  whose own header says it is "not a current open-issue ledger" — the same glyph, no way to tell
+  from a grep; 7 live in-code `REVIEW 2026-08-18 (category):` annotations; 9 `# CODEX AGENT:` risk
+  comments in `looplab/`; and 11 in-code `TODO`s pointing at `§21.20.13 CR0/CR1a/CR2b`, a doc
+  section that no longer exists. At least **seven disjoint ID namespaces** are in play and the
+  BACKLOG's own caveat block warns about three of them.
+
+  **The rule.** One token, greppable in one command, and it exists ONLY for work that is open:
+
+  ```
+  OPEN[<slug>] <one line saying what is open> proof:<predicate>[+<predicate>]
+  DECLINED[<slug>] <one line> measured: <number> — docs/<page>
+  grep -rn 'OPEN\[' .        # the whole index, code and docs, prose and rows
+  ```
+
+  Four properties, each chosen against a measured failure:
+  1. **There is no CLOSED marker.** Closing is deleting the line — the cheapest possible edit, and
+     the reason a convention people skip is worse than none. A `✅` is a claim nothing checks, which
+     is exactly how eight rows came to overstate; delete the state and the overstatement is
+     unrepresentable. The prose stays and says what landed; the KEY is the index, not the record.
+  2. **The slug survives a move.** It is the identity, not the file, the line or the section number
+     (`docs/BACKLOG.md` has TWO `§0.12`s and TWO `§0.14`s). `tests/test_open_item_index.py` pins
+     one declaration per slug, which is the fix for `C2`/`C3`/`C5` each meaning two different items.
+  3. **`DECLINED[…]` is PERMANENT and must carry a number and a doc citation.** This repo declines
+     things deliberately — doc 29 `F3` (git worktree: 929,851 B vs the copy's 910,829 B, +2.1 %, and
+     0.376 s vs 0.346 s, so the stated win is a measured loss) — and a decline is not open work.
+     Before this, §0.16's two measured-and-refused costs wore `⬜`, indistinguishable from work
+     nobody had started. A decline with no number is a dodge, so the guard refuses one.
+  4. **Every `OPEN[…]` carries its own falsifier, and the guard RE-DERIVES it from the tree.**
+     Three predicates, all reading real files: `absent:<literal>@<path>` (open BECAUSE that is not
+     there yet), `present:<literal>@<path>` (open BECAUSE the defect is still there), `missing:<path>`.
+     A missing path is itself a failure — dead citations are this repo's most-measured rot (§0.3:
+     8 of 8 line citations dead) — and it is what makes property 2 real: move the item and the
+     guard goes red until the proof is re-pointed. **A red `test_open_item_index` is not a product
+     defect. It means the item shipped: delete the marker.** That is the five-day gap, closed.
+
+  Prefer the strongest proof available, and the ladder is the guard-test ladder above:
+  (1) a predicate over the **fix's own symbol** — red the moment the stated fix lands;
+  (2) over the **defect's own text** — red when the defective construct is edited away;
+  (3) over the **item's own home** (`present:(efficiency):@ui/src/Dag.jsx`) — red only when the note
+  carrying the item is deleted. Tier 3 is admissible ONLY where the marker and the item are the same
+  object, i.e. a `REVIEW` annotation whose close IS its deletion; anywhere else it is the
+  satisfiable-by-a-comment pin that `tests/test_repair_judgment.py`'s own live annotation warns
+  about and that `tests/test_options_divergence.py:182-185` already deleted once ("bookkeeping about
+  an OPEN finding … it goes stale the moment the finding is fixed"). The guard strips every marker
+  and `proof:` line before evaluating, so a marker can neither satisfy nor falsify itself.
+
+  Rejected, each on a measurement rather than taste: **`TODO(slug)`** — 64 `TODO`s already in the
+  tree and not one is an index (prompt strings, the agent's `update_plan` tool, dead doc pointers),
+  so it starts with 64 false positives. **`STILL OPEN`** — domain vocabulary here (a card is open, a
+  span is open, a menu still opens): 22 code hits, 3 of them index entries, and the BACKLOG cites
+  CLAUDE.md as saying "STILL OPEN" in two places while this file has contained the string **zero**
+  times. **A separate `OPEN.md`** — fails the prose case by construction (an item whose home is a
+  docstring paragraph would have to be duplicated, and the duplicate IS the drift: §0.8 found four
+  implementations of one claim↔verdict join, §0.4 collapsed three spellings of one item), so
+  `test_open_item_index.py` requires the index to span both `.py` and `.md`. **A status FIELD with
+  OPEN/CLOSED/DECLINED values** — re-introduces the `✅` that overstated eight rows. **Doc 25's
+  hard-coded rollup** (`test_documentation_contracts.py` pins `147/39/2/0`) is the repo's one
+  machine-checked status convention and it is the counter-example that decided property 1: closing a
+  finding there means editing a test's constants, so the convention makes closing **more** expensive
+  than leaving it open. Same trap, live, in `tests/test_core_contracts.py:142`, which asserts
+  `"STILL OPEN:" in source` — a guard that makes an open marker *unremovable*.
+
+  **Coverage today is deliberately PARTIAL and says so: 21 markers (18 OPEN, 3 DECLINED).** Tagged:
+  the 7 live in-code `REVIEW 2026-08-18` annotations, the 2 in-code docstring residues
+  (`core/atomicio.py`, `engine/repair_verify.py`), §0.1 row 5, the eight `⬜` residues in
+  §§0.10/0.13/0.14/0.15, §0.16's two refusals and doc 29 `F3` as `DECLINED`, plus `F3`'s nested open
+  follow-up. NOT tagged, and this is the honest half: §2 Themes A–I (the older text the file's own
+  caveat 1 says to distrust), §0.2 low-cost residue, §§4–6, doc 25's 41 PARTIAL/DEFERRED findings,
+  doc 27's 7, doc 34's 5, and `CODE_REVIEW.md`'s 22. Each needs re-deriving against the tree before
+  it can carry a falsifier, and **a marker whose proof nobody re-derived is the same unverified
+  claim the glyph already was** — which is the whole reason this rule exists. Tag as you re-derive;
+  never tag to look complete.
 - Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
   snapshots and env compat depend on the names.
 - `looplab/sweep.py` is NOT a CLI subcommand — it is a runtime helper imported by *generated*

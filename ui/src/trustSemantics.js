@@ -293,6 +293,8 @@ export function objectiveMetricSource(node) {
 export function objectiveSourceHelp(source) {
   const base = OBJECTIVE_SOURCE_HELP[source?.channel] || OBJECTIVE_SOURCE_HELP[OBJECTIVE_MEASURED]
   if (source?.channel === OBJECTIVE_SALVAGED) {
+    // OPEN[salvage-sentence-overclaims-exclusion] the real exclusion goes unnamed.
+    // proof:present:(correctness):@ui/src/trustSemantics.js
     // REVIEW 2026-08-18 (correctness): `admitted` is `violations.length === 0`, i.e. "SOME row
     // exists", not "the salvage rung excluded it" — and the non-admitted sentence below attributes
     // the exclusion to the salvage rung regardless. A node salvaged-and-ADMITTED under

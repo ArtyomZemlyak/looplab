@@ -84,6 +84,8 @@ export default function ForkFromSeqPanel({
   }, [outcome])
 
   const params = parseForkParams(paramsText)
+  // OPEN[fork-draft-phantom-rationale-edit] an unchanged fork submits as edited.
+  // proof:present:'manual',@ui/src/ForkFromSeqPanel.jsx+absent:base.rationale@ui/src/forkFromSeqModel.js
   // REVIEW 2026-08-18 (correctness): the draft ALWAYS carries a `rationale` key (seeded '' above
   // when the idea has none), while `forkIdeaFromSnapshot` OMITS absent fields from `base` — so for
   // a rationale-less snapshot idea `forkIdeaEdited` compares '""' against "null" and reports the

@@ -424,6 +424,8 @@ def test_the_verdict_row_is_diagnostic_and_its_vocabularies_collide_with_nothing
     # And the partition test in tests/test_event_types.py covers the other half (registered + not
     # folded); this pins the membership the append site asserts.
     from looplab.engine import evaluate as ev_mod
+    # OPEN[review-guard-substring-pin] this file's own tier-3 pin is evadable by a comment.
+    # proof:present:ev_mod.EvaluateMixin._evaluate)@tests/test_repair_judgment.py
     # REVIEW 2026-08-18 (guard-test): a POSITIVE SUBSTRING pin — the exact residue class CLAUDE.md's
     # guard-test ladder sends to tier 3, because it is satisfied by deleting the in-code assert in
     # `evaluate.py::_evaluate` and leaving a comment carrying the literal. The next test down already

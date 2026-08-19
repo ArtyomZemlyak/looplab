@@ -67,6 +67,21 @@ Ordered by **cost of leaving it**, measured where a measurement exists and estim
 at the top. Everything not listed here is DONE or is low-cost residue (§0.2). Each entry names the
 site that proves it is open.
 
+> **[2026-08-19 — READ THIS BEFORE WORKING THIS LIST: rank is not status.** Re-derived against the
+> tree, FOUR of the nineteen ranked rows are no longer open and the list does not say so at the
+> only place a reader looks — the headline. Rows **2** (`redact_output` is `True` since 2026-08-15)
+> and **4** (`build_readmodel` stamps a watermark) retract their own headlines twenty-odd lines
+> down, so the rank stands over text the body refutes; rows **8** and **10** are simply false and
+> carry no amendment at all, both closed on **2026-08-14**, the day this list was written. Rows 12
+> and 19 were re-checked and are respectively still open (0 `pareto` hits across `looplab/search/`
+> and `looplab/engine/`) and closed (§2's B7 row records the 2026-08-15 fix).
+> **This is why the ranked list is no longer the index.** The index is the one greppable key
+> `OPEN[<slug>]` / `DECLINED[<slug>]` (CLAUDE.md, "The open-item index"), whose markers carry a
+> falsifier `tests/test_open_item_index.py` re-derives from the tree on every suite run — so a row
+> that ships cannot stay open for five days again. Only §0.1 row 5 is tagged in this section; the
+> rest of §0.1 is deliberately NOT tagged, because a marker whose proof nobody re-derived would be
+> the same unverified claim the glyph already was. See CLAUDE.md for what is and is not tagged.]
+
 ### §0.1 Ranked
 
 1. ✅ **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
@@ -177,6 +192,7 @@ site that proves it is open.
    the guarantee is available rather than enforced. If a reader is ever added, it must call
    `readmodel_is_current` before trusting a row.
 5. **`agentless` is not a developer backend, and a Strategist branch for it is dead code (P1, M).**
+  OPEN[agentless-developer-backend] proof:present:"opencode")@looplab/core/config.py
    `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose", "opencode")` —
    no `llm`, no `agentless`. `engine/strategy.py:75-77::_available_developers()` returns
    `["default", "llm", *PRESETS]`, so `agents/strategist.py:408-409`'s
@@ -242,6 +258,12 @@ site that proves it is open.
    AST parity checks (`tests/test_append_critical_section_parity.py`) and monkeypatched-failure
    simulations, but **no concurrent multi-process append race**. **Cost:** the durability guarantee
    the whole replay design rests on is held by inspection.
+   **[2026-08-19 — STALE; the row is FALSE on master and was never amended.**
+   `tests/test_append_multiprocess_race.py` — "Two REAL OS processes appending to one
+   `events.jsonl`" — landed in `c474d069` on **2026-08-14**, the same day this row was written, and
+   nothing connected the two. This is the B7 shape (recorded open 2026-08-14, fixed 2026-08-15,
+   still open on 2026-08-19) repeating in the same section, which is the measurement the open-item
+   index in CLAUDE.md was designed from. No marker is added here: this row is CLOSED.]
 9. **Two derivations of "which stages will run", and they disagree (P2, S–M).** `_resolved_stages`
    moved out of `orchestrator.py` to `engine/eval_stages.py:261-278` and still re-implements
    `_run_eval`'s chain (`engine/eval_dispatch.py:572-649`). The flagged divergence is intact:
@@ -289,6 +311,13 @@ site that proves it is open.
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
     (`panels.jsx:2340-2343`). `serve/routers/cross_run.py` is the governance/claims surface, not this.
+    **[2026-08-19 — STALE, and the second same-day case in this list.** `ui/src/crossRunRank.js`
+    ("rank inside a comparable group, never across the corpus", `4fa0d1ee`) landed **2026-08-14**
+    and `panels.jsx::CrossRunPanel` now ranks inside one `(task_id, direction)` partition —
+    CLAUDE.md's `ui/` row has carried the measurement (36 of 45 runs with a metric, 20 groups, 5 of
+    them real) since it shipped. The surviving "Cross-run ranking unavailable" string is the
+    group-of-one caveat, not the disclaimer this row quotes. No marker is added: this row is
+    CLOSED. What is genuinely left is named IN CODE as `TRAJECTORY_GAP`, not here.]
 11. ✅ **Fork-to-branch: the gesture EXISTS end to end; only its RunView affordance is missing (P1, S).**
     *(2026-08-14 — the three citations above were re-verified and all three were correct.)* The fused
     gesture landed as `inject_node` + a validated `forked_from` receipt, **not** as a new control event
@@ -2533,6 +2562,7 @@ memory-orphans`. Both CLIs report before they write and neither runs automatical
    `purge_attributable_memory` once per contributing run so every tier predicate still applies.
 
 **STILL OPEN.** ⬜ The leak's *source* is untouched: `save_deletion_identity` still runs before the
+  OPEN[deletion-identity-leaked-before-refusal] proof:present:save_deletion_identity@looplab/serve/routers/org.py
 transaction can refuse, so a refused deletion still parks a sidecar and the reaper only collects them
 afterwards. Writing it after the fence is taken would end the leak rather than sweep it, but the
 sidecar exists precisely to survive a crash *between* those points, so the honest fix is to write it
@@ -2941,6 +2971,7 @@ surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concep
 run that never quiesces records no consolidation now either.
 
 **WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
+  OPEN[concept-skeleton-matches-no-run] proof:present:skeleton_for@looplab/search/concept_graph.py
 run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
 `<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
 `dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
@@ -2958,6 +2989,7 @@ own it needs; it does **not** unify the paths the operator asked about, and sayi
 be wrong.
 
 ⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
+  OPEN[classifier-rewrites-authored-membership] proof:present:_on_node_concepts@looplab/events/replay.py
 (`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
 the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
 resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
@@ -3105,6 +3137,7 @@ stripped, and the golden fixture moves by exactly eight `"repairs": 0` lines and
    derived, not carried, and they cost one `max()` per repair row.
 
 **STILL OPEN.** ⬜ **The node graph still cannot say which experiment is running.** `util.js::
+  OPEN[node-graph-cannot-name-running-experiment] proof:present:workingId@ui/src/util.js
 workingId` returns the HIGHEST-ID pending node, and `Node.eval_started` — the folded durable proof
 that an evaluation was announced — is `exclude=True`, so it never reaches the wire
 (`narration.js::pendingWork` re-derives it from the raw event tail and says so in a comment). On v9
@@ -3331,6 +3364,7 @@ in the same body, so `cadence_while_evaluating=false` still reproduces the histo
 **STILL OPEN — filed rather than patched.**
 
 ⬜ **F1i-b · the serial deep-research gate under `concurrent_research=false`.** Not the shipped default
+  OPEN[f1i-b-serial-deep-research-gate] proof:present:cadence_due@looplab/engine/cadence.py
 (`Settings.concurrent_research = True`), so no run on this box is affected, and every run in `runs/`
 carries `true`. Under `false` the concurrent half does not exist and the serial gate is the only path,
 which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
@@ -3338,6 +3372,7 @@ other four got: it needs the two paths to agree on a single spend, i.e. the mark
 under one claim rather than two reads. Do it when someone actually wants serial research.
 
 ⬜ **A clean trust scan commits to nothing.** `reward_hack.py` and `leakage.py::code_leakage_findings`
+  OPEN[clean-trust-scan-commits-nothing] proof:present:code_leakage_findings@looplab/trust/leakage.py
 run on every evaluated node and write only on a hit, so their liveness is unfalsifiable from the log —
 the exact property the 2026-08-05 mutation audit recorded when deleting both `sigs +=` lines left 117
 trust tests green (`engine/evaluate.py`'s own docstring). Cheapest honest receipt is the `code_digest`
@@ -3346,6 +3381,7 @@ default, fold-neutral) so "scanned THESE bytes, found nothing" is a durable clai
 because it is a payload contract and this change is a cadence fix; it should not ride along.
 
 ⬜ **ASHA cannot work on this task family and nothing says so.** `asha_live=true` in five snapshots is
+  OPEN[asha-inert-on-this-task-family] proof:present:asha_live@looplab/core/config.py
 an operator belief the engine never contradicts: it starts the task, ticks for hours, and silently
 `continue`s on every tick because `eval.metric.pattern` matches once at the end of training. Either
 the launcher should refuse `asha_live` for a metric spec with no `resource_key` and no intermediate
@@ -3353,6 +3389,7 @@ contract, or it should say once per run that it is reading a curve that does not
 that is structurally inert and silent about it is worse than one that is off.
 
 ⬜ **Auto-skill promotion has produced nothing since 2026-07-18 and only runs at run END.** The shared
+  OPEN[auto-skill-promotion-run-end-only] proof:present:write_auto_skill@looplab/engine/memory.py
 `skills/` directory is empty; the only skill cards this box ever wrote are in
 `skills.quarantined-2026-08-12`, and reading them shows why the 2026-08-13 hardening exists — they are
 raw proposals ("Experiment A: further reduce temperature to 0.01…"), not techniques. So `n_skills: 0`
@@ -3372,7 +3409,9 @@ apart keeps each answerable on its own terms.)*
 Both fell out of the `REVIEW 2026-08-18` efficiency sweep. Each is real, each is sized, and each is
 left open because the cheap version of the fix is weaker than the thing it would replace.
 
-⬜ **A `run_dev_command` rebuilds the candidate from the operator's source on every call.**
+DECLINED[dev-command-seed-cache] **A `run_dev_command` rebuilds the candidate from the operator's
+source on every call.** measured: 2.4-2.7 s vs 0.12 s to clone and 0.09 s to fingerprint; refused
+because the invalidation would be a SECOND definition of `seed_mode` — docs/BACKLOG.md §0.16.
 Measured on this box, seeding the LoopLab tree itself (1,318 tracked files / 31.7 MB, `seed_mode:
 auto`) off the geesefs mount: **2.4-2.7 s**, against **0.12 s** to clone the same tree from a local
 copy and **0.09 s** to fingerprint the source (`git ls-files` + one `lstat` per file). So the
@@ -3395,7 +3434,9 @@ property any such cache has to keep. Note the tool has never run in production h
 `task.snapshot.json` under `runs/` declares `developer_commands` — so the 2.4 s is a real cost of a
 surface with no measured load, which is the other half of why it is not paid down blind.
 
-⬜ **The watch scheduler thread never exits.** `WatchService.stop()` has no production caller and
+DECLINED[watch-scheduler-idle-exit] **The watch scheduler thread never exits.** measured: one
+`scandir` + one `lstat` per record every 2 s, no file opened; refused because the retirement has to
+be observed under `_start_lock` — docs/BACKLOG.md §0.16. `WatchService.stop()` has no production caller and
 `_loop` has no self-terminating condition, so a server that has ever held one watch ticks every 2 s
 for the rest of its life, including after the last watch settles. What a tick COSTS is now bounded
 (`WatchStore.due`: one `scandir` plus one `lstat` per record, no file opened, both memos in
