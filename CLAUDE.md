@@ -479,7 +479,10 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   than leaving it open. Same trap, live, in `tests/test_core_contracts.py:142`, which asserts
   `"STILL OPEN:" in source` — a guard that makes an open marker *unremovable*.
 
-  **Coverage today is deliberately PARTIAL and says so: 21 markers (18 OPEN, 3 DECLINED).** Tagged:
+  **Coverage today is deliberately PARTIAL and says so: 22 markers (19 OPEN, 3 DECLINED).** That
+  count came from the guard's own parser, after a hand-written `21 (18 OPEN, 3 DECLINED)` stood in
+  this very sentence and was wrong within the hour — the same drift the index exists to end, in the
+  paragraph describing it. Ask the parser, never a person. Tagged:
   the 7 live in-code `REVIEW 2026-08-18` annotations, the 2 in-code docstring residues
   (`core/atomicio.py`, `engine/repair_verify.py`), §0.1 row 5, the eight `⬜` residues in
   §§0.10/0.13/0.14/0.15, §0.16's two refusals and doc 29 `F3` as `DECLINED`, plus `F3`'s nested open

@@ -108,16 +108,58 @@ second, which is why several engine paths bound their filesystem walks.
 accept — it asserts "one engine writes here" on your word instead of the kernel's. Prefer moving the
 run root.
 
-## 6b. Build the UI bundle once
+## 6b. Build the UI bundle — two blockers, both measured on this deployment
 
 ```bash
 looplab build-ui        # npm ci && npm run build in ui/
 ```
 
-Then point `LOOPLAB_UI_DIST` at the result, so the server never attempts a build at request time.
-This matters most on exactly the mounts above: **geesefs carries no exec bit**, so `npm` launched
-from a package directory there can fail outright. Build somewhere execution is permitted, then serve
-the finished `dist/`. `looplab ui --no-build` then starts instantly.
+On a plain machine that is the whole step. On a JupyterHub whose data volume is object-backed it
+fails twice, and `build-ui` predicts both in its own error output. **Read the failure text — it
+names which one you hit.**
+
+**Blocker 1 — no exec bit.** geesefs mounts carry none, so `npm` cannot execute its own
+`node_modules/.bin/vite` and you get `sh: 1: vite: Permission denied`. Nothing about the build is
+wrong; the filesystem simply refuses to run a file. Build somewhere execution IS permitted and copy
+the result back — `dist/` is static files and needs no exec bit to be SERVED:
+
+```bash
+B=/tmp/uibuild && rm -rf $B && mkdir -p $B
+cp -r ui/{package.json,package-lock.json,vite.config.*,index.html,src,scripts,public} $B/ 2>/dev/null
+(cd $B && npm ci && npm run build)
+cp -r $B/dist/. ui/dist/
+```
+
+**Blocker 2 — the Node on PATH is too old.** `ui/package.json` has required Node ≥ 20 since
+2026-07-13; JupyterHub images commonly ship 18, and you get
+`SyntaxError: The requested module 'node:util' does not provide an export named 'styleText'`.
+conda-forge may be unreachable behind a corporate proxy while `nodejs.org` is not, so the direct
+tarball is the reliable route:
+
+```bash
+node -v                 # if this is < 20, install one
+curl -sSL -o /tmp/node.tar.xz https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz
+tar -xf /tmp/node.tar.xz -C /opt/conda --strip-components=1   # /opt/conda/bin is ahead on PATH
+hash -r && node -v      # v22.x
+```
+
+`/opt/conda` is inside the container image, so this **does not survive a pod restart** — the durable
+fix is Node ≥ 20 in the image or the Spawner. Until it is there, nobody can ship a UI change: the
+bundle in the browser is whatever was last built, and every later `ui/src` commit is invisible.
+Measured here on 2026-08-19: the served bundle was four days old and **nineteen** `ui/src` commits
+post-dated it, which made a fixed defect look live (the trace-paging fix had shipped its server half
+and not its client half — the button did nothing).
+
+**Publishing needs no restart.** The server reads `dist/` per request and serves `index.html`
+`no-cache`, so copying a fresh bundle in is enough. Verify rather than assume:
+
+```bash
+grep -oE 'assets/[A-Za-z0-9_-]+\.js' ui/dist/index.html | head -1   # what the bundle references
+curl -s http://127.0.0.1:<port>/ | grep -oE 'assets/[A-Za-z0-9_-]+\.js' | head -1   # what is served
+```
+
+Equal means the running server is on the new bundle. `LOOPLAB_UI_DIST` points the server at a bundle
+built elsewhere, which is the tidier form of the same workaround.
 
 ## 7. Open the UI
 
@@ -171,4 +213,6 @@ coding-agent backends, and [configuration.md](configuration.md) for the knobs.
 | Engine refuses to start, complains about the lock | Run root is on a FUSE/S3 mount that cannot lock. Move it (step 6) rather than setting `LOOPLAB_ALLOW_UNLOCKED_WRITER` |
 | Run refused with exit code 2 before any events | Endpoint preflight — the message names which role could not reach which URL (step 5) |
 | Runs vanish after a pod restart | The run root is not on a persistent volume. Ask your hub admin which path is backed by a PVC |
-| The UI tries to `npm build` and fails | `LOOPLAB_UI_DIST` unset; run `looplab build-ui` once (step 6) |
+| `sh: 1: vite: Permission denied` | The mount carries no exec bit — build elsewhere and copy `dist/` back (step 6b) |
+| `node:util does not provide an export named 'styleText'` | Node on PATH is older than `ui/package.json` requires (step 6b) |
+| A fixed UI bug is still visible | The served bundle predates the fix. Rebuild and compare the asset hashes (step 6b) — nothing about this is cached in your browser |
