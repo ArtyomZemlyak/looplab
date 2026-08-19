@@ -731,3 +731,80 @@ def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
                f"{saved / 3600.0:.2f} h")
     typer.echo("  a wrong hit is a stale artifact silently feeding the next stage — the number "
                "that decides whether a cache may ship, not the hours.")
+
+
+@app.command(name="parser-stats")
+def parser_stats(run_dir: Path = typer.Argument(..., help="A run directory (holds spans.jsonl)."),
+                 as_json: bool = typer.Option(False, "--json", help="Emit the tally as JSON.")):
+    """How the structured-output parser actually behaved on THIS box, per role.
+
+    `core/parse.py::parse_structured` walks a fallback order (`tool_call` -> `baml`), and a failure
+    of the first parser used to be silent: the caller gets a validated object either way, so a
+    native function-call collapse that a SECOND provider call rescued left no trace anywhere. This
+    reads the `structured_parse` observations and answers the three questions that decide
+    `Settings.llm_parser`:
+
+      * how often the FIRST parser answered (`attempts == 1`) — the number
+        `docs/BACKLOG.md` H2 quotes at ~20% for native FC on small models, from a different
+        deployment and from before H1's `guided_json` shipped;
+      * how often the winner only validated after schema-aligned REPAIR (`repaired`) — a native call
+        that nearly collapsed is not a clean win, and counting it as one hides the signal;
+      * how often the whole walk failed.
+
+    A default that touches every model call in the system is not a coin to flip on someone else's
+    benchmark. This is how the flip earns its evidence here.
+    """
+    import json as _json
+    from collections import defaultdict
+
+    spans = Path(run_dir) / "spans.jsonl"
+    if not spans.is_file():
+        message = f"{spans}: no spans.jsonl — nothing to tally"
+        typer.echo(_json.dumps({"error": message}) if as_json else message)
+        raise typer.Exit(2)
+
+    tally: dict = defaultdict(lambda: {"asks": 0, "first_try": 0, "repaired": 0, "failed": 0,
+                                       "won": defaultdict(int), "damaged": 0})
+    damaged = 0
+    for line in spans.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = _json.loads(line)
+        except ValueError:
+            damaged += 1
+            continue
+        if not isinstance(row, dict) or row.get("name") != "structured_parse":
+            continue
+        attrs = row.get("attributes") if isinstance(row.get("attributes"), dict) else {}
+        # The PHASE is the role: a Researcher's ask and a Developer's ask hit different models and a
+        # single run-wide number would average them into something no operator can act on.
+        bucket = tally[str(attrs.get("phase") or "run")]
+        bucket["asks"] += 1
+        if attrs.get("failed"):
+            bucket["failed"] += 1
+            continue
+        if attrs.get("attempts") == 1:
+            bucket["first_try"] += 1
+        if attrs.get("repaired"):
+            bucket["repaired"] += 1
+        bucket["won"][str(attrs.get("parser_used") or "?")] += 1
+
+    out = {phase: {**row, "won": dict(row["won"])} for phase, row in sorted(tally.items())}
+    if as_json:
+        typer.echo(_json.dumps({"run": str(run_dir), "damaged_lines": damaged, "phases": out},
+                               indent=2))
+        raise typer.Exit(0)
+    if not out:
+        typer.echo(f"{run_dir}: no structured_parse observations "
+                   "(a run recorded before 2026-08-19, or nothing was traced)")
+        raise typer.Exit(2)
+    typer.echo(f"{run_dir}: structured-output parser, per phase")
+    for phase, row in out.items():
+        asks = row["asks"] or 1
+        typer.echo(f"  {phase:<22} asks {row['asks']:>5}   first-try "
+                   f"{100.0 * row['first_try'] / asks:5.1f}%   repaired "
+                   f"{100.0 * row['repaired'] / asks:5.1f}%   failed {row['failed']:>4}"
+                   f"   won: {', '.join(f'{k}={v}' for k, v in sorted(row['won'].items()))}")
+    if damaged:
+        typer.echo(f"  ({damaged} damaged span line(s) stepped over)")

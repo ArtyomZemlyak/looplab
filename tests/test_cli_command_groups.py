@@ -43,7 +43,14 @@ GROUPS = {
                      # reads no cross-run store. It sits beside `timings` because it answers the
                      # sibling question — `timings` says where the wall clock went, this says how
                      # much of it produced bytes some other node had already produced.
-                     "landlock-check", "stage-dups"},
+                     # `parser-stats` is the same contract again, one sidecar over: it reads THIS
+                     # run's `spans.jsonl`, tallies the `structured_parse` observations, writes
+                     # nothing, calls no model and touches no cross-run store. It belongs beside
+                     # `timings` and `stage-dups` because all three answer "what did this run
+                     # actually do" from a sidecar the run wrote itself — here, which parser
+                     # answered each structured ask, which is the evidence `Settings.llm_parser`
+                     # has to be decided on.
+                     "landlock-check", "stage-dups", "parser-stats"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",

@@ -16,6 +16,7 @@ looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or cr
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
 looplab timings         Wall-clock breakdown per node + run-level, reconciled against the run's duration
 looplab stage-dups      Duplicated stage work, and what a cross-node reuse key would have done
+looplab parser-stats    How the structured-output parser actually behaved on this box, per role
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
@@ -695,6 +696,44 @@ recompute the truth from the log itself (`looplab timings` does, and prints both
 `ts` has been on every event row since the first version of the envelope, so nothing had to be
 recorded for it. `elapsed_s` deliberately *includes* the idle gap of a stopped run: that gap is part
 of how long the run took, and `timings` names the untraced share of it.
+
+---
+
+## `parser-stats`
+
+Read-only. How the structured-output parser really behaved on **your** endpoints.
+
+`parse_structured` walks a fallback order (`tool_call` → `baml`) and returns a validated object
+whichever parser answered — so a native function-call collapse that a second provider call rescued
+used to leave no trace at all. This reads the `structured_parse` observations from `spans.jsonl`
+and tallies them per phase.
+
+```bash
+looplab parser-stats RUN_DIR [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl`) |
+| `--json` | off | Emit the tally as JSON for a scripted caller |
+
+```
+runs/demo: structured-output parser, per phase
+  propose                asks   214   first-try  97.7%   repaired   1.4%   failed    0   won: tool_call=214
+  implement              asks   631   first-try  84.6%   repaired  11.2%   failed    3   won: baml=97, tool_call=531
+```
+
+* **first-try** is how often the FIRST parser in the order answered. This is the number
+  `Settings.llm_parser` should be decided on, and it is per phase because a Researcher ask and a
+  Developer ask hit different models — one run-wide average is not actionable.
+* **repaired** counts wins that only validated after schema-aligned coercion. A `tool_call` that
+  needed repair is a native call that nearly collapsed; it is deliberately not counted as a clean
+  first-try win, because that would hide exactly the signal the setting turns on.
+* **failed** is the whole walk failing — every parser in the order exhausted.
+
+Exit 2 when the run has no such observations: a run recorded before 2026-08-19, or one where
+nothing was traced. It says so rather than printing zeros, because "no data" and "the parser never
+failed" are opposite conclusions.
 
 ---
 

@@ -19,6 +19,9 @@ from typing import Protocol, Type, TypeVar, get_args, get_origin
 from pydantic import BaseModel, ValidationError
 
 from looplab.core.errors import LLMError
+# Function-level in `parse_structured` would be per-call import overhead on a hot path;
+# module-level is safe because `core.tracing` imports only `core` siblings and never `parse`.
+from looplab.core.tracing import structured_parse as _structured_parse
 
 
 # core carries several "is this a usable number" rules, and they are NOT interchangeable (doc 25
@@ -229,10 +232,29 @@ def parse_structured(
     model: Type[T],
     parser: str = "tool_call",
 ) -> T:
-    """Return a validated `model` instance, trying parsers in fallback order."""
+    """Return a validated `model` instance, trying parsers in fallback order.
+
+    THE WALK IS RECORDED (2026-08-19). Which parser answered, and how many failed before it, used to
+    be invisible: the caller gets a validated object either way, so a native function-call collapse
+    that a second provider call rescued left no trace anywhere — no span, no counter, no event. That
+    is what made `docs/BACKLOG.md` H2 ("make the schema-aligned parser the default") unanswerable on
+    this box: the row's ~20% vs ~92-94% is a different deployment's benchmark, taken before H1's
+    `guided_json` shipped, and `guided_json` repairs exactly the weakness the row is about. The span
+    is what lets the default be decided from OUR endpoints instead of someone else's.
+    """
     schema = model.model_json_schema()
+    order = _ORDER.get(parser, ["tool_call", "baml"])
+    with _structured_parse(parser) as _obs:
+        return _walk_parsers(client, messages, model, schema, order, _obs)
+
+
+def _walk_parsers(client, messages, model, schema, order, obs) -> T:
+    """The fallback walk itself. Split out so the observation above wraps ONE expression and the
+    walk keeps its original shape — every `return`/`continue` below is where it always was."""
     last_err: Exception | None = None
-    for p in _ORDER.get(parser, ["tool_call", "baml"]):
+    attempts = 0
+    for p in order:
+        attempts += 1
         try:
             if p == "tool_call":
                 obj = client.complete_tool(messages, schema)
@@ -246,12 +268,20 @@ def parse_structured(
                         "content": f"Respond with ONLY a JSON object matching this schema: {json.dumps(schema)}"}
                 obj = _extract_json(client.complete_text([*messages, hint]))
             try:
-                return model.model_validate(obj)
+                answer = model.model_validate(obj)
+                obs.set("parser_used", p).set("attempts", attempts).set("repaired", False)
+                return answer
             except ValidationError:
                 # H2 schema-aligned repair: coerce common type/format drift, then re-validate. Only
                 # if THAT fails do we fall through to the next parser — so a weak model's near-miss
                 # (e.g. {"degree":"3"} or single-quoted keys) parses instead of crashing the run.
-                return model.model_validate(_coerce_to_model(obj, model))
+                answer = model.model_validate(_coerce_to_model(obj, model))
+                # `repaired` is the OTHER half of the H2 question and is not the same fact as which
+                # parser won: a `tool_call` that only validated after coercion is a native FC that
+                # nearly collapsed, and counting it as a clean win would hide precisely the signal
+                # the default flip needs.
+                obs.set("parser_used", p).set("attempts", attempts).set("repaired", True)
+                return answer
         except (ValidationError, ParseError, json.JSONDecodeError, KeyError, AttributeError,
                 ArithmeticError, TypeError, LLMError) as e:
             # ArithmeticError/TypeError: belt-and-suspenders for a coercion path that raises on
@@ -260,7 +290,9 @@ def parse_structured(
             # contract. LLMError (a transient endpoint/transport failure) is treated like an unparseable
             # response: try the next parser, then let the caller fall back — never crash the run.
             last_err = e
+            obs.set(f"failed_{p}", type(e).__name__)
             continue
+    obs.set("attempts", attempts).set("failed", True)
     raise ParseError(f"all parsers failed (last: {last_err})")
 
 

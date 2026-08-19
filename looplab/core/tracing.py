@@ -600,6 +600,31 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
 
 
 @contextmanager
+def structured_parse(parser: str):
+    """Open a PARSE observation — one structured ask and which parser actually answered it.
+
+    WHY THIS EXISTS. `core/parse.py::parse_structured` walks a fallback order (`tool_call` -> `baml`,
+    …) and a failure of the first parser is completely silent: the caller gets a validated object
+    either way, so nothing anywhere records that native function-calling collapsed and a SECOND
+    provider call rescued it. `docs/BACKLOG.md` H2 asks to make the schema-aligned path the default
+    on the strength of ~20% vs ~92-94% — numbers from a different box, measured before `H1`'s
+    `guided_json` shipped, which is the very thing that repairs native FC on the endpoints the row
+    is about. A global default that touches every model call in the system is not a coin to flip on
+    someone else's benchmark, and until this span existed there was no way to earn our own.
+
+    One observation per structured ask, i.e. proportional to LLM calls and not to loop iterations —
+    the call it wraps already has a `generation` span of its own. No-op when nothing is traced, so
+    an untraced CLI path is byte-identical to before.
+    """
+    tr = _current_tracer.get()
+    if tr is None:
+        yield _NULL_OBS
+        return
+    with tr.span("structured_parse", kind="tool", parser=str(parser)[:32]) as h:
+        yield ObservationHandle(h)
+
+
+@contextmanager
 def tool(name: str, arguments=None):
     """Open a first-class TOOL observation (one tool invocation) as a child of the active span — the
     Langfuse `tool` node. Records the call arguments up front; the caller attaches the result via

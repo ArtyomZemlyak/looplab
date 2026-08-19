@@ -276,3 +276,85 @@ def test_the_strategist_keeps_none_distinguishable_from_a_failed_parse():
     from looplab.agents import strategist as strategist_module
 
     assert strategist_module._RULE_FALLBACK is not None
+
+
+# ================== H2: the parser walk is now RECORDED, so the default can be earned
+
+def test_the_winning_parser_and_the_attempt_count_are_recorded(tmp_path):
+    """A failure of the first parser was completely silent: the caller gets a validated object
+    either way, so a native function-call collapse that a SECOND provider call rescued left no
+    trace anywhere. That is what made H2's default flip unanswerable on this box."""
+    from pydantic import BaseModel
+
+    import json as _json
+
+    from looplab.core.errors import LLMError
+    from looplab.core.parse import parse_structured
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    class _M(BaseModel):
+        degree: int
+
+    class _ToolFails:
+        # the realistic shape: the endpoint answers, but not with a usable tool call
+        def complete_tool(self, messages, schema):
+            raise LLMError("this endpoint ignored the tool")
+
+        def complete_text(self, messages):
+            return '{"degree": 3}'
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path))
+    with tracer.span("propose", kind="operation"):
+        assert parse_structured(_ToolFails(), [{"role": "user", "content": "x"}], _M).degree == 3
+
+    rows = [_json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    parse = next(r for r in rows if r.get("name") == "structured_parse")
+    assert parse["attributes"]["parser_used"] == "baml"
+    assert parse["attributes"]["attempts"] == 2            # native FC was tried and failed first
+    assert parse["attributes"]["failed_tool_call"] == "LLMError"
+
+
+def test_a_win_that_needed_repair_is_not_recorded_as_a_clean_one(tmp_path):
+    """The other half of the H2 question. A `tool_call` that only validated after schema-aligned
+    coercion is a native call that nearly collapsed; counting it as a clean first-try win would
+    hide exactly the signal the flip needs."""
+    from pydantic import BaseModel
+
+    import json as _json
+
+    from looplab.core.parse import parse_structured
+    from looplab.core.tracing import JsonlSpanExporter, Tracer
+
+    class _M(BaseModel):
+        degree: int
+
+    class _NearMiss:
+        def complete_tool(self, messages, schema):
+            return {"Degree": "3"}                          # wrong case AND a string
+
+    path = tmp_path / "spans.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path))
+    with tracer.span("propose", kind="operation"):
+        assert parse_structured(_NearMiss(), [{"role": "user", "content": "x"}], _M).degree == 3
+
+    rows = [_json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    attrs = next(r for r in rows if r.get("name") == "structured_parse")["attributes"]
+    assert attrs["parser_used"] == "tool_call" and attrs["attempts"] == 1
+    assert attrs["repaired"] is True
+
+
+def test_an_untraced_call_is_byte_for_byte_what_it_was(tmp_path):
+    """The observation must be free where nothing is traced — every CLI path, every test."""
+    from pydantic import BaseModel
+
+    from looplab.core.parse import parse_structured
+
+    class _M(BaseModel):
+        degree: int
+
+    class _Ok:
+        def complete_tool(self, messages, schema):
+            return {"degree": 3}
+
+    assert parse_structured(_Ok(), [{"role": "user", "content": "x"}], _M).degree == 3

@@ -3813,7 +3813,8 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   there is no mismatch left to flag; the residual heuristic is `perfect_metric`
   (`reward_hack.py:317-320`). Sidestepped by design, not missing. **Its live defect is the §6
   hardened-suite residual row (SURVIVOR #3).**]
-- ⬜ **P1 · B7 claim ratification vs trust flags (S). [added 2026-08-14]** D8 memo-claim
+- ✅ **P1 · B7 claim ratification vs trust flags (S). [added 2026-08-14; the row below is STALE —
+  the fix landed 2026-08-15, the day after it was written]** D8 memo-claim
   verification checks a cited node's lifecycle but not its feasibility or trust flags:
   `trust/memo_verify.py:209::finalize_verified_evidence` rejects tombstoned/aborted/non-terminal
   nodes yet never consults `feasible`, `metric_salvaged` or `flagged_node_ids` (0 grep hits in the
@@ -3824,6 +3825,14 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   (`engine/metric_salvage.py::metric_unmeasured` ∪ `events/replay.py::flagged_node_ids`) inside
   `finalize_verified_evidence` and downgrade/refuse `supported` with a stated reason. See §0.1
   item 19.
+  **[2026-08-19 — ALREADY DONE; this row's "0 grep hits" is what went stale.**
+  `trust/memo_verify.py::finalize_verified_evidence` calls `engine/memory.py::unreliable_metric_ids`
+  (function-local, because `engine` imports `trust` and the module edge would be a cycle) and
+  refuses with *"verification evidence rests on a node whose metric this run refuses to select on"*
+  — a DISTINCT refusal from the lifecycle one, because the remedies differ. It fails CLOSED on an
+  unreadable state, which is the opposite containment from the predicate's own and is argued in
+  place. `tests/test_memo_verify_evidence_trust.py` drives it; green. The row was written on
+  2026-08-14 and the fix landed 2026-08-15, so nothing was missed — only the checklist was.]
 - *(B1/B2/B3/B4 tracked in §1 Foundation.)*
 
 ### Theme C · Reliable coding Developer (SWE-bench stack)
@@ -4028,6 +4037,22 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   `core/parse.py:213::_ORDER["tool_call"] = ["tool_call", "baml"]`, so `baml` runs only after native
   FC has already failed. That is the exact configuration whose ~20 % the row was written about, and
   this box serves local models. Remaining work is a default flip plus its blast-radius test.]
+  **[2026-08-19 — THE FLIP IS NOT THE NEXT STEP; THE MEASUREMENT IS, and it now exists.**
+  Two things are wrong with flipping on this row's evidence. The ~20 % vs ~92-94 % is a DIFFERENT
+  deployment's benchmark, and it predates **H1**, which shipped `guided_json` — the endpoint-side
+  constrained decoding that repairs precisely the native-FC weakness the number describes. And the
+  fallback was **unobservable**: `parse_structured` returns a validated object whichever parser
+  answered, so a native collapse rescued by a SECOND provider call left no span, no counter and no
+  event. Nobody could say what our own endpoints do, which makes a global default touching every
+  model call in the system a coin flip rather than a decision.
+  So `core/tracing.py::structured_parse` now opens one observation per structured ask carrying
+  `parser_used`, `attempts`, `repaired` and `failed_<parser>`, and `looplab parser-stats RUN_DIR`
+  tallies it PER PHASE — a Researcher ask and a Developer ask hit different models and one run-wide
+  number would average them into something no operator can act on. `repaired` is deliberately its
+  own fact: a `tool_call` that only validated after schema-aligned coercion is a native call that
+  nearly collapsed, and counting it as a clean first-try win would hide the exact signal the flip
+  needs. Untraced callers are byte-for-byte unchanged (the observation no-ops), which a test pins.
+  NEXT: let a run record under this, read `parser-stats`, and flip — or decline — on our numbers.]
 - ✅ **P1 · H1 vLLM/SGLang recipe + `guided_json` constrained decoding (S–M).** Drive structured calls
   from the Pydantic schema. → `llm.py`, `parse.py`, docs.
   **[2026-08-14 — DONE; collapses into ★Shipped.** `core/llm.py:661,756,836-837,1593-1596` sends
