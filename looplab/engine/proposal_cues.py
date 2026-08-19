@@ -435,6 +435,49 @@ class ProposalCuesMixin:
         there is no ceiling to state. Naming GPU counts to a role whose adapter says its code cannot
         touch a device is the prompt-side twin of the category error `_task_gpu_capable` exists to
         stop: inferring the WORK's needs from the BOX.
+
+        WHAT `Settings.gpu_footprint_cue` MOVES, and why the historical tail is a legacy branch
+        rather than an edit. The shipped paragraph closed with a claim the scheduler contradicts —
+        that declaring above the budget "does NOT get this experiment more hardware" and the run
+        "serialises at the same per-experiment cost". `resources.py::_resource_request_for_node`
+        takes a DECLARED count over AUTO, `_acquire_gpus` reserves exactly that many devices
+        all-or-nothing and `_resource_eval_env` writes them into the child's
+        `CUDA_VISIBLE_DEVICES`; `tests/test_proposal_derived_width.py::
+        test_two_two_gpu_proposals_on_a_two_gpu_box_repin_the_run_to_serial` is the shipped proof of
+        the second half. The sentence was written from the v5 incident above, which was a WIDTH
+        defect — the run went on claiming a width of 2 while one node held both cards — and
+        `proposal_width` closed it; the wording outlived its cause and became the reason no Card on
+        this box has EVER declared anything but 1.
+
+        The replacement states the trade instead of foreclosing it, and every clause of it is either
+        arithmetic or something the engine can see:
+
+        * K devices at the SAME per-device batch do K x the examples per optimizer step, so the same
+          epochs take ~1/K the steps: about the same experiments per HOUR, each finishing ~K x
+          sooner. It is a DIFFERENT experiment though — K x the effective batch, and K x the
+          in-batch negative pool for a contrastive loss that GATHERS across devices — so it is
+          re-tuned, not merely re-timed. Whether the gather happens is a property of the loss the
+          node chose, not of the box: in `vectorizer-unified` the CrossBatch/SigLIP/Qwen3 losses
+          gather and `NLLCosLoss` (which every evaluated node of the live run configured) says in
+          its own docstring that it does not — which is precisely why the cue asks rather than
+          asserts.
+        * K devices at the same GLOBAL batch split one step K ways, and that speedup is below K, so
+          the run does FEWER experiments per hour and each finishes sooner. Same optimization.
+        * If the experiment does not FIT on one device the count is not a preference at all.
+          Gradient accumulation restores the effective batch and NOT the negative pool.
+
+        Nothing here claims a measured speedup, because this repo has none: every node of all six
+        preserved runs with a footprint declared `{"gpus": 1}`, and the only 2-GPU population on the
+        box (`runs/rubertlite-dense-retrieval`, DDP at `--gpus 2`) is a different repo, model and
+        framework, so no controlled arm exists to quote. Inviting a short fixed-step probe is the
+        same remedy `_cue_experiment_time_budget` already offers for per-step time, and for the same
+        reason: the role is being asked to size something the run can cheaply measure.
+
+        The MEMORY clause is the one new FACT, and it is the scheduler's own inventory
+        (`_gpu_mem`, which `_memory_envelope` and `_clamp_resource_footprint` already clamp
+        `gpu_mem_mib` against) rather than a second probe. Rendered only when the inventory joined
+        losslessly — `detect_gpu_inventory` returns `({}, {})` rather than guessing — which is the
+        same fail-quiet rule the count-only admission fallback uses one layer down.
         """
         from looplab.engine.widths import per_experiment_gpu_budget
         if not self._task_gpu_capable():
@@ -450,14 +493,59 @@ class ProposalCuesMixin:
                     "(or leave `footprint` unspecified) and write CPU-only code: a positive `gpus` "
                     "declaration cannot be satisfied here and the experiment is REFUSED admission "
                     "rather than queued.")
+        head = (f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
+                f"concurrently on a pool of {pool} GPU(s)")
+        if not getattr(self, "_gpu_footprint_cue", False):
+            # LEGACY BRANCH: byte-identical to the pre-2026-08-19 paragraph. Spliced at the same
+            # position as the replacement below (the `_system_body` pattern), so `false` is the old
+            # prompt and not a shorter one.
+            return (
+                head + ", so ONE experiment may declare at most "
+                f"`footprint.gpus = {budget}`. That is a CEILING, and declaring more does NOT get this "
+                "experiment more hardware: the extra devices are taken from the sibling experiments that "
+                "would otherwise run at the same time, so the run serialises at the same per-experiment "
+                f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
+                "declare, the training/eval command must target that SAME count.")
         return (
-            f"\nGPU BUDGET — this run evaluates up to {self._eval_parallel} experiment(s) "
-            f"concurrently on a pool of {pool} GPU(s), so ONE experiment may declare at most "
-            f"`footprint.gpus = {budget}`. That is a CEILING, and declaring more does NOT get this "
-            "experiment more hardware: the extra devices are taken from the sibling experiments that "
-            "would otherwise run at the same time, so the run serialises at the same per-experiment "
-            f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
-            "declare, the training/eval command must target that SAME count.")
+            head + self._gpu_memory_clause()
+            + f", so `footprint.gpus = {budget}` is the ORDINARY declaration and leaves every "
+            "sibling experiment a device. It is a DEFAULT, not a wall: a LARGER count is HONOURED — "
+            "the scheduler reserves that many devices for this one experiment and re-pins the run to "
+            "`pool // gpus` concurrent experiments (never above the width this run launched with) "
+            "for as long as such a card is open. So it is a real choice and it is YOURS to make, on "
+            "evidence. The arithmetic that does not need measuring: K devices at the SAME per-device "
+            "batch do K x the examples per optimizer step, so the same schedule takes ~1/K the steps "
+            "— about the same experiments per hour, each finishing ~K x sooner, but a DIFFERENT "
+            "experiment (K x the effective batch, and — for a contrastive loss that GATHERS across "
+            "devices — K x the in-batch negative pool; check which your loss does), which must be "
+            "re-tuned and not just re-timed; K devices at the same "
+            "GLOBAL batch split one step K ways for a speedup BELOW K, i.e. the same experiment, "
+            "fewer per hour, each sooner. And if the experiment does not FIT on one device, the "
+            "count is not a preference at all — gradient accumulation restores the effective batch "
+            "and never the in-batch negative pool. This box's own speedup is UNMEASURED: before "
+            "committing hours to a footprint, measure both with a short fixed-step probe. Whatever "
+            "you declare, the training/eval command must target that SAME count, and a count the "
+            "operator's own task statement names wins over this paragraph.")
+
+    def _gpu_memory_clause(self) -> str:
+        """" (each holding ~N GiB)" when the pool's memory inventory joined losslessly, else "".
+
+        The role is being asked whether one device can hold this experiment and was never told how
+        big a device is. `agents/roles.py` appends `core/hardware.py::environment_brief`, but that
+        is the BOX (`detect_gpus`, every physical card) while a repo node is fenced to what the
+        scheduler reserved, so on a partially-fenced host the two disagree — and the number that
+        decides a footprint is the reservable one. Silent unless `_gpu_mem` covers every visible
+        device, for `detect_gpu_inventory`'s own reason: a partial join means the engine cannot say
+        WHICH device carries which capacity, and admission already degrades to count-only there."""
+        ids = list(getattr(self, "_gpu_ids", None) or [])
+        memory = getattr(self, "_gpu_mem", None) or {}
+        sizes = [memory[gpu] for gpu in ids
+                 if type(memory.get(gpu)) is int and memory[gpu] > 0]
+        if not ids or len(sizes) != len(ids):
+            return ""
+        # The SMALLEST reservable device, because a footprint that fits the largest and not the
+        # smallest is a declaration the first-fit reservation may satisfy either way.
+        return f" (each holding ~{min(sizes) // 1024} GiB)"
 
     def _stamp_gpu_budget_hint(self, researcher=None) -> None:
         """Stamp `_gpu_budget_hint` (RESEARCHER_HINT_ATTRS) onto the active Researcher.
@@ -466,10 +554,23 @@ class ProposalCuesMixin:
         (Variant-1), so a stale ceiling from an earlier width would otherwise outlive a
         `budget_extend` retune. Same `researcher` override and same swallow-everything contract as
         `_set_complexity_hint`, whose per-build researcher this is called with — a Toy role that
-        rejects attribute writes must not fail a build over a prompt cue."""
+        rejects attribute writes must not fail a build over a prompt cue.
+
+        `_gpu_footprint_cue` rides HERE and not only on `Engine.__init__`'s setattr, for the same
+        pooling reason one sentence up and because it is the same paragraph in the other prompt:
+        `_build_role_pairs` builds fan-out pairs from `role_factory()` AFTER `__init__` and caches
+        them in `_role_pool`, so an `__init__`-only stamp covers the primary role and nothing else —
+        and a concurrent-build run would then ask its pooled researchers the pre-2026-08-19 question
+        while the primary asked the corrected one. That is precisely the two-variants-disagree drift
+        `_researcher_capability_suffix` exists to prevent, one axis over. Its default when unset is
+        still the legacy clause, so this only ever moves a role the ENGINE is proposing with."""
         _r = researcher if researcher is not None else self.researcher
         try:
             setattr(_r, "_gpu_budget_hint", self._gpu_budget_hint_text())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            setattr(_r, "_gpu_footprint_cue", bool(getattr(self, "_gpu_footprint_cue", False)))
         except Exception:  # noqa: BLE001
             pass
 

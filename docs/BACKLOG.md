@@ -3114,6 +3114,163 @@ change to the state payload's field set and to a heuristic three surfaces read, 
 measurement of which runs evaluate in parallel, and it is a different defect from the one the chips
 had.
 
+### §0.15 The engine asked the agent to choose a GPU footprint and told it the choice was free (2026-08-19)
+
+**THE QUESTION.** Is it faster to run two experiments at one GPU each, or one experiment on both
+cards? Asked of the live `e5small-dr-unified-v2`, every node of which declared `{"gpus": 1}`.
+
+**THE HISTORICAL DATA CANNOT ANSWER IT, and that is the first finding.** Every footprint in every
+preserved event log on this box is `{"gpus": 1}` — v2, v3 (the `vec-backups` copy), v6, v7, v8, v9,
+132 recorded footprint values, zero exceptions. The only 2-GPU population is `runs/rubertlite-dense-retrieval`:
+all 80 of its nodes ran Lightning DDP with `--gpus 2` (`LOCAL_RANK: 0/1 - CUDA_VISIBLE_DEVICES:
+[0,1]`, `distributed_backend=nccl`) — a different repo, a different backbone (`rubert-tiny-lite`, 3
+layers / hidden 256, against `e5-small-en-ru`), a different framework and a different dataset. There
+is no controlled arm, so any speedup number quoted from `runs/` would be a comparison of two
+workloads.
+
+**AND THE UNIFORMITY IS NOT THE AGENT'S CHOICE.** The `run_started.goal` of v2, v6, v7, v8 and v9
+all end with the same operator sentence:
+
+    EACH EXPERIMENT GETS EXACTLY ONE GPU. Declare footprint {"gpus": 1} on every card and write
+    single-GPU training code — do not use accelerate --multi_gpu. Two experiments run concurrently,
+    one per device.
+
+`rubert_dr_0804`'s task file says the same thing in its own words. So on the runs that prompted the
+question the role was obeying an instruction, and no engine change reaches that: **the largest lever
+here is the operator's own goal text**, and the cue this section ships defers to it explicitly.
+
+**WHAT THE CORPUS DOES DECIDE.** Two things, both on the live run's own bytes:
+
+* **One H200 does not hold this recipe.** Four of v2's nine nodes died of `torch.OutOfMemoryError`
+  inside `train` — node 0 at per-device batch 8192 (the manual recipe ported unchanged), node 1 at
+  2048x8, node 7 at 2048x2, node 2 at 1750 — each traceback reporting the node's OWN process holding
+  ~139 of 139.8 GiB, i.e. its own allocation and not a sibling's. The nodes that ran to completion
+  did so at 512-2048. So for this backbone the second card is not a speed preference; at the
+  recipe's batch it is the difference between running and not running.
+* **Whether the footprint changes the OPTIMIZATION or only the clock is a property of the LOSS,
+  and that is the sharper finding.** The manual champion's repo gathers with gradient flow —
+  `train.py::_gather_cross_batch_zoneids_and_embeddings` calls `self.all_gather(..., sync_grads=True)`
+  — so its in-batch negative pool is `world_size x train_bs`, and `looplab-knowledge` records the
+  recipe exactly that way: *"bs 8k x 2gpu = 16k/step, accumulate 2 (eff ~32k)"*. There, a 1-GPU node
+  at 8192 x 4 accumulation is a DIFFERENT experiment from a 2-GPU node at 8192 x 2, because
+  accumulation restores the effective batch and never the negative pool. In `vectorizer-unified` it
+  depends on which loss the node picked: `CrossBatchMultipleNegativesRankingLoss`,
+  `CrossBatchClassAwareMNRLoss`, `SigLIPLoss` and `Qwen3EmbeddingLoss` all call
+  `torch.distributed.nn.functional.all_gather`, while `NLLCosLoss` — the loss ALL FIVE evaluated v2
+  nodes configured (`"loss": {"type": "nll_cos"}`) — states in its own docstring: *"Operates on the
+  per-device batch (no cross-process gather)"*. So on the live run's own recipe the second card
+  would NOT enlarge the negative pool and the two footprints ARE comparable; on the recipe the
+  operator benchmarks against, they are not. No fixed engine rule can know which — the agent that
+  chose the loss can, which is the argument for putting the choice there.
+
+**EVERY WALL CLOCK QUOTED FROM `runs/` CARRIES ~2 h/NODE OF CPU-ONLY SEARCH THAT NO LONGER
+HAPPENS, and that makes this decision BIGGER rather than smaller.** The `faiss-gpu-cu12` wheel on
+this box ships cubins for arch 70 and 80 with no sm_90 and no PTX, so every faiss GPU probe aborted
+and every index fell back to exact CPU — 20 of 20 probes on the live run, which is why v2's own
+`train_monitor_alert` rows narrate a "graceful faiss GPU->CPU index fallback (rc=-6)". Replaced with
+an exact torch IP search (local commit `1eff7c1`, equivalence proven against a float64 arbiter) and
+measured on interleaved arms: evaluation (641,261 x 384, k=1000) 12.00 -> 0.056 s/batch (~210x),
+mining (k=1000) 4.79 -> 0.080 s/batch (~60x). Against v2's stage ledger — `train` 40.75 h, `mine`
+8.17 h, `score` 5.00 h over 33 stage rows, 53.93 h of stage time in a 36.2 h run — that means the
+~13.2 h outside `train` was very largely CPU search and collapses. So a node's critical path becomes
+essentially its TRAINING, and the footprint (which is what decides training's wall clock) goes from
+governing ~76 % of a node's stage time to governing nearly all of it. **Any per-node figure taken
+from `runs/` — node 1's 14.6 h, node 5's rejected 10.5 h burn — is an OLD-search number and must not
+be used to size a future node.** The three-arm probe below is unaffected: it measures training only,
+and it is now a cleaner measurement than it would have been.
+
+**AND ON THE SEARCH SIDE A SECOND CARD CURRENTLY BUYS NOTHING.** faiss replicated the index across
+every card named in `IndexSettings.gpus`; the torch path uses `gpus[0]` only, and the replication was
+not measured. At the new numbers that is the right default and probably not worth restoring yet: a
+`score` stage's search has gone from ~1:11 per node to seconds, so a perfect 2x on it saves seconds
+while adding an index-sharding/merge correctness surface — and it would be spent on the ONE stage
+where a 2-GPU node's second card is otherwise idle, which is a real but now-tiny waste. Revisit it
+only if the corpus grows enough that search re-enters the node's critical path (re-measure, do not
+assume: the ratio it has to beat is now `search_seconds / train_seconds`, which is ~0 on this data).
+
+**THE ARITHMETIC, which needs no measurement and is what the role was missing.** Holding the
+PER-DEVICE batch fixed, K devices do K x the examples per optimizer step, so the same epochs take
+~1/K the steps: about the SAME experiments per hour, each finishing ~K x sooner — but a different
+experiment (K x effective batch, K x negatives). Holding the GLOBAL batch fixed, K devices split one
+step K ways at a speedup below K: the same experiment, FEWER experiments per hour, each sooner. So
+"two 1-GPU experiments in T" and "one 2-GPU experiment in T/1.6" are not two answers to one question
+— they are answers to two, and which one is being asked depends on whether the batch is scaled with
+the device count. Nothing in either direction makes the shipped prompt's claim true.
+
+**THE DEFECT.** Both paragraphs the Researcher reads about `footprint.gpus` closed on the same
+sentence — `proposal_cues.py::_gpu_budget_hint_text` ("declaring more does NOT get this experiment
+more hardware … the run serialises at the same per-experiment cost") and the code-owned
+`roles.py::_FOOTPRINT_GUIDANCE` ("the run SERIALISES at the same per-experiment cost"). The
+scheduler contradicts both halves: `resources.py::_resource_request_for_node` takes a DECLARED count
+over AUTO, `_acquire_gpus` reserves exactly that many devices all-or-nothing, and
+`_resource_eval_env` writes them into the child's `CUDA_VISIBLE_DEVICES` — pinned by
+`tests/test_gpu_footprint_choice.py::test_the_scheduler_honours_the_declaration_the_old_text_denied`,
+which passes BEFORE the change. The wording came from the `rubertlite-dr-unified-v5` incident, which
+was a WIDTH defect (`run_started` claimed 2 while one node held both cards); `Settings.proposal_width`
+closed that in the scheduler in 2026-08-13 and the sentence outlived its cause.
+
+**WHAT SHIPPED.** `Settings.gpu_footprint_cue` (ON) replaces that clause, at the SAME splice
+position in both prompts (`developer_probe`'s `_system_body` pattern — the two alternatives say
+OPPOSITE things about one declaration, so appending would leave the prompt carrying both readings).
+The share is stated as the ORDINARY default rather than a wall, a larger count is stated as
+HONOURED with the width consequence named, both directions of the arithmetic above are stated, the
+per-device memory comes from the scheduler's OWN `_gpu_mem` inventory (silent unless it joined
+losslessly — `detect_gpu_inventory` returns `({}, {})` rather than guess), the box's speedup is
+stated as UNMEASURED with a short fixed-step probe invited (`_cue_experiment_time_budget`'s remedy
+for per-step time, one axis over), and a count named in the operator's task statement is stated to
+win. `false` reproduces BOTH historical paragraphs byte for byte, and an UNSTAMPED role — a library
+caller with no engine — keeps the historical clause, so the two spellings of "off" agree.
+
+docs/36: a wider ACTION space, never a wider trusted set. The role may now ask for a different
+footprint and must say why in its rationale; it still cannot exceed the pool
+(`_clamp_resource_footprint`), still does not own the width (`proposal_derived_width`), and touches
+no metric, champion, selectability or violation.
+
+**A SECOND DEFECT, found while wiring the first.** A flag set only in `Engine.__init__` reaches the
+PRIMARY role and nothing else: `_build_role_pairs` builds fan-out pairs from `role_factory()` after
+`__init__` and caches them in `_role_pool`, and `_prepare_node_idea` is handed one of those as the
+proposing `researcher`. So a run with a build fan-out would have had its primary role asking the
+corrected question while every pooled sibling asked the pre-change one — the two-variants-disagree
+drift `_researcher_capability_suffix` exists to stop, arriving through a different door. The boolean
+therefore rides on `_stamp_gpu_budget_hint`, which already runs per proposal on whichever role is
+proposing and already documents the pooling reason. Driven by
+`test_a_POOLED_researcher_asks_the_same_question_as_the_primary`, and proved non-vacuous by deleting
+the two-line stamp in a throwaway copy: both parametrizations go red. (`memo_verdict_cue` is wired
+the `__init__`-only way and has the same exposure — not touched here, because its clause is spliced
+into `_state_brief`, which is a different delivery path and would need its own measurement.)
+
+**SPECULATION UNDER A 2-GPU NODE: already correct, now pinned.** A speculative card BUILD is a
+Developer call on a producer lane and reserves no device — the freshness envelope it is gated on is
+the PERMANENT machine (`speculation.py::_resource_envelope` reads `_gpu_ids`/`_gpu_mem`, never
+`_free_gpus`), which is `card_selection.py`'s stated rule: *"a busy GPU makes a Card wait; only a
+declaration that cannot fit on this machine makes speculative work stale"*. Verified with both
+devices reserved: the envelope and `_speculative_prefetch_ceiling()` are unchanged, and the waiting
+1-GPU node's reservation returns `None` (retry) rather than a refusal, then succeeds on release.
+What a full pool stops is DISPATCH, which is the intended cost of the choice.
+
+**STILL OPEN — do not re-discover these.**
+
+1. **The measurement itself.** The cheapest decisive experiment is ~45 GPU-minutes and was NOT run
+   (both cards were busy with the live run): a fixed 200-step training of one v2 recipe at three
+   footprints — (a) `gpus=1`, per-device batch B; (b) `gpus=2`, per-device batch B; (c) `gpus=2`,
+   per-device batch B/2 — reporting s/step and samples/s. (a) vs (c) is the strong-scaling speedup S
+   (the only number that decides the same-global-batch case); (a) vs (b) is the weak-scaling case
+   the contrastive recipe actually wants; and the largest B that survives on one card is the memory
+   answer the OOM evidence above only brackets. **Interleave the arms** — sequential A/B on this box
+   measures the box's other load, not the arms. Measure TRAINING only: with the faiss fallback fixed
+   the search cost is no longer part of the comparison, and folding it in would re-import the
+   confound this section's wall-clock paragraph exists to remove.
+2. **`core/hardware.py::operational_attention_points` still says the opposite**, in the same system
+   prompt: *"By DEFAULT use ALL available GPUs (e.g. `--gpus <N>` / DataParallel/DDP for N GPUs)
+   unless the task says otherwise; don't leave GPUs idle or run a tiny single-GPU job on a multi-GPU
+   box without reason."* That block reaches Genesis, Boss, Researcher, Developer AND Strategist and
+   has no flag, so it was not touched here on the strength of a measurement nobody has. It is now
+   the only remaining contradiction of the footprint contract, and closing it needs its own change.
+3. **The prompt ceiling and the scheduler grant still disagree** whenever `eval_parallel != pool`
+   (`widths.py::per_experiment_gpu_budget` says `pool // eval_parallel`, the undeclared-footprint
+   branch of `_resource_request_for_node` grants a flat `1`). Unchanged by this section and still
+   recorded in that helper's own docstring.
+
 ### §0.14 A repair that retuned `train` forfeited a 61-minute `mine` it provably could not reach (2026-08-18)
 
 Reported against the live `e5small-dr-unified-v2`. Node 0's whole history, four repairs, every

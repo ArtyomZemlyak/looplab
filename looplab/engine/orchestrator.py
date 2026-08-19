@@ -600,6 +600,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cross_run_curation_auto = _opt("cross_run_curation_auto")
         concept_tidy = _opt("concept_tidy")
         proposal_width = _opt("proposal_width")
+        gpu_footprint_cue = _opt("gpu_footprint_cue")
         cross_run_read_tools = _opt("cross_run_read_tools")
         phase_handoff_summary = _opt("phase_handoff_summary")
         trust_mode = _opt("trust_mode")
@@ -882,6 +883,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._concept_tidy = bool(concept_tidy)
         # docs/29 F1: whether the PROPOSALS may re-pin this run's width (`_settle_proposal_width`).
         self._proposal_width = bool(proposal_width)
+        # …and whether the cue that ASKS for those footprints states what a larger one really does.
+        # TWO deliveries, because the same false claim was in two prompts: the engine's own GPU BUDGET
+        # cue (`proposal_cues._gpu_budget_hint_text`, an engine attribute) AND the code-owned
+        # `roles._FOOTPRINT_GUIDANCE` suffix both said a larger count buys nothing. Threaded onto the
+        # researcher exactly like `_memo_verdict_cue` (registry `roles.RESEARCHER_HINT_ATTRS`, so every
+        # wrapper mirrors it) — the two propose paths read it there, and an UNSTAMPED role keeps the
+        # historical clause, which is what makes `false` and "no engine at all" the same prompt.
+        self._gpu_footprint_cue = bool(gpu_footprint_cue)
+        try:
+            setattr(researcher, "_gpu_footprint_cue", bool(gpu_footprint_cue))
+        except Exception:  # noqa: BLE001 — toy researchers without attrs are fine
+            pass
         self._cross_run_read_tools = bool(cross_run_read_tools)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty

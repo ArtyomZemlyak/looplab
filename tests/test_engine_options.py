@@ -114,6 +114,7 @@ ATTR_BY_FIELD = {
     "agent_drives_actions": "agent_drives_actions",
     "card_driven_selection": "card_driven_selection",
     "proposal_width": "_proposal_width",
+    "gpu_footprint_cue": "_gpu_footprint_cue",
     "speculation_depth": "speculation_depth",
     "speculation_gate_receipt": "speculation_gate_receipt",
     "inline_repair": "_inline_repair",
@@ -337,6 +338,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the proposal-derived width (docs/29 F1), ON in Settings and OFF in the bare library
         # for the reason frozen in tests/test_options_divergence.py.
         proposal_width=settings.proposal_width,
+        gpu_footprint_cue=settings.gpu_footprint_cue,
         # …and the run-level systemic-failure stop, ON in Settings (3) and OFF in the bare
         # library (0) for the reason frozen in tests/test_options_divergence.py.
         systemic_failure_stop=settings.systemic_failure_stop,

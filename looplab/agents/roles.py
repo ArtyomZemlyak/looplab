@@ -96,18 +96,51 @@ _EVAL_TIMEOUT_GUIDANCE = (
 # code-owned capability suffix rather than either PromptStore default: both Researcher variants
 # append that suffix after rendering an override, so a custom persona cannot hide this contract.
 # The Developer may refine the estimate later; the Researcher owns only these quantitative keys.
-_FOOTPRINT_GUIDANCE = (
+_FOOTPRINT_HEAD = (
     "Optionally set `footprint` to a JSON object describing this experiment's expected resources: "
     "{`gpus`: <non-negative integer>, `gpu_mem_mib`: <non-negative integer or null>}. Leave "
     "`footprint` null (or omit it) when GPU needs are UNSPECIFIED; unspecified is distinct from "
-    "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment. When the user turn states "
+    "`gpus=1`. Use `gpus=0` only for a deliberately CPU-only experiment. ")
+# The BUDGET clause, in two alternatives spliced at the SAME position (the `_system_body` pattern).
+# `_FOOTPRINT_BUDGET_LEGACY` is the historical text verbatim and is what an unset
+# `_gpu_footprint_cue` still gets, so a role nobody stamped asks exactly the question it always did.
+# It is replaced rather than appended to because the two say OPPOSITE things about the same
+# declaration, and the engine's own GPU BUDGET cue is being corrected in the same change — one
+# prompt carrying both readings is worse than either alone.
+_FOOTPRINT_BUDGET_LEGACY = (
+    "When the user turn states "
     "a GPU BUDGET, the count it names is a per-experiment CEILING and `gpus=1` is the ORDINARY "
     "case, not an exception: declaring MORE than the ceiling does not get this experiment more "
     "hardware — the extra devices come out of the sibling experiments that would otherwise run at "
-    "the same time, so the run SERIALISES at the same per-experiment cost. Size the training/eval "
+    "the same time, so the run SERIALISES at the same per-experiment cost. ")
+_FOOTPRINT_BUDGET_CHOICE = (
+    "When the user turn states "
+    "a GPU BUDGET, the count it names is the ORDINARY per-experiment share and `gpus=1` on a "
+    "one-device share is the default rather than a rule: a LARGER count IS honoured — the scheduler "
+    "reserves that many devices for this experiment and runs correspondingly fewer at once — so "
+    "choosing it is a decision you make on evidence about THIS experiment (does it fit on one "
+    "device, does its loss gather across devices, and is finishing one sooner worth running fewer "
+    "at a time), and the user turn states "
+    "the arithmetic. Say WHY in your rationale whenever you ask for more than the ordinary share. "
+    "An explicit count in the task statement still wins. ")
+_FOOTPRINT_TAIL = (
+    "Size the training/eval "
     "command to the count you declare. Do not put `timeout`/`eval_timeout` or authority "
     "and provenance keys such as `proposed_by`, `finalized_by`, or `pinned_by` inside `footprint`; "
     "wall-clock stays in the top-level `eval_timeout`, and the engine/operator own authority fields. ")
+
+
+def footprint_guidance(footprint_choice: bool = False) -> str:
+    """The Researcher's footprint contract, with the budget clause the run is actually running.
+
+    `Settings.gpu_footprint_cue`; the default is the LEGACY clause so an unstamped role — a bare
+    `LLMResearcher` in a library caller, a test double — keeps the historical prompt byte for byte.
+    """
+    return _FOOTPRINT_HEAD + (_FOOTPRINT_BUDGET_CHOICE if footprint_choice
+                              else _FOOTPRINT_BUDGET_LEGACY) + _FOOTPRINT_TAIL
+
+
+_FOOTPRINT_GUIDANCE = footprint_guidance()
 # P14: the schema requires `operator` but the engine's policy overwrites it unconditionally
 # (orchestrator's node-creation sites) — say so, in BOTH researcher prompts, so the model
 # doesn't strategize around a dead field.
@@ -134,16 +167,21 @@ _UNTRUSTED_MEMORY_RULE = (
     "contradicts what this run's own state shows, believe this run's state.")
 
 
-def _researcher_capability_suffix(offer_sweep: bool) -> str:
+def _researcher_capability_suffix(offer_sweep: bool, footprint_choice: bool = False) -> str:
     """P6: capability prose SHARED by both researchers (`LLMResearcher` here and agent.py's
     `ToolUsingResearcher`) so the two role variants can't drift apart again: the sweep offer
     (only when the active Developer implements `idea.space` — `make_roles` decides, see
-    `_SWEEP_OFFER`) + the `eval_timeout` ask + the optional resource-footprint contract."""
+    `_SWEEP_OFFER`) + the `eval_timeout` ask + the optional resource-footprint contract.
+
+    `footprint_choice` is the engine-threaded `_gpu_footprint_cue` (registry
+    `RESEARCHER_HINT_ATTRS`, the `_memo_verdict_cue` shape: a BOOLEAN, not prose). It has to reach
+    BOTH call sites or the two variants ask different questions about the same declaration —
+    which is the drift this function exists to stop."""
     return ((_SWEEP_OFFER if offer_sweep else "") + _EVAL_TIMEOUT_GUIDANCE
-            + _FOOTPRINT_GUIDANCE)
+            + footprint_guidance(footprint_choice))
 
 
-def _researcher_system(offer_sweep: bool = True) -> str:
+def _researcher_system(offer_sweep: bool = True, footprint_choice: bool = False) -> str:
     """Assemble the plain researcher's FULL system prompt (core + capability suffix + operator
     note + emit instruction) — a back-compat/reference assembly. The `researcher_system`
     PromptStore default is `_RESEARCHER_CORE` ALONE: `LLMResearcher.propose` appends the
@@ -154,7 +192,7 @@ def _researcher_system(offer_sweep: bool = True) -> str:
     prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, Stage-1b footprint contract,
     P14 operator note)."""
     return (_RESEARCHER_CORE + _CONCEPT_AUTHORING_GUIDANCE
-            + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE
+            + _researcher_capability_suffix(offer_sweep, footprint_choice) + _OPERATOR_NOTE
             + "Respond ONLY with the requested structured fields.")
 
 
@@ -348,7 +386,7 @@ RESEARCHER_PROMPT_CUES: tuple[str, ...] = (
 RESEARCHER_HINT_ATTRS: tuple[str, ...] = (
     "_digest_cap", "_complexity_hint", "_sweep_hint", "_novelty_feedback", "_novelty_hint",
     "_novelty_stance", "_hyp_order", "_steering_context", "_cross_run_advisory_receipt",
-    "_gpu_budget_hint", "_time_budget_hint", "_memo_verdict_cue")
+    "_gpu_budget_hint", "_time_budget_hint", "_memo_verdict_cue", "_gpu_footprint_cue")
 """Ephemeral hint attributes communicated to the ACTIVE Researcher via `setattr` and consumed
 with `getattr(obj, name, default)`. Writers: the engine (`_digest_cap` in orchestrator.py
 `__init__`; `_complexity_hint`/`_sweep_hint` in engine/proposal_cues.py `_set_complexity_hint`;
@@ -1029,7 +1067,9 @@ class LLMResearcher:
              # `_researcher_system(offer_sweep)`.
              "content": render(self.prompts, "researcher_system", _RESEARCHER_CORE)
                         + _CONCEPT_AUTHORING_GUIDANCE
-                        + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + _researcher_capability_suffix(
+                            getattr(self, "offer_sweep", True),
+                            bool(getattr(self, "_gpu_footprint_cue", False)))
                         + _OPERATOR_NOTE
                         + "Respond ONLY with the requested structured fields." + hyp_sys
                         + _UNTRUSTED_MEMORY_RULE
