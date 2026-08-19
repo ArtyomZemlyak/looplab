@@ -233,9 +233,13 @@ class WorkspaceSeeder:
         return seed_protected_files(src, dst, protect, reserved_top=reserved_top)
 
     def link_input(self, src, dst) -> None:
-        """Delegate to the shared evaluation/Developer input-mount rule."""
+        """Delegate to the shared evaluation/Developer input-mount rule.
+
+        `self.copy_input` is threaded through as the fallback so an override of it covers BOTH
+        branches — the `mount:false` copy in `seed_workspace` and the symlink-failure copy here.
+        Without it the second silently escaped the seam (see `workspace_seed.link_input`)."""
         from looplab.engine.workspace_seed import link_input
-        return link_input(src, dst)
+        return link_input(src, dst, self.copy_input)
 
     def copy_input(self, src, dst, ignore=None) -> None:
         """Delegate to the shared evaluation/Developer input-copy rule."""

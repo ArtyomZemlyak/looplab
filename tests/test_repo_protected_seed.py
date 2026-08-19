@@ -276,3 +276,51 @@ def test_the_preflight_reads_the_protected_name_through_the_eval_cwd(tmp_path):
     (wd / "sub" / "score.py").write_text("x\n", encoding="utf-8")
     assert eng._unrunnable_protected_scripts([("score", [sys.executable, "score.py"])],
                                              str(wd), str(wd / "sub")) == []
+
+
+# ================= the 2026-08-18 review finding: a seam a refactor quietly stopped honouring
+
+def test_an_override_of_copy_input_covers_the_symlink_failure_fallback_too(tmp_path, monkeypatch):
+    """`link_input` falls back to a COPY when `os.symlink` fails, and on geesefs — where symlinks
+    flatten — that is not a hypothetical path. Before the rule was extracted out of `workspace.py`
+    the fallback was `self.copy_input(...)`, so an override or monkeypatch of it covered both
+    branches; as a direct module-level call it silently stopped reaching this one, which is the
+    "patch resolves but reaches nothing" shape the seam rules exist to prevent."""
+    from looplab.engine.workspace import WorkspaceSeeder
+    import looplab.engine.workspace_seed as ws
+
+    src = tmp_path / "big-input"
+    src.mkdir()
+    (src / "data.txt").write_text("rows", encoding="utf-8")
+
+    seen: list = []
+
+    class _Seeder(WorkspaceSeeder):
+        def copy_input(self, s, d, ignore=None):
+            seen.append((Path(s).name, Path(d).name))
+            return ws.copy_input(s, d, ignore)
+
+    monkeypatch.setattr(ws.os, "symlink",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError(1, "not supported")))
+
+    dst = tmp_path / "wd" / "input"
+    _Seeder(None).link_input(src, dst)
+
+    assert seen == [("big-input", "input")], seen
+    assert (dst / "data.txt").read_text(encoding="utf-8") == "rows"
+
+
+def test_a_plain_caller_still_gets_the_module_copy(tmp_path, monkeypatch):
+    """The seam is opt-in: everything that is not the seeder keeps the module function, so this is
+    additive rather than a new required argument."""
+    import looplab.engine.workspace_seed as ws
+
+    src = tmp_path / "in"
+    src.mkdir()
+    (src / "a.txt").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(ws.os, "symlink",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError(1, "nope")))
+
+    dst = tmp_path / "wd" / "in"
+    ws.link_input(src, dst)
+    assert (dst / "a.txt").read_text(encoding="utf-8") == "x"

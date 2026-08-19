@@ -136,8 +136,21 @@ def copy_input(src, dst, ignore=None) -> None:
         shutil.copy2(src, dst)
 
 
-def link_input(src, dst) -> None:
-    """Expose a large task input by symlink, falling back to :func:`copy_input`."""
+def link_input(src, dst, copy_fallback=None) -> None:
+    """Expose a large task input by symlink, falling back to a COPY.
+
+    `copy_fallback` is the seam, and it is not decoration. Before this rule was extracted out of
+    `workspace.py` the fallback read `self.copy_input(src, dst)` — instance dispatch — so a
+    subclass override or a monkeypatch of `WorkspaceSeeder.copy_input` covered it. As a direct
+    module-level call such a patch still intercepts the `mount:false` copy branch in
+    `seed_workspace` and silently stops reaching THIS one: the "patch resolves but reaches nothing"
+    shape the repo's seam rules exist to prevent, and invisible until a symlink actually fails at
+    runtime — on geesefs, where symlinks flatten, that is not a hypothetical path.
+
+    `WorkspaceSeeder.link_input` passes `self.copy_input`, so the two branches go through one
+    dispatch again; a caller that passes nothing gets the module function, which is what every
+    non-seeder caller wants.
+    """
     src = Path(src)
     dst = Path(dst)
     if dst.is_symlink() or dst.exists():
@@ -146,14 +159,4 @@ def link_input(src, dst) -> None:
     try:
         os.symlink(src, dst, target_is_directory=src.is_dir())
     except OSError:
-        # REVIEW 2026-08-18 (correctness/seam): before the extraction out of `workspace.py`, this
-        # fallback was `self.copy_input(src, dst)` — instance dispatch through `WorkspaceSeeder`, so
-        # a subclass override or monkeypatch of `WorkspaceSeeder.copy_input` covered it. Now it is a
-        # direct module-level call: such a patch still intercepts the `mount:false` copy branch in
-        # `seed_workspace` but silently no longer reaches the symlink-failure fallback — the "patch
-        # resolves but reaches nothing" shape the repo's seam rules (CLAUDE.md, `_CompatLoader`)
-        # exist to prevent, and the divergence is invisible until symlinking fails at runtime.
-        # Fix direction: route the fallback through the caller-supplied seam (e.g. take a
-        # `copy_fallback` callable defaulting to `copy_input`, with `WorkspaceSeeder.link_input`
-        # passing `self.copy_input`), or document HERE that copy_input is not patchable for this path.
-        copy_input(src, dst)
+        (copy_fallback or copy_input)(src, dst)

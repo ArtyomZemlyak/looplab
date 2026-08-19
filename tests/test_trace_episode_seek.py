@@ -377,3 +377,93 @@ def test_the_map_and_the_window_agree_about_what_a_step_is(tmp_path):
     seeked = client.get("/api/runs/demo/nodes/0/conversation",
                         params={"before": middle["anchor"]}).json()
     assert seeked["stages"][-1]["band"] == middle["band"]
+
+
+# =========== the 2026-08-18 review finding: the snapshot cursor a LIVE node invalidated
+
+def _live_node_client(tmp_path, *, extra_content: int = 0, close_band: bool = False):
+    """A node whose newest band is OPEN — its operation span has not flushed yet, which is exactly
+    the state the operator is in while they watch a node work."""
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir(exist_ok=True)          # the same tmp_path is re-seeded to model the run moving on
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    rows = [{
+        "trace_id": "t", "span_id": "root", "parent_id": None, "run_id": "demo",
+        "name": "create_node", "kind": "operation", "start": 0.0, "duration_s": 1.0,
+        "status": "OK", "attributes": {"node_id": 0, "generation": 0}, "events": [],
+    }]
+
+    def gen(span_id, parent, start, phase, text):
+        rows.append({
+            "trace_id": "t", "span_id": span_id, "parent_id": parent, "run_id": "demo",
+            "name": "generation", "kind": "generation", "start": start, "duration_s": 1.0,
+            "status": "OK",
+            "attributes": {"node_id": 0, "phase": phase, "phase_span": parent,
+                           "input": [{"role": "user", "content": "go"}], "output": text},
+            "events": [],
+        })
+
+    # one CLOSED band, so there is something to page back to
+    gen("done-gen", "done", 2.0, "implement", "the first code")
+    rows.append({
+        "trace_id": "t", "span_id": "done", "parent_id": "root", "run_id": "demo",
+        "name": "implement", "kind": "operation", "start": 1.0, "duration_s": 5.0, "status": "OK",
+        "attributes": {"node_id": 0}, "events": [],
+    })
+    # ...and one OPEN band: its children are on disk, its own operation span is NOT (yet)
+    for index in range(1 + extra_content):
+        gen(f"live-gen-{index}", "live", 10.0 + index, "inline_repair", f"working {index}")
+    if close_band:
+        rows.append({
+            "trace_id": "t", "span_id": "live", "parent_id": "root", "run_id": "demo",
+            "name": "inline_repair", "kind": "operation", "start": 9.0, "duration_s": 5.0,
+            "status": "OK", "attributes": {"node_id": 0, "attempt": 1}, "events": [],
+        })
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    return TestClient(make_app(tmp_path))
+
+
+def test_a_snapshot_survives_an_append_into_the_open_band(tmp_path):
+    """A band's `anchor` is its operation span only once that span has FLUSHED; an open band falls
+    back to its latest CONTENT span, which moves on every append. So the snapshot a live node handed
+    back on page 2 matched no band, and backward paging 409ed on every walk — on exactly the live
+    node this feature was built for."""
+    first = _live_node_client(tmp_path).get(
+        "/api/runs/demo/nodes/0/episodes", params={"limit": 1}).json()
+    snapshot = first["page"]["snapshot"]
+    assert snapshot
+
+    # the run keeps working: more generations land inside the still-open band
+    grown = _live_node_client(tmp_path, extra_content=3)
+    page = grown.get("/api/runs/demo/nodes/0/episodes",
+                     params={"limit": 1, "snapshot": snapshot})
+    assert page.status_code == 200, page.text
+
+
+def test_a_snapshot_survives_the_band_closing(tmp_path):
+    """The other direction, and the same cursor: when the operation span finally flushes, the band's
+    anchor changes from its content-span fallback to the op span id."""
+    first = _live_node_client(tmp_path).get(
+        "/api/runs/demo/nodes/0/episodes", params={"limit": 1}).json()
+    snapshot = first["page"]["snapshot"]
+
+    closed = _live_node_client(tmp_path, close_band=True)
+    page = closed.get("/api/runs/demo/nodes/0/episodes",
+                      params={"limit": 1, "snapshot": snapshot})
+    assert page.status_code == 200, page.text
+
+
+def test_a_cursor_that_names_no_band_at_all_is_still_refused(tmp_path):
+    """The fix widens what MATCHES, never what is accepted: an unplaceable cursor must still 409
+    rather than be answered with the tail."""
+    client = _live_node_client(tmp_path)
+    page = client.get("/api/runs/demo/nodes/0/episodes",
+                      params={"limit": 1, "snapshot": "no-such-span"})
+    assert page.status_code == 409, page.text

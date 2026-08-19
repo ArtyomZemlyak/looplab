@@ -4768,3 +4768,22 @@ deliberately deferred, with rationale:
   the command: `memory_cmds` is named, and the governance sentence now says what it actually means
   (money on a steward, or authoring cross-run memory CONTENT) with `memory-orphans` — which only
   ever REMOVES rows whose run is gone — stated as the deliberate exception.]
+
+  **[2026-08-18 — the two remaining correctness findings.**
+  *A seam a refactor quietly stopped honouring.* `link_input` falls back to a COPY when `os.symlink`
+  fails — on geesefs, where symlinks flatten, not a hypothetical path. Before the rule was extracted
+  out of `workspace.py` that fallback read `self.copy_input(...)`, so an override or monkeypatch of
+  it covered both branches; as a module-level call it still intercepted the `mount:false` copy in
+  `seed_workspace` and silently stopped reaching this one — "patch resolves but reaches nothing",
+  invisible until a symlink actually fails at runtime. `link_input(src, dst, copy_fallback=None)`
+  restores the dispatch, `WorkspaceSeeder.link_input` passes `self.copy_input`, and a caller that
+  passes nothing keeps the module function.
+  *A snapshot cursor a LIVE node invalidated on every walk.* The cursor was minted from the newest
+  band's `anchor`, which is its operation span only once that span has FLUSHED; an OPEN band falls
+  back to its latest CONTENT span, which moves on every append and then becomes the op span id when
+  the band closes. Either way the cursor echoed back on page 2 matched no band, `next(...)` raised,
+  and backward paging 409ed with `trace_episode_cursor_unknown` — on exactly the live node the
+  feature was built for. Cursors are now minted from `band` (the band span's own id, which does not
+  depend on anything having flushed) and matched by `_cursor_matches` against BOTH spellings, so a
+  cursor an older client still holds keeps working instead of becoming a 409 on the next click. An
+  unplaceable cursor is still refused — the fix widens what MATCHES, never what is accepted.]

@@ -1493,6 +1493,18 @@ def hydrate_inputs(spans: list[dict], *, _normalized: bool = False) -> list[dict
     return out
 
 
+def _cursor_matches(stage: dict, cursor) -> bool:
+    """Does this band answer to `cursor`? EITHER spelling counts.
+
+    Cursors are minted from `band` (stable: the band span's own id) and matched against both, so a
+    cursor an older client is still holding — those were minted from `anchor` — keeps working
+    instead of turning into a 409 on the operator's next click. The two id spaces cannot collide
+    into a WRONG band either: both are span ids drawn from the same trace, and a band's `anchor` is
+    either its own `band` id or one of its own content spans.
+    """
+    return bool(cursor) and cursor in (stage.get("band"), stage.get("anchor"))
+
+
 def _conversation_bands(spans: list[dict], *, keep, claimed=None) -> tuple[list[dict], list[dict]]:
     """Bands + threaded turns over an ALREADY-SELECTED, already-normalized span set.
 
@@ -1776,22 +1788,21 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
     if snapshot is not None:
         try:
             snapshot_end = next(index for index, stage in enumerate(stages)
-                                if stage.get("anchor") == snapshot) + 1
+                                if _cursor_matches(stage, snapshot)) + 1
         except StopIteration as exc:
             raise TraceEpisodeCursorUnknown(snapshot, field="snapshot") from exc
         stages = stages[:snapshot_end]
     elif stages:
-        # REVIEW 2026-08-18 (correctness): the snapshot cursor minted here is the newest band's
-        # `anchor`, but an OPEN (live) band has no flushed operation span, so its anchor is the
-        # `grp[-1]` content-span fallback (`_conversation_bands`) — which moves on every append, and
-        # becomes the op span id once the band closes. Either way the anchor echoed back on page 2 no
-        # longer matches ANY band, the `next(...)` above hits StopIteration, and backward paging on a
-        # live node — this feature's motivating case — 409s with `trace_episode_cursor_unknown` on
-        # every walk (reproduced: append-to-open-band AND band-close both invalidate the snapshot).
-        # Fix direction: mint the snapshot from the newest band whose anchor is STABLE (a closed op
-        # span present in the population), or match the snapshot by band identity (`band` id) rather
-        # than by the anchor spelling.
-        snapshot = stages[-1].get("anchor")
+        # MINTED FROM `band`, NOT FROM `anchor`, and this is the whole reason `_cursor_matches`
+        # exists. A band's `anchor` is its operation span only when that span has FLUSHED; an OPEN
+        # (live) band falls back to `grp[-1]` — the latest content span — which moves on every
+        # append and then becomes the op span id the moment the band closes. So the cursor a live
+        # node handed back on page 2 matched no band at all, `next(...)` raised, and backward paging
+        # 409ed with `trace_episode_cursor_unknown` on every walk — on exactly the live node this
+        # feature was built for (reproduced from both directions: an append into the open band, and
+        # the band closing). `band` is `band_span["span_id"]`, which is the band's identity and does
+        # not depend on anything having flushed.
+        snapshot = stages[-1].get("band") or stages[-1].get("anchor")
 
     total_episodes = len(stages)
     cap = max(0, int(cap))
@@ -1808,15 +1819,16 @@ def node_episodes(spans: list[dict], node_id, *, total_spans=None,
     if before is not None:
         try:
             end = next(index for index, stage in enumerate(stages)
-                       if stage.get("anchor") == before)
+                       if _cursor_matches(stage, before))
         except StopIteration as exc:
             raise TraceEpisodeCursorUnknown(before) from exc
     start = max(0, end - cap)
     visible = stages[start:end]
-    # Every real band has an anchor: synthesized/live bands fall back to their latest content span
-    # in `_conversation_bands`. Keep this explicit anyway so a malformed legacy row cannot publish a
-    # cursor that will only fail on the next click.
-    next_before = visible[0].get("anchor") if start > 0 and visible else None
+    # `band` first, for the reason the snapshot mint gives: an OPEN band's `anchor` moves under the
+    # walk. Kept explicit so a malformed legacy row cannot publish a cursor that will only fail on
+    # the next click.
+    next_before = ((visible[0].get("band") or visible[0].get("anchor"))
+                   if start > 0 and visible else None)
     has_older = bool(start > 0 and next_before)
     # Flat counts, not the band's `rollup`: a map row is chosen from, not read from, and the nested
     # token/cost record is most of its bytes. Measured on rubert-dr-0804 node 1 — 7,048 rows, 2.3 MB
