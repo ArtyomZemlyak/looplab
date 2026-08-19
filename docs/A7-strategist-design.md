@@ -4,6 +4,22 @@
 [BACKLOG.md](BACKLOG.md) Theme A · **Current decision:** config-first, Strategist defaults to the
 tool-using `agent` backend; `off`, deterministic `rule`, and single-shot `llm` remain explicit options.
 
+> **[2026-08-19 — one name in this record is now permanently unavailable, and one dependency it
+> claims is not wired.]** This document names `agentless` as a Developer the Strategist may select
+> (§7's rule table, §10 step 1, §11). There is no such backend and there will not be one:
+> `docs/BACKLOG.md` §0.18 declines `localize → generate-N → validate` on this repo's own corpus
+> (8 of 58 repairs visible to any pre-execution check; the median repair edits 1 file out of a
+> working set of 5; the execution-free validator separates 0 of 683 authored files). The live
+> vocabulary is exactly `core/config.py::developer_switch_names()` — `default`, `llm`, `aider`,
+> `continue`, `goose`, `opencode` — and `validate_strategy` drops anything else *before*
+> `_prepare_strategy_developer` can write a refusal receipt, so a rule flipping
+> `developer→agentless` would record a decision with no switch and no refusal. Read every
+> `agentless` below as "some other backend". Separately, §11's "ships useful with … `llm|agentless`"
+> overstates what is wired for the LLM Strategist specifically: `_StrategyOut` still carries no
+> `developer` field and `serve/control_validation.py::_normalize_set_strategy` rejects one, so the
+> only live producer of a `developer` decision is a rule-based or custom Strategist — the one part of
+> this row still open, indexed under its own slug in `docs/BACKLOG.md` §0.1 item 5.
+
 > The Strategist is an **optional meta-controller** that, at a bounded cadence, reads the folded run
 > state and decides *which search machinery to use next* — search policy/allocator, Developer backend
 > (agentless vs agentic vs in-house LLM), operator mix, and fidelity. It never selects a node itself

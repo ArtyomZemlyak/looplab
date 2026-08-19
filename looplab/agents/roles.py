@@ -1145,6 +1145,13 @@ class LLMDeveloper:
     # positive marker (absent means NO) because the templated Developers are the majority and none
     # of them reads `idea.space`; see `agents/factory.py::_offer_sweep`.
     honors_idea_space = True
+    # C5/C2: the CAPABILITY best-of-N selection is gated on — this Developer's `implement` RETURN
+    # VALUE *is* the artifact, so `search/best_of_n.py::_score` can rank N candidates by compiling
+    # them. A positive marker (absent means NO) for the same reason `honors_idea_space` is: the
+    # majority of Developers here answer some other way, and `LLMRepoDeveloper` answers on
+    # `last_files` — which made every repo task's `best_of_n` a coin flip the operator paid N full
+    # builds for. `search/best_of_n.py::refuse_unrankable_best_of_n` owns the rule and the numbers.
+    answers_with_code = True
 
     def __init__(self, client: LLMClient, brief: str = "",
                  prompts: Optional[PromptStore] = None):
@@ -1254,7 +1261,8 @@ class WrapsDeveloper:
       The engine's ablation probe reads ``getattr(developer, "inner", developer)`` to bypass
       wrapper retry/fallback/best-of-N machinery (``orchestrator._probe_developer``), so
       `inner` must always be the raw developer a probe should hit.
-    - `brief` / `is_code_generating` / `honors_idea_space` / `client` / `prompts` / `last_report`:
+    - `brief` / `is_code_generating` / `honors_idea_space` / `answers_with_code` / `client` /
+      `prompts` / `last_report`:
       read-through (and, for `client`/`prompts`, hasattr-guarded write-through) to the wrapped
       developer — `make_roles` pokes `prompts`, H3 per-role rewiring pokes `client`, T8/A0b
       merge_mode="auto" resolution reads `is_code_generating`, `make_roles`'s sweep gate reads
@@ -1294,6 +1302,14 @@ class WrapsDeveloper:
     @property
     def honors_idea_space(self) -> bool:
         return bool(getattr(self._wrapped, "honors_idea_space", False))
+
+    # C5/C2: and so does "is this Developer's answer the thing best-of-N ranks?" — `make_roles`
+    # reads it off the (possibly wrapped) developer to decide whether `best_of_n > 1` can be
+    # honoured at all. Forwarded read-through so a wrapper never makes a repo Developer look
+    # rankable.
+    @property
+    def answers_with_code(self) -> bool:
+        return bool(getattr(self._wrapped, "answers_with_code", False))
 
     @property
     def client(self):

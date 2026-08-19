@@ -191,53 +191,59 @@ site that proves it is open.
    `looplab readmodel`), and no consumer consults the watermark — there is no consumer at all, so
    the guarantee is available rather than enforced. If a reader is ever added, it must call
    `readmodel_is_current` before trusting a row.
-5. **`agentless` is not a developer backend, and a Strategist branch for it is dead code (P1, M).**
-  OPEN[agentless-developer-backend] proof:present:"opencode")@looplab/core/config.py
-   `core/config.py:350::DEVELOPER_BACKENDS = ("default", "aider", "continue", "goose", "opencode")` —
-   no `llm`, no `agentless`. `engine/strategy.py:75-77::_available_developers()` returns
-   `["default", "llm", *PRESETS]`, so `agents/strategist.py:408-409`'s
-   `if "agentless" in ctx.available_developers` (comment: *"only when C5 has landed"*) can never
-   fire. **Cost:** the Strategist's `developer` decision has a permanently unreachable arm — a
-   silent capability gap, not a red test — plus the localize→generate-N→validate pipeline itself.
-   Its two building blocks already exist (`engine/localize.py`, `search/best_of_n.py`).
-   **[2026-08-14 — the DISAGREEMENT half is CLOSED; the BACKEND half is not.** All three citations
-   were real. The vocabulary now has one home: `core/config.py::DEVELOPER_BACKENDS` +
-   `DEVELOPER_BACKEND_ALIASES` (`llm` -> `default`, published as `developer_switch_names()`), which
-   `_available_developers` derives from and `make_developer_factory` resolves through instead of the
-   bare `"llm"` literal; `tests/test_developer_backend_registry.py` guards both directions and
-   AST-scans the tree, so a re-introduced `agentless` arm names its own file and line. The dead
-   branch is REMOVED with a comment saying why (an unreachable `if` is a promise the code cannot
-   keep). **What was measured, and is the reason it was a guard and not a lint:** an unregistered
-   `developer` is dropped by `validate_strategy` *before* `_prepare_strategy_developer` runs, so the
-   `developer_application: {status: "refused", …}` receipt — which exists, and fires for a factory
-   refusal — cannot fire for an unknown NAME. Driven end-to-end through `_maybe_consult_strategist`:
-   `{"policy": "mcts", "developer": "agentless", "rationale": "switch developer to agentless"}` is
-   recorded with the policy applied, the rationale VERBATIM, no `developer` field and no receipt of
-   any kind. The history reads as a switch that never happened.
-   **STILL OPEN — exactly what an `agentless` backend needs** (nothing below is built):
-   (a) a `Developer` object composing localize -> generate-N -> validate. `engine/localize.py` and
-   `search/best_of_n.py` exist but neither is a Developer: `BestOfNDeveloper`
-   (`agents/factory.py:483-487`) wraps an existing Developer and re-runs its `implement`, and
-   localize is engine-side, so the new class owns the *sequencing* and the file-scope hand-off;
-   (b) a construction site in `agents/factory.py::make_roles` keyed on `developer_backend`, since
-   `PRESETS` membership is what routes a name to the external-CLI path today and `agentless` is
-   neither a preset nor the in-house default — a third branch, not a preset entry. Note the same
-   binary predicate gates three other decisions in that file (`:348` in-process build, `:461` sweep
-   offer, `:487` the `BestOfNDeveloper` wrap), so a new name falls into the in-house side of all
-   three by default — including a best-of-N wrap the agentless pipeline already does itself;
-   (c) the registry entry (`DEVELOPER_BACKENDS`), which is what makes it `Settings`-configurable AND
-   what makes `_available_developers` offer it to the Strategist — with no edit to `strategist.py`,
-   because the removed arm's `if` is now expressible as a plain membership test on a name that
-   really exists. Note `test_every_configurable_backend_exists` demands a matching `PRESETS` key, so
-   landing (c) means extending that test's `{"default"}` exemption to the in-house family;
-   (d) the C2 knobs already present (`best_of_n`, `best_of_n_listwise`) either reused or given
-   agentless-specific spellings, plus a docs row for whichever;
-   (e) a producer that can actually ASK for it — today the LLM Strategist's `_StrategyOut` has no
-   `developer` field and the operator `set_strategy` control refuses one, so the only live producer
-   of a `developer` decision is a rule-based/custom Strategist. Selecting it "by the A7 Strategist
-   per phase/node", as this row asks, needs that field added to the structured schema and spliced
-   into `_strategist_brief` (which today never mentions developers at all).
-   Deliberately NOT built here: it is a feature with real blast radius, and the box is mid-GPU-run.]
+5. **The `agentless` Developer is DECLINED on our own corpus; what stays open is the Strategist's
+   ability to ask for a backend at all (P2, S).**
+   OPEN[strategist-developer-field] the LLM Strategist cannot propose a `developer` — the field is
+   absent from `_StrategyOut` and `_normalize_set_strategy` rejects one, so the switch machinery
+   below it has no live producer. The proof is the OPERATOR half because it is the one whose file
+   does not contain the word at all today: `serve/control_validation.py` has zero occurrences of
+   `developer`, and a Strategist-selectable backend cannot ship without the operator being able to
+   name one too. proof:absent:developer@looplab/serve/control_validation.py
+   **[2026-08-14 — the DISAGREEMENT half closed.]** The vocabulary has one home:
+   `core/config.py::DEVELOPER_BACKENDS` + `DEVELOPER_BACKEND_ALIASES` (`llm` -> `default`, published
+   as `developer_switch_names()`), which `_available_developers` derives from and
+   `make_developer_factory` resolves through instead of the bare `"llm"` literal;
+   `tests/test_developer_backend_registry.py` guards both directions and AST-scans the tree, so a
+   re-introduced `agentless` arm names its own file and line. The dead `if "agentless" in
+   ctx.available_developers` branch is REMOVED with a comment saying why (an unreachable `if` is a
+   promise the code cannot keep). **What was measured, and is the reason it was a guard and not a
+   lint:** an unregistered `developer` is dropped by `validate_strategy` *before*
+   `_prepare_strategy_developer` runs, so the `developer_application: {status: "refused", …}`
+   receipt — which exists, and fires for a factory refusal — cannot fire for an unknown NAME. Driven
+   end-to-end through `_maybe_consult_strategist`: `{"policy": "mcts", "developer": "agentless",
+   "rationale": "switch developer to agentless"}` is recorded with the policy applied, the rationale
+   VERBATIM, no `developer` field and no receipt of any kind. The history reads as a switch that
+   never happened.
+   **[2026-08-19 — the BACKEND half is DECLINED, not deferred, and the number is in §0.18.]** The
+   row asked for `localize → generate-N → validate` as the DEFAULT repo Developer on the Agentless
+   paper's SWE-bench Lite result, and asked for that number to be re-argued against our task shape
+   first. It was, over all five real repo runs: 61 % of 41 nodes fail their first eval, but only 8 of
+   58 repairs — 0.13 h of 220.2 h of stage time — are visible to any pre-execution check; the median
+   repair edits **1** file out of a working set of 5, so there is nothing to localize; 48.6 % of the
+   files repairs change are not `.py` and are therefore outside `engine/localize.py` by construction
+   (`configs/config.yaml` and `looplab_stages.json` are the two most-edited files in the corpus);
+   and the only execution-free validator docs/36 permits scores **683 of 683** authored `.py` files
+   valid, separating zero candidates — against **+34 %** of the corpus's entire LLM spend at N=3.
+   The permanent decline marker and the full table live in §0.18. What the
+   corpus supports INSTEAD is a **budget probe** (74 % of the wasted GPU time is `timeout`/`stalled`/
+   `declared_condition`, all of it it/s arithmetic the triage model already does after the fact) —
+   single-candidate, no extra generation, and it needs its own measurement before it is built.
+   Two of the row's five sub-items are settled by that decline rather than by construction: (a) the
+   composing `Developer` object and (b)/(c) its `make_roles` branch + registry entry are refused with
+   it. **(d) is FIXED**: `best_of_n` was silently inert on every repo task and billing for it —
+   `BestOfNDeveloper` ranks the string `implement()` returns and `LLMRepoDeveloper` returns a
+   sentinel, so all N candidates scored -1.0, both LLM tie-breaks were skipped and candidate 0 always
+   won after N full builds (7.37M prompt tokens each). `make_roles` now REFUSES that combination
+   (`search/best_of_n.py::refuse_unrankable_best_of_n`, a `ConfigRefusal`) rather than silently
+   dropping to N=1, gated on the new positive marker `agents/roles.py::LLMDeveloper.answers_with_code`. **(e) is what stays open above**: the LLM
+   Strategist's `_StrategyOut` still has no `developer` field and `serve/control_validation.py::
+   _normalize_set_strategy` still rejects one, so the only live producer of a `developer` decision is
+   a rule-based/custom Strategist — and that gap is about `aider`/`goose`/`opencode`/`llm` just as
+   much as it ever was about `agentless`, which is why it keeps its own slug now that the backend is
+   declined. Landing it means the field in the structured schema, the copy in `_assemble_strategy`,
+   the whitelist in `validate_strategy` (three of the four steps `strategist.py:81-86` names — the
+   fourth, `Engine._apply_strategy`, already applies a `developer`), and a mention
+   in `_strategist_brief`, which today never tells the model developers are switchable at all.
 6. **The schema-aligned parser is a fallback, not the default (P0, S).** `core/parse.py:195
    ::_coerce_to_model` IS a real error-correcting SAP (case-insensitive key match, per-field
    coercion, extras dropped) — but `core/config.py:1483` is `llm_parser: str = "tool_call"` and
@@ -1940,7 +1946,7 @@ site that proves it is open.
 | `search/policy.py:722` (`"bohb": _make_asha`) | `search/policy.py:696` |
 | `adapters/mlebench.py:102` (`grader._Y`) | `adapters/mlebench.py:123`, and now only the synthetic fixture's `_GRADER_TEMPLATE` under `host_graded=False` |
 | `stage_completed` (D5) | **no such event.** The registry name is `events/types.py:224::EV_STAGE_FINISHED = "stage_finished"` |
-| `developer_backend = llm \| agentless \| <agent>` | `agentless` is not in `core/config.py::DEVELOPER_BACKENDS` and no backend implements it. `llm` IS real, but as a live-SWAP alias of `default` (`core/config.py::DEVELOPER_BACKEND_ALIASES`), never a launch value. The `agents/strategist.py` branch that could never fire was removed 2026-08-14; §0.1 item 5 records what an `agentless` backend still needs |
+| `developer_backend = llm \| agentless \| <agent>` | `agentless` is not in `core/config.py::DEVELOPER_BACKENDS` and no backend implements it — and since 2026-08-19 none ever will: §0.18 declines it on our own corpus. `llm` IS real, but as a live-SWAP alias of `default` (`core/config.py::DEVELOPER_BACKEND_ALIASES`), never a launch value. The `agents/strategist.py` branch that could never fire was removed 2026-08-14 |
 | `trust/` owns redaction | it does not — `core/redact.py::redact_secrets`, reached via `engine/audit.py:269::_redact`. (`CLAUDE.md`'s package map still says `trust/ … redaction`.) |
 | **A4 is one ID** | **a FIFTH namespace collision the caveat block does not list:** ★Shipped's *"A4 failure-reflection"* and §2's *"A4 LATS-style MCTS"* are different items. Caveat 2 lists C2/C3/C5 and the §6 `D1–D5`; add A4. |
 
@@ -1953,7 +1959,7 @@ F6 · G3 · G5 · H1 · H2 · H3 · H4 · I1 · I2 · I3 · I4 · I5 (36 rows) c
 ★Shipped rather than with §2. Each is marked below with its re-derived status; **eight of the 36 were
 overstated by ★Shipped and are re-opened as PARTIAL here** — A2, F2, H2, I1, I2, I3, I4, I5 (§0.1
 items 6, 10, 13, 14, 15, 16, plus A2 in §0.2 and I5 at item 12). Three §2 rows are **NOT** duplicates and stand on their own: **A0c,
-A0e, A0f** (never in ★Shipped), **C5 agentless** and **C6 ACI** (★Shipped explicitly parked C6 as
+A0e, A0f** (never in ★Shipped), **C5 agentless** (declined 2026-08-19, §0.18) and **C6 ACI** (★Shipped explicitly parked C6 as
 "largely covered"), and **A4**, which collides with a *different* ★Shipped A4 (§0.3).
 
 Cross-theme overlaps the file already flagged, re-confirmed and now resolved the same way in both
@@ -5294,3 +5300,123 @@ deliberately deferred, with rationale:
   `repairs` on purpose — is gone, with the ROW predicate kept and a negative pin so it stays gone.
   *Two findings NOT taken, both measured:* the `run_dev_command` seed cache and the watch
   scheduler's endless tick — §0.15 holds the numbers and what each would have to prove first.]
+
+### §0.18 The Agentless recipe was measured against our own failures, and the corpus refuses it (2026-08-19)
+
+**THE ASK.** §0.1 row 5 (Theme C, C5) proposes making an *agentless* Developer the DEFAULT for repo
+tasks — `localize → generate-N → validate`, on the Agentless paper's SWE-bench Lite result (32 % at
+$0.70). The row's own instruction is that the paper's number is from a different task shape and must
+be re-argued against ours before anything is built. This is that re-derivation, over every event log
+in `runs/` for the five real repo runs (`rubertlite-dr-unified-v6/v7/v8/v9`, `e5small-dr-unified-v2`;
+`e5small-dr-unified-v3` was live and is excluded, `rubertlite-dense-retrieval` is the pre-repo
+dataset adapter and carries no `reason`/`verified` fields). Every one of the five ran
+`developer_backend: "default"` with `best_of_n: 1` — the pure agentic loop, no wrapper.
+
+**WHAT THE AGENTIC LOOP ACTUALLY COSTS US.** 41 nodes reached an evaluation; **25 of them (61 %)
+failed their first eval** and needed at least one inline repair — 5/7, 2/3, 6/14, 5/7 and 7/10 across
+the five runs. Repair rounds per node: 16 nodes 0, 8 nodes 1, 7 nodes 2, 6 nodes 3, 2 nodes 4, 2
+nodes 5 — mean 1.41 over all nodes, 2.32 over the repaired ones. **9 of the 33 consecutive repair
+pairs re-hit the SAME failure class** (27 %), 4 repairs were `inert` (changed no file at all) and 10
+were `unmet` (the tree does not contain the change the repair's own rationale claimed). Stage wall
+clock: 220.2 h total, of which **77.2 h (35.1 %) went to stages that failed**, plus **10.0 h (7.0 %
+of the successful time) re-running a `(node, stage)` pair that had already passed** before a later
+stage failed — 87.2 h, **39.6 % of all stage time, spent on work the run threw away or repeated.**
+
+**THE FAILURES ARE NOT THE SHAPE AGENTLESS FIXES.** Classifying all 58 repairs by their `error_in`
+(falling back to the triage rationale only where the recorded tail is a bare progress bar; the
+`manifest_vs_code` row folds in one v6 repair that predates the `reason` field and whose 4,000-char
+tail is truncated past the phrase the classifier keys on) and joining each to the wall clock of the
+stage it followed — the 14 rows are all 58 repairs and the hours sum to the 62.8 h of failing-stage
+time a repair follows:
+
+    class                     n   failing-stage h   median s     what would have caught it
+    timeout_or_slow           4        23.56          18,203     nothing static — hours of GPU
+    stalled                   2        16.27          29,287     nothing static — a wedged CUDA op
+    declared_condition        4         6.86           6,178     2 of 4 are a static manifest↔config
+                                                                 disagreement (declared 50 epochs,
+                                                                 config n_epochs: 1); 2 are budget
+    manifest_vs_code          6         5.85           3,613     partly: declared path vs written path
+    gpu_oom                  18         4.79             267     nothing static — the real batch
+    path_mismatch             3         2.01           2,639     partly
+    own_guardrail_assert      3         1.80           2,658     nothing static — 43 % mining coverage
+    diverged                  5         1.28             192     nothing static — 50 real train steps
+    attribute_error           2         0.13             233     no (Series.to_set, nn.Module order)
+    name_error                2         0.12             219     yes — pyflakes
+    shape_error               1         0.06             224     no — needs a real forward pass
+    argv_vs_parser            4         0.01               7     yes — one `--help` of the stage argv
+    env_credentials           2         0.00               9     no — an S3 key, not the node's code
+    missing_import_or_dep     2         0.00               2     yes — one import
+
+**The cheaply-detectable failures are also the cheap ones to suffer.** Everything a pre-execution
+check could see — `argv_vs_parser`, `missing_import_or_dep`, `name_error` — is **8 of 58 repairs and
+0.13 h of the 220.2 h**, i.e. **0.06 % of stage time**. Two thirds of the wasted time
+(`timeout_or_slow` + `stalled` + `declared_condition` = 46.7 h, 74 % of the 62.8 h attributable to a
+repair) is a property of a multi-hour GPU training run: no localization, no static validator and no
+`dev_probe` can predict it, and the only honest way to rank N candidates on it is to RUN all N.
+
+**LOCALIZE HAS NOTHING TO LOCALIZE.** SWE-bench's phase 1 finds the 1 file to change among thousands.
+Here the Developer's authored working set is **2–10 files, median 5**, and the median repair changes
+**exactly one** of them (38 of 58 change 1 file, mean 1.24). Worse, `engine/localize.py` ranks
+`*.py` **only**, and **48.6 % of the files repairs actually change are not Python**: the two most-edited
+files in the whole corpus are `vectorsearch/configs/config.yaml` (18 of 72 changed-file mentions) and
+`looplab_stages.json` (17) — the stage manifest and the training config, both invisible to the
+ranker. The one clean localization failure in the corpus is v9 node 1 attempt 1, which edited
+`vectorsearch/config.py` + `loss.py` while the executed configuration was `configs/config.yaml`; it
+is **1 of 58**, and the file it should have found is one `localize()` cannot return.
+
+**VALIDATE HAS NOTHING TO SEPARATE, AND THIS IS THE DECIDING NUMBER.** docs/36 bounds what may pick
+a winner: the selector may WIDEN the action space, never the trusted set, so it must be something the
+engine checks itself — does it parse, does it satisfy the manifest, does `dev_probe` run it. Over all
+222 authored working sets preserved in `runs/`, **683 `.py` files were parsed and 0 failed** — the
+execution-free floor would have refused nothing, ever. The remaining engine-checkable predicate (the
+declared artifact contract) is `expect`, which already runs, after the stage.
+
+**AND THE GENERATION IS THE EXPENSIVE HALF.** Joining `llm_usage` to the `phase` on each generation
+span: the corpus spent **593.3M prompt / 22.7M completion tokens** over 5 runs, of which the Developer
+build phases (`stages` + `plan` + `implement`) are **383.0M in / 12.3M out over 8,831 calls** — over
+52 card builds that is **7.37M prompt tokens and 170 provider calls per node build** (per-run range
+4.95M–8.16M). An inline repair is **0.86M in / 21 calls**, 12 % of a build. So N=3 over the implement
+phase alone is +200M prompt tokens, **+34 % of the entire corpus's LLM spend**, to remove at most the
+8 repairs (6.9M repair tokens, 0.13 GPU-h) a check could have seen — and N=3 over the whole build is
++766M, more than double everything five runs of this engine have ever spent.
+
+DECLINED[agentless-developer-backend] `localize → generate-N → validate` is refused as the repo
+Developer, permanently and on our own corpus rather than on SWE-bench's. measured: 8 of 58 repairs
+(0.13 h of 220.2 h of stage time) are visible to any pre-execution check; the median repair edits 1
+file out of a working set of 5; the execution-free validator scores 683 of 683 authored `.py` files
+valid, separating 0 candidates; and N=3 costs +34 % of all LLM spend — docs/BACKLOG.md §0.18.
+The three numbers each kill a different phase: 1-of-5 kills LOCALIZE (there is nothing to find,
+and 48.6 % of the files repairs change are not `.py`, i.e. outside `engine/localize.py` by
+construction), 683/683 kills VALIDATE (the only selector docs/36 permits separates nothing), and
++34 % against 0.13 h kills GENERATE-N. 61 % of 41 nodes do fail their first eval — the loop is
+genuinely unreliable — but not in the shape this recipe repairs.
+
+**WHAT THE MEASUREMENT DOES SUPPORT, and it is not this row.** The 46.7 h of `timeout`/`stalled`/
+`declared_condition` are all the same sentence — *the declared schedule does not fit the declared
+budget* — and every one of them is arithmetic the triage model performs AFTER the fact from the
+node's own progress bar ("73 % done at 1.77 s/it, 10 epochs needs ~5h22m against a 4 h stage"). That
+is a **budget probe**, not an agentless pipeline: one short run of the declared stage, an it/s
+extrapolation against `timeout`, and a manifest↔config epoch cross-check. It is single-candidate,
+costs no extra generation, and is the shape the corpus actually asks for. It is deliberately NOT
+built here (the box is mid-GPU-run and it needs its own measurement of what a representative first
+minute predicts); it is written down so the next agent starts from the number rather than the paper.
+
+**AND ONE LIVE DEFECT THE MEASUREMENT TURNED UP, now fixed.** `best_of_n` — C5's item (d) — was
+silently inert on every repo task and billing for it. `search/best_of_n.py::BestOfNDeveloper` ranks
+the STRING `implement()` returns; `adapters/repo_developer.py::LLMRepoDeveloper.implement` returns a
+SENTINEL (`""` = "the files are the answer"; the artifact travels on `last_files`). Driven through
+the shipped classes: with `n=2` and a deliberately broken candidate 0, both candidates score
+**-1.0**, `top` holds both, the FOREAGENT ranker and the D10 list-wise tie-break are both skipped
+because `len({"", ""}) == 1`, and `chosen = top[0]` — **the broken one wins**, after two full builds
+were paid for. At the corpus's 7.37M prompt tokens per build that is **+14.7M tokens per node at
+`best_of_n=3` for an outcome the setting has no influence over.** `search/best_of_n.py::refuse_unrankable_best_of_n`, called
+from `make_roles`, now REFUSES the combination (`ConfigRefusal`, so `cli/__init__.py`'s boundary
+prints one line at exit 2, and a live Strategist developer swap records the
+`developer_application: refused` receipt `engine/strategy.py::_prepare_strategy_developer` already
+writes) instead of a silent drop to N=1 —
+the same reason `DEVELOPER_BACKEND_ALIASES` is wider than the launch set. The capability is asked of
+the Developer, not inferred from the backend: `agents/roles.py::LLMDeveloper.answers_with_code`, a
+POSITIVE marker (absent means no) forwarded read-through by `WrapsDeveloper`, exactly like
+`honors_idea_space`. Making the selection read `last_files` instead was considered and refused on the
+683/683 number above: a selector with measured discrimination of zero is the unverified claim this
+file exists to end. `tests/test_best_of_n.py` drives the broken selection AND the refusal.
