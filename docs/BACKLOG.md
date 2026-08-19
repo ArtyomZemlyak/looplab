@@ -3472,7 +3472,7 @@ started 2026-08-17 16:38 and therefore PINNED to code from before every 2026-08-
 | lesson distillation, report refresh | **DEAD — FIXED HERE** | see below |
 | auto-skill promotion | DEAD | the shared `skills/` store is EMPTY. `n_skills` went 4 → 12 (dense-retrieval, July) → 0 (v7) → 0 (v8), and v6/v9/live never reached the phase at all because it is RUN-END only and none of them finished |
 | training monitor | DEGRADED | 205 alerts corpus-wide (live 96, of which 70 `broken` at up to 0.97 confidence with a 41-tick streak), **0 acts, ever**. Five of six kill conjuncts cleared simultaneously on the live run; only `log_role` refused, because a 3-stage pipeline can never earn `LOG_ROLE_TRAINING`. Fixed by `a5412bb8`/`364cef55` — after the live run pinned its code |
-| ASHA monitor | DEAD | zero `asha_rank` rows in six runs. `asha_live=true` and `min_siblings` is NOT the blocker: `asha_monitor.py:686` bails at `sample is None` because `RECALL@100:` is printed ONCE, on the LAST line of a 7-hour training. A successive-halving watchdog pointed at a task with no intermediate curve |
+| ASHA monitor | DEAD — now SAYS SO | zero `asha_rank` AND zero `asha_verdict` rows in seven runs (re-derived 2026-08-19), all with `asha_live` and `asha_live_kill` on. `min_siblings` is NOT the blocker: the tick bails at `sample is None` because `RECALL@100:` is printed ONCE, on the LAST line of a 5-10 hour training. A successive-halving watchdog pointed at a task with no intermediate curve. Still inert; no longer silent about it (`kill_reachable: false` + `inert_reason`, below) — and the corpus DISQUALIFIES every engine-side proxy curve |
 | every phase of a node's life | FIRING | live run: stages 11/11, plan 11, propose 18, card build 11, novelty 18, create 11, seed 9, eval-start 9, stage exec 33, terminal 8, repair 13. The 11/9/8 gaps are fully accounted for by one Card-freshness supersede and three nodes genuinely in flight — no phase is silently skipped |
 | card board / speculation | FIRING | `card_added` 11, `card_build_*` 11 each, `card_enriched` 35, last 2026-08-19 00:38 |
 
@@ -3537,13 +3537,77 @@ these detectors already compute, stamped on `node_evaluated` beside the metric (
 default, fold-neutral) so "scanned THESE bytes, found nothing" is a durable claim. Not done here
 because it is a payload contract and this change is a cadence fix; it should not ride along.
 
-⬜ **ASHA cannot work on this task family and nothing says so.** `asha_live=true` in five snapshots is
-  OPEN[asha-inert-on-this-task-family] proof:present:asha_live@looplab/core/config.py
-an operator belief the engine never contradicts: it starts the task, ticks for hours, and silently
-`continue`s on every tick because `eval.metric.pattern` matches once at the end of training. Either
-the launcher should refuse `asha_live` for a metric spec with no `resource_key` and no intermediate
-contract, or it should say once per run that it is reading a curve that does not exist. A watchdog
-that is structurally inert and silent about it is worse than one that is off.
+**ASHA cannot work on this task family — the SILENCE is fixed here, the CURVE is refused on evidence.**
+Re-derived 2026-08-19 over all seven event logs in `runs/`: **`asha_rank` 0, `asha_verdict` 0**, against
+205 `train_monitor_alert` rows over the same evals, with `asha_live: true` AND `asha_live_kill: true`
+in every snapshot that carries them. Not `min_siblings`, not configuration: the tick `continue`s at
+`sample is None` because the objective is printed ONCE, on the last line. Counted per training log,
+`RECALL@100:` appears **0-3 times in a whole multi-hour run** (the 2s and 3s are repeat attempts, not
+points): `e5small-dr-unified-v2` node 2 is 53 MB and 13,337 lines with exactly one, the last. Node 5
+of that run trained from 09:32:00 to 20:14:13 — **10 h 42 min** — and was rejected 106 s later
+(`node_failed reason=idea_rejected`); nodes 2 and 4 ran to completion for 0.0 and 2e-05.
+The 2026-08-07 audit (`docs/audit/2026-08-07-search-loop.md` F3) had already asked for exactly the
+diagnostic this entry ships, twelve days earlier.
+
+**SHIPPED: the watchdog now says it cannot act.** `asha_inert_reason` is a pure three-rung truth table
+over the METRIC CONTRACT (a kind with no live reader at all / a readable `stdout_regex` that
+`sibling_metrics_at_resource` will not accept / a missing `resource_key`), stated on the FIRST tick
+because — like the training monitor's role gate — it is a property of the contract and not of the run's
+health. The observational rung is the one the corpus measured: three consecutive ticks whose log is
+WRITING and has still never named the objective are reported as "no curve to halve"; an EMPTY tail is
+not counted, because "nothing written yet" is the stall watchdog's question. Each is said at most once
+per eval, on one `asha_monitor` span carrying `kill_reachable: false` + `inert_reason` — the training
+monitor's attribute name and meaning, deliberately one vocabulary across both watchdogs — plus one
+`_LOG.warning`, because an operator reading a config is reading a console and not a trace (the GPU-pool
+lease's precedent). It is NOT a widening: no event, nothing the fold reads, no model reading made
+load-bearing, `should_asha_kill`'s conjuncts untouched. `tests/test_asha_inert_is_visible.py`; both loop
+properties verified red against `4138e7ef` in a throwaway tree, as assertions rather than ImportErrors.
+
+**REFUSED: no engine-side proxy curve. The corpus disqualifies it.** The tempting move is to rank the
+signal these logs DO carry — `train_monitor.LossTrajectoryTracker` already reduces one per tick — but a
+successive-halving race assumes every arm is on ONE axis, and here each arm is a different LOSS
+FUNCTION. Replayed over the corpus (median `loss` over each node's first half, and the first `eval_loss`
+point, ranked at the median bar, against each node's final `RECALL@100`):
+
+    run                        signal      n    spearman(signal, final)   would kill   killed the run's BEST
+    e5small-dr-unified-v2      loss        5          +0.600                  2               YES (0.7934)
+    e5small-dr-unified-v2      eval_loss   5          -0.300                  2               no
+    rubertlite-dense-retrieval loss       69          -0.531                 34               no
+    rubertlite-dr-unified-v6   loss        6          -0.371                  3               no
+    rubertlite-dr-unified-v6   eval_loss   6          -0.600                  3               no
+    rubertlite-dr-unified-v8   loss       12          +0.350                  6               YES (0.7620)
+    rubertlite-dr-unified-v8   eval_loss  11          -0.445                  5               no
+    rubertlite-dr-unified-v9   loss        4          -0.800                  2               no
+    rubertlite-dr-unified-v9   eval_loss   4          +0.400                  2               YES (0.7406)
+
+A working signal is NEGATIVE here (lower loss, higher recall). **The sign is not even stable across runs
+of one task family** — +0.600, -0.531, -0.371, +0.350, -0.800 — and the rule kills the run's single best
+node in 3 of the 9 pairs. Node-by-node it is worse than the summary: on `-v8` it stops **6 of the 10**
+evaluated nodes including the top three (0.7620, 0.7618, 0.7527); on `-v2` two of the top three
+(0.7934 — the champion — and 0.7742); on `-v6` three of the top five. On `rubertlite-dense-retrieval` it
+spares all ten best and still kills **34 of 69**, and it spares them for the wrong reason: that run's
+leaders sit in a cluster whose custom loss runs to -2.4e6..-3.7e8, so they rank "best" on SCALE. The
+rule this repo set itself — a rule that would have killed a node that went on to produce a good number
+is disqualified — is failed in three runs out of four. **Not built.** Reading what exists would be the
+stronger claim only if what exists were comparable; measured, it is not.
+
+    OPEN[asha-inert-on-this-task-family] ASHA still has no curve to halve on this task family, and
+    `resource_key` — the one declaration that makes its kill reachable — is unnamed in the task schema
+    an operator authors against. proof:absent:resource_key@looplab/adapters/repo_task.py
+
+**What the remaining half would cost, measured, so the next agent argues from a number.** The only
+comparable quantity is the objective itself, and only the training script can emit it mid-run — so this
+half is a TASK-side contract (`/home/jovyan/data/vectorizer-unified`), which is why the engine's honest
+move was to name the missing declaration rather than invent a proxy. It is not free: in `-v2` the
+objective evaluation (encode the corpus, build the index, search, score) took **74.6-75.9 min** on every
+one of the four nodes measured, against a `train_runtime` of 18,273 s — **25 % of the training per
+point**. Emitting the five-point curve ASHA wants would MORE THAN DOUBLE the run it is meant to shorten.
+So the task-side fix is a SUBSAMPLED intermediate eval (a query slice, reported as
+`{"recall": …, "step": …}` on one stdout_json line) plus `eval.metric.resource_key` in the task file —
+and the engine-side residue is that `resource_key` reaches the watchdog through a free-form
+`EvalSpec.metric: dict` — it is named in `docs/guide/tasks.md` and in no schema field, no validator and
+no Genesis prompt, so nothing an operator authors against ever mentions the one switch that arms the
+kill. That is what the marker above is pointed at.
 
 ⬜ **Auto-skill promotion has produced nothing since 2026-07-18 and only runs at run END.** The shared
   OPEN[auto-skill-promotion-run-end-only] proof:present:write_auto_skill@looplab/engine/memory.py

@@ -33,6 +33,9 @@ Fragility is contained by construction:
    ticks, only after the underperformance persists;
  - endpoint comparison remains useful diagnostics but cannot kill; missing same-resource evidence
    degrades safely to advisory-only observation;
+ - and when NONE of that can fire — the metric contract makes a kill unreachable, or the training log
+   never prints the objective at all — the watchdog SAYS SO once per eval instead of ticking silently
+   for hours (`asha_inert_reason` / `_state_asha_inert`; measured: zero rows in seven real runs);
  - the judge's verdict is a DIAGNOSTIC (fold-ignored) `EV_ASHA_VERDICT` row, like the training monitor's
    alert: its position in the log is thread-dependent, so it must never reach folded state. The stop
    itself is recorded by the node's single ordinary terminal, which is what replay reads — replay NEVER
@@ -41,6 +44,7 @@ Fragility is contained by construction:
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -70,6 +74,83 @@ _ASHA_GRACE_TICKS = 2
 # flapping curve. Past the cap the watchdog keeps OBSERVING (trace + advisory rank rows) but stops
 # spending on the LLM — and therefore stops being able to kill, which is the safe direction.
 _MAX_ASHA_JUDGE_CALLS = 20
+
+_LOG = logging.getLogger(__name__)
+
+# ------------------------------------------------------- SAYING SO WHEN THIS WATCHDOG CANNOT ACT
+# WHY THIS EXISTS, measured over the seven event logs in `runs/` (docs/BACKLOG.md §0.15, re-derived
+# 2026-08-19): `asha_rank` has ZERO rows corpus-wide, and so has `asha_verdict`. `asha_live=true` AND `asha_live_kill=true` in every snapshot, and this
+# watchdog stopped nothing, ever, because the tick below `continue`s at `sample is None` — the task
+# prints `RECALL@100:` exactly ONCE, on the last line of a 5-10 hour training. A successive-halving
+# watchdog needs a CURVE to halve and was handed a single point at the end. The 2026-08-07 audit
+# (`docs/audit/2026-08-07-search-loop.md` F3) already named the fix — "make the engine emit one
+# diagnostic at eval start naming why the gate is inert" — and twelve days later an operator reading
+# the config still saw `asha_live: true` and concluded underperformers were being stopped.
+#
+# The shape is the training monitor's `kill_reachable: false` (`train_monitor.py`, 2026-08-19), not a
+# second vocabulary: the same attribute name, the same meaning ("nothing here can be stopped"), on
+# this watchdog's own span. Two differences follow from the two watchdogs being unlike:
+#   • train_monitor opens a span every acting tick, so it can afford to restate the fact every time.
+#     This one opens a span only on a rank TRANSITION, and an inert watchdog has no transitions — the
+#     silence WAS the defect — so the statement has to open a span of its own, at most once per
+#     distinct reason per eval.
+#   • it also goes to `_LOG.warning`, because an operator "reading the config" is reading a console,
+#     not a trace. That is the GPU-pool lease's precedent (`engine/resources.py`, a wait that "used to
+#     be completely silent, which reads as a deadlock and repeatedly got debugged as one").
+# It writes NOTHING else: no event, no fold input, no change to what may kill a node. See
+# `asha_inert_reason` on why the rule is a pure function rather than an `if` inside the loop.
+
+# A kill needs a live sample carrying a resource coordinate AND sibling curve points at the same rung
+# (`sibling_metrics_at_resource`), so both of those readers' preconditions are properties of the
+# METRIC CONTRACT and are decidable before the first tick — exactly like the training monitor's role
+# gate, "a property of the resolved PIPELINE, not of the run's health". Each string says what is
+# unreachable and what would have to change; an operator who reads one should not have to open this
+# file to learn what to declare.
+_ASHA_INERT_NO_LIVE_READ = (
+    "this metric kind is never read from a live log, so the ASHA watchdog observes nothing at all "
+    "(it reads stdout_json / stdout_regex only)")
+_ASHA_INERT_NO_JSON = (
+    "a stdout_regex metric can be ranked against finished siblings but never killed: a same-resource "
+    "comparison needs stdout_json records carrying the metric and its resource in ONE object")
+_ASHA_INERT_NO_RESOURCE_KEY = (
+    "the metric spec declares no `resource_key`, so no live sample can ever be compared against a "
+    "sibling at the same amount of training and the kill path is unreachable")
+# The observational rung, and the one the corpus actually measured. Not decidable from the contract:
+# the spec can be perfect and the training still print its objective once, at the end.
+_ASHA_INERT_NO_CURVE = (
+    "the training log is being written but has never printed the objective metric, so there is no "
+    "curve to halve — the ASHA watchdog will observe nothing for the rest of this eval")
+
+# How many CONSECUTIVE ticks with a non-empty tail and no parseable metric before the watchdog says
+# the curve does not exist. Counted only on ticks whose log is TALKING: an empty tail is "the stage
+# has not started writing yet", which is the stall watchdog's question, not this one. At the default
+# 600 s cadence three such ticks is ~30 minutes of a training that is printing steadily and has never
+# named its objective — long past any warm-up, and short against the 5-10 hour evals this fires on.
+_ASHA_SILENT_TICKS = 3
+
+
+def asha_inert_reason(metric_spec) -> Optional[str]:
+    """Why this watchdog's KILL path is structurally unreachable for this metric contract, or None.
+    Pure/deterministic — a truth table (`tests/test_asha_inert_is_visible.py`) rather than a
+    condition reachable only through a simulated multi-hour eval, which is how the reachability rule
+    stayed unstated for twelve days after it was first written down.
+
+    Three rungs, worst first, because the first that holds is the one an operator needs told: a kind
+    with no live reader at all (`latest_intermediate` returns None for every tick, so not even the
+    advisory rank exists), a readable kind that `sibling_metrics_at_resource` will not accept, and a
+    declaration that is simply missing. It reports only what the CONTRACT decides; `asha_live_kill`
+    being off is an operator's own choice on their own config line and is not inertness.
+    """
+    if not isinstance(metric_spec, dict):
+        return None                    # nothing declared to judge — the caller has no contract to read
+    kind = metric_spec.get("kind", "stdout_json")
+    if kind not in ("stdout_json", "stdout_regex"):
+        return _ASHA_INERT_NO_LIVE_READ
+    if kind != "stdout_json":
+        return _ASHA_INERT_NO_JSON
+    if _declared_resource_key(metric_spec) is None:
+        return _ASHA_INERT_NO_RESOURCE_KEY
+    return None
 
 
 # The stop-decision schema the judge returns — the ASHA sibling of `train_monitor.TrainingVerdict`, and
@@ -566,6 +647,25 @@ class AshaMonitorMixin:
                 pass
         return 600.0
 
+    def _state_asha_inert(self, node_id: int, generation: int, reason: str, **facts) -> None:
+        """Say ONCE, on the surfaces an operator already reads, that this watchdog cannot act.
+
+        The training monitor's `kill_reachable: false` in this watchdog's spelling — see the block
+        above `asha_inert_reason` for why the two sites differ in WHEN they fire and not in what they
+        mean. Best-effort by construction: an inert watchdog failing to announce its inertness must
+        never end a node, so a tracer/logging hiccup is swallowed exactly like a per-tick one.
+
+        It is not a widening. Nothing here reads a model, nothing reaches the fold, and the kill
+        conjuncts in `should_asha_kill` are untouched — this only makes an existing refusal legible.
+        """
+        try:
+            with self.tracer.span("asha_monitor", node_id=node_id) as sp:
+                sp.set_many(generation=generation, kill_reachable=False, inert_reason=reason, **facts)
+            _LOG.warning("node %s: the ASHA early-stop watchdog is inert for this eval — %s",
+                         node_id, reason)
+        except Exception:  # noqa: BLE001 — a statement about inertness is never worth a raise
+            pass
+
     def _asha_verdict(self, context: str, tools=None) -> Optional[AshaVerdict]:
         """One-shot LLM stop decision over the rank evidence (SYNC — the caller runs it in a worker
         thread), mirroring `train_monitor._training_verdict`. Uses the Developer's client (it wrote the
@@ -674,17 +774,42 @@ class AshaMonitorMixin:
 
         under_streak = 0
         judge_calls = 0
+        # WHAT THIS WATCHDOG CANNOT DO, said once per distinct reason (see `asha_inert_reason`). The
+        # structural reason is known before the first read, so it is stated on the first tick rather
+        # than after the hours it takes for a rank transition that will never come; the observational
+        # one can only be earned by ticking. `stated` bounds both to one statement each per eval.
+        stated: set[str] = set()
+        structural_inert = asha_inert_reason(metric_spec)
+        silent_ticks = 0
         while True:
             await anyio.sleep(base)
             if cancel.is_set():
                 return
+            if structural_inert is not None and structural_inert not in stated:
+                stated.add(structural_inert)
+                self._state_asha_inert(node_id, generation, structural_inert,
+                                       metric_kind=str(metric_spec.get("kind", "stdout_json"))
+                                       if isinstance(metric_spec, dict) else "")
             try:
                 tail = await anyio.to_thread.run_sync(
                     lambda: read_training_tail_raw(workdir, snapshot=log_snapshot, plan=log_plan),
                     limiter=_watch_limiter())
                 sample = latest_intermediate_sample(tail, workdir, metric_spec)
                 if sample is None:
+                    # THE MEASURED DEFECT: this `continue` ran on every tick of every run in the
+                    # corpus and left no trace whatsoever. A tick whose log is TALKING and still names
+                    # no objective is evidence the metric is printed once at the end; an EMPTY tail is
+                    # only "nothing written yet" and is the stall watchdog's business, so it does not
+                    # count toward the streak.
+                    if tail:
+                        silent_ticks += 1
+                        if (silent_ticks >= _ASHA_SILENT_TICKS
+                                and _ASHA_INERT_NO_CURVE not in stated):
+                            stated.add(_ASHA_INERT_NO_CURVE)
+                            self._state_asha_inert(node_id, generation, _ASHA_INERT_NO_CURVE,
+                                                   silent_ticks=silent_ticks)
                     continue
+                silent_ticks = 0
                 value = sample.value
                 state, train_verdict = await anyio.to_thread.run_sync(
                     _observe, limiter=_watch_limiter())
