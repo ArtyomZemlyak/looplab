@@ -8,8 +8,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  stageIcon, stagePipelineView, stageRowSuperseded, stageRowTitle, stageRowView, stageTone,
-  stageSupersessionNotice,
+  STAGE_SUPERSEDED_ICON, stageIcon, stagePipelineView, stageRowSuperseded, stageRowTitle,
+  stageRowView, stageSupersededLabel, stageTone, stageSupersessionNotice,
 } from '../src/stageAttribution.js'
 
 // runs/rubertlite-dr-unified-v9 node 5, exactly as the fold reports it.
@@ -42,9 +42,10 @@ const v9Node4 = {
 test('a node whose last stage row is a failure but which has a later repair does not read as failed', () => {
   const { rows, notice } = stagePipelineView(v9Node5)
   assert.deepEqual(rows.map(r => r.superseded), [true, true])
-  // The glyph is KEPT — the row still records what that attempt did — and only the tone moves off
-  // the failure red, which is the whole visible claim.
-  assert.deepEqual(rows.map(r => r.icon), ['✗', '✗'])
+  // The glyph is REPLACED, not kept. It used to stay '✗' while the tone said "stale", and the glyph
+  // is what an operator reads — see the e5small node 9 case below, which is why this pin moved.
+  assert.deepEqual(rows.map(r => r.icon), ['⋯', '⋯'])
+  assert.equal(rows.every(r => r.icon !== stageIcon(r.row)), true)
   assert.deepEqual(rows.map(r => r.tone), ['var(--fg-mut)', 'var(--fg-mut)'])
   assert.notEqual(notice, null)
   assert.equal(notice.superseded, 2)
@@ -76,6 +77,53 @@ test('a settled node says its outcome came from a later attempt, not that it is 
   assert.doesNotMatch(notice.text, /not been scored/)
 })
 
+// ------------------------------------------- the glyph, on the run that produced the complaint
+
+// runs/e5small-dr-unified-v2 node 9 at 2026-08-19, exactly as the fold reports it: ONE inline
+// repair applied, both stage rows recorded at repair 0, node still pending. The `train` crash at
+// 223.871 s was repaired and the retry trained all 2,109 steps and went to evaluation — nothing in
+// the log says either row is the node's current state, and the strip drew `✓ mine → ✗ train`.
+const e5Node9 = {
+  id: 9, status: 'pending', failed_stage: null, repairs: 1,
+  stages: [
+    { name: 'mine', status: 'ok', exit_code: 0, seconds: 3688.692, repairs: 0 },
+    { name: 'train', status: 'fail', exit_code: 1, seconds: 223.871, repairs: 0 },
+  ],
+}
+
+test('a superseded FAILURE does not keep the glyph that says the stage failed', () => {
+  const { rows } = stagePipelineView(e5Node9)
+  const train = rows[1]
+  assert.equal(train.superseded, true)
+  assert.equal(train.icon, STAGE_SUPERSEDED_ICON)
+  assert.notEqual(train.icon, '✗')               // the operator read '✗ train' as "training failed"
+  // The tone was already right; the row must not go on making two opposite claims.
+  assert.equal(train.tone, 'var(--fg-mut)')
+  // The glyph agrees with the sentence the title already writes.
+  assert.match(train.title, /recorded under repair 0 of 1; no later attempt has reported/)
+})
+
+test('a superseded SUCCESS does not keep its ✓ either, and is never promoted to a result', () => {
+  const { rows } = stagePipelineView(e5Node9)
+  const mine = rows[0]
+  assert.equal(mine.superseded, true)
+  // Both rows of this node are superseded, so one glyph has to serve `ok` and `fail` alike: it may
+  // not assert that this attempt's success stands, and it may not assert the retry succeeded.
+  assert.equal(mine.icon, STAGE_SUPERSEDED_ICON)
+  assert.notEqual(mine.icon, '✓')
+  assert.equal(rows[0].icon, rows[1].icon)
+  // ... and it is not the `reused` glyph, which WOULD be a claim: a reuse is a later attempt saying
+  // the result stands, and `stageRowSuperseded` is exactly the case where no later attempt spoke.
+  assert.notEqual(mine.icon, stageIcon({ status: 'reused' }))
+})
+
+test('the replaced glyph keeps its own status reachable as text', () => {
+  const { rows } = stagePipelineView(e5Node9)
+  assert.equal(rows[1].iconLabel, stageSupersededLabel(e5Node9.stages[1]))
+  assert.match(rows[1].iconLabel, /^fail under an earlier attempt; superseded/)
+  assert.match(rows[0].iconLabel, /^ok under an earlier attempt; superseded/)
+})
+
 // ------------------------------------------------------------------ negative controls
 
 test('a node whose last stage row IS its current state renders exactly as before', () => {
@@ -86,6 +134,7 @@ test('a node whose last stage row IS its current state renders exactly as before
   for (const [i, s] of v9Node4.stages.entries()) {
     assert.equal(rows[i].tone, stageTone(s))
     assert.equal(rows[i].icon, stageIcon(s))
+    assert.equal(rows[i].iconLabel, null)        // no sr-only text is added to an unchanged glyph
     assert.equal(rows[i].title,
       `${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}`
       + `${s.exit_code != null ? ` · exit ${s.exit_code}` : ''}`)

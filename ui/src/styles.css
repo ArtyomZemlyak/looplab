@@ -1719,6 +1719,10 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
 .trace-live-status .tls-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
 .trace-small { font-size: 12px; }
+/* The shared-stage-log disclosure (traceProjection.js::stageLogAttribution). It sits directly
+   above the log text it is about, so it is bordered rather than floated away from it. */
+.stage-log-share { border-left: 2px solid var(--line); padding-left: 8px; margin: 4px 0; }
+
 /* The scroll sentinel that replaced the "load more" button. It has to be a real, non-zero box: an
    IntersectionObserver on a collapsed element never reports an intersection in some engines, and
    this is the whole mechanism by which earlier steps arrive. */

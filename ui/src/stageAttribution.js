@@ -43,14 +43,41 @@ export const stageRowSuperseded = (row, repairs) =>
 // stage status cannot end up red in one place and amber in the other.
 export const STAGE_OK_STATUSES = ['ok', 'timeout', 'reused']
 
-// The strip's historical tone/icon tables, unchanged. A superseded row keeps its OWN outcome glyph
-// — the row still records what that attempt did, and replacing the glyph would be a second claim —
-// and only its TONE moves to the muted one `reused` already uses for "not this attempt's work".
+// The strip's historical tone/icon tables, for a row that IS the node's current state.
 export const stageTone = (s) => s?.status === 'ok' ? 'var(--ok)'
   : s?.status === 'timeout' ? 'var(--working)'
     : s?.status === 'reused' ? 'var(--fg-mut)' : 'var(--fail)'
 export const stageIcon = (s) => s?.status === 'ok' ? '✓'
   : s?.status === 'timeout' ? '⧗' : s?.status === 'reused' ? '↺' : '✗'
+
+// THE SUPERSEDED GLYPH, and why the row does NOT keep its own outcome glyph.
+//
+// This module shipped with the opposite rule — "a superseded row keeps its OWN outcome glyph, the
+// row still records what that attempt did, and replacing the glyph would be a second claim" — and
+// that reasoning is wrong in one specific way: the glyph is not a caption on the row, it is the
+// row's HEADLINE. It is read before the tone and instead of the title. Measured on the live
+// `runs/e5small-dr-unified-v2` node 9 on 2026-08-19: `Node.repairs` 1, both stage rows recorded at
+// `repairs` 0, so `stageRowSuperseded` answers true for BOTH — and the strip drew
+// `✓ mine → ✗ train`, which the operator read as "training failed". It had not: that `train`
+// crashed at 223.871 s, a repair landed, and the retry trained all 2,109 steps and went on to
+// evaluation. Tone said "stale" (`var(--fg-mut)`) and glyph said "failed" — one row making two
+// opposite claims, and the glyph won.
+//
+// So the glyph is REPLACED, by the one thing the fold proves about a superseded row: a later
+// attempt exists and has not reported on this stage. It deliberately does NOT vary with the row's
+// status. The two live rows here are exactly `✓ mine` and `✗ train` and BOTH are superseded, so
+// a glyph that kept the outcome for the OK half would still assert an outcome that has been
+// replaced, and one that promoted it to a success would claim a retry nothing has reported on.
+// `⋯` is "no current statement" — the checkable sentence `stageRowTitle` already writes — and it
+// is distinct from every member of `stageIcon`'s table, so no row can be mistaken for a `reused` one.
+export const STAGE_SUPERSEDED_ICON = '⋯'
+
+// The glyph's text equivalent, and the superseded row is the ONLY row that gets one — because it
+// is the only row whose glyph stopped naming its own status. The outcome is still true of the
+// attempt that recorded it and must stay reachable to a reader who cannot see a tone. Every other
+// row is unchanged, label included (there is none), which is what keeps the negative control exact.
+export const stageSupersededLabel = (s) =>
+  `${s?.status} under an earlier attempt; superseded — no later attempt has reported on this stage`
 
 const seconds = (s) => s?.seconds != null ? ` · ${s.seconds}s` : ''
 const exit = (s) => s?.exit_code != null ? ` · exit ${s.exit_code}` : ''
@@ -64,8 +91,8 @@ export const stageRowTitle = (s, { superseded = false, repairs = null } = {}) =>
     + 'no later attempt has reported on this stage'
 }
 
-// ONE row, ready to render. `superseded` is the only new key; every other value is what the strip
-// computed before, so a strip with nothing superseded is byte-identical to the historical one.
+// ONE row, ready to render. A strip with nothing superseded is byte-identical to the historical one:
+// `superseded` is false, `iconLabel` is null, and `icon`/`tone` are the historical tables verbatim.
 export const stageRowView = (s, repairs) => {
   const superseded = stageRowSuperseded(s, repairs)
   return {
@@ -75,7 +102,9 @@ export const stageRowView = (s, repairs) => {
     superseded,
     failed: !STAGE_OK_STATUSES.includes(s?.status),
     tone: superseded ? 'var(--fg-mut)' : stageTone(s),
-    icon: stageIcon(s),
+    icon: superseded ? STAGE_SUPERSEDED_ICON : stageIcon(s),
+    // `null` on every row that is not superseded, so the component renders the markup it always did.
+    iconLabel: superseded ? stageSupersededLabel(s) : null,
     title: stageRowTitle(s, { superseded, repairs }),
   }
 }

@@ -2436,6 +2436,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const onEmptyAction = (action) => {
     if (action === 'events') { revealEvents(); return }
+    // The empty canvas offers this while a speculative card build is the only work in flight: the
+    // Cards board is the surface that actually shows that build, so the button goes there.
+    if (action === 'cards') { setView('cards'); return }
     if (action === 'report') { setView('report'); return }
     if (action === 'return-live') { returnToLiveAndFocusWorkspace(); return }
     if (action === 'retry-connection') { retryRun(); return }

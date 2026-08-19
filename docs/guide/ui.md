@@ -400,12 +400,24 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   .train` processes alive in its workdir and had been running under repair #3 for 177 minutes, and
   its strip read `✗ mine → ✗ train` — statements from repair cycles 2 and 1. Over the four runs
   whose stage rows are written inside the attempt loop there are 44 such windows, MEDIAN 66.1
-  minutes. A superseded chip now keeps its own glyph (the row still records what that attempt did),
-  takes the muted tone with a DASHED border, and a `role="status"` line above the strip names both
-  epochs — *"2 of 2 stage results are from an earlier attempt — repair 3 was applied after them and
+  minutes. A superseded chip takes the muted tone with a DASHED border, its GLYPH is replaced by
+  `⋯` — *"a later attempt exists and has not reported on this stage"* — and a `role="status"` line
+  above the strip names both epochs — *"2 of 2 stage results are from an earlier attempt — repair 3 was applied after them and
   this experiment has not been scored since."* It says exactly that and no more: the fold proves a
   repair landed after those rows and that no terminal followed, never that a process is alive
-  (`narration.js::pendingWork` draws the same line). A node whose rows ARE its state renders exactly
+  (`narration.js::pendingWork` draws the same line). The glyph shipped UNCHANGED on 2026-08-17, on
+  the reasoning that the row still records what that attempt did and replacing the glyph would be a
+  second claim; that was wrong about which signal an operator reads, and was corrected 2026-08-19.
+  Measured on the live `runs/e5small-dr-unified-v2` node 9: `Node.repairs` 1, both stage rows at
+  `repairs` 0, so the strip drew `✓ mine → ✗ train` — read as "training failed" when that `train`
+  had crashed at 223.871 s, been repaired, and the retry had trained all 2,109 steps and gone to
+  evaluation. Tone said "stale" and glyph said "failed"; the glyph won. The replacement does not vary
+  with the row's status, because both of that node's rows are superseded and one glyph has to serve
+  `ok` and `fail` alike: keeping the outcome for the OK half would still assert a replaced result,
+  and promoting it would claim a retry nothing has reported on. It is not the `reused` glyph either
+  — a reuse IS a later attempt saying the result stands, which is the opposite of this case. The
+  superseded row is the only one that carries screen-reader text for its glyph, because it is the
+  only one whose glyph stopped naming its own status. A node whose rows ARE its state renders exactly
   as before, banner absent — including every unrepaired node and every projection with no `repairs`
   key, where absent is no claim rather than zero. The rule lives once, in `ui/src/stageAttribution
   .js::stageRowSuperseded` mirroring `core/models.py::stage_row_superseded`; the Inspector's TRACE

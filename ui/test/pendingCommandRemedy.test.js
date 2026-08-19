@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
 
-import { COMMAND_STALL_NOTICE_MS, pendingCommandRemedy } from '../src/runCommandMachine.js'
+import { COMMAND_STALL_NOTICE_MS, foreignCommandLockAge, foreignCommandLockView,
+  pendingCommandRemedy } from '../src/runCommandMachine.js'
 
 // A PENDING COMMAND MUST NEVER READ AS FROZEN.
 //
@@ -89,4 +90,76 @@ test('Dock actually renders it', async () => {
   assert.match(source, /pendingRemedy\.elapsedMs/)
   assert.match(source, /pendingRemedy\.boundedMs == null/)
   assert.match(source, /pendingRemedy\.canCheck && <button/)
+})
+
+// ------------------------------------------------------- the OTHER surface's pending command
+//
+// The operator's 2026-08-19 report is the same sentence one branch over: pressing pause left
+// `/stop is pending in Assistant · cmd_fc2a50f8…` standing in place of Stop/Finalize/Resume/Start
+// over, and it never cleared. That branch was the only transport state with no affordance at all —
+// no elapsed time, no remedy, no dismiss — and the Dock could not clear the lock even in principle,
+// because `clearRunCommandLock` demands an exact identity the Dock never wrote. The lock lives in
+// `sessionStorage` with no expiry, so an Assistant that unmounted, gave up polling, or was left on
+// another run froze the run controls for the life of the tab.
+
+const foreignLock = (overrides = {}) => ({
+  runId: 'r1', source: 'assistant', action: 'stop', expectedGeneration: 'a'.repeat(64),
+  idempotencyKey: 'idem-1', commandId: 'cmd_fc2a50f8beef', status: 'accepted',
+  statusUnavailable: false, updatedAt: Date.now() - 60_000, ...overrides,
+})
+
+test('a lock owned by this surface is not a foreign lock and gets no view', () => {
+  assert.equal(foreignCommandLockView(foreignLock({ source: 'dock' }), 'dock'), null)
+  assert.equal(foreignCommandLockView(null, 'dock'), null)
+  assert.equal(foreignCommandLockView(undefined, 'dock'), null)
+})
+
+test('a foreign lock that has been held offers a release, and says what releasing does', () => {
+  const view = foreignCommandLockView(foreignLock(), 'dock')
+  assert.equal(view.action, 'stop')
+  assert.equal(view.owner, 'Assistant')
+  assert.equal(view.commandId, 'cmd_fc2a50f8beef')
+  assert.equal(view.accountable, true)
+  // The escape the branch had none of, and it must be usable by a surface that never wrote the lock.
+  assert.deepEqual(view.releaseIdentity, {
+    source: 'assistant', idempotencyKey: 'idem-1', action: 'stop',
+    expectedGeneration: 'a'.repeat(64), commandId: 'cmd_fc2a50f8beef',
+  })
+  // Releasing is a claim about THIS TAB, and the copy may not let it read as a cancel.
+  assert.match(view.releaseHint, /this tab only/)
+  assert.match(view.releaseHint, /does not cancel the command/)
+  assert.match(view.text, /cannot observe/)
+})
+
+test('a foreign lock that has only just appeared withholds the escape', () => {
+  // Symmetry with pendingCommandRemedy: a command that lands promptly must not flash a release
+  // button at the operator.
+  const view = foreignCommandLockView(foreignLock({ updatedAt: Date.now() - 1000 }), 'dock')
+  assert.equal(view.accountable, false)
+  assert.equal(view.action, 'stop')
+})
+
+test('the released identity is EXACTLY what clearRunCommandLock demands, id included', () => {
+  // A lock that has not learned a durable id yet clears on an empty string, never on undefined —
+  // `clearRunCommandLock` compares `current.commandId !== String(expected.commandId || '')`.
+  const view = foreignCommandLockView(foreignLock({ commandId: undefined }), 'dock')
+  assert.equal(view.releaseIdentity.commandId, '')
+  assert.equal(view.commandId, null)
+})
+
+test('an unreadable lock clock is SAID, never rounded down to "just now"', () => {
+  const view = foreignCommandLockView(foreignLock({ updatedAt: Number.NaN }), 'dock')
+  assert.equal(view.ageMs, null)
+  assert.equal(view.accountable, true, 'an age we cannot read may not withhold the escape')
+  assert.equal(foreignCommandLockAge(view.ageMs), 'for an unknown length of time')
+  assert.equal(foreignCommandLockAge(20_000), 'for 20s')
+  assert.equal(foreignCommandLockAge(240_000), 'for 4 min')
+})
+
+test('the Dock renders the escape and can actually clear a lock it never wrote', async () => {
+  const dock = await readFile(new URL('../src/Dock.jsx', import.meta.url), 'utf8')
+  // AST-free but negative-and-positive: the dead branch is gone and the release path exists.
+  assert.match(dock, /clearRunCommandLock\(runId, foreignLockView\.releaseIdentity\)/)
+  assert.match(dock, /Release these controls/)
+  assert.match(dock, /foreignLockView\.accountable && </)
 })

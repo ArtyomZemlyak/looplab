@@ -9,7 +9,8 @@ import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
 import { useCommandStatusPoll, useNodeSpanWindow, usePoll, useTraceRetry } from './hooks.js'
 import {
   commandIntentPreserved, commandLockIdentity, commandLockMismatch, commandStorageUnavailableRecord,
-  foreignCommandLock, interruptedCommandRecovery, observeCommandError, pendingCommandRemedy,
+  foreignCommandLock, foreignCommandLockAge, foreignCommandLockView, interruptedCommandRecovery,
+  observeCommandError, pendingCommandRemedy,
   protocolCommandRecord, restoredCommandRecord, settledCommandFailure,
 } from './runCommandMachine.js'
 import Markdown from './markdown.jsx'
@@ -714,7 +715,11 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const [transportPending, setTransportPending] = useState(() => restoredRef.current.pending)
   const [transportFailure, setTransportFailure] = useState(() => restoredRef.current.failure)
   const [runCommandLock, setRunCommandLock] = useState(() => loadRunCommandLock(runId))
+  // A lock owned by the OTHER surface still gates this one's controls — two surfaces must not both
+  // drive one run — but it is now an observation with an account and an exit rather than a dead
+  // chip (runCommandMachine.js::foreignCommandLockView).
   const externalTransportPending = runCommandLock?.source === 'assistant' ? runCommandLock : null
+  const foreignLockView = foreignCommandLockView(runCommandLock, 'dock')
   const transportBusy = !!transportPending || !!externalTransportPending
   const runActionBusy = transportBusy || !!startOverState?.lifecycleBlocked
   const startOverDisabled = transportBusy || !!startOverState?.blocked
@@ -1162,6 +1167,13 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const dismissTransportFailure = () => {
     clearRunTransport(runId); setTransportFailure(null)
   }
+  // Clears the SHARED lock using the identity carried on the lock itself. It frees this tab's
+  // controls and nothing else — the durable command is server-side and is not touched.
+  const releaseForeignLock = () => {
+    if (!foreignLockView) return
+    clearRunCommandLock(runId, foreignLockView.releaseIdentity)
+    setRunCommandLock(loadRunCommandLock(runId))
+  }
   const dismissProtocolTransport = () => {
     const pending = transportPending
     if (!pending?.protocolInvalid) return
@@ -1375,12 +1387,23 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                   Check now</button>}
               </>}
             </div>}
-            {!transportPending && externalTransportPending && <div className="transport-message" role="status"
-              aria-live="polite" aria-atomic="true">
-              <span>/{externalTransportPending.action} is pending in Assistant</span>
-              {externalTransportPending.commandId && <span className="transport-command-id"
-                title={`Command ${externalTransportPending.commandId}`}>
-                {' · '}{String(externalTransportPending.commandId).slice(0, 12)}…</span>}
+            {!transportPending && externalTransportPending && foreignLockView && <div
+              className="transport-message" role="status" aria-live="polite" aria-atomic="true">
+              <span>/{foreignLockView.action} is pending in {foreignLockView.owner}</span>
+              {foreignLockView.commandId && <span className="transport-command-id"
+                title={`Command ${foreignLockView.commandId}`}>
+                {' · '}{String(foreignLockView.commandId).slice(0, 12)}…</span>}
+              {/* The account and the escape. Withheld while the command still looks instantaneous,
+                  so a stop that lands in 300 ms does not flash a release button at the operator. */}
+              {foreignLockView.accountable && <>
+                <span className="transport-detail">
+                  {`Held ${foreignCommandLockAge(foreignLockView.ageMs)}. ${foreignLockView.text}`}
+                </span>
+                <button className="btn sm ghost" onClick={releaseForeignLock}
+                  title={foreignLockView.releaseHint}
+                  aria-label={`Release the run controls held by ${foreignLockView.owner}`}>
+                  Release these controls</button>
+              </>}
             </div>}
             {!transportBusy && transportFailure && <>
               <div className="transport-message error" role="alert">

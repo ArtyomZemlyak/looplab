@@ -185,3 +185,49 @@ export const traceForAttempt = ({ selected, current, paged, detail, anchored = f
 // optional the way the current attempt's tail pager is.
 export const attemptReadRequired = ({ selected, current, canPageFurther, anchored = false }) =>
   selected !== current || anchored || canPageFurther
+
+// ONE LOG FILE, SEVERAL ATTEMPTS — the stage log a repaired node's bands share.
+//
+// The operator's report is "в разных попытках логов стейджей один и тот же лог", and it is exactly
+// true. A stage's subprocess log is opened in APPEND mode (`runtime/sandbox.py`: `open(log_path,
+// "a", …)`), so every inline-repair attempt of `train` writes into the same `train.log`; the node
+// route serves that file's TAIL by NAME (`serve/routers/runs.py::node_logs` → `_tail(f"{name}.log")`,
+// with `attempt` used only as a compare-and-swap fence, never to select bytes); and the conversation
+// renders one band per attempt, each keyed by the stage LABEL. So N bands showed one string.
+//
+// Measured on the live `runs/e5small-dr-unified-v2` node 0: four `train` stage rows and four `mine`
+// rows, ONE `train.log` (83,217 bytes, three tracebacks = four concatenated attempts) and ONE
+// `mine.log` — four bands, one text, four times. On node 1 `train.log` is 9,342,149 bytes against a
+// ~200 KB response cap, so all four bands show the LAST attempt's tail and the earlier attempts'
+// bytes are not in the response at all.
+//
+// THE ENGINE'S BOUNDARY CANNOT BE BORROWED HERE, and that is why this is a disclosure and not a
+// slice. `engine/train_monitor.py::attempt_byte_floor` really does know where an attempt's bytes
+// begin — but it derives that from a `TrainingLogSnapshot` taken in memory at eval start, and
+// nothing about it is written to the event log. There is no durable record of an attempt boundary
+// for a later read to seek to, so a client that split this text by attempt would be inventing the
+// split. What it CAN do is stop presenting one file as N attempts' logs.
+export function stageLogAttribution(stages = []) {
+  const rows = Array.isArray(stages) ? stages : []
+  const totals = new Map()
+  for (const stage of rows) {
+    const label = typeof stage?.label === 'string' && stage.label ? stage.label : null
+    if (label) totals.set(label, (totals.get(label) || 0) + 1)
+  }
+  const seen = new Map()
+  return rows.map(stage => {
+    const label = typeof stage?.label === 'string' && stage.label ? stage.label : null
+    const total = label ? totals.get(label) : 0
+    if (!label || total < 2) return null
+    const ordinal = (seen.get(label) || 0) + 1
+    seen.set(label, ordinal)
+    return {
+      label, ordinal, total,
+      // Says what the text IS, not what it is not: a band that only denied being this attempt's log
+      // would leave the operator with no idea what they are reading.
+      note: `This run wrote all ${total} ${label} attempts into one ${label}.log, and the engine`
+        + ' keeps no durable record of where one attempt ends. The text below is that whole file’s'
+        + ` tail — the same bytes on all ${total} bands, not this attempt’s (#${ordinal}) alone.`,
+    }
+  })
+}

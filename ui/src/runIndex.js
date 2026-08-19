@@ -248,6 +248,38 @@ export function approvalCommandFor(state = {}) {
   return target ? `/approve #${target.nodeId}` : null
 }
 
+// The OLDEST open card-build head, i.e. the one the first experiment is waiting on. Mirrors
+// `cardBoardModel.js::cardAuthoring`'s admission rules rather than re-deriving them loosely: a row
+// must name a card and carry one of the two phases that projection publishes, because an unknown
+// phase is a newer server naming a lane this build has no words for, and inventing one here would
+// put a sentence on the canvas that nobody designed. `card_authoring` is newest-request-LAST, so
+// the first admissible row is the head that has been open longest.
+const AUTHORING_HEAD_PHASES = new Set(['speculating', 'building'])
+export function firstAuthoringHead(state) {
+  const rows = Array.isArray(state?.card_authoring) ? state.card_authoring : []
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+    const cardId = typeof row.card_id === 'string' && row.card_id ? row.card_id : null
+    const phase = typeof row.phase === 'string' ? row.phase : ''
+    if (!cardId || !AUTHORING_HEAD_PHASES.has(phase)) continue
+    return { cardId, phase, started: Number(row.started) }
+  }
+  return null
+}
+
+// " for 47 min" — and nothing at all when the head carries no usable start. `started` is the build
+// receipt's own event timestamp in unix SECONDS (authoring_projection.py), never a client clock, so
+// an absent or future value is reported as no elapsed time rather than as a negative or a zero: a
+// build that claims to have started "0s ago" for 47 minutes is the frozen chip one file over.
+export function authoringElapsed(head, nowMs = Date.now()) {
+  const startedMs = Number.isFinite(head?.started) && head.started > 0 ? head.started * 1000 : null
+  if (startedMs === null) return ''
+  const secs = Math.round((nowMs - startedMs) / 1000)
+  if (secs < 1) return ''
+  if (secs < 90) return ` for ${secs}s`
+  return ` for ${Math.round(secs / 60)} min`
+}
+
 // A blank graph is not one state. It can mean an early historical snapshot, an intentionally
 // read-only review, setup in progress, a paused/stalled engine, incomplete finalization, or a truly
 // terminal run with no experiments. Keep that distinction in one pure model so the canvas never
@@ -256,6 +288,7 @@ export function approvalCommandFor(state = {}) {
 export function dagEmptyPresentation({
   displayed = {}, live = null, resourceStatus = 'ready', connected = true,
   historyActive = false, reviewMode = false, sequence = null, runId = '',
+  nowMs = Date.now(),
 } = {}) {
   // Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
   // active nodes. Base the empty-state decision on the same projection or the canvas goes blank
@@ -355,13 +388,46 @@ export function dagEmptyPresentation({
     'Open the report for the terminal explanation, or resume the run to continue searching.',
     [action('report', 'View report', 'primary'), action('resume', 'Resume run')],
   )
-  if (state.engine_running === true) return result(
-    'preparing', 'progress', 'Preparing the first experiment…',
-    state.phase && !['running', 'search'].includes(state.phase)
-      ? `The run is in ${state.phase}. Setup and research events remain available in the timeline.`
-      : 'The engine is active. Setup and research events remain available in the timeline.',
-    [action('events', 'Show events')],
-  )
+  if (state.engine_running === true) {
+    // WHAT THE CANVAS OWES DURING A SPECULATIVE BUILD. This branch used to print one sentence —
+    // "The engine is active" — for the whole window before the first experiment, and on the
+    // speculative lane that window is not short. Measured on `runs/e5small-dr-unified-v2`
+    // (2026-08-19): `run_started` -> the first `node_created` is 4,216.5 s, of which 2,815.9 s has
+    // no open `phase_progress` beacon of any kind, and the node existed for 0.1 s before it was
+    // created. The operator's report is exactly that: "at run start it hangs on 'still building'
+    // for ages when it could show the node and how it is being built."
+    //
+    // It CAN, and the client already decodes the answer for a surface the operator is not looking
+    // at: `state.card_authoring` (events/authoring_projection.py) is the open card-build head, and
+    // `cardBoardModel.js::cardAuthoring` renders it on the Cards board. There is no NODE to show —
+    // a speculative build runs before an experiment id is reserved and may be refused and mint no
+    // node at all, which is why filing it under a predicted id is the one thing a trace may not do
+    // — so this names the CARD, its phase and its elapsed time, and says why no experiment can be
+    // drawn yet. That is the "explain it rather than pretend" half of the report.
+    const head = firstAuthoringHead(state)
+    const phaseNote = state.phase && !['running', 'search'].includes(state.phase)
+      ? `The run is in ${state.phase}. ` : ''
+    if (head) return result(
+      'preparing', 'progress',
+      head.phase === 'building' ? 'Writing the first experiment’s code…'
+        : 'Choosing the first experiment…',
+      phaseNote + (head.phase === 'building'
+        ? `The Developer is writing the code for ${head.cardId}${authoringElapsed(head, nowMs)}. `
+          + 'It is built before an experiment id is reserved, so the canvas stays empty until the '
+          + 'build commits — the Cards board shows this work while it runs.'
+        : `${head.cardId} is queued for its build${authoringElapsed(head, nowMs)}. `
+          + 'The code is written before an experiment id is reserved, so no experiment can be '
+          + 'drawn yet — the Cards board shows this work while it runs.'),
+      [action('cards', 'Open the Cards board', 'primary'), action('events', 'Show events')],
+    )
+    return result(
+      'preparing', 'progress', 'Preparing the first experiment…',
+      phaseNote
+        ? `${phaseNote}Setup and research events remain available in the timeline.`
+        : 'The engine is active. Setup and research events remain available in the timeline.',
+      [action('events', 'Show events')],
+    )
+  }
   const actions = [action('events', 'Show events', 'primary')]
   if (!connected) actions.push(action('retry-connection', 'Retry connection'))
   return result(

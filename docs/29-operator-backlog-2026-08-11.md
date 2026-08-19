@@ -1141,6 +1141,213 @@ inline_repair #1` — the beginning of the experiment, which no surface could op
 Related and already fixed: run-level agents (the Researcher above all) had no surface at all — see the
 new Operations panel.
 
+## F9 · The 2026-08-19 operator round — and the stale bundle that produced half of it
+
+**The finding that has to be read first, because it reframes the rest.** The server the operator
+reported against is `python -m looplab.cli ui --port 8792 --no-build --run-root .../runs`, started
+2026-08-17 12:54 UTC and therefore pinned to `499ba72d`, serving `ui/dist` built **2026-08-15
+01:41**. Nineteen `ui/src` commits post-date that bundle. Several complaints below are about code
+`master` already fixes, and the sharpest one is a straddle: `3492bfad` (2026-08-17 16:34) landed the
+episode back-pager, so the RUNNING SERVER HAS ITS SERVER HALF AND THE BUNDLE LACKS ITS CLIENT HALF —
+an old client against a new route, which is exactly *"нельзя получить более ранние трейсы — не
+происходит ничего"*. `--no-build` is what makes this silent: `uibuild.py` would have rebuilt on the
+missing `.looplab-build.sha256` freshness stamp (`ui/dist` has none), and the flag skips the check.
+
+**Verdict per complaint. "Stale bundle" is a complete answer and is recorded as one.**
+
+| # | Complaint | Verdict |
+|---|---|---|
+| 1 | Concepts `UNAVAILABLE` / "Membership unavailable; not empty" though concepts exist | **Could not reproduce** — see below |
+| 2 | "Карты сломаны в UI" | **Real**, three defects; two fixed here |
+| 3 | The load-the-whole-trace button is gone AGAIN; earlier traces do nothing | **Both**: bundle-stale for the control, plus a real master-side stall bug — fixed |
+| 4 | Researcher/Developer traces missing; earlier node versions invisible | **Reachable, on two different surfaces** — the Developer's build is evicted by the node window's tail, the Researcher's is on the CARD trace and was never on the node; no code change, see the correction below |
+| 5 | The same stage log under different attempts | **Real and exactly true** — disclosed here; a true fix needs a durable boundary that does not exist |
+| 6 | `/stop is pending` never clears | **Real** — fixed |
+| 7 | `blocked` on a card reads as a status | **Fixed 2026-08-14, except one render path** — fixed here |
+| 8 | Long bare "still building" at run start | **Real** — fixed |
+| 9 | Run menu and LoopLab menu are one menu | **Already split** (`globalNav.js`), invisible because the bundle predates it |
+| 10 | `✓ mine → ✗ train` read as "training failed" | **Real** — fixed |
+
+### 1 · Concepts UNAVAILABLE — could not reproduce, and the reason is worth keeping
+
+`ConceptChipBar.jsx` prints that exact pair (`UNAVAILABLE` + *"Membership unavailable; not empty."*)
+on one condition: `nodeProjection.js::conceptMaterializationStatus` returning `unavailable`, which
+needs either a degraded run-base receipt or a malformed/orphaned receipt STORE. **No run on this box
+mints a concept materialization receipt at all.** Folded with today's code and with the server's own
+pinned `499ba72d` tree, `runs/e5small-dr-unified-v2` reports `node_concept_materialization_receipts
+== {}` and `run_base_concept_receipt is None`, at the final state and at all 123 sampled prefixes;
+the same holds for all six runs with an event log. Its 11 nodes carry 65 memberships over 12
+concepts, the wire payload carries them, `authoritativeNodeConcepts` withholds 0 rows, and the
+`/concepts` frame is `complete: true`, `authoritative: true`, 19 tree nodes under 5 roots. The
+built bundle's own copy of that function was extracted and matches the source byte-for-byte, so the
+operator's client decides the same way.
+
+So the panel that says it is not this one on this data. Left open deliberately rather than closed:
+what was on screen is unexplained, and the next report needs the RUN and the VIEW (the `/concepts`
+tab's own error card says *"Concepts are unavailable"*, a different string reachable from a failed
+or timed-out frame read, which a live run's cost makes plausible).
+
+### 2 · The Card board
+
+Server side is clean: `public_cards_projection` reports `total: 15, returned: 15, omitted: 0,
+complete: true`, every per-card receipt complete. Every defect is in the browser half.
+
+* **The detail pane kept the retired binary chip.** `cardSelectionBlock`'s lifecycle-vs-fault split
+  (F7's fix for complaint 9 below) was wired into the LANE card only. The `full` presentation — the
+  pane that opens when the operator clicks the card, and the whole `HypothesisBoard` — still printed
+  an unexplained amber chip. All 15 live cards have `selection_ready: false`, so the board showed a
+  quiet explained chip in the lane and an alarm one click away, on every card. **Fixed**: both paths
+  resolve through the one model, pinned by a negative source pin so the retired wording cannot come
+  back on either.
+* **One blocker, two truths.** `card-10` is `status: "coded"` with `selection_blockers:
+  ["work_in_flight"]` and node 10 `pending`, `eval_started` false. The `coded` lane hint reads *"an
+  experiment is built and waiting to run — it has NOT started"* and the chip on that same card read
+  *"an experiment is running"*. `card_ledger.py::_apply_card_status` split the pending branch on the
+  eval-start boundary on 2026-08-14; `BLOCKER_LIFECYCLE` did not move with it. **Fixed**, keyed on
+  the card's own status so the chip and the lane hint cannot disagree.
+* **A node that never ran is counted as an experiment that tested the card.** `card-3` is
+  `proposed`, `evidence: []`, `discarded_nodes: [3]`, and node 3 is `failed` with `eval_started`
+  false — yet the lane renders `1 exp` titled *"1 experiment tested this work item"*, the exact
+  sentence `card_ledger.py::_apply_unexecuted_discards` exists to make false. Nothing in `ui/src`
+  reads `discarded_nodes`. **NOT fixed here** — it needs `cardAttempts`, `cardAttemptSummary` and
+  `cardBoardViewModel.js::cardAttemptIndex` to gain a third lane beside `evidence`/`owned`, and
+  `cardWorkspace.test.js` pins today's join. Highest-value remaining card item.
+* Also open: `cardRows` stamps an `authoring` payload (phase, started, folded_status) that
+  `CardBoard.jsx` never renders — the lane moves, the clock is dropped, for a mean 2,725 s per build.
+
+### 3 · The trace controls
+
+`TraceReach` is present and genuinely visible on `master` (`Inspector.jsx`, `.trace-reach { display:
+block }`); no commit re-hid it, and `git log -S` on that CSS finds nothing after 2026-08-12. What
+the operator means by "подгрузка всего трейса" is the episode back-pager from `3492bfad`, which is
+not in their bundle.
+
+**But there is a real master-side bug, and it is the one that makes the control vanish.**
+`traceScrollModel.js::traceWidenStalled` recorded "a strictly larger window did not return strictly
+more" as a fact about the SURFACE. `TRACE_SCROLL_BOUNDED` is the only state that renders no control,
+`stalled` forces it, and nothing but a node/attempt/generation change ever cleared it — so ONE
+unproductive widen retired the affordance for the rest of the visit. And an unproductive widen is
+routine once `?before=` exists: an anchored window selects the `limit` rows ENDING at the anchor, so
+widening near the beginning of a node legitimately returns the same turns. **Fixed**: the stall is
+now anchor-scoped — the read record carries its `before`, a different anchor is a new question with
+a full budget, and within one anchor the auto-loader still terminates exactly as before.
+
+Not fixed and still true: a click while `LOADING` is a 24-56 s window whose only feedback is a 12 px
+muted line; and `/api/runs/{id}/trace` (run level) has no `limit`/`before` at all, over a 226 MB
+`spans.jsonl` on this run.
+
+### 4 · Researcher / Developer traces, and earlier node versions
+
+Measured on `runs/e5small-dr-unified-v2` (9,212 spans, 169 traces): the build-claim machinery is
+**fully intact** — 11/11 `card_build` spans carry `card_id` + `card_build_generation`, 11/11
+`materialize_node` spans carry `build_trace`, 11/11 claims resolve. The Developer's build is
+reachable and is then **evicted by the default 512-span TAIL**: node 1 reaches 583 build spans and
+**0** survive the window; node 0 keeps 73 of 435. The episode picker is how you get there, and it is
+`3492bfad`-era. No code change here; the honest statement is that the default view hides reachable
+data and the seek control is the answer.
+
+**CORRECTED 2026-08-19, and the first answer was wrong in a way worth keeping on the page.** This
+entry first read *"the Researcher half is a genuine absence — 2,309 spans carry no node link and
+there is no research analogue of `build_trace`."* Both halves of that are false, and the error was
+looking for a NODE link on a surface that is bound per CARD. The Researcher works per card, so a
+node id on each span is the wrong thing to count. Re-measured over the same index:
+
+* **29 traces are anchored by a root carrying `card_id`, holding 6,400 spans** — 18 `propose`
+  (2,060 spans, mean 114.4, largest 228) and 11 `card_build` (4,340 spans, mean 394.5, largest 602).
+* Every one of the 18 `propose` roots carries BOTH `card_id` and `proposed_for_node`.
+* The inner spans carry no id because they do not need one: they belong by `trace_id`, exactly as
+  the build spans above do. Counting spans-without-`node_id` therefore measures nothing.
+* The analogue is not missing and does not need building. `traceview.py::project_card_trace` already
+  matches research two ways — a `propose` root stamped with this `card_id`, or one sharing a trace
+  with the card's own `node_created` — and emits a row per proposal with its span count, its
+  rollup and the trace to open. `TRACE_CARD_RESEARCH_CAP` is 256 against at most 18 rows here, so
+  nothing on this run is dropped.
+
+**But the two halves are hidden by DIFFERENT things, and only one of them is the tail.** Measured:
+11 of 11 `card_build` traces are claimed by a node (`materialize_node.build_trace`), so they enter
+the node window and the 512-span tail is exactly what evicts them — the paragraph above stands
+unchanged, and the episode picker is its answer. **0 of 18 `propose` traces are claimed, and 0 of
+their 2,060 spans carry `node_id`**, so they are never candidates for that window at all and no
+change to it can reach them. That is deliberate: `traceview.py::_ATTRIBUTE_FIELDS` says
+`proposed_for_node` "is deliberately NOT `node_id`, which would re-attribute the whole trace to one
+node", and a card's research belongs to every node the card carries.
+
+So the Researcher half is a NAVIGATION defect, not an absence and not an eviction: the operator went
+looking on the node and the research lives on the card. It is reachable today. What is unresolved is
+that nothing on the node's own trace says where it went — a one-line pointer from the node trace
+to its card's research is the remaining work, and it is a disclosure, not a binding. Card-7 has no
+`propose` span at all, and node 7's panel already says so.
+
+Earlier node VERSIONS: this run has **0 `node_reset`** and 14 `node_repaired`, so every node is
+generation 0 and the attempt picker correctly does not render (`Node.attempt` is bumped by
+`node_reset` only — F6 above). Repair history is reachable through the episode map, which lists all
+14 `inline_repair` episodes with seekable anchors.
+
+### 5 · One stage log under every attempt — true, and not fixable by seeking
+
+A stage's log is opened in APPEND mode (`runtime/sandbox.py`), so every inline-repair attempt writes
+into one `<stage>.log`; `routers/runs.py::node_logs` serves that file's tail BY NAME, using `attempt`
+only as a compare-and-swap fence; and the conversation keys the log by stage LABEL, so N bands render
+one string. On node 0: four `train` rows and four `mine` rows against ONE `train.log` (83,217 bytes,
+three tracebacks = four concatenated attempts). On node 1 `train.log` is 9,342,149 bytes against a
+~200 KB response cap, so all four bands show the LAST attempt's tail.
+
+**The engine's boundary cannot be borrowed.** `train_monitor.py::attempt_byte_floor` does know where
+an attempt begins, but it derives that from a `TrainingLogSnapshot` taken in memory at eval start and
+writes nothing to the log; `stage_finished` carries no `attempt` on this run. There is no durable
+boundary for a later read to seek to, so a client that split the text would be inventing the split.
+**Shipped**: `traceProjection.js::stageLogAttribution` — the bands that share one file say so, name
+the total and their own ordinal, and say the text is the whole file's tail. A stage that ran once
+gets nothing, so an unrepaired node's thread is unchanged. The real fix is a durable per-attempt
+offset on `stage_finished`, and it is an engine change, not a UI one.
+
+### 6 · `/stop is pending` forever
+
+The command lifecycle is sound: the server's terminal set is complete, a pause succeeds when the
+pause FOLDS, and the Dock's OWN pending chip clears on a terminal record. What had no exit is the
+SHARED per-run lock. `Dock.jsx` hides Stop/Finalize/Resume/Start-over whenever a lock owned by the
+Assistant exists; the lock lives in `sessionStorage` with no expiry; `clearRunCommandLock` demands an
+exact identity the Dock never held; and only a mounted `AssistantBar` on that same run ever cleared
+it. So an Assistant poll that gave up, a surface that unmounted, or an operator who navigated away
+froze the run controls for the life of the tab — and that branch rendered `/{action} is pending in
+Assistant · cmd_…` with no button, no elapsed time, no remedy and no dismiss, the only transport
+state with no affordance at all.
+
+**Fixed**: `runCommandMachine.js::foreignCommandLockView` accounts for the lock (owner, age, "this
+surface cannot observe it") and rebuilds the exact clear identity FROM THE LOCK ITSELF, so the Dock
+can release a lock it never wrote without weakening the identity rule that protects a live one. It
+is deliberately NOT a TTL: the Assistant refreshes `updatedAt` on its own settle path and not on a
+fixed cadence, so an age threshold would release an in-flight command as readily as an orphan. The
+release frees this tab's controls and states that it does not cancel the command.
+
+### 8 · The long bare "still building"
+
+Measured on `runs/e5small-dr-unified-v2`: `run_started` → first `node_created` is **4,216.5 s**, of
+which **2,815.9 s** carries no open `phase_progress` beacon of any kind; the node existed on the
+board for 0.1 s before it was created; all 11 `card_build` request→done gaps average 2,725 s. For
+that whole window the canvas printed *"The engine is active."*
+
+The operator's own note is the answer: speculative pre-building is exactly why no node can be shown
+— the build runs before an experiment id is reserved and may be refused and mint no node at all,
+which is why filing it under a predicted id is the one thing a trace may not do. So the canvas now
+names the CARD instead: `state.card_authoring` (`events/authoring_projection.py`) is already on the
+wire and already decoded by `cardBoardModel.js` for a surface the operator was not looking at.
+**Fixed**: the empty-canvas card names the card, its phase and its elapsed time, says why no
+experiment can be drawn yet, and offers the Cards board — which does show the build. An unknown
+phase is dropped rather than given an invented sentence, and an unreadable start prints no elapsed
+time rather than "0s".
+
+### 10 · A superseded stage glyph asserting the outcome it replaced
+
+See `docs/guide/ui.md` → the eval-pipeline strip. `stageRowView` already muted the tone and wrote a
+checkable title for a superseded row, but `icon` was still `stageIcon(status)`, so on
+`runs/e5small-dr-unified-v2` node 9 (`Node.repairs` 1, both rows at `repairs` 0, node pending) the
+strip drew `✓ mine → ✗ train` and it was read as "training failed" — that `train` crashed at
+223.871 s, was repaired, and the retry trained all 2,109 steps. **Fixed**: the glyph becomes `⋯`,
+which does not vary with status (both of that node's rows are superseded, so one glyph must serve
+`ok` and `fail` alike), is not the `reused` glyph (a reuse IS a later attempt saying the result
+stands), and carries the row's own status as screen-reader text.
+
 ## F8 · Repair without a fixed bound, stopped by judgment instead of by a counter
 
 **Asked, 2026-08-13:** *"я бы хотел чтобы репейринг у нас был по сути бесконечный, но стопался бы

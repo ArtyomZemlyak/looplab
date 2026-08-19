@@ -62,12 +62,35 @@ export const traceWidenProgressed = (previous, next) => {
   return count(next.visible) > count(previous.visible)
 }
 
+// The read's ANCHOR, normalized. `?before=<span_id>` is what makes the window a SEEK rather than a
+// tail (`span_index.py::_anchored`), and absent/blank/non-string all mean the same thing — the tail.
+const anchorOf = read => (typeof read?.before === 'string' && read.before ? read.before : null)
+
+// Two reads asking about the SAME place in the node. Exported because the stall rule below is the
+// only thing that reads it and its whole point is to be checkable on its own.
+export const traceReadSameAnchor = (previous, next) => anchorOf(previous) === anchorOf(next)
+
 // Carry the stall finding across reads. A WIDEN decides it (did the bigger window buy anything?); a
 // same-window read — the 4 s live poll, a re-mount — carries the previous answer rather than
 // clearing it, because a poll tick is not evidence that the server would now answer a wider request
 // differently. Stated here rather than inline in the component so the "who may clear a stall" rule
 // has a truth table instead of living inside a setState updater nothing can call.
+//
+// A STALL IS A FACT ABOUT ONE ANCHOR, and it used to be recorded as a fact about the surface. That
+// is the defect behind the operator's "кнопка ушла ОПЯТЬ" — the load-earlier control disappearing
+// for good. `TRACE_SCROLL_BOUNDED` is the only state that renders NO control, `stalled` forces it,
+// and nothing but a change of node/attempt/generation ever cleared it (`Inspector.jsx`'s
+// `lifecycleScope` effect), so ONE unproductive widen retired the affordance for the rest of the
+// visit. And an unproductive widen is not exotic once `?before=` exists: an anchored window selects
+// the `limit` rows ENDING at the anchor, so widening a window whose anchor is already near the
+// beginning of the node legitimately returns the same turns — the surface is not stalled, that
+// EPISODE is simply short. Carrying that finding to the next anchor then says "nowhere to go" about
+// a place it never read. So the carry is anchor-scoped: a read at a different `before` is a new
+// question and starts with a full budget, exactly as a new `lifecycleScope` does. The termination
+// property the stall exists for is untouched — within one anchor a widen that buys nothing still
+// stops the auto-loader, which is the loop that costs seconds per call.
 export const traceWidenStalled = (previous, next) => {
+  if (!traceReadSameAnchor(previous, next)) return false
   const widened = positive(previous?.window) && positive(next?.window)
     && next.window > previous.window
   if (!widened) return previous?.stalled === true
