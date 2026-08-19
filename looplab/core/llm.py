@@ -2343,7 +2343,9 @@ def make_llm_client(settings, *, model: str | None = None,
     return OpenAICompatibleClient(
         model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
-        accountant=CostAccountant(),
+        # `llm_budget_usd` 0.0 = no ceiling, which is what every historical caller got.
+        accountant=CostAccountant(
+            limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None)),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=(getattr(settings, "llm_stream", True) if stream is None else stream),

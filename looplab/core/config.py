@@ -1789,6 +1789,37 @@ class Settings(BaseSettings):
     # ambient proxy — a picked-up proxy yields "connection refused"). Set true when the endpoint is
     # reachable ONLY via a corporate proxy or needs a custom CA bundle from the environment.
     llm_trust_env: bool = False
+    # HARD spend ceiling for this run's LLM calls, in USD. `0.0` (the default) = NO limit, which is
+    # the historical behaviour byte for byte: `CostAccountant` has always accepted a `limit` and
+    # every agent path already treats `BudgetExceeded` as a hard stop that PROPAGATES rather than
+    # degrading to a fallback (see the ten `except BudgetExceeded` sites in `agents/`) — the one
+    # thing missing was a way to SET it.
+    #
+    # It exists because a wall-clock cap is not a comparable budget across two agent loops. The
+    # external reference loop this repo is benchmarked against (AlgoTuner) is budgeted by SPEND
+    # (`spend_limit: $1.00`, `total_messages: 9999`) and pays its reference-timing pass — ~30
+    # minutes on this box — INSIDE the run at a cost of $0. Capping either arm by wall-clock would
+    # therefore charge one loop for a measurement pass neither one's agent performs, so the arms
+    # are equalised on the axis the reference harness itself uses.
+    #
+    # Deliberately NOT pinned into `run_started`: the fold never reads it, and a resumed run
+    # re-reads the live value, which is what an operator raising a ceiling to continue a stopped
+    # run expects. Priced calls only — a local model reports no cost and can never trip it.
+    llm_budget_usd: float = Field(default=0.0, ge=0.0)
+    # Stop ADVERTISING a tool whose provider reports it holds nothing right now
+    # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a
+    # withheld tool still dispatches if the model calls it, so nothing becomes unreachable, and the
+    # filter is re-evaluated every turn so a tool reappears the moment it has something.
+    #
+    # Only a DECISIVE zero hides anything. `UNKNOWN` -- the provider could not count -- always keeps
+    # the tool offered, which is the same asymmetry the published counts carry: an over-offer costs
+    # one call, an under-offer costs an answer.
+    #
+    # Off by default because it changes the tool SURFACE a model sees, which is a bigger claim than
+    # the prompt block that describes it. On a cold-start repo task it withholds every one of the 14
+    # provider tools, leaving the loop with `emit` alone -- correct (there is nothing to read) but
+    # not something to impose on every existing configuration without measuring it there.
+    hide_empty_tools: bool = False
     # H4/C2: compact the growing agentic tool-call history once it exceeds this many chars (auto_summary
     # LLM-summarizes the stale middle; else middle-truncate). Sized to the model's real context window so
     # files read earlier STAY in context instead of being compacted away and re-read: ~1,000,000 chars ≈

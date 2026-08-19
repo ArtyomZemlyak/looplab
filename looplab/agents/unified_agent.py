@@ -224,7 +224,13 @@ class UnifiedAgent(WrapsDeveloper):
         loop_opts = self._loop_opts
         if extra_tools is not None:
             from looplab.agents.agent import CompositeTools
-            tools = (CompositeTools([self._pilot_tools, extra_tools])
+            # A MERGE of two already-built toolsets, so there is no `settings` here to read — carry
+            # the pilot's own setting forward instead. Dropping it would let one phase of a run
+            # offer tools every other phase withholds, which is worse than either policy applied
+            # consistently. `False` when the pilot is a bare provider, which is what it had.
+            tools = (CompositeTools([self._pilot_tools, extra_tools],
+                                    hide_empty_tools=bool(getattr(
+                                        self._pilot_tools, "hide_empty_tools", False)))
                      if self._pilot_tools is not None else extra_tools)
             _configured = int(getattr(loop_opts, "max_turns", 0) or 0)
             if _configured > 0 and extra_turns > 0:

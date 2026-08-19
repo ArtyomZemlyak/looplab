@@ -27,6 +27,7 @@ from typing import Literal, Optional, Protocol, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.agents.roles import _attention_points
 from looplab.core.config import PARALLELISM_ALIASES, canonicalize_parallelism_source
@@ -819,7 +820,8 @@ class ToolUsingStrategist:
             {"role": "system",
              "content": render(self.prompts, "tool_strategist_system", _TOOL_STRATEGIST_SYSTEM)
                         + "\n\n" + _LLM_LANE_ALLOCATION_CONTRACT
-                        + "\n\n" + _attention_points()},
+                        + "\n\n" + _attention_points()
+                        + _CONTEXT_BEFORE_TOOLS_RULE},
             {"role": "user", "content": _strategist_brief(state, ctx)
                 + "\nInvestigate with the tools if useful, then emit the strategy."},
         ]

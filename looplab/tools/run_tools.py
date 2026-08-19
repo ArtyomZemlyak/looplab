@@ -114,6 +114,51 @@ class RunTools:
     def bind_state(self, state: RunState, parent=None) -> None:
         self.state = state
 
+    def inventory(self) -> dict[str, int | str]:
+        """How much this run holds for each tool here (`_base.INVENTORY_CONTRACT`).
+
+        Answered through the SAME private helpers the tools answer through -- `_concept_projection`,
+        `_current_theme_rollup` -- so a published count cannot drift from what a call would show. A
+        second, hand-derived reading of "what does this run contain" is how a brief comes to state a
+        number the tool then contradicts.
+
+        The concept rows are the reason the `int`/`str` split in the contract exists at all. This
+        provider already refuses to call an empty projection an empty taxonomy (`_themes` answers
+        "this is NOT proof that no themes are assigned" when the projection is not `complete`), so
+        publishing `list_themes=0` off an `unavailable` projection would assert exactly what the
+        tool declines to assert -- and would suppress the call that says so.
+        """
+        st = self.state
+        if st is None:
+            return {}                      # unbound: it has not been told which run it answers for
+        try:
+            nodes = len(getattr(st, "nodes", {}) or {})
+            memos = len(getattr(st, "research", ()) or ())
+            rows: dict[str, int | str] = {
+                "list_experiments": nodes,
+                "read_experiment": nodes,
+                "read_code": nodes,
+                "read_logs": nodes,
+                "find_analogous": nodes,
+                "read_research_memo": memos,
+            }
+            projection = self._concept_projection(st)
+            if projection.status == "complete":
+                rows["list_themes"] = len(self._current_theme_rollup(st, projection) or {})
+                tagged = sum(1 for concepts in projection.memberships.values() if concepts)
+                rows["read_concept_tree"] = tagged
+                rows["concept_nodes"] = tagged
+                rows["node_concepts"] = tagged
+                rows["node_concept_delta"] = tagged
+            else:
+                note = f"{projection.status} concept projection"
+                for name in ("list_themes", "read_concept_tree", "concept_nodes",
+                             "node_concepts", "node_concept_delta"):
+                    rows[name] = note
+            return rows
+        except Exception as exc:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_experiments",
@@ -1128,6 +1173,21 @@ class SiblingRunTools(ForeignRunReader):
         self.self_run_id = self_run_id
         self.task_id = ""
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many sibling runs these tools can reach (`_base.INVENTORY_CONTRACT`).
+
+        `_sibling_ids()` is the same fail-closed enumeration the listing uses -- including its
+        refusal to widen when no authoritative task id was bound -- so the published count carries
+        that boundary rather than a second, looser reading of it. Zero siblings makes all four
+        tools structurally empty, which is the whole of the default single-run case.
+        """
+        try:
+            ids = len(self._sibling_ids())
+        except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+        return {"list_sibling_runs": ids, "read_sibling_experiment": ids,
+                "read_sibling_code": ids, "find_analogous_across_runs": ids}
+
     def _scope_denial(self, run_id: str, st: RunState) -> str:
         """The same-task boundary, fail-CLOSED. Discovery is same-task scoped, but a DIRECT read takes
         a model-supplied run_id, so a caller that guesses one must not read ANOTHER task through a
@@ -1293,6 +1353,19 @@ class AllRunsTools(ForeignRunReader):
         if state is not None and getattr(state, "run_id", ""):
             self.self_run_id = state.run_id
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many foreign runs these tools can reach (`_base.INVENTORY_CONTRACT`).
+
+        Self is excluded for the reason `bind_state` excludes it: this run's own experiments arrive
+        through `RunTools`, so counting itself here would promise a foreign run that is not one.
+        """
+        try:
+            ids = [rid for rid in self._runs.run_ids() if rid != self.self_run_id]
+        except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            return {}
+        return {"list_all_runs": len(ids), "read_run_code": len(ids),
+                "read_run_experiment": len(ids)}
+
     def specs(self) -> list[dict]:
         return [
             fn_spec("list_all_runs",
@@ -1370,9 +1443,48 @@ class DataTools:
         self.task = task
         self.max_chars = max_chars
         self.state: Optional[RunState] = None
+        # `inventory()` is answered from the SAME reads the tools make, so it is computed once and
+        # remembered: a task's `assets()` materializes its files, and paying that per prompt build
+        # would make publishing the count cost more than the call it saves.
+        self._inventory_cache: Optional[dict] = None
 
     def bind_state(self, state: RunState, parent=None) -> None:
         self.state = state
+
+    def inventory(self) -> dict[str, int | str]:
+        """How much task data each of these three tools has to show (`_base.INVENTORY_CONTRACT`).
+
+        The whole reason this provider needs the hook: on a `repo` or `toy` task there is no
+        dataset at all, so all three tools answer with an apology -- measured 2026-08-19 over six
+        cold-start runs, `read_asset` returned nothing 20 times out of 20, `data_schema` 9 of 9 and
+        `data_profile` 8 of 8, on a task that never had a row of data to show.
+
+        Computed from the same `columns()`/`assets()` surface the tools read, then cached (see
+        `__init__`). A task whose hooks RAISE is UNKNOWN rather than 0: this provider exists
+        precisely for tasks whose data lives behind an adapter, and reporting "no data" because an
+        adapter hiccuped would suppress the call that would have surfaced the failure.
+        """
+        if self._inventory_cache is not None:
+            return dict(self._inventory_cache)
+        try:
+            assets = self._assets()
+            columns = self._columns() or {}
+            tables = [name for name in assets
+                      if isinstance(assets[name], str) and name.lower().endswith((".csv", ".tsv"))]
+            # `data_schema` reads `columns()` and FALLS BACK to a parsed table, so it has something
+            # to say when either exists; `data_profile` only ever derives from a table.
+            rows: dict[str, int | str] = {
+                "read_asset": len(assets),
+                "data_schema": len(columns) or (len(tables) and -1) or 0,
+                "data_profile": len(tables),
+            }
+            if rows["data_schema"] == -1:            # no declared columns, but a table to infer from
+                rows["data_schema"] = "inferred from a table, not counted"
+        except Exception as exc:  # noqa: BLE001 - an adapter that raises is UNKNOWN, never zero
+            reason = f"task data unavailable: {type(exc).__name__}"
+            rows = {"read_asset": reason, "data_schema": reason, "data_profile": reason}
+        self._inventory_cache = rows
+        return dict(rows)
 
     def specs(self) -> list[dict]:
         return [
@@ -1462,6 +1574,13 @@ class DataTools:
         # so a task that exposes no explicit columns() (e.g. mlebench_real) still gets a real schema.
         tbl = self._primary_table()
         if not tbl:
+            # A REFERRAL is only useful if the referent has something. When the task has no data
+            # surface at all, "try read_asset or data_profile" sends the model to two tools that
+            # are empty for the SAME reason -- measured 2026-08-19, that sentence was live while
+            # `read_asset=0` and `data_profile=0` were both published in the prompt. Refer only
+            # when there is something to refer to.
+            if not self._assets():
+                return self._NO_ASSETS
             return "(this task exposes no structured schema — try read_asset or data_profile)"
         name, header, rows = tbl
         lines = [f"schema inferred from {name} ({len(header)} columns, {len(rows)} rows sampled):"]
@@ -1489,6 +1608,10 @@ class DataTools:
         # categorical cardinality) when the run recorded no profile — real per-column stats, cheaply.
         tbl = self._primary_table()
         if not tbl:
+            # Same rule: distinguish "this run recorded no profile" (a profile could still be
+            # derived later) from "there is no data here to profile at all", which is terminal.
+            if not self._assets():
+                return self._NO_ASSETS
             return "(no data profile recorded for this run)"
         name, header, rows = tbl
         lines = [f"column profile from {name} ({len(rows)} rows sampled):"]
@@ -1508,10 +1631,22 @@ class DataTools:
                 lines.append(f"  {col}: categorical missing={missing:.2f} unique={len(set(present))}")
         return "\n".join(lines)[:self.max_chars]
 
+    _NO_ASSETS = (
+        "(this task has NO data assets at all — not zero matching this name, zero in total, and "
+        "no name will change that. This tool reads a task's DATASET; a task whose subject is source "
+        "code has none. Nothing here reads source files.)")
+
     def _asset(self, name: Optional[str]) -> str:
         assets = self._assets()
         if not assets:
-            return "(this task has no data assets)"
+            # TERMINAL on purpose. The old text was "(this task has no data assets)", which reads as
+            # "not that one" and invites a retry with a different name -- measured 2026-08-19 on a
+            # repo task, ONE deep-research phase spent NINE `read_asset` calls walking `solver.py`,
+            # `reference_svm.py`, `reference`, `train`, `test`, ... against a task with no dataset,
+            # while the prompt was already publishing `read_asset=0`. An answer a model can read as
+            # a near-miss defeats a correct count, so the answer states the CLASS of the emptiness
+            # and that nothing else here reads files.
+            return self._NO_ASSETS
         if not name:
             return "available assets: " + ", ".join(assets)
         if name not in assets:

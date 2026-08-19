@@ -339,6 +339,74 @@ def fn_spec(name: str, description: str, props: dict, required: Optional[list] =
         "parameters": {"type": "object", "properties": props, "required": required or []}}}
 
 
+# ------------------------------------------------------------------------------ tool inventory
+#
+# WHAT IT IS. The optional `inventory()` hook (see `ToolProvider`) lets a provider publish how much
+# each of its tools can return right now, so the prompt states it and the model does not spend a
+# call discovering that a store is empty. Measured 2026-08-19 over six cold-start runs, 138 of 227
+# tool calls returned nothing at all, and the empty tail was dominated by tools whose emptiness was
+# knowable before the call: `read_asset` 20/20, `cross_run_search` 12/12, `data_schema` 9/9.
+#
+# WHY A COUNT AND A REASON ARE DIFFERENT VALUES. "I looked and there are zero" and "I could not
+# look" are not the same claim, and collapsing them is the failure this hook must not commit. A
+# published `cross_run_search=0` tells the model the call is pointless; if the real situation was
+# that the store could not be READ, that suppresses a call that had something to return. The
+# concept readers in `tools/run_tools.py` already draw this line by hand -- `_concept_tree` answers
+# "recorded fallback [] is NOT a known-empty taxonomy" when its projection is `unavailable` -- and
+# this hook keeps it: an `int` is a count the provider stands behind, a `str` is the REASON it has
+# no count, rendered as `UNKNOWN(<reason>)` and read by the model as "still worth a call".
+#
+# FAIL-CLOSED. A provider that raises, returns a wrong-shaped value, or simply omits the hook
+# contributes NOTHING to the block rather than a zero. Absence of a row is silence, and silence
+# costs at most the call that would have happened anyway.
+INVENTORY_CONTRACT = "int = a count the provider stands behind; str = the reason it has none"
+
+
+def coerce_inventory(raw: object) -> dict[str, int | str]:
+    """Normalize one provider's `inventory()` return, dropping anything ill-formed.
+
+    Total on purpose: this runs while building a prompt, and a provider with a broken hook must
+    cost the run a missing row, never a raised exception. A bool is rejected because `True` would
+    render as the count `1`; a negative count is rejected because no tool can hold fewer than none.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    rows: dict[str, int | str] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            if value >= 0:
+                rows[name] = value
+        elif isinstance(value, str) and value.strip():
+            rows[name] = value.strip()
+    return rows
+
+
+def collect_inventory(provider: object) -> dict[str, int | str]:
+    """Ask one provider (or a `CompositeTools`) for its inventory; `{}` if it has none to give."""
+    hook = getattr(provider, "inventory", None)
+    if not callable(hook):
+        return {}
+    try:
+        return coerce_inventory(hook())
+    except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+        return {}
+
+
+def render_inventory(rows: Mapping[str, int | str]) -> str:
+    """Render inventory rows as the `name=value` pairs the briefs publish.
+
+    Bare pairs on purpose: the tool DESCRIPTIONS are already in the request, so the name is the
+    whole link back to the tool surface and any prose around it is duplicated context.
+    """
+    return " ".join(
+        f"{name}={value}" if isinstance(value, int) else f"{name}=UNKNOWN({value})"
+        for name, value in sorted(rows.items()))
+
+
 class ToolProvider(Protocol):
     """The duck-typed tool-provider contract (structural — no provider inherits this).
 
@@ -367,6 +435,14 @@ class ToolProvider(Protocol):
     - `execute_result(name, args, cancel_check=None) -> ToolResult` retains structured content,
       tool-level errors, provenance and execution receipts. The shared loop still sends
       ``result.content`` to legacy model transports and propagates its live cancellation callback.
+    - `inventory() -> dict[str, int | str]` (optional) — HOW MUCH each of this provider's tools
+      has to return RIGHT NOW, so the prompt can publish it and the model need not spend a call
+      to find out. An `int` is a count the provider stands behind; a `str` is an UNKNOWN reason.
+      See `INVENTORY_CONTRACT` below for why the two are not interchangeable.
+
+    Inventory is a claim about SIZE, never about CONTENT: `cross_run_search=41` says the store
+    holds 41 rows, not that any of them answers the query. Only a zero is decisive, and it is
+    decisive in exactly one direction — a tool with nothing to read cannot return anything.
     """
 
     def specs(self) -> list[dict]: ...

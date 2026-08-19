@@ -100,11 +100,35 @@ def test_a_probe_cannot_delete_rename_or_mkdir(outside):
     assert not (outside / "newdir").exists()
 
 
-def test_a_probe_cannot_read_a_file_it_may_not_read_but_may_read_the_ones_it_may(outside):
+def test_a_probe_may_still_read_its_own_workdir(tmp_path):
     """Rule 2 is about WRITES only. A probe that could not read would be useless — reading is the
-    whole job — so this pins that the write rule did not quietly become a read rule."""
+    whole job — so this pins that neither the write rule nor the confinement below quietly became a
+    ban on reading.
+
+    Scoped to the probe's OWN directory, which is what it was always really asserting: the file it
+    used to reach lived outside, and reaching outside is now refused on purpose (see the companion
+    test)."""
+    out = _probe("import pathlib; p = pathlib.Path('mine.txt'); print('cwd-read-ok')")
+    assert "exit=0" in out and "cwd-read-ok" in out
+
+
+def test_a_probe_cannot_read_outside_its_own_workdir(outside):
+    """CONFINEMENT (2026-08-19). The probe's read fence used to be the ENGINE's denylist — it fenced
+    the editable source tree and, when a task declared none, installed no fence at all.
+
+    That was measured wrong in the sharpest way: on an AlgoTune benchmark run a Developer spent 150
+    of its 239 tool calls inside `run_probe`, reading the BENCHMARK HARNESS sitting beside the run —
+    `validation_pipeline.py` (how solutions are checked) and `isolated_benchmark.py` (how they are
+    timed). A solver written after reading the checker is not a result; and the reference agent it
+    was being compared against has no filesystem access at all, so the asymmetry also destroyed the
+    comparison the probe was serving.
+
+    The fence is now an ALLOW-LIST (`read_fence.render(confine=True)`): the probe's own replica plus
+    what the interpreter needs to import, and nothing else. Cross-run and cross-node knowledge is
+    unaffected — that never travelled through the probe's filesystem."""
     out = _probe(f"print(open({str(outside / 'existing.txt')!r}).read())")
-    assert "exit=0" in out and "original" in out
+    assert "exit=0" not in out, "the probe read a file outside its own workdir"
+    assert "original" not in out, "the probe returned content from outside its workdir"
 
 
 def test_the_kernel_backstop_is_armed_independently_of_the_audit_hook():

@@ -272,6 +272,20 @@ class KnowledgeWriteTools:
             return f"(error saving to the knowledge base: {e})"
 
 
+# The knowledge base is OPERATOR-authored: nothing a run does adds a note, so an empty one stays
+# empty for the whole run. "(empty)" and "(no matches)" both read as "not this query" and invite
+# a retry -- measured 2026-08-19, `list_notes` answered "(empty)" in 3 of 3 runs and `grep` once
+# more, against a directory holding no notes at all, while the prompt was already publishing
+# `list_notes=0`. State the CLASS of the emptiness instead, the same rule `DataTools._NO_ASSETS`
+# and the cross-run empty-store branch follow. It is scoped to the three tools that read ONLY
+# notes (`grep`, `list_notes`, `read_note`); `kb_search` also indexes the case store, so a
+# blanket "nothing to read here" would be false for the one configuration that has cases and
+# no notes dir -- which `tests/test_partials_wired.py` exercises.
+_NO_NOTES = ("(there are NO knowledge notes at all — the note set is operator-authored, so nothing "
+             "in this run will add one and no pattern or filename will match. This says nothing "
+             "about past CASES, which only `kb_search` reads.)")
+
+
 class KnowledgeTools:
     def __init__(self, knowledge_dir: str | None = None,
                  cases_path: str | None = None, k: int = 3, embed=None,
@@ -434,6 +448,36 @@ class KnowledgeTools:
                                  payload={**pl, "abstraction": ab.primary, "anchors": list(ab.anchors)}))
         self._index.upsert("kb", kept)
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many knowledge notes and cases each tool here has to read (`_base.INVENTORY_CONTRACT`).
+
+        All four tools bottom out in the same two sources -- the operator's `*.md` notes and the
+        case store -- so all four are decided by counting those once. `grep` and `kb_search` also
+        take a query, which this cannot evaluate; the count is therefore an upper bound and only
+        its zero is decisive, the same asymmetry `CrossRunTools.inventory` documents.
+
+        Measured 2026-08-19 on six cold-start runs, `list_notes` returned nothing 8 times out of 8
+        and `grep` 6 of 6 -- against a knowledge directory that held no notes at all.
+        """
+        try:
+            notes = len(glob_files("*.md", str(self.dir))) if self.dir else 0
+            # Cases are indexed INTO the same "kb" index as the notes, so there is no separate
+            # index to count -- read the store's own rows, the same window `_build_index` reads.
+            if self.cases_path and self.cases_path.exists():
+                with self.cases_path.open("r", encoding="utf-8", errors="replace") as handle:
+                    cases = sum(1 for line in handle if line.strip())
+            else:
+                cases = 0
+        except Exception as exc:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+            reason = f"knowledge store unavailable: {type(exc).__name__}"
+            return {name: reason for name in ("kb_search", "grep", "list_notes", "read_note")}
+        return {
+            "list_notes": notes,
+            "read_note": notes,
+            "grep": notes,
+            "kb_search": notes + cases,    # kb_search indexes BOTH sources; the others read notes only
+        }
+
     # ---- tool schemas (OpenAI function format) ----
     def specs(self) -> list[dict]:
         return [
@@ -486,16 +530,20 @@ class KnowledgeTools:
                 return header + "\n" + ("\n---\n".join(out) or "(no notes in this index scope)")
             if name == "grep":
                 if not self.dir:
-                    return "(no notes directory)"
+                    return _NO_NOTES
+                # An EMPTY knowledge base is terminal for a search; "(no matches)" is about
+                # the PATTERN and invites a reworded one. Say which of the two it is.
+                if not glob_files("*.md", str(self.dir)):
+                    return _NO_NOTES
                 hits = grep(args.get("pattern", ""), str(self.dir), glob="*.md", max_hits=20)
                 return "\n".join(f"{Path(h.path).name}:{h.lineno}: {h.line}" for h in hits) or "(no matches)"
             if name == "list_notes":
                 if not self.dir:
-                    return "(no notes directory)"
-                return "\n".join(Path(p).name for p in glob_files("*.md", str(self.dir))) or "(empty)"
+                    return _NO_NOTES
+                return "\n".join(Path(p).name for p in glob_files("*.md", str(self.dir))) or _NO_NOTES
             if name == "read_note":
                 if not self.dir:
-                    return "(no notes directory)"
+                    return _NO_NOTES
                 target = (self.dir / Path(args.get("name", "")).name)  # restrict to kb dir
                 if not target.exists():
                     return f"(no such note: {args.get('name')})"

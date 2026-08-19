@@ -25,7 +25,7 @@ from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
-from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult,
+from looplab.tools._base import (RESULT_CAP, ToolCapability, ToolResult, collect_inventory,
                                  capability_manifest)
 from looplab.core.redact import redact_secrets
 # The typed options bundle (doc 25 AG-01). Re-exported here — and, through `agents/agent.py`, under
@@ -51,8 +51,13 @@ class CompositeTools:
     """Merge several tool providers (each with .specs()/.execute()) into one toolset,
     so the Researcher can use knowledge + skills + memory tools together."""
 
-    def __init__(self, providers: list, *, strict_collisions: bool = False):
+    def __init__(self, providers: list, *, strict_collisions: bool = False,
+                 hide_empty_tools: bool = False):
         self.providers = providers
+        # Withhold the SPEC of a tool whose provider reports a decisive zero (see `specs`).
+        # An UNKNOWN never hides anything: "I could not count it" is not "it is empty",
+        # and hiding on it would remove a tool that had something to return.
+        self.hide_empty_tools = bool(hide_empty_tools)
         self._route: dict[str, object] = {}
         self._capabilities: dict[str, ToolCapability] = {}
         # De-dup by function name (FIRST provider wins): two providers registering the same tool name
@@ -104,7 +109,46 @@ class CompositeTools:
             self._specs, self._capabilities.values())
 
     def specs(self) -> list[dict]:
-        return list(self._specs)
+        """The tools to OFFER this turn.
+
+        Filtered live, never at construction, and only ever the OFFER: `_route` keeps every provider
+        it ever routed, so a tool withheld here still DISPATCHES if the model calls it from history
+        or from a spec it saw a turn ago. Nothing becomes unreachable — a tool only stops being
+        advertised while it provably has nothing to say.
+
+        `hide_empty_tools` is off by default and the reason is the caching: this object is built
+        ONCE per role, so a filter applied in `__init__` would hide a tool for the whole run on the
+        strength of what was true at construction — `list_experiments` would vanish at node 0 and
+        never come back. Re-asking here makes the offer track the run.
+        """
+        if not self.hide_empty_tools:
+            return list(self._specs)
+        empty = {name for name, value in self.inventory().items()
+                 if isinstance(value, int) and value == 0}
+        if not empty:
+            return list(self._specs)
+        return [spec for spec in self._specs
+                if (spec.get("function") or {}).get("name") not in empty]
+
+    def inventory(self) -> dict[str, int | str]:
+        """Merge the providers' optional `inventory()` receipts (`tools/_base.INVENTORY_CONTRACT`).
+
+        Filtered through `self._route`, which is what makes the merge correct rather than merely
+        convenient: a name registered by two providers is DISPATCHED to the first and the second is
+        shadowed, so publishing the shadowed provider's count would state a number no call can
+        return. Same first-wins rule, one source.
+
+        A name this composite does not route at all is dropped for the same reason -- a provider
+        may know about a tool it is not currently offering (`CrossRunTools` answers for all eight of
+        its tools whether or not `specs()` published them), and a count for a tool the model cannot
+        call is noise in a block whose entire value is that every row names a real tool.
+        """
+        merged: dict[str, int | str] = {}
+        for provider in self.providers:
+            for name, value in collect_inventory(provider).items():
+                if self._route.get(name) is provider and name not in merged:
+                    merged[name] = value
+        return merged
 
     def execute(self, name: str, args: dict) -> str:
         p = self._route.get(name)
@@ -153,6 +197,20 @@ class CompositeTools:
         for p in self.providers:
             if hasattr(p, "bind_state"):
                 p.bind_state(state, parent)
+
+
+def compose_tools(providers: list, settings):
+    """Turn a provider list into the toolset a role is handed — the ONE place that decision lives.
+
+    A single provider is normally handed over bare. But `Settings.hide_empty_tools` (stop
+    advertising a tool whose provider reports it currently holds nothing) is implemented by
+    `CompositeTools.specs`, so a bare provider would silently opt that configuration out of the
+    filter. Lives here rather than in `agents/factory.py` because the rule is a property of this
+    class, and because two call sites spelling it out is how they come to disagree.
+    """
+    hide = bool(getattr(settings, "hide_empty_tools", False))
+    return (providers[0] if len(providers) == 1 and not hide
+            else CompositeTools(providers, hide_empty_tools=hide))
 
 
 def _force_emit(client, messages: list, emit_spec: dict) -> Optional[dict]:

@@ -608,12 +608,48 @@ class DevProbeTools:
         docstring. Returns whether a fence was written: `False` means the task declares no editable
         source tree at all, i.e. there is nothing a probe could read that the node does not own."""
         roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
-        if not roots:
-            return False
+        # CONFINE, not the engine's denylist. The old shape fenced only the editable source tree and
+        # returned False when a task declared none -- installing NO fence at all, on the reasoning
+        # that "there is nothing a probe could read that the node does not own". That reasoning holds
+        # only if the editable tree is the sole interesting thing on the disk, and it is not:
+        # measured 2026-08-19, a Developer spent 150 of its 239 tool calls reading the BENCHMARK
+        # HARNESS beside the run -- its `validation_pipeline.py` (how solutions are checked) and
+        # `isolated_benchmark.py` (how they are timed). A solver written after reading the checker is
+        # not a result, and the reference agent it was being compared against has no filesystem at
+        # all, so the asymmetry also broke the comparison it existed to serve.
+        #
+        # The allow-list is the probe's own disposable replica plus what the interpreter needs to
+        # start and import -- nothing else, by construction rather than by enumeration of what to
+        # refuse. Cross-run and cross-node knowledge is unaffected: it never travels through the
+        # probe's filesystem, it arrives through the run-reading tools, which are unchanged.
+        allow = tuple(allow) + self._interpreter_allow(fence_dir.parent)
         (fence_dir / "sitecustomize.py").write_text(
-            read_fence.render(roots, allow, policy="deny", log="", run="developer-probe"),
+            read_fence.render(roots, allow, policy="deny", log="", run="developer-probe",
+                              confine=True),
             encoding="utf-8")
         return True
+
+    @staticmethod
+    def _interpreter_allow(work_root) -> tuple:
+        """The paths a confined probe must still reach: its own tree, and the interpreter.
+
+        Denying the interpreter does not fence a probe, it stops python from starting -- which is the
+        failure `read_fence._too_broad` exists to prevent one layer down. Everything here is derived
+        from the running interpreter rather than listed, so a venv, a conda env and a system python
+        all work without a per-machine path table."""
+        import site
+        import sysconfig
+        paths = {str(Path(work_root).resolve()), sys.prefix, sys.base_prefix,
+                 sysconfig.get_paths().get("stdlib") or "", sysconfig.get_paths().get("purelib") or ""}
+        try:
+            paths.update(site.getsitepackages())
+        except Exception:  # noqa: BLE001 - absent inside some venvs; the prefixes above still cover it
+            pass
+        try:
+            paths.add(site.getusersitepackages())
+        except Exception:  # noqa: BLE001
+            pass
+        return tuple(sorted(p for p in paths if p))
 
     def _replicate(self, work: Path) -> str:
         """Materialize the node's staged files into the probe's cwd, bounded.

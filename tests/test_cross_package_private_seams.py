@@ -51,6 +51,12 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # declaration family should be reaching for it, and this registry is what makes a future
         # rename a red test instead of a submit-time validator that silently stops running.
         "looplab.runtime.command_eval": ("_validate_rel_paths",),
+        # The repo Developer's system prompt carries the SAME context-before-tools clause the
+        # Researcher's does, and a second copy of a prompt contract is how the two come to say
+        # different things about one tool surface. `agents/roles.py` owns the sentence; this is a
+        # declared read of it, not a promotion, because nothing outside a role's system prompt has
+        # any business splicing it.
+        "looplab.agents.roles": ("_CONTEXT_BEFORE_TOOLS_RULE",),
     },
     "agents": {
         "looplab.core.llm": ("_reasoning_of",),

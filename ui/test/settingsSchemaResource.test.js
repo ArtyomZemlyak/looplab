@@ -103,6 +103,19 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   assert.equal(Object.keys(schema.fieldByKey).length, 183)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
+  //   181 -> 183 (2026-08-19): `llm_budget_usd` (a HARD spend ceiling for a run's LLM calls, 0 =
+  //   the historical no-limit behaviour, and it ENDS a run rather than degrading — so an operator
+  //   must be able to see it to RAISE it) and `hide_empty_tools` (stop advertising a tool whose
+  //   provider reports it holds nothing right now; only the offer is withheld, never the route).
+  //   TWELFTH occurrence, and the Python guard caught it first for the eighth consecutive time.
+  //   Verified as the paragraph prescribes rather than by bumping the number: the catalogue was
+  //   183 keys and removing exactly those two gave back 181, so these are two real additions with
+  //   nothing renamed away underneath them.
+  assert.equal(Object.keys(schema.fieldByKey).length, 183)
+  assert.equal(schema.fieldByKey.llm_budget_usd.type, 'float')
+  assert.equal(schema.fieldByKey.llm_budget_usd.default, 0)
+  assert.equal(schema.fieldByKey.hide_empty_tools.type, 'bool')
+  assert.equal(schema.fieldByKey.hide_empty_tools.default, false)
   assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')
   assert.equal(schema.fieldByKey.cadence_while_evaluating.default, true)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')

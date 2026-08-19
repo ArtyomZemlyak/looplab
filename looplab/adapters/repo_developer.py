@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.agents.answered_by_context import answered_by_context
+from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -666,7 +668,10 @@ class LLMRepoDeveloper:
         else:
             default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
                        else _REPO_DEV_SYSTEM_BODY)
-        return render(self.prompts, "repo_developer_system_body", default)
+        # CONTEXT FIRST, TOOLS FOR THE GAP — appended AFTER render() so a PromptStore override of the
+        # persona cannot drop it, the same discipline as the trust rules on the Researcher side.
+        return (render(self.prompts, "repo_developer_system_body", default)
+                + _CONTEXT_BEFORE_TOOLS_RULE)
 
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so
@@ -714,12 +719,17 @@ class LLMRepoDeveloper:
             "what to change — THEN call propose_plan with an ordered list of ATOMIC, independently-"
             "testable steps, each naming concretely what to change and why. Do NOT guess from the "
             "truncated preview; the implement stage (and update_plan) come next.")
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         # READ-ONLY toolset: repo scouts + env inspection, but NO write tools — the plan stage's only
         # output is the plan. (This used to be tools=None to force convergence, which made the planner
         # work BLIND off the truncated preview; the read_file pagination fix + emit_after/emit_force
         # convergence backstop now let it read PROPERLY without exploring forever.)
+        #
+        # Composed BEFORE the messages, because the user turn names what this toolset already holds
+        # (`agents/answered_by_context.py`). Composition only reads each provider's `specs()`, so the
+        # reorder costs nothing and changes no dispatch.
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": plan_user + answered_by_context(read_only)}]
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
             # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
@@ -1235,10 +1245,12 @@ class LLMRepoDeveloper:
         import json as _json
         ev, has_cmd = self._cmd_context()
         reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
-        messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
-        # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo
+        # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
+        # Composed first so the user turn can name what it already holds — see the plan phase above.
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        messages = [{"role": "system", "content": system},
+                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)
+                                               + answered_by_context(read_only)}]
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")

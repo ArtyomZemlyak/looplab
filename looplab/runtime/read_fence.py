@@ -387,6 +387,14 @@ import threading
 
 _ROOTS = %(roots)r
 _ALLOW = %(allow)r
+# CONFINE inverts the policy: instead of "refuse what is under a ROOT", it refuses EVERYTHING that is
+# not under `_ALLOW`. The engine's fence never sets it (a training process needs to read the box);
+# `tools/dev_probe.py` always does, because a probe's whole legitimate world is its own disposable
+# replica plus the interpreter, and a denylist keyed on the editable tree leaves every OTHER
+# directory on the machine readable. Measured 2026-08-19: with no editable root declared, the probe
+# fence was skipped entirely and a Developer used 150 `run_probe` calls to read the BENCHMARK
+# HARNESS's own validation and timing code. A denylist cannot express "only your own workdir".
+_CONFINE = %(confine)r
 _POLICY = %(policy)r
 _LOG = %(log)r
 _MESSAGE = %(message)r
@@ -487,6 +495,8 @@ def _cwd_reaches_root():
     except OSError:
         return True                # cannot prove it is safe -> resolve, and let `_fenced` decide
     d = d if d.endswith(_SEP) else d + _SEP
+    if _CONFINE:
+        return not (_ALLOW and d.startswith(_ALLOW))
     if not d.startswith(_ROOTS):
         return False
     return not (_ALLOW and d.startswith(_ALLOW))
@@ -495,7 +505,11 @@ def _cwd_reaches_root():
 def _fenced(p):
     """The path this fence refuses, or None. The whole policy, in three string operations."""
     p = _resolve(p)
-    if p is None or not p.startswith(_ROOTS):
+    if p is None:
+        return None
+    if _CONFINE:
+        return None if (_ALLOW and p.startswith(_ALLOW)) else p
+    if not p.startswith(_ROOTS):
         return None
     if _ALLOW and p.startswith(_ALLOW):
         return None
@@ -511,6 +525,8 @@ def _prefixed(r):
     NOT pay for this, because opening a directory raises IsADirectoryError before it can read
     anything."""
     d = r if r.endswith(_SEP) else r + _SEP
+    if _CONFINE:
+        return None if (_ALLOW and d.startswith(_ALLOW)) else r
     if not d.startswith(_ROOTS):
         return None
     if _ALLOW and d.startswith(_ALLOW):
@@ -798,7 +814,7 @@ def _chain():
 
 
 if __name__ != "%(probe)s":
-    if _POLICY != "off" and _ROOTS:
+    if _POLICY != "off" and (_ROOTS or _CONFINE):
         # Resolve the launcher-set cwd ONCE, before the hook is armed, so the very first relative
         # open is already judged correctly (and so this `getcwd` is not itself audited).
         _CWD_REACHES_ROOT = _cwd_reaches_root()
@@ -807,10 +823,18 @@ if __name__ != "%(probe)s":
 '''
 
 
-def render(roots, allow, *, policy: str, log: str = "", run: str = "") -> str:
-    """The generated `sitecustomize.py` source for one run's fence."""
+def render(roots, allow, *, policy: str, log: str = "", run: str = "",
+           confine: bool = False) -> str:
+    """The generated `sitecustomize.py` source for one run's fence.
+
+    `confine=False` (the default, and what the engine installs) keeps the historical DENYLIST: refuse
+    paths under `roots`, exempting `allow`. `confine=True` INVERTS it into an allow-list — refuse
+    everything outside `allow`, `roots` unused — which is the only shape that can express "this
+    process may read its own workdir and nothing else". See `_CONFINE` in the template for the
+    incident that made the denylist insufficient for `tools/dev_probe.py`."""
     return _TEMPLATE % {
         "roots": tuple(roots), "allow": tuple(allow), "policy": settle_policy(policy),
+        "confine": bool(confine),
         "log": str(log), "message": REFUSAL_MESSAGE, "run": str(run), "probe": _PROBE_NAME,
         "mutation_message": MUTATION_REFUSAL_MESSAGE, "mutations": MUTATION_EVENTS,
         # Baked rather than probed in the child: the fence runs on the same box that generated it

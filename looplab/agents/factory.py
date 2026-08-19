@@ -195,10 +195,8 @@ def build_strategist_tools(task: TaskAdapter, settings, run_dir=None):
         providers.append(WebTools(enabled=True))
     if not providers:
         return None
-    if len(providers) == 1:
-        return providers[0]
-    from looplab.agents.agent import CompositeTools
-    return CompositeTools(providers)
+    from looplab.agents.tool_loop import compose_tools
+    return compose_tools(providers, settings)
 
 
 def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
@@ -281,8 +279,9 @@ def build_unified_agent(task: TaskAdapter, settings, run_dir=None):
         # consulting the real schema/columns (e.g. a reference to a column that doesn't exist).
         # Cross-run: let the pilot look at sibling runs of the same task (read-only) so it can choose
         # to import a winning experiment from a neighbour. Needs the run's own dir; no-op without it.
-        from looplab.agents.agent import CompositeTools
-        pilot_tools = CompositeTools(_shared_providers(task, settings, run_dir, core_only=True))
+        from looplab.agents.tool_loop import compose_tools
+        pilot_tools = compose_tools(
+            _shared_providers(task, settings, run_dir, core_only=True), settings)
 
     extra_clients = [c for c in (strat_client, pilot_client) if c is not None]
     from looplab.agents.agent import loop_opts_from_settings
@@ -472,7 +471,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # skills) are configured, so the flag's meaning stays "no tool loop", not just "no run-introspection".
     if providers and getattr(settings, "researcher_tools", True):
         from looplab.agents.agent import CompositeTools, ToolUsingResearcher, loop_opts_from_settings
-        tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+        from looplab.agents.tool_loop import compose_tools
+        tools = compose_tools(providers, settings)
         researcher = ToolUsingResearcher(
             client, tools,
             space_hint=getattr(researcher, "space_hint", ""),

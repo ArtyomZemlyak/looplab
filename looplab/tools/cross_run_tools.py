@@ -285,6 +285,41 @@ class CrossRunTools:
                 return False
         return self._scope.allows(row)
 
+    def inventory(self) -> dict[str, int | str]:
+        """How many stored rows each cross-run tool has to read (see `_base.INVENTORY_CONTRACT`).
+
+        Derived from `_GOVERNED_TOOL_SOURCES` rather than hand-listed, so a tool added there is
+        published here on the same commit instead of quietly reporting nothing.
+
+        This counts what the tool READS, not what it would RETURN: every one of these applies a
+        scope filter (task family, objective direction) afterwards, so a non-zero count is an
+        upper bound and only a ZERO is decisive. That asymmetry is the point -- an over-count
+        costs at most the call that would have happened anyway, while an under-count would
+        suppress a call that had an answer. An unreadable file is therefore UNKNOWN and never 0.
+        """
+        if not self.dir:
+            return {}                      # `specs()` offers nothing either; silence, not zeros
+        rows: dict[str, int] = {}
+        unknown: dict[str, str] = {}
+        for filename in {name for _, names in _GOVERNED_TOOL_SOURCES.values() for name in names}:
+            path = self.dir / filename
+            try:
+                if not path.exists():
+                    rows[filename] = 0     # an absent store is a KNOWN-empty one
+                    continue
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    rows[filename] = sum(1 for line in handle if line.strip())
+            except OSError as exc:
+                unknown[filename] = f"unreadable store: {type(exc).__name__}"
+        out: dict[str, int | str] = {}
+        for tool, (_scoped, sources) in _GOVERNED_TOOL_SOURCES.items():
+            blocked = [name for name in sources if name in unknown]
+            if blocked:
+                out[tool] = unknown[blocked[0]]
+            else:
+                out[tool] = sum(rows.get(name, 0) for name in sources)
+        return out
+
     def specs(self) -> list[dict]:
         if not self.dir:
             return []
@@ -855,8 +890,22 @@ class CrossRunTools:
         claim_complete = claim_source.get("source_complete") is True
         fully_complete = source_complete and scope_complete and claim_complete
         if not hits:
-            lines = [("(no retained cross-run knowledge matched; partial source/scope is not proof "
-                      "that no matching concept exists or that no matching claim exists)")
+            # An EMPTY STORE is a different answer from an empty RESULT, and only the first is
+            # terminal. "(no cross-run knowledge matched)" reads as "not that query" and invites a
+            # reformulation: measured 2026-08-19 on a cold-start run, one deep-research phase spent
+            # FIVE `cross_run_search` calls rephrasing ("SVM", "algotune_svm", "SMO sequential
+            # minimal optimization", ...) against a store holding zero records, while the prompt was
+            # already publishing `cross_run_search=0`. The receipt below even prints a
+            # `corpus=<digest>`, which looks like a corpus that exists. So when the store is empty,
+            # say THAT -- it is the one case where no query can succeed, and it comes from the same
+            # `inventory()` count the prompt publishes, so the two cannot disagree.
+            empty_store = self.inventory().get("cross_run_search") == 0
+            lines = [("(the cross-run store is EMPTY — 0 records across every source it reads, so "
+                      "no query will match. This is the store's size, not a judgement on your "
+                      "query; nothing will change until another run writes to it.)")
+                     if empty_store
+                     else ("(no retained cross-run knowledge matched; partial source/scope is not "
+                           "proof that no matching concept exists or that no matching claim exists)")
                      if not fully_complete
                      else "(no cross-run knowledge matched)"]
             # a legacy/capped capsule may have omitted the matching concept entirely;

@@ -110,7 +110,17 @@ def test_the_guidance_still_reaches_the_developer_that_writes_the_code():
     # the operator's business, dropping it silently is not.
     dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
     dev._probe, dev.prompts = True, {"repo_developer_system_body": "OPERATOR BODY"}
-    assert dev._system_body(render) == "OPERATOR BODY"
+    body = dev._system_body(render)
+    assert body.startswith("OPERATOR BODY"), (
+        "an operator override must replace the persona body, not be merged into it")
+    # What may follow it is exactly the CODE-OWNED suffixes, appended AFTER `render()` on purpose
+    # (see `_system_body`): an override replaces the PERSONA and must not be able to drop a rule the
+    # code is responsible for. Asserting equality here would have made adding any such rule look
+    # like a regression; asserting the prefix plus a closed set of suffixes keeps the real property
+    # — nothing else leaks in — while letting the code own its own contracts.
+    from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
+    assert body == "OPERATOR BODY" + _CONTEXT_BEFORE_TOOLS_RULE, (
+        "the override carried something other than the code-owned suffixes")
     # ...and the assembly must still ASK for the body. AST, not a substring: a commented-out call
     # would satisfy a regex while the model received no guidance at all.
     assert "self._system_body" in called_names(LLMRepoDeveloper._run)

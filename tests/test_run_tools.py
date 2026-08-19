@@ -845,8 +845,14 @@ def test_data_tools_graceful_and_with_data():
     st = _st()
     bare = DataTools(object())
     bare.bind_state(st)
-    assert "no structured schema" in bare.execute("data_schema", {}).lower()
-    assert "no data assets" in bare.execute("read_asset", {}).lower()
+    # A task with NO data surface answers all three the same way, and terminally: the wording
+    # changed on 2026-08-19 because "(no structured schema — try read_asset or data_profile)"
+    # referred the model to two tools that were empty for the same reason. The property is that a
+    # dataless task says so and closes the door, not that it says any particular sentence.
+    for tool in ("data_schema", "data_profile", "read_asset"):
+        answer = bare.execute(tool, {}).lower()
+        assert "no data assets" in answer, tool
+        assert "try read_asset" not in answer, tool
 
     dt = DataTools(_FakeTask())
     dt.bind_state(st)

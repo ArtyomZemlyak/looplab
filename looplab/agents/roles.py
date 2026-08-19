@@ -167,6 +167,32 @@ _UNTRUSTED_MEMORY_RULE = (
     "contradicts what this run's own state shows, believe this run's state.")
 
 
+# CONTEXT FIRST, TOOLS FOR THE GAP — appended wherever a role is offered tools, for the same reason
+# `_UNTRUSTED_MEMORY_RULE` is: code-owned, after `render()`, so a PromptStore persona override cannot
+# drop it.
+#
+# Measured 2026-08-19 on a cold-start run (AlgoTune `svm`, 23 tools offered): 37 of 40 tool calls
+# returned an empty answer, `read_asset` was called NINE times for the same "(this task has no data
+# assets)", and the user turn had ALREADY said "0 nodes total, 0 active experiments" before the model
+# asked `list_experiments` four times. Replayed on four models, the shape held for three of them
+# (deepseek-v4-flash 17-19 calls, glm-5.3 15, claude-opus-5 14) and not the fourth
+# (gemini-3.7-flash 3-4) — so it is not one model's quirk, and paying more does not buy the
+# discipline: opus-5 costs ~145x deepseek per slice and behaved the same.
+#
+# The rule is stated as a PROPERTY of the two information sources rather than as a list of tools not
+# to call, because a list goes stale the moment a provider is added, and because the useful idea
+# generalizes: the turn you were handed is a SNAPSHOT that already answers "what exists"; a tool is
+# for what the snapshot does not contain. An empty answer is therefore not a hint to look harder — it
+# is confirmation of something the snapshot already told you.
+_CONTEXT_BEFORE_TOOLS_RULE = (
+    "\n\nYour turn opens with a snapshot of this run's state — what exists, what is "
+    "active, what was omitted. The snapshot answers WHAT IS THERE; a tool answers what is inside "
+    "one of those things. If the snapshot shows something absent or a count at zero, a tool can "
+    "only repeat that. The snapshot is a point in time and the run keeps moving, so re-ask when "
+    "something has HAPPENED since — an experiment finished, an evaluation landed — and not "
+    "because an answer came back empty.")
+
+
 def _researcher_capability_suffix(offer_sweep: bool, footprint_choice: bool = False) -> str:
     """P6: capability prose SHARED by both researchers (`LLMResearcher` here and agent.py's
     `ToolUsingResearcher`) so the two role variants can't drift apart again: the sweep offer
@@ -1072,7 +1098,7 @@ class LLMResearcher:
                             bool(getattr(self, "_gpu_footprint_cue", False)))
                         + _OPERATOR_NOTE
                         + "Respond ONLY with the requested structured fields." + hyp_sys
-                        + _UNTRUSTED_MEMORY_RULE
+                        + _UNTRUSTED_MEMORY_RULE + _CONTEXT_BEFORE_TOOLS_RULE
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),

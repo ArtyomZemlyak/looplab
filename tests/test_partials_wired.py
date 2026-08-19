@@ -196,7 +196,12 @@ def test_past_cases_become_searchable_knowledge(tmp_path):
     out = kt.execute("kb_search", {"query": "polynomial degree"})
     assert "PAST CASE" in out and "degree" in out.lower()
     # file tools degrade gracefully without a notes dir
-    assert "no notes directory" in kt.execute("grep", {"pattern": "x"}).lower()
+    # File tools degrade gracefully without a notes dir. The sentence is deliberately scoped to
+    # the note readers: this provider HAS cases, and `kb_search` above just found one, so an answer
+    # claiming there is nothing to read at all would be false here.
+    answer = kt.execute("grep", {"pattern": "x"}).lower()
+    assert "no knowledge notes at all" in answer
+    assert "kb_search" in answer
 
 
 class _FailsUnderConfirmDeveloper:

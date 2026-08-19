@@ -20,8 +20,10 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
+from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import (
-    _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _UNTRUSTED_MEMORY_RULE,
+    _CONCEPT_AUTHORING_GUIDANCE, _CONTEXT_BEFORE_TOOLS_RULE, _OPERATOR_NOTE,
+    _UNTRUSTED_MEMORY_RULE,
     _attention_points, _clamp_fill,
     _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, bind_idea_to_board_card,
@@ -298,7 +300,7 @@ class ToolUsingResearcher:
                         + self.space_hint + hyp
                         # Mirror of LLMResearcher's rule — this variant splices the same untrusted
                         # cross-run cues into its user turn, so it needs the same code-owned guard.
-                        + _UNTRUSTED_MEMORY_RULE
+                        + _UNTRUSTED_MEMORY_RULE + _CONTEXT_BEFORE_TOOLS_RULE
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),
@@ -306,6 +308,7 @@ class ToolUsingResearcher:
                                                      board_cards=self._visible_board_cards,
                                                      memo_verdicts=bool(getattr(
                                                          self, "_memo_verdict_cue", False)))
+                + answered_by_context(self.tools)
                 + hint_block + cue +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},

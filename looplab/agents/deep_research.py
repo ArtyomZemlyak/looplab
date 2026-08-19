@@ -22,6 +22,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.agents.answered_by_context import answered_by_context
+from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.agents.loop_options import LoopOptions
 from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.fitness import is_usable_metric
@@ -264,6 +266,7 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         discard_counts: dict[str, int] = {}
         for node in predispatch_discards:
             reason = failure_text(node, max_chars=80, fallback="unknown")
+
             discard_counts[reason] = discard_counts.get(reason, 0) + 1
         ranked_reasons = sorted(discard_counts.items(), key=lambda item: (-item[1], item[0]))
         shown_reasons = ranked_reasons[:5]
@@ -423,8 +426,12 @@ class DeepResearcher:
         messages = [
             {"role": "system", "content":
                 render(self.prompts, "deep_research_system", _SYSTEM)
-                + _UNTRUSTED_RESEARCH_DATA_RULE},
+                + _UNTRUSTED_RESEARCH_DATA_RULE + _CONTEXT_BEFORE_TOOLS_RULE},
+            # The tool-surface join goes in the USER turn, beside the snapshot it describes, and
+            # is built from the BOUND provider rather than re-derived here — see
+            # `agents/answered_by_context.py` for why this is data and not another prompt rule.
             {"role": "user", "content": state_brief(state) +
+                answered_by_context(self.tools) +
                 "\nReview the run. Consult sources if useful, then emit your memo."},
         ]
         sources: list[dict] = []
@@ -545,10 +552,14 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     if getattr(settings, "web_search", False):
         from looplab.tools.web import WebTools
         providers.append(WebTools(enabled=True))
-    tools = None
-    if providers:
-        from looplab.agents.agent import CompositeTools
-        tools = providers[0] if len(providers) == 1 else CompositeTools(providers)
+    # Through `compose_tools`, not a hand-rolled `CompositeTools(providers)`. The comment above says
+    # this stage uses the same capability assembly as the Researcher — and then the composition step
+    # was spelled out separately, which is how it silently missed `Settings.hide_empty_tools`:
+    # measured 2026-08-19, a run launched with the flag ON recorded it as `true` in
+    # `config.snapshot.json` and still offered every empty tool here, because this is the phase that
+    # makes essentially all of a cold-start run's tool calls.
+    from looplab.agents.tool_loop import compose_tools
+    tools = compose_tools(providers, settings) if providers else None
     # `loop_opts_from_settings(settings)` MINUS this stage's summary-client divergence, instead of the nine
     # individually re-plumbed settings this used to spell out (doc 25 AG-01). The bundle also
     # carries the operator's `self_plan` setting and the D11 `summary_client` (compressor_model — this

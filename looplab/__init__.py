@@ -40,6 +40,7 @@ _LAYOUT = {
     "ablation": "engine",
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
+    "answered_by_context": "agents",
     "agents_md": "tools",
     "appconfig": "core",
     "envsafe": "core",   # the secret screen + the DECLARED ENVIRONMENT rule all three levels share
