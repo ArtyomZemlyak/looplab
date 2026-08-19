@@ -492,12 +492,26 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   directory-form predicate filtered `_SKIP_DIRS` over the ABSOLUTE path, and this repo's agent
   worktrees live under `.claude/worktrees/`, so in a worktree every file under a cited directory was
   skipped and a `present:` proof reported a live defect as shipped.
+  **The other three large pools are re-derived too (2026-08-19).** `docs/CODE_REVIEW.md`: all
+  **21** `🟡` rows — not 22; the count every doc quoted counted the severity LEGEND as a row — 7 are
+  still true and carry markers, 12 shipped, and **2 were false on the day they were written**, one of
+  them asserting the exact opposite of another row 24 lines below it. All 21 line citations are dead
+  (the flat package split in `e1c85ddd`), so locate by SYMBOL. Its header's "not a current
+  open-issue ledger" was falsified by the file itself in three places and now says what the file is.
+  `docs/27`: 15 markers; its two status surfaces disagreed (the banner covers 8 items against ≥13
+  non-resolved cells, one banner has no cell in the `Open` vocabulary to reconcile with, the
+  eval-receipt cell still says "Open" where its own banner says "PARTIALLY CLOSED"), the cancellation
+  banner is now 2/3 true (MCP cancellation shipped `cb3433b3`, 2026-08-17), and the eval-corpus
+  banner was FALSE WHEN WRITTEN (`tests/test_phase_handoff.py` and
+  `tests/test_prompt_injection_rule.py` both predate the document). `docs/34`: 4 markers and **D-05
+  CLOSED** — its fix landed at 06:32 UTC and its "still open" status update at 11:02 UTC the SAME
+  day. Doc 27 has no ID namespace of its own, which is why none of its contradictions was greppable.
   Earlier tagged: the 7 live in-code `REVIEW 2026-08-18` annotations, the 2 in-code docstring
   residues (`core/atomicio.py`, `engine/repair_verify.py`), §0.1 row 5, the eight `⬜` residues in
   §§0.10/0.13/0.14/0.15, §0.16's two refusals and doc 29 `F3` as `DECLINED`, plus `F3`'s nested open
   follow-up. STILL NOT tagged, and this is the honest half: §2 Themes A–I (the older text the file's
-  own caveat 1 says to distrust), §0.2 low-cost residue, §§4–6, doc 27's, doc 34's 5, and
-  `CODE_REVIEW.md`'s 22. Each needs re-deriving against the tree before
+  own caveat 1 says to distrust), §0.2 low-cost residue, and §§4–6 of the BACKLOG. Each needs
+  re-deriving against the tree before
   it can carry a falsifier, and **a marker whose proof nobody re-derived is the same unverified
   claim the glyph already was** — which is the whole reason this rule exists. Tag as you re-derive;
   never tag to look complete.
