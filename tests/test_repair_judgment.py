@@ -746,3 +746,52 @@ def test_a_cap_above_the_engine_ceiling_is_never_reached_and_the_terminal_says_s
             if row.type == "node_repaired" and isinstance(row.data, dict)
             and row.data.get("attempts_left") is not None]
     assert all(value <= _UNLIMITED_REPAIR_CEILING for value in told), told
+
+
+def test_the_license_is_priced_at_the_chains_largest_declaration_not_its_latest():
+    """The spend and the license have to be priced under the same declarations.
+
+    `chain_seconds` accumulates wall-clock earned under every manifest the chain has run, while the
+    pipeline cost is re-resolved from the CURRENT one — so a repair that legitimately shrinks its
+    declared stage timeouts (right-sizing after an epoch cut) retroactively re-priced seconds that
+    were inside the license when they were spent. Driven as the pure decision the engine makes: the
+    same spend, against the same cap, answered by the two prices.
+    """
+    from looplab.engine.repair_judgment import repair_redone_work_stop
+
+    big, small, cap = 3600.0, 600.0, 2       # licenses 10,800s vs 1,800s
+    spent = 4000.0                           # earned while the pipeline still declared 3600s
+
+    assert repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=big,
+                                   retrain_cap=cap) is None
+    stop = repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=small, retrain_cap=cap)
+    assert stop is not None                  # the pre-fix answer: abandoned on a cheaper manifest
+    assert "1800s" in stop and "600s" in stop, stop
+
+    # ...and the engine takes the max, so the chain keeps the license it earned.
+    assert repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=max(big, small),
+                                   retrain_cap=cap) is None
+
+
+def test_the_engine_feeds_that_floor_a_running_maximum_and_not_the_latest_pipeline():
+    """Pinned on the call itself: the value handed to `repair_redone_work_stop` must be the
+    chain-scoped high-water mark, not the attempt's freshly-resolved number. Driving it would mean
+    standing up a repo eval and two manifests for one `max()`; the AST is rung 3 of the ladder and
+    the arithmetic either side of it is driven above."""
+    import ast
+
+    from tests._source_scan import function_tree
+    from looplab.engine.evaluate import EvaluateMixin
+
+    tree = function_tree(EvaluateMixin._evaluate)
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "repair_redone_work_stop"]
+    assert len(calls) == 1, "the floor is decided in one place; re-derive this test"
+    priced = {kw.arg: ast.unparse(kw.value) for kw in calls[0].keywords}
+    assert priced.get("pipeline_seconds") == "chain_pipeline_s", priced
+    # and that name is a running maximum, not a rebinding of the per-attempt resolution
+    maxima = [n for n in ast.walk(tree)
+              if isinstance(n, ast.Assign)
+              and any(getattr(t, "id", None) == "chain_pipeline_s" for t in n.targets)
+              and isinstance(n.value, ast.Call) and getattr(n.value.func, "id", "") == "max"]
+    assert len(maxima) == 1, ast.unparse(tree)[:200]

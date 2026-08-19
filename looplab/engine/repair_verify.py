@@ -387,13 +387,12 @@ _CITATION_RE = re.compile(
     r"|\bnode-\d+"
     r"|\bthe\s+(?:previous|prior|last|earlier)\s+(?:repair|attempt|fix|change|run|node)\b",
     re.IGNORECASE)
-# REVIEW 2026-08-18 (correctness): the `.` in _CLAUSE_ENDS also matches the decimal point of a
-# number, so a citation clause that quotes a value ends INSIDE it and every cited token after the
-# number falls outside the span — driven: "Node 1 used lr 0.5 and nll_cos throughout its training"
-# over a diff without `nll_cos` yields `_citation_clauses` == [(0, 16)] (the clause dies at the '.'
-# in `0.5`) and `verify_repair` returns REPAIR_UNMET ('nll_cos',), the citation false-positive
-# class the demotion shipped to remove; the same text minus the decimal answers `unstated`. Fix
-# direction: only treat `.` as a clause end when it is not between two digits.
+# A clause ends at one of these — but a `.` BETWEEN TWO DIGITS is a decimal point and not the end of
+# anything (`_clause_end_at`). A rationale citing another experiment almost always quotes its
+# numbers, and ending the clause inside `0.5` put every later cited token outside the span: "Node 1
+# used lr 0.5 and nll_cos throughout its training", over a diff that touches no `nll_cos`, was
+# demoted to REPAIR_UNMET('nll_cos') — exactly the citation false positive this rung shipped to
+# remove — while the same sentence without the decimal answered `unstated`.
 _CLAUSE_ENDS = ";.\n"
 
 # --- An abbreviated identifier -------------------------------------------------------------------
@@ -583,13 +582,30 @@ def _claim_met(token: str, changed_paths, region: str, identifiers=None) -> bool
     return _abbreviated_identifier(token, region, identifiers) is not None
 
 
+def _clause_end_at(text: str, k: int) -> bool:
+    """Is `text[k]` the END of a clause?
+
+    `.` is the whole subtlety: it ends a sentence AND separates the halves of a decimal. Only the
+    digit-dot-digit shape is exempted — a trailing `2.` or a leading `.5` still ends the clause,
+    because neither is how a rationale writes a value, and widening the exemption would let a
+    sentence ending in a version number swallow the rest of the paragraph into the citation.
+    """
+    ch = text[k]
+    if ch not in _CLAUSE_ENDS:
+        return False
+    if ch == "." and 0 < k < len(text) - 1 and text[k - 1].isdigit() and text[k + 1].isdigit():
+        return False
+    return True
+
+
 def _citation_clauses(text: str) -> list:
     """Half-open spans of `text` that are talking about ANOTHER experiment."""
     out = []
-    for m in _CITATION_RE.finditer(text or ""):
+    text = text or ""
+    for m in _CITATION_RE.finditer(text):
         end = len(text)
         for k in range(m.end(), len(text)):
-            if text[k] in _CLAUSE_ENDS:
+            if _clause_end_at(text, k):
                 end = k
                 break
         out.append((m.start(), end))
@@ -771,6 +787,20 @@ def _assigned_numeric_paths(source: str) -> dict:
     except (SyntaxError, ValueError, RecursionError, MemoryError):  # noqa: BLE001 — not evidence
         return {}
     found: list = []
+    # SCOPE DEPTH per statement: 0 for the module body, +1 inside every `def`/`class`/`lambda`.
+    # Computed here rather than inferred from `col_offset`, which a continuation line or a
+    # module-level `if` would both get wrong.
+    depth_of: dict = {}
+
+    def _mark(node, depth: int) -> None:
+        for child in ast.iter_child_nodes(node):
+            deeper = depth + isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                                ast.ClassDef, ast.Lambda))
+            depth_of[id(child)] = deeper
+            _mark(child, deeper)
+
+    depth_of[id(tree)] = 0
+    _mark(tree, 0)
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
             targets, value = node.targets, node.value
@@ -781,19 +811,19 @@ def _assigned_numeric_paths(source: str) -> dict:
         val = _numeric_literal(value)
         if val is None:
             continue
-        found.append((getattr(node, "lineno", 0), getattr(node, "col_offset", 0), targets, val))
+        found.append((depth_of.get(id(node), 0), getattr(node, "lineno", 0),
+                      getattr(node, "col_offset", 0), targets, val))
     out: dict = {}
-    # REVIEW 2026-08-18 (correctness): textual (lineno, col) order still lets DEAD code win — the
-    # adversarial decoy the docstring's fix narrative reads as closed is only RELOCATED: a
-    # never-called helper placed AFTER the real assignment outranks it. Driven: module-level
-    # `config.train.training.batch_size = 8192` followed by `def _unused(): ... = 1024` reports
-    # 1024, so `declared_param_overrides` mints a false `params_overridden` caveat on a champion
-    # whose running code agrees with its declaration — and a trailing decoy EQUAL to the declared
-    # value suppresses a real module-level override. Fix direction: prefer the shallowest enclosing
-    # scope (module level first) and fall back to textual order only within one depth.
-    # A stable sort on the position the source really has; `ast.walk`'s own order is BFS and is the
-    # one thing this dict may not inherit (see the docstring).
-    for lineno, _col, targets, val in sorted(found, key=lambda f: (f[0], f[1])):
+    # SHALLOWEST WINS, then latest. `out[key] = ...` is last-write-wins, so the sort runs DEEPEST
+    # first and the module body last: an assignment in the module body certainly executes, one
+    # inside a `def` only if something calls it, and letting the second outrank the first is what
+    # made a one-line `def _unused(): cfg.a.b = <declared value>` — placed ANYWHERE in the file —
+    # a free acquittal, and a nested default a free conviction of an agreeing module body. Within
+    # ONE depth the rule is unchanged and is textual: later overwrites earlier. (Textual order still
+    # is not execution order, which is exactly why the module docstring says this compares two
+    # artifacts and never claims "this is what ran".)
+    for _depth, lineno, _col, targets, val in sorted(
+            found, key=lambda f: (-f[0], f[1], f[2])):
         for tgt in targets:
             parts = _assignment_target_parts(tgt)
             if parts:

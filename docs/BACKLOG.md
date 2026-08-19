@@ -4654,3 +4654,48 @@ deliberately deferred, with rationale:
   halves fail closed, the two name sets are disjoint (pinned as disjointness, not as an
   unfalsifiable ordering claim), and the OFF path is the historical one-shot call with the
   invitation absent.]
+
+## The 2026-08-18 review annotations, worked
+
+  36 findings arrived as in-code `REVIEW 2026-08-18` annotations, each with driven evidence and a
+  fix direction. Worked in order of what they touch: the judge's own evidence first, then the
+  repair path the fault-routing change had just widened.
+
+  **[log_tools — four, all about a RESUMED sweep.** Everything a resumed sweep reports is relative
+  to something, and four of those relations were wrong. (1) Hit numbers were minted from the resume
+  point while `_record_range_scan` counts from this attempt's FLOOR, so the number the receipt tells
+  the caller to spend addressed a DIFFERENT record — two numberings for one log, the spent-remedy
+  defect the module was rewritten to remove, one mode over. `_records_before` re-walks the prefix to
+  seed the count: split-only, no caller pattern, which is the expensive half and the whole reason a
+  resume exists; a record straddling the resume point is counted in the prefix and skipped by the
+  sweep, so once either way. (2) The first record after a resume was dropped as torn, though every
+  byte a receipt hands back is a record BOUNDARY — a match in the record starting at a ceiling stop
+  was counted by NEITHER sweep while the resumed one reported reaching the end of the log; one
+  1-byte read answers it, and a resume INSIDE a record is still torn. (3) A deadline in the first
+  batch made `hi == lo`, so "continue with from_byte=<lo>" named the call just made; withholding
+  the byte would break the never-skip rule it exists for, so it is given AND labelled. (4) `of
+  {seen}` was suffixed "+" only for the satisfied stop, so a range cut short by the ceiling read
+  "records 40-45 of 45" on a 100-record log — three false claims in one line.]
+
+  **[repair_verify — two, both flippable by an adversarial one-liner.** The `.` in `_CLAUSE_ENDS`
+  also matches a decimal point, so a citation clause quoting a value ended INSIDE the number and
+  every cited token after it fell outside the span: "Node 1 used lr 0.5 and nll_cos throughout its
+  training" was charged with promising `nll_cos`, the exact false positive the rung shipped to
+  remove. `_clause_end_at` exempts digit-dot-digit only — a trailing `2.` still ends the clause, or
+  one sentence about another node would swallow the paragraph after it. And `_assigned_numeric_paths`
+  ordered by `(lineno, col)`, which let DEAD code win: a `def _unused(): cfg.a.b = <declared value>`
+  placed anywhere acquitted a real module-level divergence, and a nested default convicted an
+  agreeing module body as `params_overridden` on the run's best number. Scope DEPTH is now computed
+  and the sort runs deepest-first so the module body — the code that certainly executes — is written
+  last; within one depth the textual rule is unchanged.]
+
+  **[evaluate — the repair license was priced under the wrong declaration.** `chain_seconds`
+  accumulates wall-clock earned under every manifest the chain has run, while the pipeline cost was
+  re-resolved from the CURRENT one — so a repair that legitimately SHRINKS its declared stage
+  timeouts (right-sizing after an epoch cut) retroactively re-priced seconds that were inside the
+  license when they were spent, leaving the fix exactly ONE eval and, if it failed for any reason, a
+  terminal charging old-declaration work at the new rate. The floor is now fed the chain's largest
+  declaration. It cannot be gamed upward past the operator's own number — `stage_budget_refusal`
+  already refuses a declaration above `eval_spec_time_budget` — and the residual is stated: the
+  high-water mark is per-PROCESS, so a resumed chain is priced exactly as it was before and only a
+  live one is priced honestly.]

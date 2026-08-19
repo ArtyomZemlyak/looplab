@@ -1491,3 +1491,58 @@ def test_the_triage_providers_construction_does_not_park_the_engine_loop(tmp_pat
         assert len(during) >= 3, (
             f"the event loop made {len(during)} tick(s) while the triage provider was being built — "
             "the construction is running on the loop")
+
+
+# =========================================== the 2026-08-18 review findings in this module
+#
+# Both are about a rung reaching its verdict from TEXT and from an AST, where the thing being read
+# is written by the party being judged. Each let an adversarial one-liner flip the answer.
+
+def test_a_citation_that_quotes_a_number_keeps_its_whole_clause():
+    """`.` ends a clause AND separates the halves of a decimal, and a rationale citing another
+    experiment almost always quotes its numbers. Ending the clause inside `0.5` put every later
+    cited token outside the citation span, so a sentence that is entirely ABOUT another node was
+    charged with promising the tokens in its second half — the citation false positive this rung
+    shipped to remove."""
+    from looplab.engine.repair_verify import _citation_clauses, verify_repair
+
+    text = "Node 1 used lr 0.5 and nll_cos throughout its training"
+    assert [text[a:b] for a, b in _citation_clauses(text)] == [text]
+
+    answer = verify_repair(text, changed=("train.py",), code_changed=True, region="train.py")
+    assert "nll_cos" not in (answer.unmet or ()), answer
+
+    # A `.` that is NOT between two digits still ends the clause — otherwise one sentence about
+    # another node would swallow the paragraph after it.
+    other = "Node 1 used version 2. Then I deleted the nll_cos path"
+    assert [other[a:b] for a, b in _citation_clauses(other)] == ["Node 1 used version 2"]
+
+
+def test_dead_code_cannot_outrank_the_module_body_in_either_direction():
+    """`out[key] = ...` is last-write-wins, so ORDER is the verdict. Textual order let a nested
+    assignment beat the module body, which handed an adversarial candidate both directions for
+    free: a `def _unused(): cfg.a.b = <the declared value>` acquits a real module-level divergence,
+    and a nested default convicts a module body that agrees with its declaration — as
+    `params_overridden` on the run's best number."""
+    from looplab.engine.repair_verify import _assigned_numeric_paths
+
+    key = ("config", "train", "training", "batch_size")
+
+    acquittal_decoy = ("config.train.training.batch_size = 8192\n"
+                       "def _unused():\n"
+                       "    config.train.training.batch_size = 1024\n")
+    assert _assigned_numeric_paths(acquittal_decoy)[key][0] == 8192
+
+    conviction_decoy = ("def _unused():\n"
+                        "    config.train.training.batch_size = 1024\n"
+                        "config.train.training.batch_size = 8192\n")
+    assert _assigned_numeric_paths(conviction_decoy)[key][0] == 8192
+
+    # Within ONE depth the rule is unchanged: later overwrites earlier.
+    same_depth = ("config.train.training.batch_size = 1\n"
+                  "config.train.training.batch_size = 2\n")
+    assert _assigned_numeric_paths(same_depth)[key][0] == 2
+
+    # A value that only ever appears nested is still reported — the rule is precedence, not blindness.
+    nested_only = "def go():\n    config.train.training.batch_size = 256\n"
+    assert _assigned_numeric_paths(nested_only)[key][0] == 256

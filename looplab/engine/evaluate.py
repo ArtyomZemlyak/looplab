@@ -1658,6 +1658,21 @@ class EvaluateMixin:
             # bound that reaches the repair chains `inline_repair_retrain_cap` structurally cannot
             # charge — the ones that re-run a stage without discarding a completed one.
             prior_repair_seconds = _durable_repair_seconds(events_at_start, node_id, generation)
+            # THE LICENSE IS PRICED AT THE LARGEST DECLARATION THE CHAIN HAS SEEN, because the SPEND
+            # it is compared against was earned under all of them. `chain_seconds` accumulates
+            # wall-clock spent under the PRE-repair manifest, while the pipeline cost is re-resolved
+            # from the POST-repair one each attempt — so a repair that legitimately SHRINKS its
+            # declared stage timeouts (right-sizing after an epoch cut) retroactively re-priced
+            # seconds that were inside the license when they were spent, leaving the fix exactly ONE
+            # eval and, if that attempt failed for any reason, a terminal charging old-declaration
+            # work at the new rate. A high-water mark cannot be gamed upward past the operator's own
+            # number: `stage_budget_refusal` already refuses a declaration above
+            # `eval_spec_time_budget`, so the ceiling on this maximum is the budget the operator set.
+            # RESIDUAL, stated rather than hidden: it is per-PROCESS. A resume re-seeds it from the
+            # manifest it resumes with, which is the same declaration the pre-fix code used for the
+            # whole chain — so a resumed chain is never priced looser than before, only a live one
+            # is priced honestly.
+            chain_pipeline_s = 0.0
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
             async def _record_superseded() -> None:
                 async with self._write_lock:
@@ -2132,19 +2147,15 @@ class EvaluateMixin:
                         self._resolved_stages(node, workdir),
                         eval_spec_time_budget(self._eval_spec)
                         if isinstance(self._eval_spec, dict) else None)
-                    # REVIEW 2026-08-18 (correctness): the spend and the license are priced under
-                    # DIFFERENT declarations — `chain_seconds` includes wall-clock spent under the
-                    # PRE-repair manifest while `_pipeline_s` is re-resolved from the POST-repair
-                    # one, so a repair that SHRINKS declared stage timeouts (right-sizing after an
-                    # epoch cut) retroactively re-prices seconds that were inside the license when
-                    # they were spent: the fix gets exactly ONE eval, and if that attempt fails for
-                    # anything the chain is abandoned against `(cap+1) * <the new, cheaper
-                    # pipeline>` with a terminal that charges old-declaration work at the new rate.
-                    # Fix direction: charge each attempt against the pipeline declared when it ran
-                    # (or license against the largest declaration the chain has seen).
+                    # See `chain_pipeline_s` above: the spend is cumulative over every manifest
+                    # this chain has run, so the license must be too.
+                    try:
+                        chain_pipeline_s = max(chain_pipeline_s, float(_pipeline_s or 0.0))
+                    except (TypeError, ValueError):
+                        pass
                     floor_stop = repair_redone_work_stop(
                         chain_seconds=prior_repair_seconds + total_eval,
-                        pipeline_seconds=_pipeline_s,
+                        pipeline_seconds=chain_pipeline_s,
                         retrain_cap=int(self._inline_repair_retrain_cap or 0))
                 # Inline-repair gate: feature on, repairable reason, no floor reached, a Developer that
                 # can repair, and something to repair (whole-file code, multi-file edits, or a repo).
