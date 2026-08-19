@@ -193,6 +193,45 @@ def test_an_unreadable_cross_run_store_is_unknown_not_empty(tmp_path, monkeypatc
     assert rows["cross_run_prior_attempts"] == 0
 
 
+# ---- the spend ceiling ---------------------------------------------------------------------
+#
+# `llm_budget_usd` ships in the same change because it is the same question asked about money
+# rather than about calls: what does this run get, and how is that comparable to another loop's.
+
+
+def test_the_spend_ceiling_reaches_the_accountant_and_zero_means_no_limit():
+    from looplab.core.config import Settings
+    from looplab.core.llm import make_llm_client
+
+    common = dict(llm_model="m", llm_base_url="http://localhost:1/v1", llm_api_key="k")
+    assert make_llm_client(Settings(**common)).accountant.limit is None, (
+        "0.0 must stay the historical no-limit behaviour, not a ceiling of zero")
+    assert make_llm_client(Settings(llm_budget_usd=0.25, **common)).accountant.limit == 0.25
+
+
+def test_the_ceiling_stops_the_run_rather_than_degrading_it():
+    """`BudgetExceeded` is a hard stop every agent path propagates; the accountant must raise it
+    AT the limit, not past it, and must commit the spend it is refusing to exceed."""
+    from looplab.core.llm import BudgetExceeded, CostAccountant
+
+    acc = CostAccountant(limit=0.10)
+    acc.add(0.04)
+    acc.add(0.05)
+    assert acc.remaining() == pytest.approx(0.01)
+    with pytest.raises(BudgetExceeded):
+        acc.add(0.02)
+    assert acc.remaining() == 0.0, "a refused call still spent what it spent"
+
+
+def test_no_limit_never_raises():
+    from looplab.core.llm import CostAccountant
+
+    acc = CostAccountant()
+    for _ in range(50):
+        acc.add(1.0)
+    assert acc.remaining() is None
+
+
 # ---- the other half of the fix: the tools' own answers must be TERMINAL --------------------
 #
 # A correct count is defeated by an answer the model can read as a near-miss. Both of these were
