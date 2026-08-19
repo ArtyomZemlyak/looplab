@@ -55,7 +55,10 @@ def test_index_mentions_every_numbered_document():
     #   column and `mkdocs.yml` nav together — rather than one being dropped. Note the collision
     #   itself still slipped past the membership check exactly as the comment says; what went red
     #   was the count, because after renumbering there genuinely is one more document.
-    assert len(numbered) == 42, "the derived numbered-document inventory changed"
+    #   42 -> 43 (2026-08-19): the operator-list audit (doc 43). No collision this time — the
+    #   number was claimed by checking the glob AND the index table together, which is the
+    #   procedure the three earlier collisions existed for.
+    assert len(numbered) == 43, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
