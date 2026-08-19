@@ -70,7 +70,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               other — the same shape as the 2026-08-13 merge recorded below, and with the same
 #               answer: neither branch's digest was ever correct for the shipped tree, so this is
 #               re-measured ONCE over the merged map rather than picked from a side.
-_EXPECTED_DIGEST = "sha256:92711cc014eb99103dc51de567ea8f7db43fdb2b21692406bfabe49d3ba8e2fd"
+_EXPECTED_DIGEST = "sha256:16d6005d4e64326158b925d75526907ff34cdddcb5df828aa953858000bb4f6c"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -312,7 +312,27 @@ _EXPECTED_DIGEST = "sha256:92711cc014eb99103dc51de567ea8f7db43fdb2b21692406bfabe
 #               would be compared against. Old receipts SHOULD stop verifying, and the revocation
 #               costs nothing that was not already spent: `speculation_implementation_digest` hashes
 #               every shipped `.py` and this change moves it regardless.
-_EXPECTED_FIELD_COUNT = 211
+#   2026-08-19  + gpu_footprint_cue  (do the two Researcher prompts state what a LARGER
+#               `footprint.gpus` actually does, against a shipped wording the scheduler
+#               contradicts — docs/BACKLOG.md §0.15). The 'field set changed too' branch, and
+#               verified that way rather than from the count: diffing the `Settings` field set
+#               against `086ca5b4` reports exactly `['gpu_footprint_cue']` added and nothing
+#               removed, so a +2/-1 cannot be hiding behind the +1. `_EXPECTED_FIELD_COUNT` goes
+#               211 -> 212 and both pins are re-set.
+#               INERT for a calibration replicate, and inert twice over: the profile's researcher
+#               is `cli/__init__.py::_make_calibration_roles`' GPU probe rather than an
+#               `LLMResearcher`, so no footprint clause is ever composed; and the engine cue it
+#               also governs is silent unless `_repo_spec` and a GPU pool are both present, which
+#               the toy calibration workload has not. Left at the shipped `True` for
+#               `cadence_while_evaluating`'s reason — a `False` here would assert an intent about
+#               behaviour that cannot occur. Re-pinning is right rather than merely necessary for
+#               this list's usual reason: the field decides what a PAID role is told about the
+#               hardware it may ask for, and an envelope that cannot state that is not the
+#               envelope a later receipt would be compared against. Old receipts SHOULD stop
+#               verifying, and the revocation costs nothing that was not already spent —
+#               `speculation_implementation_digest` hashes every shipped `.py` and this change
+#               moves it regardless.
+_EXPECTED_FIELD_COUNT = 212
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

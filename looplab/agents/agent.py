@@ -292,7 +292,9 @@ class ToolUsingResearcher:
              # LLMResearcher (whose researcher_system default is likewise core-only) / LLMDeveloper.
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
                         + "\n" + _CONCEPT_AUTHORING_GUIDANCE
-                        + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + _researcher_capability_suffix(
+                            getattr(self, "offer_sweep", True),
+                            bool(getattr(self, "_gpu_footprint_cue", False)))
                         + self.space_hint + hyp
                         # Mirror of LLMResearcher's rule — this variant splices the same untrusted
                         # cross-run cues into its user turn, so it needs the same code-owned guard.

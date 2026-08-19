@@ -502,6 +502,25 @@ class Settings(BaseSettings):
     # operator's `budget_extend` owns, and it never widens past the launch pin — so `false` here, an
     # explicit `eval_parallel=N`, or a `budget_extend` each keep today's behaviour byte for byte.
     proposal_width: bool = True
+    # The PROMPT half of `proposal_width`, and it shipped saying the opposite of what that axis does.
+    # The GPU BUDGET cue (`engine/proposal_cues.py::_gpu_budget_hint_text`) told the Researcher that
+    # declaring more than `pool // eval_parallel` "does NOT get this experiment more hardware … the run
+    # serialises at the SAME per-experiment cost". Both halves are false against the shipped scheduler:
+    # `resources.py::_resource_request_for_node` honours a declared count (declared beats AUTO),
+    # `_acquire_gpus` reserves exactly that many devices and `_resource_eval_env` hands the child
+    # `CUDA_VISIBLE_DEVICES=0,1` — and the per-experiment cost is precisely what changes, which is the
+    # whole reason the choice exists. The v5 incident the wording was written from was a WIDTH defect
+    # (the run kept claiming 2 while one node held both cards); `proposal_width` fixed it, and the
+    # sentence outlived its cause. So the cue now states what a larger count actually buys and costs
+    # and leaves the decision to the role (docs/36): a wider ACTION space, no wider trusted set — the
+    # scheduler still clamps to the pool, the metric/champion/selection are untouched, and an operator
+    # count named in the task statement still wins. Measured on `runs/e5small-dr-unified-v2`, whose
+    # every node declared `{"gpus": 1}`: 4 of its 9 nodes died of `torch.OutOfMemoryError` on ONE
+    # H200 (at per-device batch 8192, 2048 and 1750 — the process itself holding 139 of 139.8 GiB),
+    # so on that run the second card was not a speed preference at all but the only way to hold the
+    # recipe's batch. `false` restores the historical paragraph BYTE FOR BYTE (the `developer_probe` /
+    # `memo_verdict_cue` same-position pattern).
+    gpu_footprint_cue: bool = True
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings). Its alert event is fold-ignored and cannot directly change lifecycle/champion;

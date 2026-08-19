@@ -87,7 +87,15 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   time. Verified as the paragraph prescribes rather than by bumping the number: the
   //   catalogue was 181 keys and removing exactly `cadence_while_evaluating` gave back 180, so
   //   this is one real addition with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 181)
+  //   181 -> 182 (2026-08-19): `gpu_footprint_cue` — what the two Researcher prompts say a LARGER
+  //   `footprint.gpus` actually does, against a shipped wording the scheduler contradicts.
+  //   TWELFTH occurrence, and the Python guard caught it first for the eighth consecutive time.
+  //   Verified as the paragraph prescribes rather than by bumping the number: the catalogue was
+  //   182 keys and removing exactly `gpu_footprint_cue` gave back 181, so this is one real
+  //   addition with nothing renamed away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 182)
+  assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
+  assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')
   assert.equal(schema.fieldByKey.cadence_while_evaluating.default, true)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')

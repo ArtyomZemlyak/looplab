@@ -112,9 +112,15 @@ def test_a_real_engine_stamps_its_own_settled_ceiling(tmp_path, monkeypatch, gpu
     hint = _stamp(engine, LLMResearcher(_ToolEmitClient()))
     assert f"`footprint.gpus = {ceiling}`" in hint
     assert f"up to {width} experiment(s)" in hint and f"pool of {gpus} GPU(s)" in hint
-    # The MEANING of the ceiling, which is the half the old `_FOOTPRINT_GUIDANCE` wording got
-    # backwards ("`gpus=1` only when the experiment specifically needs one GPU").
-    assert "does NOT get this experiment more hardware" in hint and "serialises" in hint
+    # The MEANING of the share, which is the half the old `_FOOTPRINT_GUIDANCE` wording got
+    # backwards ("`gpus=1` only when the experiment specifically needs one GPU") — and which this
+    # cue then got backwards in the OTHER direction until `Settings.gpu_footprint_cue`: it said a
+    # larger count "does NOT get this experiment more hardware", which `_acquire_gpus` contradicts.
+    # The legacy sentence is now the `false` branch and is pinned in
+    # `tests/test_gpu_footprint_choice.py`; what the SHIPPED default owes the role is the trade.
+    assert f"`footprint.gpus = {ceiling}` is the ORDINARY declaration" in hint
+    assert "a LARGER count is HONOURED" in hint
+    assert "does NOT get this experiment more hardware" not in hint
 
 
 def test_a_cpu_locked_task_is_told_nothing(tmp_path, monkeypatch):
@@ -178,10 +184,16 @@ def test_both_researcher_prompts_carry_the_engine_stamped_ceiling(tmp_path, monk
         assert "`footprint.gpus = 2`" in turn
         # The cue is spliced VERBATIM — the two prompts carry the same bytes, not two paraphrases.
         assert stamped in turn
-    # And the code-owned system suffix now says what a stated ceiling MEANS, in both variants.
+    # And the code-owned system suffix now says what a stated share MEANS, in both variants — the
+    # SAME sentence in both, which is this test's whole subject. Under the shipped
+    # `gpu_footprint_cue` that is the corrected clause: `_stamp_gpu_budget_hint` (the call `_stamp`
+    # above makes) puts the boolean on whichever role is proposing, so a role the engine stamped
+    # asks the corrected question on both paths. The legacy wording and the byte-for-byte off path
+    # are pinned in `tests/test_gpu_footprint_choice.py`.
     for turn in (plain_turn, agentic_turn):
-        assert "the count it names is a per-experiment CEILING" in turn
-        assert "`gpus=1` is the ORDINARY case, not an exception" in turn
+        assert "the count it names is the ORDINARY per-experiment share" in turn
+        assert "a LARGER count IS honoured" in turn
+        assert "the count it names is a per-experiment CEILING" not in turn
 
 
 def test_the_ceiling_survives_a_real_wrapper_chain(tmp_path, monkeypatch):

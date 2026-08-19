@@ -63,6 +63,13 @@ class EngineOptions:
     # library default is "off == today", and this knob needs a Card board, a GPU pool and a durable
     # log to do anything at all — none of which a bare `EngineOptions` caller necessarily has.
     proposal_width: bool = False
+    # The prompt half of the axis above: does the GPU BUDGET cue state what a larger declared
+    # footprint actually buys and costs, instead of the shipped claim that it "does NOT get this
+    # experiment more hardware"? Matches the `Settings` default (so NOT a divergence-table row) for
+    # the reason `memo_verdict_cue` is not one either: this is the WORDING of a cue a bare
+    # `EngineOptions` caller only ever sees when it already has a repo spec and a GPU pool — no
+    # call, no money, no kill, no selection, and the scheduler's clamps are unchanged either way.
+    gpu_footprint_cue: bool = True
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
     train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early
