@@ -900,11 +900,18 @@ read fence's own symlink residual is stated the same way.
 
 ## F3 · Node workspaces on `git worktree` — **MEASURED AND DECLINED (2026-08-13)**
 
+DECLINED[f3-node-workspace-worktree] measured: per node the worktree is 929,851 B against the
+copy's 910,829 B (+2.1 %) and the full W=1 cycle is 0.376 s against 0.346 s — the stated disk win
+is a measured loss. Full derivation: docs/37-node-workspace-worktree-measurement-2026-08-13.md.
+This entry is PERMANENT. Do not re-open it without reading doc 37.
+
 > **Status update (2026-08-14).** Re-verified against the tree, and doc 37's ask — carry this row as
 > DECLINED WITH MEASUREMENT, never as deferred — is what the heading now says (a stray duplicate
 > heading from the rename was removed here). Doc 37 §8's R1 follow-up (record the workspace's real
 > size as a fold-ignored diagnostic) is NOT yet in code: `engine/workspace.py` still appends
 > `workspace_seeded` with only the `materialized` name list and no byte total. The root close is one
+> OPEN[f3-workspace-byte-total] doc 37 §8's R1 follow-up, nested inside a DECLINED entry.
+> proof:absent:workspace_bytes@looplab/engine/workspace.py
 > additive field — a byte sum taken during the seed walk, added to that payload with a reader-side
 > default (invariant #5-safe) — followed by the written retention policy doc 37 §8 requires before
 > any checkpoint reclaim.

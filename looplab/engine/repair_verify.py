@@ -168,6 +168,10 @@ vocabulary this module carries. Measured over all 137 model-authored rationales:
 row in the corpus, the one above, and `mine_stage` against that same run's `mine_negatives.py` diff
 does NOT match it.
 
+OPEN[repair-unmet-five-unpatched-shapes] five of the 14 surviving `unmet` shapes are left
+deliberately unpatched, and `verified` is a FLOOR (at least one claimed token in the diff), not a
+guarantee. proof:present:changed_region@looplab/engine/repair_verify.py
+
 WHAT IS STILL OPEN, having been measured rather than assumed. The 14 surviving `unmet` verdicts split
 7 / 2 / 5: SEVEN are genuine discrepancies, i.e. the rung working; TWO are withdrawn by the rules
 above (v8 node 3 attempts 2 and 4) and one further row keeps its verdict with a shortened list; and

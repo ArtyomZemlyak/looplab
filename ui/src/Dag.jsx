@@ -239,6 +239,8 @@ function ExpNode({ data }) {
   // and the expander still lists them all — and the run-wide ones are marked so the strip cannot be
   // re-read as "this experiment is about ESCI". Empty (hence today's order) whenever the split cannot
   // be made over every experiment: see nodeProjection.js::runConstantConcepts.
+  // OPEN[dag-run-constant-per-node-recompute] N x O(N.|tags|) identical work per poll tick.
+  // proof:present:(efficiency):@ui/src/Dag.jsx
   // REVIEW 2026-08-18 (efficiency): a RUN-level fact derived inside the per-NODE component — every
   // ExpNode computes `runConstantConcepts(state, …)`, an intersection over ALL active experiments'
   // canonicalized memberships, in its own useMemo whose deps (`state.node_concepts`, `state.nodes`,

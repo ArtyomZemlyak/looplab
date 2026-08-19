@@ -596,6 +596,8 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     # `serve/`). A durability helper describing itself as unused misleads exactly the reviewer the
     # note was written for, so that point is dropped rather than corrected in place.
     #
+    # OPEN[atomicio-windows-parent-publication] unreachable from this repo's POSIX CI, so the
+    # proof can only name the site that owns it. proof:present:_ensure_strict_parent@looplab/core/atomicio.py
     # STILL OPEN: Windows parent-dir publication (_ensure_strict_parent -> _strict_publish_directory,
     # replace=False) makes two racing writers of the SAME missing parent fail one of them with
     # ERROR_ALREADY_EXISTS, where POSIX mkdir(exist_ok=True) tolerates the identical race; and a
