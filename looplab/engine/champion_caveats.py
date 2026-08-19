@@ -124,6 +124,15 @@ AN EMPTY LIST IS NOT A CERTIFICATE, which is `ui/src/trustSemantics.js`'s first 
 verbatim here: it says the run recorded no such caveat, never that a detector ran. `reward_hack_detect`
 is OFF by default, so the trust member is silent on almost every run on this box — and the third
 member is silent on every space that declares its parameters by bare name.
+
+THAT SENTENCE STAYS TRUE OF THIS LIST, and since 2026-08-19 there is a place that answers the other
+half of it. `trust/scan_receipt.py` reads the per-node `trust_scan` rows the engine now writes on
+EVERY evaluated node, clean or not, and its `trust_scan_status` has three answers where an empty
+caveat list has one: `unknown` (no receipt — every log written before that date), `unscanned` (a
+receipt naming no detector, which is what `reward_hack_detect=false` looks like on the four preserved
+runs that carry it), and `clean`. It is a fact about the SCAN and this module is about the NUMBER, so
+neither belongs in the other's vocabulary — but an operator asking "did anything look?" of a champion
+now has somewhere to ask it, and the answer is never inferred from silence.
 """
 from __future__ import annotations
 

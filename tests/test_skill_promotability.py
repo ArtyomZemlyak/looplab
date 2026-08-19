@@ -387,3 +387,96 @@ def test_the_candidate_receipt_and_the_card_take_their_digest_from_ONE_function(
     assert receipt["source_sha256"] == "f" * 63 + "1"
     assert parse_skill_frontmatter(card[0].read_text(encoding="utf-8"))[
         "source_statement_sha256"] == receipt["source_sha256"]
+
+
+# ------------------------------------------------- the rung with no name and no receipt
+
+def _reflection_note_for_cards(tmp_path, cards: dict) -> dict:
+    """Drive the real run-end distillation over a hand-built card board and return its receipt row.
+
+    A one-node real run (so `final.nodes` and the finish boundary are genuine) with the cards set on
+    the folded state, which is exactly how `_write_reflection_note` receives them.
+    """
+    from pathlib import Path
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.engine.orchestrator import Engine
+    from looplab.events.replay import fold
+    from looplab.runtime.sandbox import SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    mem = tmp_path / "mem"
+    task = ToyTask.load(Path(__file__).resolve().parents[1] / "examples" / "toy_task.json")
+    researcher, developer = task.build_roles()
+    eng = Engine(tmp_path / "run", task=task, researcher=researcher, developer=developer,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 reflection_priors=True, memory_dir=str(mem))
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._causal_meta_note = lambda *_args: "note"         # type: ignore[method-assign]
+    eng._reflect_lessons = lambda *_args: []              # type: ignore[method-assign]
+    eng._comparative_lessons_on = False
+
+    state = fold(eng.store.read_all())
+    state.cards.update(cards)
+    eng._write_reflection_note(state)
+    note = [e.data for e in eng.store.read_all() if e.type == "reflection_note"][-1]
+    return note, mem
+
+
+def test_a_card_refused_BEFORE_the_filter_now_says_so(tmp_path):
+    """THE RUNG THE RECEIPT COULD NOT SEE, and the one that actually zeroed v7 and v8.
+
+    `n_skills: 0` on the corpus's two finished Card-era runs was read as "the filter may be
+    over-rejecting". It was not: v7 had no evaluated node at all, and all three of v8's `supported`
+    cards are RECORD SETTERS whose `best_delta` is `None`, so the eligibility gate dropped them
+    before either classifier ran — and wrote nothing about it. Re-derived here as the two shapes,
+    over the real `_write_reflection_note`.
+
+    Against the pre-change tree both assertions fail on an EMPTY `skill_candidates` list: the gate
+    was a bare `continue`.
+    """
+    from looplab.core.models import Card
+    from looplab.engine.memory import (SKILL_ELIGIBILITY_VERSION, SKILL_REFUSED_NO_MEASURED_DELTA,
+                                       SKILL_REFUSED_NO_POSITIVE_DELTA, skill_source_digest)
+
+    record_setter = "Use hard-negative mining in contrastive retrieval training"
+    regressed = "Use out-of-fold target encoding for high-cardinality categorical features"
+    note, mem = _reflection_note_for_cards(tmp_path, {
+        # v8's exact shape: supported because a node set the run record, with no evaluated parent to
+        # have improved over, so `best_delta` is None.
+        "c1": Card(id="c1", statement=record_setter, verdict="supported",
+                   best_delta=None, evidence=[0]),
+        "c2": Card(id="c2", statement=regressed, verdict="supported",
+                   best_delta=-0.02, evidence=[0]),
+        # …and the control: a card the run did NOT call supported is not a candidate in any sense and
+        # must not gain a row, or the receipt drowns in the 19 open/tested cards a real run carries.
+        "c3": Card(id="c3", statement="A tested idea that did not improve anything at all",
+                   verdict="tested", best_delta=-0.5, evidence=[0]),
+        "c4": Card(id="c4", statement="An open idea nobody has run yet", verdict="open"),
+    })
+
+    rows = {row["source_sha256"]: row for row in note["skill_candidates"]}
+    assert len(rows) == 2, "exactly the two SUPPORTED-but-ineligible cards get a receipt"
+    setter_row = rows[skill_source_digest(record_setter)]
+    assert setter_row["accepted"] is False
+    assert setter_row["reason"] == SKILL_REFUSED_NO_MEASURED_DELTA
+    assert setter_row["classifier"] == SKILL_ELIGIBILITY_VERSION
+    assert rows[skill_source_digest(regressed)]["reason"] == SKILL_REFUSED_NO_POSITIVE_DELTA
+    assert note["n_skill_candidates"] == 2
+
+
+def test_the_eligibility_RULE_is_unchanged_only_its_silence_is(tmp_path):
+    """The receipt is not a widening. A card refused at rung 0 still promotes nothing — no skill
+    card on disk, `n_skills: 0` — because a technique claiming "this improved the metric" may not be
+    minted from a card that never measured an improvement."""
+    from looplab.core.models import Card
+
+    note, mem = _reflection_note_for_cards(tmp_path, {
+        "c1": Card(id="c1", statement="Use hard-negative mining in contrastive retrieval training",
+                   verdict="supported", best_delta=None, evidence=[0])})
+    assert note["n_skills"] == 0 and note["skills"] == []
+    assert not sorted((mem / "skills").glob("auto-*.md"))

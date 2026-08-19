@@ -151,6 +151,19 @@ EV_HYPOTHESIS_RANKED = "hypothesis_ranked"   # FOREAGENT board prioritization: o
 EV_RUNG_PROMOTED = "rung_promoted"
 EV_AGENT_DECISION = "agent_decision"
 EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
+# THE OTHER HALF OF THE ROW ABOVE, and the reason it had to become an event rather than a nicer
+# comment: `reward_hack_suspected` is written only WHEN SOMETHING IS FOUND, so a run in which every
+# node was scanned and came back clean is byte-identical to a run in which the scan call was deleted
+# — measured 2026-08-05, when deleting both `sigs +=` lines in `engine/evaluate.py` left 117 trust
+# tests green. `trust_scan` is appended for EVERY evaluated node, hit or no hit, and says what was
+# scanned (`code_digest`, the same subject digest the flagged row publishes), WHICH detectors ran,
+# and how many findings came back. Never what they read: the flagged row already carries the detail,
+# and a receipt quoting candidate text would be a second copy of the artifact inside the audit trail.
+# DIAGNOSTIC on purpose — the fold ignores it, so no selection can move, and `_proposal_authority_seq`
+# excludes DIAGNOSTIC_EVENTS wholesale so a per-node receipt cannot discard a paid proposal.
+# The reader-side default lives in `trust/scan_receipt.py` and is the load-bearing half: a node with
+# no receipt reads `unknown`, NEVER `clean` — which is the inversion this event exists to prevent.
+EV_TRUST_SCAN = "trust_scan"
 EV_NOVELTY_REJECTED = "novelty_rejected"
 # PART IV D3 (§21.4, Phase 2b): the LIVE novelty gate GRADED a proposal over the concept graph and
 # ALLOWED it despite a concept overlap the flat dedup gate would have rejected — a level-4 "same
@@ -679,7 +692,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_PHASE_PROGRESS,
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
-    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT,
+    EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN,
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,

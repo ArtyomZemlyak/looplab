@@ -917,6 +917,25 @@ and breeding/confirmation under `gate`; `block` additionally makes it infeasible
 These surface in the UI's Trust panel as audit events. See [Deployment](deployment.md) for the
 untrusted tier.
 
+**A clean scan is recorded too, and an absent record is never read as clean.** The detectors above
+write a `reward_hack_suspected` event only when they find something, so until 2026-08-19 a run whose
+every node was scanned clean produced a log byte-identical to a run whose scan call had been deleted —
+and identical again to a run with every detector switched off, which is what four of the six
+preserved runs on this box actually are. Every evaluated node now also gets a fold-ignored
+`trust_scan` row naming **which detectors ran**, a **count** of findings, and the `code_digest` of the
+exact bytes they read (the same digest the flagged event carries, so the two join). It carries no
+candidate text — it is a receipt about the SCAN, not about the code. `looplab inspect` prints the
+run's summary, and the reader (`looplab/trust/scan_receipt.py`) has three answers, not two:
+
+| what the log holds | reading |
+|---|---|
+| no `trust_scan` row for the node | `unknown` — nobody can say whether anything looked (every log written before 2026-08-19) |
+| a row naming no detector | `unscanned` — the engine got there and every detector was configured off |
+| a row naming detectors, `findings: 0` | `clean` — these detectors read these bytes and found nothing |
+| a row with `findings > 0` | `flagged` — see the `reward_hack_suspected` row beside it for the detail |
+
+An absent receipt reading as `clean` is the one answer the reader will not produce.
+
 ## Meta-control: the Strategist & unified agent
 
 - **Strategist** (`strategist_backend`, default `agent`) — a meta-controller that adapts the

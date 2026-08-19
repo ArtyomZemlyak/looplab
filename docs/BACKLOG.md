@@ -3528,14 +3528,12 @@ which in a GPU-shaped run means deep research never fires at all. The fix is not
 other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
 under one claim rather than two reads. Do it when someone actually wants serial research.
 
-⬜ **A clean trust scan commits to nothing.** `reward_hack.py` and `leakage.py::code_leakage_findings`
-  OPEN[clean-trust-scan-commits-nothing] proof:present:code_leakage_findings@looplab/trust/leakage.py
-run on every evaluated node and write only on a hit, so their liveness is unfalsifiable from the log —
-the exact property the 2026-08-05 mutation audit recorded when deleting both `sigs +=` lines left 117
-trust tests green (`engine/evaluate.py`'s own docstring). Cheapest honest receipt is the `code_digest`
-these detectors already compute, stamped on `node_evaluated` beside the metric (additive, reader-side
-default, fold-neutral) so "scanned THESE bytes, found nothing" is a durable claim. Not done here
-because it is a payload contract and this change is a cadence fix; it should not ride along.
+**A clean trust scan commits to nothing — CLOSED 2026-08-19, see §0.18.** The `trust_scan` receipt
+is written for EVERY evaluated node, hit or no hit. One correction to the ledger row above that this
+entry owes: **"they run unconditionally per evaluated node" is FALSE** — `reward_hack_detect` and
+`code_leakage_detect` are `false` in four of the six snapshots (`rubertlite-dense-retrieval`, `-v6`,
+`-v7`, `-v8`, together 100 evaluated nodes), so on those runs neither detector ran at all, and the
+log was identical to the two runs where they did.
 
 **ASHA cannot work on this task family — the SILENCE is fixed here, the CURVE is refused on evidence.**
 Re-derived 2026-08-19 over all seven event logs in `runs/`: **`asha_rank` 0, `asha_verdict` 0**, against
@@ -3609,16 +3607,147 @@ and the engine-side residue is that `resource_key` reaches the watchdog through 
 no Genesis prompt, so nothing an operator authors against ever mentions the one switch that arms the
 kill. That is what the marker above is pointed at.
 
-⬜ **Auto-skill promotion has produced nothing since 2026-07-18 and only runs at run END.** The shared
-  OPEN[auto-skill-promotion-run-end-only] proof:present:write_auto_skill@looplab/engine/memory.py
-`skills/` directory is empty; the only skill cards this box ever wrote are in
-`skills.quarantined-2026-08-12`, and reading them shows why the 2026-08-13 hardening exists — they are
-raw proposals ("Experiment A: further reduce temperature to 0.01…"), not techniques. So `n_skills: 0`
-on v7/v8 may be the filter working. It is not currently decidable: the `skill_candidates` receipt that
-would say which statements were refused and why landed 2026-08-18 (`1f7b481a`), after both runs. Two
-separate questions to settle on the next finished run — is the classifier over-rejecting, and should a
-phase whose whole value is cross-run survive being reachable only from a clean finish, when three of
-the last four runs on this box were stopped mid-flight.
+⬜ **Auto-skill promotion still runs only from the wrap-up pass — NARROWED 2026-08-19, see §0.18.**
+  OPEN[auto-skill-promotion-run-end-only] proof:absent:promote_settled_skills@looplab/engine/lessons_distill.py
+The TWIN question is settled and needed no new run: `n_skills: 0` on v7/v8 is not the classifier
+over-rejecting, because **zero cards reached it** (v7 has no evaluated node at all; all three of v8's
+`supported` cards are record setters with `best_delta = None`). That rung now writes its own
+`skill_candidates` row, so the next run says so on disk instead of being re-derived by hand. What
+stays open is the TRIGGER, and it is the trigger and not the phase: `looplab finalize` reaches the
+identical run-end pass on a stopped run — driven end to end, a 38-node run stopped mid-flight and
+then finalized produced its `reflection_note` with 4 lessons and 14 candidate receipts — so nothing
+in the engine prevents a stopped run from getting this pass. Nothing SURFACES it either: `looplab
+stop` says so once, in a terminal, and a KILLED run (v6, v9 — no `pause`, no finish) is never told
+anything at all. The named fix a future change would land is a per-card settled-promotion pass
+(`promote_settled_skills`); this marker's proof is its absence.
+
+### §0.18 Two receipts that never existed, and the audit question each of them decides (2026-08-19)
+
+*(§0.15's liveness audit left two items whose common shape is not "a feature is dead" but "the
+evidence a feature produces does not survive". Both are closed or narrowed here on measurement.)*
+
+**METHOD.** Every number below is re-derived from `runs/` — six preserved event logs plus the live
+one — by folding each log and reading its own `config.snapshot.json`. Nothing is taken from the
+§0.15 ledger, and one row of that ledger turned out to be wrong.
+
+---
+
+#### A. A CLEAN SCAN NOW LEAVES A RECEIPT — and the ledger's premise was false
+
+**The defect.** `reward_hack.py`, `leakage.py`, `critic.py`, the hardened exploit suite and the
+workdir-write audit all run per evaluated node and write to the log ONLY on a hit, so a run in which
+every node was scanned clean is byte-identical to a run whose scan call was deleted — the 2026-08-05
+mutation audit's own finding (deleting both `sigs +=` lines left 117 trust tests green).
+
+**THE LEDGER SAID "they run unconditionally per evaluated node" AND THAT IS FALSE.** Re-derived from
+the snapshots, `trust_gate="audit"` in all six as stated, but:
+
+    run                          reward_hack_detect  code_leakage_detect  evaluated  trust rows
+    rubertlite-dense-retrieval        false               false               1*          0
+    rubertlite-dr-unified-v6          false               false               6           4   (critic only)
+    rubertlite-dr-unified-v7          false               false               0           0
+    rubertlite-dr-unified-v8          false               false              13           0
+    rubertlite-dr-unified-v9          true                true                4           0
+    e5small-dr-unified-v2             true                true                5           0
+
+    * folded under today's code; that July log is pre-Card and does not re-derive.
+
+So the corpus holds BOTH populations the log could not distinguish — 9 evaluated nodes that were
+genuinely scanned by both detectors and came back clean, and 100 on which those two detectors never
+ran — and an auditor reading `events.jsonl` gets the same silence from either.
+
+**What shipped.** `trust_scan` (fold-ignored, `DIAGNOSTIC_EVENTS`), one row per evaluated node,
+carrying `detectors` (which ones ran, in `TRUST_DETECTORS` order), `findings` (a COUNT), the
+`evidence_version` and `code_digest` of the exact scanned surface. It says nothing about the code:
+no signal payload, no rule name, no candidate text — the flagged `reward_hack_suspected` row already
+owns the detail, and both rows now take that digest from ONE function (`trust/scan_receipt.py::
+scan_subject_digest`), reached through the module so a test that moves the rule moves both writers.
+
+**Three design decisions worth keeping.**
+
+1. **The reader-side default is the point.** `trust_scan_status` answers `unknown` for a node with no
+   receipt, `unscanned` for a receipt naming no detector, and `clean` only for one that names a
+   detector and zero findings. An absent receipt reading as `clean` is the exact inversion this
+   closes, and it is the state every log on this box is in.
+2. **A separate row, not a `node_evaluated` field** — this is a deviation from the sketch in §0.15
+   and it is deliberate. Stamping the terminal requires the scan to run BEFORE the terminal append,
+   which puts five detector calls (three over agent-authored source, one a filesystem walk) between
+   an evaluation and the one row a run cannot lose. A separate row can instead be lost to a kill in
+   that window — and then it reads `unknown`, which is the correct answer.
+3. **The detector list is the scan's OWN decision.** `_trust_scan_detectors` is the single predicate
+   the scan branches on and the receipt reports; a receipt derived from a second copy of the
+   settings reads would claim a detector looked when it did not.
+
+**Nothing can move a selection today, and that is checked rather than asserted:** the type is in
+`DIAGNOSTIC_EVENTS` (so the fold has no handler and `_proposal_authority_seq` skips it), and
+`test_the_receipt_is_fold_ignored_so_no_selection_can_move` folds a real run with and without the
+rows and compares the full `RunState` dump. `trust_gate` is `audit` in all six snapshots and this
+change does not read it.
+
+**Where an auditor sees it.** `looplab inspect` now closes with one line — on a preserved log,
+`trust scan: 13 evaluated node(s); 13 with NO scan receipt — unknown, not clean (…)`; on a fresh
+default-profile run, `8 evaluated node(s); 8 scanned by NO detector (all of them configured off)`.
+
+---
+
+#### B. AUTO-SKILL PROMOTION: THE TWIN QUESTION IS ANSWERED, THE TRIGGER QUESTION IS NARROWED
+
+**The twin question §0.15 called undecidable is decidable, and the answer is neither classifier.**
+Folding every log and re-running the promotion loop's own gates:
+
+    run    cards   supported   supported AND best_delta > 0   evaluated
+    v6      15         0                    0                     6
+    v7      11         0                    0                     0
+    v8      22         3                    0                    13
+    v9      13         1                    1                     4
+    v2      17         2                    1                     5
+
+v7 recorded `n_skills: 0` because it never evaluated a node. v8 recorded `n_skills: 0` because all
+three of its `supported` cards carry `best_delta = None`: `card_ledger.py::_evidence_verdict` makes
+a card supported when one of its nodes SETS the run record, and leaves `best_delta` None when that
+node has no feasible evaluated parent to measure against. `(h.best_delta or 0) > 0` therefore dropped
+every one of them **before the deterministic prefilter, let alone the rubric model**. The classifier
+was never asked. (Caveat, stated because it is real: this is today's fold over an August-16 log, so a
+change to `_evidence_verdict` since then would move these numbers. v7 needs no such caveat — a run
+with zero evaluated nodes can have no positive delta under any verdict rule.)
+
+**What shipped: the rung that refused gets a receipt.** The eligibility gate was a bare `continue`,
+so the `skill_candidates` receipt built on 2026-08-18 to answer "which statements were refused and
+why" was blind to the rung that refuses most. It now writes a row for a card the run ITSELF called
+`supported` — `no_measured_delta` (the record setter, v8's shape) or `no_positive_delta` (a measured
+regression) — under `classifier: "skill-eligibility/v1"`. Only for `supported` cards: a
+`tested`/`open`/`abandoned` card is not a candidate in any sense, and a row per card would bury the
+three that matter under v8's other nineteen. **The eligibility RULE is unchanged and that is
+deliberate** — a technique card claims "this improved the metric over its baseline", and a card
+supported by setting the record has no baseline to have improved over.
+
+**The trigger question, argued.** *Should a phase whose whole value is cross-run depend on a clean
+finish?* No — and it does not. It depends on the WRAP-UP PASS, which `looplab finalize` performs on a
+stopped run, and that is the phase, not the trigger. Driven end to end: a 38-node toy run stopped
+mid-flight (`looplab stop`: 38 `node_created`, one `pause`, no `run_finished`, no `reflection_note` —
+the exact shape of v2, v6 and v9 on disk) and then `looplab finalize`d produced its `reflection_note`
+with 4 lessons and 14 candidate receipts, 3 of them from the new rung. **The gap is the trigger.**
+
+**Mid-run promotion was NOT built, and the honest reason is that the corpus cannot yet justify it.**
+Replaying each log prefix-by-prefix at every terminal boundary and re-asking the promotion gate:
+across v6/v7/v8/v9/v2, exactly **2 cards ever qualified**, both on the final state, and **0 were
+retracted** — no card was promotable at one boundary and not at the end. So the obvious argument
+against mid-run promotion ("it would promote claims the run later withdraws") is *unsupported by this
+corpus*, and so is the argument for it: two candidates over five runs is not a population you design
+a paid cadence against. What a safe intermediate point would have to settle is the card's EVIDENCE
+SET and its IDENTITY — no pending evidence, no pending merge (a merged card's `statement` is
+rewritten by the fold, so a skill promoted early is filed under a title the run later replaces), and
+no route to `abandoned`, which overrides every verdict. That is a per-CARD settlement, not a run-level
+one, and it is the shape a `promote_settled_skills` pass would need.
+
+**What is left open** is therefore narrow and is not an engine defect: nothing SURFACES that a
+stopped or killed run holds unclaimed cross-run value. `looplab stop` says "`looplab finalize` to
+wrap it up" once, into a terminal that scrolled away days ago; a KILLED run (v6 and v9 carry no
+`pause` and no finish at all) is never told anything, and `classify_prior_run` reads both as `paused`
+/ `live` rather than as work owing a wrap-up. Three of the last four runs on this box ended that way,
+and `e5small-dr-unified-v2` is sitting there right now with exactly ONE card that is `supported`,
+positive-delta and passes the deterministic prefilter — the only promotable skill candidate this box
+has produced since July, unpromoted because nobody typed one command.
 
 ### §0.17 The truncation cuts the END, and we put the answer at the end (2026-08-19)
 

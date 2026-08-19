@@ -269,7 +269,10 @@ class LessonDistillMixin:
         # actually moved the metric becomes a candidate SKILL.md; a later run on a DIFFERENT task
         # fingerprint that re-confirms it promotes it. Best-effort; never fails the run.
         from looplab.engine import memory as _memory
-        from looplab.engine.memory import (SKILL_PREFILTER_VERSION, assess_skill_statement,
+        from looplab.engine.memory import (SKILL_ELIGIBILITY_VERSION, SKILL_PREFILTER_VERSION,
+                                           SKILL_REFUSED_NO_MEASURED_DELTA,
+                                           SKILL_REFUSED_NO_POSITIVE_DELTA,
+                                           assess_skill_statement,
                                            classify_skill_candidate,
                                            promotable_skill_statement, unreliable_metric_ids,
                                            write_auto_skill)
@@ -311,9 +314,26 @@ class LessonDistillMixin:
                 classifier_tools = None
                 classifier_loop_opts = None
         for h in final.research_cards():
-            if not (h.verdict == "supported" and (h.best_delta or 0) > 0):
+            if h.verdict != "supported":
                 continue
             source = str(h.statement or "")
+            # RUNG 0, AND ITS RECEIPT (`memory.py::SKILL_ELIGIBILITY_VERSION` holds the measurement).
+            # A card the run itself called `supported` can still be refused here — and until
+            # 2026-08-19 that refusal was a bare `continue`, so the `skill_candidates` receipt built
+            # to say "which statements were refused and why" was blind to the rung that refuses most.
+            # Measured over `runs/`: it is the ONLY thing that fired on v7 and v8, the two finished
+            # runs whose `n_skills: 0` this receipt exists to explain. The eligibility rule itself is
+            # unchanged — a card supported because a node SET the run record has no baseline to have
+            # improved over, and a technique card whose claim is "this improved the metric" must not
+            # be minted from one — it just stops being invisible.
+            if (h.best_delta or 0) <= 0:
+                skill_candidates.append({
+                    "source_sha256": _memory.skill_source_digest(source), "accepted": False,
+                    "reason": (SKILL_REFUSED_NO_MEASURED_DELTA if h.best_delta is None
+                               else SKILL_REFUSED_NO_POSITIVE_DELTA),
+                    "classifier": SKILL_ELIGIBILITY_VERSION,
+                })
+                continue
             # The candidate receipt and the durable card name ONE claim, so they take their digest
             # from one function (`memory.skill_source_digest`, which holds the reason). Reached
             # through the module rather than by value: `write_auto_skill` calls the same name, and a

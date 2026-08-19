@@ -469,8 +469,22 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
                                   EV_REPAIR_CRITIC_VERDICT,
-                                  EV_REWARD_HACK_SUSPECTED,
+                                  EV_REWARD_HACK_SUSPECTED, EV_TRUST_SCAN,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
+# Module level, like `hashlib` above and for the same reason: a function-local import of these names
+# would bind them for the WHOLE of the method it appears in. `trust/` imports nothing from `engine/`,
+# so this is a leaf import and not a cycle.
+from looplab.trust import scan_receipt as _scan_receipt
+from looplab.trust.scan_receipt import (TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC,
+                                        TRUST_DETECTOR_EXPLOIT_SUITE, TRUST_DETECTOR_REWARD_HACK,
+                                        TRUST_DETECTOR_WORKDIR_AUDIT, TRUST_DETECTORS,
+                                        TRUST_SCAN_EVIDENCE_VERSION)
+# The two WRITERS below reach their shared rules through the MODULE, never by value: `trust_scan` and
+# `reward_hack_suspected` must commit to one subject under one digest, and a `from … import
+# scan_subject_digest` here would bind a second reference that a test moving the rule cannot reach —
+# so the join it guards would be vacuous exactly when it mattered. The closed detector VOCABULARY is
+# imported by value on purpose: constants are not seams. (Same pattern, same reason, as
+# `engine/lessons_distill.py`'s `_memory.skill_source_digest`.)
 
 
 def _card_identity_spellings(state, raw_card_id) -> frozenset[str]:
@@ -805,7 +819,33 @@ class EvaluateMixin:
         external-agent calls by len(params) per ablation (ADR-7 cost rule)."""
         return getattr(self.developer, "inner", self.developer)
 
-    def _trust_gate_signals(self, node, scan_src: str) -> list[dict]:
+    def _trust_scan_detectors(self, scan_src: str) -> tuple[str, ...]:
+        """WHICH detectors this engine will run over one node's surface, in `TRUST_DETECTORS` order.
+
+        The single decision the two `sigs +=` halves below and the `trust_scan` receipt all read.
+        It has to be one function rather than the six inline `if`s it replaced, because the receipt's
+        whole claim is "these detectors looked" — and a receipt whose predicate is a COPY of the
+        scan's predicate is true only until someone edits one of them. That is the same defect one
+        layer up: a clean scan that commits to nothing is indistinguishable from no scan, and a
+        receipt that names a detector which did not run is worse than no receipt at all.
+
+        `scan_src` is part of the decision, not decoration: the leakage and critic gates already
+        skipped an empty surface, so a node with no code must not be reported as leakage-scanned.
+        """
+        names: list[str] = []
+        if self.reward_hack_detect:
+            names.append(TRUST_DETECTOR_REWARD_HACK)
+            if self._exploit_suite is not None:
+                names.append(TRUST_DETECTOR_EXPLOIT_SUITE)
+            if self._workdir_audit:
+                names.append(TRUST_DETECTOR_WORKDIR_AUDIT)
+        if self._code_leakage_detect and scan_src:
+            names.append(TRUST_DETECTOR_CODE_LEAKAGE)
+        if self._critic_check and scan_src:
+            names.append(TRUST_DETECTOR_CRITIC)
+        return tuple(name for name in TRUST_DETECTORS if name in set(names))
+
+    def _trust_gate_signals(self, node, scan_src: str, detectors=None) -> list[dict]:
         """The leakage + critic half of a node's trust findings, as a rule with a NAME.
 
         These two concatenations were inline in `_evaluate`, ~40 lines inside a `_write_lock` block
@@ -826,15 +866,21 @@ class EvaluateMixin:
         detectors' own signals concatenate ahead of these, and one `reward_hack_suspected` carries
         the union), so this stays a pure function of `(self._code_leakage_detect, self._critic_check,
         node.idea, scan_src)` and the graded-output name.
+
+        `detectors` is `_trust_scan_detectors`' answer, threaded through so the scan and the
+        `trust_scan` receipt branch on ONE value; `None` recomputes it, which keeps every existing
+        two-argument caller (this method is called directly by unit tests) behaving identically.
         """
+        if detectors is None:
+            detectors = self._trust_scan_detectors(scan_src)
         sigs: list[dict] = []
         # Both detectors emit their OWN namespaced signals (doc 25 CT-10). This used to
         # mint `data_leakage:`/`critic:` here, which put the string `is_hard_signal`
         # gates on three files away from the detector that knows what it found.
-        if self._code_leakage_detect and scan_src:
+        if TRUST_DETECTOR_CODE_LEAKAGE in detectors:
             from looplab.trust.leakage import code_leakage_findings
             sigs += code_leakage_findings(scan_src)
-        if self._critic_check and scan_src:
+        if TRUST_DETECTOR_CRITIC in detectors:
             from looplab.trust.critic import critic_findings
             # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
             # so the critic's in-code `metric` checks don't apply — hand it the expected
@@ -856,7 +902,8 @@ class EvaluateMixin:
             f"\n\n# --- {fn} ---\n{src}" for fn, src in (node.files or {}).items()
             if str(fn).replace("\\", "/").lower() != "solution.py")
 
-    def _trust_scan_signals(self, node, res, state, workdir, scan_src: str) -> list[dict]:
+    def _trust_scan_signals(self, node, res, state, workdir, scan_src: str,
+                            detectors=None) -> list[dict]:
         """Every trust finding for one evaluated node, in the order the union event carries them.
 
         The reward-hack half (detectors + the hardened exploit suite + the workdir write audit)
@@ -870,9 +917,16 @@ class EvaluateMixin:
 
         Returns the findings; it does NOT append. The caller owns the event, because the payload
         also binds the schema version and the digest of `scan_src` (see the call site).
+
+        `detectors` is `_trust_scan_detectors`' answer. It is threaded from the call site so that the
+        scan and the `trust_scan` receipt it writes read ONE decision — the receipt claims "these
+        detectors looked", and a claim derived from a second copy of the predicate is a claim nobody
+        checked. `None` recomputes it, so every existing five-argument caller is unchanged.
         """
+        if detectors is None:
+            detectors = self._trust_scan_detectors(scan_src)
         sigs: list[dict] = []
-        if self.reward_hack_detect:
+        if TRUST_DETECTOR_REWARD_HACK in detectors:
             from looplab.trust.reward_hack import detect_reward_hacks, grader_import_sanctioned
             protected = set(self._repo_spec.get("protected_names", [])) | set(self._assets)
             # The grader-IMPORT waiver keys on the task genuinely MATERIALIZING
@@ -898,19 +952,19 @@ class EvaluateMixin:
             # minus what this task's own eval contract sanctions (`scan` waives a match
             # that is a grader import and NOTHING more; a rule matching a key access, a
             # shell-out or a protected write still fires).
-            if self._exploit_suite is not None:
+            if TRUST_DETECTOR_EXPLOIT_SUITE in detectors:
                 sigs += self._exploit_suite.scan(scan_src, grader_import_ok=grader_import_ok)
             # 4.4 sandbox instrumentation (RewardHackingAgents recipe): flag RUNTIME
             # writes to protected/frozen files — behavioral evidence a static scan of the
             # code can miss (a write via a helper, os.system, a template). Compares the
             # workdir against the assets/protected set the engine placed there.
-            if self._workdir_audit:
+            if TRUST_DETECTOR_WORKDIR_AUDIT in detectors:
                 sigs += self._audit_workdir_writes(workdir, protected)
         # …and the leakage + critic gates, which are a NAMED rule (`_trust_gate_signals`)
         # rather than two more `sigs +=` lines: as inline concatenations, silencing them
         # was invisible to every trust test that does not drive a whole run. See that
         # method's docstring.
-        sigs += self._trust_gate_signals(node, scan_src)
+        sigs += self._trust_gate_signals(node, scan_src, detectors)
         return sigs
 
     def _eval_intervention_seen(self, node_id: int, generation: int, start_seq: int,
@@ -2886,7 +2940,28 @@ class EvaluateMixin:
                     # `code_digest` below must be the digest of the exact bytes that were scanned, so
                     # the surface is read once, here, and handed to the scan.
                     scan_src = self._trust_scan_surface(node)
-                    sigs = self._trust_scan_signals(node, res, state, workdir, scan_src)
+                    detectors = self._trust_scan_detectors(scan_src)
+                    sigs = self._trust_scan_signals(node, res, state, workdir, scan_src,
+                                                    detectors)
+                    # THE CLEAN CASE LEAVES A RECEIPT, and that is the whole point of this row: the
+                    # `if sigs:` below writes only on a hit, so until 2026-08-19 a run whose every
+                    # node was scanned clean was byte-identical to a run whose scan call had been
+                    # deleted — and identical again to a run with every detector switched off, which
+                    # is what four of the six preserved logs on this box actually are. Appended
+                    # UNCONDITIONALLY (an empty `detectors` list is itself the durable claim "the
+                    # engine got here and nothing was configured to look"), and it carries no
+                    # candidate text — what was scanned is named by its digest, which is the SAME
+                    # value the flagged row below publishes, from one function.
+                    #
+                    # AFTER the terminal, not folded into it. The BACKLOG's own sketch was a field on
+                    # `node_evaluated`; that needs the scan to run BEFORE the terminal append, which
+                    # would put five detector calls — three of them over agent-authored source, one
+                    # of them a filesystem walk — between an evaluation and the one row the run
+                    # cannot afford to lose. A separate row can be lost to a kill in this window
+                    # instead, and then it reads `unknown`, which is the correct default and the
+                    # exact reading `trust/scan_receipt.py` guarantees for it.
+                    self.store.append(EV_TRUST_SCAN, _scan_receipt.trust_scan_receipt(
+                        node_id, generation, detectors, len(sigs), scan_src))
                     if sigs:
                         # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
                         # of the exact scanned surface (provenance — which bytes produced these signals),
@@ -2899,9 +2974,13 @@ class EvaluateMixin:
                         self.store.append(EV_REWARD_HACK_SUSPECTED,
                                           {"node_id": node_id, "generation": generation,
                                            "signals": sigs,
-                                           "evidence_version": 1,
-                                           "code_digest": hashlib.sha256(
-                                               scan_src.encode("utf-8", "replace")).hexdigest()[:16]})
+                                           "evidence_version": TRUST_SCAN_EVIDENCE_VERSION,
+                                           # ONE digest rule for both rows (`trust/scan_receipt.py`),
+                                           # so the receipt above and this evidence commit to the
+                                           # same subject by construction rather than by two equal
+                                           # inline `hashlib.sha256(...)` calls that agree until
+                                           # someone edits one of them.
+                                           "code_digest": _scan_receipt.scan_subject_digest(scan_src)})
                 else:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
                     # if the crash-triage agent judged the idea fundamentally wrong).

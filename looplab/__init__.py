@@ -271,6 +271,7 @@ _LAYOUT = {
     "retrieval": "tools",
     "reviews": "serve",
     "reward_hack": "trust",
+    "scan_receipt": "trust",   # the per-node trust_scan receipt + its reader-side default
     "roles": "agents",
     "run_commands": "serve",
     "run_files": "serve",
