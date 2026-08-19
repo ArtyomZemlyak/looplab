@@ -35,7 +35,8 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext,
 from looplab.core.config import parallelism_aliases
 from looplab.core.llm_broker import LLM_LANES, in_llm_lane
 from looplab.core.models import RunState
-from looplab.engine.cadence import cadence_due, cadence_marks, seed_boundary_due
+from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
+                                     seed_boundary_due)
 from looplab.engine.widths import EVAL_WIDTH_MAX, LLM_WIDTH_MAX, settle_width
 from looplab.engine.costs import bind_cost_accountants
 from looplab.engine.governance_health import GovernanceLedgerUnavailable
@@ -345,8 +346,17 @@ class StrategyCadenceMixin:
         events), because the three consumers of this gate — the Strategist consult, the coverage
         snapshot, the concept-coverage snapshot — advance independently. Passing none keeps the
         window open from node 0, which is right for a consumer that has never fired.
+
+        "No pending evals" is the OBSERVABLE the creation decision point used to have and no longer
+        does — since F1f the outer loop turns while adopted evaluations burn, and this gate answered
+        NO for the whole life of every GPU run after `rubertlite-dr-unified-v8` (measured: 0
+        quiescent prefixes on v7, v9 and the live `e5small-dr-unified-v2`; v8's own single window is
+        the last 8.1 minutes of a 47.6-hour run). `cadence.at_creation_boundary` carries the
+        measurement and the money rule; `_cadence_while_evaluating` is the kill switch back.
         """
-        if state.pending_nodes():
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=getattr(
+                                        self, "_cadence_while_evaluating", False)):
             return False
         n = len(state.nodes)
         if n == 0:
@@ -730,7 +740,25 @@ class StrategyCadenceMixin:
         n = len(state.nodes)
         consulting = (self.strategist is not None
                       and self._should_consult(state, marks=state.strategy_history)
-                      and not self._autonomous_strategy_already_recorded_at(state, n))
+                      and not self._autonomous_strategy_already_recorded_at(state, n)
+                      # THE MONEY BOUND for the in-flight cadence (F1i). Both durable gates above close
+                      # only when a decision is RECORDED, and `_record_strategy` records only a strategy
+                      # that actually CHANGED — so the ordinary "the Strategist agrees with itself"
+                      # outcome leaves the window open. Before F1i that was free: the loop reached this
+                      # gate once per node count and then created a node. Since the loop now turns at a
+                      # fixed `n` while an evaluation runs, an unchanged decision would buy one paid
+                      # consult PER TURN. This memo is in-process only and skips exactly the work whose
+                      # outcome was "return state unchanged", so no event, replay or resume can see it;
+                      # a resumed engine re-asks once, which is what the durable gates are for.
+                      # Keyed on `(n, projection token)` and NOT on `n`, for the reason
+                      # `search/coverage.py::already_covered_at` states about its own pair: at a fixed
+                      # node count the live inputs still move — a node terminates, a metric lands, an
+                      # operator aborts — and each of those is a brief the Strategist has not seen. An
+                      # `n`-only memo would silence it for the rest of the node count, which under F1i
+                      # is most of a multi-hour run. It still bounds the loop, because the token moves
+                      # only when something the brief reads actually changed.
+                      and getattr(self, "_strategist_consulted_at", None)
+                      != (n, analytics_projection_token(state)))
         active_core = self._strategy_core(state.active_strategy)
         # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's
         # active OR if the currently recorded ownership set differs. Ownership itself is durable
@@ -801,6 +829,11 @@ class StrategyCadenceMixin:
             # No node_id on the op span: stamping it would file the strategist's LLM generations under
             # the NEXT node (id == len(nodes)) in /trace, polluting that node's Trace tab. The event still
             # gets THIS span's trace_id (current_ids), which is how the UI scopes it via by_trace.
+            # Spend the in-process attempt memo BEFORE the provider call, never after: an exception
+            # from `decide` (or a decision that turns out to change nothing) must still close this
+            # node-count for this process, or the very failure mode the memo bounds — one paid consult
+            # per outer-loop turn at a fixed `n` — comes back through the error path.
+            self._strategist_consulted_at = (n, analytics_projection_token(state))
             with self._op_span("strategist_consult"):
                 strat = validate_strategy(self.strategist.decide(state, ctx), ctx)
                 if strat:

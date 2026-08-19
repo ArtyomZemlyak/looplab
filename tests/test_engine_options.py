@@ -138,6 +138,7 @@ ATTR_BY_FIELD = {
     "verifier_ci_tie": "_verifier_ci_tie",
     "select_verifier_samples": "_select_verifier_samples",
     "coverage_context": "_coverage_context",
+    "cadence_while_evaluating": "_cadence_while_evaluating",
     "concept_pivot": "_concept_pivot",
     "graded_novelty": "_graded_novelty",
     "capability_expansion": "_capability_expansion",
@@ -339,6 +340,10 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the run-level systemic-failure stop, ON in Settings (3) and OFF in the bare
         # library (0) for the reason frozen in tests/test_options_divergence.py.
         systemic_failure_stop=settings.systemic_failure_stop,
+        # …and F1i's cadence precondition, ON in Settings and OFF in the bare library for the reason
+        # frozen in tests/test_options_divergence.py (the product may spend on a Strategist consult
+        # or a classifier pass beside a running GPU; a direct `Engine(...)` may not gain that unasked).
+        cadence_while_evaluating=settings.cadence_while_evaluating,
     )
 
     # (b) the NEW single-bundle style.

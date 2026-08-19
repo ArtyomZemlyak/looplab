@@ -71,8 +71,15 @@ def test_the_concept_gate_survives_a_stride_and_the_strategy_gate_still_agrees()
     assert cadence_marks(fired) == 4
     assert engine._should_consult_concepts(_State(6), marks=fired) is False
     assert engine._should_consult_concepts(_State(9), marks=fired) is True   # 9 - 4 >= 5
-    # An in-flight evaluation still closes both gates — that guard is unchanged.
+    # An in-flight evaluation closes both gates ONLY under the historical predicate, which is what
+    # `_Fake` gets by omitting `_cadence_while_evaluating` (the getattr default is False). That is
+    # deliberate here: this file is about the seed boundary, so it pins the pre-F1i behaviour as a
+    # negative control and `tests/test_cadence_while_evaluating.py` owns the other branch.
     assert engine._should_consult_concepts(_State(4, pending=True), marks=[]) is False
+    engine._cadence_while_evaluating = True
+    assert engine._should_consult_concepts(_State(4, pending=True), marks=[]) is True
+    assert engine._should_consult(_State(4, pending=True), marks=[]) is True
+    del engine._cadence_while_evaluating
 
 
 def test_the_shipped_retag_interval_fires_more_than_once_on_a_real_run_length():

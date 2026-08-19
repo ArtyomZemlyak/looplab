@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 180
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 181
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -108,7 +108,15 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # number from a run `engine/eval_contract.py` calls a different evaluation contract. It buys no
 # paid call and moves nothing; it is a row because a prompt is a contract and OFF must restore
 # the historical line byte for byte.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "ef3ad6c1e3942a2ef97d8e51b71cf1b35d76aac1ce97b5c8ffe9ebcf652bff32"
+# (181 since `cadence_while_evaluating`: may the node-count cadences fire at a creation decision
+# point that still has an evaluation in flight? A row because OFF is the historical behaviour and
+# the operator must be able to get it back — and because what it turns on is PAID cadence work
+# beside a running GPU. Measured over `runs/`: with it off (i.e. today) `rubertlite-dr-unified-v7`,
+# `-v9` and the live `e5small-dr-unified-v2` recorded ZERO `strategy_decision`, ZERO
+# `coverage_snapshot` and ZERO classifier `node_concepts` between them, because none of them ever
+# reached a moment with no pending node. It buys no extra passes per node count and its output is
+# fenced out of the graded-novelty evidence channel, so nothing it enables can reach selection.)
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "8cf75cbeb9869d04ac6d7ea60782718a17988a14bcdc27de22191fe2c509f11a"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

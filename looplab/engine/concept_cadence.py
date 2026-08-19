@@ -32,7 +32,8 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
-from looplab.engine.cadence import cadence_due, cadence_marks, seed_boundary_due
+from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
+                                     seed_boundary_due)
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
@@ -60,8 +61,18 @@ class ConceptCadenceMixin:
         Researcher-authored `idea.concepts` still fold into node_concepts at node_created (immediate UI
         freshness); this only paces the classifier-EVIDENCE + consolidation refresh and the concept-coverage
         pivot snapshot. Same shape/guards as `_should_consult` (creation decision point, seed boundary, then
-        every interval — since-last, for the same batch-stride reason `_should_consult` states)."""
-        if state.pending_nodes():
+        every interval — since-last, for the same batch-stride reason `_should_consult` states).
+
+        The creation decision point is `cadence.at_creation_boundary`, NOT "no pending evals" — this is
+        the consumer where that difference cost the most. Measured over `runs/`: v7, v9 and the live
+        `e5small-dr-unified-v2` reach 0 quiescent prefixes and recorded 0 classifier tags between them,
+        so every experiment in those runs carries only its own proposer's free-form taxonomy. What the
+        in-flight pass produces is a READ-MODEL tag and deliberately not evidence: the row is stamped
+        `at_pending` and `classifier_verified_node_concepts` refuses it, which is what keeps a mid-eval
+        tag out of graded-novelty admission (docs/36 — concepts may not reach selectability)."""
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=getattr(
+                                        self, "_cadence_while_evaluating", False)):
             return False
         n = len(state.nodes)
         if n == 0:
@@ -97,6 +108,30 @@ class ConceptCadenceMixin:
         n = len(state.nodes)
         if already_covered_at(state, n, state.concept_coverage_snapshots):
             return state
+        # THE MONEY BOUND for the in-flight cadence (F1i), and it is required rather than an
+        # optimization. `already_covered_at` is a DURABLE at_node gate and it only closes once a snapshot
+        # is actually appended — but `_concept_coverage_snapshot` returns None whenever the producer
+        # yields no graph (no client, no curated skeleton, a tagging hiccup), and it returns None AFTER
+        # paying for `_refresh_concept_tags`. Before F1i that cost at most one wasted pass per node
+        # count, because the loop reached this gate once and then created a node; now the loop turns
+        # freely at a fixed `n` while an evaluation runs, so an unbounded number of paid tagging passes
+        # sit behind that one None. The memo is purely in-process and only ever skips work whose outcome
+        # was "return state unchanged" (the same argument `_maybe_consult_strategist`'s pin memo makes),
+        # so it cannot affect the event log, replay or resume — a resumed engine simply re-attempts once.
+        # …and the memo is keyed on the SAME pair that gate is, `(at_node, projection token)`, not on
+        # `n` alone. `already_covered_at`'s own docstring says why: "an abort / reset / tag edit
+        # changes the live steering inputs WITHOUT allocating a node, so a snapshot taken before it no
+        # longer describes the run and the cadence must be allowed to record a fresh one at the same
+        # `n`". An `n`-only memo re-broke exactly that, and `tests/test_snapshot_cadence_idempotence.py`
+        # and `test_concept_pivot.py::test_same_node_count_abort_refreshes_concept_snapshot` caught it.
+        # The pair is also the RIGHT bound for the in-flight case rather than a concession to it: at a
+        # fixed node count with an evaluation running, the token moves only when a node's status,
+        # metric, idea or membership actually changes — so the loop turning a hundred times buys one
+        # pass, and a node terminating mid-flight buys a second one, which is a pass with new evidence.
+        attempted = (n, analytics_projection_token(state))
+        if getattr(self, "_concept_cadence_attempted_at", None) == attempted:
+            return state
+        self._concept_cadence_attempted_at = attempted
         # KNOWN GAP (not a claim-fenced path, unlike the finalize stewards): this cadence dispatches
         # `_concept_coverage_snapshot`'s paid tagging/consolidation calls DIRECTLY, with no durable
         # invocation claim taken before the provider call. A crash between provider success and the
@@ -292,6 +327,20 @@ class ConceptCadenceMixin:
                             if provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER]
         stale = set(stale_tagged_nodes(classifier_known, at_vocab,
                                        growth=_RETAG_GROWTH, cap=_RETAG_CAP))
+        # F1i: a row produced BESIDE a live evaluation is stale in a second sense, and the two sit
+        # together because they are the same remedy — re-tag against what is known NOW. It is stale
+        # exactly while the run is quiescent, which makes it self-clearing (one re-tag stamps
+        # `at_pending: 0` and the node leaves this set forever) and makes the condition unreachable on a
+        # run that never drains, so a continuously-busy run pays nothing for it. This is what keeps the
+        # graded-novelty evidence channel IDENTICAL to its pre-F1i self on a run that does quiesce: the
+        # in-flight row is not evidence, and the quiescent pass that would have produced the only row
+        # under the old gate still produces one. Bounded by the SAME `_RETAG_CAP` as the vocabulary
+        # half — the money bound is the existing constant, not a new one.
+        if not state.pending_nodes():
+            at_pending = getattr(state, "node_concepts_at_pending", None) or {}
+            inflight = [nid for nid in classifier_known
+                        if nid not in stale and int(at_pending.get(nid, 0) or 0) > 0]
+            stale.update(sorted(inflight)[:max(0, _RETAG_CAP - len(stale))])
         known = {nid: v for nid, v in all_known.items() if nid not in stale}
         known_renames = {str(k): str(v)
                          for k, v in (getattr(state, "concept_consolidation", None) or {}).items()}
@@ -326,6 +375,20 @@ class ConceptCadenceMixin:
         # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
         new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()
                        if known_renames.get(k) != v}
+        # …but NOT from an in-flight pass (F1i). This is the ONE output of this cadence that is
+        # RETROACTIVE and RUN-WIDE, so the per-row `at_pending` evidence gate cannot express it: a
+        # rename is applied backwards by the fold to every authored-delta node's stored membership
+        # (`replay.py::_materialize_concept_deltas` resolves `added`/`removed`, the run base and each
+        # parent's set through the map) and again at every read surface (`events/digest.py::
+        # _folded_axes`/`folded_concepts`, `serve/concept_frame.py`, `search/coverage.py`). Measured on
+        # `rubertlite-dr-unified-v8`, its 9 recorded renames change what 11 of its 16 nodes are reported
+        # as being about. Deciding that mid-evaluation, on a vocabulary that has not seen the running
+        # experiments' results, would rewrite the meaning of already-recorded tags from a producer this
+        # repo has reviewed only at a quiescent boundary. Withholding it costs nothing that exists
+        # today: a run that never quiesces records no consolidation now either. The tags themselves are
+        # still recorded — the classifier giving an experiment a tag of its OWN is the whole point.
+        if new_renames and state.pending_nodes():
+            new_renames = {}
         if new_renames:
             self.store.append(EV_CONCEPT_CONSOLIDATION,
                               {"rename": new_renames, "mode": cmap.get("mode", "llm")})
@@ -338,6 +401,13 @@ class ConceptCadenceMixin:
         mode = cmap.get("mode", "llm")
         graph = cmap["graph"]
         v_now = len(graph.concepts())    # the vocabulary size THESE tags were produced against
+        # …and how many evaluations this pass ran BESIDE (F1i). Stamped on every row so the evidence
+        # consumers can tell an in-flight tag from a quiescent one WITHOUT a second vocabulary: the
+        # provenance stays `classifier`, because the producer really is the reviewed classifier and the
+        # read models must keep showing the tag. Recorded rather than derived in the fold so replay stays
+        # order-tolerant (invariant 5) — a derivation would depend on where this row sits relative to the
+        # node terminals around it.
+        at_pending = len(state.pending_nodes())
         raw_tag_modes = cmap.get("raw_tag_modes") or {}
         # Record a node's RAW tags + at_vocab when it is NEW/re-tagged (not in `known`) OR its tags
         # changed. Re-recording a staleness-refreshed node even when its tags are unchanged updates
@@ -371,6 +441,7 @@ class ConceptCadenceMixin:
             if nid not in known or known.get(nid) != new_ids:
                 self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                      "mode": producer_mode, "at_vocab": v_now,
+                                                     "at_pending": at_pending,
                                                      "generation": node.attempt})
 
     def _assert_concept_edges(self, state: RunState, graph, mode: str) -> None:

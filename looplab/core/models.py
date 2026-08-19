@@ -401,6 +401,15 @@ def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
     # only the exact reviewed producer is evidence; proposer-authored labels remain display-only.
     if provenance.get(node_id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
         return []
+    # …and only a QUIESCENT pass of that producer (backlog F1i). The classifier may now run while an
+    # evaluation is in flight, which is a strictly wider producer than the one every evidence consumer
+    # here was reviewed against: it can tag a node whose result does not exist yet, and it makes tags
+    # APPEAR EARLIER than they used to, which is enough on its own to move a graded-novelty admission.
+    # The row stays a first-class read-model tag (that is what the in-flight pass is FOR); it simply is
+    # not evidence until a quiescent pass re-states it. Absent == 0 == quiescent, so every pre-F1i log
+    # answers byte-identically.
+    if int((getattr(state, "node_concepts_at_pending", None) or {}).get(node_id, 0) or 0) > 0:
+        return []
     receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
     if node_id in receipts:
         # A classifier may have produced some valid labels while also overflowing the bound or emitting
@@ -1538,6 +1547,17 @@ class RunState(BaseModel):
     # node may now apply to it), so the cadence re-tags the most-stale nodes against the grown vocabulary
     # (bounded per cadence). Additive/reader-defaulted; empty on old logs / pre-B1 events -> no re-tag.
     node_concepts_at_vocab: dict[int, int] = Field(default_factory=dict)
+    # The number of nodes still PENDING when the classifier produced this node's CURRENT tags (backlog
+    # F1i). `> 0` means the pass ran BESIDE a live evaluation, which is a producer this repo has never
+    # reviewed as EVIDENCE: the node's own result/log excerpts may not exist yet, the vocabulary is
+    # whatever the run had reached mid-flight, and — the load-bearing half — a tag that appeared at a
+    # different INSTANT than it would have before can flip a graded-novelty admission. So the flag is
+    # the EVIDENCE gate for the in-flight cadence, read by `classifier_verified_node_concepts` and by
+    # `engine/novelty.py::_graded_novelty_precheck`; the read models are deliberately untouched, which
+    # is the entire point of tagging mid-eval (the operator sees the tag; selection does not).
+    # Additive/reader-defaulted: absent == 0 == quiescent, which is EXACTLY right for every log written
+    # before F1i, because `_should_consult_concepts` could not fire with a pending node at all.
+    node_concepts_at_pending: dict[int, int] = Field(default_factory=dict)
     # PART IV D4 (§21.18 HT): per-hypothesis agentic concept tags (hyp_id -> [concept_id]) recorded once by
     # the LLM tagger, reused by taxonomy dedup instead of the tag_text alias heuristic. Populated only when
     # `concept_pivot` is on. Advisory rather than pure telemetry: taxonomy dedup and concept cadences reuse

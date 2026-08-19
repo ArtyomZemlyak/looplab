@@ -2794,8 +2794,14 @@ aliases (re-derived: `tag_text` returns `[]` for all eight v9 nodes against v9's
 only thing that separates node 0 from node 4 is the English of its hypothesis, which is the classifier's
 job.
 
-**STILL OPEN — ⬜ the concept classifier cadence is structurally unreachable on a run that is never
-quiescent, and that is why node 0 has no tag of its own.** `engine/concept_cadence.py::_should_consult_concepts`
+**CLOSED 2026-08-18 by §0.14 — ⬜ the concept classifier cadence was structurally unreachable on a
+run that is never quiescent, and that is why node 0 had no tag of its own.** The remedy prescribed
+below (a THIRD pace) turned out to be forbidden by `cadence.py`'s own rule, and the blast radius was
+wider than stated — read §0.14 for what shipped, for the correction that v8 is NOT an older code
+baseline, and for the two findings that survive the fix: `skeleton_for()` matches no run on this box,
+and the classifier REWRITES an authored membership rather than reconciling it.
+
+The original diagnosis, kept verbatim: `engine/concept_cadence.py::_should_consult_concepts`
 opens `if state.pending_nodes(): return False`. Since backlog F1f made evaluation children outlive the
 turn that admitted them, a run with continuously-overlapping multi-hour evals never has a quiescent
 moment. Measured by walking each log's node lifecycle:
@@ -2828,6 +2834,191 @@ seeded from node 0, which would stop it being self-confirming for the NEXT run's
 done: `run_base_concepts` is an inheritance source the fold reads, so changing what is written to it is a
 writer change with replay consequences, and the reader-side split makes it unnecessary for the operator's
 view. Recorded so the self-confirming property is not rediscovered.
+### §0.14 The Strategist has adapted nothing since v8, and the reason is six words written in June (2026-08-18)
+
+**THE MEASUREMENT.** Folded every event log under `runs/` (42 of them) and walked each one prefix by
+prefix, asking the question the cadence family asks: are there nodes, and is none of them pending?
+
+    run                          quiescent prefixes   windows   strategy_decision   classifier node_concepts
+    rubertlite-dense-retrieval (07-09→07-18)   683        43            25                    159
+    rubertlite-dr-unified-v6   (08-12→08-13)   850         5             1                      3
+    rubertlite-dr-unified-v7   (08-14)           0         0             0                      0
+    rubertlite-dr-unified-v8   (08-14→08-16)   148         1             1                     16
+    rubertlite-dr-unified-v9   (08-16→08-17)     0         0             0                      0
+    e5small-dr-unified-v2      (live, 11.6 h)    0         0             0                      0
+
+(`rubertlite-dense-retrieval`'s row is a LENIENT read: `EventStore.read_all` fails closed at a seq
+gap that an operator trace-clear left at line 20 of 1,624, so the strict fold sees 20 records. Its
+counts are over the raw lines and are quoted for the shape, not as a folded projection.)
+
+A perfect correlation, and **every single quiescence-gated firing in the corpus landed inside a
+quiescent window** — measuring the state BEFORE each event was appended, v6 is 23 of 23, v8 is all
+of its, and dense-retrieval is 159 of 159 `node_concepts`. So nothing else was ever the binding
+constraint, and the two members that DID keep firing on v7/v9/e5 prove the same thing from the other
+side: `research_attempted`/`research_completed` (whose manual branch precedes the gate and whose
+concurrent `_spawn_research` half carries no `pending_nodes()` check) and `lessons_refreshed` (the
+READ side, on a different gate).
+
+**v8 IS NOT A DIFFERENT CODE BASELINE, AND THAT IS THE FINDING.** It is tempting to read the table
+as a regression between v8 and v9. It is not: v8 started 2026-08-14 16:25, *after* every commit in
+the F1f chain, `git log -S` over its whole window touches neither `_eval_inflight` nor
+`pending_nodes`, and its config snapshot is byte-identical to v9's on every relevant knob. Its 148
+quiescent prefixes are **one** window — the last 2.3 % of a 47.6-hour log, 8.1 minutes, opening on
+the run's FINAL `node_evaluated` — and every cadence firing that run ever made is inside it. So the
+difference between v8 and v9 is **run shape**: since 2026-08-13 the family fires at most once per
+run, in the end-of-run drain, and not at all in a run that ends with an evaluation still going.
+v7, v9 and the live e5small run each end with three pending nodes.
+
+**THE MECHANISM, AND THE REASON THE GUARD EXISTED.** Five periodic phases opened with
+`if state.pending_nodes(): return False`: `strategy.py::_should_consult` (→ `strategy_decision` AND
+`coverage_snapshot`), `concept_cadence.py::_should_consult_concepts` (→ `node_concepts`,
+`concept_consolidation`, `concept_edge`, `hypothesis_concepts`, `concept_coverage_snapshot`),
+`lessons.py::maybe_distill_lessons`, and `research_cadence.py`'s serial deep-research and
+`_maybe_refresh_report`. The whole stated reason is **six words**, in the docstring `bb421e0f7`
+(2026-06-24) shipped with the Strategist — *"only at a creation decision point (no pending evals)"*
+— and that commit's message never mentions the guard. Four consumers then copied it by imitation
+over three weeks; `_maybe_refresh_report` states no reason at all. The parenthesis is the tell:
+"no pending evals" was never the requirement, it was the OBSERVABLE that coincided with it under
+serial evaluation. `ba08f1f9` (2026-08-13, F1f) hoisted the eval task group to run scope so a
+session returns while its evals burn — its own comment says *"Owning the group HERE makes a session
+turn a DECISION boundary instead of a QUIESCENCE one"* — and the requirement survived that while
+the observable did not. `docs/audit/2026-08-07-search-loop.md` had already recorded the same guard
+as *"under speculation is almost never true"* six days earlier, filed as "Decision needed".
+
+`run_concepts` is the control: it is the ONE member of the concept subsystem NOT behind the gate,
+and it is exactly what v9 recorded — `run_concepts 1` and nothing else.
+
+**THE FIX IS A PRECONDITION, NOT A PACE, and `cadence.py`'s own rule is what refused the obvious
+alternative.** `engine/cadence.py::at_creation_boundary(pending, while_evaluating=…)` reads no `n`,
+no `last`, no `every`, and records nothing. A "third pace scoped to the concept classifier" — the
+remedy §0.12 proposed — cannot be built: `cadence.py` states that *a pace which records an `at_node`
+mark is a node-count pace whatever it is called*, and every consumer here records one
+(`node_concepts`, `concept_coverage_snapshot`, `coverage_snapshot`, `strategy_decision`). It would
+also have had no self-clearing condition to bound its money the way `occupancy_due` does. The pace
+count stays two.
+
+**THE MONEY, measured as a rule rather than asserted.** The interval and each consumer's `at_node`
+idempotence twin are untouched, so paid passes per node count are unchanged. What genuinely changes
+is that the outer loop now reaches the gate many times at the SAME `n` — and two consumers record
+no mark on their "nothing changed" path: the Strategist records only a CHANGED strategy, and the
+concept snapshot records nothing when its producer yields None *after* paying for the tagging. Left
+alone, each is one paid LLM call per outer-loop turn. Both carry an in-process attempted-at-`n`
+memo, spent BEFORE the provider call so the error path cannot evade it; the memo only ever skips
+work whose outcome was "return state unchanged", so no event, replay or resume can see it.
+
+**THE RESUME RULE, and it costs something on purpose.** `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` gets a
+row pinning the knob `false`, so a run resumed from a snapshot written before the field keeps the
+DEAD cadence — which on this box is v9's and the live e5small's shape, i.e. exactly the runs the fix
+exists for. The first draft exempted it on the reasoning that pinning a resumed run to the defect
+preserves the defect. `tests/test_config.py::test_every_product_on_divergence_is_grandfathered_for_a_pre_versioning_snapshot`
+refused that, and it was right on the table's own conditions: the historical value IS pointable at a
+commit (`false` is the literal guard every consumer carried from 2026-06-24), and the change adds
+paid calls AND an intervention to an old run. "The new behaviour is better" is precisely the
+argument that rule exists to refuse. An operator opts a resumed run in by setting the knob
+explicitly; every new run gets it without asking.
+
+**HOLDING THE LINE (docs/36).** Relaxing the gate newly emits CLASSIFIER-provenance `node_concepts`,
+which `_graded_novelty_precheck` reads — and a level-4/5 grade there SHORT-CIRCUITS the flat dedup
+gate, i.e. it is an admission decision. Even identical tags would move it, because they would EXIST
+EARLIER. So the OUTPUT is gated, not the input: each row carries `at_pending` (how many nodes were
+pending when it was produced; absent == 0 == quiescent, which every pre-fix log provably was), and
+`core/models.py::classifier_verified_node_concepts` plus the precheck both refuse a non-zero one.
+An in-flight row is **invisible** to the precheck rather than "present but rejected" — a non-empty
+`classifier_ids` arms its completeness rule, so counting-then-rejecting would flip a run that grades
+on the curated skeleton today into one that returns None. A never-quiescent run's precheck is
+therefore byte-identical to its pre-fix self, and `_reusable_node_tags` re-tags an in-flight row at
+the next quiescent pass (bounded by the EXISTING `_RETAG_CAP`), so a run that DOES drain ends with
+exactly the evidence it would have had. The read models are untouched, which is the entire point:
+the operator sees node 0's tag; selection does not.
+
+**ONE OUTPUT IS WITHHELD ENTIRELY, and it is the one a per-row stamp cannot fence.** An in-flight
+pass records no `EV_CONCEPT_CONSOLIDATION`. A rename is RETROACTIVE and RUN-WIDE — the fold applies
+it backwards to every authored-delta node's stored membership (`_materialize_concept_deltas`
+resolves `added`/`removed`, the run base and each parent's set through the map) and every read
+surface resolves ids through it (`events/digest.py::_folded_axes`/`folded_concepts`,
+`serve/concept_frame.py`, `search/coverage.py`). Measured on v8, its 9 recorded renames change what
+**11 of its 16 nodes** are reported as being about. Withholding costs nothing that exists today: a
+run that never quiesces records no consolidation now either.
+
+**WHAT THIS DOES NOT FIX, and it is the more expensive finding.** ⬜ **`skeleton_for()` matches no
+run on this box.** The curated taxonomy (`search/concept_graph.py`: 26 leaves + 10 axis roots + 10
+`<axis>/*` placeholders = 46 ids) is resolved from `state.task_id` against ONE registered pack,
+`dense-retrieval`, plus seven substring aliases. Every run here answers `repo_task`,
+`e5small-dr-unified-v2` or `toy_quadratic`, none of which contains an alias — so `seed=None` and
+`build_concept_map` grows a vocabulary from scratch. The consequence refutes the natural assumption
+that the dead classifier is why v9's vocabulary is invented: measured per run (distinct ids /
+invented), the classifier-LIVE group is **58.8 %** invented and the classifier-DEAD group **40.7 %**.
+On the operator's own axis, v8's LIVE classifier minted SEVEN spellings — `mining/hard_negative`,
+`mining/false_negative_filtering`, `train/negatives/mining`, `train/negatives/in-batch`,
+`sampling/in-batch/negatives`, `training/negative_mining`, `training/negatives/count` — for the four
+curated `negatives/*` ids, in one run. The only 100 %-curated population on the box
+(`rubertlite-dense-retrieval`, 159 rows) was tagged by an OFFLINE CLI pass eight days after the run
+ended, with the task type given explicitly. Turning the classifier on gives node 0 the tag of its
+own it needs; it does **not** unify the paths the operator asked about, and saying otherwise would
+be wrong.
+
+⬜ **The classifier REWRITES, it does not add.** `_on_node_concepts` assigns
+(`st.node_concepts[nid] = bounded`), authored provenance has no protection (only OPERATOR does), and
+the authored ids survive only in the raw log — `events/digest.py` explicitly forbids readers from
+resurrecting `idea.concepts`. Measured on v8, which is the precedent: **2 of 24 authored ids survive
+into their own node's classifier row (91.7 % replaced)**, node 0's authored set and its folded set
+share nothing, and node 3's exactly-curated `regularization/r-drop` was replaced by the invented
+`regularization/rdrop`. A classifier row on a PARENT also re-materializes every authored-delta
+child's inherited set. This is the designed behaviour — the proposer must not certify its own
+taxonomy, and §0.12 measured the authored regime as self-confirming — but it is a record-side effect
+and it is recorded here rather than discovered later. No live run is disturbed by this change: a
+running engine does not reload its source.
+
+**ALTERNATIVES REJECTED.**
+1. *A third pace under `cadence.py`* (§0.12's own proposal). Refused by `cadence.py`'s stated rule:
+   every consumer records an `at_node`, so the "new pace" is the node-count pace renamed, and it
+   would close that window for a full `every` nodes while `already_covered_at` refused the next
+   firing at the same count. It also has no self-clearing condition — `occupancy_due`'s money bound
+   is its CONDITION, and "the classifier has something to say" never clears on its own.
+2. *Redefine quiescence as "no eval is mid-STAGE".* A node is `pending` for its whole evaluation and
+   is mid-stage for essentially all of it; on this corpus the predicate is the same predicate. It
+   also invents a second meaning of quiescent beside invariant #1's, which already had to be
+   restated once for F1f.
+3. *Fire at a boundary that provably exists — a node terminal, or finalization.* A terminal is a
+   real boundary, but `_run_cadences` has ONE call site and it is the outer loop's creation decision
+   point; routing a second entry through a terminal would put a paid LLM pass on the eval-completion
+   path and give the family two firing sites with two idempotence stories. Finalization is where v8
+   already fires, and it is exactly the behaviour being called a defect.
+4. *Leave the gate and add a `run_constant`-style reader.* That is §0.12, and it got the operator to
+   "node 0 has no distinguishing tag" and stopped — a reader cannot mint the tag only a classifier
+   can produce.
+5. *Relax the gate with no output fence.* The measured hazard: v9 runs `graded_novelty=True` and has
+   a `novelty_rejected` row, so newly-visible classifier evidence reaches a level-4/5 admission
+   override. Refused; this is what `at_pending` exists for.
+6. *Give in-flight rows a new PROVENANCE tier instead of a stamp.* Cheaper at the precheck (the
+   `== CLASSIFIER` compare filters them for free) but the tier is enumerated in
+   `INHERITABLE_CONCEPT_PROVENANCE`, `card_ledger._CARD_NODE_CONCEPT_PROVENANCE`,
+   `search/concept_projection.py` and the CLI, and it would strip the tag out of the read models —
+   which is the one thing the operator asked for.
+7. *Also let `lessons_distilled`, serial deep research and the report refresh through.* Deliberately
+   not in this change: deep research already has its own overlap path (`_spawn_research`, which is
+   why `research_attempted`/`research_completed` are the two things that DID keep firing on v7/v9/e5)
+   and the other two are recorded below as the remaining share of the same gate.
+
+**PROVEN BY:** `tests/test_cadence_while_evaluating.py` — 21 tests over the real predicate, a real
+`EventStore`/`fold` run shaped like v9, and a real `Engine` with a counting Strategist: the property
+(a never-quiescent run fires the family), the money bound (25 outer-loop turns at one node count buy
+exactly one paid concept pass and one consult, including through a raising provider), the line (a
+run whose only classifier rows are in-flight grades on EXACTLY what a run with no classifier rows
+grades on, while a quiescent row still reaches the channel), the parity re-tag and its `_RETAG_CAP`
+bound, the consolidation withholding, and the fold's fail-closed receipt. Non-vacuity re-verified by
+mutating a throwaway `tar` copy of the tree with NINE mutations — the gate reverted, the novelty
+filter removed, the evidence boundary removed, each memo removed, the parity rule removed, the
+withholding removed, the stamp removed, and a comment-only evasion of the gate — **all nine killed**.
+Replayed over all 42 event logs under `runs/`, metrics, champions, feasible sets, violations,
+memberships and provenance are byte-identical: digest `3eda8c9d95dadd1b` before and after.
+
+⬜ **Remaining share of the same gate, not taken here:** `lessons.py::maybe_distill_lessons`
+(`lessons_distilled`: 0 on v7/v9/e5, 2 on v8) and `research_cadence.py::_maybe_refresh_report`
+(`report_generated`: 0 on v9 and e5). Both are one call to the same predicate; they are left out
+because neither was measured for what it costs to run mid-eval, and this change's whole claim is
+that each consumer's output was fenced deliberately rather than by inheritance.
+
 ### §0.13 A red stage chip about an attempt that ended 177 minutes ago, over a node that was training (2026-08-17)
 
 Reported by the operator: the Inspector's TRACE showed experiments #5 and #6 of the live

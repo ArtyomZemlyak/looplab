@@ -65,7 +65,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop terminalizes with `not_learning`, which this default is what makes repairable.
 #               A replicate calibrated before it would abandon a class of node this one repairs, so
 #               the envelope genuinely moved and old receipts SHOULD stop verifying.)
-_EXPECTED_DIGEST = "sha256:029b3df6194c48d98b6bac7245f5f3bceaa6cbcbe86266d227b370f4f633315d"
+#   2026-08-18  MERGE: `not_learning` (a changed DEFAULT) and `cadence_while_evaluating` (a new
+#               FIELD) landed on separate branches, each re-pinned against a tree without the
+#               other — the same shape as the 2026-08-13 merge recorded below, and with the same
+#               answer: neither branch's digest was ever correct for the shipped tree, so this is
+#               re-measured ONCE over the merged map rather than picked from a side.
+_EXPECTED_DIGEST = "sha256:92711cc014eb99103dc51de567ea8f7db43fdb2b21692406bfabe49d3ba8e2fd"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -287,7 +292,27 @@ _EXPECTED_DIGEST = "sha256:029b3df6194c48d98b6bac7245f5f3bceaa6cbcbe86266d227b37
 #               `calibration_profile_digest: sha256:e3fd5e10…`, which is neither the digest
 #               being replaced nor the new one — it was already dead before this change, as the
 #               two entries above it also record.
-_EXPECTED_FIELD_COUNT = 210
+#   2026-08-18  + cadence_while_evaluating  (may the node-count cadences fire at a creation
+#               decision point that still has evaluations IN FLIGHT — backlog F1i). The 'field set
+#               changed too' branch, and verified that way rather than from the count: diffing the
+#               `Settings` field set against `fbbab725` reports exactly `['cadence_while_evaluating']`
+#               added and nothing removed, so a +2/-1 cannot be hiding behind the +1.
+#               `_EXPECTED_FIELD_COUNT` goes 210 -> 211 and both pins are re-set.
+#               INERT for a calibration replicate, and inert three times over rather than by
+#               accident: the profile already pins `coverage_context: False`, `concept_pivot: False`
+#               and `strategist_backend: "off"`, which is EVERY consumer of the predicate this knob
+#               governs — so no cadence it could release is wired at all, and the replicate's toy
+#               evals are instantaneous besides. It is therefore left at the shipped `True` rather
+#               than pinned False: a False here would assert an intent about behaviour that cannot
+#               occur, and the three overrides above are what actually holds the line. The guard is
+#               deliberately not clever enough to exempt an inert knob, and re-pinning is right
+#               rather than merely necessary for this list's usual reason — the field decides
+#               whether a run may spend on a Strategist consult or a classifier pass WHILE a GPU is
+#               busy, and an envelope that cannot state that is not the envelope a later receipt
+#               would be compared against. Old receipts SHOULD stop verifying, and the revocation
+#               costs nothing that was not already spent: `speculation_implementation_digest` hashes
+#               every shipped `.py` and this change moves it regardless.
+_EXPECTED_FIELD_COUNT = 211
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

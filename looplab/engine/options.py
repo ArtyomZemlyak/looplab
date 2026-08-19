@@ -258,6 +258,7 @@ class EngineOptions:
     # `Engine(...)` did before this knob existed).
     trace_llm_io: Optional[bool] = None
     coverage_context: bool = True        # narrowing signal: coverage_snapshot at the strategist cadence
+    cadence_while_evaluating: bool = False  # F1i: node-count cadences may fire with evals in flight
     concept_pivot: bool = False          # PART IV 2a: concept-graph uncovered-region pivot (opt-in)
     graded_novelty: bool = False         # PART IV 2b: D3 graded novelty into the live gate (level-4/5 allow)
     capability_expansion: bool = False   # PART IV 2b: D7 capability-expansion forced-jump directive on lock-in

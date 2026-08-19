@@ -878,11 +878,29 @@ class NoveltyGateMixin:
             # A retained subset cannot certify complete experiment coverage or an L4/L5 bypass. This
             # also prevents an emptied partial cache from silently falling back to the heuristic path.
             return None
+        # F1i: a classifier row produced while an evaluation was IN FLIGHT is not evidence here, and
+        # this is the ONE line that keeps the in-flight cadence out of SELECTABILITY (docs/36). The
+        # classifier may now run at a creation decision point that still has pending nodes, which is a
+        # strictly wider producer than the quiescent-only one this bypass was reviewed against: it can
+        # tag from an idea whose result does not exist yet, and — the half that matters even when the
+        # tags would have been identical — it makes them EXIST EARLIER, which is on its own enough to
+        # turn a defer into a level-4/5 ALLOW that short-circuits the flat dedup gate.
+        # An in-flight row is invisible here rather than "present but untrusted", and the difference is
+        # deliberate: `classifier_ids` being non-empty arms the completeness rule below, so counting the
+        # row and then rejecting it would flip a run that grades on the curated skeleton today into one
+        # that returns None. Invisible keeps a never-quiescent run's precheck byte-identical to its
+        # pre-F1i self — `runs/rubertlite-dr-unified-v9` and the live `e5small-dr-unified-v2` have zero
+        # classifier rows today, and every row the in-flight cadence gives them is filtered out here.
+        # `_reusable_node_tags` re-tags such a node at the next quiescent pass, so a run that DOES drain
+        # ends up with exactly the evidence it would have had. Absent == 0 == quiescent (every pre-F1i
+        # log), so no recorded run's admission history can move.
+        at_pending = getattr(state, "node_concepts_at_pending", None) or {}
         classifier_ids = {
             nid for nid in experiment_ids
             if nid in all_node_concepts
             and concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
             and nid not in receipts
+            and int(at_pending.get(nid, 0) or 0) <= 0
         }
         # An operator-edited node has an authoritative human/assistant-asserted tag set, so it counts as
         # COVERED for the completeness check below — but its tags never enter `node_concepts` (the graded

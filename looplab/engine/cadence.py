@@ -16,6 +16,16 @@ not a variant of the first: a node count cannot express "an evaluation has been 
 hours and the board behind it is empty", which is the state that cost this box 167.7 GPU-h. Read its
 docstring before adding a third — the rule that keeps two paces from collapsing into one is that a
 pace which records an `at_node` mark is a node-count pace whatever it is called.
+
+There is STILL no third pace, and `at_creation_boundary` below is why the obvious candidate was
+refused rather than built (backlog F1i). What was broken was never the PACE — it was the
+PRECONDITION every node-count consumer shared, `state.pending_nodes()` empty, which since F1f made
+evaluation children outlive the turn that admitted them is a state a GPU run does not reach until
+its last evaluation has terminated. A "third pace for the concept classifier" would have had to
+record an `at_node` (its consumers all do: `node_concepts`, `concept_coverage_snapshot`,
+`coverage_snapshot`, `strategy_decision`), which by the rule above makes it the FIRST pace under
+another name — and it would have had no self-clearing condition to bound its money the way
+`occupancy_due` does. So the fix is one line of precondition, and the pace count stays two.
 """
 from __future__ import annotations
 
@@ -28,6 +38,91 @@ def cadence_due(n: int, last: int, every: int) -> bool:
     with no consumer wired at all.
     """
     return every > 0 and n > 0 and n - last >= every
+
+
+# ----------------------------------------- the PRECONDITION every node-count consumer shares (F1i)
+def at_creation_boundary(pending: int, *, while_evaluating: bool) -> bool:
+    """Whether a node-count cadence may fire at the decision point the outer loop has just reached.
+
+    THIS IS NOT A PACE and must never become one — it reads no `n`, no `last` and no `every`, and it
+    records nothing. `cadence_due` above still decides HOW OFTEN; this decides only WHETHER THIS
+    MOMENT COUNTS as one of the run's creation decision points.
+
+    WHAT THE OLD SPELLING PROTECTED, in its own words, because it must be stated before it is
+    touched. The whole reason is SIX WORDS, written once and never argued for again: `bb421e0f7`
+    (2026-06-24, the commit that added the Strategist) introduced
+
+        # docstring: 'Bounded, deterministic cadence: only at a creation decision point (no
+        #             pending evals), at the seed boundary or every `strategist_every` created
+        #             nodes.'
+        if state.pending_nodes():
+            return False
+
+    and its commit message says nothing about the guard at all. Four more consumers then copied it
+    by imitation over the next three weeks — `concept_cadence.py::_should_consult_concepts`
+    ("Same shape/guards as `_should_consult`"), `lessons.py::maybe_distill_lessons` ("fires only at
+    a creation decision point (no pending evals), mirroring deep-research"),
+    `research_cadence.py::_maybe_deep_research` ("Auto triggers only at a creation decision point")
+    and `_maybe_refresh_report`, which states no reason at all.
+
+    The parenthesis is the tell: "no pending evals" was never the requirement, it was the
+    OBSERVABLE that used to coincide with the requirement. Under serial evaluation the loop could
+    only be at a creation decision point when nothing was in flight, so one test served for both —
+    and the phases it gates really do want a decision point, because the Strategist rewires
+    policy/operators/fidelity/widths for the nodes the policy is about to propose and the coverage
+    snapshots are the brief it reads. `_apply_strategy` already says in its own docstring that those
+    knobs are safe to move between iterations ("self.timeout is read fresh per eval and
+    self._eval_parallel rebuilds the CapacityLimiter each batch, so a mid-run change takes effect on
+    the next node without any rewiring"), and the Developer swap it guards is still taken between
+    sequential `_create_node` calls. And the eval dispatcher was ALREADY hardened for this writer:
+    `orchestrator.py`'s batch semaphore captures its own token total precisely because
+    "`self._eval_parallel` is live and has three writers that move it mid-batch (the Strategist, an
+    operator `budget_extend`, and since docs/29 F1 the proposal-derived re-pin)". So the requirement
+    survives the change; only the proxy for it does not.
+
+    WHY IT STOPPED BEING REACHABLE. Backlog F1f (2026-08-13) made the eval task group run-scoped, so
+    `_run_card_session` returns while its evaluations burn and the outer loop keeps turning. The
+    creation decision point is still reached — `_run_cadences` has exactly one call site, in the
+    outer loop, after the width settle and the speculation settles, on a stable decision prefix that
+    the `post_cadence_seq != decision_seq` re-enter maintains — but the observable is now false
+    forever. Measured over `runs/` on 2026-08-18, prefixes with >0 nodes and 0 pending:
+
+        rubertlite-dense-retrieval (to 07-18)   683 (43 windows)   classifier fired 159x
+        rubertlite-dr-unified-v6   (to 08-13)   850 ( 5 windows)   fired
+        rubertlite-dr-unified-v7   (from 08-14)   0                never
+        rubertlite-dr-unified-v8                148 ( 1 window)    fired ONCE, in the window
+        rubertlite-dr-unified-v9                  0                never
+        e5small-dr-unified-v2 (live, 11.6 h)      0                never
+
+    v8 is the one that settles the argument, and NOT because it is an older code baseline — it
+    started 2026-08-14 16:25, after every commit in the F1f chain, and `git log -S` over its window
+    touches neither `_eval_inflight` nor `pending_nodes`. Its config is byte-identical to v9's. Its
+    148 quiescent prefixes are ONE window, the last 2.3 % of a 47.6-hour log, opening on the run's
+    FINAL `node_evaluated` — 8.1 minutes of end-of-run drain — and every cadence firing that run ever
+    made is inside it. So the difference between v8 and v9 is RUN SHAPE, not configuration and not
+    code: the family now fires at most once per run, in the drain, and not at all in a run that ends
+    with an evaluation still going (v7, v9 and the live `e5small-dr-unified-v2` each end with three
+    pending nodes and recorded nothing).
+
+    This was seen coming. `docs/audit/2026-08-07-search-loop.md` observed six days BEFORE F1f that
+    the same guard on the serial deep-research path "under speculation is almost never true", and
+    filed it as "Decision needed". F1f took it from almost-never to never.
+
+    `while_evaluating` is the operator's kill switch (`Settings.cadence_while_evaluating`, ON).
+    `False` restores the historical predicate byte for byte, which is what makes the old behaviour a
+    negative control rather than a memory.
+
+    THE MONEY RULE THIS DEPENDS ON, stated here because it is the reason this is safe rather than an
+    unbudgeted mid-eval spend. The PACE does not change, so the number of paid passes per node count
+    does not change: each consumer's `at_node` idempotence twin (`search/coverage.py::
+    already_covered_at`, `_autonomous_strategy_already_recorded_at`) still admits one firing per
+    node-count. What DOES change is that the loop can now reach the gate many times at the SAME `n`,
+    where it used to reach it once and then create a node — and two consumers record no mark on the
+    "nothing changed" path (the Strategist records only a CHANGED strategy; the concept snapshot
+    records nothing when the producer yields None). Those two therefore carry an explicit in-process
+    attempted-at-`n` memo. Without it this predicate is a paid LLM call per outer-loop turn.
+    """
+    return bool(while_evaluating) or int(pending or 0) <= 0
 
 
 # ------------------------------------------------------------------- the SECOND pacing rule (F1g)

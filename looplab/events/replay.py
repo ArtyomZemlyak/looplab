@@ -1402,6 +1402,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 st.node_concepts.pop(n.id, None)
                 st.node_concept_provenance.pop(n.id, None)
                 st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
+                st.node_concepts_at_pending.pop(n.id, None)  # …and the F1i evidence gate beside it
                 # the raw delta belongs to the Idea being abandoned. Clear it at the reset
                 # boundary itself; otherwise a replay between reset and rebuild rematerializes stale
                 # taxonomy for the pending node from a proposal that no longer exists.
@@ -2300,6 +2301,7 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
         st.node_concepts.pop(n.id, None)
         st.node_concept_provenance.pop(n.id, None)
         st.node_concepts_at_vocab.pop(n.id, None)
+        st.node_concepts_at_pending.pop(n.id, None)
         st.node_concept_deltas.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
     if delta_mode and not unsupported_mode and not receipt_protected:
@@ -2312,6 +2314,7 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
         st.node_concept_deltas[n.id] = {"added": delta_added, "removed": delta_removed}
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
+        st.node_concepts_at_pending.pop(n.id, None)
     elif (not unsupported_mode and not receipt_protected
           and (n.idea.concepts or recognized_mode == "full")):
         # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
@@ -2320,6 +2323,7 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
+        st.node_concepts_at_pending.pop(n.id, None)
     elif not receipt_protected:
         # Unknown mode and genuinely absent legacy membership are both non-authoritative. A pending
         # replacement must not retain a previous authored set merely because classifier-protected
@@ -2329,6 +2333,7 @@ def _fold_node_concept_envelope(st: RunState, ctx: "_FoldCtx", n: Node, d: dict,
             st.node_concepts.pop(n.id, None)
             st.node_concept_provenance.pop(n.id, None)
             st.node_concepts_at_vocab.pop(n.id, None)
+            st.node_concepts_at_pending.pop(n.id, None)
 
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2391,6 +2396,20 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts_at_vocab[nid] = av
     else:
         st.node_concepts_at_vocab.pop(nid, None)
+    # F1i: how many nodes were still PENDING when this row was produced. It is READ ONLY as an evidence
+    # gate (`core/models.py::classifier_verified_node_concepts`, `_graded_novelty_precheck`), never as a
+    # display filter. Same fail-closed shape as `at_vocab` and the same reason: only the reviewed
+    # classifier's own writer stamps it, so a future/malformed producer cannot claim quiescence — but the
+    # DEFAULT here is the opposite direction, absent == 0 == quiescent, because that is what every log
+    # written before this cadence could fire mid-eval provably was. A malformed value fails CLOSED to
+    # "in flight" rather than to 0: a row that cannot say when it was made is not evidence.
+    ap = d.get("at_pending")
+    if ap is None:
+        st.node_concepts_at_pending.pop(nid, None)
+    elif isinstance(ap, int) and not isinstance(ap, bool) and ap >= 0:
+        st.node_concepts_at_pending[nid] = ap
+    else:
+        st.node_concepts_at_pending[nid] = 1
 
 
 def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2430,6 +2449,8 @@ def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         ctx.concept_input_invalid.add(nid)
     # Operator tags are not vocabulary-versioned; clear any classifier staleness receipt for this node.
     st.node_concepts_at_vocab.pop(nid, None)
+    # …and the F1i in-flight receipt: an operator assertion is a human's, not a mid-eval classifier's.
+    st.node_concepts_at_pending.pop(nid, None)
 
 
 def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
