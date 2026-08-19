@@ -28,6 +28,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol
 # is what decides which content is dropped. Canonical home: core/context_budget.py (runtime/ sits
 # BELOW tools/ in the layering and needs it too); re-exported here for the providers.
 from looplab.core.context_budget import RESULT_CAP  # noqa: F401  (re-export, see comment above)
+from looplab.core.jsonutil import canonical_json
 
 
 # -------------------------------------------------------------------------------------- typed tools
@@ -205,14 +206,16 @@ def capability_manifest(specs, capabilities=()) -> tuple[dict, str]:
         rows.append({"spec": spec, "capability": cap.as_dict()})
     rows.sort(key=lambda row: row["capability"]["name"])
     raw_manifest = {"schema": 1, "tools": rows}
-    # REVIEW 2026-08-18 (reuse): this inlines core/jsonutil.canonical_json byte-for-byte (the same
-    # four strict options) and hashes it to mint the `capability_manifest_sha256` stamped on every
-    # tool observation (agents/tool_loop.py) — a private re-spelling of the one canonical-JSON
-    # contract jsonutil exists to keep singular (doc 25 SE-08: a drifted copy is two digests for one
-    # value, with nothing to say why). tools/ already imports core.jsonutil (write_tools.py), so
-    # `encoded = canonical_json(raw_manifest)` serves directly with no layering cost.
-    encoded = json.dumps(raw_manifest, ensure_ascii=False, sort_keys=True, allow_nan=False,
-                         separators=(",", ":")).encode("utf-8")
+    # THE ONE canonical-JSON contract (doc 25 SE-08), not a private re-spelling of its four strict
+    # options: these bytes are a digest PREIMAGE — `agents/tool_loop.py` stamps their sha256 on every
+    # tool observation as `capability_manifest_sha256` — and a second spelling of "canonical" is two
+    # digests for one manifest with nothing to say why. It was byte-identical when this call replaced
+    # it (2026-08-19); what moves with it now is the ANSWER FOR A SPEC THAT HAS NO CANONICAL FORM,
+    # which is the reason to share rather than to copy: a bare `json.dumps` raised a `TypeError` out
+    # of the router constructor, and `canonical_json` raises the contract's own `ValueError` naming
+    # the value. Both are the same unhandled construction failure — no caller catches either — and
+    # only one of them says what is wrong.
+    encoded = canonical_json(raw_manifest)
     # Detach the retained manifest from provider-owned spec dicts. Without the round-trip a provider
     # could mutate a nested schema after construction, leaving ``manifest()`` describing bytes that
     # no longer match the digest stamped on tool observations.

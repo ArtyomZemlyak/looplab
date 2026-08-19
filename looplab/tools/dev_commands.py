@@ -21,9 +21,10 @@ import shutil
 import tempfile
 import time
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Mapping, Optional
 
 from looplab.core.envsafe import merge_env
+from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.redact import redact_secrets
 from looplab.engine import workspace_seed
 from looplab.tools._base import (RESULT_CAP, CancelSignal, ToolCapability, ToolResult,
@@ -69,19 +70,6 @@ class DeveloperCommandRuntime:
             eval_env=getattr(settings, "eval_env", {}) or {})
 
 
-# REVIEW 2026-08-18 (reuse): re-implements core/jsonutil.canonical_json_digest (identical dump
-# options) plus `default=str`, and names the LENIENT result "canonical" — the exact naming hazard
-# jsonutil's own docstring warns about (the deliberate lenient sibling in serve/launch.py is named
-# `_lenient_json_bytes` for that reason). `default=str` digests a fallback rendering the canonical
-# contract refuses, so two distinct values (e.g. Path('/x') vs '/x') would mint ONE receipt digest.
-# Command specs are plain-JSON operator config, so canonical_json_digest (or canonical_json +
-# sha256 to keep raising) serves directly; if leniency is truly wanted, name it lenient.
-def _canonical_digest(value: Any) -> str:
-    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False,
-                         separators=(",", ":"), default=str).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _overlay_digest(staged) -> str:
     h = hashlib.sha256()
     files = getattr(staged, "files", None) or {}
@@ -115,9 +103,20 @@ class DevCommandTools:
             row = raw.model_dump() if hasattr(raw, "model_dump") else dict(raw)
             rows.append(row)
         self._commands = {str(row.get("name") or ""): row for row in rows if row.get("name")}
-        self.policy_digest = _canonical_digest(
+        # THE ONE canonical-JSON digest (`core/jsonutil`, doc 25 SE-08), and it is the STRICT one on
+        # purpose. This module minted these three receipts with a private copy of the same four dump
+        # options PLUS `default=str` — a LENIENT digest wearing the word "canonical", which is the
+        # exact hazard `jsonutil`'s docstring names and which `serve/launch.py` keeps apart by
+        # calling its own lenient sibling `_lenient_json_bytes`. `default=str` digests a FALLBACK
+        # RENDERING, so `Path('/x')` and `'/x'` — two different command specs — minted one receipt.
+        # A spec with no canonical form now yields `None` (no digest) rather than a digest over
+        # something else: these are operator config, validated by pydantic into plain JSON before
+        # they ever reach here, so `None` names a spec built by hand around that validation, and
+        # "this receipt has no digest" is the only honest thing to say about it. It fails CLOSED
+        # rather than raising because a Developer role must not fail to construct over a receipt.
+        self.policy_digest = canonical_json_digest(
             [self._commands[name] for name in sorted(self._commands)])
-        self.runtime_digest = _canonical_digest({
+        self.runtime_digest = canonical_json_digest({
             "trust_mode": self.runtime.trust_mode,
             "docker_image": self.runtime.docker_image,
             "sandbox_memory": self.runtime.sandbox_memory,
@@ -210,7 +209,7 @@ class DevCommandTools:
                 provenance={"source": "task.developer_commands", "command": command_name},
                 receipt={"policy_sha256": self.policy_digest,
                          "runtime_policy_sha256": self.runtime_digest,
-                         "command_sha256": _canonical_digest(spec),
+                         "command_sha256": canonical_json_digest(spec),
                          "overlay_sha256": _overlay_digest(self.staged)})
 
     def _execute(self, command_name: str, spec: dict, signal: CancelSignal) -> ToolResult:
@@ -219,13 +218,22 @@ class DevCommandTools:
         raw_out = raw_err = ""
         try:
             work = root / "work"
-            # REVIEW 2026-08-18 (efficiency): every run_dev_command call rebuilds the whole candidate
-            # from the operator's SOURCE — `git ls-files` + per-file copy2 of the entire tracked tree
-            # (network-mount reads in this deployment) plus copy_input deep copies for every
-            # copy-mode data spec — for a tool whose intended use is a repeated compile→fix→test loop
-            # over a seed that does not change between calls. Seed ONCE into a provider-local cache
-            # (invalidated via workspace_fingerprint/mtime) and clone locally per call; the
-            # disposable-workspace isolation property is unchanged.
+            # A FRESH CANDIDATE PER CALL, seeded from the operator's SOURCE every time, and the
+            # cost of that is measured rather than assumed: on this box (2026-08-19) seeding the
+            # LoopLab tree itself — 1,318 tracked files / 31.7 MB, `auto` — off the geesefs mount
+            # takes 2.4-2.7 s, against 0.12 s to clone the same tree from a local copy and 0.09 s to
+            # fingerprint the source (`git ls-files` plus one `lstat` per file). So the seed-once,
+            # clone-per-call cache is worth ~91 % of this tool's setup and is genuinely tempting for
+            # the compile→fix→test loop this tool exists for.
+            #
+            # It is NOT taken, and the blocker is correctness rather than the size of the prize: the
+            # cache has to be invalidated against what `seed_repo_tree` ACTUALLY copied, and that
+            # function publishes a COUNT. A fingerprint derived independently here would be a second
+            # definition of `seed_mode` — precisely what `engine/workspace_seed.py` exists to
+            # prevent — and it would fail in the wrong direction, because a stale candidate makes
+            # the Developer check an edit against bytes the eval will never run, which is the v6
+            # node 4 class of defect with the tool that is supposed to catch it. `docs/BACKLOG.md`
+            # §0.15 holds the measurement and names what a cache has to publish first.
             notes, binds = self._materialize(work)
             cwd = (work / str(spec.get("cwd") or ".")).resolve()
             if not _inside(work, cwd) or not cwd.is_dir():
@@ -279,7 +287,7 @@ class DevCommandTools:
         receipt = {
             "policy_sha256": self.policy_digest,
             "runtime_policy_sha256": self.runtime_digest,
-            "command_sha256": _canonical_digest(spec),
+            "command_sha256": canonical_json_digest(spec),
             "overlay_sha256": _overlay_digest(self.staged),
             "stdout_sha256": hashlib.sha256((raw_out or "").encode(
                 "utf-8", errors="replace")).hexdigest(),
@@ -292,52 +300,27 @@ class DevCommandTools:
                           provenance={"source": "task.developer_commands",
                                       "command": command_name}, receipt=receipt)
 
-    # REVIEW 2026-08-18 (altitude): a second hand-written copy of WorkspaceSeeder.seed_workspace's
-    # ORCHESTRATION, not just its primitives — the root-editable mount-collision rule, the
-    # protected-files placement BETWEEN the shadow guard and the mounts (the ordering
-    # engine/workspace.py's comment calls "the safety argument": earlier -> false collisions abort
-    # valid tasks, later -> a protect entry writes THROUGH a read-only mount symlink into the
-    # operator's original data), and the DataSpec mount/copy split, all re-derived above the shared
-    # workspace_seed primitives. No shared function or cross-check test holds the two orchestrations
-    # together (tests/test_dev_commands.py pins only the seed_repo_tree passthrough), so the next
-    # ordering fix to seed_workspace lands in one body only. Extract the pure ordering into
-    # workspace_seed (the engine keeping tracing/eventing) or pin the two with a cross-check test.
     def _materialize(self, work: Path) -> tuple[list[str], list[tuple[str, bool]]]:
-        work.mkdir(parents=True, exist_ok=True)
-        ignore = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", ".venv", "node_modules")
-        notes: list[str] = []
-        editables = self.repo_spec.get("editables") or []
-        mounts = [r.get("name") for r in self.repo_spec.get("references") or [] if r.get("mount")]
-        mounts += list((self.repo_spec.get("data") or {}).keys())
-        for editable in editables:
-            target = work if editable.get("name") in {"", "."} else work / editable["name"]
-            mode = editable.get("seed_mode") or self.runtime.seed_mode or "auto"
-            count = workspace_seed.seed_repo_tree(editable["path"], target, ignore, mode)
-            notes.append(f"{editable.get('name') or '.'}:{'all' if count < 0 else count}")
-        root_editable = next((e for e in editables if e.get("name") in {"", "."}), None)
-        collision = next((name for name in mounts if name and (work / name).exists()), None)
-        if root_editable and collision:
-            raise ValueError(f"mount name {collision!r} collides with the seeded root repo")
-        for editable in editables:
-            target = work if editable.get("name") in {"", "."} else work / editable["name"]
-            workspace_seed.seed_protected_files(
-                editable["path"], target, editable.get("protect"),
-                reserved_top=(set(mounts) if editable.get("name") in {"", "."} else set()))
+        """Build this call's disposable candidate: the operator's tree, then the staged overlay.
 
-        binds: list[tuple[str, bool]] = []
-        for ref in self.repo_spec.get("references") or []:
-            if ref.get("mount"):
-                workspace_seed.link_input(ref["path"], work / ref["name"])
-                if (work / ref["name"]).is_symlink():
-                    binds.append((ref["path"], True))
-        for name, raw in (self.repo_spec.get("data") or {}).items():
-            spec = raw if isinstance(raw, dict) else {"path": raw, "mount": True, "edit": False}
-            if spec.get("mount", True):
-                workspace_seed.link_input(spec["path"], work / name)
-                if (work / name).is_symlink():
-                    binds.append((spec["path"], not spec.get("edit", False)))
-            else:
-                workspace_seed.copy_input(spec["path"], work / name, ignore)
+        THE ORDER IS NOT THIS MODULE'S TO CHOOSE. `engine/workspace_seed.py::
+        seed_candidate_workspace` is the one spelling of it, shared with the eval workspace the
+        Developer's edits are ultimately scored in — this method re-derived the whole sequence by
+        hand (the shadow guard, the protected files BETWEEN it and the mounts, the mount/copy split)
+        until 2026-08-19, so an ordering fix to the eval side landed in one body only and the two
+        could differ about what a candidate even contains. What is this module's own is what follows:
+        the DOCKER BIND list, read off the result rather than off the declaration, and the staged
+        overlay, which the engine deliberately does not have here (`_write_node_files` is its writer).
+        """
+        rows = workspace_seed.seed_candidate_workspace(
+            self.repo_spec, work, seed_mode=self.runtime.seed_mode or "auto")
+        notes = [f"{row['name'] or '.'}:{'all' if row['count'] < 0 else row['count']}"
+                 for row in rows if row["kind"] == "editable"]
+        # A bind for what the candidate really reads THROUGH: a `link_input` that fell back to a
+        # copy (geesefs flattens symlinks) has nothing outside the tree to bind, and binding it
+        # anyway would hand the container a path this run is not reading.
+        binds = [(row["source"], row["read_only"]) for row in rows
+                 if row["kind"] in ("reference", "data") and row["symlink"]]
         self._apply_overlay(work)
         return notes, binds
 

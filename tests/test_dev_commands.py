@@ -210,3 +210,99 @@ def test_developer_prompt_and_tools_advertise_only_declared_commands(tmp_path):
     # The generic brief is also consumed by external CLI agents, which do not receive this in-house
     # tool; it must not advertise an authority that their native shell does not enforce.
     assert "run_dev_command" not in task.agent_brief()
+
+
+def test_the_receipt_digests_are_the_STRICT_canonical_json_contract(tmp_path):
+    """`policy_sha256` / `runtime_policy_sha256` / `command_sha256` are IDENTITIES of the authority
+    a command ran under, so their preimage is `core/jsonutil`'s canonical contract.
+
+    This module minted them with a private copy of the same four dump options plus `default=str` —
+    a LENIENT digest named "canonical". Both halves are pinned here. (1) The bytes for a real,
+    plain-JSON operator spec are unchanged, which is what makes this a reuse. (2) A value with no
+    canonical form no longer digests its `str()` FALLBACK: `Path('/x')` and `'/x'` are two different
+    commands and used to mint ONE receipt.
+    """
+    import hashlib
+
+    from looplab.core.jsonutil import canonical_json
+
+    task = _repo_task(tmp_path, [{"name": "check", "command": [sys.executable, "main.py"]}])
+    spec = task.repo_spec()
+    tool = DevCommandTools(spec)
+    rows = [row.model_dump() if hasattr(row, "model_dump") else dict(row)
+            for row in spec["developer_commands"]]
+    assert tool.policy_digest == hashlib.sha256(canonical_json(rows)).hexdigest()
+
+    as_text = {"developer_commands": [{"name": "check", "command": ["/x"]}]}
+    as_path = {"developer_commands": [{"name": "check", "command": [Path("/x")]}]}
+    assert len(DevCommandTools(as_text).policy_digest) == 64
+    assert DevCommandTools(as_path).policy_digest is None      # no canonical form -> NO digest
+    assert DevCommandTools(as_path).policy_digest != DevCommandTools(as_text).policy_digest
+
+
+def test_the_candidate_and_the_eval_workspace_are_materialized_by_ONE_ordering(tmp_path, monkeypatch):
+    """The Developer checks an edit in a candidate; the engine SCORES it in an eval workspace. If
+    those two are built by two hand-written sequences, the next ordering fix lands in one of them.
+
+    The sequence is not incidental — `workspace_seed`'s docstring holds its safety argument (the
+    shadow guard AFTER the trees, the protected files BETWEEN it and the mounts) — so what this
+    drives is that MOVING it moves both surfaces: the one function is replaced, and each caller has
+    to have gone through it. Two hand-written copies (what this was until 2026-08-19) leave the
+    recorder empty while both callers still happily materialize their own tree.
+    """
+    from looplab.engine import workspace_seed as seed_mod
+
+    # Fetched defensively so the PRE-FIX tree fails on the PROPERTY — two copies, one empty
+    # recorder — rather than on the shared name being absent.
+    real = getattr(seed_mod, "seed_candidate_workspace", None)
+    calls = []
+
+    def recording(repo_spec, workdir, **kwargs):
+        rows = real(repo_spec, workdir, **kwargs)
+        calls.append((str(workdir), [(r["kind"], r["name"]) for r in rows]))
+        return rows
+
+    if real is not None:
+        monkeypatch.setattr(seed_mod, "seed_candidate_workspace", recording)
+
+    src = tmp_path / "repo"
+    (src / "datasets").mkdir(parents=True)
+    (src / "datasets" / "labels.csv").write_text("a,b\n", encoding="utf-8")
+    task = _repo_task(src, [{"name": "check", "command": [sys.executable, "main.py"]}])
+    spec = task.repo_spec()
+    spec["editables"][0]["protect"] = ["datasets/labels.csv"]
+
+    result = DevCommandTools(spec).execute_result("run_dev_command", {"name": "check"})
+    assert result.is_error is False, result.content
+
+    from looplab.engine.workspace import WorkspaceSeeder
+    seeder = WorkspaceSeeder(SimpleNamespace(
+        _repo_spec=spec, _seed_mode="all", tracer=None,
+        _seed_repo_tree=workspace_seed.seed_repo_tree,
+        _link_input=workspace_seed.link_input,
+        store=SimpleNamespace(append=lambda *a, **k: None)))
+    seeder.seed_workspace(tmp_path / "workdir_0")
+
+    assert len(calls) == 2, calls                       # …the tool AND the engine, through one body
+    assert calls[0][1] == calls[1][1]                   # …and the same sequence for the same task
+    assert calls[0][1][0][0] == "editable" and calls[0][1][1][0] == "protected"
+    assert (tmp_path / "workdir_0" / "datasets" / "labels.csv").exists()
+
+
+def test_each_call_sees_the_operators_CURRENT_source(tmp_path):
+    """The property any future seed cache has to keep, pinned before there is one.
+
+    Seeding the candidate off the mount is the expensive half of a `run_dev_command` (measured
+    2.4-2.7 s against 0.12 s for a local clone — see `_execute`'s note and `docs/BACKLOG.md` §0.15),
+    so the shape that will be proposed again is "seed once, clone per call". A cache that answered a
+    later call from an earlier snapshot would have the Developer check its edit against bytes the
+    eval will not run — the failure this tool exists to catch, produced by the tool.
+    """
+    task = _repo_task(tmp_path, [{"name": "check", "command": [sys.executable, "main.py"]}])
+    tool = DevCommandTools(task.repo_spec())
+    assert "source" in tool.execute_result("run_dev_command", {"name": "check"}).content
+
+    time.sleep(0.01)
+    (tmp_path / "main.py").write_text("print('edited by the operator')\n", encoding="utf-8")
+    again = tool.execute_result("run_dev_command", {"name": "check"})
+    assert "edited by the operator" in again.content and "source" not in again.content

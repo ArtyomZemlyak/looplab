@@ -733,6 +733,27 @@ def classify_skill_candidate(statement, *, client=None, task_goal: str = "", tas
         True, canonical.statement, identity, "rubric_pass", explanation or "All rubric axes passed.")
 
 
+def skill_source_digest(statement) -> str:
+    """sha256 of the CARD STATEMENT a skill was distilled from — ONE spelling, two writers.
+
+    `engine/lessons_distill.py` stamps it on every skill CANDIDATE receipt (`source_sha256`, inside
+    the run's `reflection_note` event) and `write_auto_skill` stamps it on the durable card
+    (`source_statement_sha256`, in the frontmatter). Those two receipts are meant to NAME ONE CLAIM
+    — that join is the whole path an audit walks from "this run considered this belief" to "…and
+    this is the card it wrote" — so the normalization, the encoding and the hash may be decided only
+    once. They were two hand-written `hashlib.sha256(…)` calls in two files under two field names
+    until 2026-08-19, with no test comparing them: a cap or a `normalize_statement` added to either
+    side would have broken the join SILENTLY, leaving both receipts well-formed and unjoinable.
+
+    THE EMPTY STATEMENT stays each caller's own decision and is deliberately not folded in here,
+    because the two answers are both right and they differ: the card omits the frontmatter line
+    entirely (there is no claim to name), while the candidate receipt carries the digest of the
+    empty string, because a receipt row exists for every card the pass LOOKED AT and a missing key
+    there would read as "this pass wrote no receipt" rather than "this card said nothing".
+    """
+    return hashlib.sha256(str(statement or "").encode("utf-8")).hexdigest()
+
+
 def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
                      fingerprint: list[str], task_id: str, *, identity_claim: Optional[str] = None,
                      classifier_version: str = "", source_statement: str = "") -> Optional[Path]:
@@ -816,8 +837,10 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
             classifier = (str(classifier_version).strip()
                           if re.fullmatch(r"[a-zA-Z0-9._/-]{1,80}", str(classifier_version or ""))
                           else "")
-            source_digest = (hashlib.sha256(source_statement.encode("utf-8")).hexdigest()
-                             if source_statement else "")
+            # ONE digest rule, shared with the candidate receipt `lessons_distill` writes for this
+            # same statement (`skill_source_digest`); the empty case is this side's own answer, and
+            # its reason is in that function.
+            source_digest = skill_source_digest(source_statement) if source_statement else ""
             classifier_metadata = ((f"classifier_version: {classifier}\n" if classifier else "")
                                    + (f"source_statement_sha256: {source_digest}\n"
                                       if source_digest else ""))

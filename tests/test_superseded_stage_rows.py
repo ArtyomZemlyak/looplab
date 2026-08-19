@@ -19,15 +19,29 @@ stale in any sense — a rule that convicted it would be worse than the defect.
 """
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
-from looplab.core.models import Event, NodeStatus, stage_row_superseded, superseded_stage_rows
+from looplab.core.models import Event, NodeStatus, stage_row_superseded
 from looplab.events.replay import fold
 
 
 def _ev(t, d, s):
     return Event(seq=s, ts=float(s), type=t, data=d)
+
+
+def _superseded(node) -> list:
+    """The rows a later repair superseded — the comprehension `ui/src/stageAttribution.js` runs over
+    the same predicate, written HERE rather than in `core/models.py`.
+
+    It lived in production as `superseded_stage_rows(node)` until 2026-08-19 and had no caller: the
+    stage strip is rendered by the browser, and `serve/routers/reviews.py` hands the client `stages`
+    + `repairs` rather than a derived list. Keeping the loop in the test keeps every case below
+    exactly as it was while leaving ONE spelling of the comparison in production.
+    """
+    return [r for r in (getattr(node, "stages", None) or [])
+            if stage_row_superseded(r, getattr(node, "repairs", None))]
 
 
 def _node(nid, rows, *, created_seq=0):
@@ -86,14 +100,14 @@ def test_v9_node_5_stage_rows_are_attributed_to_the_attempt_that_wrote_them():
     assert [(s["name"], s["status"], s["repairs"]) for s in n.stages] == [
         ("mine", "expect_failed", 2), ("train", "fail", 1)]
     # …and BOTH of the red chips the operator was shown are superseded.
-    assert [s["name"] for s in superseded_stage_rows(n)] == ["mine", "train"]
+    assert [s["name"] for s in _superseded(n)] == ["mine", "train"]
 
 
 def test_v9_node_6_stage_rows_are_superseded_by_its_one_repair():
     n = _node(6, _V9_NODE_6)
     assert n.status is NodeStatus.pending and n.repairs == 1
     assert [(s["name"], s["repairs"]) for s in n.stages] == [("mine", 0), ("train", 0)]
-    assert [s["name"] for s in superseded_stage_rows(n)] == ["mine", "train"]
+    assert [s["name"] for s in _superseded(n)] == ["mine", "train"]
 
 
 def test_a_reused_marker_advances_the_epoch_so_a_reused_success_is_never_superseded():
@@ -103,7 +117,7 @@ def test_a_reused_marker_advances_the_epoch_so_a_reused_success_is_never_superse
     mine = next(s for s in n.stages if s["name"] == "mine")
     assert mine["status"] == "ok" and mine["seconds"] == 2304.0   # the REAL record, not the marker
     assert mine["repairs"] == n.repairs == 2                      # …carried forward by the reuse
-    assert superseded_stage_rows(n) == []
+    assert _superseded(n) == []
 
 
 # ---------------------------------------------------------------- the negative control
@@ -114,7 +128,7 @@ def test_a_node_whose_rows_are_its_state_is_unchanged():
     n = _node(4, [_sf("mine", "ok", 0, 3642.915), _sf("train", "ok", 0, 11053.199),
                   _sf("score", "ok", 0, 3107.442)])
     assert n.repairs == 0
-    assert superseded_stage_rows(n) == []
+    assert _superseded(n) == []
     assert n.stages == [
         {"name": "mine", "status": "ok", "exit_code": 0, "seconds": 3642.915, "repairs": 0},
         {"name": "train", "status": "ok", "exit_code": 0, "seconds": 11053.199, "repairs": 0},
@@ -127,7 +141,7 @@ def test_a_repaired_node_whose_last_attempt_reported_is_not_superseded():
                   _sf("train", "ok", 0, 8370.609), _sf("score", "ok", 0, 3089.111)])
     assert n.repairs == 1
     assert [s["repairs"] for s in n.stages] == [1, 1]
-    assert superseded_stage_rows(n) == []
+    assert _superseded(n) == []
 
 
 # ---------------------------------------------------------------- the rule's own truth table
@@ -205,7 +219,7 @@ def test_a_real_record_arriving_after_a_reused_marker_keeps_the_newer_epoch():
                   _sf("train", "ok", 0, 8370.609)])
     assert n.stages == [{"name": "train", "status": "ok", "exit_code": 0, "seconds": 8370.609,
                          "repairs": 1}]
-    assert superseded_stage_rows(n) == []
+    assert _superseded(n) == []
 
 
 def test_a_reset_restamps_the_rows_it_retains():
@@ -232,7 +246,7 @@ def test_a_reset_restamps_the_rows_it_retains():
     assert n.attempt == 1 and n.repairs == 0            # a new lifecycle, a fresh repair budget
     assert [s["name"] for s in n.stages] == ["mine"]    # only what precedes the restart boundary
     assert n.stages[0]["repairs"] == 0                  # …re-stamped to the fresh epoch
-    assert superseded_stage_rows(n) == []
+    assert _superseded(n) == []
 
 
 # ---------------------------------------------------------------- the record does not move
@@ -279,3 +293,17 @@ def test_old_logs_fold_identically_apart_from_the_new_keys():
             if n.repairs == 0:
                 assert all(r["repairs"] == 0 for r in n.stages)
     assert seen  # a corpus that folded to nothing would make the loop above vacuous
+
+
+def test_the_row_predicate_is_the_only_python_spelling_of_the_rule():
+    """A NEGATIVE pin (CLAUDE.md: what must not come back is the TEXT).
+
+    `superseded_stage_rows(node)` was a list wrapper over the predicate with no production caller in
+    `looplab/` at all — the stage strip is rendered by `ui/src/stageAttribution.js`, and the one
+    python surface that carries the ingredients (`serve/routers/reviews.py`) hands the client
+    `stages` + `repairs` on purpose. A wrapper nobody asks is a second place for the comparison to
+    drift with only a test to notice, so the python side keeps the ROW predicate and nothing else.
+    """
+    source = Path(inspect.getsourcefile(stage_row_superseded)).read_text(encoding="utf-8")
+    assert "def superseded_stage_rows" not in source
+    assert "def stage_row_superseded" in source          # …the rule itself is still one function

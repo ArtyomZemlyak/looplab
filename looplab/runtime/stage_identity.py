@@ -132,6 +132,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.atomicio import file_identity
 from looplab.core.jsonutil import canonical_json_digest
 # THE DIGEST RULE IS metric_subject's, IMPORTED AND NOT RE-DERIVED. Two content-identity derivations
 # in one runtime that disagreed about "the digest of this file" is how a reuse key and the metric's
@@ -217,8 +218,19 @@ def declared_outputs(stages: list, *, at: int = 0) -> set:
     return out
 
 
-def workdir_content(workdir, *, exclude: set) -> tuple:
+def workdir_content(workdir, *, exclude: set, digests: Optional[dict] = None) -> tuple:
     """`({workdir-relative path -> "<mode>:<digest>"}, "")` for every keyable file, or `(None, why)`.
+
+    `digests` is an optional CALLER-OWNED memo, `{rel -> (file_identity, "<mode>:<digest>")}`, and it
+    is the difference between a key that costs one walk per ATTEMPT and one that costs a full sha256
+    sweep per STAGE. The N stages of one pipeline run against the same workdir minutes apart and
+    most of the tree does not move between them (§0.12 measured 3.0-4.4 s per stage on a 1 GB
+    workdir), so a file whose `atomicio.file_identity` is unchanged keeps the digest already taken
+    for it and every other file is re-read. That is the SAME fence `reuse_refusal` decides on, used
+    in the same direction, and it is why the memo is a stat-identity map rather than a path set: a
+    stage that rewrites its own input changes size/mtime/ctime (or the inode, on a replace) and is
+    re-digested. Absent, nothing is remembered and every file is hashed, which is what a caller
+    holding no attempt-scoped state (`looplab stage-dups`) wants.
 
     THE REASON IS RETURNED AND NOT SWALLOWED, and the test that added this signature is what found
     that it had to be: with a bare `None` the caller mapped every refusal onto `unreadable_workdir`,
@@ -275,11 +287,18 @@ def workdir_content(workdir, *, exclude: set) -> tuple:
                     continue
                 if not os.path.isfile(full):
                     continue
+                identity = file_identity(st)
+                remembered = digests.get(rel) if digests is not None else None
+                if remembered is not None and remembered[0] == identity:
+                    out[rel] = remembered[1]
+                    continue
                 try:
                     mode, digest = _sha256(full, int(st.st_size))
                 except OSError:
                     return None, "unreadable_workdir"
                 out[rel] = f"{mode}:{digest}"
+                if digests is not None:
+                    digests[rel] = (identity, out[rel])
     except OSError:
         return None, "unreadable_workdir"
     return out, ""
@@ -301,7 +320,7 @@ def stage_entry(stage: dict) -> dict:
 
 
 def stage_input_key(stages: list, index: int, workdir, *, scope: str, reachable,
-                    cwd=None) -> tuple:
+                    cwd=None, digests: Optional[dict] = None) -> tuple:
     """`(key, reason)` — the reuse key for `stages[index]`, or `(None, <KEY_REASONS member>)`.
 
     `scope` binds the key to ONE run's materialization and is required, not defaulted: everything
@@ -329,17 +348,6 @@ def stage_input_key(stages: list, index: int, workdir, *, scope: str, reachable,
         return None, "non_default_cwd"
     if reachable is None:
         return None, "opaque_entry"
-    # REVIEW 2026-08-18 (efficiency): the full-tree digest runs BEFORE the `unresolved_entry` check
-    # below, which depends only on `reachable` and a handful of `exists()` probes — so the wrapper
-    # shape that check exists for (`sh -c "python mine.py"`, 10 of the 39 corpus rows per the comment
-    # below) pays the multi-second `workdir_content` walk on every stage of every attempt only to be
-    # refused unconditionally afterwards. Hoisting the reachable-only existence probe above this call
-    # skips the digest for the always-refused shape and costs a normal stage one short-circuiting
-    # `exists()`; keep it `exists()`-based rather than content-map membership, since the map excludes
-    # declared outputs/sidecars and would mis-answer for an entry the map deliberately omits.
-    content, why = workdir_content(workdir, exclude=declared_outputs(stages, at=index))
-    if content is None:
-        return None, why
     # A SECOND opacity clause, and it is here rather than in `_stage_reachable_files` because that
     # function is the LIVE reuse decision and its reach must not move for an instrument's sake.
     # It credits any argv token ENDING in `.py` as a script, so `sh -c "python mine.py"` — the
@@ -348,8 +356,22 @@ def stage_input_key(stages: list, index: int, workdir, *, scope: str, reachable,
     # there (a phantom only ever ADDS to a set that is used to REFUSE reuse) and not harmless here,
     # where a key must never claim to have bounded an entry point it did not find. So: at least one
     # member of the closure has to be a file that really exists under this workdir.
+    #
+    # IT RUNS BEFORE THE WALK, and that ordering is the cheap half of this instrument's cost: this
+    # clause reads `reachable` and a handful of short-circuiting `exists()` probes, while
+    # `workdir_content` sha256s the whole tree — so the wrapper shape, which is refused
+    # unconditionally, used to pay the full walk on every stage of every attempt first. It stays
+    # `exists()`-based rather than a membership test against the content map, because that map
+    # deliberately omits declared outputs and engine sidecars and would answer "absent" about an
+    # entry point that is right there. When BOTH clauses would refuse, the recorded reason is now
+    # this one rather than the workdir's; neither decides anything, and `unresolved_entry` is the
+    # one that names something an operator can fix.
     if not any((Path(workdir) / str(f)).exists() for f in reachable):
         return None, "unresolved_entry"
+    content, why = workdir_content(workdir, exclude=declared_outputs(stages, at=index),
+                                   digests=digests)
+    if content is None:
+        return None, why
     # The closure is named EXPLICITLY beside the whole-workdir map rather than folded into it. Both
     # cover the same files, and that is the point: the map is what makes the key SOUND (it sees the
     # config the closure cannot), the closure is what makes the key READABLE — `looplab stage-dups`

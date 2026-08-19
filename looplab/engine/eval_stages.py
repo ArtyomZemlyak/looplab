@@ -706,18 +706,23 @@ class EvalStagesMixin:
         except Exception:  # noqa: BLE001 — an instrument may never take down an eval
             return None
 
-        # REVIEW 2026-08-18 (efficiency): each `_key(stages, i)` call — `_run_stages` makes one per
-        # stage, unconditionally, before the stage's command runs — pays a FRESH `workdir_content`
-        # walk sha256ing every keyable file (3.0-4.4 s/stage warm on a 1 GB workdir per §0.12's own
-        # numbers), with nothing shared across the N stages of one attempt even though most of the
-        # tree is unchanged between them, and re-paid whole per repair attempt — all feeding a
-        # records-only instrument. A digest memo in this closure keyed on (rel, file identity — the
-        # `atomicio.file_identity` stat tuple `reuse_refusal` already trusts) re-digests only files
-        # whose identity moved, collapsing N stages to ~one digest pass plus N stat sweeps while
-        # still keying each stage at its own instant.
+        # ONE DIGEST MEMO PER CLOSURE, i.e. per eval attempt: `_run_stages` calls `_key` once per
+        # stage, unconditionally, before that stage's command runs, and each call used to sha256 the
+        # whole keyable tree again (3.0-4.4 s per stage warm on a 1 GB workdir, §0.12's own numbers)
+        # even though a `train` stage moves a handful of files and leaves the rest of the workdir
+        # exactly as `mine` left it. The memo is `{rel -> (file_identity, digest)}` and it is owned
+        # HERE rather than inside `workdir_content` for two reasons: its lifetime is the attempt (a
+        # repair re-enters `run_command_eval`, gets a fresh closure and re-digests from scratch,
+        # which is what a workdir the engine has since rewritten deserves), and a module-level cache
+        # would be shared by every run in the process with nothing to bound it. Each stage is still
+        # keyed at its OWN instant — an unchanged file is re-stat'd on every stage and only its hash
+        # is remembered, so the key still moves the moment the bytes do.
+        digests: dict = {}
+
         def _key(stages, index):
             reachable = EvalStagesMixin._stage_reachable_files(stages[:index + 1], workdir)
-            return stage_input_key(stages, index, workdir, scope=scope, reachable=reachable, cwd=cwd)
+            return stage_input_key(stages, index, workdir, scope=scope, reachable=reachable,
+                                   cwd=cwd, digests=digests)
         return _key
 
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,
