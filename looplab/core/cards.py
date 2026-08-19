@@ -307,6 +307,23 @@ IDEA_PROPOSAL_DIGEST_V1_FIELDS = (
 )
 
 
+def idea_field_carried(value) -> bool:
+    """Does an Idea actually PUT SOMETHING in this field?
+
+    Not "is the key present": `Idea` has a default for every field, so a validated model always holds
+    all of them and the key set answers nothing.  Emptiness is the test — `None`, `""`, `[]` and `{}`
+    are the four ways this model spells "nothing here".  `0`/`0.0`/`False` are values an operator can
+    mean and are CARRIED.
+
+    Spelled ONCE, here beside the digest, because two surfaces must agree about it or the record and
+    its reader disagree about the same branch: `serve/control_validation.py::_normalize_fork_receipt`
+    splits a fork receipt's diff with it, and `serve/routers/runs.py::prov` decides with it which of a
+    branched node's idea fields the PARENT contributed.  A second private copy is how the W3C export
+    comes to name a field the receipt did not.
+    """
+    return value is not None and value != "" and value != [] and value != {}
+
+
 def idea_proposal_digest(idea: Idea) -> str | None:
     """Versioned exact digest of one bounded normalized durable Idea, or None when it is oversized."""
     try:

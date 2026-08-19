@@ -361,6 +361,11 @@ site that proves it is open.
     deferred it was removed rather than waived: the tree is built into a STAGING dir
     (`vite build --outDir .dist.stage`) so `ui/dist/assets` is never emptied under a live
     `test_server`, and `vite.ssrLoadModule` gives RunView a compile check in the suite itself.
+    **[2026-08-19 — the READ half landed too, and it was not a detail: the receipt was written,
+    stamped and folded, and then no surface anywhere showed it back.** `ui/src/forkProvenance.js`
+    plus the `authored_fields`/`not_carried_fields` split on the receipt and the operator agent in
+    the `/prov` export. See the Theme F row for the three findings and the two `OPEN[…]` markers
+    they closed.]
 12. **Pareto selection is display-only (P2, M).** The real non-dominated algorithm exists —
     `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
     every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`
@@ -4554,21 +4559,43 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   `ui/src/CollabPanel.jsx:681`. Export-to-report: `serve/routers/reports.py` +
   `serve/scope_report.py::generate_scope_report` (multi-run portfolio reports over project / task /
   super-task scopes), with the paid-action protocol in `serve/scope_actions.py`.]
-- ⬜ **P1 · F6 fork-to-branch from any checkpoint (M).** Fuse time-travel + `inject_node` + reopen into
-  one "branch from this seq with edited idea" gesture (top verified steering UX). *Partially in progress.*
-  **[2026-08-14 — STILL OPEN; ★Shipped's ✅ is wrong for the FUSED gesture, which is the whole row.
-  SURVIVOR #11.** Both primitives exist and stayed separate: `fork` (`EV_FORK`, `CONTROL.fork(rid,
-  id, generation)` at `ui/src/api.js:202`) carries no edited idea, and `inject_node`
-  (`serve/control_validation.py:712::_normalize_inject_node`) is a distinct manual add. There is no
-  fused symbol, and the time-travel view forbids the gesture outright:
-  `ui/src/RunView.jsx:1700` refuses every node action with *"Historical snapshot seq ${viewSeq} is
-  read-only"*. Branching from a seq today = return to live, then inject, then re-type the idea.
+- ✅ **P1 · F6 fork-to-branch from any checkpoint (M).** Fuse time-travel + `inject_node` + reopen into
+  one "branch from this seq with edited idea" gesture (top verified steering UX).
+  **[2026-08-14 — the gesture and its panel both landed; see §1 survivor #11 for the shape chosen
+  (`inject_node` + a server-stamped `forked_from` receipt, no new control event) and the four wiring
+  steps, all four done. The ⬜ and the "STILL OPEN" note this row carried until 2026-08-19 were
+  themselves stale by five days.**
   **Not to be confused with docs/29's F6**, which is the conversation-trace episode seek that landed
   2026-08-13 (`events/traceview.py::node_episodes`, `/nodes/{n}/episodes`, `?before=` via
   `events/span_index.py::_anchored`) — different namespace, different item.]
-  **[2026-08-14 — the GESTURE landed; only the RunView panel remains. See §1 survivor #11 for the
-  shape chosen (`inject_node` + a server-stamped `forked_from` receipt, no new control event), what
-  is driven, and the four wiring steps that are left.]**
+  **[2026-08-19 — DONE, and the closing half was PROVENANCE, which the row's own framing had left
+  implicit: a branched node's idea is part operator-authored and part inherited, and until today
+  nothing could tell a reader which.** Three things were wrong, all on the READ side of a record
+  that was itself sound. (1) `changed_fields` was being treated as "what the operator changed" when
+  it is a raw diff of two `Idea`s, and a branch differs from its parent for two unrelated reasons —
+  an edit, and the gesture deliberately not carrying `card_id`/`hypothesis`/`footprint`/`theme`/the
+  concept envelope across. Measured: two edits produce a three-field diff on the toy run and eight
+  against a Researcher-built parent. `_normalize_fork_receipt` now also stamps `authored_fields` and
+  `not_carried_fields` (refusing a client that supplies either, same rule as the other two), because
+  only the server holds both ideas — the node's own idea drifts after intake when the Developer
+  finalizes a `footprint`, and the parent may since have been reset out of the fold. (2) NOTHING in
+  the browser read `Node.forked_from` at all: the DAG drew chips for a cross-run `origin` and a
+  `research_origin` and none for an operator branch, and the Inspector rendered an inherited
+  rationale under a bare "Rationale" heading — i.e. as this experiment's own justification. New pure
+  model `ui/src/forkProvenance.js` (+ `Dag.jsx` chip, `Inspector.jsx` block and attributed idea
+  headings), with the `stamped`/`legacy`/`unrecorded` ladder so a pre-split receipt degrades to "not
+  recorded" rather than to "the operator changed nothing". Inherited is the complement of the DIFF
+  and never of `authored_fields`, and is attributed to the PARENT NODE rather than to "the
+  Researcher" — a branch can be taken from another branch. (3) `/api/runs/{id}/prov`, the one
+  surface whose whole job is provenance, associated every activity with the engine's
+  `prov:SoftwareAgent`; a branched node's activity now carries `agent:operator` (`prov:Person`,
+  `ll:idea-author`) beside it and the split travels with it. Two `OPEN[…]` markers in the fork files
+  closed on the way: `fork-draft-phantom-rationale-edit` (an untouched form submitted as edited and
+  the receipt stamped `rationale` as an operator change — the exact field the new readers now
+  display) and `fork-editable-fields-dead-export`, both resolved by `forkDraftIdea` owning the
+  draft's shape. Driven by `tests/test_fork_from_seq.py` (+3), `ui/test/forkProvenance.test.js` (9)
+  and `ui/test/forkFromSeqModel.test.js` (+3); docs in `docs/guide/concepts.md`
+  §"Branching from a snapshot".]**
 - *(F5 UX debt tracked in §1.)*
 
 ### Theme G · Scale, ops, hardening

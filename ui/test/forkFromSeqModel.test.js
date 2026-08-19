@@ -20,9 +20,9 @@ const model = await vite.ssrLoadModule('/src/forkFromSeqModel.js')
 test.after(() => vite.close())
 
 const {
-  FORK_BLOCKED_REASONS, FORK_IDEA_FIELDS, FORK_UNPROVEN_4XX_STATUSES, buildForkPayload,
-  classifyForkFailure, forkIdeaEdited, forkIdeaFromSnapshot, forkLandedNotice, forkRetryable,
-  forkSubmitDecision,
+  FORK_BLOCKED_REASONS, FORK_EDITABLE_FIELDS, FORK_IDEA_FIELDS, FORK_UNPROVEN_4XX_STATUSES,
+  buildForkPayload, classifyForkFailure, forkDraftIdea, forkIdeaEdited, forkIdeaFromSnapshot,
+  forkLandedNotice, forkRetryable, forkSubmitDecision,
 } = model
 
 // A node exactly as the historical `/state?seq=` projection serves it: the concept envelope is
@@ -260,4 +260,51 @@ test('the forked status list is the fork lifecycle’s own, not the command life
     if (node.type === 'ImportDeclaration') imported.push(node.source.value)
   }
   assert.deepEqual(imported, [], 'this module owns its list; it imports nothing at all')
+})
+
+// ---------------------------------------------------------------- the draft the form offers
+
+test('an untouched form is an unchanged copy, and the receipt must not blame the operator for it', () => {
+  // A parent whose durable idea authored NO rationale — `forkIdeaFromSnapshot` omits the field
+  // rather than inventing '' for it. The form seeds its textarea with '' all the same, because a
+  // textarea has no other empty value.
+  const base = forkIdeaFromSnapshot(snapshotNode({ idea: { operator: 'improve', params: { x: 1 } } }))
+  assert.equal('rationale' in base, false)
+  const untouched = forkDraftIdea(base, { operator: 'improve', rationale: '', params: { x: 1 } })
+  assert.equal('rationale' in untouched, false,
+    'a field the operator put nothing in must not travel as one they wrote')
+  assert.equal(forkIdeaEdited(base, untouched), false)
+  // ...so the refusal that exists for exactly this actually fires. Before `forkDraftIdea` owned the
+  // shape, the panel spread an unconditional `rationale: ''` onto the draft, `forkIdeaEdited`
+  // compared '""' against 'null', submit was live on a byte-for-byte copy, and the server stamped
+  // `rationale` as a field the operator changed — which is now what a later reader is SHOWN.
+  const decision = forkSubmitDecision({ node: snapshotNode(), viewSeq: 7, base, draft: untouched })
+  assert.deepEqual(decision, { ok: false, reason: 'unedited' })
+  assert.equal(buildForkPayload({ node: snapshotNode(), viewSeq: 7, base, draft: untouched }), null)
+})
+
+test('clearing a rationale the PARENT had is a real edit and survives to the payload', () => {
+  // The other half of the rule, and the reason it is not simply "drop empty fields": erasing the
+  // parent's justification is a deliberate act, and a draft that silently restored it would send an
+  // idea the operator did not author.
+  const base = forkIdeaFromSnapshot(snapshotNode({
+    idea: { operator: 'improve', params: { x: 1 }, rationale: "the parent's reason" } }))
+  const cleared = forkDraftIdea(base, { operator: 'improve', rationale: '', params: { x: 1 } })
+  assert.equal(cleared.rationale, '')
+  assert.equal(forkIdeaEdited(base, cleared), true)
+})
+
+test('the draft rule is stated once, and the form is its only reader', async () => {
+  // `FORK_EDITABLE_FIELDS` used to be exported and read by nobody while `ForkFromSeqPanel.jsx`
+  // hardcoded the same three fields, i.e. two statements of one rule free to drift apart.
+  assert.deepEqual([...FORK_EDITABLE_FIELDS], ['operator', 'rationale', 'params'])
+  // An edit to a field NOT on the list is not an edit this form can make, so it is ignored.
+  const base = forkIdeaFromSnapshot(snapshotNode())
+  const draft = forkDraftIdea(base, { hypothesis: 'smuggled', operator: 'improve' })
+  assert.equal('hypothesis' in draft, false)
+  // A blank operator falls back rather than sending '' — `inject_node` refuses an empty operator.
+  assert.equal(forkDraftIdea(base, { operator: '   ' }).operator, 'manual')
+  const panel = await readFile(new URL('../src/ForkFromSeqPanel.jsx', import.meta.url), 'utf8')
+  assert.match(panel, /forkDraftIdea\(base, \{/,
+    'the panel must ASK the model for its draft rather than restate it')
 })

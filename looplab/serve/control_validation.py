@@ -49,7 +49,8 @@ from looplab.core.concepts import (
 from looplab.core.hardware import detect_gpus, gpu_free_mib_uncached
 from looplab.core.models import (
     CARD_STATEMENT_MAX_CHARS,
-    Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_proposal_digest,
+    Idea, IdeaEmission, durable_idea_payload, effective_card_footprint, idea_field_carried,
+    idea_proposal_digest,
 )
 from looplab.core.redact import redact_secrets
 from looplab.events.comment_projection import (
@@ -724,13 +725,14 @@ def _relative_file_name(value, field: str) -> str:
     return portable
 
 
-# The fields a CLIENT may author on `forked_from`.  The receipt's other two keys are STAMPED by the
-# server from state it holds, and a payload that supplies either is REFUSED rather than overwritten:
-# "what the operator changed" is the whole point of the receipt, so it must be a fact the server
-# derived, not a claim the browser made about itself.  (Same rule, same reason, as the Card controls'
-# server-stamped provenance a few tables down.)
+# The fields a CLIENT may author on `forked_from`.  The receipt's other FOUR keys are STAMPED by the
+# server from state it holds, and a payload that supplies any of them is REFUSED rather than
+# overwritten: "what the operator changed" is the whole point of the receipt, so it must be a fact the
+# server derived, not a claim the browser made about itself.  (Same rule, same reason, as the Card
+# controls' server-stamped provenance a few tables down.)
 _FORK_RECEIPT_CLIENT_FIELDS = frozenset({"node_id", "generation", "observed_seq"})
-_FORK_RECEIPT_SERVER_FIELDS = frozenset({"changed_fields", "base_idea_digest"})
+_FORK_RECEIPT_SERVER_FIELDS = frozenset({
+    "changed_fields", "base_idea_digest", "authored_fields", "not_carried_fields"})
 
 
 def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> dict:
@@ -808,6 +810,34 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
     base = source.idea
     changed = sorted(field for field in Idea.model_fields
                      if getattr(idea, field, None) != getattr(base, field, None))
+    # `changed_fields` alone cannot answer the question the receipt exists for, and reading it as if
+    # it could is how a branch comes to read as the operator's work when most of it is not.  It is a
+    # raw diff of two Ideas, and a branch differs from its parent for TWO unrelated reasons: the
+    # operator edited something, and the gesture deliberately does not carry the parent's engine
+    # bookkeeping across (`card_id`, `hypothesis`, `footprint`, `theme`, the concept envelope — see
+    # `ui/src/forkFromSeqModel.js::FORK_IDEA_FIELDS` for why each is left behind).  Measured on the
+    # toy run in `tests/test_fork_from_seq.py`, an operator who edits exactly two things already gets
+    # `["card_id", "params", "rationale"]`; against a Researcher-built parent carrying a hypothesis, a
+    # theme, a finalized footprint and a concept envelope it is eight fields for the same two edits.
+    # A reader shown that list as "what the operator changed" is being told a falsehood, and one shown
+    # its complement as "what the parent contributed" is being told a different one.
+    #
+    # So the server SPLITS it, because only the server holds both ideas at once.  The browser cannot
+    # derive this later: the node's idea drifts after intake (`_finalize_developer_footprint` mints a
+    # `footprint` the submission had none of), and the parent may since have been reset out of the
+    # folded state.  Both halves are stamped, never accepted, for the same reason the other two are.
+    #
+    # The two lists deliberately do NOT partition `changed_fields`.  `not_carried_fields` claims the
+    # PARENT had something here that did not come across, so a field where neither side carries
+    # anything and the values still differ (`concept_mode: None` vs `""`) is in neither list — an
+    # honest residue beats inflating either claim to make the arithmetic tidy.  `changed_fields`
+    # stays the authority for "these two ideas differ here" and is unchanged, so every receipt
+    # already on disk keeps its exact meaning.
+    authored = [field for field in changed
+                if idea_field_carried(getattr(idea, field, None))]
+    not_carried = [field for field in changed
+                   if not idea_field_carried(getattr(idea, field, None))
+                   and idea_field_carried(getattr(base, field, None))]
     return {
         "node_id": source_id,
         "generation": generation,
@@ -816,6 +846,10 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
         # could be minted" beats a fallback rendering two different ideas could both claim.
         "base_idea_digest": idea_proposal_digest(base),
         "changed_fields": changed,
+        # The operator's own substance: a difference this branch puts a VALUE behind.
+        "authored_fields": authored,
+        # The parent's substance that the branch left behind: a difference the branch is empty at.
+        "not_carried_fields": not_carried,
     }
 
 

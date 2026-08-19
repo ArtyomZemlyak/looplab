@@ -33,6 +33,7 @@ from looplab.core.cards import (
     hypothesis_concept_cache_keys as _hypothesis_concept_cache_keys,
     hypothesis_id as _hypothesis_id,
     hypothesis_statement_digest,
+    idea_field_carried as _idea_field_carried,
     idea_proposal_digest as _idea_proposal_digest,
     idea_proposal_ref as _idea_proposal_ref,
     legacy_card_action_digest_v1 as _legacy_card_action_digest_v1,
@@ -85,6 +86,7 @@ durable_idea_payload = _durable_idea_payload
 effective_card_footprint = _effective_card_footprint
 hypothesis_concept_cache_keys = _hypothesis_concept_cache_keys
 hypothesis_id = _hypothesis_id
+idea_field_carried = _idea_field_carried
 idea_proposal_digest = _idea_proposal_digest
 idea_proposal_ref = _idea_proposal_ref
 legacy_card_action_digest_v1 = _legacy_card_action_digest_v1

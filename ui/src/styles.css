@@ -802,6 +802,9 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .cmp-col { flex: 1; min-width: 0; }
 .section-h { font-weight: 600; margin: 11px 0 5px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
 .section-h .pill { font-weight: 400; }
+/* who wrote the value under this heading (fork-to-branch). Normal weight and dimmed: it qualifies
+   the heading, it is not a second heading. */
+.section-h .idea-attribution { font-weight: 400; }
 .bul { margin: 4px 0 4px 18px; padding: 0; }
 .bul li { margin: 2px 0; }
 
@@ -1878,6 +1881,11 @@ pre.code.event-json { max-height: 220px; }
    the cross-run ⤴ origin chip — just marks where research landed in the tree. */
 .node-card .origin-chip.rsch { color: var(--fg-dim); cursor: default; }
 .node-card .origin-chip.rsch:hover { border-color: var(--line); }
+/* operator-branch chip: not a link either, and deliberately NOT muted like the research one — it is
+   the only chip on the card that says a HUMAN wrote this node's idea, which is the claim a reader has
+   to see before they read the idea itself. */
+.node-card .origin-chip.fork { color: var(--fg); cursor: default; font-weight: 600; }
+.node-card .origin-chip.fork:hover { border-color: var(--line); }
 .node-card .origin-chip.compact { flex: none; max-width: none; margin-top: 0; padding: 0 3px;
   line-height: 16px; text-align: center; }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
