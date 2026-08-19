@@ -1144,7 +1144,7 @@ missing `.looplab-build.sha256` freshness stamp (`ui/dist` has none), and the fl
 | 1 | Concepts `UNAVAILABLE` / "Membership unavailable; not empty" though concepts exist | **Could not reproduce** — see below |
 | 2 | "Карты сломаны в UI" | **Real**, three defects; two fixed here |
 | 3 | The load-the-whole-trace button is gone AGAIN; earlier traces do nothing | **Both**: bundle-stale for the control, plus a real master-side stall bug — fixed |
-| 4 | Researcher/Developer traces missing; earlier node versions invisible | **Reachable data behind a default** — no code change; measured below |
+| 4 | Researcher/Developer traces missing; earlier node versions invisible | **Reachable, on two different surfaces** — the Developer's build is evicted by the node window's tail, the Researcher's is on the CARD trace and was never on the node; no code change, see the correction below |
 | 5 | The same stage log under different attempts | **Real and exactly true** — disclosed here; a true fix needs a durable boundary that does not exist |
 | 6 | `/stop is pending` never clears | **Real** — fixed |
 | 7 | `blocked` on a card reads as a status | **Fixed 2026-08-14, except one render path** — fixed here |
@@ -1230,10 +1230,37 @@ reachable and is then **evicted by the default 512-span TAIL**: node 1 reaches 5
 `3492bfad`-era. No code change here; the honest statement is that the default view hides reachable
 data and the seek control is the answer.
 
-The Researcher half is a genuine absence: 2,309 spans (`propose` 2,042, `deep_research` 78, …) carry
-no node link of any kind and there is no research analogue of `build_trace`, so the node routes are
-right to exclude them. They are reached through the card trace disclosure. Card-7 has no `propose`
-span at all, and node 7's panel says so.
+**CORRECTED 2026-08-19, and the first answer was wrong in a way worth keeping on the page.** This
+entry first read *"the Researcher half is a genuine absence — 2,309 spans carry no node link and
+there is no research analogue of `build_trace`."* Both halves of that are false, and the error was
+looking for a NODE link on a surface that is bound per CARD. The Researcher works per card, so a
+node id on each span is the wrong thing to count. Re-measured over the same index:
+
+* **29 traces are anchored by a root carrying `card_id`, holding 6,400 spans** — 18 `propose`
+  (2,060 spans, mean 114.4, largest 228) and 11 `card_build` (4,340 spans, mean 394.5, largest 602).
+* Every one of the 18 `propose` roots carries BOTH `card_id` and `proposed_for_node`.
+* The inner spans carry no id because they do not need one: they belong by `trace_id`, exactly as
+  the build spans above do. Counting spans-without-`node_id` therefore measures nothing.
+* The analogue is not missing and does not need building. `traceview.py::project_card_trace` already
+  matches research two ways — a `propose` root stamped with this `card_id`, or one sharing a trace
+  with the card's own `node_created` — and emits a row per proposal with its span count, its
+  rollup and the trace to open. `TRACE_CARD_RESEARCH_CAP` is 256 against at most 18 rows here, so
+  nothing on this run is dropped.
+
+**But the two halves are hidden by DIFFERENT things, and only one of them is the tail.** Measured:
+11 of 11 `card_build` traces are claimed by a node (`materialize_node.build_trace`), so they enter
+the node window and the 512-span tail is exactly what evicts them — the paragraph above stands
+unchanged, and the episode picker is its answer. **0 of 18 `propose` traces are claimed, and 0 of
+their 2,060 spans carry `node_id`**, so they are never candidates for that window at all and no
+change to it can reach them. That is deliberate: `traceview.py::_ATTRIBUTE_FIELDS` says
+`proposed_for_node` "is deliberately NOT `node_id`, which would re-attribute the whole trace to one
+node", and a card's research belongs to every node the card carries.
+
+So the Researcher half is a NAVIGATION defect, not an absence and not an eviction: the operator went
+looking on the node and the research lives on the card. It is reachable today. What is unresolved is
+that nothing on the node's own trace says where it went — a one-line pointer from the node trace
+to its card's research is the remaining work, and it is a disclosure, not a binding. Card-7 has no
+`propose` span at all, and node 7's panel already says so.
 
 Earlier node VERSIONS: this run has **0 `node_reset`** and 14 `node_repaired`, so every node is
 generation 0 and the attempt picker correctly does not render (`Node.attempt` is bumped by
