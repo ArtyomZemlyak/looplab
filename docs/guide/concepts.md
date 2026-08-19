@@ -126,7 +126,21 @@ a pace: it reads no `n`, no `last` and no `every`, and it records nothing. The i
 `at_node` idempotence are untouched, so the number of paid passes per node count is unchanged — the
 only new cost would have been the outer loop reaching a gate many times at the *same* `n`, which the
 two consumers that record no mark on their "nothing changed" path bound with an in-process
-attempted-at-`n` memo. `Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
+attempted-at-`n` memo. The other two — comparative-lesson distillation and the report refresh —
+need no memo, because they record their `at_node` on every path: `lessons_distilled` is appended
+even with zero lessons, and the report writer stamps `at_node` outside its own try, so even a
+provider failure closes the window.
+
+**Four of the five call it; the fifth is a refusal.** The serial deep research
+(`_maybe_deep_research`) keeps the old predicate on purpose. Its phase never stopped happening —
+the *concurrent* half of that same decision (`_spawn_research`) carries no such guard, and
+`research_completed (trigger=cadence)` is alive in every run on this box, including the three with
+zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think and a
+background think at the same node count with only a read-then-write window between their shared
+mark check and their receipts, buying a double-spend to reach work already being done. The residual
+hole — `concurrent_research=false`, not the shipped default — is filed as backlog F1i-b.
+
+`Settings.cadence_while_evaluating` (ON) is the kill switch back, and it carries a
 `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row pinning it `false` for a run resumed from a snapshot written
 before the field existed — re-entry must not silently add paid calls to a run whose first half
 bought none, and "the new behaviour is better" is the argument that rule exists to refuse.

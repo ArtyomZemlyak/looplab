@@ -3259,6 +3259,109 @@ exempted. A stage's `timeout` is a leash and not an input — `stage_identity` a
 EARLIER stage's still forfeits it. Left closed deliberately: no corpus row asks for it, and a field
 carved out of an entry compare is a hole that has to be re-argued every time the entry gains a key.
 
+### §0.15 A pre-launch liveness audit of the whole feature stack, and the two cadences §0.14 left behind (2026-08-19)
+
+**WHY THIS EXISTS.** Before a multi-day run, "the unit tests are green" is not the question. The
+question is whether each feature FIRED on a real run and did its job, and the only evidence that
+answers it is `runs/`. Every subsystem here writes something durable, so the method is a COUNT per
+run and a last-seen — the same method that found §0.14. Corpus: the six event logs under `runs/`
+(`rubertlite-dense-retrieval`, `-v6`, `-v7`, `-v8`, `-v9`, and the live `e5small-dr-unified-v2`,
+started 2026-08-17 16:38 and therefore PINNED to code from before every 2026-08-18 fix).
+
+**THE LEDGER.** FIRING / DEAD / DEGRADED, with the count that decides it.
+
+| feature | verdict | evidence |
+|---|---|---|
+| novelty gate (`novelty_mode=llm` in all six) | FIRING | 18 adjudications on the live run (17 of them ≥2 s of agentic deliberation, `phase_progress{phase:"novelty"}` paired started/finished), 14 `novelty_rejected` corpus-wide (dr 10, v7 3, v9 1). Live 0/18 rejected — accepted, not skipped |
+| repair critic | FIRING | 6 consultations (live 1, v7 1, v8 4); only 1 `repair_critic_verdict` because the event type postdates v7/v8. The gate is `attempt >= repair_critic_after(3)` and only three runs ever reached a 4th repair |
+| memo verifier (`trust/memo_verify.py`) | FIRING | 89 of 89 eligible memos verified, all six runs, up to the live run's latest. 438 `unsupported` vs 328 `supported` — the healthiest critic in the engine is the one saying the memos are mostly unevidenced |
+| plan critic (`trust/critic.py`) | FIRING | wired in all six (`critic_check=true`); sole producer of the corpus's only trust signals (4 `critic:params_ignored` on v6) |
+| reward-hack + code-leakage detectors | DEGRADED | they run unconditionally per evaluated node, but a CLEAN scan writes nothing at all — no event, no span, no `node_evaluated` field. A run where the call was deleted is byte-identical to a clean one. Also `trust_gate="audit"` in all six, so neither could have moved a selection |
+| confirm phase, verifier tie-break | DEAD (off) | `confirm_top_k=0`/`confirm_seeds=0` and `select_verifier=false` in all six snapshots. An operator choice, not a defect |
+| Strategist + concept cadence | was DEAD, fixed 2026-08-18 | §0.14. Unprovable on disk: the fix postdates every run |
+| lesson distillation, report refresh | **DEAD — FIXED HERE** | see below |
+| auto-skill promotion | DEAD | the shared `skills/` store is EMPTY. `n_skills` went 4 → 12 (dense-retrieval, July) → 0 (v7) → 0 (v8), and v6/v9/live never reached the phase at all because it is RUN-END only and none of them finished |
+| training monitor | DEGRADED | 205 alerts corpus-wide (live 96, of which 70 `broken` at up to 0.97 confidence with a 41-tick streak), **0 acts, ever**. Five of six kill conjuncts cleared simultaneously on the live run; only `log_role` refused, because a 3-stage pipeline can never earn `LOG_ROLE_TRAINING`. Fixed by `a5412bb8`/`364cef55` — after the live run pinned its code |
+| ASHA monitor | DEAD | zero `asha_rank` rows in six runs. `asha_live=true` and `min_siblings` is NOT the blocker: `asha_monitor.py:686` bails at `sample is None` because `RECALL@100:` is printed ONCE, on the LAST line of a 7-hour training. A successive-halving watchdog pointed at a task with no intermediate curve |
+| every phase of a node's life | FIRING | live run: stages 11/11, plan 11, propose 18, card build 11, novelty 18, create 11, seed 9, eval-start 9, stage exec 33, terminal 8, repair 13. The 11/9/8 gaps are fully accounted for by one Card-freshness supersede and three nodes genuinely in flight — no phase is silently skipped |
+| card board / speculation | FIRING | `card_added` 11, `card_build_*` 11 each, `card_enriched` 35, last 2026-08-19 00:38 |
+
+**THE DEFECT FIXED HERE: §0.14 CONVERTED TWO OF THE FIVE CONSUMERS IT NAMED.** `engine/cadence.py`'s
+own docstring, `core/config.py`'s field comment and `tests/test_cadence_while_evaluating.py`'s module
+docstring all enumerate FIVE phases that opened with `if state.pending_nodes(): return False`. The
+2026-08-18 change moved `strategy.py::_should_consult` and `concept_cadence.py::_should_consult_concepts`
+onto `cadence.at_creation_boundary` and left the other three on the dead proxy, and the reader of
+those docstrings could not tell — they name the copiers and then read as if the family were done.
+
+The corpus decides it, on the SAME configuration in every run (`lessons_every=4`, `report_every=3`,
+`comparative_lessons=true`, `reflection_priors=true`) and re-derived here independently of §0.14:
+
+    quiescent prefixes (nodes exist, none pending)     dr 903/81w   v6 850/5w   v7 0   v8 148/1w   v9 0   live 0
+    lessons_distilled   (trigger=cadence)                 19           1          0        1          0      0
+    report_generated    (trigger=cadence)                 26           1          0        1          0      0
+    research_completed  (trigger=cadence)                 27           5          2       14          6      9
+
+The last row is the control and it is what keeps `_maybe_deep_research` OUT of this fix. That gate is
+the SERIAL half of a decision whose CONCURRENT half (`orchestrator._spawn_research` →
+`_due_research_trigger`) never carried the guard, so deep research is alive in all six runs including
+the three with zero quiescent prefixes. Opening the serial half mid-eval would put a main-task think
+and a background think at the same node count with only a read-then-write window between their shared
+`_cadence_research_marks` check and their receipts — a double-spend bought to reach work already being
+done. So four of five now call `at_creation_boundary` and the fifth is a stated refusal, pinned by
+`test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate`.
+
+**THE MONEY, and why these two need no memo.** §0.14's two consumers carry an in-process
+attempted-at-`n` memo because they record no `at_node` on their "nothing changed" path. These two
+record one on EVERY path: `lessons_distilled` is appended even with zero lessons (its own comment
+says why), and `serve/report.py` sets `content["at_node"]` OUTSIDE its try, so even a provider failure
+that degrades to the minimal report closes the durable window. The pace is unchanged — one paid pass
+per node count however many times the outer loop turns at it — and
+`test_a_fixed_node_count_buys_exactly_one_distill_and_one_report` drives 25 turns at a fixed `n`
+against both. The one shape that does change is that a lesson window can now open before any pair is
+comparable; that costs nothing (`select_comparison_pairs` returns `([], [])` with no provider call)
+and loses nothing (an empty receipt spends no pair), it only delays that batch by one interval — against
+a status quo of never distilling at all.
+
+**THE THREE NEW TESTS FAIL AGAINST THE PRE-CHANGE TREE** (verified before the edit, in the worktree at
+`086ca5b4`): `test_lessons_distil_on_a_run_with_evaluations_in_flight` and
+`test_the_report_refreshes_on_a_run_with_evaluations_in_flight` both `assert (0 == 1)`, and the money
+test reports `paid 0 distillations at one node count`. Each carries its kill-switch negative control
+in the same body, so `cadence_while_evaluating=false` still reproduces the historical predicate.
+
+**STILL OPEN — filed rather than patched.**
+
+⬜ **F1i-b · the serial deep-research gate under `concurrent_research=false`.** Not the shipped default
+(`Settings.concurrent_research = True`), so no run on this box is affected, and every run in `runs/`
+carries `true`. Under `false` the concurrent half does not exist and the serial gate is the only path,
+which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
+other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
+under one claim rather than two reads. Do it when someone actually wants serial research.
+
+⬜ **A clean trust scan commits to nothing.** `reward_hack.py` and `leakage.py::code_leakage_findings`
+run on every evaluated node and write only on a hit, so their liveness is unfalsifiable from the log —
+the exact property the 2026-08-05 mutation audit recorded when deleting both `sigs +=` lines left 117
+trust tests green (`engine/evaluate.py`'s own docstring). Cheapest honest receipt is the `code_digest`
+these detectors already compute, stamped on `node_evaluated` beside the metric (additive, reader-side
+default, fold-neutral) so "scanned THESE bytes, found nothing" is a durable claim. Not done here
+because it is a payload contract and this change is a cadence fix; it should not ride along.
+
+⬜ **ASHA cannot work on this task family and nothing says so.** `asha_live=true` in five snapshots is
+an operator belief the engine never contradicts: it starts the task, ticks for hours, and silently
+`continue`s on every tick because `eval.metric.pattern` matches once at the end of training. Either
+the launcher should refuse `asha_live` for a metric spec with no `resource_key` and no intermediate
+contract, or it should say once per run that it is reading a curve that does not exist. A watchdog
+that is structurally inert and silent about it is worse than one that is off.
+
+⬜ **Auto-skill promotion has produced nothing since 2026-07-18 and only runs at run END.** The shared
+`skills/` directory is empty; the only skill cards this box ever wrote are in
+`skills.quarantined-2026-08-12`, and reading them shows why the 2026-08-13 hardening exists — they are
+raw proposals ("Experiment A: further reduce temperature to 0.01…"), not techniques. So `n_skills: 0`
+on v7/v8 may be the filter working. It is not currently decidable: the `skill_candidates` receipt that
+would say which statements were refused and why landed 2026-08-18 (`1f7b481a`), after both runs. Two
+separate questions to settle on the next finished run — is the classifier over-rejecting, and should a
+phase whose whole value is cross-run survive being reachable only from a clean finish, when three of
+the last four runs on this box were stopped mid-flight.
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
