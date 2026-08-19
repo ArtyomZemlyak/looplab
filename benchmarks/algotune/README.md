@@ -22,7 +22,10 @@ single box, for four reasons:
 |---|---|
 | `looplab_eval.py` | The eval bridge. Copies a candidate `solver.py` into `results/<model>/<task>/`, runs **AlgoTune's own** `evaluate_results.py`, prints `speedup` as stdout JSON. Holds the parity cache (below). |
 | `make_task.py` | Generates a LoopLab `repo` task spec + workspace for one AlgoTune task. |
-| `.baseline_cache.json` | Written at runtime; per-task reference timings. Not committed. |
+| `run_evaluator.py` | Runs AlgoTune's evaluator with a **disk-backed** baseline cache. Without it the reference pass is re-measured in a fresh interpreter on **every node** — see Parity below. |
+| `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from the LoopLab run's folded event log. A missing arm prints `--`, never `0`. |
+| `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
+| `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |
 
 ## Setup (once)
 
@@ -72,6 +75,12 @@ python benchmarks/algotune/make_task.py \
 looplab run /path/to/workspaces/algotune_svm.json --out runs/algotune-svm-looplab --backend llm
 ```
 
+**Summarising a campaign:**
+
+```bash
+python benchmarks/algotune/compare_arms.py --algotune-root /path/to/AlgoTune --runs-root /path/to/camp-runs --reference
+```
+
 **Re-timing the shipped reference solvers on this machine:**
 
 ```bash
@@ -94,6 +103,49 @@ So `looplab_eval.py` measures each task's baseline once, caches it, and scores l
 deviation** — it is exactly what `BaselineManager` does inside an AlgoTuner run — but it *is* a
 departure from a naive reading of the harness, so state it in any published methods note. Use
 `--no-cache` to force full re-measurement.
+
+### The trap has a second half, and caching the number does not close it
+
+The cache above fixes the **denominator**. It does not fix the **cost**: `looplab_eval.py` shells out
+to `evaluate_results.py`, which builds a fresh `BaselineManager` in a fresh interpreter — and that
+class caches in `self._cache`, *process memory*. So the whole reference pass was still re-measured
+per node; only its result was being thrown away.
+
+Measured 2026-08-19: the pass advances at ~2.4 s/instance and one task's pass took **100 instances /
+~15 minutes**. `run_evaluator.py` wraps `BaselineManager.get_baseline_times` in a disk cache keyed by
+`(task, subset)` and runs the upstream script unmodified through `runpy`. It never caches across
+tasks or across the train/test split — those are different reference sets — and honours
+`force_regenerate`. Disable with `--no-baseline-cache`.
+
+### The budget must be SPEND, not wall-clock
+
+Arm A's own startup log settles this:
+
+```
+INFO - Configuration loaded successfully. Budget: $1.0000
+INFO - Config loaded: spend_limit=1.0 total_messages=9999 max_messages_in_history=5
+```
+
+AlgoTuner is budgeted by **money**, with an effectively unlimited message count, and its ~15-minute
+reference pass costs **$0** of it. A wall-clock cap therefore charges one loop for a measurement pass
+neither one's *agent* performs — and on the 20-minute cap originally planned, arm B would have
+completed zero evaluations.
+
+**But $1 is not a budget for a cheap model.** Measured here: seven agent messages cost **$0.0071**,
+so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without approaching it. The
+campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
+`config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
+
+### Two parity choices that cost LoopLab something, on purpose
+
+* **Reasoning effort `medium` on both arms.** Measured: medium 21.5 s/call, high 111.3 s/call, with
+  quality at `high` *not* measured either way. Under any bounded budget `high` buys so few calls that
+  the comparison is between two truncated runs.
+* **Cross-run memory off.** LoopLab can read its own past runs and a shared memory store; AlgoTuner
+  has no equivalent and each of its runs starts blind. Left shared, arm B would reach task 12 with
+  eleven prior runs to mine — measuring a capability the other arm lacks rather than the loop. Each
+  task gets its own run root and memory dir. This **discards a real LoopLab advantage**, which is the
+  direction that cannot flatter us.
 
 > **General rule this instance illustrates.** When the reference agent has an in-process cache and
 > our integration is out-of-process, equal *budgets* are not equal *work*. Compare the cost structure
@@ -168,6 +220,12 @@ Use an explicit **`reasoning: {max_tokens: N}`** rather than `effort`: providers
 level however they like, whereas a token budget reads the same on both arms — and parity requires
 both arms carry the *same* bound. Disabling reasoning entirely also works but handicaps the model's
 quality, which is not what we want to measure.
+
+> **What the campaign actually uses, and why it is not this.** `reasoning: {max_tokens: N}` was
+> measured NOT to hold on the real prompts (see below: 21,759 reasoning tokens against a 2,000
+> budget), so the bound it promises is not one it delivers. The campaign pins `effort: medium` on
+> both arms instead — the same value on both, which is what parity requires; the level itself is
+> chosen because `high` is 5x slower for no measured quality gain.
 
 Effect on the LoopLab arm after applying it: max completion 66,459 → **1,957**, gaps over 60 s
 **6 → 0**, longest gap 1,089 s → **26.9 s**.
