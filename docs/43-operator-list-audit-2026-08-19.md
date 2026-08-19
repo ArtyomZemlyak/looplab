@@ -197,6 +197,22 @@ its only non-note corpus, changing `kb_search` for every existing memory dir, an
 kind** — write the winning params onto the meta-note that already reaches the prompt, and stop
 maintaining a second store whose search has no callers.
 
+> **SUPERSEDED the same day — the recommendation above was drawn from a corpus that is 29/30 toy.**
+> It is kept as the record of what this audit believed. On the ONE real row the premise does not
+> hold: `rubertlite-dr-unified-v8`'s meta-note is a causal narrative naming ONE hyperparameter
+> (`R-Drop … at α=0.5 … lifted recall from 0.7384 to 0.762`) while its case carries fifteen beside
+> `metric 0.762048` — so "the note already says the same thing in prose" is true of `toy_quadratic`
+> (two params, inline) and false of every real run. A second measurement made the case for fixing
+> rather than folding: the one reader a case had never delivered the params either — a `kb_search`
+> hit is head-clipped at 600 chars and the record led with the `goal`, so `best params=` began at
+> char **691** of that 1,610-char record and what arrived was 600 chars of the reader's own task
+> prompt. Both are now closed: `engine/lessons_priors.py::_scan_prior_context` reads the active case
+> beside the meta-note it already reads, under the same `(task_id, direction)` key and the same
+> fail-closed `LessonScope`, into one Researcher-only prior line; and the `kb_search` record leads
+> with its params. See `docs/guide/memory.md` § *What are cases for?* and
+> `tests/test_case_store_wiring.py`, which drives both on `tests/data/v8_case_and_note.json` — that
+> run's own two rows, verbatim.
+
 ### N5 · "Надо подписи в UI чтобы понимать чем отличаются все виды памяти"
 
 **Today — SHIPPED for the seven kinds that have a UI; absent for the other nine.** The authoritative
@@ -572,6 +588,19 @@ most actionable section every single time. **To close:** give `_research_memo` t
 structure the card already has, and order it so the sections a caller acts on survive a head cut —
 `recommended_directions` and the verification tally FIRST, `sources` last. No new data, no new
 event, and it is the same fix for the tool and for the push line.
+
+> **CLOSED 2026-08-19 for the PULL half.** Re-derived independently over the same 90 memos and the
+> numbers reproduce exactly (89 of 90 over the cap, median 9,083 chars, median 5,180 discarded,
+> `Claims` past the cut in 80 of 89 and `Recommended directions` in 89 of 89; in the traces 375 calls,
+> 362 over the cap, directions past the cut in 194 of 212). Reordering alone was refused, because it
+> only moves which section is silently amputated: `read_research_memo` now takes a `section`
+> (`overview` (default) | `directions` | `findings` | `claims` | `summary`), the overview carries the
+> verifier block + the directions IN FULL + a clipped summary, each section page gets the whole cap to
+> itself, and the answer NAMES what it left out beside the call that returns it (`log_tools.py` rule
+> 3). The cap was not raised. Measured after: **0 of 90** answers are cut by the agent layer in any
+> section and the directions arrive complete in **86 of 89** overviews, with the other 3 naming
+> `section="directions"`, which delivers them for 89 of 89. The PUSH half (`summary[:300]`) is
+> unchanged and remains open.
 
 ## 3 · UI defects reported live (U1–U10)
 

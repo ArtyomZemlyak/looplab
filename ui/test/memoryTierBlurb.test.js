@@ -23,9 +23,20 @@ test('every tab the panel renders has a blurb', () => {
 
 test('the Cases caption answers the question that was actually asked', () => {
   // Not "what a case is" in the abstract — why there are ten of them and what reads them.
+  // RE-POINTED 2026-08-19 with the kind itself: a case is now read back into the next Researcher
+  // prompt for the same task (engine/lessons_priors.py), so the caption has to say WHAT it holds
+  // that the note beside it does not — the configuration — and not only how few rows there are.
   const cases = MEMORY_TIER_BLURB.cases
-  assert.match(cases, /one row per task/i)
-  assert.match(cases, /one per task, not one per experiment/i)
+  assert.match(cases, /configuration/i)
+  assert.match(cases, /parameter dict/i)
+  assert.match(cases, /one per task and objective, not one per experiment/i)
+})
+
+test('cases and notes are told apart by recipe vs cause', () => {
+  // The operator's neighbouring complaint: the memory kinds are not distinguishable to a reader.
+  // These two describe the SAME finished run, so if any pair has to be separable it is this one.
+  assert.match(MEMORY_TIER_BLURB.cases, /machine-readable/i)
+  assert.match(MEMORY_TIER_BLURB.notes, /the CAUSE where a case is the recipe/i)
 })
 
 test('the Knowledge caption states the distinction from the other three', () => {

@@ -28,6 +28,13 @@ from looplab.trust.cross_run import LessonScope, cross_run_text, scope_terms
 LESSON_ROLE_RESEARCHER = "researcher"
 LESSON_ROLE_DEVELOPER = "developer"
 
+#: How much of a case's PARAMS dict may enter a prompt. It is the one payload a case holds that no
+#: neighbouring kind does, so it is bounded generously and clipped from the head with its own
+#: receipt (`cross_run_text`) rather than dropped: an incomplete recipe a reader knows is incomplete
+#: is usable, one it believes is whole is not. Measured on the only real case in the shared store,
+#: the params render is 490 chars over 15 keys.
+CASE_PARAMS_CHARS = 1_200
+
 
 def _memoized_embed(embed):
     """Wrap an embedder in a per-build content memo. The two role priors (built together at run start
@@ -55,7 +62,9 @@ class LessonPriorsMixin:
                                exclude_run_uid: Optional[str] = None,
                                role: Optional[str] = None) -> str:
         """E4 + M2/M3: build the cross-run prior injected into a role's prompt. Two parts:
-        (1) exact-task "what won" notes (meta_notes.jsonl — unchanged E4 warm-start), and
+        (1) exact-task "what won" — the meta-note (meta_notes.jsonl, unchanged E4 warm start) and, since
+        2026-08-19, the active CASE beside it (cases.jsonl: the winning run's own parameter dict,
+        which the note's prose does not carry), and
         (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
         benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
         doesn't re-tread a known dead end. Empty unless enabled + present. `exclude_run_id` drops
@@ -134,6 +143,61 @@ class LessonPriorsMixin:
                 continue
             notes.append(cross_run_text(
                 o["note"], max_chars=1_200, single_line=True, entropy=True))
+        # (1b) the exact-task CASE — the same "what won" tier as the notes above, in the form prose
+        # cannot carry. THIS LOADER IS THE READER `cases.jsonl` NEVER HAD. `store_case` has written
+        # one row per finished run since I19, keyed by exactly the `(task_id, direction)` this scan
+        # is already scoped by and gated by exactly the `LessonScope` above — and nothing in
+        # `looplab/` ever read it back into a decision or a prompt (`JsonlCaseLibrary.search()` and
+        # `.all()` have no production call sites; the file's only reader was `KnowledgeTools`, which
+        # embeds it into the `kb` index where it must first win a top-3 semantic ranking against
+        # every knowledge note).
+        #
+        # WHY THE NOTE DOES NOT ALREADY COVER IT, which is the whole argument and is a measurement
+        # rather than a preference. The shared store's 30 cases are 29 `toy_quadratic` and ONE real
+        # row, and on the toy task the meta-note genuinely IS the case's twin — "best metric 4.483
+        # via op 'improve' params {'x': 0.885, 'y': -0.9026}" carries both parameters inline, which
+        # is why folding cases into notes looks correct from that corpus. On the one real row it is
+        # not: `rubertlite-dr-unified-v8`'s note is a causal narrative ("R-Drop … at alpha=0.5
+        # stacked onto the DCL nll_cos loss … lifted recall from 0.7384 to 0.762") naming ONE
+        # hyperparameter, while its case carries fifteen — `loss.temperature 0.05`, `loss.thr 0.1`,
+        # `train.negatives.mining_type 1`, `train.training.batch_size 8192`,
+        # `gradient_accumulation_steps 2`, `learning_rate 0.001`, `max_grad_norm 1.0` — beside
+        # `metric 0.762048`. Prose is the CAUSE; the case is the CONFIGURATION, and only one of
+        # those can be re-run.
+        #
+        # Bounded to ONE row on purpose: `_add_locked` already keeps a single `active` winner per
+        # (task, direction), so "the best configuration for this task" is a store-level fact and not
+        # a ranking this reader gets to make. Inactive rows are the store's own history and stay out.
+        # The LAST admitted row wins rather than the first, which matters only on a store that has
+        # somehow acquired two active rows for one key: the newest append is the one `_add_locked`
+        # would have elected, and picking the oldest would pin a prompt to a superseded winner.
+        #
+        # An unreadable or absent case store DEGRADES here and does not raise, unlike the two reads
+        # around it. Those raise because their callers own a recovery contract (leave the source
+        # stamp uncommitted, retry next cadence) that predates this tier; adding a THIRD file to
+        # that raise would let an unreadable `cases.jsonl` fail deterministic run setup on every
+        # start and resume, for a tier that is additive. A missing ledger is already a healthy empty
+        # source (`read_memory_jsonl_window`), so a store that never had cases is unaffected; an
+        # unreadable one is folded into the health receipt below and the prior says it is partial.
+        from looplab.engine.memory import valid_case_record
+        case_line = ""
+        case_rows, case_health = read_memory_jsonl_window(base / "cases.jsonl")
+        for _index, c in case_rows:
+            if not isinstance(c, dict):
+                case_health["skipped"] += 1
+                continue
+            # The writer's own validity fence, so a poisoned or future-schema row cannot enter a
+            # prompt through a reader that applies a weaker rule than the store does.
+            if not valid_case_record(c) or c.get("active") is False:
+                continue
+            if c.get("task_id") != self._e.task.id or not isinstance(c.get("params"), dict):
+                continue
+            if not scope.allows(c):
+                scope_filtered += 1
+                continue
+            case_line = (f"metric {c.get('metric')} (run {c.get('run_id') or 'unknown'}) with params "
+                         + cross_run_text(c.get("params"), max_chars=CASE_PARAMS_CHARS,
+                                          single_line=True, entropy=True))
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
@@ -175,14 +239,22 @@ class LessonPriorsMixin:
             # from `invalid`, and the one that explains an empty E4 tier on a legacy store.
             "scope_filtered": int(scope_filtered),
         }
-        return notes, parsed, fp, _memoized_embed(self._e._embedder), health
+        # The case store joins the health receipt on the SAME terms as the other two — an unreadable
+        # or bounded case window must not read as "this task has no winning configuration".
+        health["invalid"] += int(case_health["skipped"])
+        health["source"] += int(case_health["source_rows"])
+        health["truncated"] = bool(health["truncated"] or case_health["source_window_truncated"])
+        health["complete"] = bool(health["complete"] and not (
+            case_health["source_window_truncated"] or case_health["skipped"]
+            or case_health["unavailable"]))
+        return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
         """Render ONE role's prior text from a shared `_scan_prior_context` scan: filter the parsed
         lessons to that role (untagged = shared), score by fingerprint similarity, splice in Memora
         harmonic recall, apply D2 read-time hygiene + ranking, and pick the top 5 with a role label."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
-        notes, parsed, fp, embed, health = ctx
+        notes, parsed, fp, embed, health, case_line = ctx
         out = (f"\n[MEMORY_SOURCE: canonical recent snapshot; rows={health['source']}; "
                f"notes_sha256={health['notes_digest']}; lessons_sha256={health['lessons_digest']}; "
                f"complete={'true' if health['complete'] else 'false'}.]"
@@ -217,6 +289,12 @@ class LessonPriorsMixin:
                 _distinct.append(_n)
             _distinct.reverse()
             out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(_distinct[-3:])
+        # The CASE rides the same tier and the same role gate as the notes above — it is the same
+        # "what won on this exact task" fact, in the form a next run can act on. One line, after the
+        # prose, because the prose says WHY it won and this says WHAT to set.
+        if case_line and role != LESSON_ROLE_DEVELOPER:
+            out += ("\nBest known configuration for this task (the winning run's own parameters, "
+                    "not a recommendation): " + case_line)
         if not parsed:
             return cross_run_text(
                 out, max_chars=8_000, single_line=False, entropy=True)
