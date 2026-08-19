@@ -6,6 +6,7 @@ import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERA
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
+import { forkChip } from './forkProvenance.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
 import { conceptMaterializationStatus, runConstantConcepts } from './nodeProjection.js'
@@ -277,8 +278,12 @@ function ExpNode({ data }) {
   const conceptTruth = conceptStatus === 'unavailable' ? 'concepts unavailable, not empty'
     : conceptStatus === 'partial' ? `PARTIAL concepts (display-only): ${conceptTags.join(', ') || 'none retained'}`
       : conceptTags.length ? `concepts: ${conceptTags.join(', ')}${runWideNote}` : ''
+  // The one thing a node card must not do is present an inherited rationale as this experiment's own
+  // justification. `forkChip` is null for every node nobody branched, so an ordinary card is unchanged.
+  const branch = forkChip(node)
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
     + (conceptTruth ? ` · ${conceptTruth}` : '')
+    + (branch ? ` · ${branch.title}` : '')
   const selectionLabel = [
     `Experiment #${node.id}`, op.label, node.status || 'unknown status',
     m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
@@ -290,6 +295,10 @@ function ExpNode({ data }) {
     conceptTruth || null,
     node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
+    // An operator branch is a statement about WHO WROTE THIS IDEA, so it belongs in the selection
+    // label beside the other two provenance facts rather than only in a hover title a screen reader
+    // never reaches.
+    branch ? branch.label : null,
     node.status === 'failed' ? `failure reason ${node.error_reason || 'not reported'}` : null,
     'Select to inspect',
   ].filter(Boolean).join(', ')
@@ -332,6 +341,8 @@ function ExpNode({ data }) {
           : node.research_origin ? <span className="origin-chip rsch compact" role="img"
           aria-label="Proposed from deep research directions"
           title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /></span> : null}
+        {branch && <span className="origin-chip fork compact" role="img"
+          aria-label={branch.label} title={branch.title}><OpIcon name={branch.icon} size={11} /></span>}
         {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials — open the node's Trials tab`}>⊞ {sw.count}</span>}
         {agentBadge(node.agent_report)}
       </div>

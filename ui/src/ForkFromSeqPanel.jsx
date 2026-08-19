@@ -4,7 +4,8 @@ import PanelShell from './PanelShell.jsx'
 import { CONTROL, commandFeedback } from './util.js'
 import {
   FORK_ACCESS_REASONS, FORK_BLOCKED_REASONS, buildForkPayload, classifyForkFailure,
-  forkIdeaFromSnapshot, forkLandedNotice, forkRetryable, forkSubmitDecision,
+  forkDraftIdea, forkIdeaFromSnapshot, forkLandedNotice, forkRetryable,
+  forkSubmitDecision,
 } from './forkFromSeqModel.js'
 
 // Branch from the experiment you are READING, with its idea edited — the React half of
@@ -84,23 +85,12 @@ export default function ForkFromSeqPanel({
   }, [outcome])
 
   const params = parseForkParams(paramsText)
-  // OPEN[fork-draft-phantom-rationale-edit] an unchanged fork submits as edited.
-  // proof:present:'manual',@ui/src/ForkFromSeqPanel.jsx+absent:base.rationale@ui/src/forkFromSeqModel.js
-  // REVIEW 2026-08-18 (correctness): the draft ALWAYS carries a `rationale` key (seeded '' above
-  // when the idea has none), while `forkIdeaFromSnapshot` OMITS absent fields from `base` — so for
-  // a rationale-less snapshot idea `forkIdeaEdited` compares '""' against "null" and reports the
-  // untouched form as edited (driven: base {operator,params} vs draft {…, rationale: ''} →
-  // edited=true, decision ok). The `unedited: "an unchanged copy is not a new experiment"` refusal
-  // never fires, the submit is live on a byte-for-byte copy, and the server stamps
-  // `changed_fields: ['rationale']` for a field the operator never touched. Fix direction: drop
-  // `rationale` from the draft when it is '' and `base` has none (mirroring how empty `params` is
-  // deleted two lines down), or seed `base.rationale` to '' in the model.
-  const draft = useMemo(() => {
-    const next = { ...base, operator: operator.trim() || 'manual', rationale }
-    if (params.ok && params.value !== undefined) next.params = params.value
-    else delete next.params
-    return next
-  }, [base, operator, rationale, params.ok, paramsText])
+  // The draft's SHAPE is the model's rule, not the form's: an editable field the operator put
+  // nothing in must not travel, or the server's receipt records them as having changed it. See
+  // `forkFromSeqModel.js::forkDraftIdea`.
+  const draft = useMemo(() => forkDraftIdea(base, {
+    operator, rationale, params: params.ok ? params.value : undefined,
+  }), [base, operator, rationale, params.ok, paramsText])
 
   // The form is FENCED once a submission ended in a way that resubmitting these same bytes cannot
   // improve — the run moved, or the outcome is unknown. `forkRetryable` is that rule; the panel only

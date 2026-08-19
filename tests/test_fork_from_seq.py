@@ -315,3 +315,133 @@ def test_inject_without_a_fork_receipt_is_unchanged(tmp_path):
     created = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "node_created"]
     assert created and all("forked_from" not in e.data for e in created)
     assert all(n.forked_from is None for n in folded.nodes.values())
+
+
+def test_the_receipt_separates_what_the_operator_wrote_from_what_it_left_behind(tmp_path):
+    """`changed_fields` is a raw diff of two Ideas, and reading it as "what the operator changed" is
+    how a branch comes to read as the operator's work when most of it is not theirs.
+
+    A branch differs from its parent for TWO unrelated reasons. The operator edited something — and
+    the gesture deliberately does not carry the parent's engine bookkeeping across (`card_id`,
+    `hypothesis`, `footprint`, `theme`, the concept envelope; `ui/src/forkFromSeqModel.js`'s
+    `FORK_IDEA_FIELDS` says why each is left behind). Here that is two edits and one dropped field;
+    against a Researcher-built parent carrying a hypothesis, a theme, a finalized footprint and a
+    concept envelope it is eight fields for the same two edits, all of them presented as the
+    operator's. So the SERVER splits the diff, because only the server holds both ideas at once: the
+    node's own idea drifts after intake (`_finalize_developer_footprint` mints a `footprint` the
+    submission had none of) and the parent may since have been reset out of the folded state.
+    """
+    rd = _live_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    source_id, view_seq, seen = _snapshot_before_the_tail(client, rd)
+    edited = _fork_idea(seen["idea"],
+                        rationale="operator: halve the step",
+                        params={**(seen["idea"].get("params") or {}), "x": 0.125})
+    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 1}})
+    posted = client.post("/api/runs/demo/control",
+                         json=_fork_payload(source_id, seen["attempt"], view_seq, edited))
+    assert posted.status_code == 200, posted.text
+    receipt = fold(EventStore(rd / "events.jsonl").read_all()).inject_requests[-1]["forked_from"]
+
+    # The raw diff is UNCHANGED — it stays the authority for "these two ideas differ here", so every
+    # receipt already on disk keeps its exact meaning.
+    assert receipt["changed_fields"] == ["card_id", "params", "rationale"]
+    # ...and it is now split into the two claims a reader actually needs.
+    assert receipt["authored_fields"] == ["params", "rationale"]
+    assert receipt["not_carried_fields"] == ["card_id"]
+
+    # Neither half may be supplied by the browser, for the same reason the first two could not be:
+    # "what the operator changed" must be a fact the server derived, not a claim about itself.
+    for forged in ("authored_fields", "not_carried_fields"):
+        body = _fork_payload(source_id, seen["attempt"], view_seq, edited)
+        body["data"]["forked_from"][forged] = []
+        refused = client.post("/api/runs/demo/control", json=body)
+        assert refused.status_code == 400, refused.text
+        assert "fork_receipt_forged" in refused.text
+
+    # The split survives to the durable node, which is what a later reader folds.
+    state = _resume(rd)
+    forked = [n for n in state.nodes.values()
+              if isinstance(n.forked_from, dict) and n.forked_from["node_id"] == source_id]
+    assert len(forked) == 1
+    assert forked[0].forked_from["authored_fields"] == ["params", "rationale"]
+    assert forked[0].forked_from["not_carried_fields"] == ["card_id"]
+
+
+def test_the_prov_export_does_not_credit_the_engine_with_an_operators_idea(tmp_path):
+    """The W3C-PROV export is the one surface whose entire job is provenance, and it used to say a
+    `prov:SoftwareAgent` was associated with every experiment in the run — including one whose idea
+    an OPERATOR wrote by branching from a snapshot, with the parent's inherited rationale sitting on
+    it as `ll:rationale` as if the Researcher had written it for this experiment.
+    """
+    rd = _live_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    source_id, view_seq, seen = _snapshot_before_the_tail(client, rd)
+    edited = _fork_idea(seen["idea"], rationale="operator: halve the step",
+                        params={**(seen["idea"].get("params") or {}), "x": 0.125})
+    client.post("/api/runs/demo/control", json={"type": "budget_extend", "data": {"add_nodes": 1}})
+    assert client.post("/api/runs/demo/control",
+                       json=_fork_payload(source_id, seen["attempt"], view_seq, edited)
+                       ).status_code == 200
+    state = _resume(rd)
+    branch = next(n for n in state.nodes.values()
+                  if isinstance(n.forked_from, dict) and n.forked_from["node_id"] == source_id)
+
+    graph = client.get("/api/runs/demo/prov").json()
+    activity = f"exp:{branch.id}:{branch.attempt}"
+
+    # A person is now in the graph, and the branch's authoring act is associated with them.
+    assert graph["agent"]["agent:operator"]["prov:type"] == "prov:Person"
+    associations = [w for w in graph["wasAssociatedWith"].values()
+                    if w["prov:activity"] == activity]
+    assert {(w["prov:agent"], w.get("prov:role")) for w in associations} == {
+        (f"agent:looplab/{state.config_hash or 'run'}", "ll:implementer"),
+        ("agent:operator", "ll:idea-author"),
+    }, "the operator wrote the idea; the engine's Developer still wrote the code"
+
+    # And the activity says which parts of the idea are whose, at a level it names.
+    act = graph["activity"][activity]
+    assert act["ll:idea_author"] == "operator"
+    assert act["ll:attribution"] == "stamped"
+    assert act["ll:branched_from_node"] == source_id
+    assert act["ll:observed_seq"] == view_seq
+    assert act["ll:authored_fields"] == ["params", "rationale"]
+    assert act["ll:not_carried_fields"] == ["card_id"]
+    # `carried_over_fields` is the complement of the raw diff, never of `authored_fields`, so a field
+    # the branch LEFT BEHIND can never be exported as something the parent contributed to it.
+    assert "card_id" not in act["ll:carried_over_fields"]
+    assert set(act["ll:carried_over_fields"]) <= set(vars(branch.idea))
+
+    # A node nobody branched keeps EXACTLY the association it always had — no role, one agent.
+    plain = f"exp:{source_id}:{state.nodes[source_id].attempt}"
+    plain_assoc = [w for w in graph["wasAssociatedWith"].values() if w["prov:activity"] == plain]
+    assert len(plain_assoc) == 1 and "prov:role" not in plain_assoc[0]
+    assert "ll:idea_author" not in graph["activity"][plain]
+
+
+def test_a_receipt_written_before_the_split_is_read_as_legacy_not_as_no_edits(tmp_path):
+    """Invariant 5, in the direction that matters here: a pre-split receipt on disk carries neither
+    new key, and the export must degrade to "not recorded" rather than to "the operator changed
+    nothing" — which is a stronger claim, and the one that reads as the Researcher's proposal."""
+    rd = _live_run(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    state = fold(store.read_all())
+    parent_id = sorted(state.nodes)[0]
+    store.append("node_created", {
+        "node_id": max(state.nodes) + 1, "generation": 0, "parent_ids": [parent_id],
+        "parent_generations": {str(parent_id): state.nodes[parent_id].attempt},
+        "operator": "manual",
+        "idea": {"operator": "manual", "params": {"x": 0.25}, "rationale": "an old branch"},
+        "forked_from": {"node_id": parent_id,
+                        "generation": state.nodes[parent_id].attempt, "observed_seq": 1,
+                        "base_idea_digest": "idea:v1:legacy", "changed_fields": ["params"]},
+    })
+    graph = TestClient(make_app(tmp_path)).get("/api/runs/demo/prov").json()
+    act = graph["activity"][f"exp:{max(fold(store.read_all()).nodes)}:0"]
+    assert act["ll:attribution"] == "legacy"
+    assert act["ll:idea_author"] == "operator", "the branch itself is still proven"
+    assert "ll:authored_fields" not in act and "ll:not_carried_fields" not in act
+    # The one claim a legacy receipt still supports soundly: a field this idea carries that the
+    # receipt does not list as different from its base holds the BASE's own value.
+    assert "rationale" in act["ll:carried_over_fields"]
+    assert "params" not in act["ll:carried_over_fields"]

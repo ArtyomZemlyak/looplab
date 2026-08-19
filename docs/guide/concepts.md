@@ -565,11 +565,56 @@ propose an improvement on this node" and carries no idea at all. Branching with 
 
 `forked_from` is the lineage receipt. Its three authored fields say what the branch came FROM and
 where the operator was standing; `observed_seq` is bounded by the run's current tail, so it can never
-name a state that does not exist. The server then **stamps two more** and refuses a payload that
-supplies either — `changed_fields` (the `Idea` fields on which this idea differs from its parent's)
-and `base_idea_digest` (the parent's own versioned idea identity), so "what the operator changed" is
-a fact anyone can re-derive from the same log rather than a claim the browser made about itself. The
-whole receipt lands on `node_created` and is folded to `Node.forked_from`.
+name a state that does not exist. The server then **stamps four more** and refuses a payload that
+supplies any of them, so what the record says about authorship is a fact anyone can re-derive from
+the same log rather than a claim the browser made about itself. The whole receipt lands on
+`node_created` and is folded to `Node.forked_from`.
+
+| stamped field | what it says |
+|---|---|
+| `base_idea_digest` | the parent's own versioned idea identity, so the lineage is checkable |
+| `changed_fields` | every `Idea` field on which this idea differs from its parent's |
+| `authored_fields` | the differences the branch puts a VALUE behind — the operator's own substance |
+| `not_carried_fields` | the differences the branch is EMPTY at, where the parent was not |
+
+**Why the diff alone is not an answer.** `changed_fields` is a raw comparison of two `Idea`s, and a
+branch differs from its parent for two unrelated reasons: the operator edited something, *and* the
+gesture deliberately does not carry the parent's engine bookkeeping across (`card_id`, `hypothesis`,
+`footprint`, `theme`, the concept envelope — see below). An operator who edits exactly two things
+already gets a three-field diff on a toy run, and eight fields against a Researcher-built parent. A
+reader shown that as "what the operator changed" is told a falsehood; one shown its complement as
+"what the parent contributed" is told a different one. Only the server can split it — the node's
+idea *drifts* after intake (the Developer's footprint finalization mints a `footprint` the submission
+had none of) and the parent may since have been reset out of the folded state — so it stamps both
+halves. The two lists deliberately do **not** partition `changed_fields`: `not_carried_fields` claims
+the *parent* had something there, so a field where neither side carries anything and the values still
+differ is in neither, and an honest residue beats tidy arithmetic.
+
+**What a later reader may conclude.** `ui/src/forkProvenance.js` is the one place that decides, and
+it degrades in named steps rather than guessing: a receipt carrying both stamped halves is
+`stamped`; one written before they existed is `legacy` — the *inherited* set is still sound there
+(a field the branch carries that the diff does not list holds the base's own value) while "what the
+operator wrote" is not, and is left unclaimed; a receipt with no readable `changed_fields` at all is
+`unrecorded`, which proves the branch and nothing else. An inherited field is always attributed to
+the **parent node**, never to "the Researcher": a branch can be taken from another branch, so the
+value's source may itself be operator-authored and this surface cannot tell.
+
+Two places show it. The node card carries a `⑂` chip whose tooltip is the whole sentence, beside the
+existing cross-run `⤴` and deep-research `💡` chips — those say where a node was *seeded from*, this
+one says who wrote its *idea*. The Inspector prints a **Branched by an operator** block above the
+idea and marks the headings over it, so a `Rationale` carried across verbatim reads as *carried over
+from #3* rather than as this experiment's own justification. A node nobody branched gains no label
+anywhere.
+
+`GET /api/runs/{run_id}/prov`, the W3C-PROV export, carries the same split. A branched node's
+experiment activity is `wasAssociatedWith` **two** agents with explicit roles — `agent:operator`
+(`prov:Person`, `ll:idea-author`) and the engine's `prov:SoftwareAgent` (`ll:implementer`, because
+the Developer really did write the code) — and carries `ll:authored_fields`,
+`ll:not_carried_fields`, `ll:carried_over_fields`, `ll:observed_seq` and `ll:attribution`. Before
+this, every activity in the graph was associated with the software agent alone, so an experiment an
+operator authored was exported as the engine's own proposal with the parent's inherited
+`ll:rationale` on it. A node nobody branched keeps exactly the association it always had, with no
+role attached.
 
 **The fence is a CONTENT compare-and-swap, deliberately not a tail one.** The legacy `/control`
 route binds an *approval* append to the pre-normalization tail, because an approval means "accept the
@@ -601,7 +646,10 @@ they are absent rather than shown and then refused. The panel seeds `operator`, 
 `params` from the snapshot's own idea and refuses an unedited copy, since that is not a new
 experiment. It carries the evaluation profile, timeout and search space across; it deliberately does
 **not** carry the concept envelope, the Card, the hypothesis or the footprint — a branch you authored
-is not inside the Researcher's Card budget and should not assert a taxonomy you did not write. On a
+is not inside the Researcher's Card budget and should not assert a taxonomy you did not write (those
+are the fields that turn up in `not_carried_fields`). A field you put nothing in never travels at
+all: an untouched form is refused as an unchanged copy, and the receipt does not record you as
+having changed something you did not touch. On a
 refusal the form stays live so you can fix and resubmit; if the run moved under you it fences and
 offers to take you back to live to re-read the parent; and if the outcome is *unknown* — a timeout,
 a 5xx — it fences with no retry at all, because branching queues paid work and a second press is how

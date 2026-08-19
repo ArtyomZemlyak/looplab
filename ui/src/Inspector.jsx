@@ -26,6 +26,8 @@ import {
 } from './traceProjection.js'
 import { cardTraceNotice, cardTraceSections, researchLinkLabel } from './cardTraceModel.js'
 import { stagePipelineView } from './stageAttribution.js'
+import { FORK_ATTRIBUTION_STAMPED, forkFieldNote, forkProvenance,
+  forkProvenanceSentence } from './forkProvenance.js'
 import {
   EPISODE_MAP_EMPTY, EPISODE_MAP_UNAVAILABLE, buildEpisodeMap, clampEpisodeIndex, episodeAnchor,
   episodeAt, episodeKindOptions, episodeMapNotice, episodePosition, episodeSummary,
@@ -1002,6 +1004,15 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   const lanes = nodeConceptLanes(
     nodeCanonicalConcepts(state?.node_concepts || {}, n.id, state?.concept_consolidation || {}),
     cardLink.card)
+  // Who wrote each idea field. `null` for every node nobody branched, and `ideaNote` renders '' for
+  // it — an ordinary node's Overview is byte-identical to what it was. On a BRANCH the heading is
+  // the whole point: an inherited rationale under a bare "Rationale" reads as this experiment's own
+  // justification, which is the misreading the fork receipt was stamped to prevent.
+  const forkProv = forkProvenance(n)
+  const ideaNote = field => {
+    const note = forkFieldNote(forkProv, field)
+    return note ? <span className="muted idea-attribution"> — {note}</span> : ''
+  }
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
@@ -1031,11 +1042,33 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>
         <b>#{u.parentId}</b>{u.theme ? ` · ${u.theme}` : ''}{u.change && u.change !== '—' ? ` — ${u.change}` : ''}</li>)}</ul></>}
-    <div className="section-h">Idea params</div>
+    <ForkProvenance prov={forkProv} />
+    <div className="section-h">Idea params{ideaNote('params')}</div>
     {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
-    {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
+    {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale{ideaNote('rationale')}</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
     <DerivedMemory n={n} state={state} runId={runId} />
     {n.deleted?.length > 0 && <><div className="section-h">Deleted files</div><div className="v">{n.deleted.join(', ')}</div></>}
+  </>
+}
+
+/** The lineage block for a node an OPERATOR branched. Renders nothing at all for every other node.
+ *
+ * It sits directly above `Idea params` rather than up with the identity `kv` on purpose: it is the
+ * qualification a reader needs to have in hand BEFORE reading the idea, not another id to scan past.
+ * Everything it prints comes from `forkProvenance.js` — the field lists, the sentence, and the
+ * refusal to split a receipt that predates the split — so this half only lays it out.
+ */
+function ForkProvenance({ prov }) {
+  if (!prov) return null
+  const at = prov.observedSeq === null ? '' : ` · read at seq ${prov.observedSeq}`
+  return <>
+    <div className="section-h">Branched by an operator</div>
+    <div className="v">from #{prov.parentId}
+      {prov.generation === null ? '' : ` generation ${prov.generation}`}{at}</div>
+    <div className="muted">{forkProvenanceSentence(prov)}</div>
+    {prov.attribution === FORK_ATTRIBUTION_STAMPED && prov.baseDigest
+      && <div className="muted">Parent idea identity: <code>{prov.baseDigest}</code> — re-derivable
+        from this run's own log, so the lineage is checkable rather than asserted.</div>}
   </>
 }
 

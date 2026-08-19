@@ -120,14 +120,41 @@ export const FORK_IDEA_FIELDS = Object.freeze([
 ])
 
 // The fields the operator may edit in the branch form. `operator` is the search operator name and is
-// editable because a branch often IS a different operator applied to the same parent.
-// OPEN[fork-editable-fields-dead-export] a second, unread statement of the form's field rule.
-// proof:present:FORK_EDITABLE_FIELDS@ui/src/forkFromSeqModel.js+absent:FORK_EDITABLE_FIELDS@ui/src/ForkFromSeqPanel.jsx
-// REVIEW 2026-08-18 (simplification/dead-export): referenced nowhere — not by `ForkFromSeqPanel.jsx`
-// (which hardcodes the same three fields as separate useState hooks) and not by any test — so this
-// is a second, unread statement of the rule that can silently drift from the form. Fix direction:
-// either drive the panel's fields from it (and pin it in the panel test) or delete the export.
+// editable because a branch often IS a different operator applied to the same parent. `forkDraftIdea`
+// below is the one reader, so the list and the form cannot drift apart into two statements of the
+// same rule.
 export const FORK_EDITABLE_FIELDS = Object.freeze(['operator', 'rationale', 'params'])
+
+/**
+ * The idea the form is CURRENTLY offering, from the snapshot base plus the operator's edits.
+ *
+ * Lives here rather than inline in the panel because the rule it owns is a PROVENANCE rule, not a
+ * render: an editable field the operator has put nothing in must not reach the payload, or the
+ * server's receipt blames them for it. `ForkFromSeqPanel.jsx` used to build this with a spread and
+ * an unconditional `rationale`, and the form always seeds `''` while `forkIdeaFromSnapshot` OMITS an
+ * absent field — so for a rationale-less parent `forkIdeaEdited` compared `'""'` against `'null'`
+ * and reported a byte-for-byte copy as edited. Two things followed, and the second is the one that
+ * outlives the click: `FORK_BLOCKED_REASONS.unedited` never fired, so submit was live on an
+ * unchanged copy; and the durable receipt stamped `rationale` as a field the operator changed,
+ * which is now what `forkProvenance.js` shows a later reader under "The operator wrote".
+ *
+ * `undefined` means the form has nothing to put in the field (a blank or unparseable params box) and
+ * REMOVES it — `inject_node` fills every `Idea` default server-side anyway. `''` does the same
+ * UNLESS the parent carried something there, where clearing it is a deliberate edit that has to
+ * survive to the payload.
+ */
+export function forkDraftIdea(base, edits = {}) {
+  const next = { ...(base && typeof base === 'object' ? base : {}) }
+  for (const field of FORK_EDITABLE_FIELDS) {
+    const value = edits[field]
+    if (value === undefined) { delete next[field]; continue }
+    if (value === '' && !(field in next)) continue
+    next[field] = value
+  }
+  const operator = typeof next.operator === 'string' ? next.operator.trim() : ''
+  next.operator = operator || 'manual'
+  return next
+}
 
 /** The idea a branch starts from: the snapshot node's own idea, narrowed to `FORK_IDEA_FIELDS`. */
 export function forkIdeaFromSnapshot(node) {
