@@ -54,8 +54,10 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
             _channels = getattr(best, "extra_metrics_provenance", None)
             for k, v in (best.extra_metrics or {}).items():
                 if v is not None:
+                    logged = False
                     try:                              # extra_metrics is eval-reported: a non-numeric
                         mlflow.log_metric(str(k), float(v))   # value must not abort the whole export
+                        logged = True
                     except (TypeError, ValueError):
                         pass
                     # AND THE CHANNEL IT CAME THROUGH, as a tag beside it. MLflow's metric surface
@@ -68,13 +70,15 @@ def export_run(state: RunState, *, tracking_uri: str | None = None,
                     # export exists for. `unknown` is exported too, and says so — silence there
                     # would read as "declared" to exactly the reader this is for. Same containment
                     # as the metric above: a key MLflow's tag charset refuses must not abort the run.
-                    # REVIEW 2026-08-18 (correctness): this tag is set whenever `v is not None`, but
-                    # the `log_metric` above it is inside its own try/except — a non-numeric extra
-                    # value (float() raising TypeError/ValueError, the exact case that containment
-                    # exists for) skips the metric and still publishes
-                    # `looplab.extra_metric_channel.<k>`, i.e. provenance for a metric that does not
-                    # exist in the run's metric table. Fix direction: move this set_tag into the
-                    # log_metric success path (after the float() call succeeds).
+                    # SET ONLY WHERE THE METRIC LANDED. The `log_metric` above has its own
+                    # containment, and the case it exists for is a non-numeric extra value — so
+                    # tagging on `v is not None` published provenance for a number that is not in
+                    # the run's metric table at all, which is worse than no provenance: the tag is
+                    # what an operator reads to tell an auto-captured value from the protected
+                    # `best_metric`, and a channel naming a missing metric answers a question about
+                    # nothing. Gated on `logged` (see the metric branch above).
+                    if not logged:
+                        continue
                     try:
                         mlflow.set_tag(f"looplab.extra_metric_channel.{k}",
                                        extra_metric_channel(_channels, k))

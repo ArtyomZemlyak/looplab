@@ -1181,3 +1181,61 @@ def test_an_unattended_turn_denies_a_confirm_instead_of_parking_the_scheduler():
     assert declined == ["edit config.yaml"]
     note = unattended_denial_note(declined)
     assert "edit config.yaml" in note and "declined" in note
+
+
+# ================== the 2026-08-18 review finding: a claim nothing could ever settle
+
+def test_a_store_failure_after_the_claim_re_arms_instead_of_stranding_the_watch(tmp_path):
+    """`claim` moves a record `armed -> waking`, and every settling write after it goes through
+    `atomic_write_text`, which has no containment. A transient OSError on the geesefs mount was
+    therefore swallowed by `_loop`'s per-tick containment and left the record `waking` FOREVER:
+    `due()` returns only `armed` records, `claimed_at` is written and read nowhere, and nothing
+    reclaims it — silently dead monitoring that still counts against the session's active cap until
+    the server restarts.
+    """
+    store = _store(tmp_path)
+    service = _service(store)
+    record = store.arm(session="s1", instruction="watch it", trigger={"kind": "schedule", "every_s": 300},
+                       waiting_for="something")
+
+    real_update = store.update
+    boom = {"left": 1}
+
+    def _flaky(watch_id, **fields):
+        # Fail only the SETTLING write — the one carrying this wake-up's result — so the claim
+        # succeeds, the turn runs, and the escape lands exactly where the finding says it does.
+        # `_unclaim`'s own write carries no `wakeups` and is therefore let through.
+        if boom["left"] and "wakeups" in fields:
+            boom["left"] -= 1
+            raise OSError(5, "Input/output error")
+        return real_update(watch_id, **fields)
+
+    store.update = _flaky
+    with pytest.raises(OSError):
+        service._wake(record, observation=None, now=time.time())
+    store.update = real_update
+
+    settled = store.get(record["id"])
+    assert settled["status"] == "armed", settled
+    assert "could not be settled" in (settled.get("last_error") or ""), settled
+    # ...and it is DUE again, so the next tick picks it up rather than the operator noticing.
+    assert settled["next_due"] <= time.time() + WATCH_POLL_BASE_S + 1
+
+
+def test_a_deferral_still_re_arms_through_its_own_path(tmp_path):
+    """`WatchDeferred` is not an escape to settle — it is the deferral path's own re-arm, which
+    counts no wake-up and leaves `attempts` alone. The new guard must let it through untouched."""
+    store = _store(tmp_path)
+
+    def _busy(record, instruction):
+        raise WatchDeferred("the chat was busy")
+
+    service = _service(store)
+    service.run_turn_fn = _busy
+    record = store.arm(session="s1", instruction="watch it",
+                       trigger={"kind": "schedule", "every_s": 300}, waiting_for="something")
+
+    out = service._wake(record, observation=None, now=time.time())
+    assert out["status"] == "armed"
+    assert "deferred" in (out.get("last_error") or "")
+    assert int(out.get("wakeups", 0)) == 0

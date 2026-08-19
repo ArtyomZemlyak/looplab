@@ -1272,20 +1272,39 @@ class WatchService:
         The claim is what makes concurrent ticks safe: two threads reaching the same due record
         cannot both spend a model call on it, because only one `armed -> waking` write wins.
         """
-        # REVIEW 2026-08-18 (correctness): a claim is unrecoverable within a live process. Every
-        # settling write AFTER this claim (`store.update`/`_retire` -> `_write` -> atomic_write_text,
-        # which has NO containment; also `wakeup_instruction` below, outside the try) can raise —
-        # e.g. a transient OSError on the geesefs mount — and the escape is swallowed by `_loop`'s
-        # per-tick containment, leaving the record `waking` on disk. `due()` returns only `armed`
-        # records and `claimed_at` is written here and read NOWHERE, so no staleness recovery exists:
-        # the watch is silently dead monitoring that still counts against the session's active cap
-        # until a server restart, whose `reconcile_on_start` then settles a mutating watch whose turn
-        # actually COMPLETED as `interrupted`. Fix direction: settle the claim in a try/finally
-        # around the post-claim path, or teach `due()` to reclaim `waking` records with a stale
-        # `claimed_at` under `reconcile_on_start`'s own plan-rearm/mutating-interrupt rule.
         claimed = self.store.claim(record["id"], now=now)
         if claimed is None:
             return None
+        # A CLAIM MUST BE SETTLED, including by an escape nobody planned for. Every settling write
+        # after this point (`store.update` / `_retire` -> `_write` -> `atomic_write_text`, which has
+        # no containment of its own) can raise on a transient OSError on the geesefs mount, and
+        # `_loop`'s per-tick containment then swallows it — leaving the record `waking` on disk
+        # forever. `due()` returns only `armed` records and `claimed_at` is written and read
+        # NOWHERE, so nothing reclaims it: the watch is silently dead monitoring that still counts
+        # against the session's active cap until the server restarts. `_unclaim` puts it back the
+        # way `WatchDeferred` does — armed, one short interval out, `attempts` untouched, no wake-up
+        # counted — because an escape here is evidence about the STORE and not about the condition.
+        try:
+            return self._wake_claimed(claimed, observation=observation, now=now)
+        except WatchDeferred:
+            raise
+        except BaseException as exc:  # noqa: BLE001 — re-raised; this only settles the claim
+            self._unclaim(claimed, now=now, exc=exc)
+            raise
+
+    def _unclaim(self, claimed: dict, *, now: float, exc: BaseException) -> None:
+        """Return an unsettled claim to `armed`. Never raises — a store that just failed may fail
+        again, and losing the ORIGINAL escape to a second one would hide the real cause."""
+        try:
+            self.store.update(
+                claimed["id"], status="armed", next_due=now + WATCH_POLL_BASE_S,
+                last_error=f"the wake-up could not be settled ({type(exc).__name__}); re-armed")
+        except Exception:  # noqa: BLE001 — best effort; `reconcile_on_start` is the next rung
+            pass
+
+    def _wake_claimed(self, claimed: dict, *, observation, now: float):
+        """The claimed half of `_wake`. Split out so the claim above has exactly one settling
+        guard around everything that can fail, rather than a guard per write."""
         trigger = claimed.get("trigger") or {}
         instruction = wakeup_instruction(claimed, observation)
         try:

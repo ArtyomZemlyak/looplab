@@ -134,3 +134,74 @@ def test_exported_champion_code_is_redacted_at_the_egress_boundary(tmp_path, mon
     assert secret not in logged["solution.py"], "the champion's credential was shipped verbatim"
     assert "***" in logged["solution.py"]                 # masked, not silently dropped
     assert 'print("train")' in logged["solution.py"]      # the code itself still exports
+
+
+def test_a_channel_tag_is_never_published_for_a_metric_that_did_not_land(tmp_path, monkeypatch):
+    """The tag is what an operator reads to tell an auto-captured value from the protected
+    `best_metric`, so publishing one for a number that is not in the run's metric table answers a
+    question about nothing.
+
+    CORRECTION TO THE FINDING, and it is why this test builds its state in memory: through the FOLD
+    the state is unreachable — `node_evaluated` with `extra_metrics={"bad": "not-a-number"}` folds
+    to `{}` for that key, so `float()` never raises in production and the `log_metric` containment
+    here is defensive only. The gate is still right (it costs nothing and removes a way for the two
+    surfaces to disagree), but it closes a shape the reader is protected from one layer up, not a
+    live defect. Driven at the branch itself rather than claimed through a path that cannot reach
+    it — a test that "passes" on the pre-fix code proves nothing, and this one did.
+    """
+    import sys
+    import types
+
+    from looplab.core.models import Idea, Node, RunState
+    import looplab.events.mlflow_export as mod
+
+    state = RunState(run_id="r", task_id="t", direction="min")
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}, rationale=""),
+                code="print(1)", metric=1.0)
+    node.extra_metrics = {"good": 0.5, "bad": "not-a-number"}
+    state.nodes[0] = node
+
+    metrics: dict = {}
+    tags: dict = {}
+    fake = types.ModuleType("mlflow")
+    fake.set_tracking_uri = fake.set_experiment = lambda *a, **k: None
+    fake.set_tags = lambda d: tags.update(d)
+    fake.set_tag = lambda k, v: tags.__setitem__(k, v)
+    fake.log_param = fake.log_text = lambda *a, **k: None
+    fake.log_metric = lambda k, v: metrics.__setitem__(str(k), v)
+
+    class _Run:
+        class info:
+            run_id = "fake-1"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    fake.start_run = lambda *a, **k: _Run()
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+
+    mod.export_run(state, node=node, experiment="x")
+    assert metrics.get("good") == 0.5 and "bad" not in metrics
+    assert "looplab.extra_metric_channel.good" in tags
+    assert "looplab.extra_metric_channel.bad" not in tags, tags
+
+
+def test_the_fold_is_what_really_keeps_a_non_numeric_extra_metric_out():
+    """The rung above the export, stated so the defensive gate is not mistaken for the protection.
+    A candidate can print anything; `node_evaluated` folding is where that stops being a number."""
+    from looplab.events.eventstore import EventStore
+
+    import tempfile
+    from pathlib import Path as _P
+
+    store = EventStore(_P(tempfile.mkdtemp()) / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {}, "rationale": ""},
+                                  "code": "x"})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0,
+                                    "extra_metrics": {"good": 0.5, "bad": "not-a-number"}})
+    assert fold(store.read_all()).best().extra_metrics == {"good": 0.5}

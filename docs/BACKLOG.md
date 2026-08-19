@@ -4727,3 +4727,27 @@ deliberately deferred, with rationale:
   ARE the legacy shape and must both count, and `EventStore.append` mints seq from the tail and
   never retries, so a duplicate at a new seq is not a shape this event can have. A
   `salvage_cause_fix` row still charges nothing.]
+
+  **[2026-08-18 — three more, one of them a correction to the finding.**
+  *A claim nothing could settle.* `WatchService._wake` moved a record `armed -> waking` and every
+  settling write after it goes through `atomic_write_text`, which has no containment — so a
+  transient OSError on the geesefs mount was swallowed by `_loop`'s per-tick containment and left
+  the record `waking` FOREVER: `due()` returns only `armed` records, `claimed_at` is written and
+  read nowhere, and nothing reclaims it. Silently dead monitoring that still counts against the
+  session's active cap until the server restarts. The claimed half is now its own method under one
+  settling guard: an unplanned escape re-arms the watch the way `WatchDeferred` does (one short
+  interval out, no wake-up counted, `attempts` untouched — an escape here is evidence about the
+  STORE, not about the condition) and is then re-raised. `_unclaim` never raises, because losing
+  the original escape to a second one would hide the cause.
+  *A comment that was false.* `Card.discarded_nodes` promised disjointness from `evidence` "by
+  construction", and `_apply_unexecuted_discards` only empties `evidence` when the single discard IS
+  the whole evidence set — a mixed set deliberately keeps it (so `gated` stays unreachable) and the
+  two-discard retirement keeps both. Restated: disjoint only in that one shape, and a reader wanting
+  "evidence that actually ran" must SUBTRACT rather than assume the subtraction was done.
+  *The mlflow channel tag — and a CORRECTION.* The tag was published on `v is not None` while the
+  `log_metric` beside it has its own containment, so provenance could name a metric absent from the
+  run's table. The gate is right and costs nothing, but the finding's premise does not hold end to
+  end: through the FOLD the state is unreachable — `node_evaluated` with a non-numeric extra metric
+  folds that key away, so `float()` never raises in production and the containment is defensive
+  only. The first test written for it PASSED on the pre-fix code, which is the tell; it now drives
+  the branch directly and a second test pins the fold as the rung that really protects the reader.]
