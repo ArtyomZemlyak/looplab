@@ -776,6 +776,57 @@ class _RecordBatch:
     stopped: str
 
 
+def _resumed_at_boundary(path, lo: int) -> bool:
+    """Is `lo` immediately after a record delimiter — i.e. does a sweep resuming there start on a
+    WHOLE record? One 1-byte read.
+
+    Fail-closed: a byte that cannot be read answers False, which keeps the historical "a mid-file
+    seek is half a record" behaviour for anything this cannot verify. The delimiters are the pair
+    `_record_batches` cuts on, spelled here from the same two characters rather than a second rule.
+    """
+    if lo <= 0:
+        return False
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(lo - 1)
+            return fh.read(1) in (b"\n", b"\r")
+    except OSError:
+        return False
+
+
+def _records_before(path, *, floor: int, lo: int, ceiling: int) -> tuple:
+    """How many whole records lie in `[floor, lo)`, and whether that count is EXACT.
+
+    The seed for a resumed sweep's record numbering (see `_search_scan`). Split-only: no caller
+    pattern is run over these bytes, which is why re-walking a prefix that has already been searched
+    is affordable at all.
+
+    A record STRADDLING `lo` is counted here and skipped there (`torn`), so it is counted exactly
+    once either way — the two halves of that record are one record and get one number.
+
+    `ceiling` bounds this pass as it bounds every other, and the second half of the answer is what
+    keeps a truncated walk from silently minting a numbering of its own: the caller states the
+    inexactness instead of pretending to a count it did not finish.
+    """
+    span = max(0, lo - floor)
+    if span <= 0:
+        return 0, True
+    seen = 0
+    stopped = ""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(floor)
+            # `size=lo` makes the prefix its own file, so the final record ends at `lo` exactly.
+            for batch in _record_batches(fh, lo=floor, size=lo, ceiling=max(ceiling, span)):
+                seen += len(batch.records)
+                stopped = batch.stopped
+                if stopped:
+                    break
+    except OSError:
+        return 0, False
+    return seen, not stopped
+
+
 def _record_batches(fh, *, lo: int, size: int, ceiling: int):
     """Stream `[lo, min(size, lo + ceiling))` forward as batches of WHOLE records.
 
@@ -850,6 +901,12 @@ class _SearchAnswer:
     torn: bool
     stopped: str
     clipped: int = 0             # records whose match attempt was cut at `_MAX_MATCH_CHARS`
+    # The floor-based record count the numbering STARTS from (0 for a sweep that began at the
+    # floor), and whether re-walking the prefix to establish it finished. `seed_exact=False` means
+    # the ceiling cut that walk short, so the numbers this answer carries are offset by an unknown
+    # amount and must not be spent on `mode="range"` — which the receipt then says out loud.
+    seed: int = 0
+    seed_exact: bool = True
 
 
 def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], ceiling: int,
@@ -908,26 +965,30 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
     # "just the hits") is a legitimate ask that costs nothing here.
     recent: deque = deque(maxlen=max(0, context))
     hits = 0                     # EVERY match in [lo, hi) — the answer's count, not the render's
-    # REVIEW 2026-08-18 (correctness): hit numbers are minted 1-based from `lo`, but the tool spec's
-    # `start` text promises hit numbers are "counted from this attempt's start" and "go straight in"
-    # to mode="range", whose `_record_range_scan` always counts from the FLOOR — so every hit number
-    # a from_byte-resumed sweep reports resolves to the WRONG record in range mode, with no warning
-    # (driven: a resumed sweep reported its hit at record 30; range start=30 returned an unrelated
-    # head record, the real hit being record 51 from the floor). Fix: seed `index` with the resume
-    # point's floor-based record count, or state in the resumed answer that its numbers are
-    # lo-relative and do not address mode="range".
-    index = 0                    # record number, 1-based from `lo`
+    # A RESUMED SWEEP COUNTS FROM THE FLOOR, not from where it happened to resume. The number a hit
+    # carries is spendable — the receipt says record 412 "can be re-read in full with mode='range',
+    # start=412" — and `_record_range_scan` always counts from the floor, so a lo-relative number
+    # addresses a DIFFERENT record there (driven: a resumed sweep reported its hit at record 30 and
+    # range start=30 returned an unrelated head record; the hit was record 51 from the floor). Two
+    # numberings for one log is the spent-remedy defect this module was rewritten to remove, one
+    # mode over, so the prefix is re-walked to seed the count.
+    #
+    # The cost is a SPLIT-ONLY pass over bytes already searched — no caller pattern runs on them,
+    # which is the expensive half and the whole reason a resume exists. `_record_range_scan` already
+    # pays exactly this to reach a numbered record and its docstring calls it proportional and
+    # acceptable. `_records_before` uses the SAME `_record_batches`, so "what a record is" still has
+    # one definition, and it reports whether the ceiling cut it short — an inexact seed is stated in
+    # the answer rather than silently minting a third numbering.
+    seed, seed_exact = _records_before(path, floor=floor, lo=lo, ceiling=ceiling)
+    index = seed                 # record number, 1-based FROM THE FLOOR — the spendable numbering
     clipped = 0                  # records whose match input hit `_MAX_MATCH_CHARS`
-    # REVIEW 2026-08-18 (correctness): every byte a receipt names as `from_byte=` is a record
-    # BOUNDARY (`hi = buf_start + cut` lands just past a delimiter; a deadline's `buf_start` is the
-    # carried record's start), so a receipt-resumed sweep's first record is COMPLETE — yet
-    # `lo > floor` calls it torn and the `first`/`continue` below drops it unmatched. A `Traceback`
-    # in the record starting at the ceiling stop is counted by NEITHER sweep, while the resumed one
-    # still reports "reached the END of the log, so the count above is a TOTAL" (driven: sweep 1's
-    # ceiling receipt names byte N, a match starts at N, the resumed sweep reaches EOF with 0 hits).
-    # Fix: treat `lo` as torn only when the byte before it is not a record delimiter (one 1-byte
-    # read), so a boundary resume keeps its first record.
-    torn = lo > floor            # the first record at a mid-file seek is half a record
+    # TORN IS ABOUT THE BYTE, not about having seeked. Every byte a receipt names as `from_byte=` is
+    # a record BOUNDARY (`hi = buf_start + cut` lands just past a delimiter; a deadline's
+    # `buf_start` is the carried record's start), so a receipt-resumed sweep's first record is
+    # COMPLETE — and calling it torn dropped it unmatched, which meant a `Traceback` in the record
+    # starting at a ceiling stop was counted by NEITHER sweep while the resumed one still reported
+    # "reached the END of the log, so the count above is a TOTAL". One byte answers it.
+    torn = lo > floor and not _resumed_at_boundary(path, lo)
     first = True
     stopped = ""
     hi = lo
@@ -949,15 +1010,12 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
                 # BETWEEN records, never inside one — `re` cannot be interrupted mid-match, so this
                 # is checked before a match is started and not after. See `_SEARCH_DEADLINE_S`.
                 if deadline is not None and time.monotonic() >= deadline:
-                    # REVIEW 2026-08-18 (correctness): when the deadline fires inside the FIRST
-                    # batch, `batch.buf_start == lo`, so the receipt's remedy "Continue with
-                    # from_byte={hi}" names the byte this caller already started at — a
-                    # non-progressing remedy (the module's own rule: a remedy must be one the
-                    # caller has not already spent), looping any caller whose pattern is slow
-                    # enough to spend the whole deadline on one batch's records (driven: deadline
-                    # in batch 1 yields hi == lo). Fix: name the last record boundary actually
-                    # consumed, or when hi == lo drop the from_byte remedy and offer only the
-                    # cheaper-pattern one.
+                    # `hi` is the batch's START, not where the deadline fell: a byte further on
+                    # would step over the records after the stop, and skipping is the one thing a
+                    # bounded answer here may never do. On a FIRST-batch stop that makes `hi == lo`,
+                    # i.e. the byte the caller already spent — honest, but bare it reads as a remedy
+                    # and loops a caller whose pattern is simply too slow, so `_search_reach` labels
+                    # it instead of withholding it.
                     stopped, hi = "deadline", batch.buf_start
                     break
                 index += 1
@@ -991,8 +1049,12 @@ def _search_scan(source: LogSource, rx: re.Pattern, *, start: Optional[int], cei
             stopped = batch.stopped
             if stopped:
                 break
-    return _SearchAnswer(head=head, tail=list(tail), hits=hits, records=index, lo=lo, hi=hi,
-                         size=size, torn=torn, stopped=stopped, clipped=clipped)
+    # `records` stays what it always was — records read in THIS window — because that is what the
+    # receipt says beside "the bytes read". The seed only moves the NUMBERS, which is the half that
+    # has to agree with `mode="range"`.
+    return _SearchAnswer(head=head, tail=list(tail), hits=hits, records=index - seed, lo=lo, hi=hi,
+                         size=size, torn=torn, stopped=stopped, clipped=clipped,
+                         seed=seed, seed_exact=seed_exact)
 
 
 def _record_range_scan(source: LogSource, *, start: int, count: int, ceiling: int) -> tuple:
@@ -1093,7 +1155,7 @@ def _group_rows(head: list, tail: list) -> tuple:
 
 
 def _search_reach(source: LogSource, lo: int, hi: int, size: int, *, ceiling: int, stopped: str,
-                  torn: bool, clipped: int = 0) -> str:
+                  torn: bool, clipped: int = 0, seed_exact: bool = True) -> str:
     """What a SEARCH did not look at, and the exact call that looks at it (rule 3).
 
     The sibling of `_scan_reach`, and it exists for the same reason that one does: the receipt this
@@ -1126,15 +1188,34 @@ def _search_reach(source: LogSource, lo: int, hi: int, size: int, *, ceiling: in
         parts.append(f"{clipped:,} record(s) were longer than {_MAX_MATCH_CHARS:,} characters and "
                      "were matched over their first "
                      f"{_MAX_MATCH_CHARS:,} only, so a match later inside one of them is not ruled out")
+    if not seed_exact:
+        # The numbering could not be anchored to the floor (the prefix walk hit the ceiling), so the
+        # record numbers here are offset by an unknown amount. Said out loud rather than left to be
+        # discovered by a `mode="range"` that answers about a different record — a remedy that
+        # silently addresses the wrong thing is worse than one that is withheld.
+        parts.append("the record NUMBERS below could not be anchored to this attempt's start, so "
+                     "they are offset by an unknown amount and must NOT be passed to mode=\"range\" "
+                     "— re-run without from_byte to get spendable numbers")
     if stopped == "deadline":
         # The wall-clock stop. Same shape as the ceiling stop and for the same reason — a bounded
         # answer names a call that continues it — but the bound is TIME, so the remedy is a cheaper
         # pattern as well as a resume byte.
+        #
+        # UNLESS THAT BYTE IS THE ONE THE CALLER ALREADY SPENT. The deadline can fire inside the
+        # FIRST batch, where `hi` is set to `batch.buf_start` == `lo`, and "continue with
+        # from_byte=<lo>" then names the call just made — a non-progressing remedy, which is the one
+        # thing this module's receipts may never be, and a loop for any caller whose pattern is slow
+        # enough to spend the whole deadline on one batch. The cheaper-pattern remedy is the real
+        # one there, and it is offered alone.
         parts.append(f"**this sweep did NOT reach the end of the log** — it hit this tool's "
                      f"{_SEARCH_DEADLINE_S:.0f}-second search deadline with {size - hi:,} bytes still "
                      "unswept, so the count above is a FLOOR and not a total. This pattern is "
                      "expensive to match; a simpler/more literal one sweeps further per call. "
-                     f"Continue with from_byte={hi}")
+                     f"Continue with from_byte={hi}"
+                     + ("" if hi > lo else
+                        " — WHICH IS WHERE THIS SWEEP ALREADY STARTED: the deadline was spent "
+                        "inside the very first batch, so repeating this call alone cannot get "
+                        "further and the PATTERN is what has to change"))
     elif hi >= size:
         parts.append("this sweep reached the END of the log, so the count above is a TOTAL")
     elif stopped == "ceiling":
@@ -1519,16 +1600,24 @@ class LogQueryTools:
         body = [self._render(record, raw_mode) for record in chosen]
         # `seen` is a floor once the seek stopped early with what it was asked for — it counted the
         # records up to the answer and no further, which is the point of stopping. Say which it is.
-        # REVIEW 2026-08-18 (correctness): "enough" is not the only early stop — a seek that
-        # returned SOME records and then hit the byte ceiling arrives here with stopped ==
-        # "ceiling" and renders `of {seen}` with no "+", presenting a floor as an exact total
-        # while the log holds an unknown number of further records and the requested tail of the
-        # range was never reached (driven: 100-record log, ceiling at record 45, answer reads
-        # "records 40-45 of 45 from this attempt's start"). Fix: suffix "+" for ANY non-empty
-        # `stopped`, and let the ceiling case state the stop in the receipt as search does.
-        total = (f"{seen:,}+" if stopped == "enough" else f"{seen:,}")
+        # ANY early stop makes it a floor, not just the satisfied one. "enough" was the only case
+        # marked, so a seek that returned SOME records and then hit the byte ceiling rendered
+        # `of {seen}` bare — presenting a floor as an exact total while the log held an unknown
+        # number of further records AND the requested tail of the range was never reached (driven:
+        # a 100-record log with the ceiling at record 45 read "records 40-45 of 45 from this
+        # attempt's start", which is three wrong claims in one line). An empty `stopped` is the only
+        # state that counted every record there is.
+        total = (f"{seen:,}" if not stopped else f"{seen:,}+")
+        ceiling_cut = stopped == "ceiling" and len(chosen) < lines
         receipt = self._reach_receipt("range", lo, hi, size, seen, start, False,
                                       floor=max(0, min(int(source.floor or 0), size)))
+        if ceiling_cut:
+            # The stop said out loud, the way SEARCH says it: a short range that never reached the
+            # records it was asked for must not read as "that is all there was".
+            receipt = (f"; the seek stopped at this tool's {ceiling:,}-byte ceiling with "
+                       f"{lines - len(chosen)} of the {lines} requested record(s) not reached — "
+                       f"mode=\"search\" from_byte={hi} looks past it by content"
+                       + (receipt if receipt else ""))
         return fit_rows([header, f"records {start}-{start + len(chosen) - 1} of {total} "
                                  f"from this attempt's start:"], body, receipt=receipt, cap=_CAP,
                         omitted="... ({receipt}{n} record(s) dropped to fit the result cap — ask "
@@ -1594,7 +1683,8 @@ class LogQueryTools:
                              tail_take=budget // 2)
         header = self._header(source, found.lo, found.hi, found.size)
         reach = _search_reach(source, found.lo, found.hi, found.size, ceiling=ceiling,
-                              stopped=found.stopped, torn=found.torn, clipped=found.clipped)
+                              stopped=found.stopped, torn=found.torn, clipped=found.clipped,
+                              seed_exact=found.seed_exact)
         if not found.hits:
             # The whole point of the sweep: when it reached the end, "no match" is a statement about
             # the LOG and not about a window, and it is allowed to say so. When it did not, `reach`
