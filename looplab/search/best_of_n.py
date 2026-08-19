@@ -34,6 +34,49 @@ def _score(code: str) -> float:
     return s
 
 
+def refuse_unrankable_best_of_n(developer, n: int) -> None:
+    """Refuse `best_of_n > 1` for a Developer whose answer is not the code this module ranks.
+
+    **ASK THE DEVELOPER, don't infer it from the backend** — the same rule
+    `agents/factory.py::_offer_sweep` learned the hard way. `_score` above ranks the STRING
+    `implement()` returns; `adapters/repo_developer.py::LLMRepoDeveloper.implement` returns a
+    SENTINEL (`""` = "the files are the answer" — the artifact travels on `last_files`). So on every
+    repo task the operator's `best_of_n` bought N full builds and then discarded the selection
+    entirely: all N candidates score -1.0, `top` holds them all, the FOREAGENT ranker and the D10
+    tie-break are both skipped because `len({"", ""}) == 1`, and `chosen = top[0]` — candidate 0 wins
+    even when it is the one with the syntax error. That is not a degraded selection, it is a paid
+    coin flip with a fixed outcome: measured over the 52 real repo builds in `runs/`, a build costs
+    7.37M prompt tokens, so `best_of_n=3` was +14.7M tokens per node for an answer the setting had no
+    influence over (`docs/BACKLOG.md` §0.18).
+
+    It REFUSES rather than silently dropping to N=1, on this repo's own precedent
+    (`core/config.py::DEVELOPER_BACKEND_ALIASES` is deliberately wider than the launch set "because
+    admitting it at launch would be the silent downgrade the closed set exists to stop"): an operator
+    who typed `best_of_n=3` and got one build with no message cannot tell the knob from a no-op.
+    `ConfigRefusal` because it is a fact about the operator's own input, so `cli/__init__.py`'s
+    refusal boundary prints it as one line at exit 2 — and on a LIVE Strategist developer swap the
+    same raise is caught by `engine/strategy.py::_prepare_strategy_developer` and recorded as the
+    durable `developer_application: refused` receipt, which is the right answer there too.
+
+    Teaching `_score` to read `last_files` instead was measured and NOT built: the only
+    execution-free discriminator docs/36 permits (does it parse — a selector may REFUSE a candidate,
+    never ELECT one on a model's opinion) scores 683 of 683 authored `.py` files in `runs/` as valid,
+    i.e. it would have separated nothing. A selector with measured discrimination of zero is the
+    unverified claim `docs/BACKLOG.md` §0.18 exists to end.
+
+    `answers_with_code` is a POSITIVE marker (absent means NO — `agents/roles.py`, forwarded
+    read-through by `WrapsDeveloper`), so a third-party or templated Developer is fail-closed by
+    omission rather than silently billed.
+    """
+    if n > 1 and not getattr(developer, "answers_with_code", False):
+        from looplab.core.errors import ConfigRefusal
+        raise ConfigRefusal(
+            f"best_of_n={n} cannot be honoured by the active Developer "
+            f"({type(developer).__name__}): best-of-N ranks the code `implement()` returns, and this "
+            "Developer answers on `last_files` instead — every candidate would score identically and "
+            "candidate 0 would always win, after N full builds were paid for. Set best_of_n=1.")
+
+
 def _listwise_pick(client, idea, candidates: list[str], parser: str = "tool_call",
                    prompts=None) -> int:
     """D10 (OPPO arXiv:2506.12928): comparative LLM selection over candidates presented TOGETHER —

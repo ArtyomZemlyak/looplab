@@ -778,7 +778,7 @@ never touches.
 | `merge_mode` | `LOOPLAB_MERGE_MODE` | `auto` | `auto` (ensemble when the Developer writes code, else mean) · `mean` (param mean) · `ensemble` (code recombination) |
 | `complexity_cue` | `LOOPLAB_COMPLEXITY_CUE` | `false` | Inject a complexity hint keyed on the node's child count |
 | `feature_engineering` | `LOOPLAB_FEATURE_ENGINEERING` | `false` | Instruct the agent to add engineered features (CAAFE-style; CV gate enforced) |
-| `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off) |
+| `best_of_n` | `LOOPLAB_BEST_OF_N` | `1` | Generate N implementations per node, keep the best by execution-free reward (1 = off). REFUSED at launch (`search/best_of_n.py::refuse_unrankable_best_of_n`) when the active Developer answers on `last_files` rather than on the code `implement()` returns (every repo task) — the selector would rank N identical sentinels and always pick candidate 0 after paying for N builds; see `docs/BACKLOG.md` §0.18 |
 | `best_of_n_listwise` | `LOOPLAB_BEST_OF_N_LISTWISE` | `true` | Break a best-of-N static-score tie with a comparative LLM selection (D10) |
 | `operator_bandit` | `LOOPLAB_OPERATOR_BANDIT` | `False` | P4: replace the fixed merge/ablate cadences with a UCB bandit over per-operator yield (Δmetric per eval-second). Off by default; `thorough` turns it on |
 

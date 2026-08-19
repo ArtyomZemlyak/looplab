@@ -150,3 +150,87 @@ def test_best_of_n_threads_direction_into_foresight(monkeypatch):
     assert dev.client is not None                 # foresight branch is reachable
     dev.implement(Idea(operator="draft"))
     assert seen == {"direction": "max", "goal": "maximize AUC"}
+
+
+# --- C5/C2: best-of-N ranks the RETURN VALUE, and the repo Developer's return value is a sentinel ---
+# Measured on `runs/` (docs/BACKLOG.md §0.18): the corpus's 52 real repo builds cost 7.37M prompt
+# tokens each, so `best_of_n=3` was billing +14.7M tokens per node for a selection that could not
+# run — every candidate scored -1.0, both LLM tie-breaks were skipped on `len({""}) == 1`, and
+# candidate 0 always won. These pin the property, not the wiring: the first test DRIVES the broken
+# selection through the real `BestOfNDeveloper` so the refusal below is provably not cosmetic.
+
+class _RepoShapedDev:
+    """The `LLMRepoDeveloper` contract exactly: `implement` returns the SENTINEL "" and the
+    artifact travels on `last_files` (adapters/repo_developer.py — '"" means the files are the
+    answer'). Deliberately NOT the real class: this is the SHAPE best-of-N cannot rank, and any
+    third-party Developer with the same shape inherits the same refusal."""
+
+    def __init__(self, working_sets):
+        self.working_sets = working_sets
+        self.calls = 0
+        self.last_files: dict = {}
+        self.last_deleted: list = []
+        self.last_footprint = None
+
+    def implement(self, idea):
+        self.last_files = self.working_sets[self.calls % len(self.working_sets)]
+        self.calls += 1
+        return ""
+
+
+def test_best_of_n_cannot_rank_a_developer_that_answers_on_last_files():
+    """THE reason for the refusal below, driven rather than asserted about."""
+    good, broken = {"train.py": _GOOD}, {"train.py": _BROKEN}
+    inner = _RepoShapedDev([broken, good])          # candidate 0 is the one with the syntax error
+    dev = BestOfNDeveloper(inner, n=2, listwise=False, foresight=False)
+    dev.implement(Idea(operator="draft"))
+    assert inner.calls == 2                          # N full builds were generated and paid for
+    assert dev.last_n_scores == [-1.0, -1.0]         # and the scorer separated nothing
+    assert dev.last_files == broken                  # so candidate 0 won — the broken one
+
+
+def test_answers_with_code_is_a_positive_marker_the_repo_developer_does_not_carry():
+    from looplab.agents.roles import LLMDeveloper
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    assert LLMDeveloper.answers_with_code is True
+    # absent means NO (the `honors_idea_space` rule): a Developer that never declares it is
+    # fail-closed, so a third-party/templated Developer is refused rather than silently billed.
+    assert not getattr(LLMRepoDeveloper, "answers_with_code", False)
+
+
+def test_wraps_developer_forwards_answers_with_code():
+    """A wrapper must not make an unrankable Developer look rankable."""
+    assert BestOfNDeveloper(_RepoShapedDev([{}]), n=1).answers_with_code is False
+    assert BestOfNDeveloper(_VaryingDev([_GOOD]), n=1).answers_with_code is False   # plain stub
+    from looplab.agents.roles import LLMDeveloper, ValidatingDeveloper
+    assert ValidatingDeveloper(LLMDeveloper(client=None)).answers_with_code is True
+
+
+def test_make_roles_refuses_best_of_n_it_cannot_honour_on_a_repo_task():
+    """A silent drop to N=1 is the failure this repo already measured on `developer_backend`
+    aliases; refuse at launch instead, as a typed `OperatorRefusal` so the CLI boundary prints
+    one line at exit 2 (and a LIVE Strategist swap records a `refused` receipt)."""
+    from pathlib import Path
+    import pytest
+    from looplab.core.config import Settings
+    from looplab.core.errors import ConfigRefusal, OperatorRefusal
+    from looplab.adapters.tasks import load_task, make_roles
+    task = load_task(Path(__file__).resolve().parents[1] / "examples" / "repo_task.json")
+    with pytest.raises(ConfigRefusal) as excinfo:
+        make_roles(task, Settings(backend="llm", best_of_n=3, unified_agent=False))
+    assert isinstance(excinfo.value, OperatorRefusal)
+    assert "best_of_n=3" in str(excinfo.value) and "last_files" in str(excinfo.value)
+    # N=1 is untouched: the knob is off, nothing to honour, the run starts.
+    _r, dev = make_roles(task, Settings(backend="llm", best_of_n=1, unified_agent=False))
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    assert isinstance(dev, LLMRepoDeveloper)
+
+
+def test_make_roles_still_wraps_best_of_n_where_the_answer_is_the_code():
+    """The refusal is narrow: a script-solution task is byte-for-byte what it was."""
+    from pathlib import Path
+    from looplab.core.config import Settings
+    from looplab.adapters.tasks import load_task, make_roles
+    task = load_task(Path(__file__).resolve().parents[1] / "examples" / "code_regression_task.json")
+    _r, dev = make_roles(task, Settings(backend="llm", best_of_n=3, unified_agent=False))
+    assert isinstance(dev, BestOfNDeveloper) and dev.n == 3 and dev.answers_with_code is True

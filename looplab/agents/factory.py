@@ -489,7 +489,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # execution-free reward. Skipped for external coding agents (cost rule) and the no-edit param mode.
     if (settings.best_of_n > 1 and settings.developer_backend not in PRESETS
             and not _param_search):
-        from looplab.search.best_of_n import BestOfNDeveloper
+        from looplab.search.best_of_n import BestOfNDeveloper, refuse_unrankable_best_of_n
+        refuse_unrankable_best_of_n(developer, settings.best_of_n)  # C5/C2 · docs/BACKLOG.md §0.18
         developer = BestOfNDeveloper(developer, n=settings.best_of_n,
                                      listwise=getattr(settings, "best_of_n_listwise", True),
                                      parser=getattr(settings, "llm_parser", "tool_call"),
