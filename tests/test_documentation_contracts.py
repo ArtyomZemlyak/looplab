@@ -128,15 +128,24 @@ def test_architecture_ledger_has_one_current_status_per_finding_and_exact_rollup
     assert len(all_ids) == len(set(all_ids)) == 188
     assert len(statuses) == 188, "every finding heading must carry exactly one disposition"
     counts = Counter(status for _, status in statuses)
-    assert counts == {
-        "RESOLVED": 147,
-        "PARTIALLY RESOLVED": 39,
-        "DEFERRED": 2,
-    }
+    # The tally is DERIVED, never pinned — changed 2026-08-19. It used to be four literals
+    # (`147/39/2/0`) asserted here, and CLAUDE.md's "open-item index" section names that as the
+    # counter-example that decided the whole convention: closing a finding meant editing a TEST's
+    # constants, so the guard made closing a finding MORE expensive than leaving it open. A status
+    # guard that penalises closing is how 39 PARTIALLY RESOLVED findings sat unre-derived for
+    # eleven days. What is worth guarding is that the doc's human-facing rollup AGREES with its own
+    # headings, and that the inventory has not silently lost a finding — both derived, so closing a
+    # finding is one edit to the heading plus one to the sentence it is a summary of.
+    assert set(counts) <= {"RESOLVED", "PARTIALLY RESOLVED", "DEFERRED", "OPEN"}
     summary = re.search(
         r"Status totals: (\d+) resolved, (\d+) partially resolved, (\d+) deferred, "
         r"(\d+) open \((\d+) total\)", text)
-    assert summary and tuple(map(int, summary.groups())) == (147, 39, 2, 0, 188)
+    assert summary, "the ledger must carry a `Status totals:` rollup sentence"
+    derived = (counts.get("RESOLVED", 0), counts.get("PARTIALLY RESOLVED", 0),
+               counts.get("DEFERRED", 0), counts.get("OPEN", 0), len(statuses))
+    assert tuple(map(int, summary.groups())) == derived, (
+        "the ledger's `Status totals:` sentence disagrees with its own finding headings: "
+        f"sentence says {summary.groups()}, headings derive {derived}")
 
 
 def test_current_user_docs_have_no_hidden_review_handoffs():

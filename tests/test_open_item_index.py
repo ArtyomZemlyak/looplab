@@ -112,9 +112,17 @@ def _predicate_holds(pred: str) -> tuple[bool, str]:
             # SURVIVE A MOVE: the key does not change, the proof is re-pointed under a red test.
             return False, f"{rel} does not exist — re-point this proof at where the item now lives"
         if target.is_dir():
+            # The skip check is RELATIVE to the cited directory, not over the absolute path —
+            # fixed 2026-08-19, and the bug it had was a silent false GREEN. `p.parts` on an
+            # absolute path carries every component of wherever this checkout happens to live, and
+            # this repo's own agent worktrees live under `.claude/worktrees/<name>/`, which is in
+            # `_SKIP_DIRS`. So in a worktree EVERY file under a cited directory was filtered out,
+            # `found` was False for all of them, and a directory-form `absent:` predicate held
+            # vacuously while a `present:` one reported a defect as shipped. An index whose proofs
+            # depend on the checkout PATH is the unverified claim this file exists to replace.
             files = [p for p in target.rglob("*")
                      if p.is_file() and p.suffix in _TEXT_SUFFIXES
-                     and not any(part in _SKIP_DIRS for part in p.parts)]
+                     and not any(part in _SKIP_DIRS for part in p.relative_to(target).parts)]
         else:
             files = [target]
         found = any(literal in _text_without_markers(p) for p in files)

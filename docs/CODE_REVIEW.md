@@ -1,7 +1,24 @@
 # LoopLab — Comprehensive Code Review
 
-> **Historical review archive.** The embedded review handoffs below record what was found at their named
-> commits; they are not a current open-issue ledger. Use source/tests and
+> **Historical review archive, WITH SEVEN LIVE ITEMS THAT ARE NOW IN THE INDEX.** The embedded review
+> handoffs below record what was found at their named commits. Until 2026-08-19 the header said flatly
+> "they are not a current open-issue ledger" and the file disproved that three times over — a
+> `**[status 2026-08-14 — CLOSED …]**` banner on C3 (line ~193), an inline `**Fixed 2026-08-14**` on a
+> 🔴 row (~247) and a `✅ Resolved` row (~305) — so the contradiction was resolved by RE-DERIVING every
+> `🟡` row against the tree rather than by repeating the claim.
+>
+> Result (2026-08-19, all 21 `🟡` rows re-derived; the "22" every other doc quotes counted the severity
+> LEGEND at line 135 as a row): **7 are still true and now carry `OPEN[…]` markers with falsifiers the
+> guard re-derives**, 12 shipped, and **2 were false on the day they were written** (`cv.py:36`'s
+> `kfold` clause and `roles.py:111`, the latter asserting the opposite of the `models.py:19` row 24
+> lines below it). Every closed row is struck (`~~🟡~~`) and carries a dated line saying what closed it
+> and where. **The glyph is a SEVERITY, not a status** — that is what the legend at line 135 says — so
+> what answers "what is still open here?" is `grep -rn 'OPEN\['`, never the glyph.
+>
+> Note for anyone re-deriving these rows: **every one of the 21 line citations is dead.** The flat
+> package was split in `e1c85ddd`, so no `looplab/<name>.py` path below resolves, and no line number
+> does either (`models.py:19` → `looplab/core/models.py:489`; `leakage.py:34` →
+> `looplab/trust/leakage.py:66`). Locate by SYMBOL. Use source/tests and
 > [doc 25](25-architecture-modularity-review-2026-08-01.md) for reconciled dispositions. The remaining
 > load-bearing `# CODEX AGENT:` source comments identify current risks at their actual authority boundary.
 
@@ -236,9 +253,9 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | operators.py:24 / orchestrator.py:903 | `merge_idea`/`_ablate` crash on a non-numeric param (`sum()`/`float`) **without writing an event** → loop re-attempts the same merge forever on resume. |
 | 🟠 | orchestrator.py:797 | Variance gate weakened by `confirmed_seeds or confirm_seeds`: `0` is indistinguishable from "unknown", inflating n / shrinking SE — the exact bug the adjacent comment warns against. |
 | 🟠 | orchestrator.py:709 | Abort-watcher rescans the **whole** log every 0.3 s per in-flight eval (O(events)·N_parallel). |
-| 🟡 | cv.py:36 | `purged_walk_forward`/`kfold` silently drop folds when `embargo ≥ fold` or `k>n`; no signal that CV degenerated. |
-| 🟡 | leakage.py:52 | `temporal_leakage` flags a train row exactly at the boundary (`>=`), aborting valid runs with coarse (day-granularity) timestamps. |
-| 🟡 | orchestrator.py:56 | `_workspace_fingerprint` uses `st_mtime_ns` — `git checkout` (content-identical, mtime-changed) triggers false `workspace_changed`. |
+| ~~🟡~~ | cv.py:36 | `purged_walk_forward`/`kfold` silently drop folds when `embargo ≥ fold` or `k>n`; no signal that CV degenerated. **[closed 2026-08-19 — the `kfold` half was FALSE ON THE DAY IT WAS WRITTEN: `cv.py` already raised `ValueError("need 2 <= k <= n")` at the review's own commit `a322e4de`. The `purged_walk_forward` silent drop is real (`looplab/trust/cv.py:50`) but is unwired ADR-15 library code the tree already labels as such — `looplab/trust/cv.py:8-12`, `tests/test_trust_seam_status.py:24-25`.]** |
+| 🟡 | leakage.py:52 | `temporal_leakage` flags a train row exactly at the boundary (`>=`), aborting valid runs with coarse (day-granularity) timestamps. **OPEN[temporal-leakage-flags-the-boundary-row]** `temporal_leakage` still compares `t >= cutoff`, so a train row exactly at the boundary aborts a coarse-timestamp run — and unlike most rows here it IS wired: `looplab/engine/audit.py:312-316` returns on it. proof:present:cutoff)@looplab/trust/leakage.py |
+| ~~🟡~~ | orchestrator.py:56 | `_workspace_fingerprint` uses `st_mtime_ns` — `git checkout` (content-identical, mtime-changed) triggers false `workspace_changed`. **[closed 2026-08-19 — shipped in `6e0fd694` (2026-07-04): the fingerprint tries `git rev-parse HEAD` FIRST and returns `git:<sha>`; mtime is the non-git fallback only. `looplab/engine/triage.py:57-74`.]** |
 
 ### Persistence / event-sourcing
 | Sev | Loc | Finding |
@@ -248,9 +265,9 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | eventstore.py:104 | `_disk_last_seq` and `iter_jsonl` use **different** "last record" rules → seq gap after a crash. |
 | 🟠 | memory.py:30 | `JsonlCaseLibrary._flush` does a full `write_text` (non-atomic) — a crash mid-write loses **all** cross-run memory; `atomic_write_text` exists but is unused. |
 | 🟠 | retrieval.py:55 | `read_file` reads any absolute path — no root containment (path traversal / arbitrary read). |
-| 🟡 | eventstore.py:81 | `EventStore.__init__` does an O(events) full scan; the UI constructs one per control POST → quadratic over a session. |
-| 🟡 | eventstore.py:70 | `iter_jsonl` `break`s on the first corrupt **interior** line → silently hides all later events. |
-| 🟡 | atomicio.py:17 | No parent-dir fsync after `os.replace`/first-create — rename can be lost on crash. |
+| 🟡 | eventstore.py:81 | `EventStore.__init__` does an O(events) full scan; the UI constructs one per control POST → quadratic over a session. **OPEN[eventstore-rescans-the-log-per-control-post]** `EventStore.__init__` still does an O(events) scan (`_scan_last_seq`, plus `log_divergence`'s `read_bytes`), and the control route still constructs a fresh store per POST. proof:present:_scan_last_seq()@looplab/events/eventstore.py+present:EventStore(local_rd@looplab/serve/routers/control.py |
+| ~~🟡~~ | eventstore.py:70 | `iter_jsonl` `break`s on the first corrupt **interior** line → silently hides all later events. **[closed 2026-08-19 — the `break` is now the SPECIFIED torn-tail rule for a format-agnostic reader (`looplab/core/jsonlio.py:101-120`) with a detector beside it: `log_divergence` walks past the bad line and counts `dropped_lines` (`looplab/events/eventstore.py:358-365`), it is surfaced (`looplab/serve/appstate.py:250-256`) and `resume` fails closed on it (`looplab/cli/run_cmds.py:915-917`). Not silent.]** |
+| 🟡 | atomicio.py:17 | No parent-dir fsync after `os.replace`/first-create — rename can be lost on crash. **OPEN[default-atomic-write-skips-parent-fsync]** the DEFAULT tier still publishes with a bare `os.replace` and no parent-directory sync; the strict tier built beside it (`strict_fsync_parent`, `strict_atomic_write_bytes`) is opt-in. proof:present:os.replace(tmpname,@looplab/core/atomicio.py |
 
 ### LLM / roles / external agent
 | Sev | Loc | Finding |
@@ -260,9 +277,9 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | llm.py:71 | `body["choices"][0]` unguarded → `KeyError`/`IndexError` on an Ollama error envelope. |
 | 🟠 | cli_agent.py:203 | Agent subprocess launched **without a process group** — on timeout only the direct child is killed; node/opencode grandchildren orphan and hold the temp dir. `command_eval` already has `_kill_tree`; `cli_agent` doesn't reuse it. |
 | 🟠 | cli_agent.py:85 | `.cmd`/`.bat` launcher fallback runs the multi-line untrusted prompt through `cmd.exe` → metachar injection. |
-| 🟡 | roles.py:111 | `LLMResearcher._clamp_fill` calls `float(params[k])` without `_sanitize` → `ValueError` on `{"x":"high"}` crashes the retry-protected propose. |
-| 🟡 | parse.py:45 | `_extract_json` returns the **first** JSON object — a model's example/echo wins over the real answer. |
-| 🟡 | roles.py:160 | Retry re-sends the identical request (no temp bump / no failure feedback) → same unparseable output. |
+| ~~🟡~~ | roles.py:111 | `LLMResearcher._clamp_fill` calls `float(params[k])` without `_sanitize` → `ValueError` on `{"x":"high"}` crashes the retry-protected propose. **[closed 2026-08-19 — FALSE ON THE DAY IT WAS WRITTEN: `git show a322e4de:looplab/models.py:19` already carried `params: dict[str, float]`, so pydantic rejected `{"x": "high"}` at `Idea(...)` and `float()` never saw it. `looplab/agents/roles.py:1066-1068` states exactly this. It also contradicts the row at line 287 below, which complains about that same annotation.]** |
+| 🟡 | parse.py:45 | `_extract_json` returns the **first** JSON object — a model's example/echo wins over the real answer. **OPEN[json-extraction-takes-the-first-object]** `_extract_json` still returns the FIRST complete JSON object, so a model's own example or echo wins over its answer; the only mitigation is `<think>` stripping. proof:present:decoder.raw_decode(text,@looplab/core/parse.py |
+| ~~🟡~~ | roles.py:160 | Retry re-sends the identical request (no temp bump / no failure feedback) → same unparseable output. **[closed 2026-08-19 — the retry is no longer byte-identical: the validator rejection is folded into `attempt.rationale` (`looplab/agents/roles.py:1407-1411`) and the `ParseError` text back into `messages` (`:1082-1086`), with `:1066-1069` recording why. No temperature bump — feedback is the shipped fix.]** |
 | ⚪ | skills.py:23 / prompts.py:29 | `read_text(utf-8)` without `errors=` → a cp1252/UTF-16 skill/prompt file crashes load on Windows. |
 
 ### Sandbox / trust / security
@@ -273,8 +290,8 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | sandbox.py:214 / command_eval.py:177 | Docker has **no** `--memory`/`--pids-limit`/`--cpus`/`--read-only`, runs as **root**, writable host mount — fork-bomb/OOM + host-write despite `--network none` (the only real isolation). |
 | 🟠 | sandbox.py:110 | `communicate(timeout)` buffers all child output in memory until timeout — `while True: print('A'*10**6)` OOMs the **host**; the byte cap is post-hoc (storage only). |
 | 🟠 | patch.py:22 | Surface gate doesn't parse `rename to`/`copy to`/`GIT binary patch`, and ignores symlink/junction escape; `apply_patch` calls `gate` **without** `protect`/`prefixes`. |
-| 🟡 | sandbox.py:134 | Windows tree-kill via `taskkill /T` races enumerate→kill; `CREATE_NEW_PROCESS_GROUP` is set but never signaled — needs a Job Object. |
-| 🟡 | leakage.py:34 | `target_leakage` is Pearson-only → misses non-linear/categorical leaks (the "differentiator" gives false assurance). |
+| 🟡 | sandbox.py:134 | Windows tree-kill via `taskkill /T` races enumerate→kill; `CREATE_NEW_PROCESS_GROUP` is set but never signaled — needs a Job Object. **OPEN[windows-tree-kill-is-not-atomic]** still `taskkill /F /T /PID` with the enumerate→kill race; the module's own comment at `sandbox.py:1527-1539` calls it "a known, unfixed gap" and names the Job Object that would close it. proof:absent:AssignProcessToJobObject@looplab/runtime/sandbox.py |
+| 🟡 | leakage.py:34 | `target_leakage` is Pearson-only → misses non-linear/categorical leaks (the "differentiator" gives false assurance). **OPEN[target-leakage-is-linear-only]** `target_leakage` is still one Pearson correlation against the target, so a non-linear or categorical leak reads as clean — which is worse than no detector, because the gate reports assurance. proof:absent:spearman@looplab/trust/leakage.py |
 
 ### Task adapters (repo / regression / mlebench / models / config)
 | Sev | Loc | Finding |
@@ -284,8 +301,8 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | models.py:45 | `metric: Optional[float]` accepts NaN/inf; `regression.cv_mse` returns `inf` on degenerate folds → poisons `is_better`. |
 | 🟠 | models.py:97 | `RunState.direction` (the field that drives `is_better`) has **no validator**; a typo `"Max"`/`"maximize"` silently inverts the objective for the whole run (only `RepoTask` validates it). |
 | 🟠 | regression.py:90 | `cv_k>n`/`k=1` silently averages fewer folds or returns `inf`; no `2 ≤ cv_k ≤ n` validation. |
-| 🟡 | models.py:19 | `Idea.params: dict[str,float]` but repo params are free-form → silent coerce/`ValidationError` swallowed in `parse_structured`. |
-| 🟡 | repo_task.py:46 | `EvalSpec.metric` is a bare `dict` — a typo'd `kind` ("stdout_jsom") yields no protection + no metric; should be a discriminated union. |
+| ~~🟡~~ | models.py:19 | `Idea.params: dict[str,float]` but repo params are free-form → silent coerce/`ValidationError` swallowed in `parse_structured`. **[closed 2026-08-19 — the SWALLOW is gone: `looplab/core/parse.py:296` raises `ParseError("all parsers failed…")` and a coercion is recorded (`:283` `obs.set("repaired", True)`). The annotation itself stands by design and the divergence it permits is now a published caveat, `engine/champion_caveats.py::params_overridden`. See also line 263, which asserts the opposite of this row.]** |
+| ~~🟡~~ | repo_task.py:46 | `EvalSpec.metric` is a bare `dict` — a typo'd `kind` ("stdout_jsom") yields no protection + no metric; should be a discriminated union. **[closed 2026-08-19 — a typo'd `kind` is refused at submit by `@field_validator("metric")` `_valid_metric_kind` against the authoritative `METRIC_READERS` (`looplab/adapters/repo_task.py:891-910`, whose comment names this exact failure). The discriminated union was not adopted; the defect was.]** |
 | ⚪ | config.py:14 | `n_seeds`/`max_nodes`/`max_parallel`/`max_seconds` have no lower bound (`ge=1`/`gt=0`) — `max_parallel=0` silently breaks the loop. |
 | ⚪ | repo_task.py:128 | `NoOpRepoDeveloper.last_files = {}` mutable class attribute (shared-state footgun). |
 
@@ -298,12 +315,12 @@ the UI derive from `fold`, not stale SQLite).
 | 🟠 | util.js:92 | `layoutWithGroups` cycle "guard" is a no-op → order-dependent depths and `Math.max()`-of-empty `NaN` positions on any malformed `parent_ids`. |
 | 🟠 | Dock.jsx:42,87 | **Diff regression:** the working tree renamed the Inspector `Reasoning` tab to `Trace`, but `Dock` still calls `onFocus(…, 'Reasoning', …)` → focusing a node opens a **blank inspector** (no tab matches). One-line fix. |
 | 🟠 | hooks.js:39 | `if (Notification && …)` throws `ReferenceError` where the API is absent (insecure/unsupported context) — guard with `'Notification' in window`. |
-| 🟡 | Dock.jsx:34 | Re-GETs the full `/log` (+`/trace`) on **every** SSE seq tick → O(n²) bytes over a run. |
-| 🟡 | panels.jsx:226 | `RegistryPanel` sorts `runs` **in place** (mutates state) and always descending — ranks `direction:"min"` runs upside-down. |
-| 🟡 | panels.jsx:313 / Dock.jsx:83 | `EventExplorer`/feed render the entire unbounded log un-virtualized (re-rendered per filter keystroke). |
-| 🟡 | RunView.jsx:50 | Window-level drag listeners not cleaned up on unmount-mid-drag → setState-after-unmount + leaked listener. |
+| ~~🟡~~ | Dock.jsx:34 | Re-GETs the full `/log` (+`/trace`) on **every** SSE seq tick → O(n²) bytes over a run. **[closed 2026-08-19 — the feed is a 200-row paged window (`ui/src/timelineModel.js:6`, `:353` fetching `/log-page?…`) read as `timeline.rows` (`ui/src/Dock.jsx:682`); traces load lazily per expanded row (`:782`).]** |
+| ~~🟡~~ | panels.jsx:226 | `RegistryPanel` sorts `runs` **in place** (mutates state) and always descending — ranks `direction:"min"` runs upside-down. **[closed 2026-08-19 — `sortRuns` copies (`ui/src/runIndex.js:492`) and reads `direction` (`:508-509`); the panel asks for `'asc'` explicitly (`ui/src/panels.jsx:2296`, with the defect named in the comment at `:2291-2294`).]** |
+| ~~🟡~~ | panels.jsx:313 / Dock.jsx:83 | `EventExplorer`/feed render the entire unbounded log un-virtualized (re-rendered per filter keystroke). **[closed 2026-08-19 — both render `<VirtualTimeline …>` (`ui/src/panels.jsx:2964`, `ui/src/Dock.jsx:1292`) over the 200-row paged window, with the filter memoized (`panels.jsx:2868-2869`).]** |
+| ~~🟡~~ | RunView.jsx:50 | Window-level drag listeners not cleaned up on unmount-mid-drag → setState-after-unmount + leaked listener. **[closed 2026-08-19 — `ui/src/RunView.jsx:1307` keeps `dragCleanupRef` and `:1322` detaches it on unmount, with the comment naming unmount-mid-drag.]** |
 | ✅ | Inspector.jsx (virtual span tree) | Resolved: the stage treeitem is the root span itself, so its bounded attrs/events remain disclosable with children; event names and safe scalar metadata (including legacy `llm_call`) are searchable. The extreme-tree mounted regression covers this path. |
-| 🟡 | server.py:218 | `rename_run` does unguarded `await request.json()` → unhandled 500 on empty/bad body. |
+| ~~🟡~~ | server.py:218 | `rename_run` does unguarded `await request.json()` → unhandled 500 on empty/bad body. **[closed 2026-08-19 — `looplab/serve/routers/org.py:217` uses `json_object(request)`, which raises a clean 400 (`looplab/serve/http.py:95-101`); `:108-109` names this defect as the helper's reason to exist. The code also moved: `server.py` is now a thin composition root.]** |
 | ⚪ | charts.jsx:14 | `Trajectory`/`Scatter`/`Bars` pin an all-equal series to the floor (implies "worst") instead of centering; `fmt` renders `Infinity` literally (no `Number.isFinite` guard). |
 
 ---
@@ -338,9 +355,9 @@ append); (3) metric **confidentiality** (label reading) and selection edge cases
 |---|---|---|
 | 🟠 | README:15 / 03-decisions.md:301 | "secret-leak gate" / "redaction + gitleaks over the event log" — **not implemented** (C2). |
 | 🟠 | README (~12×) | `python -m LoopLab.cli` works only on a case-insensitive FS; the package is `looplab`. Broken on Linux/macOS CI. Entry-point casing (`LoopLab = looplab.cli:app`) is inconsistent. |
-| 🟡 | README:88 | Documents a `--agent-max-retries` CLI flag that **doesn't exist** (only the env var / `config` field). |
-| 🟡 | README:179 vs :215 | Self-contradictory test count ("34 tests" vs "105 pass"); `sandbox.py:7` hard-codes "34". |
-| 🟡 | cli.py:152 | `resume` silently falls back to fresh `Settings()` when `config.snapshot.json` is missing — can finish an approval-pending run **without approval**, the very case its own comment warns about. |
+| ~~🟡~~ | README:88 | Documents a `--agent-max-retries` CLI flag that **doesn't exist** (only the env var / `config` field). **[closed 2026-08-19 — `grep -n 'agent-max-retries' README.md` returns nothing; only the `agent_max_retries` config field remains (`looplab/core/config.py:1440`).]** |
+| ~~🟡~~ | README:179 vs :215 | Self-contradictory test count ("34 tests" vs "105 pass"); `sandbox.py:7` hard-codes "34". **[closed 2026-08-19 — README now says `tests-8.9k` (`README.md:6`) and `8,900+ collected tests` (`:276`), and `looplab/runtime/sandbox.py` contains no `34`. This row had itself become the stale doc-drift it reports.]** |
+| 🟡 | cli.py:152 | `resume` silently falls back to fresh `Settings()` when `config.snapshot.json` is missing — can finish an approval-pending run **without approval**, the very case its own comment warns about. **OPEN[resume-with-no-snapshot-runs-ambient-settings]** an ABSENT `config.snapshot.json` still returns a fresh `Settings()` under both modes (`looplab/cli/__init__.py:363-369`), and `require_approval` is not pinned in `run_started` — it is read live (`orchestrator.py:1108`, gated at `:2033`) — so a resumed approval-pending run can finish unapproved. The CORRUPT case IS fixed (`strict=True` → `BadParameter`). proof:present:snap.exists():@looplab/cli/__init__.py |
 | ⚪ | e2e_report.py:5 | Invoked as `python -m tools.e2e_report` but `tools/` isn't a package and isn't shipped. |
 
 **Verified claims that DO hold:** crash-resume mechanism (real `os._exit(137)` + replay), zero-dep

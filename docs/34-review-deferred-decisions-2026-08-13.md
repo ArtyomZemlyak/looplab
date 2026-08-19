@@ -6,10 +6,39 @@ test-integrity…`, `refactor: reuse, budget and hot-path findings…`). Sevente
 correctness candidates were REFUTED under adversarial verification and are recorded there.
 
 This document holds the residue: findings that are **real and reproducible but whose fix is a
-product or architecture decision**, not a defect repair. Each has a pointer comment at its site so a
-reader meets the reasoning where the cost is paid, rather than only here.
+product or architecture decision**, not a defect repair. Each was supposed to have a pointer comment
+at its site so a reader meets the reasoning where the cost is paid, rather than only here — **and
+only three of the five do** (re-derived 2026-08-19: `grep -c 'docs/34'` is 0 in both
+`core/tracing.py` and `ui/test/settingsSchemaResource.test.js`). D-02's own status update admits it
+while this paragraph asserted the opposite; `docs/00-INDEX.md` propagates the false version.
 
 Nothing below is a bug you can fix without deciding something first. That is the entry criterion.
+
+> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** Four of the five are genuinely
+> still deferred and now carry `OPEN[…]` markers whose proofs the guard re-derives from the tree;
+> **D-05 is CLOSED** and its own status update was false the day it was written. From here,
+> `grep -rn 'OPEN\['` is the answer to "what is still deferred in doc 34?".
+>
+> - **OPEN[agent-node-purge-has-no-durable-receipt]** `_purge_node_snapshot` is still an irreversible
+>   multi-file transaction inside a bare `try/finally` with the ad-hoc `events.jsonl.bak-del<N>`
+>   backup, still reachable from the agent-facing tool provider — no operation id, no phase, no
+>   crash-recovery record. proof:present:events.jsonl.bak-del@looplab/tools/machine_runs_tools.py
+> - **OPEN[trace-exporter-hardens-per-span-not-per-batch]** the worker still takes exactly one row per
+>   iteration and runs the whole hardened ladder (guarded open, torn-tail heal, identity CAS before
+>   and after, one append receipt) per SPAN. proof:present:self._queue.popleft()@looplab/core/tracing.py
+> - **OPEN[card-trace-scans-whole-run-span-index]** `card_trace_view` still copies the whole run's
+>   light spans; `SpanIndex` has no `card_id` dimension and `_SCHEMA` is unbumped.
+>   proof:absent:card_id@looplab/events/span_index.py
+> - **OPEN[span-index-hashes-every-source-row]** `_read_full` still re-hashes each selected row's FULL
+>   bytes on the request path, and a 64-char digest is retained per row in memory and on disk.
+>   proof:present:hashlib.sha256(data).hexdigest()@looplab/events/span_index.py
+>
+> **Dead line citations, all three in the 2026-08-14 status updates and all off by 80-170 lines:**
+> `machine_runs_tools.py:1623` → the pointer is at `:1796`; `serve/appstate.py:613` → the comment is
+> at `:706`; `events/span_index.py:694` → the comment is at `:756`. `docs/00-INDEX.md` also describes
+> "the settings tripwire that has drifted four times"; its own ledger records eleven.
+
+
 
 ---
 
@@ -147,6 +176,24 @@ explicitly rather than by deleting a hash.
 
 ## D-05 · The catalogue tripwire keeps drifting · `ui/test/settingsSchemaResource.test.js`
 
+> **CLOSED (2026-08-19).** The drift is bound, by a THIRD mechanism neither option in this decision
+> proposed, and the status update below was **already false when it was written**:
+> `tests/test_settings_ui_schema.py:161-179` reads `ui/test/settingsSchemaResource.test.js` as TEXT,
+> extracts the pinned literal by regex and asserts it equals the derived
+> `SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT` — so the Python suite a contributor actually runs fails
+> on JS drift, with no CI-ordering assumption at all. It landed in `9644724e` at **2026-08-14
+> 06:32 UTC**; the status update below landed in `1fa4ac9b` at **11:02 UTC the same day**, four and a
+> half hours later, on a tree that already contained the guard (`git merge-base --is-ancestor` says
+> yes). Its remark that the last two drifts were "both caught by the Python half first" is that guard
+> working, read as luck. All four numbers agree today at **181** (`serve/settings_ui_schema.json`
+> computed, `serve/settings_ui_schema.py:28`, `tests/test_settings_ui_schema.py:103`,
+> `ui/test/settingsSchemaResource.test.js:90`), CI runs both suites on every push
+> (`.github/workflows/tests.yml:15` and `:53`/`:65`), and the second option is deliberately NOT taken:
+> the fixture already reads the packaged JSON, and the literal sits beside it on purpose so a change
+> in the catalogue's SIZE has to be re-pinned deliberately — this decision's own text concedes that
+> deriving it "would remove the tripwire's whole purpose". No marker: closing is a deletion, and what
+> is left below is the record of what was decided.
+>
 > **Status update (2026-08-14).** Half-taken, and the half taken has not stopped the drift. CI runs
 > the UI suite beside the Python one on every push/PR (`.github/workflows/tests.yml`: the `pytest`
 > job plus a `ui` job running `npm test`), yet the JS literal is still hand-pinned and its own

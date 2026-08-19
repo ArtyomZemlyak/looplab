@@ -136,6 +136,106 @@ Research only.
 | P2 | UI guide said the launch card was not editable, while the shipped card edits a validated draft and invalidates validation after change | documented workflow contradicted the guarded UI | **Fixed:** guide now describes editable fields and mandatory revalidation |
 | P2 | MCP wrapper comment said Auto runs calls inline, while UNKNOWN MCP effects deliberately ask even in Auto | security contract was correct in code/test but false in its owning comment | **Fixed:** comment now matches fail-closed behavior |
 
+> **Re-derived 2026-08-19 against master `8be301f7`, and INDEXED.** This document had two status
+> surfaces that could disagree — the table's disposition cells and the 2026-08-14 banner below — and
+> they did. This block is the reconciliation, and from here the answer to "what is still open in
+> doc 27?" is `grep -rn 'OPEN\['`, not either surface.
+>
+> **What the two surfaces disagreed about, measured:**
+>
+> - **The banner covers 8 items; the table has at least 13 non-resolved cells.** Three "Open" cells
+>   were never re-derived by any banner — the research-call cap, the eval-lane reservation and the MCP
+>   expansion — and the MCP one is the row that moved MOST (below). The banner's own preamble claims
+>   it exists "so the table's 'Open …' dispositions stay honest".
+> - **One banner has no cell to reconcile with.** The `RunProposal` banner refers to the planners row,
+>   whose disposition reads "**Documented truthfully now;** canonical planner/service remains a
+>   follow-up" — not in the `Open` vocabulary at all, so a grep for `Open` misses it entirely.
+> - **The eval-receipt cell still says flatly "Open architecture item"** while its banner says
+>   "PARTIALLY CLOSED, at the serve/governance layer only". The banner is right and the cell was never
+>   amended: `serve/paid_ledger.py`, `engine/curation_protocol.py` and `engine/steward_invocation.py`
+>   all ship claim→terminal receipts. The ENGINE half is what is still open, and that is what is
+>   tagged below.
+> - **The cancellation banner is now 2/3 true.** It asserts nothing propagates a cancel into a
+>   provider request, an external CLI process "or MCP operation". MCP cancellation shipped in
+>   `cb3433b3` on **2026-08-17**, three days after the banner: `tools/mcp_tools.py` takes
+>   `cancel_check`, maps `InterruptedError` to `ToolResult(structured={"cancelled": True})` and
+>   publishes `cancellable=` on the capability. The provider and external-CLI legs are still open.
+> - **The eval-corpus banner was already FALSE ON THE DAY IT WAS WRITTEN.** "No trajectory/handoff/
+>   prompt-injection eval ladder exists under `tests/`" — `tests/test_phase_handoff.py` landed
+>   2026-08-01 and `tests/test_prompt_injection_rule.py` 2026-07-30, both BEFORE this document's own
+>   date. Rungs 2-5 (curated trajectory cases, frozen outcomes, confused-deputy, repeated stochastic
+>   trials) are genuinely absent, which is what the marker below claims; the sentence as written is
+>   not, and `test_prompt_injection_rule.py`'s own docstring is about exactly this failure mode.
+> - **The §2 prescription shipped and neither surface records it.** `ToolResult(content, structured,
+>   is_error, provenance, receipt, retryable)` and `ToolCapability(...)` landed field-for-field in
+>   `cb3433b3` (2026-08-17), legacy `__str__` view included — yet the SOTA table's Tools row still
+>   asserts "internal API is `str` and MCP contract is flattened", which is false today.
+> - **Three dead line citations** in the banner: `agents/tool_loop.py:400,474-478` (the real
+>   `cancel_check` sites are `:380,502,576-580,765`; `drive_tool_loop` is at `:495`),
+>   `agents/roles.py:251::DEVELOPER_OUTPUT_ATTRS` (it is at `:253`) and `agents/factory.py:396`
+>   (the construction is at `:403`). One misattribution: `orchestrator._drop_stale_speculation` is
+>   defined in `engine/speculation.py`, not `orchestrator.py` — it resolves through the mixin.
+> - **Doc 27 has no ID namespace of its own** — the only status-bearing doc in the tree without one —
+>   which is why none of the above was greppable. The slugs below are that namespace.
+>
+> **The index (15 items, each proof re-derived against the tree on 2026-08-19):**
+>
+> - **OPEN[prompt-bundle-unpinned-across-hot-reload]** the PromptStore is still re-read on every use
+>   with no run/phase-pinned revision; the only run-start pins are the `run_started` settings and the
+>   two `core/setup_identity.py` digests. proof:present:(hot-reload)@looplab/core/prompts.py
+> - **OPEN[inner-agent-phases-not-event-sourced]** none of `agent_phase_started` /
+>   `agent_checkpointed` / `agent_phase_completed` exists; the inner trajectory lives only in
+>   `spans.jsonl`, which replay does not read. proof:absent:agent_phase_started@looplab/events/types.py
+> - **OPEN[paid-eval-has-no-attempt-scoped-receipt]** the ENGINE half of the receipt item — the
+>   serve/governance half shipped. `EV_NODE_EVAL_STARTED` carries only `node_id`+`generation`: no
+>   attempt-scoped invocation id and no completed receipt.
+>   proof:absent:eval_invocation_id@looplab/engine/evaluate.py
+> - **OPEN[no-shared-reserve-commit-run-budget]** `CostAccountant` still takes a per-client limit,
+>   `llm_broker` is concurrency ADMISSION with no reserve, and `engine/costs.py` commits post hoc, so
+>   concurrent roles cannot reserve against one cap. proof:present:dollar-cap@looplab/core/llm.py
+> - **OPEN[research-cap-counts-passes-not-provider-calls]** the cap is still incremented once per
+>   research PASS in the spine, not debited at the provider broker, so the named ceiling undercounts
+>   real spend. proof:absent:concurrent_research_max_calls@looplab/core/llm_broker.py
+> - **OPEN[eval-lanes-admit-without-reserving-time]** lanes still admit against
+>   `cur.total_eval_seconds`, i.e. already-COMPLETED time, so several can enter under one remaining
+>   allowance; the spine carries a live annotation prescribing the reservation.
+>   proof:present:cur.total_eval_seconds@looplab/engine/orchestrator.py
+> - **OPEN[developer-output-has-no-immutable-envelope]** Developer output is still `str` plus the
+>   mutable `DEVELOPER_OUTPUT_ATTRS` side channels; no `DeveloperResult` envelope exists.
+>   proof:absent:DeveloperResult@looplab/agents/roles.py
+> - **OPEN[cancel-not-propagated-into-provider-request]** two of the three legs: nothing reaches an
+>   in-flight provider request (`core/llm.py` has no `cancel_check` at all) and the external CLI is
+>   killed on TIMEOUT rather than on a cancel token. The MCP leg shipped 2026-08-17.
+>   proof:absent:cancel_check@looplab/core/llm.py
+> - **OPEN[external-cli-timeout-not-settings-bound]** still a composition-independent 600-second
+>   constructor default that the factory does not override, and no priced/unpriced usage result.
+>   proof:present:600.0@looplab/agents/cli_agent.py
+> - **OPEN[agent-trajectory-eval-ladder-absent]** rungs 2-5 of §4 — curated trajectory cases, frozen
+>   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
+>   corpus. (Rung 1 exists and predates this document; see the correction above.)
+>   proof:missing:tests/test_agent_trajectory_corpus.py
+> - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
+>   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
+>   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
+> - **OPEN[mcp-tool-cache-not-principal-keyed]** typed results, cancellation and the authz binding all
+>   shipped in `cb3433b3`; the residue is that the adapter cache is still one process-global
+>   `_CACHED`, not keyed by principal. proof:present:_CACHED@looplab/tools/mcp_tools.py
+> - **OPEN[prompt-governance-has-no-typed-registry]** repo onboarding joined the store, but the
+>   additive typed registry the row asks for does not exist, so Genesis, assistants, reports, monitors
+>   and stewards keep separate prompt families. proof:absent:PromptDefinition@looplab/core/prompts.py
+> - **OPEN[developer-backend-switch-not-exposed-to-the-operator]** the P2 product choice, re-derived:
+>   the operational gap is fixed, but nothing in `serve/` names the developer-switch vocabulary, so the
+>   capability is still neither exposed through governance nor retired.
+>   proof:absent:developer_switch_names@looplab/serve
+> - **OPEN[auto-distilled-skills-outside-authoring]** the P2 remaining product gap: the Authoring
+>   surface's roots are `prompts`/`skills`/`knowledge` off `Settings`, so auto-distilled
+>   `<memory_dir>/skills/` candidates stay hidden until cross-task promotion with no first-party
+>   review UI. The named close is a `memory_skills_dir` root on that surface.
+>   proof:absent:memory_skills_dir@looplab/serve
+>
+> **Not re-derived here, and saying so:** the `**Fixed:**` rows above (they were not this pass's
+> scope) and the Validation record's suite counts.
+
 > **Status update (2026-08-14) — the open architecture items above, re-verified against master
 > `d307542`.** One consolidated banner so the table's "Open …" dispositions stay honest:
 >

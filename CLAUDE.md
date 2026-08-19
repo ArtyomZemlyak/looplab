@@ -479,16 +479,43 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   than leaving it open. Same trap, live, in `tests/test_core_contracts.py:142`, which asserts
   `"STILL OPEN:" in source` — a guard that makes an open marker *unremovable*.
 
-  **Coverage today is deliberately PARTIAL and says so: 22 markers (19 OPEN, 3 DECLINED).** That
-  count came from the guard's own parser, after a hand-written `21 (18 OPEN, 3 DECLINED)` stood in
-  this very sentence and was wrong within the hour — the same drift the index exists to end, in the
-  paragraph describing it. Ask the parser, never a person. Tagged:
-  the 7 live in-code `REVIEW 2026-08-18` annotations, the 2 in-code docstring residues
-  (`core/atomicio.py`, `engine/repair_verify.py`), §0.1 row 5, the eight `⬜` residues in
+  **The count in this paragraph comes from the guard's own parser, never from a person.** A
+  hand-written `21 (18 OPEN, 3 DECLINED)` stood here on 2026-08-19 and was wrong within the
+  hour — the exact drift the index exists to end, inside the paragraph describing it.
+
+  **Coverage is still PARTIAL and says so. Doc 25's ledger is now re-derived (2026-08-19):** its 41
+  PARTIALLY RESOLVED/DEFERRED findings were each checked against the tree and carry 32 `OPEN[…]` and
+  8 `DECLINED[…]` markers, and ONE closed — `ES-04`'s named remaining arm (the calibration-envelope
+  closures) shipped in `9f7c0a22` on 2026-08-05, the same day the entry saying it had not was
+  written, and the 2026-08-08 reconciliation did not catch it. Its heading is flipped to RESOLVED
+  and the rollup is 148/38/2/0. **The rollup guard is no longer a pin**: `test_documentation_
+  contracts.py` DERIVES the four counts from the headings and only asserts the doc's own
+  `Status totals:` sentence agrees, so closing a finding is two edits in the doc and none in a test.
+  That guard was the counter-example that decided property 1 and it was live for eleven days.
+  `test_open_item_index.py` also had a silent FALSE GREEN, fixed in the same change: its
+  directory-form predicate filtered `_SKIP_DIRS` over the ABSOLUTE path, and this repo's agent
+  worktrees live under `.claude/worktrees/`, so in a worktree every file under a cited directory was
+  skipped and a `present:` proof reported a live defect as shipped.
+  **The other three large pools are re-derived too (2026-08-19).** `docs/CODE_REVIEW.md`: all
+  **21** `🟡` rows — not 22; the count every doc quoted counted the severity LEGEND as a row — 7 are
+  still true and carry markers, 12 shipped, and **2 were false on the day they were written**, one of
+  them asserting the exact opposite of another row 24 lines below it. All 21 line citations are dead
+  (the flat package split in `e1c85ddd`), so locate by SYMBOL. Its header's "not a current
+  open-issue ledger" was falsified by the file itself in three places and now says what the file is.
+  `docs/27`: 15 markers; its two status surfaces disagreed (the banner covers 8 items against ≥13
+  non-resolved cells, one banner has no cell in the `Open` vocabulary to reconcile with, the
+  eval-receipt cell still says "Open" where its own banner says "PARTIALLY CLOSED"), the cancellation
+  banner is now 2/3 true (MCP cancellation shipped `cb3433b3`, 2026-08-17), and the eval-corpus
+  banner was FALSE WHEN WRITTEN (`tests/test_phase_handoff.py` and
+  `tests/test_prompt_injection_rule.py` both predate the document). `docs/34`: 4 markers and **D-05
+  CLOSED** — its fix landed at 06:32 UTC and its "still open" status update at 11:02 UTC the SAME
+  day. Doc 27 has no ID namespace of its own, which is why none of its contradictions was greppable.
+  Earlier tagged: the 7 live in-code `REVIEW 2026-08-18` annotations, the 2 in-code docstring
+  residues (`core/atomicio.py`, `engine/repair_verify.py`), §0.1 row 5, the eight `⬜` residues in
   §§0.10/0.13/0.14/0.15, §0.16's two refusals and doc 29 `F3` as `DECLINED`, plus `F3`'s nested open
-  follow-up. NOT tagged, and this is the honest half: §2 Themes A–I (the older text the file's own
-  caveat 1 says to distrust), §0.2 low-cost residue, §§4–6, doc 25's 41 PARTIAL/DEFERRED findings,
-  doc 27's 7, doc 34's 5, and `CODE_REVIEW.md`'s 22. Each needs re-deriving against the tree before
+  follow-up. STILL NOT tagged, and this is the honest half: §2 Themes A–I (the older text the file's
+  own caveat 1 says to distrust), §0.2 low-cost residue, and §§4–6 of the BACKLOG. Each needs
+  re-deriving against the tree before
   it can carry a falsifier, and **a marker whose proof nobody re-derived is the same unverified
   claim the glyph already was** — which is the whole reason this rule exists. Tag as you re-derive;
   never tag to look complete.
