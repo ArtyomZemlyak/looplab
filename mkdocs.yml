@@ -140,6 +140,7 @@ nav:
   - Guide:
       - Overview: guide/index.md
       - Installation: guide/installation.md
+      - JupyterHub onboarding: guide/jupyterhub-onboarding.md
       - Quickstart: guide/quickstart.md
       - CLI reference: guide/cli-reference.md
       - Configuration: guide/configuration.md

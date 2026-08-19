@@ -62,7 +62,15 @@ def test_index_mentions_every_numbered_document():
 
 
 def test_all_relative_markdown_links_resolve():
-    files = [ROOT / "README.md", ROOT / "CLAUDE.md", *sorted(DOCS.rglob("*.md"))]
+    # `.ipynb_checkpoints` is EXCLUDED, and not as tidiness: this repo is edited on a JupyterHub
+    # box, where saving any doc mints `docs/guide/.ipynb_checkpoints/<name>-checkpoint.md`. Its
+    # relative links resolve from one directory deeper, so every sibling link in it "breaks" — a red
+    # suite for a file nobody publishes and nobody reads. The rest of the codebase already skips
+    # this directory by name (`tools/reposcout.py::_SKIP_DIRS`,
+    # `runtime/stage_identity.py::SKIP_DIRS`); this walker simply had not.
+    files = [ROOT / "README.md", ROOT / "CLAUDE.md",
+             *sorted(p for p in DOCS.rglob("*.md")
+                     if ".ipynb_checkpoints" not in p.parts)]
     broken = []
     for source in files:
         text = source.read_text(encoding="utf-8-sig")
@@ -80,7 +88,9 @@ def test_all_relative_markdown_links_resolve():
 
 
 def test_readme_and_guide_name_only_real_cli_commands_and_cover_the_registry():
-    sources = [ROOT / "README.md", *sorted((DOCS / "guide").glob("*.md"))]
+    sources = [ROOT / "README.md",
+               *sorted(p for p in (DOCS / "guide").glob("*.md")
+                       if ".ipynb_checkpoints" not in p.parts)]
     documented = set()
     for path in sources:
         documented.update(_LOOPLAB_COMMAND.findall(path.read_text(encoding="utf-8")))

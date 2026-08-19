@@ -14,6 +14,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | Guide | What it covers |
 |---|---|
 | **[Installation](installation.md)** | Requirements, install extras, optional backends |
+| **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Nine ordered steps to a working LoopLab inside a hub single-user server, and the two settings people lose an afternoon to |
 | **[Quickstart](quickstart.md)** | Your first run (`--backend toy` for the offline path) → LLM-driven, reading results |
 
 ## Reference
