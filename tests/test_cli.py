@@ -914,3 +914,53 @@ def test_resume_reports_a_wedged_engine_lock_instead_of_hanging_forever(tmp_path
     assert "waiting for the engine lock" in result.output      # narrated while it waited
     assert "gave up after" in result.output                    # and bounded, with a next step
     assert "retry `looplab resume`" in result.output
+
+
+# =========== the 2026-08-18 review findings: two maintenance commands whose EXIT CODE lied
+#
+# `--json` exists for a scripted caller, and a scripted caller reads the exit code. Both commands
+# had a JSON path that answered 0 for a state the human path called an error, and both silently
+# ignored `--json` on the half that actually writes.
+
+def test_memory_orphans_reports_a_missing_store_as_a_failure_in_both_modes(tmp_path):
+    """A mistyped `--memory-dir` printed `{"available": false}` and exited 0 under --json while the
+    human path exited 1 — so a health check keyed on the exit code read a misconfigured store as
+    healthy. The JSON BODY is still emitted: a machine caller needs the reason, not just the code."""
+    import json as _json
+
+    missing = tmp_path / "nope"
+    human = runner.invoke(app, ["memory-orphans", str(missing), "--runs-root", str(tmp_path)])
+    assert human.exit_code == 1, plain(human)
+
+    machine = runner.invoke(app, ["memory-orphans", str(missing), "--runs-root", str(tmp_path),
+                                  "--json"])
+    assert machine.exit_code == 1, plain(machine)
+    assert _json.loads(plain(machine))["available"] is False
+
+
+def test_service_files_reports_a_missing_runs_root_as_a_failure(tmp_path):
+    """`plan_service_file_reap` catches the `iterdir` OSError and reports "0 service files", so a
+    mistyped root read exactly like a clean one — exit 0, nothing wrong, in both modes."""
+    import json as _json
+
+    missing = tmp_path / "nope"
+    human = runner.invoke(app, ["reap-service-files", str(missing)])
+    assert human.exit_code == 1, plain(human)
+    assert "no such runs root" in plain(human)
+
+    machine = runner.invoke(app, ["reap-service-files", str(missing), "--json"])
+    assert machine.exit_code == 1, plain(machine)
+    assert "no such runs root" in _json.loads(plain(machine))["error"]
+
+
+def test_the_writing_half_of_both_commands_honours_json(tmp_path):
+    """`--json --apply` fell through to prose in both, so a caller that asked for JSON got neither
+    the plan nor a receipt — for the one invocation of each command that WRITES."""
+    import json as _json
+
+    root = tmp_path / "runs"
+    root.mkdir()
+    out = runner.invoke(app, ["reap-service-files", str(root), "--json", "--apply"])
+    assert out.exit_code == 0, plain(out)
+    receipt = _json.loads(plain(out))
+    assert receipt["applied"] is True and "plan" in receipt and "removed_count" in receipt

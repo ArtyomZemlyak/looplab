@@ -31,9 +31,13 @@ surrounding code (~100-col lines, heavy why-comments) and do not reformat.
 Docs are built with `mkdocs build --strict` in CI — broken doc links fail the deploy.
 `looplab build-ui` builds the React UI (`npm ci && npm run build` in `ui/`); `looplab ui`
 auto-builds when the dist is missing. `looplab/cli/` is a PACKAGE (command groups in
-`run_cmds`/`export_cmds`/`inspect_cmds`/`concept_cmds`/`governance_cmds`/`ui_cmds` — `inspect_cmds`
-is run diagnostics ONLY, the Part IV concept/novelty diagnostics are `concept_cmds`, and everything
-that WRITES cross-run memory or spends money on a steward is `governance_cmds`; the Typer app +
+`run_cmds`/`export_cmds`/`inspect_cmds`/`concept_cmds`/`governance_cmds`/`memory_cmds`/`ui_cmds` —
+`inspect_cmds` is run diagnostics ONLY, the Part IV concept/novelty diagnostics are `concept_cmds`,
+and everything that spends money on a steward or authors cross-run memory CONTENT is
+`governance_cmds`. `memory_cmds` is the one deliberate exception and it is a DOMAIN split, not a
+drift: `memory-orphans` writes the shared stores too, but only ever by REMOVING rows whose run no
+longer exists — a maintenance sweep with no model call and no new claim — and it lives apart
+because `governance_cmds` was 11 lines under its file ceiling when the command arrived; the Typer app +
 patchable builders (including the shared `_make_llm_client`/`_settings_for_run`) live in
 its `__init__`; `python -m looplab.cli` works via `__main__.py`).
 

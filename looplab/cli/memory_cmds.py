@@ -14,14 +14,6 @@ operator says `--apply`, and every rule it obeys (attribution by `run_uid` then 
 predicates that keep shared evidence, the `blind` refusal) belongs to `serve/memory_cascade.py`
 rather than to this file.
 """
-# REVIEW 2026-08-18 (conventions): `--apply` below calls `purge_orphan_identities`, which REWRITES
-# the shared cross-run stores — a command that WRITES cross-run memory living outside
-# `governance_cmds`, while CLAUDE.md's cli row still reads "everything that WRITES cross-run memory
-# or spends money on a steward is `governance_cmds`" and enumerates six groups without this module.
-# The docstring above argues the domain split, but the CLAUDE.md sentence did not move in the SAME
-# change (CLAUDE.md's own docs-in-sync rule), so the package map now contradicts the code. Fix:
-# amend CLAUDE.md's cli row (name `memory_cmds` and scope the governance sentence) — or move the
-# command.
 from __future__ import annotations
 
 from pathlib import Path
@@ -56,28 +48,36 @@ def memory_orphans_cmd(
                                               render_orphan_survey)
 
     survey = orphan_survey(memory_dir, runs_root)
-    # REVIEW 2026-08-18 (correctness): this JSON branch exits 0 BEFORE the `survey["available"]`
-    # check below it, so a missing/typo'd memory_dir prints `{"available": false, ...}` and exits 0
-    # in --json mode while the human-readable path exits 1 — a scripted health check keyed on the
-    # exit code reads a misconfigured store as healthy. And `--json --apply` falls through this
-    # branch entirely, silently ignoring --json (the purge receipt is only ever printed as prose).
-    # Fix: hoist the availability check above this branch (exit 1, JSON body kept), and either honor
-    # --json on the apply path or refuse the flag combination out loud.
+    # AVAILABILITY FIRST, in BOTH modes. The JSON branch used to exit 0 above this check, so a
+    # missing or mistyped `memory_dir` printed `{"available": false, ...}` and exited 0 while the
+    # human path exited 1 — and a scripted health check keyed on the exit code (the only reason
+    # --json exists) read a misconfigured store as healthy. The JSON BODY is still emitted, because
+    # a machine caller needs the reason and not just the code.
+    if not survey["available"]:
+        if as_json:
+            typer.echo(orjson.dumps(survey, option=orjson.OPT_INDENT_2).decode())
+        else:
+            typer.echo(f"{memory_dir}: no such cross-run store")
+        raise typer.Exit(1)
     if as_json and not apply:
         typer.echo(orjson.dumps(survey, option=orjson.OPT_INDENT_2).decode())
         raise typer.Exit(0)
-    if not survey["available"]:
-        typer.echo(f"{memory_dir}: no such cross-run store")
-        raise typer.Exit(1)
-    for line in render_orphan_survey(survey, limit=limit):
-        typer.echo(line)
+    if not as_json:
+        for line in render_orphan_survey(survey, limit=limit):
+            typer.echo(line)
     if not apply:
         typer.echo("\nNothing was written. Re-run with --apply to purge. THIS IS IRREVERSIBLE.")
         raise typer.Exit(0)
     receipt = purge_orphan_identities(memory_dir, survey["identities"])
     deleted, kept, failures = receipt["deleted"], receipt["kept"], receipt["failures"]
-    typer.echo(f"\npurged {deleted} row(s); {kept} row(s) kept by a tier rule; "
-               f"{len(failures)} failure(s)")
-    for failure in failures[:20]:
-        typer.echo(f"  FAILED {failure.get('store')}: {failure.get('error')}")
+    if as_json:
+        # `--json --apply` used to fall through to prose, so a caller that asked for JSON got
+        # neither the plan nor a receipt — for the one invocation in this command that WRITES.
+        typer.echo(orjson.dumps({"applied": True, **receipt},
+                                option=orjson.OPT_INDENT_2).decode())
+    else:
+        typer.echo(f"\npurged {deleted} row(s); {kept} row(s) kept by a tier rule; "
+                   f"{len(failures)} failure(s)")
+        for failure in failures[:20]:
+            typer.echo(f"  FAILED {failure.get('store')}: {failure.get('error')}")
     raise typer.Exit(1 if failures else 0)

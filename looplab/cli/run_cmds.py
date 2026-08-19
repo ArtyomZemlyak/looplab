@@ -1298,15 +1298,25 @@ def reap_service_files_cmd(
     from looplab.serve.service_reaper import apply_service_file_reap, plan_service_file_reap
 
     plan = plan_service_file_reap(runs_root, grace_s=max(0.0, grace_hours) * 3600.0)
-    # REVIEW 2026-08-18 (correctness): `--json --apply` falls through this branch and silently
-    # ignores --json — the apply outcome is only ever printed as prose, so a scripted caller asking
-    # for JSON gets neither the plan nor a JSON receipt, with no refusal. (Related silence: a
-    # missing/typo'd runs_root is swallowed by `plan_service_file_reap`'s iterdir OSError catch and
-    # reports "0 service files" with exit 0 in BOTH modes.) Fix: emit the apply receipt as JSON, or
-    # refuse the --json/--apply combination out loud.
+    # A ROOT THAT ISN'T THERE IS NOT AN EMPTY ROOT. `plan_service_file_reap` catches the `iterdir`
+    # OSError and reports "0 service files" with exit 0, so a mistyped `runs_root` read exactly like
+    # a clean one — in both modes, and to a scripted caller keyed on the exit code most of all.
+    # Checked HERE rather than inside the planner because the planner is also used on a live tree
+    # where a partially-readable root is a legitimate (and separately reported) state.
+    if not Path(runs_root).is_dir():
+        message = f"{runs_root}: no such runs root"
+        typer.echo(json.dumps({"root": str(runs_root), "error": message}, indent=2)
+                   if as_json else message)
+        raise typer.Exit(1)
     if as_json and not apply:
         typer.echo(json.dumps(plan, indent=2, default=str))
         raise typer.Exit(0)
+    if as_json:
+        # `--json --apply` used to fall through to prose, so a caller that asked for JSON got
+        # neither the plan nor a receipt — for the one invocation of this command that DELETES.
+        outcome = apply_service_file_reap(plan)
+        typer.echo(json.dumps({"applied": True, "plan": plan, **outcome}, indent=2, default=str))
+        raise typer.Exit(1 if outcome["failures"] else 0)
     typer.echo(f"{plan['root']}: {plan['total']} service files, "
                f"{plan['removable']} removable, {plan['kept']} kept "
                f"(grace {grace_hours:g}h)")

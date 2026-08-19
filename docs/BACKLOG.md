@@ -4751,3 +4751,20 @@ deliberately deferred, with rationale:
   folds that key away, so `float()` never raises in production and the containment is defensive
   only. The first test written for it PASSED on the pre-fix code, which is the tell; it now drives
   the branch directly and a second test pins the fold as the rung that really protects the reader.]
+
+  **[2026-08-18 — the two maintenance commands whose EXIT CODE lied.** `--json` exists for a
+  scripted caller and a scripted caller reads the exit code, so both of these were worse than a
+  missing feature. `memory-orphans --json` emitted `{"available": false, ...}` and exited 0 for a
+  missing or mistyped store while the human path exited 1 — a health check keyed on the code read a
+  misconfigured cross-run store as healthy; the availability check now runs FIRST in both modes and
+  the JSON body is still emitted, because a machine caller needs the reason and not just the code.
+  `reap-service-files` had the same shape one layer down: `plan_service_file_reap` catches the
+  `iterdir` OSError and reports "0 service files", so a mistyped runs root read exactly like a clean
+  one, exit 0, in both modes — checked at the command rather than inside the planner, which is also
+  used on a live tree where a partially-readable root is a legitimate and separately-reported state.
+  And BOTH silently ignored `--json` on `--apply` — the one invocation of each that writes or
+  deletes — so a caller that asked for JSON got neither the plan nor a receipt; both now emit one.
+  The `conventions` finding beside them is closed by amending CLAUDE.md's cli row rather than moving
+  the command: `memory_cmds` is named, and the governance sentence now says what it actually means
+  (money on a steward, or authoring cross-run memory CONTENT) with `memory-orphans` — which only
+  ever REMOVES rows whose run is gone — stated as the deliberate exception.]
