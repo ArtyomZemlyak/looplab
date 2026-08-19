@@ -5,6 +5,15 @@ in the same pass. Each entry states what was asked, what the code does today (ve
 site), and what building it would actually take. Bugs from the same session were fixed and are in the
 git history, not here.
 
+> **Re-verified 2026-08-19 by [doc 43](43-operator-list-audit-2026-08-19.md), which captures the
+> operator's full notebook list.** Every F-entry's feature branch is merged into `master` — nothing was
+> left on a branch — but two statuses here overstate what the operator got, and doc 43 holds the
+> evidence: **F6**'s closing line promises an "Operations panel" that does not exist in `ui/src` (the
+> run-level spans it would show are served and have zero UI consumers), and **F4**'s watches cannot be
+> ARMED from the browser (`ui/src/api.js` has GET and DELETE and no POST). **F2** is stale rather than
+> wrong: `looplab/tools/dev_commands.py` landed 2026-08-17. Read doc 43 §0 before treating any symptom
+> reported on this box as evidence about `master`.
+
 Unlike [`BACKLOG.md`](BACKLOG.md) — which warns at length that it contradicts itself and is six weeks
 stale — every status below was read off the tree on 2026-08-11.
 
