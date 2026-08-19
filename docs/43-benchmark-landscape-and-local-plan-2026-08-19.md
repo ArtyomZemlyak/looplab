@@ -893,6 +893,42 @@ Measured on this endpoint: `medium` 21.5 s/call, `high` 111.3 s/call — 5x — 
 comparison becomes one of two truncated runs. Both arms are pinned to `medium`; parity is what the
 shared value buys, not the level itself.
 
+### The bridge scored 0.0 for everything, for three independent reasons
+
+Validating the arm end to end — rather than reasoning about it — found three defects, any one of
+which alone would have produced a campaign of zeros indistinguishable from a bad agent:
+
+1. **`RLIMIT_AS` killed every evaluation.** `validation_pool.disable_rlimit_as: false` caps VIRTUAL
+   address space, which JAX/torch/BLAS reserve in tens of GB without touching. Every run died with
+   "A process in the process pool was terminated abruptly" — at 14 GB and again at 30 GB, on a
+   321 MB task and on a 28 KB one, with 45 GB free. It is neither dataset size nor real memory.
+
+2. **The summary reader was keyed on fields nothing writes.** The file is
+   `{"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}` — no `task_name`, no `speedup`, value a
+   string — and `looplab_eval.py` searched for `task_name`/`speedup`. It reported `speedup: 0.0` on
+   a summary that had just been written successfully. This is the same defect class doc 43's own
+   subject matter keeps producing: *a reader keyed on a field nothing writes is a silent empty
+   answer, not a red test.*
+
+3. **My own fix for the parity trap broke the thing it was optimising.** Wrapping
+   `BaselineManager.get_baseline_times` from the parent process and running the evaluator through
+   `runpy` crashed the worker pool. Decisive measurement: same task, same config — direct
+   `0.9963x`, through the wrapper a pool crash. The cache now ships as an on-disk patch applied
+   before anything imports the module, which is the recipe this checkout already uses for the
+   upstream `sys.modules` bug.
+
+After all three: `discrete_log` scores end to end, and the cache takes a repeat evaluation from
+**668 s to 215 s**.
+
+### The metric is noisy, and the arms are noisy symmetrically
+
+The same solver scored **1.0006** then **1.4468** on consecutive runs of `discrete_log`. Caching the
+reference means the numerator and denominator are no longer timed in one pass, so machine drift stops
+cancelling. **This is not an asymmetry** — AlgoTuner's `BaselineManager` decouples them the same way
+inside its own run — but it does decide how to READ the campaign: one task's ratio is weak evidence,
+and the aggregate over 20 tasks is the comparison. `compare_arms.py` prints every per-task row so a
+single wild value cannot hide inside a mean.
+
 ### Sizing the campaign: three things the first run taught, all of them cost-shaped
 
 **1. A wall-clock net that BINDS deletes rows.** Arm A on `svm` reached $0.0182 of its $0.02 in

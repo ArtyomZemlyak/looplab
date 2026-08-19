@@ -136,6 +136,43 @@ so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without appr
 campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
 `config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
 
+### Three defects that made the bridge score 0.0 for everything
+
+All three were found by validating end to end rather than by inspection, and any one of them alone
+would have produced a campaign of zeros that looked like a bad agent.
+
+1. **`RLIMIT_AS` killed every evaluation.** `validation_pool.disable_rlimit_as: false` caps VIRTUAL
+   address space, which JAX/torch/BLAS reserve in tens of GB without touching. Every run died with
+   *"A process in the process pool was terminated abruptly"* — at 14 GB and again at 30 GB, on a
+   321 MB task and on a 28 KB one, with 45 GB free. Set `disable_rlimit_as: true`. Applies to both
+   arms.
+
+2. **The summary reader was keyed on fields nothing writes.** `evaluate_summary.json` is
+   `{"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}` — no `task_name`, no `speedup`, and the
+   value is a **string**. `looplab_eval.py` searched for `task_name`/`speedup`, so it reported
+   `speedup: 0.0` on a summary that had just been written successfully. It could never have returned
+   a number, for any task, on any node.
+
+3. **Wrapping `BaselineManager` in-process crashed the pool.** The persistent cache was first
+   implemented by patching the class from the parent and running the script via `runpy`. Same task,
+   same config: direct → `0.9963x`; through the wrapper → pool crash. The cache now ships as an
+   on-disk patch (`patch_baseline_cache.py`), applied before anything imports the module.
+
+Measured after all three: `discrete_log` scores end to end, and the cache takes a repeat evaluation
+from **668 s to 215 s** (3.1x).
+
+### The metric is noisy on small tasks, and both arms are noisy the same way
+
+The same solver on `discrete_log` scored **1.0006** and then **1.4468** on consecutive runs. The
+cache reuses the baseline from an earlier pass while re-timing the solver now, so machine drift no
+longer cancels between numerator and denominator.
+
+**This is not an asymmetry.** AlgoTuner's own `BaselineManager` does exactly the same thing inside a
+run — reference measured once at the start, every later `eval` timed against it — so both arms carry
+it. What follows is about how to READ the results: a single task's ratio is weak evidence, and the
+aggregate over the 20 tasks is the comparison. `compare_arms.py` prints per-task rows precisely so a
+single wild row cannot hide inside a mean.
+
 ### Bound `baseline_timeout`, or one bad candidate eats the campaign
 
 Shipped default 60 s per instance. Measured 2026-08-19: after its 14th message, one arm-A run spent

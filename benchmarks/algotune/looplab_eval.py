@@ -59,8 +59,8 @@ from typing import Any
 DEFAULT_CACHE = Path(__file__).resolve().parent / ".baseline_cache.json"
 # The per-INSTANCE reference timings (the cache that saves the WALL CLOCK), as opposed to
 # DEFAULT_CACHE above, which holds the aggregate (the cache that stabilises the DENOMINATOR).
+# The per-instance one is written by `patch_baseline_cache.py`, which patches AlgoTune itself.
 DEFAULT_TIMES_DIR = Path(__file__).resolve().parent / ".baseline_times"
-RUNNER = Path(__file__).resolve().parent / "run_evaluator.py"
 
 
 def _load_cache(path: Path) -> dict[str, Any]:
@@ -77,23 +77,63 @@ def _save_cache(path: Path, data: dict[str, Any]) -> None:
         pass
 
 
-def _find_result(node: Any, task: str) -> dict[str, Any] | None:
-    """Locate this task's result record anywhere in evaluate_summary.json.
+_SPEEDUP_KEYS = ("final_speedup", "speedup", "avg_speedup")
 
-    The summary's nesting has changed shape across AlgoTune versions, so this walks
-    rather than indexing a fixed path — a reader keyed on one layout goes silently
-    empty when upstream reshapes it.
+
+def _coerce_speedup(value) -> float | None:
+    """`evaluate_results.py` writes the number as a STRING, and writes words for a non-number."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None          # "N/A" / "Error" are the harness's own words for "no number"
+
+
+def _find_result(node, task: str, model: str) -> dict | None:
+    """Locate this (task, model) result anywhere in `evaluate_summary.json`.
+
+    THE SHAPE THIS ACTUALLY HAS, measured 2026-08-19 against a real run:
+
+        {"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}
+
+    Note what is NOT there: no `task_name`, no `speedup`, no `baseline_time_ms`, and the value is a
+    STRING. The first version of this function looked for `node.get("task_name") == task and
+    "speedup" in node` — fields nothing writes — so it returned None on a summary that had just been
+    written successfully, and the bridge reported `speedup: 0.0` for a solver the evaluator had
+    scored at 0.9963. It could never have returned a number for any task, on any node, for the whole
+    campaign, and the failure looked exactly like a wrong solver.
+
+    So the documented shape is read FIRST and explicitly. The tolerant walk stays underneath it
+    because upstream has reshaped this file before — but a walk is a fallback, never the primary
+    reader: a reader that only ever guesses cannot go red when the guess stops matching.
     """
     if isinstance(node, dict):
-        if node.get("task_name") == task and "speedup" in node:
+        entry = node.get(task)
+        if isinstance(entry, dict):
+            row = entry.get(model)
+            if isinstance(row, dict):
+                for key in _SPEEDUP_KEYS:
+                    if key in row:
+                        return dict(row)
+            # A model key we did not predict (upstream normalizes names): accept a UNIQUE row.
+            rows = [dict(v) for v in entry.values()
+                    if isinstance(v, dict) and any(k in v for k in _SPEEDUP_KEYS)]
+            if len(rows) == 1:
+                return rows[0]
+    return _walk_for_result(node, task)
+
+
+def _walk_for_result(node, task: str) -> dict | None:
+    """Fallback for a reshaped summary: any dict that names this task and carries a speedup."""
+    if isinstance(node, dict):
+        if node.get("task_name") == task and any(k in node for k in _SPEEDUP_KEYS):
             return node
         for value in node.values():
-            found = _find_result(value, task)
+            found = _walk_for_result(value, task)
             if found is not None:
                 return found
     elif isinstance(node, list):
         for value in node:
-            found = _find_result(value, task)
+            found = _walk_for_result(value, task)
             if found is not None:
                 return found
     return None
@@ -113,10 +153,8 @@ def main() -> int:
                     help="Ignore and do not write the aggregate baseline cache; recompute the ratio "
                          "from each run's freshly measured baseline.")
     ap.add_argument("--baseline-times-dir", type=Path, default=DEFAULT_TIMES_DIR,
-                    help=f"Per-instance reference-timing cache (default: {DEFAULT_TIMES_DIR}).")
-    ap.add_argument("--no-baseline-cache", action="store_true",
-                    help="Run the evaluator directly, re-measuring the whole reference pass on "
-                         "EVERY call. Correct but slow — see run_evaluator.py.")
+                    help="Where patch_baseline_cache.py keeps the per-instance reference timings. "
+                         "Informational here; the patch owns that path.")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
     args = ap.parse_args()
 
@@ -139,14 +177,12 @@ def main() -> int:
     if summary.exists():
         summary.unlink()
 
-    # The evaluator runs THROUGH `run_evaluator.py`, which gives `BaselineManager` a disk-backed
-    # cache. Without it every node re-measures the whole reference pass in a fresh interpreter --
-    # see that module's docstring for why the aggregate cache below does not cover this.
-    if args.no_baseline_cache:
-        argv = [sys.executable, str(evaluator)]
-    else:
-        argv = [sys.executable, str(RUNNER), str(args.baseline_times_dir), args.task, str(evaluator)]
-    argv += ["--models", args.model, "--tasks", args.task]
+    # The evaluator is invoked DIRECTLY. The persistent baseline cache is applied by patching
+    # `BaselineManager` on disk (`patch_baseline_cache.py`), NOT by wrapping it from here: measured
+    # 2026-08-19, importing AlgoTuner in this process before the evaluator builds its worker pool
+    # crashed every evaluation ("A process in the process pool was terminated abruptly"), while the
+    # identical run invoked directly returned 0.9963x.
+    argv = [sys.executable, str(evaluator), "--models", args.model, "--tasks", args.task]
 
     started = time.time()
     proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True, timeout=args.timeout)
@@ -161,7 +197,8 @@ def main() -> int:
         return 0
 
     try:
-        record = _find_result(json.loads(summary.read_text(encoding="utf-8")), args.task)
+        record = _find_result(json.loads(summary.read_text(encoding="utf-8")),
+                              args.task, args.model)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"unreadable summary: {type(exc).__name__}: {exc}"
         print(json.dumps(out))
@@ -173,7 +210,9 @@ def main() -> int:
         print(json.dumps(out))
         return 0
 
-    speedup = record.get("speedup")
+    speedup = next((_coerce_speedup(record[k]) for k in _SPEEDUP_KEYS if k in record), None)
+    # These two are absent from the shape this file actually has; they are read defensively so the
+    # aggregate cache below still works if upstream restores them.
     baseline_ms = record.get("baseline_time_ms")
     optimized_ms = record.get("optimized_time_ms")
 
