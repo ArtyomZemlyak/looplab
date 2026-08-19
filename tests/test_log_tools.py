@@ -1083,3 +1083,115 @@ def test_a_default_read_of_a_multi_megabyte_live_log_is_cheap():
     covered = out.splitlines()[0]
     assert "bytes total" in covered and "this answer covers bytes" in covered
     assert "earlier bytes not read" in out
+
+
+# ================================================ the three 2026-08-18 review findings, driven
+#
+# All three are about a RESUMED sweep — the one shape the module's own rule ("a remedy must be one
+# the caller has not already spent") is hardest to keep, because the caller arrives holding a byte
+# from a previous answer and everything it is told next is relative to something.
+
+def _search(tools, pattern, **kw):
+    return tools.execute("read_log", {"mode": "search", "pattern": pattern, **kw})
+
+
+def _hit_number(answer: str) -> int:
+    """The record number a search puts on its match — the number its own receipt tells the caller to
+    spend on mode="range"."""
+    for line in answer.splitlines():
+        if line.startswith(">"):
+            return int(line[1:].split(":", 1)[0])
+    raise AssertionError(f"no hit row in:\n{answer}")
+
+
+def test_a_resumed_sweeps_hit_numbers_address_the_same_records_as_range(tmp_path):
+    """The numbering must be ONE numbering. A search's receipt says a hit "can be re-read in full
+    with mode='range', start=N", and `_record_range_scan` counts from this attempt's FLOOR — so a
+    sweep that numbered from wherever it resumed handed the caller a number pointing at a different
+    record, silently. That is the spent-remedy defect this module was rewritten to remove, one mode
+    over."""
+    body = "".join(("BOOM\n" if i == 700 else f"quiet {i:05d}\n") for i in range(1_000))
+    tools = _tools(tmp_path, body)
+
+    whole = _search(tools, "BOOM")
+    absolute = _hit_number(whole)
+    assert absolute == 701, whole                    # 1-based from the floor
+
+    resume = len("".join(f"quiet {i:05d}\n" for i in range(400)))
+    resumed = _search(tools, "BOOM", from_byte=resume)
+    assert _hit_number(resumed) == absolute, resumed
+
+    # ...and the number is spendable: range answers about the record the sweep pointed at.
+    ranged = tools.execute("read_log", {"mode": "range", "start": absolute, "count": 1})
+    assert "BOOM" in ranged, ranged
+
+
+def test_a_resume_on_a_record_boundary_keeps_its_first_record(tmp_path):
+    """Every byte a receipt hands back is a record BOUNDARY, so the record starting there is whole.
+    Calling it torn dropped it unmatched — and since the previous sweep stopped BEFORE it, a match
+    in that record was counted by NEITHER sweep while the resumed one still reported reaching the
+    end of the log."""
+    head = "".join(f"quiet {i:05d}\n" for i in range(10))
+    body = head + "BOOM at the boundary\n" + "".join(f"quiet {i:05d}\n" for i in range(10))
+    tools = _tools(tmp_path, body)
+
+    resumed = _search(tools, "BOOM", from_byte=len(head))
+    assert "1 match(es)" in resumed, resumed
+    assert "torn by the seek" not in resumed, resumed
+    assert _hit_number(resumed) == 11, resumed
+
+    # A resume INSIDE a record is still torn, and still says so — the fix is about the byte, not
+    # about having seeked at all.
+    inside = _search(tools, "BOOM", from_byte=len(head) + 4)
+    assert "torn by the seek" in inside, inside
+
+
+def test_a_deadline_inside_the_first_batch_says_its_byte_does_not_progress(tmp_path):
+    """The resume byte deliberately UNDERSTATES how far the sweep got (never skip unswept bytes), so
+    on a first-batch stop it names the byte the caller already spent. Withholding it would break the
+    never-skip rule; presenting it bare reads as a remedy and loops a caller whose pattern is simply
+    too slow. So it is given AND labelled."""
+    import looplab.tools.log_tools as lt
+
+    body = "".join(("BOOM\n" if i == 500 else f"quiet {i:05d}\n") for i in range(1_000))
+    tools = _tools(tmp_path, body)
+    monkey = lt._SEARCH_DEADLINE_S
+    try:
+        lt._SEARCH_DEADLINE_S = 1e-9
+        out = _search(tools, "BOOM")
+    finally:
+        lt._SEARCH_DEADLINE_S = monkey
+
+    assert "search deadline" in out and _resume_byte(out) == 0    # still honest, still no skipping
+    assert "ALREADY STARTED" in out and "PATTERN is what has to change" in out, out
+
+    # A stop that DID move keeps the plain remedy — the label is about non-progress, not about
+    # deadlines in general.
+    try:
+        lt._SEARCH_DEADLINE_S = 1e-9
+        moved = _search(tools, "BOOM", from_byte=0)
+    finally:
+        lt._SEARCH_DEADLINE_S = monkey
+    assert "search deadline" in moved
+
+
+def test_a_range_cut_short_by_the_ceiling_never_reads_as_a_total(tmp_path):
+    """`of {seen}` is a FLOOR whenever anything stopped the seek early, not only when it stopped
+    satisfied. A ceiling stop used to render bare — "records 40-45 of 45 from this attempt's start"
+    on a 100-record log — which is three wrong claims at once: that 45 is the total, that the range
+    ended there, and (by silence) that nothing further exists."""
+    body = "".join(f"record {i:05d} with some padding to spend bytes\n" for i in range(100))
+    tools = _tools(tmp_path, body)
+
+    # The ONLY state that counted every record there is: a seek that ran to EOF unsatisfied.
+    whole = tools.execute("read_log", {"mode": "range", "start": 95, "lines": 60})
+    assert "of 100 " in whole, whole
+
+    # Satisfied early -> a floor, as it always was.
+    enough = tools.execute("read_log", {"mode": "range", "start": 40, "lines": 6})
+    assert "of 45+" in enough, enough
+
+    # Stopped by the ceiling with records still owed -> also a floor, and it says WHY.
+    cut = tools.execute("read_log", {"mode": "range", "start": 40, "lines": 6, "max_bytes": 1900})
+    assert "+ from this attempt" in cut, cut
+    assert "requested record(s) not reached" in cut, cut
