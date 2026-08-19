@@ -486,3 +486,61 @@ def test_memory_dir_source_says_whether_the_store_was_the_runs_own(tmp_path: Pat
     assert defaulted["memory_dir_source"] == "server_default"
 
     assert run_memory_identity(bare)["memory_dir_source"] == "none"
+
+
+# ============ the 2026-08-18 review finding: an ALLOW-LIST that failed OPEN on a transient error
+
+def test_an_unreadable_run_directory_never_licenses_reaping_a_live_lock(tmp_path, monkeypatch):
+    """The digest set is an ALLOW-LIST, so a missing entry does not read as "unknown" — it reads as
+    "that run is gone". One live run's `resolve()` raising ESTALE on a geesefs mount therefore
+    dropped its digest, the plan called its lock "fences no surviving run directory and is cold"
+    (a lock's mtime is its CREATION time, so any day-old run is cold), and `--apply` would unlink a
+    lock a live engine holds via flock — the per-inode fresh-lock race this module exists to stop.
+
+    `_age_ok` one screen up fails CLOSED on the same error class; now so does this.
+    """
+    import looplab.serve.service_reaper as sr
+
+    root = tmp_path / "runs"
+    (root / "live-run").mkdir(parents=True)
+    digest = sr.hashlib.sha256(
+        sr.os.path.normcase(str((root / "live-run").resolve())).encode("utf-8")).hexdigest()[:24]
+    lock = root / f"{sr._LIFECYCLE_LOCK_PREFIX}{digest}.lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 30 * 86400
+    os.utime(lock, (old, old))
+
+    plan = sr.plan_service_file_reap(root, grace_s=60.0)
+    entry = next(e for e in plan["entries"] if e["category"] == "lifecycle_lock")
+    assert entry["remove"] is False and "still exists" in entry["rule"]
+
+    # ...and now the walk goes blind on exactly that directory.
+    real_resolve = Path.resolve
+
+    def _blind(self, *a, **kw):
+        if self.name == "live-run":
+            raise OSError(116, "Stale file handle")
+        return real_resolve(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "resolve", _blind)
+    blinded = sr.plan_service_file_reap(root, grace_s=60.0)
+    entry = next(e for e in blinded["entries"] if e["category"] == "lifecycle_lock")
+    assert entry["remove"] is False, entry
+    assert "incomplete" in entry["rule"], entry
+
+
+def test_a_lock_whose_run_is_genuinely_gone_is_still_reaped(tmp_path):
+    """The fix must not turn the category off: a complete walk that simply does not contain the
+    digest still reaps a cold lock."""
+    import looplab.serve.service_reaper as sr
+
+    root = tmp_path / "runs"
+    root.mkdir(parents=True)
+    lock = root / f"{sr._LIFECYCLE_LOCK_PREFIX}{'0' * 24}.lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 30 * 86400
+    os.utime(lock, (old, old))
+
+    plan = sr.plan_service_file_reap(root, grace_s=60.0)
+    entry = next(e for e in plan["entries"] if e["category"] == "lifecycle_lock")
+    assert entry["remove"] is True and "cold" in entry["rule"], entry

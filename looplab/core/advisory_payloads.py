@@ -603,17 +603,18 @@ def memo_verification_view(memo) -> dict:
     if not isinstance(memo, dict):
         return {"status": "absent", "method": "", "counts": {}, "rows": []}
     block = memo.get("verification")
-    # REVIEW 2026-08-18 (correctness): this strip-filter pairs a FILTERED claim list positionally
-    # with verdict rows the writer (`trust/memo_verify.py::_check_claims`) emits for the UNFILTERED
-    # sanitized list — `sanitize_research_memo_payload` retains blank/whitespace statements
-    # (`redact_persisted_text(" ") == " "`) and the writer emits a row per claim, no filter — so one
-    # such claim shifts the join and every LATER claim reads `unverified`/"verification alignment
-    # mismatch" while its real verdict is counted as an unmatched row (driven: claims [" ", "A", "B"]
-    # -> both real claims `unverified`, `unmatched_verdicts` 1), pushing a false tally into
-    # `verdict_tally`/`memo_verdict_cue` prompts. Fix: enumerate the same unfiltered dict-coerced
-    # population the writer enumerates, filtering blanks only for display.
-    claims = [c for c in (memo.get("claims") or [])
-              if isinstance(c, dict) and str(c.get("statement") or "").strip()]
+    # THE JOIN IS POSITIONAL, so both sides must enumerate the SAME population. The writer
+    # (`trust/memo_verify.py::_check_claims`) emits one row per claim of the sanitized list,
+    # dict-coercing a non-dict and filtering NOTHING — and `sanitize_research_memo_payload` keeps a
+    # whitespace-only statement verbatim (`redact_persisted_text(" ") == " "`). Dropping blanks
+    # HERE therefore shifted the join by one for every blank above: each later claim read
+    # `unverified` / "verification alignment mismatch" while its real verdict was counted as an
+    # unmatched row, and that false tally went on into `verdict_tally` / `memo_verdict_cue` prompts
+    # (driven: claims [" ", "A", "B"] made both real claims `unverified` with
+    # `unmatched_verdicts` 1). So the population is the writer's — same coercion, same cap — and
+    # blankness is a DISPLAY concern, applied after the rows are paired.
+    claims = [c if isinstance(c, dict) else {}
+              for c in (memo.get("claims") or [])[:MAX_RESEARCH_CLAIMS]]
     if block is None:
         return {"status": "absent", "method": "", "counts": {}, "rows": []}
     if not isinstance(block, dict) or not isinstance(block.get("verdicts"), (list, tuple)):
@@ -627,6 +628,12 @@ def memo_verification_view(memo) -> dict:
     rows: list[dict] = []
     for index, claim in enumerate(claims):
         statement = str(claim.get("statement") or "").strip()
+        if not statement:
+            # A blank claim holds its POSITION in the join — that is the whole point — and is then
+            # dropped from what a reader sees and counts. It is not a claim; it is an artefact of a
+            # sanitizer that preserves whitespace, and neither the tallies nor the prompts should
+            # ever have to know it existed.
+            continue
         row = raw_rows[index] if index < len(raw_rows) else None
         if row is None:
             rows.append({"verdict": VERDICT_UNVERIFIED, "aligned": False, "statement": statement,
@@ -644,12 +651,14 @@ def memo_verification_view(memo) -> dict:
             "note": str(row.get("note") or "").strip(),
         })
     # Verdict rows BEYOND the claim list are counted and never dropped in silence: a block longer
-    # than its claims is a mismatch the reader must be able to say out loud.
+    # than its claims is a mismatch the reader must be able to say out loud. Measured against the
+    # POSITIONS, not against the rendered rows — a blank claim consumed a position and its row is
+    # therefore matched, not spare.
     unmatched = max(0, len(raw_rows) - len(claims))
 
     counts = {name: sum(1 for row in rows if row["verdict"] == name)
               for name in sorted(_VERDICTS | {VERDICT_UNVERIFIED})}
-    counts["claims"] = len(claims)
+    counts["claims"] = len(rows)
     counts["unmatched_verdicts"] = unmatched
     declared_total = block.get("total_verdicts")
     counts["total_verdicts"] = declared_total if type(declared_total) is int else len(raw_rows)

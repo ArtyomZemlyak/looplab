@@ -107,38 +107,48 @@ def _split_operation(name: str, prefix: str) -> Optional[tuple[str, str]]:
     return key, operation
 
 
-# REVIEW 2026-08-18 (correctness): this helper fails OPEN on the exact error class `_age_ok` above
-# fails CLOSED on. A transient OSError — `root.iterdir()` raising mid-iteration, or one live run's
-# `resolve()`/`is_dir()` raising (ESTALE/EIO on the geesefs mounts run roots live on) — silently
-# drops that run's digest from the allow-list, and the plan then marks its lifecycle lock "fences no
-# surviving run directory and is cold" (lock mtime is creation time; the `a+` open on acquire never
-# bumps it, so any day-old run qualifies). `--apply` then unlinks a lock a live engine HOLDS via
-# flock, enabling the per-inode fresh-lock race the module header documents as the one failure this
-# category exists to prevent. Nothing downstream can tell "run absent" from "digest set incomplete"
-# — the plan carries no such flag. Fix direction: on any OSError here, return a sentinel ("blind")
-# that makes every lifecycle-lock entry a KEEP with a stated reason, mirroring `_age_ok`'s rule.
-def _live_lifecycle_digests(root: Path) -> set[str]:
-    """The lifecycle-lock digest of every run directory that still exists.
+def _live_lifecycle_digests(root: Path) -> tuple[set[str], bool]:
+    """The lifecycle-lock digest of every run directory that still exists, AND whether that set is
+    COMPLETE.
 
     Recomputed from the same expression `engine_proc._run_lifecycle_lock_path` uses rather than
     imported, because importing that private helper would pull the engine-process module (and its
     thread registries) into a maintenance sweep. The expression is pinned by a test that asserts the
     two agree on a real path — a copy that silently drifts would start reaping LIVE locks, which is
-    the one failure this category exists to prevent."""
+    the one failure this category exists to prevent.
+
+    THE SECOND RETURN VALUE IS THE WHOLE POINT. This is an ALLOW-LIST, so a missing entry does not
+    read as "unknown", it reads as "that run is gone". A transient OSError — `iterdir` raising
+    mid-iteration, or one live run's `resolve()`/`is_dir()` raising ESTALE/EIO on the geesefs mounts
+    these roots live on — silently dropped exactly one live run from it, and the plan then called
+    its lock "fences no surviving run directory and is cold". Cold is easy to reach: a lock's mtime
+    is its CREATION time (the `a+` open on acquire never bumps it), so any day-old run qualifies.
+    `--apply` would then unlink a lock a live engine HOLDS via flock, opening the per-inode
+    fresh-lock race this module's header names as the one failure the category exists to prevent.
+
+    So an incomplete walk is reported rather than absorbed, and `_age_ok` one screen up is the
+    precedent: it fails CLOSED on the same error class. `blind=True` makes every lifecycle-lock
+    entry a KEEP with a stated reason — the sweep does less work, which is the safe direction for a
+    maintenance job whose remedy is to run again."""
     digests: set[str] = set()
     try:
         entries = sorted(root.iterdir())
     except OSError:
-        return digests
+        return digests, True
+    blind = False
     for run_dir in entries:
         try:
             if not run_dir.is_dir() or run_dir.name.startswith("."):
                 continue
             key = os.path.normcase(str(run_dir.resolve()))
         except OSError:
+            # One unreadable entry is one POSSIBLY-LIVE run whose digest is now missing from an
+            # allow-list, which is indistinguishable from a deleted run. Keep walking — the rest of
+            # the set is still worth having for the entries it does explain — but say so.
+            blind = True
             continue
         digests.add(hashlib.sha256(key.encode("utf-8")).hexdigest()[:24])
-    return digests
+    return digests, blind
 
 
 def _entry(path: Path, category: str, remove: bool, rule: str, age: float,
@@ -217,7 +227,7 @@ def plan_service_file_reap(runs_root: str | Path, *, now: Optional[float] = None
     # read that answer back — the pair must never be split.
     receipt_fate: dict[tuple[str, str], bool] = {}
     receipt_seen: set[tuple[str, str]] = set()
-    lifecycle_digests = _live_lifecycle_digests(root)
+    lifecycle_digests, lifecycle_blind = _live_lifecycle_digests(root)
 
     for name in names:
         path = root / name
@@ -268,6 +278,14 @@ def plan_service_file_reap(runs_root: str | Path, *, now: Optional[float] = None
             elif match.group(1) in lifecycle_digests:
                 entries.append(_entry(path, "lifecycle_lock", False,
                                       "fences a run directory that still exists", age))
+            elif lifecycle_blind:
+                # The allow-list is incomplete, so "not in it" no longer means "gone". Stated as
+                # its own rule rather than folded into the cold one: an operator reading this needs
+                # to know the sweep was blind, not that the lock looked young.
+                entries.append(_entry(path, "lifecycle_lock", False,
+                                      "the run directory listing was incomplete (an entry could "
+                                      "not be read), so a missing digest does not prove this "
+                                      "lock's run is gone", age))
             elif not cold:
                 entries.append(_entry(path, "lifecycle_lock", False,
                                       f"fences no surviving run but is only {age:.0f}s old; a "

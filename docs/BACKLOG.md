@@ -4699,3 +4699,31 @@ deliberately deferred, with rationale:
   already refuses a declaration above `eval_spec_time_budget` — and the residual is stated: the
   high-water mark is per-PROCESS, so a resumed chain is priced exactly as it was before and only a
   live one is priced honestly.]
+
+  **[2026-08-18 — three more, worked.**
+  *One join, three populations.* The memo verdict join is POSITIONAL, so every reader has to
+  enumerate what the writer enumerated. `_check_claims` emits one row per claim, dict-coercing a
+  non-dict and filtering nothing, and `sanitize_research_memo_payload` keeps a whitespace-only
+  statement verbatim — so `memo_verification_view` (which dropped blanks after strip) and
+  `run_tools` (which dropped them on a TRUTHY test, keeping `" "`) each shifted the join by one per
+  blank above. Both real claims came back `unverified` with "verification alignment mismatch",
+  their true verdicts were counted as unmatched rows, that false tally went into `verdict_tally` /
+  `memo_verdict_cue` prompts, and the rendered memo tagged "A" with "B"'s verdict. The view now
+  enumerates the writer's population — same coercion, same `MAX_RESEARCH_CLAIMS` cap — and blankness
+  is a DISPLAY concern applied after pairing; `run_tools` uses the view's own rule and cap.
+  *An allow-list that failed OPEN.* `_live_lifecycle_digests` swallowed an OSError per entry, and a
+  missing digest does not read as "unknown" there — it reads as "that run is gone". One live run's
+  `resolve()` raising ESTALE on geesefs therefore made the plan call its lock "fences no surviving
+  run directory and is cold" (a lock's mtime is its CREATION time, so any day-old run is cold), and
+  `--apply` would unlink a lock a live engine holds via flock — the per-inode fresh-lock race this
+  module exists to prevent, driven. It now returns `(digests, blind)` and every lifecycle-lock entry
+  is a KEEP with a stated reason when the walk was incomplete, mirroring `_age_ok` one screen up.
+  *An epoch that plateaued on the legacy shape.* The repair epoch took `max(repairs, attempt)`,
+  which is idempotent — and blind to the per-process ordinal restart the engine used before
+  `_durable_repair_ledger`: a real eight-repair chain reads [1,2,1,2,1,2,1,2] and ended at 2, so the
+  last failed stage row carried the CURRENT epoch and `stage_row_superseded` called a stale row
+  live. Idempotence moved onto the SEQ (`charged_repair_seqs`, the same shape as the ledger's other
+  de-dup sets), which is what a re-folded row really shares; two identical rows at different seqs
+  ARE the legacy shape and must both count, and `EventStore.append` mints seq from the tail and
+  never retries, so a duplicate at a new seq is not a shape this event can have. A
+  `salvage_cause_fix` row still charges nothing.]

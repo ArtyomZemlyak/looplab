@@ -283,7 +283,7 @@ class _FoldCtx:
         "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
         "run_base_invalid", "run_base_seen", "event_index",
-        "card_enrichment_index", "card_enrichment_omissions",
+        "card_enrichment_index", "card_enrichment_omissions", "charged_repair_seqs",
     )
 
     def __init__(self):
@@ -301,6 +301,10 @@ class _FoldCtx:
         # still current. A reset may discard its metric/state, but cannot refund compute already spent.
         self.charged_terminal_generations: set[tuple[int, int]] = set()
         self.charged_confirm_seeds: set[tuple[int, int, int]] = set()
+        # (node_id, seq) of every `node_repaired` row already charged to the repair epoch. What
+        # carries invariant #5 for that counter now that it advances rather than max-ing: a
+        # duplicate or re-folded row shares its SEQ, a per-process ordinal restart does not.
+        self.charged_repair_seqs: set[tuple[int, int]] = set()
         self.charged_ablation_ids: set[str] = set()
         # (physical event seq, physical fold index, content). The index is needed for legacy logs
         # whose envelopes have no meaningful seq but whose report->finish adjacency is still valid.
@@ -1060,6 +1064,14 @@ def _on_node_eval_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     if n is not None and _generation_matches(n, d):
         n.eval_started = True
 
+# `engine/metric_salvage.py::SALVAGE_CAUSE_TRIAGE_ACTION`, spelled rather than imported: `events`
+# imports only `core` (see the log-role note in `engine/train_monitor.py` for the same rule in the
+# other direction), and pulling the engine in here to read one string would invert the layering.
+# `tests/test_events_replay.py` pins that the two agree, which is the same treatment every other
+# cross-layer literal in this module gets.
+_SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
+
+
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
     # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
@@ -1098,21 +1110,33 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # charges no epoch here either. A row with no `attempt` (or a non-int/bool one — `True` is
         # an `int` in python and would read as epoch 1) falls back to advancing by one, which is
         # what a log written before the ordinal existed can support.
-        # REVIEW 2026-08-18 (correctness): `max` plateaus on the legacy multi-resume ordinal shape
-        # this change claims to attribute retroactively. Before `_durable_repair_ledger` the engine
-        # restarted `attempt` per PROCESS — that function's own measured corpus is eight durable
-        # rows at attempts [1,2,1,2,1,2,1,2] — and driven through this fold that log ends at
-        # `repairs == 2` after 8 repairs: rows 3..8 advance the epoch by 0, the last failed stage
-        # row carries epoch 2 == Node.repairs, and `stage_row_superseded` answers False where the
-        # monotone [1..8] control answers True — the stale-row defect reappears on exactly the
-        # historical logs the retroactive derivation exists for. Fix direction: when a
-        # non-`salvage_cause_fix` row's ordinal does not EXCEED the counter, treat it as a
-        # per-process restart and advance by one instead of max-ing.
-        _ordinal = d.get("attempt")
-        if isinstance(_ordinal, int) and not isinstance(_ordinal, bool):
-            n.repairs = max(n.repairs, _ordinal)
-        else:
-            n.repairs += 1
+        # WHY NOT PLAIN `max`. The ordinal only rises monotonically since `_durable_repair_ledger`;
+        # before it the engine restarted `attempt` per PROCESS, and that function's own measured
+        # corpus is eight durable rows reading [1,2,1,2,1,2,1,2]. Under `max` that log ends at
+        # `repairs == 2` after eight repairs — rows 3..8 advance the epoch by zero, the last failed
+        # stage row carries epoch 2 == `Node.repairs`, and `stage_row_superseded` answers False
+        # where the monotone control answers True. That is the stale-row defect reappearing on
+        # exactly the historical logs this retroactive derivation exists for.
+        #
+        # So: an ordinal that EXCEEDS the counter is taken (the modern monotone shape, and it also
+        # absorbs a gap); one that does not is read as a per-process restart and advances by one.
+        # IDEMPOTENCE (invariant #5) is no longer carried by `max` — which is what made the two
+        # indistinguishable — but by the SEQ, which is what a duplicate or a re-folded row really
+        # shares: `charged_repair_seqs` is the same shape as the ledger's other de-dup sets. A
+        # `salvage_cause_fix` row still charges nothing at all, because it deliberately RE-STATES
+        # the ordinal it follows ("the ORDINAL this row FOLLOWS, not a new one" —
+        # `engine/evaluate.py`) rather than opening an epoch.
+        _seq_key = (n.id, getattr(e, "seq", None))
+        if _seq_key[1] is None or _seq_key not in ctx.charged_repair_seqs:
+            if _seq_key[1] is not None:
+                ctx.charged_repair_seqs.add(_seq_key)
+            if str(d.get("triage_action") or "") != _SALVAGE_CAUSE_TRIAGE_ACTION:
+                _ordinal = d.get("attempt")
+                if isinstance(_ordinal, int) and not isinstance(_ordinal, bool) \
+                        and _ordinal > n.repairs:
+                    n.repairs = _ordinal
+                else:
+                    n.repairs += 1
 
 def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) -> None:
     """Make every surviving incumbent comparable on the newly-hidden partition.

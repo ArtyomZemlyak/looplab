@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events import digest
-from looplab.core.advisory_payloads import (VERDICT_UNVERIFIED, memo_verification_view,
-                                            verdict_tally)
+from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIFIED,
+                                            memo_verification_view, verdict_tally)
 from looplab.core.models import NodeStatus, RunState, extra_metric_channel
 from looplab.tools._base import RESULT_CAP, clip, fn_spec
 from looplab.tools._runcache import RunStateCache
@@ -791,15 +791,14 @@ class RunTools:
         findings = [str(f).strip() for f in (m.get("findings") or []) if str(f).strip()]
         if findings:
             parts.append("Findings:\n" + "\n".join(f"  - {f}" for f in findings[:12]))
-        # REVIEW 2026-08-18 (correctness): this truthy-`statement` filter is a THIRD population
-        # beside the two the verdict join already has — `memo_verification_view` drops claims whose
-        # statement is blank AFTER strip, and the sanitizer preserves a whitespace-only statement
-        # verbatim (`redact_persisted_text(" ") == " "`) — so such a claim is kept here, dropped
-        # there, and the positional `verdict_rows[index]` read in `_cite` below then tags every
-        # later claim with its NEIGHBOUR's verdict row and note (driven: claims [" ", "A", "B"]
-        # render "A" under "B"'s row and "B" untagged). Fix: filter with the view's own rule
-        # (strip), or render the view's `rows` directly so one population feeds both halves.
-        claims = [c for c in (m.get("claims") or []) if isinstance(c, dict) and c.get("statement")]
+        # THE VIEW'S OWN RULE, spelled the same way, because `_cite` reads `view["rows"][index]`
+        # positionally and a population that differs by one row tags every later claim with its
+        # NEIGHBOUR's verdict. A truthy test is not that rule: the sanitizer preserves a
+        # whitespace-only statement verbatim (`redact_persisted_text(" ") == " "`), so `" "` is
+        # truthy here and blank there — driven, claims [" ", "A", "B"] rendered "A" under "B"'s
+        # verdict and left "B" untagged. Same cap too, so the two lists cannot diverge past it.
+        claims = [c for c in (m.get("claims") or [])[:MAX_RESEARCH_CLAIMS]
+                  if isinstance(c, dict) and str(c.get("statement") or "").strip()]
         if claims:
             verdict_rows = view.get("rows") or []
             def _cite(index: int, c: dict) -> str:

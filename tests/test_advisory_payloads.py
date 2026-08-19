@@ -209,3 +209,70 @@ def test_report_sanitizer_reserves_shared_budget_for_caveats():
     })
 
     assert clean["caveats"] == ["critical advisory caveat"]
+
+
+# ============================== the 2026-08-18 review finding: one join, three populations
+#
+# The verdict join is POSITIONAL — `verdicts[i]` belongs to `claims[i]` — so every reader of it has
+# to enumerate exactly what the writer enumerated. `trust/memo_verify.py::_check_claims` emits one
+# row per claim, dict-coercing a non-dict and filtering nothing; `sanitize_research_memo_payload`
+# keeps a whitespace-only statement verbatim (`redact_persisted_text(" ") == " "`). Two readers
+# filtered it out, each by its own rule, and each shifted the join by one for every blank above.
+
+def _memo_with_a_blank_claim():
+    return {
+        "claims": [{"statement": " "},
+                   {"statement": "A", "node_ids": [1]},
+                   {"statement": "B", "node_ids": [2]}],
+        "verification": {"method": "engine", "verdicts": [
+            {"statement": "", "verdict": "unsupported", "note": "no evidence cited"},
+            {"statement": "A", "verdict": "supported", "note": "node 1 exists"},
+            {"statement": "B", "verdict": "supported", "note": "node 2 exists"}]},
+    }
+
+
+def test_a_blank_claim_does_not_shift_every_verdict_after_it():
+    """Driven at the shape the sanitizer really produces. Before the fix both real claims came back
+    `unverified` with "verification alignment mismatch", their true verdicts were counted as
+    unmatched rows, and that false tally went on into `verdict_tally` / `memo_verdict_cue` prompts."""
+    from looplab.core.advisory_payloads import memo_verification_view
+
+    view = memo_verification_view(_memo_with_a_blank_claim())
+    assert [row["statement"] for row in view["rows"]] == ["A", "B"]
+    assert [row["verdict"] for row in view["rows"]] == ["supported", "supported"]
+    assert all(row["aligned"] for row in view["rows"])
+    assert view["counts"]["unverified"] == 0
+    assert view["counts"]["unmatched_verdicts"] == 0     # the blank consumed its position
+    assert view["counts"]["claims"] == 2                 # ...and is not a claim anyone counts
+    assert view["counts"]["total_verdicts"] == 3         # the block's own receipt is untouched
+
+
+def test_a_block_genuinely_longer_than_its_claims_still_says_so():
+    """The blank claim must not become a way to hide a real mismatch: a verdict row with no claim at
+    all is still counted and still reported."""
+    from looplab.core.advisory_payloads import memo_verification_view
+
+    memo = _memo_with_a_blank_claim()
+    memo["verification"]["verdicts"].append({"statement": "C", "verdict": "supported"})
+    view = memo_verification_view(memo)
+    assert view["counts"]["unmatched_verdicts"] == 1
+    assert [row["statement"] for row in view["rows"]] == ["A", "B"]
+
+
+def test_the_rendered_memo_tags_each_claim_with_its_own_verdict():
+    """The third population: `run_tools` filtered claims with a TRUTHY test, so `" "` was kept there
+    and dropped in the view — and `_cite` reads `view["rows"][index]` positionally, rendering "A"
+    under "B"'s verdict and leaving "B" untagged."""
+    from looplab.core.models import RunState
+    from looplab.tools.run_tools import RunTools
+
+    state = RunState()
+    state.research = [_memo_with_a_blank_claim()]
+    text = RunTools(lambda: state)._research_memo(state)
+
+    claim_lines = [line.strip() for line in text.splitlines()
+                   if line.strip().startswith("- ") and line.rstrip().endswith(("A", "B"))
+                   or ("] A" in line or "] B" in line)]
+    assert len(claim_lines) == 2, text
+    assert all(line.startswith("- [SUPPORTED]") for line in claim_lines), text
+    assert "evidence: #1" in text and "evidence: #2" in text, text

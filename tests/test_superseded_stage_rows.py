@@ -147,12 +147,45 @@ def test_stage_row_superseded_truth_table():
 
 # ---------------------------------------------------------------- order/duplication tolerance
 
-def test_the_epoch_is_idempotent_under_a_duplicated_repair_row():
-    """Invariant #5: the fold must not be duplication-sensitive. The counter takes the row's own
-    durable ordinal rather than incrementing, so a re-folded row cannot inflate it."""
-    doubled = [_sf("train", "fail", 1, 10.0), _repair(1, "crash", "verified"),
-               _repair(1, "crash", "verified")]
-    assert _node(0, doubled).repairs == 1
+def test_the_epoch_is_idempotent_under_a_re_folded_repair_row():
+    """Invariant #5: the fold must not be duplication-sensitive — carried by the row's SEQ.
+
+    It used to be carried by taking `max(repairs, attempt)`, and that is exactly what made a
+    per-process ordinal restart invisible: before `_durable_repair_ledger` the engine restarted
+    `attempt` per process, so a real eight-repair chain reads [1,2,1,2,1,2,1,2] on disk and `max`
+    ended it at 2 — the last failed stage row then carried the CURRENT epoch and
+    `stage_row_superseded` called a stale row live, which is the defect this stamp exists to
+    prevent. Two identical rows at DIFFERENT seqs are that legacy shape and must both count; the
+    same row folded twice shares its seq and must not. `EventStore.append` mints seq from the
+    tail and never retries, so a duplicate at a new seq is not a shape this event can have.
+    """
+    row = _ev("node_repaired", {"node_id": 0, "generation": 0, "attempt": 1, "reason": "crash",
+                                "verified": "verified", "files": {}, "deleted": []}, 3)
+    evs = [_ev("run_started", {"task": {}, "settings": {}}, 0),
+           _ev("node_created", {"node_id": 0, "operator": "draft", "parent_ids": [],
+                                "idea": {"operator": "draft", "params": {}}, "code": "x"}, 1),
+           _ev("stage_finished", {"node_id": 0, "name": "train", "status": "fail",
+                                  "exit_code": 1, "seconds": 10.0}, 2),
+           row, row]                                  # the SAME event, folded twice
+    assert fold(evs).nodes[0].repairs == 1
+
+
+def test_a_legacy_per_process_ordinal_restart_still_advances_the_epoch():
+    """THE REGRESSION the `max` rule caused, driven at the measured shape: eight durable rows whose
+    ordinals restart per process. The epoch must reach 8, or the last attempt's stage rows are
+    indistinguishable from the ones five repairs ago."""
+    rows = [_sf("train", "fail", 1, 10.0)]
+    for ordinal in (1, 2, 1, 2, 1, 2, 1, 2):
+        rows.append(_repair(ordinal, "crash", "verified"))
+    node = _node(0, rows)
+    assert node.repairs == 8
+    assert stage_row_superseded({"repairs": 1}, node.repairs) is True
+
+    # ...and the modern monotone shape is unchanged, gaps included.
+    monotone = [_sf("train", "fail", 1, 10.0)] + [_repair(i, "crash", "verified")
+                                                  for i in (1, 2, 3)]
+    assert _node(0, monotone).repairs == 3
+    assert _node(0, [_sf("train", "fail", 1, 10.0), _repair(5, "crash", "verified")]).repairs == 5
 
 
 def test_a_salvage_cause_fix_charges_no_epoch():

@@ -3435,3 +3435,12 @@ def test_a_pre_speculation_log_keeps_every_selection_decision():
     ]
     state = fold([Event(seq=i, type=k, data=d) for i, (k, d) in enumerate(legacy_spec)])
     assert 2 not in _card_debuggable_leaf_ids(state)
+
+
+def test_the_salvage_action_literal_agrees_with_the_engine_that_writes_it():
+    """`events` may not import `engine`, so `replay` spells this string. A drift would make every
+    salvage-cause row charge a repair epoch it does not open."""
+    from looplab.engine.metric_salvage import SALVAGE_CAUSE_TRIAGE_ACTION
+    from looplab.events.replay import _SALVAGE_CAUSE_TRIAGE_ACTION
+
+    assert _SALVAGE_CAUSE_TRIAGE_ACTION == SALVAGE_CAUSE_TRIAGE_ACTION
