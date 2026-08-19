@@ -42,6 +42,7 @@ from looplab.core.models import (
     latest_lesson_node_count,
     valid_concept_id,
 )
+from looplab.engine.cadence import at_creation_boundary
 from looplab.engine.concept_registry import normalize_key
 from looplab.engine.curation_protocol import CurationProtocolMixin
 from looplab.engine.lessons_distill import LessonDistillMixin
@@ -176,12 +177,38 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         comparative lessons and append them to the SHARED cross-run store IMMEDIATELY — a
         concurrent run's refresh (read side below) can pick them up mid-flight, the AgentRxiv
         live-share pattern. The `lessons_distilled` event is the replay-safe gate (at_node +
-        the pair ids already spent); fires only at a creation decision point (no pending evals),
-        mirroring deep-research. No-op when the cadence is 0 or reflection memory is off."""
+        the pair ids already spent); fires only at a creation decision point. No-op when the cadence
+        is 0 or reflection memory is off.
+
+        THE CREATION DECISION POINT IS `cadence.at_creation_boundary`, NOT "no pending evals" (F1i).
+        This method's own docstring used to say the second thing and cite deep-research as the
+        precedent it was mirroring, which is how it inherited a proxy that backlog F1f made
+        permanently false: since evaluation children outlive the turn that admitted them, a GPU run
+        never reaches a prefix with nodes and none pending. Measured over `runs/` on 2026-08-18 —
+        `rubertlite-dr-unified-v7`, `-v9` and the live `e5small-dr-unified-v2` have ZERO such
+        prefixes and recorded ZERO `lessons_distilled` rows between them, while the runs that do
+        quiesce (dense-retrieval 19, v6 1, v8 1) distilled normally. That takes the whole M6 write
+        side with it — the mid-run half of the AgentRxiv live-share pattern this method exists for,
+        i.e. exactly the lessons a CONCURRENT run could have picked up while this one trained.
+        (Auto-skill promotion is NOT downstream of this call and was checked: it hangs off
+        `lessons_distill.py::write_reflection_note` -> `memory.write_auto_skill`, a run-END phase.)
+
+        THE MONEY RULE. The PACE is untouched — `_cadence_due` against `latest_lesson_node_count`
+        still admits one pass per node count — and unlike the Strategist consult and the concept
+        snapshot this consumer needs no in-process attempted-at-n memo, because it records its
+        `at_node` on EVERY path: the event below is appended even with zero lessons (see its own
+        comment), so the durable window closes on the first turn whatever the producer returned.
+        The one thing that changes shape is that a window can now open before any pair is
+        comparable; that costs nothing (`select_comparison_pairs` returns `([], [])` with no
+        provider call) and loses nothing (an empty receipt spends no pair, so the same pairs are
+        still there for the next window) — it only delays that batch by one interval, against a
+        status quo of never distilling at all."""
         if (self._e.lessons_every <= 0 or not self._e._comparative_lessons_on
                 or not (self._e._reflection_priors and self._e.memory_dir)):
             return state
-        if state.pending_nodes():
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=getattr(
+                                        self._e, "_cadence_while_evaluating", False)):
             return state
         n = len(state.nodes)
         last = latest_lesson_node_count(state.lessons_distilled)

@@ -24,7 +24,12 @@ What this file drives, in the order the risk runs:
      many times the outer loop turns at it;
   4. THE LINE — a tag produced beside a live evaluation is invisible to the graded-novelty
      admission channel, so no concept can reach selectability (docs/36);
-  5. the negative controls — kill switch off, and a quiescent run, both behaving as before.
+  5. the negative controls — kill switch off, and a quiescent run, both behaving as before;
+  6. THE OTHER THREE CONSUMERS — the first cut of this fix converted two of the five and section 6
+     was added on 2026-08-19 after the corpus said so: `lessons_distilled` and
+     `report_generated (trigger=cadence)` are zero in exactly the three runs with no quiescent
+     prefix. `_maybe_deep_research` is the one that stays on the old predicate, and its refusal is
+     pinned there too, because its concurrent half already covers it.
 """
 from __future__ import annotations
 
@@ -489,3 +494,158 @@ def test_a_malformed_in_flight_receipt_fails_closed(tmp_path, value, expected):
     assert state.node_concepts_at_pending.get(0, 0) == expected
     if expected:
         assert classifier_verified_node_concepts(state, 0) == []
+
+
+# ---------------------------------- 6. THE THREE CONSUMERS THE FIRST CUT OF THIS FIX LEFT BEHIND
+#
+# The module docstring above names FIVE phases that opened with `if state.pending_nodes()`, and the
+# 2026-08-18 change moved TWO of them onto `at_creation_boundary`. The other three kept the dead
+# proxy, and the corpus says so directly — over `runs/`, in exactly the runs with zero quiescent
+# prefixes (v7, v9, the live e5small):
+#
+#   consumer                                 dr    v6    v7    v8    v9   live
+#   lessons_distilled  (trigger=cadence)     19     1     0     1     0      0
+#   report_generated   (trigger=cadence)     26     1     0     1     0      0
+#
+# — against `research_completed (cadence)` 27/5/2/14/6/9, which is alive in every run because the
+# CONCURRENT half of that decision (`_spawn_research` -> `_due_research_trigger`) never carried the
+# guard at all. That asymmetry is why the serial deep-research gate is deliberately NOT moved here;
+# the last test in this section pins the refusal so nobody "completes the family" into a race.
+def _lesson_engine(tmp_path, name, *, while_evaluating: bool, distilled):
+    """An engine with comparative lessons wired and the paid producer replaced by a counter."""
+    eng = make_engine(tmp_path / name, lessons_every=1, comparative_lessons=True,
+                      reflection_priors=True, memory_dir=str(tmp_path / name / "mem"),
+                      cadence_while_evaluating=while_evaluating)
+    eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                     "direction": "min"})
+    # The producer is the paid half; the store write is the shared cross-run file. Neither is what
+    # this section is about — the question is only whether the loop ever REACHES them.
+    eng._comparative_lessons = lambda state, fp, exclude=(): (distilled(), [])
+    eng._append_lessons = lambda lessons, hygiene=True, state=None: None
+    return eng
+
+
+def _busy_nodes() -> dict:
+    """One node landed, one still training — the state every GPU run on this box is in ~always."""
+    return {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                status=NodeStatus.evaluated, metric=1.0),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), status=NodeStatus.pending),
+    }
+
+
+def test_lessons_distil_on_a_run_with_evaluations_in_flight(tmp_path):
+    """THE PROPERTY for the write side of M6. `lessons_distilled` is also the ONLY route to
+    auto-skill promotion (`lessons_distill.py` -> `memory.write_auto_skill`), so a dead distiller
+    takes the whole cross-run skill channel with it."""
+    calls = []
+
+    def _drive(while_evaluating):
+        calls.clear()
+        eng = _lesson_engine(tmp_path, f"L{while_evaluating}", while_evaluating=while_evaluating,
+                             distilled=lambda: (calls.append(1) or []))
+        state = fold(eng.store.read_all())
+        state.nodes = _busy_nodes()
+        assert state.pending_nodes(), "the fixture must reproduce the state the defect needs"
+        eng._maybe_distill_lessons(state)
+        return len(calls), [e.type for e in eng.store.read_all()]
+
+    on_calls, on_kinds = _drive(True)
+    off_calls, off_kinds = _drive(False)
+    assert on_calls == 1 and "lessons_distilled" in on_kinds
+    # NEGATIVE CONTROL: the kill switch restores the historical predicate byte for byte.
+    assert off_calls == 0 and "lessons_distilled" not in off_kinds
+
+
+def test_the_report_refreshes_on_a_run_with_evaluations_in_flight(tmp_path):
+    class _Writer:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, state, trigger=""):
+            self.calls += 1
+            return {"headline": "h", "verdict": "v", "at_node": len(state.nodes),
+                    "trigger": trigger}
+
+    def _drive(while_evaluating):
+        writer = _Writer()
+        eng = make_engine(tmp_path / f"R{while_evaluating}", report_writer=writer, report_every=1,
+                          cadence_while_evaluating=while_evaluating)
+        eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                         "direction": "min"})
+        state = fold(eng.store.read_all())
+        state.nodes = _busy_nodes()
+        eng._maybe_refresh_report(state)
+        return writer.calls, [e.type for e in eng.store.read_all()]
+
+    on_calls, on_kinds = _drive(True)
+    off_calls, off_kinds = _drive(False)
+    assert on_calls == 1 and "report_generated" in on_kinds
+    assert off_calls == 0 and "report_generated" not in off_kinds
+
+
+def test_a_fixed_node_count_buys_exactly_one_distill_and_one_report(tmp_path):
+    """THE MONEY BOUND, and for these two it needs no in-process memo: both record their `at_node`
+    on EVERY path — `lessons_distilled` is appended even with zero lessons (its own comment says
+    why), and `serve/report.py` sets `at_node` outside the try, so even a provider failure closes
+    the window. So the durable gate alone bounds the loop, which is why neither needs the
+    attempted-at-n memo the Strategist and the concept snapshot carry."""
+    calls = []
+    eng = _lesson_engine(tmp_path, "Lmoney", while_evaluating=True,
+                         distilled=lambda: (calls.append(1) or []))
+    state = fold(eng.store.read_all())
+    state.nodes = _busy_nodes()
+    for _ in range(25):
+        state = eng._maybe_distill_lessons(state) or state
+        state.nodes = _busy_nodes()          # the run has not moved; only the loop has turned
+    assert len(calls) == 1, f"paid {len(calls)} distillations at one node count"
+
+    class _Writer:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, state, trigger=""):
+            self.calls += 1
+            return {"headline": "h", "verdict": "v", "at_node": len(state.nodes)}
+
+    writer = _Writer()
+    eng2 = make_engine(tmp_path / "Rmoney", report_writer=writer, report_every=1,
+                       cadence_while_evaluating=True)
+    eng2.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                      "direction": "min"})
+    state2 = fold(eng2.store.read_all())
+    state2.nodes = _busy_nodes()
+    for _ in range(25):
+        state2 = eng2._maybe_refresh_report(state2) or state2
+        state2.nodes = _busy_nodes()
+    assert writer.calls == 1, f"paid {writer.calls} reports at one node count"
+
+
+def test_the_serial_deep_research_gate_is_deliberately_left_on_the_old_predicate(tmp_path):
+    """THE ONE THAT MUST NOT BE 'COMPLETED'. `_maybe_deep_research` is the SERIAL half of a decision
+    whose CONCURRENT half (`_spawn_research`) never carried this guard and fires throughout every
+    eval — measured, `research_completed` has cadence rows in all six runs in `runs/`, including the
+    three with zero quiescent prefixes. Moving this gate would put a main-task think and a
+    background think at the SAME node count with only a read-then-write window between their shared
+    `_cadence_research_marks` check and their receipts, i.e. it buys a double-spend to reach work
+    that is already being done. The hole it leaves is `concurrent_research=false` (not the shipped
+    default), and it is filed rather than patched — `docs/BACKLOG.md` F1i-b."""
+    class _Researcher:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, *a, **k):
+            self.calls += 1
+            return {}
+
+    stub = _Researcher()
+    eng = make_engine(tmp_path / "dr", deep_researcher=stub, deep_research_every=1,
+                      cadence_while_evaluating=True)
+    eng.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
+                                     "direction": "min"})
+    state = fold(eng.store.read_all())
+    state.nodes = _busy_nodes()
+    out = eng._maybe_deep_research(state)
+    assert stub.calls == 0
+    assert "research_attempted" not in [e.type for e in eng.store.read_all()]
+    assert out is state

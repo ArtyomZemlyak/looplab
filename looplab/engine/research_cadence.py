@@ -26,7 +26,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.jsonutil import canonical_json_digest
 from looplab.core.models import RunState, idea_proposal_ref, normalize_researcher_footprint
-from looplab.engine.cadence import deep_research_window
+from looplab.engine.cadence import at_creation_boundary, deep_research_window
 from looplab.events.replay import fold
 from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
                                   EV_REPORT_GENERATED, EV_RESEARCH_ATTEMPTED,
@@ -166,6 +166,14 @@ class ResearchCadenceMixin:
             return self._run_deep_research(state, trigger="manual", manual=True)
         # Auto triggers only at a creation decision point (no pending evals), never re-firing at a
         # node-count already researched (the at_node gate makes resume a no-op).
+        # THIS IS THE ONE MEMBER OF THE F1i FAMILY THAT KEEPS THE OLD PREDICATE, deliberately. The
+        # other four moved to `cadence.at_creation_boundary` because their phase stopped happening;
+        # this one's did not — `_spawn_research` runs the SAME decision concurrently and never
+        # carried the guard, so `research_completed (trigger=cadence)` is alive in all six runs in
+        # `runs/`, including the three with zero quiescent prefixes. Opening this gate mid-eval buys
+        # a double-spend (two thinks racing between the shared `_cadence_research_marks` read and
+        # their receipts) to reach work already being done. The `concurrent_research=false` hole is
+        # `docs/BACKLOG.md` F1i-b; `tests/test_cadence_while_evaluating.py` pins the refusal.
         # `n == 0` used to be part of THIS clause; it is now the run-opening branch below, because
         # "no nodes yet" is not "nothing to research" — see `_ground_run_start`. The at_node gate is
         # evaluated FIRST so a run-opening memo already in the log makes the branch a no-op on
@@ -931,10 +939,35 @@ class ResearchCadenceMixin:
     def _maybe_refresh_report(self, state: RunState) -> RunState:
         """Regenerate the agent-authored run report on a node-count cadence, then re-fold. No-op when
         the writer is off, when there's nothing evaluated yet, or when the report is already current
-        for this node-count (the `at_node` gate makes resume a no-op). Best-effort sidecar."""
+        for this node-count (the `at_node` gate makes resume a no-op). Best-effort sidecar.
+
+        THE CREATION DECISION POINT IS `cadence.at_creation_boundary` (F1i). This gate opened with a
+        bare `state.pending_nodes()` and stated no reason for it at all — `engine/cadence.py` names
+        it as the one copier of the 2026-06-24 predicate that never even wrote down what it thought
+        it was protecting. Since backlog F1f the observable is false for the whole life of every
+        evaluation, so the phase whose entire purpose is to let the report GROW WITH THE SEARCH
+        could only ever run in a drain: measured over `runs/` on 2026-08-18, `report_generated`
+        with `trigger=cadence` is 26/1/0/1/0/0 across dense-retrieval / v6 / v7 / v8 / v9 / the live
+        `e5small-dr-unified-v2` — zero in all three runs with no quiescent prefix, whose operators
+        therefore had no mid-run narrative at all while a 47-hour search ran.
+
+        THE MONEY RULE. Unchanged pace, and no in-process memo is needed: `serve/report.py` sets
+        `content["at_node"]` OUTSIDE its try, so even a provider failure that degrades to the
+        minimal report still closes the durable window — one paid report per node count however
+        many times the outer loop turns at it. The report is selection-neutral narrative, so a
+        mid-eval one names nodes that are still training; that is what `trigger` is for, and it is
+        strictly more information than the nothing this recorded before.
+
+        NOTE the OTHER clause is not this one and stays: `not state.evaluated_nodes()` is a refusal
+        to spend a window on a run with no results yet, which is true at a creation decision point
+        or not."""
         if self.report_writer is None or self.report_every <= 0:
             return state
-        if state.pending_nodes() or not state.evaluated_nodes():
+        if not at_creation_boundary(len(state.pending_nodes()),
+                                    while_evaluating=getattr(
+                                        self, "_cadence_while_evaluating", False)):
+            return state
+        if not state.evaluated_nodes():
             return state
         n = len(state.nodes)
         last = int((state.report or {}).get("at_node") or 0)
