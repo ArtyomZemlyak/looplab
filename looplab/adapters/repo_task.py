@@ -988,6 +988,43 @@ class EvalSpec(BaseModel):
                 raise ValueError(err.replace("stage 'score'", "eval.metric") + _WHAT[field])
             v = dict(v)
             v[field] = clean
+        return cls._valid_applied_config_glob(v)
+
+    @classmethod
+    def _valid_applied_config_glob(cls, v):
+        """`metric.applied_config_glob` — WHAT THE NUMBER'S COORDINATES ARE — same shape rule.
+
+        A SINGLE pattern and not a list, which is the one place this declaration's shape differs from
+        `subject_glob`'s and the difference is load-bearing. A metric may legitimately be about
+        several artifacts; a number has exactly ONE applied configuration, and a list would make the
+        engine choose between two documents that disagree — the tie-break
+        `runtime/applied_params.py` refuses by construction. Two matches of the one pattern are
+        already `ambiguous`, and a list would be a way around that refusal rather than a use for it.
+
+        Undeclared is the state every task on this box is in and is not a refusal: the record then
+        falls back to the carriers the engine itself committed and says so (`resolved_refused`).
+        """
+        from looplab.runtime.command_eval import (MAX_STAGE_EXPECT_FILES,
+                                                  _validate_rel_paths)
+        if not isinstance(v, dict) or v.get("applied_config_glob") is None:
+            return v
+        raw = v["applied_config_glob"]
+        clean, err = _validate_rel_paths("score", "applied_config_glob",
+                                         [raw] if isinstance(raw, str) else raw,
+                                         MAX_STAGE_EXPECT_FILES)
+        if err is not None:
+            raise ValueError(
+                err.replace("stage 'score'", "eval.metric")
+                + " `applied_config_glob` names the SHAPE of the path the eval writes its RESOLVED "
+                  "configuration to (e.g. \"experiments/*/final/config.yaml\"), relative to the "
+                  "node's eval workdir. It binds only when it matches exactly ONE document.")
+        if len(clean) != 1:
+            raise ValueError(
+                "eval.metric.applied_config_glob takes exactly ONE pattern (a number has one applied "
+                f"configuration), got {len(clean)}. Two documents that disagree is the case this "
+                "declaration exists to REFUSE, not a set to choose from.")
+        v = dict(v)
+        v["applied_config_glob"] = clean[0]
         return v
 
     @field_validator("cross_check")

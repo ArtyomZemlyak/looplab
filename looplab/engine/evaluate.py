@@ -3215,6 +3215,27 @@ class EvaluateMixin:
                         if _cmp is not None:
                             _merged["comparability"] = _cmp
                         _eval_payload["metric_provenance"] = _merged
+                    # THE APPLIED COORDINATES — what the configuration that ran said this node's
+                    # declared `Idea.params` were worth (`runtime/applied_params.py`, bound at the
+                    # metric read in `eval_dispatch`).
+                    #
+                    # MERGED ONTO `metric_provenance` and NOT given a top-level event key, for the
+                    # reason the subject record already relies on: the fold ignores unknown TOP-LEVEL
+                    # keys, so a second key would be invisible in every replayed `RunState` — which
+                    # is what the UI, the report, the exports and `looplab inspect` all read.
+                    #
+                    # UNCONDITIONAL AND NEVER A VIOLATION. `Idea.params` is a PROPOSAL under
+                    # `params_style: "none"`; a node that adjusted for a real constraint (an OOM, a
+                    # time budget) did the right thing and must still be allowed to win. This says
+                    # what it ran at; it mints no row, excludes nothing, and cannot cost a node its
+                    # terminal. Absent when the node declares no comparable coordinate or no carrier
+                    # could be read — never an empty record, which would be the claim "the
+                    # configuration was checked and said nothing".
+                    _applied_prov = getattr(res, "applied_params", None)
+                    if isinstance(_applied_prov, dict):
+                        _eval_payload["metric_provenance"] = dict(
+                            _eval_payload.get("metric_provenance") or {},
+                            applied_params=_applied_prov)
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

@@ -245,9 +245,11 @@ RATIONALE AT ALL.
 
 `verify_repair` asks *did the repair do what it SAID*. This asks *does the code the engine committed
 still agree with the parameters the record DECLARES* — and both inputs are things the engine holds:
-`Idea.params`, minted into `node_created` by the Researcher (never by a repair), and the `.py` bytes
-of `node_repaired.files`. So it sits in `REPAIR_INERT`'s trust tier, not `REPAIR_UNMET`'s: no wording
-evades it, none summons it, and a model that writes a more persuasive rationale changes nothing here.
+`Idea.params`, minted into `node_created` by the Researcher (never by a repair), and the committed
+bytes of `node_repaired.files`, read through whichever CARRIER decides the value (Python source or a
+structured configuration document — `_carrier_kind`). So it sits in `REPAIR_INERT`'s trust tier, not
+`REPAIR_UNMET`'s: no wording evades it, none summons it, and a model that writes a more persuasive
+rationale changes nothing here.
 
 **THE INCIDENT, on the live run's CHAMPION.** `rubertlite-dr-unified-v8` node 3 (R-Drop α=0.5 on
 node 1's DCL loss) became the run's best at **0.762048**, +0.0236 over the next node while the other
@@ -293,9 +295,12 @@ THE BOUNDS, each load-bearing:
   * The declared key must carry at least `PARAM_OVERRIDE_MIN_PARTS` dotted parts. A bare `lr` or `x`
     (the toy/benchmark spaces) would be met by any local of that name; a dotted `train.training.
     batch_size` is a path into a config object and English does not produce one by accident.
-  * The code target is parsed with `ast`, never a regex — the input IS Python by construction, and
-    the whole false-positive family here is comments and string literals, which `ast` does not have.
-    A file that does not parse is skipped (an agent may commit anything), never guessed at.
+  * The carrier is PARSED, never regex-matched — Python with `ast`, a document with its own parser
+    — because the whole false-positive family here is comments and string literals, which neither
+    parser has. A file that does not parse is skipped (an agent may commit anything), never guessed
+    at. Which files are carriers is `_carrier_kind`, and the rule is that the guard reads what
+    DECIDES the value: the `.py` test that stood here until 2026-08-20 was the EXTRACTOR's limit
+    mistaken for the rule, and on this box it made the rung a FALSE CLEAN rather than a partial one.
   * The declared parts must be a contiguous SUFFIX of the target's own parts, so
     `config.train.training.batch_size` and `cfg["train"]["training"]["batch_size"]` both match while
     the receiver's name is nobody's business.
@@ -310,6 +315,8 @@ import difflib
 import math
 import re
 from dataclasses import dataclass
+
+from looplab.core import param_carriers
 
 # --- The verdict vocabulary (a REGISTRY: CLAUDE.md) ---------------------------------------------
 # The single spelling of what a repair did to the tree. Duck-typed across three sites — the
@@ -835,13 +842,70 @@ def _assigned_numeric_paths(source: str) -> dict:
     return out
 
 
+# --- WHICH FILES DECIDE A VALUE (the carrier rule) -----------------------------------------------
+# A CARRIER is a committed file that can be read, deterministically and without executing anything,
+# as `dotted path -> numeric literal`. The `.py` test this loop used to make was never the rule; it
+# was the only EXTRACTOR. `core/param_carriers.py` holds the second family and the whole argument —
+# and the cost of not having it is on the record: `e5small-dr-unified-v2`'s champion (RECALL@100
+# 0.793426) was handed five files INCLUDING its own `vectorsearch/configs/config.yaml`, which reads
+# `n_epochs: 3` / `batch_size: 512` / `gradient_accumulation_steps: 32` against a declaration of
+# 15 / 8192 / 2, and this function answered `()`.
+#
+# NOT "add YAML as a special case". The two kinds are matched by DIFFERENT rules and the difference
+# is a property of the format, not a preference:
+#   _CARRIER_PYTHON    — an incomplete tree. A target's path is rooted at whatever local the code
+#                        bound (`config`, `cfg`, `self.conf`), so the walk is TARGET-first and two
+#                        assignments matching one declared suffix are two assignments.
+#   _CARRIER_DOCUMENT  — a complete, rooted tree. Every leaf's full path is known, so the walk is
+#                        DECLARATION-first and "this declaration names two leaves" is decidable and
+#                        REFUSED. A bare `batch_size` resolves to three leaves of the config on this
+#                        box; guessing between them is the one thing this rung may not do.
+_CARRIER_PYTHON = "python"
+_CARRIER_DOCUMENT = "document"
+
+
+def _carrier_kind(path):
+    """`_CARRIER_PYTHON` / `_CARRIER_DOCUMENT` for a file this rung can read, else None.
+
+    `_WHOLE_FILE` is the synthetic name of the solution artifact, which is Python by construction.
+    """
+    name = str(path or "")
+    if name == _WHOLE_FILE or name.endswith(".py"):
+        return _CARRIER_PYTHON
+    if param_carriers.is_document_carrier(name):
+        return _CARRIER_DOCUMENT
+    return None
+
+
+def _carrier_numeric_paths(path, text) -> dict:
+    """The `(dotted path) -> (value, line)` map for one carrier, dispatched on its kind."""
+    kind = _carrier_kind(path)
+    if kind == _CARRIER_PYTHON:
+        return _assigned_numeric_paths(text)
+    if kind == _CARRIER_DOCUMENT:
+        return param_carriers.document_numeric_paths(path, text)
+    return {}
+
+
+def _resolve_declaration(paths, parts):
+    """`core/param_carriers.resolve_declaration`, reached through the module so the ONE resolution
+    rule the applied-configuration record uses is the one this rung uses."""
+    return param_carriers.resolve_declaration(paths, parts)
+
+
 def declared_param_overrides(params, files, *, code: str = "", baseline_files=None,
                              baseline_code: str = ""):
-    """The declared `Idea.params` keys this working set's own `.py` code assigns a DIFFERENT number.
+    """The declared `Idea.params` keys this working set's own CARRIERS assign a DIFFERENT number.
 
     Pure, total and deterministic over two things the engine holds — the Researcher's declaration and
     the bytes the engine committed. It never reads a rationale, so no agent text can summon or evade
     a row; see the module docstring for the incident, the bounds and what the claim is NOT.
+
+    A CARRIER is a committed file that decides a value: Python source read with `ast`, or a
+    structured document (YAML/JSON) read as its own nesting (`core/param_carriers.py`, which holds
+    the rule and the measurement — the `.py`-only reading this used to do returned `()` about the
+    box's best number, whose own committed config contradicts three of its declared coordinates).
+    The two families are matched by DIFFERENT rules; `_carrier_kind`'s comment says why.
 
     `files` is a `{path: content}` map (`node.files` / `node_repaired.files`); `code` is the
     whole-file solution artifact when there is one, reported under the same `<whole-file solution>`
@@ -902,7 +966,7 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
     budget = _PARAM_SOURCE_CAP
     for path in sorted(files or {}):
         text = (files or {}).get(path)
-        if not isinstance(text, str) or not str(path).endswith(".py"):
+        if not isinstance(text, str) or not _carrier_kind(path):
             continue
         if not any(t in text for t in tails):
             continue
@@ -910,6 +974,8 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
             break
         budget -= len(text)
         sources.append((str(path), text))
+    # The whole-file solution artifact is Python by construction — it is `node.code`, the thing the
+    # sandbox executes — so it is admitted under that kind and never sniffed.
     if isinstance(code, str) and code.strip() and any(t in code for t in tails):
         sources.append((_WHOLE_FILE, code))
 
@@ -924,15 +990,33 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
         for path in sorted(baseline_files or {}):
             text = (baseline_files or {}).get(path)
             if str(path) in _wanted and isinstance(text, str):
-                base_paths[str(path)] = _assigned_numeric_paths(text)
+                base_paths[str(path)] = _carrier_numeric_paths(str(path), text)
         # The whole-file artifact under the SAME synthetic name it is reported by, so the one source
         # that has no path is attributed by the same rule as the ones that do.
         if _WHOLE_FILE in _wanted and isinstance(baseline_code, str):
-            base_paths[_WHOLE_FILE] = _assigned_numeric_paths(baseline_code)
+            base_paths[_WHOLE_FILE] = _carrier_numeric_paths(_WHOLE_FILE, baseline_code)
 
     out: list = []
     for path, text in sources:
-        assigned = _assigned_numeric_paths(text)
+        assigned = _carrier_numeric_paths(path, text)
+        if _carrier_kind(path) == _CARRIER_DOCUMENT:
+            # DECLARATION-FIRST, because a document is a COMPLETE tree and the question "which leaf
+            # does this declaration name" therefore HAS an answer — one, none, or too many. Too many
+            # is a refusal (`param_carriers.resolve_declaration`), which the target-first walk below
+            # cannot express: it would emit a row per matching leaf and let a bare word convict two
+            # unrelated sections of one config at once.
+            for key, (parts, decl) in sorted(declared.items()):
+                val, line, how = _resolve_declaration(assigned, parts)
+                if val is None or val == decl:
+                    continue                  # silent, ambiguous, or AGREES — nothing to say
+                if attribute:
+                    prior_map = base_paths.get(path, {})
+                    prior, _pline, _phow = _resolve_declaration(prior_map, parts)
+                    if prior is not None and prior == val:
+                        continue              # already there before this repair — not its doing
+                out.append(ParamOverride(param=key, declared=decl, code=val,
+                                         path=path, line=int(line)))
+            continue
         for target, (val, line) in assigned.items():
             for key, (parts, decl) in declared.items():
                 # SUFFIX, not equality: the receiver (`config`, `cfg`, `self.conf`) is the caller's

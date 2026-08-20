@@ -630,6 +630,84 @@ every other caveat it is derived from the declaration and the bytes the engine c
 model-authored text, and it moves no metric, champion, selection or violation
 (`engine/repair_verify.py::declared_param_overrides` owns the rule and its bounds).
 
+**That rung read only `.py` files until 2026-08-20, and on the task family this box actually runs
+that made it a FALSE CLEAN rather than a miss.** `params_style: "none"` means the engine applies
+nothing: the Researcher proposes coordinates, the Developer realises them by editing the repo, and
+on every repo run here the file that DECIDES a value is `vectorsearch/configs/config.yaml`. Run over
+every event log on disk, matching each declared key against that document on its exact dotted path
+or an UNAMBIGUOUS dotted suffix: **529 comparable declarations, 41 diverged (7.8 %), 5 refused as
+ambiguous, and 18 of the divergences sit on nodes that produced a metric.** The champion of
+`e5small-dr-unified-v2` — RECALL@100 **0.793426**, the best number on the box — is recorded at batch
+8192 / accumulation 2 / **15 epochs** and its own committed config says **512 / 32 / 3**. Handed that
+node's five committed files, `declared_param_overrides` returned `()`.
+
+The fix is **not** "read YAML too". The rule is that the guard reads **what decides the value**: a
+carrier is any committed file that can be read, deterministically and without executing anything, as
+`dotted path -> numeric literal`. Python source is one such format (`ast`), a structured document is
+another (`core/param_carriers.py`), and the `.py` test was never the rule — it was the only
+extractor. The two families keep DIFFERENT matching rules because the difference is a property of the
+format: a document is a complete rooted tree, so "this declaration names two leaves" is decidable and
+is **refused** (a bare `batch_size` resolves to three leaves of the real config); Python source is
+not, so two assignments matching one declared suffix are two assignments and both are reported.
+
+Two bounds are worth knowing. A PLAIN YAML scalar whose text `float()` accepts is a number even when
+PyYAML leaves it a string — PyYAML implements YAML **1.1**, whose float regex needs a `.` in the
+mantissa, so `5e-3` composes as `'5e-3'` while YAML 1.2, `float()` and every pydantic `float` field
+read 0.005; taking the resolver's word for it dropped two real divergences on
+`rubertlite-dr-unified-v8` node 12 (metric 0.761400), a ten-fold change in the loss temperature. A
+QUOTED scalar is never coerced, and JSON is never coerced at all.
+
+Corpus effect: **24 of the 57 folded nodes** now carry at least one row (12 of them metric-bearing),
+41 rows from the YAML carrier and the pre-existing 12 from `.py`, and **zero** from
+`looplab_stages.json` — the other committed document. Two champions are caveated where one was:
+`e5small-dr-unified-v2` node 1 joins `rubertlite-dr-unified-v8` node 3. `champion_metric_caveats`
+costs 26-35 ms per `/api/runs` poll on the two large repo runs, up from 15-17 ms.
+
+### What the number's coordinates ARE — `eval.metric.applied_config_glob`
+
+`declared_param_overrides` compares the declaration against **bytes the engine committed**, which is
+pure, replayable and total over every log ever written. It cannot see a value the eval process
+resolved for itself. `runtime/applied_params.py` binds that third side of the record — beside
+`metric_subject` (what the number is ABOUT) and `metric_inputs` (what it was measured AGAINST) — at
+the **metric read**, and folds it onto `node_evaluated.metric_provenance.applied_params`:
+
+```jsonc
+"metric": { "kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)",
+            "applied_config_glob": "vectorsearch/experiments/*/final/config.yaml" }
+```
+
+Two authorities. `committed` reads the carriers the engine itself staged, re-read from the workdir at
+the metric read; it needs no declaration and fires on all 52 corpus nodes that have a config carrier,
+which is the whole reason it exists — a record that only fires once the operator has declared
+something is the literal-`subject` defect again. `resolved` reads the configuration **the eval
+process wrote**, elected only by the glob above, and is the stronger source because it is
+post-resolution: defaults filled in, environment and command line layered, types coerced (170 leaves
+against the input config's 149).
+
+Why both, in numbers. Over `runs/` the two agree on **341 of 345** declared keys where both answer.
+The four that differ are the argument: `rubertlite-dr-unified-v8` node 8 declares batch 8192 / 15
+epochs, its committed carrier **agrees with the declaration**, and the config the process resolved
+says **4096 / 8** — invisible to any reader of committed bytes. `e5small-dr-unified-v2` node 0
+declares 8192, its carrier says 512, and the process resolved **2048**: three different numbers for
+one parameter.
+
+**A single pattern, and it binds only on a unique match** — the same rule as `subject_glob`, for a
+measured reason rather than a symmetry. 28 of the 52 nodes hold more than one `**/final/config.yaml`,
+and on **8** of them the matches DISAGREE, on `train.training.batch_size` and
+`gradient_accumulation_steps` specifically, because the training stage and the scoring stage each
+resolved their own. Two matches is `ambiguous`, zero is `missing`, an older one is `stale`; each is a
+REFUSAL that falls back to `committed` and records *why* (`resolved_refused`). A list of patterns is
+refused at submit for the same reason: a number has one applied configuration, and choosing between
+two documents that disagree is exactly what this declaration exists to refuse.
+
+**It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
+thing — the champion's own config says so in a comment beside the line — and must still run, still
+record its metric and still be allowed to win. What must not survive is a record attributing that
+number to parameters the node never used. The record mints no violation, excludes nothing and cannot
+cost a node its terminal; it is `None` (never an empty record) when nothing was checked, and it always
+carries `checked` beside `diverged` so "everything agreed" and "nothing was looked at" can never read
+the same. Old logs carry no key at all and every reader defaults them to silence (invariant #5).
+
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine
 re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against

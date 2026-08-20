@@ -271,6 +271,10 @@ _LAYOUT = {
     "landlock": "runtime",         # the kernel read allow-list applied at the launch
     "stage_identity": "runtime",   # what a stage RAN ON and what it MADE: the reuse key a cache
     #                              would consult + the produced artifacts' content identity
+    "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates
+    #                              were worth, bound at the metric read
+    "param_carriers": "core",      # the ONE reading of what number a configuration DOCUMENT
+    #                              assigns a declared dotted path (shared by the guard and the record)
     "readmodel": "events",
     "receipts": "core",         # the one bounded-receipt-count rule (doc 25 EM-12)
     "redact": "core",

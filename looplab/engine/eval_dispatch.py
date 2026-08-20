@@ -10,6 +10,7 @@ through their source modules keeps working."""
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,7 @@ from looplab.engine.speculation_gate import engine_authored_artifacts
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
-from looplab.runtime import metric_inputs
+from looplab.runtime import applied_params, metric_inputs
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
 # (as `next_start`), so the identity check here MUST see the same object the orchestrator uses.
@@ -668,6 +669,14 @@ class EvalDispatchMixin:
             # reaches `Path.glob(pattern)`, which raises `TypeError` on a non-string just as readily.
             _subject_glob = [g for g in (_mspec.get("subject_glob") or [])
                              if isinstance(g, str) and g.strip()]
+            # THE ATTEMPT'S OWN FLOOR, taken on the engine's clock immediately before the eval.
+            # `run_command_eval` derives its subject floor from a `_eval_started` set AFTER setup, so
+            # this one is at most a few seconds EARLIER — the permissive direction, which is the
+            # right one for a record that must never refuse spuriously. It goes through the SAME
+            # `attempt_freshness_floor` so a stage-scoped re-run drops the floor here exactly as it
+            # does for the subject: the engine's own reuse must not make the reused stage's config
+            # read as `stale`.
+            _attempt_started = time.time()
             res = command_eval.run_command_eval(
                 cmd, cwd, timeout, es["metric"], env,
                 setup=es.get("setup") or None, setup_timeout=es.get("setup_timeout", 600.0),
@@ -751,6 +760,44 @@ class EvalDispatchMixin:
                 except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
                     res.eval_inputs = {"inputs_bound": False, "inputs": [],
                                        "unbound_reason": "unreadable"}
+            # THE COORDINATE SIDE — what the CONFIGURATION that ran said the node's declared
+            # `Idea.params` were worth (`runtime/applied_params.py`).
+            #
+            # AT THE METRIC READ, and the same instant argument the subject side makes: a staged
+            # pipeline REWRITES its configuration between stages (the training stage and the scoring
+            # stage each resolve their own on this box), so a record bound before the first stage
+            # would describe a document that no longer decided anything by the time the number was
+            # read. "As it stands when the number was read" is the only instant that is a fact about
+            # this number.
+            #
+            # HERE AND NOT INSIDE `run_command_eval`, for `metric_inputs`' two reasons: the workdir is
+            # unambiguously alive at this line, and `run_command_eval` is the library boundary — a
+            # caller outside the engine has no `Idea.params` and must not grow an argument for one.
+            #
+            # THE CARRIERS ARE `node.files`' OWN KEYS, i.e. exactly what the engine committed and
+            # nothing it discovered. That is what keeps this a record about the node's declared
+            # configuration and not a search of the workdir for a file that looks convenient; the
+            # STRONGER source — the config the eval process itself wrote — is elected only by the
+            # operator's `applied_config_glob`, and only on a unique match.
+            #
+            # NOT GATED, on any rung. It records what a number's coordinates are; it does not decide
+            # whether the number is sound, so it mints no violation, excludes nothing and cannot cost
+            # a node its terminal. A node that adjusted for a real constraint must still be allowed
+            # to win — what must not survive is a record attributing its number to parameters it
+            # never used.
+            try:
+                _declared_params = (dict(node.idea.params or {})
+                                    if node is not None and node.idea is not None else {})
+                res.applied_params = applied_params.bind_applied_params(
+                    _declared_params, str(workdir),
+                    carriers=sorted((node.files or {}) if node is not None else {}),
+                    applied_config_glob=_mspec.get("applied_config_glob"),
+                    since=command_eval.attempt_freshness_floor(
+                        _attempt_started, stages,
+                        (node.rerun_stage if node is not None else None)
+                        if start_stage is _UNSET else start_stage))
+            except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
+                res.applied_params = None
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;
