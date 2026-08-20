@@ -80,7 +80,20 @@ PATCH = '''        {marker}
                 # forbids, and the only safe answer is to skip the cache and measure.
                 if not _ll_task:
                     raise _LooplabNoCacheKey()
-                _ll_key = _ll_os.path.join(_ll_cache_dir, f"{{_ll_task}}__{{subset}}.json")
+                # The REGIME belongs in the key. A baseline measured while nothing else ran is
+                # not the same number as one measured while 24 other instances were being timed,
+                # and the speedup only cancels the difference when BOTH halves come from the same
+                # regime. Sharing one cache file across regimes silently divides an in-regime
+                # solver time by an out-of-regime reference -- measured on this box as a swing
+                # from 1.46x to 1.04x on the identical solver.
+                try:
+                    from AlgoTuner.utils.evaluator import looplab_parallel as _ll_par
+                    _ll_w, _ll_c = _ll_par.resolve_workers()
+                except Exception:
+                    _ll_w, _ll_c = 1, 1
+                _ll_regime = "" if _ll_w <= 1 else f"__w{{_ll_w}}x{{_ll_c}}"
+                _ll_key = _ll_os.path.join(
+                    _ll_cache_dir, f"{{_ll_task}}__{{subset}}{{_ll_regime}}.json")
                 if _ll_os.path.exists(_ll_key):
                     with open(_ll_key, "r", encoding="utf-8") as _ll_fh:
                         _ll_times = _ll_json.load(_ll_fh)
