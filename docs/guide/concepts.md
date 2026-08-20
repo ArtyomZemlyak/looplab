@@ -736,6 +736,12 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   log record it stood on. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
 
+  The engine still HANDS OVER what it saw. `engine_observed_facts` states the exit status and
+  whether the process wrote anything at all — a fact `_eval_failure_text` surfaced only when stderr
+  was blank, so a pod cgroup OOM-kill leaving a `Killed` line used to reach the judge as that one
+  word. It states the fact and never the conclusion; a hint phrased as a verdict would be the
+  deleted rule wearing a prompt.
+
   Two consequences worth knowing. `check_failed` is DIAGNOSABLE while the two filesystem contracts
   are not, because a `check_failed` row is written from another MODEL's reading of the stage's
   output — measured, 21 such rows in `runs/` hide at least three different real causes, 16 of them a

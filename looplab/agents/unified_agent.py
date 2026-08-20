@@ -493,7 +493,8 @@ class UnifiedAgent(WrapsDeveloper):
 
     def triage_crash(self, node, error: str, attempt: int, *, state: Optional[RunState] = None,
                      brief: str = "", history: str = "", stages_passed: Optional[int] = None,
-                     attempts_left: Optional[int] = None, tools=None) -> Optional[dict]:
+                     attempts_left: Optional[int] = None, tools=None,
+                     engine_facts: str = "") -> Optional[dict]:
         """Decide what to do with a just-crashed node: returns ``{"action", "failure_kind",
         "rationale"}`` where
         action ∈ {repair, abandon, reject_idea} — or one of the engine's two fail-closed verdicts
@@ -574,12 +575,21 @@ class UnifiedAgent(WrapsDeveloper):
         # which is what makes `tools=None` byte-identical to the historical prompt.
         look = ("" if tools is None else
                 render(self.prompts, "triage_look_invitation", self._REPAIR_LOOK_INVITATION) + "\n")
+        # WHAT THE ENGINE ITSELF OBSERVED, spliced in the same shape as `budget`/`depth`/`look` —
+        # empty string when absent, so an older caller reproduces the historical prompt byte for
+        # byte. It carries the exit status and whether the process wrote anything at all, which
+        # `_eval_failure_text` surfaces ONLY in its blank-stderr fallback: a cgroup OOM-kill that
+        # leaves a "Killed" line hands this judge that one word and nothing else. See
+        # `engine/failure_diagnosis.py::engine_observed_facts` for why stating the fact and NOT the
+        # conclusion is the whole point, and for why the inference it enables is stronger than the
+        # deleted rule that used to make it.
+        facts = (str(engine_facts) + "\n") if str(engine_facts or "").strip() else ""
         messages = [
             {"role": "system", "content": render(self.prompts, "triage_system", self._TRIAGE_SYSTEM)},
             {"role": "user", "content": (
                 (brief + "\n" if brief else "") +
                 f"Crashed node {getattr(node, 'id', '?')} (repair attempt {attempt}).\n"
-                + budget + depth + look +
+                + budget + depth + look + facts +
                 f"--- ERROR (stderr tail) ---\n{error}\n"
                 + (f"{history}\n" if history else "") +
                 f"--- CODE (tail) ---\n{code_tail}\n"

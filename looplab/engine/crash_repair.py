@@ -168,7 +168,7 @@ class CrashRepairMixin:
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
                       reason: str = "crash", *, repair_log=None,
                       depth: Optional[int] = None, attempts_left: Optional[int] = None,
-                      log_tools=None) -> dict:
+                      log_tools=None, engine_facts: str = "") -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str,
         "failure_kind": str}.
@@ -252,7 +252,8 @@ class CrashRepairMixin:
             # ending the node on an answer nobody could read.
             for _round in range(1 + _TRIAGE_REASK_LIMIT):
                 verdict = self._ask_triage(fn, state, node, tagged, attempt, reason,
-                                           repair_log, depth, attempts_left, log_tools)
+                                           repair_log, depth, attempts_left, log_tools,
+                                           engine_facts)
                 if verdict["action"] in AGENT_TRIAGE_ACTIONS:
                     return verdict
             return verdict
@@ -271,7 +272,7 @@ class CrashRepairMixin:
                             _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
-                    repair_log, depth, attempts_left, log_tools=None) -> dict:
+                    repair_log, depth, attempts_left, log_tools=None, engine_facts: str = "") -> dict:
         """ONE ask of the wired judge, normalized to a `TRIAGE_ACTIONS` verdict.
 
         Split out of `_triage_crash` so the re-ask above is a loop over a single, total function
@@ -316,9 +317,15 @@ class CrashRepairMixin:
             # would read like the safety and is not it — `_accepted_kwargs` is — and the two spellings
             # are indistinguishable to a new seam, whose `tools=None` default and an explicit `None`
             # are the same value. One rule for the whole bag is the reviewable one.
+            # `engine_facts` rides in the SAME narrowed bag as the four before it, and for the
+            # identical reason stated above: `triage_crash` is a DUCK-TYPED seam, so an argument
+            # passed unconditionally to an implementation written against an older signature raises
+            # TypeError, which the fail-closed handler below reads as a dead provider — a stopped
+            # node PLUS a RUN-level pause. `_accepted_kwargs` is the safety; listing it here
+            # unconditionally like the rest is what keeps one rule for the whole bag.
             extra = {"history": _format_repair_log(repair_log),
                      "stages_passed": depth, "attempts_left": attempts_left,
-                     "tools": log_tools}
+                     "tools": log_tools, "engine_facts": engine_facts}
             with self.tracer.span("triage", attempt=attempt, reason=reason):
                 out = fn(node, tagged, attempt, state=state, brief=brief,
                          **_accepted_kwargs(fn, extra))

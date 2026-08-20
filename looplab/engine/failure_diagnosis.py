@@ -482,6 +482,55 @@ def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
     return kind, REASON_SOURCE_TRIAGE
 
 
+def engine_observed_facts(res) -> str:
+    """The engine's OWN record of how the process ended, rendered for the diagnostician — or `""`
+    when there is no `res` to read.
+
+    WHY THIS EXISTS AT ALL, and it is the `setup` lesson one rung along. Deleting the kernel-OOM
+    rule was right on the ownership question — the KERNEL issued that kill, the engine did not, and
+    nothing of ours observed it, so "was this a memory kill?" is a judgement and not a fact. But the
+    exit STATUS *is* a fact the engine holds, and `evaluate._eval_failure_text` surfaces it only in
+    its blank-stderr fallback: a cgroup kill that leaves a "Killed" line hands the judge that one
+    word and nothing else. Leaving the diagnostician to re-infer an engine-held fact from the
+    candidate's own text is the same discarding this whole module exists to stop.
+
+    So the engine states what it saw and stops there. It does NOT say "this looks like an OOM" —
+    that is the judgement being delegated, and a hint phrased as a conclusion is the old rule wearing
+    a prompt.
+
+    WHAT MAKES THIS SAFE TO SAY, and why the resulting inference beats the rule it replaces: `exit
+    -9 with no output` was a bad RULE because it is also precisely what both watchdog tree-kills
+    look like — the v6 node 5 conflation, three memory-reduction rounds spent on a run that was
+    diverging. Those cannot reach here: a watchdog kill is ENGINE-FINAL, so `diagnosed_failure_reason`
+    never asks about one. The signal arrives with its single confounder already excluded BY
+    CONSTRUCTION, in front of a reader that can also check the batch size in the code.
+
+    Total over junk, like everything else on this path — a `res` missing any attribute renders the
+    fields it has and omits the rest."""
+    if res is None:
+        return ""
+    bits = []
+    code = getattr(res, "exit_code", None)
+    if isinstance(code, int):
+        # NEGATIVE exit codes are POSIX signals as Python reports them, and 128+N is the shell's
+        # spelling of the same thing. Named rather than left as a number, because "-9" means nothing
+        # to a reader that has not memorised the table and "SIGKILL" is the whole content.
+        sig = -code if code < 0 else (code - 128 if 128 < code < 160 else None)
+        named = {9: "SIGKILL", 15: "SIGTERM", 6: "SIGABRT", 11: "SIGSEGV", 7: "SIGBUS"}.get(sig)
+        bits.append(f"exit code {code}" + (f" (killed by {named})" if named else ""))
+    err = getattr(res, "stderr", None)
+    if isinstance(err, str):
+        bits.append("the process wrote NOTHING to stderr" if not err.strip()
+                    else f"it wrote {len(err)} characters to stderr")
+    if not bits:
+        return ""
+    return ("--- WHAT THE ENGINE ITSELF OBSERVED (facts, not readings) ---\n"
+            + "; ".join(bits) + ".\n"
+            "No watchdog of ours claimed this run: the stall, divergence and training monitors all "
+            "report out of band, and a kill by any of them would have been classified without "
+            "asking you. So whatever ended this process, it was not us.\n")
+
+
 def diagnosis_code_tools(engine, workdir):
     """The read-only CODE scouts the diagnostician may look with, rooted at the NODE WORKDIR — or
     None when the tools are off or there is no workdir to root them at.

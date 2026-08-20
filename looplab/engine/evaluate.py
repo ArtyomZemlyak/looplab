@@ -94,7 +94,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # agent (8.7 provider calls per failure, already paid).
 from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_evidence,
                                               diagnosed_failure_reason, diagnosis_tools,
-                                              evidence_citation_resolves)
+                                              engine_observed_facts, evidence_citation_resolves)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
 # This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
 # whole point of the rule living in one pure function. A site here that set one of them by hand
@@ -2317,7 +2317,8 @@ class EvaluateMixin:
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
                                             attempts_left=_repair_attempts_left(attempt, _repair_cap),
-                                            log_tools=_repair_tools)
+                                            log_tools=_repair_tools,
+                                            engine_facts=engine_observed_facts(res))
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
                 # verdict this attempt already paid for, and before every branch below that

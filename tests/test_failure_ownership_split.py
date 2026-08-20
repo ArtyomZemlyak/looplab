@@ -646,6 +646,81 @@ def test_the_diagnostician_gets_the_code_the_eval_actually_ran():
     assert fd.diagnosis_code_tools(_On(), "/nonexistent/nope") is None
 
 
+def test_the_engine_states_what_it_observed_and_never_the_conclusion():
+    """THE `setup` LESSON ONE RUNG ALONG, and the reason deleting the kernel-OOM rule did not make
+    the engine dumber.
+
+    `evaluate._eval_failure_text` surfaces `exit=` ONLY in its blank-stderr fallback, so a cgroup
+    OOM-kill that leaves a "Killed" line handed the diagnostician that one word and nothing else — an
+    engine-held fact, discarded, left to be re-inferred from the candidate's own text, which is
+    exactly what this module exists to stop. `engine_observed_facts` hands it over.
+
+    THE LINE IT MUST NOT CROSS is stating the CONCLUSION. "This looks like an OOM" is the deleted
+    rule wearing a prompt: it would put the engine's authority behind a judgement it has no way to
+    make, and the judgement is the thing being delegated. So the block may say `exit code -9 (killed
+    by SIGKILL)` and may not say `oom` or `memory`.
+
+    IT MAY, AND MUST, SAY WHAT IT EXCLUDED. `exit -9, no output` was a bad RULE because both watchdog
+    tree-kills produce byte-identical evidence — the v6 node 5 conflation. Those never reach a
+    diagnostician (engine-final), so naming that exclusion is what makes the remaining inference
+    sound rather than a hint."""
+    from looplab.engine.failure_diagnosis import engine_observed_facts
+
+    kill = engine_observed_facts(RunResult(exit_code=-9, stdout="", stderr="", metric=None,
+                                           timed_out=False))
+    assert "exit code -9" in kill and "SIGKILL" in kill
+    assert "wrote NOTHING to stderr" in kill
+    assert "No watchdog of ours claimed this run" in kill
+    # the conclusion stays the diagnostician's
+    for verdict_word in ("oom", "memory", "out of memory", "reduce"):
+        assert verdict_word not in kill.lower(), (
+            f"{verdict_word!r} makes this a hint, not a fact — that is the deleted rule in a prompt")
+
+    # 128+N is the shell's spelling of the same signal, and its stderr is NON-empty, which is the
+    # shape `_eval_failure_text` never surfaced an exit code for at all.
+    shell = engine_observed_facts(RunResult(exit_code=137, stdout="", stderr="Killed", metric=None,
+                                            timed_out=False))
+    assert "exit code 137" in shell and "SIGKILL" in shell
+
+    # An ordinary failure is described without inventing a signal.
+    plain = engine_observed_facts(RunResult(exit_code=1, stdout="", stderr="ValueError: x",
+                                            metric=None, timed_out=False))
+    assert "exit code 1" in plain and "killed by" not in plain
+
+    # Total over junk, like every other function on this path.
+    for junk in (None, object(), 42, "res"):
+        assert isinstance(engine_observed_facts(junk), str)
+
+
+def test_the_engine_facts_reach_the_prompt_and_an_older_seam_survives_them():
+    """The seam half. `triage_crash` is DUCK-TYPED, so a new keyword passed unconditionally to an
+    implementation written against the old signature raises TypeError — which the fail-closed
+    handler reads as a dead provider and turns into a stopped node PLUS a run-level pause. That is
+    the worst way for a signature change to land, and `_accepted_kwargs` is what stops it."""
+    from looplab.core.models import RunState
+
+    seen = {}
+
+    class _New:
+        def triage_crash(self, node, error, attempt, *, state=None, brief="", engine_facts="", **kw):
+            seen["facts"] = engine_facts
+            return {"action": "repair", "failure_kind": "oom", "rationale": "cgroup kill"}
+
+    out = _EngineStub(_New())._triage_crash(RunState(), object(), "boom", 1, reason="crash",
+                                            engine_facts="--- OBSERVED ---\nexit code -9\n")
+    assert "exit code -9" in seen["facts"], "the block never reached the seam"
+    assert diagnosed_failure_reason("crash", out) == ("oom", REASON_SOURCE_TRIAGE)
+
+    class _Old:
+        def triage_crash(self, node, error, attempt, *, state=None, brief=""):
+            return {"action": "repair", "rationale": "old-style"}
+
+    old = _EngineStub(_Old())._triage_crash(RunState(), object(), "boom", 1, reason="crash",
+                                            engine_facts="--- OBSERVED ---\nexit code -9\n")
+    assert old["action"] == "repair", (
+        "an older seam must not be read as a dead provider because a keyword was added")
+
+
 def test_the_log_tools_win_a_name_collision_with_the_code_tools():
     """`CompositeTools` de-dups by tool NAME with the first provider winning, and the logs go first
     deliberately: `read_log` is the only reader that knows this attempt's byte floor, so a general
