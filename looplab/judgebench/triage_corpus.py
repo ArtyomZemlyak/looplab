@@ -96,6 +96,12 @@ so from evidence:
   last 4,000 characters of the log, seen a flat loss inside the final epoch, and called a converged
   training "no learning progress". `rubertlite-dense-retrieval` node 1's loss went 33.9 → 13.3
   monotonically and it scored 0.805.
+* **the window that produced those ten is since fixed.** The stage checker read `run.out[-4000:]`;
+  the trajectory veto (`engine/eval_stages.py`, 2026-08-20) widened what it is judged on, so a
+  rerun of those nodes today would not be condemned. No label moves — what acquits them is the
+  operator's own re-run, not the checker's later repair — but a reader must not take "10 of 16 were
+  false refusals" as a property of the checker that ships. `CORPUS_LIMITS` says so in the header,
+  so the caveat travels with the number instead of living only here.
 * 4 of the 16 are `diverged` (`loss=inf` for all 20 epochs, `loss=nan`, `loss=-1.5e+10`,
   `-2.35e+08`) — caught by the stage CHECKER because the diverge watchdog did not exist yet;
 * exactly ONE — node 12 — is genuinely `not_learning`: its loss fell 0.986 → 0.0195 monotonically
@@ -305,6 +311,17 @@ CORPUS_LIMITS = (
     "general claim about failure classification. "
     "THE RECORDED REASON IS THE INCUMBENT, NOT THE TRUTH — agreement with it is churn, not "
     "accuracy, and `triage_score.py` never averages the two. "
+    "THE INCUMBENT THIS CORPUS MEASURES CONTAINS A DEFECT SINCE REPAIRED. Ten of the sixteen "
+    "`rubertlite-dense-retrieval` terminals were condemned by a stage checker that could see only "
+    "the last 4,000 characters of the training log, so it read a flat loss inside the final epoch "
+    "as 'no learning progress' on runs that had converged. The trajectory veto "
+    "(`engine/eval_stages.py`, 2026-08-20) widens what it is judged on, and those nodes would not "
+    "be condemned today. NOT ONE LABEL MOVES: the rows record what happened, and what acquits them "
+    "is the operator's own reused-and-scored re-run, not the checker's later repair. But 10-of-16 "
+    "is a property of a checker with a broken window, not of the checker that ships, and any rate "
+    "quoted from these rows about STAGE CHECKING is a historical rate. The failure-CLASSIFICATION "
+    "scores are unaffected, because they replay a recorded `res` whose stage statuses were written "
+    "at the time - verified: `--arm live` is 88/118 both before and after the veto landed. "
     "THE STORED STDERR IS THE 500-CHARACTER DURABLE TAIL, not the 64,000-byte stream "
     "`_failure_reason` actually read: no stored tail contains a torch OOM marker, so a candidate "
     "replayed over `evidence.at_classification` alone is strictly worse informed than the engine "

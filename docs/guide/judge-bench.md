@@ -427,6 +427,15 @@ corpus says so from evidence rather than from a second opinion:
   best. The stage check reads only the last 4,000 characters of the log; it saw a flat loss inside
   the final epoch and called a converged training "no learning progress". Node 1's loss went
   33.9 → 13.3 monotonically and it scored 0.805;
+- **and that window is since fixed.** The trajectory veto (`engine/eval_stages.py`, 2026-08-20)
+  widened what the checker is judged on, so a rerun of those ten today would not be condemned.
+  **No label moves** — what acquits them is the operator's own reused-and-scored re-run, not the
+  checker's later repair — but "10 of 16 were false refusals" is a property of a checker with a
+  broken window, not of the checker that ships, and any rate quoted from these rows *about stage
+  checking* is a historical rate. The failure-**classification** scores are unaffected: they replay
+  a recorded `res` whose stage statuses were written at the time, so a change to the live checker
+  cannot move them — verified, `--arm live` is 88/118 both before and after the veto landed.
+  `CORPUS_LIMITS` carries this in the dataset header, so it prints above every report;
 - 4 of the 16 are `diverged` (`loss=inf` for all 20 epochs; `loss=nan`; `loss=-1.5e+10`;
   `-2.35e+08`), caught by the stage checker only because the diverge watchdog did not exist yet;
 - **exactly one — node 12 — is genuinely `not_learning`**: loss fell 0.986 → 0.0195 monotonically

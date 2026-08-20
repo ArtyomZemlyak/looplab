@@ -526,6 +526,52 @@ def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring()
     assert "HANDED TO THE DIAGNOSTICIAN" not in triage_score.format_report(frozen)
 
 
+def test_the_limits_name_the_repaired_defect_in_the_incumbent():
+    """A corpus that measures a decider containing a since-fixed bug must SAY so, in the artefact.
+
+    Ten of the sixteen `rubertlite-dense-retrieval` terminals were condemned by a stage checker
+    reading only `run.out[-4000:]`; the trajectory veto widened that window, so those nodes would
+    not be condemned today. No label moves — what acquits them is the operator's own
+    reused-and-scored re-run, not the checker's later repair — but a reader who took "10 of 16 were
+    false refusals" as a property of the checker that SHIPS would be quoting a historical rate as a
+    current one. The caveat rides in the header, which is what the report prints, so it cannot be
+    separated from the number.
+    """
+    header = read_dataset(DEFAULT_DATASET)["header"]
+    limits = header["limits"]
+    assert limits == CORPUS_LIMITS
+    assert "DEFECT SINCE REPAIRED" in limits
+    assert "4,000" in limits and "trajectory veto" in limits
+    assert "NOT ONE LABEL MOVES" in limits
+    # And it is printed, not merely stored.
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    report = triage_score.score_dataset(rows, triage_score.recorded_candidate, name="r")
+    assert "DEFECT SINCE REPAIRED" in triage_score.format_report(report, limits=limits)
+
+
+def test_no_row_uses_a_label_the_classifier_cannot_produce():
+    """The load-bearing half of "the vocabulary is the classifier's own", asserted on the ARTEFACT.
+
+    `labels` in the header is a fact about the BUILD TREE and is allowed to lag: the vocabulary
+    grew a member (`unclassified`) between two of this corpus's rebuilds, and a test demanding
+    equality would turn every such addition into a red merge that can only be cleared by rebuilding
+    a dataset whose ROWS did not change. That is the "bench follows the thing it measures" defect
+    one level down, and it is not worth reintroducing to catch a stale header field.
+
+    What must never lag is the direction that can make the corpus incoherent: a row labelled with a
+    reason the classifier cannot produce would be scoring candidates against an answer that does not
+    exist. That is what this asserts, and it is asserted against the live vocabulary.
+    """
+    dataset = read_dataset(DEFAULT_DATASET)
+    used = {r["label"]["reason"] for r in dataset["rows"]}
+    assert used <= set(LABELS), (
+        "the corpus labels rows with reasons this tree cannot produce: %s"
+        % sorted(used - set(LABELS)))
+    # The header's own vocabulary must at least cover what the rows use, or the artefact
+    # contradicts itself without needing the tree at all.
+    assert used <= set(dataset["header"]["labels"])
+
+
 def test_the_frozen_vocabulary_travels_in_the_artefact():
     """A snapshot that lives only in a module is a snapshot the next reader has to go find."""
     header = read_dataset(DEFAULT_DATASET)["header"]
