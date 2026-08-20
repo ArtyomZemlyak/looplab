@@ -1,0 +1,168 @@
+# 49. Standing the arena up on a second box: JupyterHub + L40S (2026-08-20)
+
+Companion to [doc 47](47-benchmark-landscape-and-local-plan-2026-08-19.md) (*why* AlgoTune, and the
+parity analysis) and [doc 48](48-algotune-arm-operational-notes-2026-08-20.md) (*what was touched*
+in the third-party checkout). This one is the **second machine** doc 48 §6 asks for: what a box that
+is not the original 8-core Windows/WSL laptop needs, what it measured differently, and what a number
+produced here may and may not be set beside.
+
+**Nothing here changes the protocol.** The arms, the task set, the patches, the run counts and the
+$0.02-per-task-arm budget are doc 48's. What changes is the environment underneath, and one thing
+that had to be *built* because the environment took a mechanism away: the budget.
+
+---
+
+## 1. The box
+
+| Resource | Value | Consequence |
+|---|---|---|
+| CPU | `nproc` 96, **cgroup quota `cpu.max = 9000000 100000` = 90 CPUs** | 20 lanes x 2 cores = 40 — inside the quota, so lane pinning means what it says. An arm is **one round**, not seven. |
+| RAM | 755 GB (`memory.max` 773 GB) | Never the constraint here. |
+| GPU | 1x L40S, 46 GB, idle | **Unused by this arena.** AlgoTune is CPU-bound in substance (doc 47 §5d), which is why the sm_120 problem that blocks FML-bench does not arise. |
+| Disk (runtime) | overlay/xfs on `/`, ~110 GB free | Where everything runs. |
+| Disk (home) | `/home/jovyan/data`, **geesefs — an S3-backed FUSE mount**, 1 PB | Where nothing runs. See below. |
+| Python | 3.12 system, **3.11.13 via `uv` for the AlgoTune venv** | Same version as doc 48. |
+| Network | HTTPS through a local `http_proxy` on 127.0.0.1:18080 | github/pypi/HuggingFace/openrouter all reachable; the corporate LLM gateway is reached DIRECTLY, not through it. |
+
+### The home filesystem cannot host the benchmark
+
+`/home/jovyan/data` is geesefs. `uv venv` fails on it outright — `error: Operation not supported
+(os error 95)`, i.e. no `flock` — so the environment cannot even be *built* there. That is the loud
+failure; the quiet one matters more. This benchmark's cost is **process spawn and imports** (doc 48
+trap 2: one fork per timed run, spawning is ~98 % of per-instance cost), which is precisely what a
+network filesystem is worst at, and a timing taken over S3 is not a timing of the solver.
+
+So the layout splits by what each filesystem is for:
+
+```
+/home/jovyan/data/looplab-bench/   persistent, geesefs   git checkouts, archived campaign output
+/var/tmp/looplab-bench/            local overlay disk    AlgoTune + .venv + .hf_datasets, arm-B clone,
+                                                         campaign output, meter log
+```
+
+The local side is **ephemeral** — a container restart takes it. That is acceptable only because
+every part of it is scripted (`setup_algotune.sh`, `setup_gateway_arm.py`, `box-jhub-l40s.sh`) and
+the repository side is pushed. It is the same argument doc 48 makes for arm B running from a pinned
+clone: the environment is a thing you rebuild from a record, not a thing you preserve.
+
+---
+
+## 2. The LLM is a corporate gateway, and it took the budget mechanism away
+
+The model is `deepseek-v4-flash` on an internal **LiteLLM** gateway (`/v1`, SGLang behind it), not
+OpenRouter. Measured 2026-08-20:
+
+| What | Measured | Why it matters |
+|---|---|---|
+| `usage.cost` | **absent.** Its own `x-litellm-response-cost-original` is `0.0` (`x-litellm-model-name: openai/default`, i.e. unpriced there too) | **Both arms budget by reading `usage.cost`** — AlgoTuner at `models/lite_llm_model.py::_extract_cost_from_response`, LoopLab at `core/llm.py::_usage_cost`. Unpriced ⇒ `spend_limit: 0.02` and `LOOPLAB_LLM_BUDGET_USD` never bind, and the SPEND budget doc 47 §5f settles on becomes no budget at all. |
+| Rate limit | `x-litellm-key-rpm-limit: 50` (team 150), **enforced**: a 20-way burst returned **9 x HTTP 429**, and sequential calls kept 429-ing until the window rolled | A 20-lane campaign trips it constantly. |
+| Caching | The identical prompt at `temperature 0` returned in **0.0 s with 400 completion tokens** (28,886 tok/s) — a cache hit, not a generation | A probe without a nonce measures the cache and reports an endpoint that does not exist. **The first speed numbers taken here were exactly that mistake.** |
+| Real throughput | **~96 tok/s** median, 400-token completions (`deepseek-v4-flash`); `qwen3.6-35b` ~160–320 tok/s | The campaign model is the slower of the two, and is chosen anyway: it is the model doc 47/48 sized the campaign around. |
+| Reasoning channel | **none** — no `reasoning_content`, and the OpenRouter `provider` / `reasoning` blocks are accepted and ignored (HTTP 200) | doc 48's `reasoning: {effort: medium}` pin and the `siliconflow/fp8` provider pin control nothing here. They are set EMPTY rather than left in: a dead parameter in the record reads like a live control. |
+
+### The fix is one meter in front of both arms, not an edit to either
+
+`benchmarks/meter/proxy.py`. Both arms point at `http://127.0.0.1:8801/m/<arm>/<task>/v1` and the
+proxy:
+
+1. **Prices every response** from a pinned table (`benchmarks/meter/pricing.json`) and writes the
+   result into `usage.cost`, where both arms already look. Neither framework is modified.
+2. **Shapes the traffic** — one shared 45 rpm budget (under the published 50) and one 429-retry
+   policy for both arms. This is a *parity* decision before it is a politeness one: AlgoTuner retries
+   with its own backoff and LoopLab with its own, so an unshaped 429 storm would charge the two loops
+   differently for the same endpoint condition.
+3. **Attributes by path**, so cost lands per task-arm without either framework knowing it is metered.
+   Arm B reads `LOOPLAB_LLM_BASE_URL`; arm A gets the same path through `OPENAI_BASE_URL`, which
+   litellm honours for an `openai/<model>` entry that carries no `api_base` of its own.
+4. **Meters streams too.** LoopLab streams by default and AlgoTuner does not; pricing only the
+   non-streaming half would price one arm and not the other, and switching LoopLab's streaming off to
+   dodge that would change the loop under measurement. The usage frame is rewritten in flight, frame
+   by frame, unbuffered.
+
+**The price is imputed, and the doc says so.** The constants are the published OpenRouter list price
+of `deepseek/deepseek-v4-flash-0731` — $0.140 in / $0.280 out per 1M, the same `siliconflow/fp8` row
+doc 47 §5a chose — fetched 2026-08-20T10:16:47Z and **pinned in the file**, because a benchmark
+number must not move when a vendor re-prices a model between two arms. Every response carries
+`usage.cost_basis: "imputed"` and `usage.cost_source: <that timestamp>`, and an upstream that ever
+starts reporting its own cost outranks the table (`cost_basis: "upstream"`).
+
+What this buys is **parity, not accuracy**: both arms are priced by identical constants through
+identical code, so "arm B spent 1.8x arm A" is a real finding. It is not an invoice, and the dollar
+column here cannot be compared to a dollar column from an OpenRouter run.
+
+---
+
+## 3. Deviations beyond doc 48's list
+
+doc 48 §1 enumerates what is patched in the third-party checkout; all of it applies unchanged and is
+applied by the same `setup_algotune.sh`. This box adds three, in descending order of how much they
+could touch a number:
+
+| # | Deviation | Effect on the measurement |
+|---|---|---|
+| 1 | **The metering proxy** (above) | It is the reason a budget exists at all here. It adds a loopback hop to every call — measured overhead is below the endpoint's own jitter — and it queues calls when the arms exceed 45 rpm, which shows up as wall-clock, identically for both arms, and is recorded per call as `queued_s`. |
+| 2 | **A second model entry** in AlgoTune's `config.yaml`, `gateway/deepseek-v4-flash` → `openai/deepseek-v4-flash` (`benchmarks/meter/setup_gateway_arm.py`, idempotent, keeps a `.orig`) | None on scoring. The OpenRouter entry is left exactly as `setup_algotune.sh` wrote it; a box picks one with `ALGOTUNE_MODEL_KEY`. |
+| 3 | **`typer>=0.12` installed into the AlgoTune venv** | None on scoring — it is LoopLab's CLI argument parser. Worth recording because doc 48 §3 states that *nothing* was added to that venv for LoopLab's sake; on this box exactly one thing was, and arm B still inherits AlgoTune's numerical stack (`torch 2.13.0`, `numpy 1.26.4`, `scipy 1.17.1`), not ours. |
+
+`campaign.sh` gained three env knobs whose defaults reproduce the previous behaviour exactly:
+`ALGOTUNE_MODEL_KEY`, `METER_BASE`, and `LOOPLAB_LLM_REASONING_EXTRA` becoming overridable rather
+than hardcoded. Box-specific values live in `benchmarks/box-jhub-l40s.sh`, not in the campaign
+script, so the campaign script stays the same file on every machine.
+
+---
+
+## 4. What was verified here, and what it measured
+
+| Check | Result |
+|---|---|
+| AlgoTune install (`uv venv --python 3.11` + `uv pip install -e .`) | 158 packages in **2 m 07 s**. Same headline versions as doc 48: `torch 2.13.0`, `jax 0.7.1`, `scipy 1.17.1`, `numpy 1.26.4`, `ortools 9.11.4210`. `litellm` is 1.97.0 here vs 1.83.0 there. |
+| The 27 packages the agent's prompt promises | **27/27 importable**, matching doc 47 §5d's audit on the other box. |
+| All seven `setup_algotune.sh` steps | Applied: 2 `sys.modules` sites, the site-packages narrowing, `runs/dev_runs/eval_runs: 3`, `baseline_timeout: 10000`, `disable_rlimit_as: true`, both on-disk patches. |
+| **The evaluator, end to end, with no LLM in the loop** | Re-timed a SHIPPED reference solver: `GPT-5.4` on `discrete_log` → **0.9967x**, ~9 minutes cold on 2 pinned cores including the HuggingFace dataset fetch. This is doc 47 §5e's re-timing plan working on this box. |
+| `pick_tasks.py` | Reproduces campaign.sh's 20-task list exactly (cheapest 20 by `reports/generation.json` median eval pass; worst case `pde_heat1d` 60.5 s on the authors' machine). |
+| Cost reaching **arm A** | `litellm` yields `_hidden_params.response_cost = None` (it does not know this model), falls through to method 2, and `_extract_cost_from_response` returns the injected figure. Verified against a live call. |
+| Cost reaching **arm B** | LoopLab records `calls 1 priced 1 spent 1.764e-05` for 16 in / 55 out — exactly the pinned rate. `priced_calls` equalling `calls` is the property that makes `spent` an invoice rather than a floor. |
+| The rate limiter | 50 concurrent requests: **50/50 ok, 0 x 429, 0 retries**, 28 of them queued, max wait 60 s. Direct to the gateway the same shape gave 9 x 429. |
+| A real arm-A task through the whole chain | `ARM=A TASKS=discrete_log` reaches the agent loop and its first message meters as `arm A, task discrete_log, 2571 in / 205 out, $0.00041734` — so the $0.02 budget is ~48 messages here. |
+
+---
+
+## 5. What a number from this box may be set beside
+
+- **Against another arm run HERE — yes.** That is the whole design: same machine, same clock, same
+  meter, same task set, one model. Arm A vs arm B is valid, and so is re-timing the 17 shipped
+  reference solvers on these cores.
+- **Against doc 47/48's numbers from the 5090 box — no.** Different CPU count, different model
+  deployment, unknown quantization on the gateway, and an imputed price. Ratios are
+  hardware-self-normalising *within* a task-run (`speedup = baseline_ms / optimized_ms`, both timed
+  here), so the SPEEDUP column travels better than the cost and wall-clock columns do — but the arms
+  were budgeted in dollars that mean different things, so treat a cross-box comparison as
+  qualitative.
+- **Against AlgoTune's published table — no**, for the reason doc 47 §5e already gives: the 17
+  shipped arms are artifacts of AlgoTuner's own loop driving other models, and re-timing them here
+  makes them context, not controls.
+
+---
+
+## 6. Reproducing this box
+
+```bash
+mkdir -p /var/tmp/looplab-bench && cd /var/tmp/looplab-bench
+git clone --depth 1 https://github.com/oripress/AlgoTune.git AlgoTune
+cd AlgoTune && uv venv --python 3.11 .venv && VIRTUAL_ENV=.venv uv pip install -e . \
+    && VIRTUAL_ENV=.venv uv pip install 'typer>=0.12'
+printf 'LOOPLAB_LLM_API_KEY=%s\nMETER_UPSTREAM=%s\n' "$KEY" "$GATEWAY/v1" > .env
+
+git clone <looplab> /var/tmp/looplab-bench/looplab && cd /var/tmp/looplab-bench/looplab
+benchmarks/algotune/setup_algotune.sh /var/tmp/looplab-bench/AlgoTune
+python3 benchmarks/meter/setup_gateway_arm.py --algotune-root /var/tmp/looplab-bench/AlgoTune
+
+source benchmarks/box-jhub-l40s.sh
+benchmarks/meter/start_meter.sh
+python3 benchmarks/meter/probe_endpoint.py --models deepseek-v4-flash --sequential 5 --concurrent 20
+ARM=A benchmarks/algotune/campaign.sh
+```
+
+**Probe the endpoint before every campaign, with a nonce.** doc 47 §5a's rule — the catalogue is not
+evidence — has a second edge here: on a caching gateway, the *probe itself* is not evidence unless
+each call is unique.

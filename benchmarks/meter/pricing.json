@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "Price table for the metering proxy. The corporate gateway reports usage TOKENS but no",
+    "usage.cost, and BOTH arms enforce their budget by reading usage.cost (AlgoTuner:",
+    "models/lite_llm_model.py::_extract_cost_from_response method 2; LoopLab: core/llm.py::_usage_cost).",
+    "So the proxy prices every response from these constants and stamps the result into usage.cost.",
+    "",
+    "The constants are the PUBLISHED OpenRouter list price of the dated slug the campaign was",
+    "designed around (docs/47 5a: siliconflow/fp8 at $0.140 in / $0.280 out per 1M). Fetched from",
+    "https://openrouter.ai/api/v1/models at the timestamp below and PINNED here: a benchmark number",
+    "must not move because a vendor re-priced a model between two arms.",
+    "",
+    "The gateway serves 'deepseek-v4-flash' with no snapshot date in the id, so pricing it with the",
+    "-0731 list price is an ASSUMPTION, and it is the reason cost_basis says 'imputed'. It does not",
+    "affect parity: both arms are priced by the same constants through the same meter."
+  ],
+  "source": "https://openrouter.ai/api/v1/models",
+  "fetched_at": "2026-08-20T10:16:47Z",
+  "reference_slug": "deepseek/deepseek-v4-flash-0731",
+  "cost_basis": "imputed",
+  "default": {"input_per_token": 0.00000014, "output_per_token": 0.00000028},
+  "models": {
+    "deepseek-v4-flash": {"input_per_token": 0.00000014, "output_per_token": 0.00000028}
+  }
+}

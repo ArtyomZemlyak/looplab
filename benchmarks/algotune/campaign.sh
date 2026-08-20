@@ -46,6 +46,14 @@ OUT="${CAMPAIGN_OUT:-/root/benchmarks/campaign}"
 WS="${CAMPAIGN_WS:-/root/benchmarks/looplab_ws}"
 RUNS_ROOT="${CAMPAIGN_RUNS:-/root/benchmarks/camp-runs}"
 BUDGET_USD="${BUDGET_USD:-0.02}"
+# The AlgoTuner config KEY for the model (an exact `config["models"].get(name)` lookup, not a suffix
+# match). Defaults to the OpenRouter shape the campaign was designed with; a box whose model comes
+# from a gateway sets this to that entry's key instead -- see benchmarks/meter/setup_gateway_arm.py.
+ALGOTUNE_MODEL_KEY="${ALGOTUNE_MODEL_KEY:-openrouter/${LOOPLAB_LLM_MODEL:-deepseek/deepseek-v4-flash-0731}}"
+# When set, every LLM call goes through the metering proxy on a path that names the arm and the
+# task, so cost is attributed per task-arm without either framework knowing it is metered.
+# e.g. METER_BASE=http://127.0.0.1:8801  ->  http://127.0.0.1:8801/m/B/svm/v1
+METER_BASE="${METER_BASE:-}"
 HARD_TIMEOUT="${HARD_TIMEOUT:-14400}"
 
 ARM="${ARM:-A}"
@@ -88,9 +96,12 @@ export DATA_DIR="$AT/data"
 export LOOPLAB_LLM_BASE_URL="${LOOPLAB_LLM_BASE_URL:-https://openrouter.ai/api/v1}"
 export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
 export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek/deepseek-v4-flash-0731}"
-export LOOPLAB_LLM_API_KEY="${OPENROUTER_API_KEY:-}"
+export LOOPLAB_LLM_API_KEY="${LOOPLAB_LLM_API_KEY:-${OPENROUTER_API_KEY:-}}"
 export LOOPLAB_LLM_TEMPERATURE='0.0'
-export LOOPLAB_LLM_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false},"reasoning":{"effort":"medium"}}'
+# The provider pin and the effort level are OpenRouter controls. On an endpoint that serves one
+# deployment and exposes no reasoning channel they control nothing, and a box profile sets this to
+# '{}' rather than leave a dead parameter in the record where a reader would take it for live.
+export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-{\"provider\":{\"order\":[\"siliconflow/fp8\"],\"allow_fallbacks\":false},\"reasoning\":{\"effort\":\"medium\"}}}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
 export PYTHONPATH="$REPO"
 mkdir -p "$OUT" "$WS"
@@ -124,11 +135,19 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
 
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
+  if [ -n "$METER_BASE" ]; then
+    # Both arms, same meter, one path segment apart. Arm A reaches it through OPENAI_BASE_URL,
+    # which litellm honours for an `openai/<model>` entry that carries no api_base of its own.
+    export LOOPLAB_LLM_BASE_URL="$METER_BASE/m/$ARM/$T/v1"
+    export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
+    export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
+    export OPENAI_API_KEY="${LOOPLAB_LLM_API_KEY:-meter}"
+  fi
   if [ "$ARM" = "A" ]; then
     if [ -s "$OUT/A-$T.done" ]; then echo "[$CPUS] $T arm A already done"; return; fi
     S=$(date +%s)
     timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
-        "openrouter/$LOOPLAB_LLM_MODEL" "$T" > "$OUT/A-$T.log" 2>&1
+        "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
     record_done "$OUT/A-$T.done" "$RC" "$S" "$CPUS"
     [ -s "$OUT/A-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
@@ -164,6 +183,7 @@ run_one() {                       # $1 = task, $2 = cpu list
 }
 
 echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores from core $CORE_OFFSET (of $NPROC) | budget \$$BUDGET_USD"
+echo "model $ALGOTUNE_MODEL_KEY | llm ${METER_BASE:-$LOOPLAB_LLM_BASE_URL}${METER_BASE:+ (metered, per-task paths)}"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the
