@@ -59,8 +59,12 @@ try:
     print('%.4f' % sum(r.get('cost') or 0 for r in rows))
 except Exception: print('?')" 2>/dev/null)
 
+  # THROTTLING, not load average. `/proc/loadavg` is HOST-wide on this shared node and says nothing
+  # about whether WE were held back; `cpu.stat`'s throttle counter is the cgroup's own answer, and a
+  # timing taken while the quota was being enforced is not comparable to one taken while it was not.
+  local thr; thr=$(awk '/nr_throttled/{print $2}' /sys/fs/cgroup/cpu.stat 2>/dev/null)
   if [ ${#notes[@]} -eq 0 ]; then
-    echo "[$ts] ok | A:$done_a/20 B:$done_b/20 | spend \$$spend | load $(cut -d' ' -f1 /proc/loadavg)"
+    echo "[$ts] ok | A:$done_a/20 B:$done_b/20 | spend \$$spend | load $(cut -d' ' -f1 /proc/loadavg) | throttled $thr"
   else
     echo "[$ts] A:$done_a/20 B:$done_b/20 | spend \$$spend | ${notes[*]}"
   fi
