@@ -333,6 +333,54 @@ def test_the_two_halves_of_the_vocabulary_are_scored_apart():
     assert report.text_read[1] > 0 and report.authenticated[1] > 0
 
 
+def test_the_score_can_fall():
+    """A bench whose number cannot go DOWN measures nothing.
+
+    Six mechanisms in this repo were found shipping a vacuous green in one day, all the same shape:
+    the guard named the MECHANISM instead of the PROPERTY, so it passed over an empty set. The
+    bench equivalent is a score that is high whatever the candidate answers, and the only way to
+    know is to drive a candidate that is deliberately wrong and watch the number collapse.
+    """
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+
+    def constant(reason):
+        return lambda row: reason
+
+    oracle = triage_score.score_dataset(
+        rows, lambda row: row["label"]["reason"], name="oracle")
+    assert oracle.accuracy == 1.0                       # the ceiling is reachable
+    # `setup` is in the vocabulary and labels nothing here, so a candidate that always says it is
+    # wrong on every single row. If THAT scores above zero the denominator is not what it claims.
+    assert triage_score.score_dataset(rows, constant("setup"), name="s").accuracy == 0.0
+    # And the majority class — the answer a lazy classifier gives — must not look good.
+    crash_only = triage_score.score_dataset(rows, constant("crash"), name="c")
+    assert crash_only.accuracy < 0.5
+    incumbent = triage_score.score_dataset(rows, triage_score.recorded_candidate, name="r")
+    assert crash_only.accuracy < incumbent.accuracy < oracle.accuracy
+
+
+def test_a_label_that_reads_the_classifiers_own_field_is_quarantined():
+    """The one place a row's label CAN'T be wrong, named and kept out of the number that matters.
+
+    `reused_stage_later_scored` proves the stage did not fail and then names the MECHANISM from
+    `res.stages[-1]["status"]` — the very field `_failure_reason`'s contract branches read. A
+    classifier with that branch is right on those rows by construction. That is real (it is how ten
+    `no_metric` terminals got their right answer) and it is not evidence about diagnosis, so every
+    such row must land in the AUTHENTICATED half, where the report shows it apart. If one ever
+    leaked into the text-read half it would inflate the exact number a diagnostician is judged on.
+    """
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    shared_field = [r for r in rows
+                    if r["label"]["reason"] != LABEL_UNKNOWN
+                    and r["label"]["reason"] == r["evidence"]["at_classification"]
+                                                  ["failed_stage_status"]]
+    assert shared_field, "no row exercises the shared-field case — the quarantine is untested"
+    assert all(r["label"]["reason"] in triage_score.AUTHENTICATED_LABELS for r in shared_field)
+    # And the half that IS about diagnosis is the larger one, so the headline is not mostly this.
+    report = triage_score.score_dataset(rows, triage_score.recorded_candidate, name="r")
+    assert report.text_read[1] > report.authenticated[1]
+
+
 def test_the_head_replay_never_reads_the_recorded_reason():
     """The second arm is only honest if nothing it rebuilds comes from the answer it is being
     compared against. Driven: rewriting every recorded reason to nonsense must not move it."""
