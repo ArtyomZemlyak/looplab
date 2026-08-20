@@ -574,7 +574,7 @@ happened (the watchdog-vs-OOM misclassification fixed in `c862045c`). At 2.93 s/
 
 ## F1g · `yield_outer` sterilizes the run mid-eval, so NO eval runs for 167.7 GPU-h — **BUILT, 2026-08-13; the production-side remainder 2026-08-14**
 
-**The larger half of [F1f](#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours),
+**The larger half of [F1f](#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours-built-2026-08-13),
 and a separate defect.** F1f measures a second slot idling while a first one works. This one measures
 the box idling *entirely*: **167.7 GPU-h of "serial gap" across the 52-run corpus — time with no
 evaluation running at all**, against 164.4 GPU-h of work actually done. It is the single largest

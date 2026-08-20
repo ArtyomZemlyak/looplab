@@ -3899,12 +3899,29 @@ stored in the dataset header and printed above every report, because a caveat th
 doc is a caveat nobody reading the number sees. A prompt optimised against this corpus will overfit
 it.
 
-OPEN[judge-bench-covers-one-judge-of-four] the bench exists for the training-log monitor only.
-Failure triage is the next one and is outcome-labelled, but it is SMALLER than the span count
-suggests — 1,634 recorded `triage` generation spans are **104 decisions**, because one agentic
-decision is a ~16-turn tool loop. The repair critic has **7 decisions in the whole corpus** and a
-bench on it would report noise with a decimal point. The novelty gate can never be scored for
-correctness at all. proof:absent:extract_triage@looplab/judgebench/judge_corpus.py
+OPEN[judge-bench-covers-two-judges-of-four] failure triage LANDED 2026-08-20
+(`looplab/judgebench/triage_corpus.py` + `triage_score.py`,
+`tests/data/judge_bench/failure_triage.v1.jsonl.gz`, **122 rows, 118 labelled**) and it is smaller
+than the span count suggested for a reason worth keeping: the unit that can carry a label is the
+CLASSIFICATION, not the agentic decision, so it is enumerated from the durable event log and reaches
+runs whose spans were pruned. What is still uncovered is the other two, and neither is a matter of
+effort. The **repair critic** has **7 decisions in the whole corpus** and a bench on it would report
+noise with a decimal point. The **novelty gate** can never be scored for correctness at all — the
+idea it rejects is never run, so nothing on disk says whether it would have worked, and only
+`score.py`'s consistency field can ever exist for it.
+proof:absent:extract_critic@looplab/judgebench/__main__.py
+
+OPEN[torch-oom-markers-miss-the-allocator-body]
+proof:absent:PYTORCH_CUDA_ALLOC_CONF@looplab/engine/triage.py — `_TORCH_OOM_MARKERS` lists the
+EXCEPTION NAMES (`torch.OutOfMemoryError`, `CUDA out of memory`) and none of the allocator's message
+BODY, so a capture truncated past the exception line — the common shape when a chatty stage pushes
+the diagnosis out of the clamp — is invisible to it. Measured on `failure_triage.v1`:
+`_failure_reason` replayed at HEAD over the WIDE evidence gets **16 of 23** OOMs, and the **7 it
+misses are exactly the rows whose surviving text is the body** ("Tried to allocate 8.79 GiB. GPU 0
+has a total capacity of 139.80 GiB of which 4.59 GiB is free" / `PYTORCH_CUDA_ALLOC_CONF`). Over the
+DURABLE 500-char tail it gets **0 of 23**, because not one of the 122 recorded tails carries a
+marker at all — so the marker rule's whole win is the WINDOW it is handed, which is the argument for
+the agentic diagnostician that reads the stage log rather than for a longer literal list.
 
 OPEN[judge-bench-has-no-live-replay-arm] `score.llm_candidate` exists and is deliberately not the
 default, but nothing has ever been replayed through it, so no candidate — a changed prompt, a

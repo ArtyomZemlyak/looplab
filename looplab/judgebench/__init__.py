@@ -20,8 +20,19 @@ classes, and this package refuses to blur them:
   number as an accuracy number.** `score.py` keeps the two in separate fields for that reason and
   has no code path that averages them.
 
-`judge_corpus.py` builds the dataset (currently the training-log monitor only); `score.py` replays a
-candidate over it. `python -m looplab.judgebench` is the entry point.
+`judge_corpus.py` builds the training-log monitor's dataset and `score.py` replays a candidate over
+it; `triage_corpus.py` + `triage_score.py` are the same two verbs for the FAILURE CLASSIFIER
+(`engine/triage.py::_failure_reason` and whatever replaces it), which is outcome-labelled for a
+different reason — the run says what the failure really was in the repair that followed, the reset
+that reused the condemned stage output, and the allocator's own words in the log. `python -m
+looplab.judgebench` is the entry point for both (`score` / `extract` and `score-triage` /
+`extract-triage`).
+
+The failure bench also carries the one thing an accuracy number cannot: **the COST of each error**.
+Its answer selects a repair directive, gates the dependency install and meets the salvage refusal,
+so `crash`-for-`oom` (a wasted round) and `oom`-for-`diverged` (rounds spent moving the wrong dial)
+are not the same mistake. `triage_score.ERROR_COSTS` names them and there is deliberately no
+weighted total.
 
 **Deliberately not a `looplab` CLI subcommand**, for the same reason `looplab/sweep.py` is not one:
 this is a developer tool over the operator's local `runs/` directory, and nothing on a run's own
@@ -48,8 +59,19 @@ from looplab.judgebench.judge_corpus import (
     write_dataset)
 from looplab.judgebench.score import (
     ScoreReport, attempt_totals, per_attempt_report, score_dataset)
+from looplab.judgebench.triage_corpus import (
+    LABEL_BASES, LABEL_UNKNOWN as TRIAGE_LABEL_UNKNOWN, LiveRunRefused,
+    build_dataset as build_triage_dataset, derive_label as derive_triage_label,
+    extract_run as extract_triage_run, read_dataset as read_triage_dataset,
+    rederive_label as rederive_triage_label, write_dataset as write_triage_dataset)
+from looplab.judgebench.triage_score import (
+    ERROR_COSTS, cost_of, head_replay_candidate, score_dataset as score_triage_dataset)
 
 __all__ = [
+    "ERROR_COSTS", "LABEL_BASES", "LiveRunRefused", "TRIAGE_LABEL_UNKNOWN",
+    "build_triage_dataset", "cost_of", "derive_triage_label", "extract_triage_run",
+    "head_replay_candidate", "read_triage_dataset", "rederive_triage_label",
+    "score_triage_dataset", "write_triage_dataset",
     "CORPUS_LIMITS", "DATASET_SCHEMA", "LABELS", "LABEL_BUDGET_EXHAUSTED", "LABEL_PRODUCTIVE",
     "LABEL_UNKNOWN", "LABEL_WASTED", "ScoreReport", "build_dataset", "extract_run", "messages_of",
     "per_attempt_report", "attempt_totals", "read_dataset", "score_dataset",

@@ -83,6 +83,18 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # public instead"), which is why the entry is gone rather than re-pointed at the new module.
         "looplab.tools.vectorstore": ("_cosine",),
     },
+    "judgebench": {
+        # The BENCH MEASURES this function, so it has to be able to CALL it. `_failure_reason` is
+        # the whole subject of `judgebench/triage_score.py::head_replay_candidate` — the arm that
+        # replays today's classifier over the recorded corpus — and there is no public wrapper that
+        # takes a bare `res` and returns a reason. Declared rather than promoted for the reason the
+        # registry's docstring asks about: the name is private because the ENGINE owns when it runs
+        # and nothing on a run's execution path should reach it sideways, and judgebench is not on
+        # one (it is a developer tool over the operator's local `runs/`, deliberately not a
+        # `looplab` subcommand). What the registry buys here is exactly what the bench is for: a
+        # rename becomes a red test instead of a bench that silently stops measuring anything.
+        "looplab.engine.triage": ("_failure_reason",),
+    },
     "search": {
         # The discarded-prefetch predicate moved DOWN to `core/models.py` on 2026-08-05 so the FOLD
         # could reuse it (`events` may not import `search`, and a second replay-side copy of "did

@@ -669,9 +669,9 @@ that is the reason this survived to be found by an operator watching `nvidia-smi
 **Option 1, with one departure from §6's recommendation and one correction to its cost table.**
 Status of this document is no longer "analysis only": §§0–8 stand as written except where this
 section says otherwise. The backlog rows are
-[F1f](29-operator-backlog-2026-08-11.md#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours)
+[F1f](29-operator-backlog-2026-08-11.md#f1f-the-eval-batch-is-a-barrier-so-one-slow-node-idles-a-gpu-for-hours-built-2026-08-13)
 and its new sibling
-[F1g](29-operator-backlog-2026-08-11.md#f1g-yield_outer-sterilizes-the-run-mid-eval-so-no-eval-runs-for-1677-gpu-h).
+[F1g](29-operator-backlog-2026-08-11.md#f1g-yield_outer-sterilizes-the-run-mid-eval-so-no-eval-runs-for-1677-gpu-h-built-2026-08-13-the-production-side-remainder-2026-08-14).
 
 **What landed.**
 
