@@ -1760,7 +1760,13 @@ class CostAccountant:
                 with self._lock:
                     self.last_sink_error = None
         if exceeded:
-            raise BudgetExceeded(f"spent {committed_spent:.4f} >= budget {self.limit:.4f}")
+            # The message IS the operator-facing output now (the marker turns this into one
+            # printed line at `cli/__init__.py`'s refusal boundary), so it has to name the
+            # knob and not only the arithmetic.
+            raise BudgetExceeded(
+                f"LLM spend ceiling reached: ${committed_spent:.4f} of the ${self.limit:.4f} "
+                f"set by `llm_budget_usd`. The run stops here rather than spending more; "
+                f"raise `llm_budget_usd` (or set it to 0 for no limit) and resume to continue.")
         return committed_spent
 
     def remaining(self) -> Optional[float]:

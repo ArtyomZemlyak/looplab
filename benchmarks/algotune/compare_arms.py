@@ -106,7 +106,9 @@ def _arm_b_train(run_dir: Path) -> float | None:
     try:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
-        state = fold(EventStore(str(run_dir)).read_all())
+        # The LOG FILE, not the run directory -- see extract_champion.py: the directory form
+        # raised IsADirectoryError and every arm-B row read as "no champion".
+        state = fold(EventStore(str(run_dir / "events.jsonl")).read_all())
     except Exception:                       # noqa: BLE001 - a broken run is "no number", not a crash
         return None
     best = state.best()

@@ -11,9 +11,6 @@ and this is the only module all four may import.
 from __future__ import annotations
 
 
-class BudgetExceeded(Exception):
-    pass
-
 
 class OperatorRefusal(Exception):
     """Marker: LoopLab raised this ON PURPOSE, at a boundary the operator controls.
@@ -42,6 +39,28 @@ class OperatorRefusal(Exception):
     Concrete flavours below preserve each site's historical base class, so every existing
     `except ValueError` / `except RuntimeError` and every `pytest.raises(...)` keeps working — the
     marker only ADDS a way to recognize the family.
+    """
+
+
+class BudgetExceeded(OperatorRefusal, RuntimeError):
+    """The run reached the LLM spend ceiling the operator set (`Settings.llm_budget_usd`).
+
+    It wears the marker for the three reasons the docstring above requires: it is constructed at a
+    `raise` whose whole job is to refuse (`llm.py::CostAccountant.add`), the condition is a property
+    of the operator's own INPUT rather than of LoopLab's internal state, and the message names both
+    what was refused and the knob to change.
+
+    It was a bare `Exception` until 2026-08-20 and nobody noticed, because the ceiling had always
+    been settable only in code -- so no run had ever actually hit it. The first campaign that did
+    got 342 lines of Rich traceback and exit 1 to say "spent 0.0209 >= budget 0.0200": the exact
+    presentation this family exists to remove, and worse than cosmetic downstream, because exit 1
+    is indistinguishable from a crash. A harness cannot then tell "this task is FINISHED, it spent
+    its allowance" from "this task DIED, retry it" -- and retrying is strictly wrong here, since the
+    next attempt spends the same allowance and stops at the same wall.
+
+    The ten `except BudgetExceeded` sites in `agents/` are unaffected: they catch by name, and the
+    rule they enforce -- a hard budget stop PROPAGATES, it never degrades to a fallback that would
+    make another paid call -- is unchanged.
     """
 
 

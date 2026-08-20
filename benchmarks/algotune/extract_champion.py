@@ -28,13 +28,24 @@ def main() -> int:
                     help="The file to extract from the champion's committed working set.")
     args = ap.parse_args()
 
-    if not (args.run_dir / "events.jsonl").exists():
+    log = args.run_dir / "events.jsonl"
+    if not log.exists():
         print(f"no event log at {args.run_dir}", file=sys.stderr)
         return 1
     try:
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
-        state = fold(EventStore(str(args.run_dir)).read_all())
+        # `EventStore(path)` takes the LOG FILE, not the run directory. Passing the directory
+        # raised IsADirectoryError, the broad `except` below turned it into "no champion", and
+        # every task in the arm scored `speedup: null` -- a plumbing break wearing the costume of
+        # a legitimate empty result. Same shape as the `_find_result` key bug this bridge already
+        # had once: the check one line up already knew the filename and the call did not use it.
+        state = fold(EventStore(str(log)).read_all())
+    except OSError as exc:
+        # A run whose log cannot be READ is a broken BRIDGE, not a run without a champion, and it
+        # must not be reported as one. Only a fold-level failure below is "no champion".
+        print(f"cannot read the event log at {log}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     except Exception as exc:  # noqa: BLE001 - a broken run is "no champion", not a crash
         print(f"could not fold {args.run_dir}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1

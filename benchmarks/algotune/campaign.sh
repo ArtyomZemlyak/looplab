@@ -124,11 +124,18 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # markers over live runs -- one of them 230 minutes in -- and the resume would have treated all
   # six as complete with no score.
   #   0        - the run ended on its own (a score, or the harness's own N/A)
+  #   2        - a TYPED OPERATOR REFUSAL (`cli/__init__.py::REFUSAL_EXIT_CODE`), which for this
+  #              campaign is almost always the LLM spend ceiling. Terminal, and this is the whole
+  #              point of the exit code: a refusal is a property of the INPUT, so the next attempt
+  #              spends the same allowance, or reads the same bad task file, and stops at the same
+  #              wall. Before `BudgetExceeded` wore the marker it exited 1 with a traceback and was
+  #              recorded as "interrupted, still owed" -- i.e. a FINISHED task queued for a retry
+  #              that could never do anything different.
   #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
   #              rather than retried forever, but it produces no number (see docs/48)
   #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
   case "$RC" in
-    0|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;
+    0|2|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;
     *)     echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed" ;;
   esac
 }
