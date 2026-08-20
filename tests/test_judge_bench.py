@@ -15,7 +15,9 @@ source text, because the label rule is exactly the kind of thing a substring pin
 """
 from __future__ import annotations
 
+import collections
 import gzip
+import hashlib
 import json
 import typing
 
@@ -224,8 +226,19 @@ def test_bench_verdicts_match_the_production_schema():
 
 
 def test_prompt_splits_round_trip_exactly(dataset):
-    """The replay seam. If `render_prompt(row["prompt"])` did not reproduce the recorded messages,
-    a "changed prompt" replay would be measuring a prompt nobody can reconstruct."""
+    """The replay seam. If the split and the render are not inverses, a "changed prompt" replay is
+    measuring a prompt nobody can reconstruct.
+
+    **This test asserted `render_prompt(row["prompt"]) == messages_of(row)` until 2026-08-20, and
+    that is `f(x) == f(x)`**: `messages_of` returns `render_prompt(row["prompt"])` for any row with
+    no `messages` key, and the assertion two lines above pins that ALL 450 rows have none. It could
+    not fail for any input the committed corpus can contain, so the property it names had never been
+    tested. The original recorded messages are deliberately not stored (156 KB of byte-identical
+    copy), so the falsifiable form is the ROUND TRIP through the production splitter: re-render each
+    row's ingredients and split the result again, and every ingredient must come back byte-identical
+    with `prompt_split_exact` still true. That fails the moment either half's block order, separator
+    or header drifts from the other — which is the drift that would silently re-point the seam.
+    """
     exact = 0
     for row in dataset["rows"]:
         if not row["prompt"]["prompt_split_exact"]:
@@ -233,9 +246,63 @@ def test_prompt_splits_round_trip_exactly(dataset):
             continue
         exact += 1
         assert "messages" not in row, row["case_id"]       # and exact rows must not duplicate it
-        assert render_prompt(row["prompt"]) == messages_of(row), row["case_id"]
+        assert judge_corpus._split_prompt(render_prompt(row["prompt"])) == row["prompt"], \
+            row["case_id"]
+        assert messages_of(row) == render_prompt(row["prompt"]), row["case_id"]
         assert row["prompt"]["digest"], row["case_id"]
     assert exact == len(dataset["rows"])
+
+
+def test_the_split_is_not_vacuously_exact(dataset):
+    """`prompt_split_exact` must be capable of being FALSE, and `messages_of` must honour it.
+
+    The row above asserts the flag is true 450 times; without this, a splitter that hard-coded
+    `True` would satisfy it. Driven with a message the ingredients provably cannot reproduce.
+    """
+    # A well-formed TWO-message prompt whose head does not round-trip: the blocks are emitted with
+    # a trailing blank line and this one has none, so re-rendering adds it. Deliberately not a
+    # malformed message — `_split_prompt` returns False from an early guard for those, which never
+    # reaches the re-join, and a control that stops short of the line it is about proves nothing.
+    lossy = [{"role": "system", "content": "S"},
+             {"role": "user", "content": "CTX" + judge_corpus._TAIL_HEADER + "loss: 1.0\n"
+              + judge_corpus._TAIL_FOOTER}]
+    inexact = judge_corpus._split_prompt(lossy)
+    assert render_prompt(inexact) != lossy, "the control must actually be a lossy split"
+    assert inexact["prompt_split_exact"] is False
+    # ...and a row carrying that flag is replayed from the STORED messages, never re-rendered.
+    stored = [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]
+    row = {"prompt": dict(inexact), "messages": stored}
+    assert messages_of(row) == stored
+
+
+def test_the_replay_seam_still_renders_the_ENGINES_prompt():
+    """The round trip above is self-consistent; this is what stops it being self-consistent about
+    the wrong prompt. `render_prompt` must reproduce what `_training_verdict` actually sends, or the
+    bench replays a message the judge has never been asked.
+    """
+    from looplab.engine.train_monitor import TrainingMonitorMixin
+
+    sent = []
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            sent.append(messages)
+            return {"status": "healthy", "reason": "r", "confidence": 0.5}
+
+    class _Host(TrainingMonitorMixin):
+        class developer:
+            client = _Client()
+
+    parts = {"system": "SYS", "context": "CTX", "stage_context": "STAGE", "trajectory": "TRAJ",
+             "look_invitation": "LOOK", "digest": "loss: 1.0\n"}
+    _Host()._training_verdict(parts["digest"], parts["context"], parts["stage_context"],
+                              parts["trajectory"], tools=None)
+    engine_messages = sent[-1]
+    # `_training_verdict` splices `_MONITOR_SYSTEM` and `_LOOK_INVITATION` itself, so compare with
+    # the ingredients it actually used — what must match is the ASSEMBLY, not those two constants.
+    from looplab.engine.train_monitor import _MONITOR_SYSTEM
+    assert render_prompt({**parts, "system": _MONITOR_SYSTEM, "look_invitation": ""}) == \
+        engine_messages
 
 
 def test_corpus_limits_travel_with_the_artifact(dataset):
@@ -360,10 +427,79 @@ def test_the_incumbent_baseline_is_what_a_candidate_is_read_against(dataset):
     assert (totals["productive_falsely_stopped"], totals["productive_attempts"]) == (3, 49)
 
 
+# The committed artefact's UNCOMPRESSED bytes. A tripwire, and it is honest about being one: an
+# editor can update this line as easily as they can edit the file. What it buys is that the edit
+# CANNOT BE INVISIBLE — a 278 KB binary changing on its own reads as a rebuild, a binary changing
+# beside this constant reads as what it is — and that it costs nothing to check on a machine with no
+# `runs/`. It is deliberately over the DECOMPRESSED bytes: gzip output is not stable across zlib
+# versions, and a pin that goes red on a library upgrade is a pin people learn to overwrite.
+#
+# It is the WEAKEST of the three anti-hand-edit guards and is listed last for that reason. The real
+# ones are `test_every_label_rederives` (every label recomputed from the row's own facts through the
+# production rule) and `test_the_committed_corpus_is_internally_derived` below (every field the
+# label rule does NOT read, re-derived from the extractor's own construction rules).
+_CORPUS_SHA256 = "6a283e9814a55670fcd89e308f57b34308b56f718443f765add8268b9938294f"
+_CORPUS_BYTES = 3_969_540
+
+
+def test_the_committed_corpus_is_internally_derived(dataset):
+    """THE guard that replaces an always-skipping one, and it runs everywhere.
+
+    Until 2026-08-20 the only check on how this 278 KB committed binary was DERIVED was
+    `test_the_dataset_regenerates_from_the_runs_it_names`, which needs `runs/` — gitignored, and
+    `LOOPLAB_BENCH_RUNS` set nowhere — so **it had never once executed**, and nothing in CI could
+    tell a legitimately derived corpus from a hand-edited one. A skip that is unreachable in CI is
+    not a guard.
+
+    What CAN be checked without the source runs is that every row still satisfies the JOINS the
+    extractor built it from. These are not one constant somebody can bump: each is a different field
+    re-derived from a different other field, so a hand edit has to forge all of them consistently.
+
+    * `case_id` is `<run>:n<node_id>:<phase_span>` — edit the provenance and the key stops matching;
+    * `system_prompt_sha256` is the sha of the row's own stored `system` — edit the prompt and it
+      breaks, which is the field the replay seam is entirely about;
+    * `llm_calls` is the length of `span_ids` — the collapse from 3,950 spans to 450 decisions is
+      the corpus's central claim and this is the arithmetic behind it;
+    * `tools_available` is `bool(look_invitation)`, the join the whole tools A/B rests on;
+    * rows are sorted by `(run, ts, case_id)` and the header's per-run counts are the real ones.
+    """
+    rows = dataset["rows"]
+    assert len(rows) == dataset["header"]["rows"] == 450
+    seen_ts = None
+    for row in rows:
+        prov, case = row["provenance"], row["case_id"]
+        assert case == "%s:n%s:%s" % (prov["run"], prov["node_id"], prov["phase_span"]), case
+        assert prov["system_prompt_sha256"] == hashlib.sha256(
+            (row["prompt"]["system"] or "").encode("utf-8")).hexdigest()[:16], case
+        assert len(prov["span_ids"]) == prov["llm_calls"] >= 1, case
+        assert bool(prov["tools_available"]) is bool(row["prompt"]["look_invitation"]), case
+        key = (prov["run"], prov["ts"], case)
+        assert seen_ts is None or key >= seen_ts, case      # the extractor's own final sort
+        seen_ts = key
+    counted = collections.Counter(r["provenance"]["run"] for r in rows)
+    assert {s["run"]: s["rows"] for s in dataset["header"]["sources"]} == dict(counted)
+    # and the header cannot claim a judge/schema the rows do not carry
+    assert {r["judge"] for r in rows} == {dataset["header"]["judge"]}
+    assert {r["schema"] for r in rows} == {DATASET_SCHEMA}
+
+
+def test_the_committed_artifact_has_not_been_edited_in_place():
+    """The tripwire (see `_CORPUS_SHA256`). Runs with no `runs/`; a rebuild updates both lines."""
+    raw = gzip.open(DEFAULT_DATASET, "rb").read()
+    assert len(raw) == _CORPUS_BYTES
+    assert hashlib.sha256(raw).hexdigest() == _CORPUS_SHA256, (
+        "the committed corpus changed. If you REBUILT it (`python -m looplab.judgebench extract`), "
+        "update _CORPUS_SHA256/_CORPUS_BYTES in the same commit and re-argue every pinned baseline "
+        "in this file. If you did not, something edited a derived artefact in place.")
+
+
 def test_the_dataset_regenerates_from_the_runs_it_names(tmp_path, dataset):
-    """The other half of "derived, never hand-edited": on a machine that HAS the runs, rebuilding
-    the exact sources the header names must reproduce the file byte for byte. Skips elsewhere,
-    because `runs/` is not in the repository."""
+    """The strongest half, and the one that needs the source corpus: on a machine that HAS the runs,
+    rebuilding the exact sources the header names must reproduce the file byte for byte.
+
+    It SKIPS without them, and the skip is not the guarantee — that is what the two tests above are
+    for. Point `LOOPLAB_BENCH_RUNS` at a directory holding the runs the header names to run it.
+    """
     import os
     import pathlib
     # The corpus is not in the repository, and in an agent worktree it is not beside the tests
@@ -371,7 +507,133 @@ def test_the_dataset_regenerates_from_the_runs_it_names(tmp_path, dataset):
     root = pathlib.Path(os.environ.get("LOOPLAB_BENCH_RUNS")
                         or pathlib.Path(__file__).resolve().parents[1] / "runs")
     sources = [root / s["run"] for s in dataset["header"]["sources"]]
-    if not all((p / "spans.jsonl").exists() for p in sources):
-        pytest.skip("runs/ not present — the regeneration half needs the source corpus")
+    missing = [p.name for p in sources if not (p / "spans.jsonl").exists()]
+    if missing:
+        pytest.skip("runs/ not present (%s) — this half needs the source corpus; the derivation "
+                    "and tripwire guards above run without it" % ", ".join(missing))
     rebuilt = write_dataset(build_dataset(sources), tmp_path / "rebuilt.jsonl.gz")
     assert gzip.open(rebuilt, "rb").read() == gzip.open(DEFAULT_DATASET, "rb").read()
+
+
+# ------------------------------------------------- the GATE: a verdict is not an intervention
+
+def test_the_gate_is_opt_in_and_moves_nothing_when_absent(dataset):
+    """Every number above is an UNGATED number and must stay one. The gate changes what a stop
+    COUNTS AS, so a gate that leaked into the default would silently re-target every A/B."""
+    rows = dataset["rows"]
+    plain = score.score_dataset(rows, score.recorded_candidate)
+    assert plain.gate is None
+    assert (plain.true_stop, plain.false_stop, plain.missed_stop, plain.true_continue) == (
+        53, 5, 101, 195)
+    assert "GATED" not in score.format_report(plain)
+
+
+def test_the_engine_would_not_have_made_any_of_the_five_false_stops(dataset):
+    """THE reason the gate exists. All five decisions that called `broken` on a run which finished
+    fine sit at confidence 0.62-0.75, below the shipped `train_monitor_kill_confidence` of 0.8 —
+    so the number the bench headlines is a property of the VERDICT and not of the engine, and a
+    prompt change read against it is being scored on the expensive side against the wrong target.
+
+    Pinned like the baseline it qualifies: a change here means the corpus moved, not that a test
+    needs updating.
+    """
+    rows = dataset["rows"]
+    gated = score.score_dataset(rows, score.recorded_candidate, gate=score.Gate())
+    assert gated.false_stop == 0
+    assert gated.true_stop == 49            # the bar costs four of the 53 true stops
+    assert gated.missed_stop == 105
+    totals = score.attempt_totals(
+        score.per_attempt_report(rows, score.recorded_candidate, score.Gate()))
+    assert (totals["wasted_caught"], totals["wasted_attempts"]) == (6, 27)
+    assert totals["productive_falsely_stopped"] == 0
+    assert "GATED" in score.format_report(gated)
+
+
+def test_the_measured_trajectory_veto_is_inert_on_this_corpus(dataset):
+    """A conjunct that changes no number here, stated rather than assumed.
+
+    144 of 144 rows carrying a measured `descending` curve were judged `healthy`, so the veto never
+    meets a `broken` to refuse — and the four v6 false stops it reads as its motivating case carry
+    no measured trajectory at all, because `LossTrajectoryTracker` postdates those runs. The
+    confidence bar is what would have stopped them.
+    """
+    rows = dataset["rows"]
+    vetoed = [r for r in rows if score.trajectory_vetoes(r)]
+    assert vetoed, "the corpus must still exercise a descending measured curve"
+    assert {r["recorded"]["status"] for r in vetoed} == {"healthy"}
+    with_veto = score.score_dataset(rows, score.recorded_candidate, gate=score.Gate())
+    without = score.score_dataset(rows, score.recorded_candidate,
+                                  gate=score.Gate(trajectory_veto=False))
+    assert (with_veto.true_stop, with_veto.false_stop) == (without.true_stop, without.false_stop)
+
+
+def test_a_gate_refuses_an_answer_it_cannot_weigh_rather_than_scoring_it_as_calm(dataset):
+    """A candidate that says `broken` and reports no confidence has not said the run is safe.
+
+    Scoring it as "did not stop" would give a candidate a perfect false-stop record for withholding
+    the one field the gate weighs — the same defect the `unanswered` branch exists to stop one field
+    over, where an out-of-vocabulary answer used to score exactly like `healthy`.
+    """
+    rows = dataset["rows"][:40]
+    with pytest.raises(ValueError, match="no confidence"):
+        score.score_dataset(rows, _always("broken"), gate=score.Gate())
+    # ...but a bare non-stop answer needs no confidence, because no conjunct can bind on it.
+    calm = score.score_dataset(rows, _always("healthy"), gate=score.Gate())
+    assert calm.answered == len(rows) and calm.false_stop == 0
+
+
+def test_the_gate_reads_the_engines_own_confidence_rule(dataset):
+    """`_normalize_monitor_confidence`, not `float(x) >= t`. 19 of the 450 recorded confidences are
+    STRINGS the model emitted (`'0.9'`), and a non-finite one must fail closed rather than compare
+    True — `min(1.0, nan)` is 1.0 in Python, which is how that trap is spelled in the engine."""
+    from looplab.engine.train_monitor import _normalize_monitor_confidence
+
+    row = {"case_id": "x", "prompt": {}}
+    gate = score.Gate()
+    assert gate.stops(row, "broken", "0.9") is True          # the string form the model emits
+    assert gate.stops(row, "broken", float("nan")) is False  # never authority
+    assert gate.stops(row, "broken", 0.79) is False
+    assert gate.stops(row, "watch", 0.99) is False           # `watch` is not a stop at any bar
+    assert _normalize_monitor_confidence("0.9") == (0.9, True)
+    strings = [r for r in dataset["rows"]
+               if isinstance(r["recorded"]["confidence"], str)]
+    assert len(strings) == 19, "the corpus must still exercise the string form"
+
+
+def test_the_live_arm_asks_over_the_same_evidence_and_answers_what_a_gate_needs():
+    """`score.llm_candidate` is the paid arm, driven here with a fake client so its PLUMBING is a
+    red test rather than something only a spend can check.
+
+    Two properties, and both were load-bearing when the arm was first run for real (450 calls,
+    docs/guide/judge-bench.md): an `overrides` swap must re-render from the row's own stored
+    ingredients rather than replaying the original message — which is what makes "the same rows
+    with the tool affordance removed" a real A/B — and the answer must carry the `confidence` and
+    the `fault`, because one paid pass has to serve the ungated score, the gated one, and the only
+    measurement of `fault` this corpus can ever supply.
+    """
+    seen = []
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            seen.append(messages)
+            return {"status": "broken", "fault": "implementation", "confidence": 0.91,
+                    "reason": "the objective cannot descend as written"}
+
+    row = {"case_id": "c", "prompt": {"system": "S", "context": "C", "stage_context": "SC",
+                                      "trajectory": "", "look_invitation": "LOOK",
+                                      "digest": "loss: 1.0\n", "prompt_split_exact": True}}
+    plain = score.llm_candidate(_Client())(row)
+    assert plain == {"status": "broken", "confidence": 0.91, "fault": "implementation"}
+    assert "LOOK" in seen[-1][1]["content"]
+
+    stripped = score.llm_candidate(_Client(), overrides={"look_invitation": ""})(row)
+    assert stripped["status"] == "broken"
+    assert "LOOK" not in seen[-1][1]["content"]          # the affordance really left the prompt
+    assert "loss: 1.0" in seen[-1][1]["content"]         # over the SAME recorded evidence
+
+    # ...and a row that did not split exactly is refused rather than answered from the original.
+    unsplit = dict(row, prompt=dict(row["prompt"], prompt_split_exact=False))
+    assert score.llm_candidate(_Client(), overrides={"system": "X"})(unsplit) is None
+
+    # the answer is gate-ready without a second pass
+    assert score.Gate().stops(row, plain["status"], plain["confidence"]) is True

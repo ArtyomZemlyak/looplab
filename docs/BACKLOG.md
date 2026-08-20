@@ -4027,9 +4027,8 @@ outcome-labelled decisions: accuracy **0.701**; it said `broken` about a run tha
 compute is paid in — **7 of 27 wasted attempts caught, 3 of 49 productive attempts falsely stopped,
 ≈18.9 h saveable.** On the case it exists for it is strong: of 53 decisions watching a training that
 completed and produced a dead model, **48 called it `broken`**. **4 of the 5 false alarms are the
-two runs where the judge had no log tools** — suggestive of the tools change being the fix, but a
-CONFOUND and not an A/B, because those are different runs with a different failure mix. Separating
-the two needs the same rows replayed both ways, which is the live arm.
+two runs where the judge had no log tools** — which read as the tools change being the fix, and was
+a CONFOUND rather than an A/B. It is settled below, and the tools are NOT the explanation.
 
 **What this corpus cannot answer, stated in the artefact itself and not only here:** seven runs, one
 task family, one operator, one judge model (`deepseek-v4-flash`, 450 of 450). `CORPUS_LIMITS` is
@@ -4061,12 +4060,86 @@ DURABLE 500-char tail it gets **0 of 23**, because not one of the 122 recorded t
 marker at all — so the marker rule's whole win is the WINDOW it is handed, which is the argument for
 the agentic diagnostician that reads the stage log rather than for a longer literal list.
 
-OPEN[judge-bench-has-no-live-replay-arm] `score.llm_candidate` exists and is deliberately not the
-default, but nothing has ever been replayed through it, so no candidate — a changed prompt, a
-different model — has yet been measured against the baseline the corpus now fixes. Until that runs,
-the bench measures the incumbent against itself. The first question it should answer is the one the
-corpus can only hint at: replay the SAME rows with and without log tools.
-proof:absent:llm_candidate@tests/test_judge_bench.py
+**[2026-08-20 — the live arm was RUN, and the tools are not what made the difference.]** 450
+provider calls, one per row, 0 errors, 799 s, `deepseek-v4-flash` at the runs' own temperature 0.6,
+replaying each row's recorded prompt with `look_invitation` overridden to empty — byte-for-byte the
+message the engine builds when `train_monitor_tools` is off. On the 285 outcome-labelled rows the
+incumbent answered WITH tools, removing them costs **0.017 accuracy (0.782 → 0.765) and 5 of 51
+true stops, and adds no false stop (1 → 1)**. The fidelity control — the 81 rows nobody ever had
+tools for, replayed under conditions identical to how they were recorded — reproduces the error
+rates (0.362 → 0.391, 4 → 4 false stops) while moving 41 % of the individual answers, so the model
+is noisy per decision and stable in aggregate and a 0.017 gap is inside that noise. **The 0.420
+headline gap is the RUNS**: v6/v7 hold **zero** decisions of the class this judge exists for (a
+training that completes and produces a dead model, caught 48 of 53 elsewhere) and 100 % of their
+wasted population is `stage_failed`, the class caught at 5.1 % with tools and 4.8 % without.
+Standardised to the v6/v7 basis mix the with-tools slice scores **0.420** against 0.362 observed;
+the reverse standardisation is not computable, because two of the four cells are empty on the v6/v7
+side. **So: the tools are a real but small win, they were never the explanation, and the corpus
+cannot identify a tools effect on accuracy at all.** The residue — a 14.8 % false-stop rate on v6/v7
+productive decisions against 0.6 % elsewhere — survives the arm unchanged, so it is not the tools
+either; it tracks the measured TRAJECTORY (0 of the 107 productive decisions carrying a trajectory
+block were called `broken`), which is **not** measurable here, because the tracker postdates v6/v7
+and there is no stored measurement to splice into their prompts.
+
+**[2026-08-20 — the bench's own two anti-hand-edit guards were VACUOUS, both fixed.]** Found by an
+adversarial audit, and they are the same shape as the other two vacuous greens found the same day
+(the open-item index's 900-char proof window inheriting a neighbour's falsifier, 17 of 77 markers;
+the claim-pin checker printing "0 claim defect(s)" over zero pins). (1)
+`test_prompt_splits_round_trip_exactly` asserted `render_prompt(row["prompt"]) == messages_of(row)`,
+and `messages_of` RETURNS `render_prompt(row["prompt"])` for a row with no stored `messages` — which
+the assertion two lines above pins as all 450 of them. `f(x) == f(x)`, unfailable for any input the
+corpus can contain. (2) `test_the_dataset_regenerates_from_the_runs_it_names` — the ONLY guard on
+how the 278 KB committed artefact was DERIVED — always skipped: `runs/` is gitignored and
+`LOOPLAB_BENCH_RUNS` is set nowhere, so it had never executed, and nothing in CI could tell a
+derived corpus from a hand-edited one. Both replaced by guards that run everywhere and were verified
+by MUTATION on a throwaway tree: reordering `render_prompt`'s blocks kills two tests, hard-coding
+`prompt_split_exact = True` kills a third, flipping one recorded verdict kills four, and editing one
+stored PROMPT — a field no label and no headline number reads — kills the derivation guard and the
+sha tripwire. The regeneration test now runs and passes when pointed at the runs
+(`LOOPLAB_BENCH_RUNS=runs`), which is the first time it has ever executed.
+
+OPEN[judge-bench-cannot-see-a-post-exit-stage-failure] the missed-stop class is not a prompt
+problem: all **20** uncaught wasted attempts are `stage_failed`, and of the 20.1 h an oracle could
+have saved by stopping each at its first look, **13.4 h across 7 attempts is
+`check_failed`/`expect_failed`** — the stage exited rc 0 and the ENGINE then failed it, over
+artifacts the judged log never showed. What reaches that is EVIDENCE, not wording: the declared
+`expect`/`assert` contract, in front of the judge while the stage still runs.
+proof:absent:monitor_expect_context@looplab/engine/train_monitor.py
+
+The other 6.6 h is 13 real crashes, 5 of them under six minutes after the look charged for missing
+them. Both dead-model attempts were caught, at 31 of 33 and 17 of 20 decisions. **The checker half
+of this shipped 2026-08-20** (`6eecd786`, the whole-log trajectory floor under
+`loss_unchanged_from_first_step`), so an unknown share of the 13.4 h was a wrong checker rather than
+a blind monitor; the corpus is not re-labelled against a rule that postdates its runs. **Read this
+beside the failure bench's refutation above**: the same stage check that failed those 7 attempts called ten
+converged trainings "no learning progress" off the last 4,000 characters of their logs, in a
+different run. The monitor is charged for missing a verdict that is itself a 4,000-character read —
+which does not rescue it (the compute was still discarded) but does say the remedy is the same one
+at both layers, more evidence rather than better wording.
+
+**[2026-08-20 — `fault` was measured for the first time, and the finding is that it is UNSTABLE.]**
+It is unmeasurable from the RECORD, not unmeasurable: two live arms over the 88 rows where either
+the incumbent or the tool-less replay said `broken`. Without the code, 51 of 79 `broken` answers say
+`implementation` (65 %); with `monitor_code_tools` over the preserved workdir, 35 of 69 (51 %). Of
+the **67 rows both arms call `broken`, reading the code moves `fault` on 34 — half** (14
+`implementation` → `hypothesis`, 8 the other way), and the gated repair-stop volume halves from 39
+decisions to 19. **So how many repair-stops a run pays for is a function of what the judge was
+allowed to see, and the affordance shipped specifically to make this field reliable is what moves
+half its answers.** Two limits: the workdir on disk is the post-repair state, so for a repaired node
+the judge read code newer than the log; and neither arm is agentic the way the incumbent was. What
+holds the line meanwhile is the same conjunct as everywhere else — through `--gate` the repair-stop's
+own false-stop rate is 1 decision / 1 of 49 productive attempts in BOTH arms, because all four
+`implementation` verdicts on productive runs are below the 0.8 bar.
+
+OPEN[monitor-fault-has-no-outcome-label] `TrainingVerdict.fault` routes a stop to REPAIR instead of
+a terminal, and nothing measures it. `recorded.fault` is `None` in 450 of 450 rows because the field
+postdates every preserved run — the extractor already reads it, so the corpus repairs itself the
+moment a run records one. What does NOT arrive with those rows is the LABEL: the outcome that says
+whether `implementation` was right is what the REPAIR then did, which is the same shape the triage
+bench needs (`node_repaired` + the next attempt's terminal) and is not the `wasted`/`productive`
+rule this dataset has. A run must also actually reach the branch — `train_monitor_kill` on, a
+`broken` at ≥ 0.8 confirmed twice, and `fault="implementation"` — which no preserved run did.
+proof:absent:LABEL_REPAIRED@looplab/judgebench/judge_corpus.py
 
 ### §0.20 A goal sentence nobody could check killed three nodes, and the prompt telling five roles to use every GPU outlived the correction (2026-08-20)
 

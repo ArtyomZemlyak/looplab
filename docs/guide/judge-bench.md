@@ -105,14 +105,183 @@ Two findings and one warning:
 - **False alarms are rare and concentrated.** 5 of 450 decisions called `broken` on a run that
   finished fine — and **4 of the 5 are the two runs where the judge had no log tools**, the
   flat-tail misreading `train_monitor.py`'s trajectory section already documents.
-- **That last comparison is a confound, not an A/B.** The two slices are different runs with
-  different failure mixes. Separating "tools helped" from "those runs were harder" needs the SAME
-  rows replayed both ways — which is the live arm, below.
+- **That last comparison was a confound, and it is now SETTLED — the tools are not what makes the
+  difference.** See the next section.
 - **101 "missed stops" is not 101 mistakes.** Most are early looks at an attempt that failed later,
   and 38 of them watched a stage the engine failed *after* it exited, over artifacts the judged log
   never showed. Cut them with `--exclude-basis`, or read the per-attempt view, which asks the
   question an operator actually pays for: **7 of 27 wasted attempts caught, 3 of 49 productive
   attempts falsely stopped, ≈18.9 h of compute saveable.**
+
+## The live arm, run — and the tools are not what made the difference
+
+`score.llm_candidate` had never been run. It has now: **450 provider calls, one per row, 0 errors,
+799 s wall clock**, `deepseek-v4-flash` at the runs' own `llm_temperature` of 0.6, against the
+operator's own endpoint, ~603 k prompt tokens in total (2.4 MB of stored prompt text). Concurrency
+was held at 2 because a live run shares that endpoint; the throttling it drew is what the 799 s is. The arm replays each row's recorded prompt with the tool affordance
+REMOVED — `look_invitation` overridden to empty, which is byte-for-byte what the engine splices
+when `train_monitor_tools` is off — so the 369 rows the incumbent answered WITH tools are answered
+again, same model, same evidence, tools gone. That is the same-rows A/B the slice table could not be.
+
+| the 285 outcome-labelled rows the incumbent had TOOLS for | accuracy | false stop | true stop |
+|---|---|---|---|
+| **A** recorded — with tools (agentic, median 3 spans/decision) | **0.782** | **1** | **51** |
+| **B** live replay — SAME rows, tool affordance removed | **0.765** | **1** | **46** |
+
+| the 81 rows nobody ever had tools for — the FIDELITY control | accuracy | false stop | true stop |
+|---|---|---|---|
+| recorded | 0.362 | 4 | 2 |
+| **C** live replay, same conditions | 0.391 | 4 | 4 |
+
+Read them together:
+
+- **Taking the tools away costs 0.017 accuracy and 5 of 51 true stops, and adds no false stop.**
+  Not nothing — five true stops is five — but it is nowhere near the 0.420 the slice table
+  suggested.
+- **Arm C is what licenses that comparison.** Replaying rows under conditions identical to how they
+  were recorded reproduces the error rates (0.362 → 0.391, 4 → 4 false stops) while moving 41 % of
+  the individual answers (churn 0.593 at temperature 0.6). So the model is noisy per decision and
+  stable in aggregate, and a 0.017 gap in arm B is inside that noise while a 0.420 one is not.
+- **So the 0.362 is telling us about the RUNS.** The failure mixes are disjoint where it counts:
+
+  | | wasted / `node_metric_degenerate` | wasted / `stage_failed` | productive |
+  |---|---|---|---|
+  | with tools (v2/v3/v8/v9) | 53 rows, **48 caught** | 59 rows, 3 caught | 173 rows, 1 false stop |
+  | without tools (v6/v7) | **0 rows** | 42 rows, 2 caught | 27 rows, 4 false stops |
+
+  v6/v7 contain **not one** decision of the class this judge exists for — a training that runs to
+  completion and produces a dead model — and 100 % of their wasted population is `stage_failed`,
+  the class caught at 5 % *with* tools and 4.8 % without. Standardise the with-tools slice to the
+  without-tools basis mix and it scores **0.420**, against 0.362 observed. The reverse
+  standardisation is not computable at all: two of the four cells are empty on the v6/v7 side, which
+  is the honest statement — **the corpus cannot identify a tools effect on accuracy, and the live
+  arm says the effect it can measure is small.**
+
+The residual after mix — the false-stop rate, 0.6 % of productive decisions with tools against
+14.8 % without — survives arm B unchanged (1 of 173 and 4 of 27 in BOTH arms), so it is not the
+tools either. It tracks the measured TRAJECTORY instead: **0 of the 107 productive decisions that
+carried a `trajectory` block were called `broken`**, and all four v6 false stops are the flat-tail
+misread the trajectory section of `engine/train_monitor.py` was written for. That is suggestive and
+it is **not** measurable here: the tracker postdates v6/v7, so there is no stored measurement to
+splice into their prompts and no arm that could add one.
+
+## The verdict is not the stop (`--gate`)
+
+The bench's headline counts a stop as `status == "broken"`. The engine does not act on a verdict —
+it acts on `should_monitor_kill` / `should_monitor_repair`, a conjunction the model supplies two
+terms of. Applying the conjuncts a recorded row can still answer:
+
+| `python -m looplab.judgebench score …` | accuracy | false stop | true stop | attempts caught | attempts falsely stopped |
+|---|---|---|---|---|---|
+| (default — the verdict) | 0.701 | **5** | 53 | 7 of 27 | 3 of 49 |
+| `--gate` (the engine's own bar) | 0.703 | **0** | 49 | 6 of 27 | **0 of 49** |
+
+**All five false stops sit at confidence 0.62–0.75, below the shipped
+`train_monitor_kill_confidence` of 0.8; 49 of the 53 true stops clear it.** The confidence field is
+the single most discriminating signal in this corpus and the gate already spends it. A prompt
+change benched against "5 false stops" is being scored against a number the engine never pays —
+in the expensive direction, because it invites loosening something that is not loose.
+
+What `--gate` deliberately does **not** model:
+
+- **the confirm streak.** `_MONITOR_KILL_CONFIRM_TICKS` wants two consecutive `broken` verdicts, and
+  the corpus has no confirmation look in it at all: the arm that schedules one at
+  `_MONITOR_CONFIRM_DELAY_S` (30 s) was gated on `_KILL_ELIGIBLE_ROLES` and every recorded alert
+  carries `log_role: work`. Measured, the median gap from a `broken` verdict to the next decision
+  about the same attempt is **617.8 s** (min 605.5, n = 76) — the ordinary cadence. Simulating a
+  streak over ticks ten minutes apart reports 2 of 27 attempts caught instead of 7, which is a fact
+  about the corpus's spacing and not about the gate.
+- **the role conjunct**, for the same reason it is why nothing in this corpus was ever stopped: all
+  450 alerts are `log_role: work`, so the *kill* count here is 0 of 0.
+
+The measured-trajectory veto IS modelled, from each row's own stored `trajectory` text, and it is
+**inert**: 144 of 144 rows with a `descending` measured curve were judged `healthy`, so it never
+meets a `broken` to refuse. `tests/test_judge_bench.py` pins that rather than assuming it.
+
+## What the 101 missed stops are actually made of
+
+At the unit compute is paid in — the eval attempt — every one of the **20 uncaught wasted attempts
+is `stage_failed`**. Not one is a training that completed and produced a dead model; both of those
+were caught, at 31 of 33 and 17 of 20 decisions. Splitting the 20.1 h an ORACLE could have saved by
+stopping each uncaught attempt at its first look:
+
+| how the stage ended | uncaught attempts | oracle-saveable |
+|---|---|---|
+| `check_failed` / `expect_failed` — the stage exited **rc 0** and the ENGINE then failed it, over artifacts the judged log never showed | 7 | **13.4 h** |
+| `fail` — a real crash, 5 of them under six minutes after the look that is charged for missing it | 13 | 6.6 h |
+
+**Two-thirds of the money in this error class is in a class the judge is architecturally blind to.**
+No prompt change reaches it. What would is evidence: the declared `expect`/`assert` contract the
+engine is about to check, put in front of the judge while the stage is still running.
+
+Two things the **second bench on this page** adds to that, and they are the reason these two
+sections are one page:
+
+- **A `check_failed` is not automatically a failure.** *What the corpus refuted*, below, shows the
+  stage check calling ten converged trainings "no learning progress" off the last 4,000 characters
+  of their logs — nodes the operator then reset, whose `train` came back `reused` (the very
+  checkpoint the check condemned) and which scored 0.805–0.8662 against a run best of 0.8835. So
+  the 7 `check_failed`/`expect_failed` attempts above are charged to the monitor against a verdict
+  that was itself wrong ten times elsewhere in the corpus. It does not rescue the monitor — those
+  attempts *were* failed by the engine and the compute *was* discarded — but "the judge could not
+  see the evidence" and "the evidence was misread by a different rule" are the same
+  disease at two layers, and widening what the monitor is shown is the fix for both. **That second
+  layer is now fixed** (`engine/eval_stages.py`, 2026-08-20): `loss_unchanged_from_first_step` is
+  measured over the whole of the attempt's stage log instead of a 4,000-character window that
+  structurally cannot contain the first step. So an unknown share of the 13.4 h below is a checker
+  that was wrong rather than a monitor that was blind, and **that share is not re-measured here** —
+  the corpus is frozen at decisions taken before the fix, and re-labelling it against a rule that
+  did not exist when the runs ran is exactly the retro-fit `judge_corpus.py` refuses elsewhere.
+- **The record does not preserve what the decider saw.** The frozen `_is_torch_oom` — the rule as
+  it stood when that corpus was cut, since deleted from production — scores **0 of 23** over the
+  durable stderr tail, because not one of the 122 preserved tails carries a marker at all: the live
+  classifier read a 64 KB clamp and the event log kept ~500 characters. That is exactly the shape of
+  the 13.4 h above: an error class neither bench can measure past, because what was decided over is
+  gone. Both benches state the limit in their dataset header rather than scoring around it, and both
+  reach it the same way — by widening what the decider is SHOWN, not by rewording what it is asked.
+
+## `fault` — unmeasurable from the record, and NOT unmeasurable
+
+`TrainingVerdict.fault` decides whether a stop is a REPAIR (`implementation`) or a terminal
+(`hypothesis`). `recorded.fault` is `None` in 450 of 450 rows because the field postdates every
+preserved run — the extractor already reads it, so the corpus repairs itself the moment a run
+records one. But the record is not the only place to look. Two arms, over the **88 rows where
+either the incumbent or the tool-less replay said `broken`**, i.e. the whole population where a
+repair-stop is on the table:
+
+| the same 88 rows | `broken` | of those: `implementation` | `hypothesis` | `unknown` | `environment` |
+|---|---|---|---|---|---|
+| live replay, no tools | 79 | **51** (65 %) | 19 | 6 | 3 |
+| live replay, `monitor_code_tools` over the preserved workdir | 69 | **35** (51 %) | 22 | 5 | 7 |
+
+**The finding is the instability, not either column.** Of the 67 rows *both* arms call `broken`,
+letting the judge read the code moves `fault` on **34 — half of them** — including 14
+`implementation` → `hypothesis` and 8 the other way. Downstream that halves the repair-stop:
+applying `--gate`'s conjuncts plus `fault == "implementation"`, the tool-less arm would repair-stop
+**39** decisions and the code-reading arm **19**. So the volume of repair-stops a run pays for is a
+function of what the judge was allowed to see, and the affordance shipped *specifically* to make
+this field reliable is the thing that moves half its answers.
+
+Two things it does say, and they are the ones worth acting on:
+
+- **`fault` does not default to the safe answer.** The schema tells the model `unknown` is safe; it
+  answers `unknown` 6 times in 79 without the code and 5 in 69 with it. It commits.
+- **On a run that finished fine, it commits the wrong way.** 5 of the productive decisions drew
+  `broken` and 4 of those said `implementation` — but every one is below the confidence bar, so
+  through the gate the repair-stop's own false-stop rate is **1 decision, 1 of 49 productive
+  attempts**, in both arms. The gate is again what holds the line.
+
+**Two honest limits on the code arm.** The workdir on disk is the FINAL state after every repair,
+so for a repaired node the judge read code that is newer than the log it was judging — which biases
+it toward a coherent story. And neither arm is agentic in the way the incumbent was for those rows.
+
+**What would make `fault` properly benchable** is a label, and it is not the one this dataset has.
+`wasted`/`productive` says whether stopping was right; `fault` asks whether the REPAIR was the right
+remedy, and the outcome that answers it is what the repair then did — `node_repaired` plus the next
+attempt's terminal, which is the same join the (unbuilt) triage bench needs. A run must also
+actually reach the branch: `train_monitor_kill` on, a `broken` at ≥ 0.8 confirmed twice, and
+`fault="implementation"`. No preserved run did, because the confirmation arm never fired on a
+`work` stage — which is fixed, and is the other half of this change.
 
 ## Using it
 
@@ -122,6 +291,7 @@ python -m looplab.judgebench score                          # the incumbent repl
 python -m looplab.judgebench score --answers candidate.jsonl # a candidate's captured answers, offline
 python -m looplab.judgebench score --stage train --tools with
 python -m looplab.judgebench score --exclude-basis stage_failed
+python -m looplab.judgebench score --gate                    # count the ENGINE's stop, not the verdict
 ```
 
 `score` makes **no network call**. A candidate is supplied as a JSONL of `{"case_id", "status"}`.
@@ -139,10 +309,32 @@ provider call per row, and it is not the default.
 
 It is **committed** because `runs/` is not in the repository: an on-demand dataset cannot be read by
 a reviewer judging a prompt change, cannot gate a merge, and cannot be diffed. It is **derived** and
-never hand-edited — `tests/test_judge_bench.py::test_every_label_rederives` recomputes every label
-from the row's own stored facts through the production rule, offline, so an edited label goes red on
-a machine with no corpus; and `test_the_dataset_regenerates_from_the_runs_it_names` rebuilds it byte
-for byte where the runs exist.
+never hand-edited, and that claim rests on three guards in `tests/test_judge_bench.py`, in
+decreasing strength:
+
+1. `test_the_dataset_regenerates_from_the_runs_it_names` rebuilds it byte for byte — but it needs
+   the source runs, so point `LOOPLAB_BENCH_RUNS` at them. **It SKIPS otherwise, and until
+   2026-08-20 that skip was the whole derivation story: `runs/` is gitignored and the variable was
+   set nowhere, so the test had never once executed.** A skip unreachable in CI is not a guard.
+2. `test_every_label_rederives` recomputes every LABEL from the row's own stored facts through the
+   production rule, offline, so an edited label goes red on a machine with no corpus — and
+   `test_the_committed_corpus_is_internally_derived` does the same for every field the label rule
+   does NOT read, by re-deriving the JOINS the extractor built each row from: `case_id` from its
+   provenance, `system_prompt_sha256` from the row's own stored `system`, `llm_calls` from the
+   length of `span_ids`, `tools_available` from `bool(look_invitation)`, the sort order, and the
+   header's per-run counts. A hand edit has to forge all of them consistently, and editing a stored
+   PROMPT — the field the replay seam is entirely about, which no label and no headline number
+   reads — is caught here and nowhere else.
+3. `test_the_committed_artifact_has_not_been_edited_in_place` pins the artefact's uncompressed
+   sha256. A tripwire and nothing more: an editor can update the constant. What it buys is that the
+   edit cannot be *invisible* in a diff.
+
+The **replay seam** has its own guard, and it was vacuous for the same reason: until 2026-08-20
+`test_prompt_splits_round_trip_exactly` asserted `render_prompt(row["prompt"]) == messages_of(row)`,
+and `messages_of` *is* `render_prompt(row["prompt"])` for a row with no stored `messages` — which is
+all 450. It now round-trips each row's ingredients back through the production splitter, checks that
+`prompt_split_exact` is capable of being false, and pins `render_prompt` against what
+`_training_verdict` actually sends.
 
 Every stored text goes through `core/redact.py::redact_output_tail` — the same screen persisted
 output tails already pass, entropy pass included, not a second rule. Two honest limits:
@@ -153,8 +345,10 @@ text.
 ## What this corpus cannot answer
 
 - **Model choice.** One model produced all 450 verdicts.
-- **`TrainingVerdict.fault`.** Not one recorded verdict carries it; the field postdates every
-  preserved run.
+- **`TrainingVerdict.fault`, from the RECORD.** Not one recorded verdict carries it; the field
+  postdates every preserved run, and `recorded.fault` is `None` in 450 of 450 rows. **It is not
+  unmeasurable, though — it is unmeasurABLE FROM THE RECORD, which is a different sentence**, and
+  the live arm closes most of the gap today. See the section below.
 - **Whether a `broken` was worth acting on.** No run in the corpus ever exercised the kill path —
   every alert carries `log_role: work`, which has no kill authority — so the corpus records what the
   judge *said*, never what a kill would have cost.

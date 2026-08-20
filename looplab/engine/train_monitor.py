@@ -938,6 +938,31 @@ def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool
     return confidence_valid and confidence >= threshold
 
 
+def _confirmation_would_act(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float,
+                            log_role: str = LOG_ROLE_UNKNOWN,
+                            trajectory: Optional["LossTrajectory"] = None,
+                            confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS) -> bool:
+    """Whether REPEATING this verdict would reach an intervention. Pure/deterministic.
+
+    The arming question, and it is deliberately the same COUNTERFACTUAL shape as the `role_withheld`
+    / `trajectory_veto` receipts in `_monitor_training`: ask the real predicates with the one thing
+    the tick is missing — the streak — already satisfied, rather than re-listing their conjuncts at
+    the arming site where the two copies can silently disagree. They did: see the comment at that
+    call site for both directions of the drift the hand-written list carried.
+
+    It grants no authority of its own. Both predicates are unchanged, this only decides WHEN the
+    second look happens, and the second look is still judged on its own evidence — so this can never
+    turn a verdict the gate refuses into one it accepts.
+    """
+    return bool(
+        should_monitor_kill(verdict, enabled=enabled, threshold=threshold, log_role=log_role,
+                            broken_streak=confirm_ticks, confirm_ticks=confirm_ticks,
+                            trajectory=trajectory)
+        or should_monitor_repair(verdict, enabled=enabled, threshold=threshold, log_role=log_role,
+                                 broken_streak=confirm_ticks, confirm_ticks=confirm_ticks,
+                                 trajectory=trajectory))
+
+
 def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reason: str,
                         confidence: Optional[float] = None) -> bool:
     """Atomically claim the shared per-eval watchdog terminal in the cooperative event loop.
@@ -2338,19 +2363,34 @@ class TrainingMonitorMixin:
                         if repair_decided:
                             sp.set("repair_decided", True)
                         elif (verdict.status == "broken" and broken_streak == 1
-                              and log_role in _KILL_ELIGIBLE_ROLES and kill_signal is not None
-                              and getattr(self, "_train_monitor_kill", False)
-                              and not trajectory_vetoes_kill(trajectory)):
+                              and kill_signal is not None
+                              and _confirmation_would_act(
+                                  verdict, enabled=getattr(self, "_train_monitor_kill", False),
+                                  threshold=threshold, log_role=log_role, trajectory=trajectory)):
                             # ARMED, not acting: re-look promptly instead of after another full cadence
                             # (up to 30 min on a long budget), so confirmation costs seconds of a
                             # multi-hour budget rather than a meaningful slice of it. `armed_at` starts
                             # the TTL at the TRANSITION, never on a later broken tick — otherwise a
                             # flapping log could renew the arm indefinitely. It is also what licenses
-                            # the changed-digest bypass, so a `LOG_ROLE_WORK` stage (advisory, this
-                            # branch not taken) never buys a re-look it could not act on. The
-                            # measured-trajectory veto is a conjunct here for exactly that reason:
-                            # a confirmation that `should_monitor_kill` will refuse anyway is a
-                            # billable re-ask and a changed-digest bypass bought for nothing.
+                            # the changed-digest bypass, so a tick that could not act on a confirmation
+                            # never buys a re-look — a billable re-ask and a changed-digest bypass
+                            # bought for nothing.
+                            #
+                            # WHICH tick that is, is asked as the COUNTERFACTUAL
+                            # (`_confirmation_would_act`) rather than re-listed here, and that
+                            # changed on 2026-08-20. The hand-written conjuncts were
+                            # `log_role in _KILL_ELIGIBLE_ROLES` plus the
+                            # trajectory veto, written when a KILL was the only action a confirmation
+                            # could reach; `should_monitor_repair` then opened the repair-stop to
+                            # EVERY judged role, so on exactly the roles it was opened for the second
+                            # look cost a full cadence — and, on a log that diverged and then went
+                            # silent, never arrived at all, because `unchanged and armed_at is None`
+                            # `continue`s and only an arm bypasses it. The list was also missing the
+                            # CONFIDENCE bar it claimed to be a proxy for: a `broken` at 0.3 on a
+                            # training stage armed, re-asked at 30 s and bypassed the digest gate for
+                            # a kill `should_monitor_kill` refuses on confidence. Asking the two real
+                            # predicates with the streak already satisfied answers both directions at
+                            # once and cannot drift from them.
                             next_sleep = min(next_sleep, _MONITOR_CONFIRM_DELAY_S)
                             armed_at, arm_looks = anyio.current_time(), 0
                             sp.set("kill_armed", True)
