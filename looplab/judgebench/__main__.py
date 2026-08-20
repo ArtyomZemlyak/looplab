@@ -4,6 +4,14 @@
     python -m looplab.judgebench score                       # the incumbent replaying itself
     python -m looplab.judgebench score --answers cand.jsonl  # a candidate's captured answers, offline
 
+The FAILURE-CLASSIFIER bench (`engine/triage.py::_failure_reason` and whatever replaces it) is the
+same two verbs with a `triage-` prefix, over its own dataset and its own labels:
+
+    python -m looplab.judgebench extract-triage runs/*     -o tests/data/judge_bench/failure_triage.v1.jsonl.gz
+    python -m looplab.judgebench score-triage              # the reason each run actually recorded
+    python -m looplab.judgebench score-triage --arm head   # `_failure_reason` replayed at HEAD
+    python -m looplab.judgebench score-triage --answers cand.jsonl
+
 Deliberately not a `looplab` subcommand (see `looplab/judgebench/__init__.py`). `extract` reads `runs/`
 and writes ONLY the output file; `score` makes no network call at all.
 """
@@ -18,6 +26,7 @@ from looplab.judgebench.judge_corpus import (
 from looplab.judgebench.score import (
     attempt_totals, format_report, jsonl_candidate, per_attempt_report, recorded_candidate,
     score_dataset)
+from looplab.judgebench import triage_corpus, triage_score
 
 
 def main(argv=None) -> int:
@@ -40,7 +49,58 @@ def main(argv=None) -> int:
                              "'stage_failed' to cut the failures the engine decided over artifacts "
                              "AFTER the stage exited, which the judged log could not show")
 
+    tri_extract = sub.add_parser("extract-triage",
+                                 help="rebuild the FAILURE-CLASSIFIER dataset from run directories")
+    tri_extract.add_argument("run_dirs", nargs="+", type=Path)
+    tri_extract.add_argument("-o", "--out", type=Path, default=triage_corpus.DEFAULT_DATASET)
+
+    tri_score = sub.add_parser("score-triage", help="score a failure classifier offline")
+    tri_score.add_argument("--dataset", type=Path, default=triage_corpus.DEFAULT_DATASET)
+    tri_score.add_argument("--arm", choices=("recorded", "head", "head-widened"),
+                           default="recorded",
+                           help="'recorded' is the reason each run actually recorded (zero "
+                                "reconstruction); 'head' replays `_failure_reason` today over the "
+                                "durable stderr tail; 'head-widened' gives that replay the triage "
+                                "agent's own log reads as well, which is what isolates how much of "
+                                "the marker rule's win is the WINDOW rather than the rule")
+    tri_score.add_argument("--answers", type=Path, default=None,
+                           help="JSONL of {case_id,reason}; overrides --arm")
+    tri_score.add_argument("--run", default=None, help="only rows from this run")
+    tri_score.add_argument("--high-confidence-only", action="store_true",
+                           help="score only rows whose label rests on a high-confidence basis")
+
     args = parser.parse_args(argv)
+    if args.cmd == "extract-triage":
+        dataset = triage_corpus.build_dataset(args.run_dirs)
+        triage_corpus.write_dataset(dataset, args.out)
+        head = dataset["header"]
+        print("%s rows (%s labelled, %s unlabelled) from %d runs -> %s (%d bytes)"
+              % (head["rows"], head["labelled"], head["unlabelled"], len(head["sources"]),
+                 args.out, args.out.stat().st_size))
+        for source in head["sources"]:
+            print("  %-32s %3d rows  %3d labelled" % (source["run"], source["rows"],
+                                                      source["labelled"]))
+        return 0
+
+    if args.cmd == "score-triage":
+        dataset = triage_corpus.read_dataset(args.dataset)
+        rows = dataset["rows"]
+        if args.run:
+            rows = [r for r in rows if r["provenance"]["run"] == args.run]
+        if args.answers is not None:
+            candidate, name = triage_score.jsonl_candidate(args.answers), str(args.answers)
+        elif args.arm == "recorded":
+            candidate, name = triage_score.recorded_candidate, "recorded (the incumbent as it ran)"
+        else:
+            widened = args.arm == "head-widened"
+            candidate = triage_score.head_replay_candidate(widened=widened)
+            name = "_failure_reason at HEAD (%s stderr)" % ("widened" if widened else "durable tail")
+        report = triage_score.score_dataset(
+            rows, candidate, name=name, high_confidence_only=args.high_confidence_only)
+        sys.stdout.write(triage_score.format_report(
+            report, limits=dataset["header"].get("limits", "")))
+        return 0
+
     if args.cmd == "extract":
         dataset = build_dataset(args.run_dirs)
         write_dataset(dataset, args.out)
