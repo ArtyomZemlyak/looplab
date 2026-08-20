@@ -195,10 +195,12 @@ def _oracle_run(payload):
     try:
         return problem_id, run_isolated_benchmark(**kwargs)
     except Exception as exc:  # noqa: BLE001
+        # The reason travels back with the result. A worker's log line does not survive the
+        # harness's logging config, and "returned 0 of 100" with no reason is a debugging dead end
+        # -- measured: the first version of this pool failed every job and looked like a slow one.
         logging.getLogger(__name__).warning(
-            "looplab_parallel: oracle for %s failed in worker (%r); the serial loop recomputes it",
-            problem_id, exc)
-        return problem_id, None
+            "looplab_parallel: oracle for %s failed in worker (%r)", problem_id, exc)
+        return problem_id, {"__looplab_error__": f"{type(exc).__name__}: {exc}"[:300]}
 
 
 def prefetch_oracle(jobs, workers, cores_per_worker):
@@ -223,16 +225,24 @@ def prefetch_oracle(jobs, workers, cores_per_worker):
 
     t0 = _time.time()
     out = {}
+    errors = []
     with ctx.Pool(processes=workers, initializer=_pool_init) as pool:
         for problem_id, result in pool.imap_unordered(_oracle_run, jobs, chunksize=1):
-            if result is not None:
+            if isinstance(result, dict) and "__looplab_error__" in result:
+                errors.append(result["__looplab_error__"])
+            elif result is not None:
                 out[problem_id] = result
+    if errors:
+        log.warning("looplab_parallel: %d/%d oracle jobs failed; first: %s",
+                    len(errors), len(jobs), errors[0])
     trace = os.environ.get("ALGOTUNE_PARALLEL_TRACE")
     if trace:
         try:
             with open(trace, "a", encoding="utf-8") as fh:
                 fh.write(_json.dumps({"phase": "oracle", "instances": len(jobs),
-                                      "returned": len(out), "workers": workers,
+                                      "returned": len(out), "failed": len(errors),
+                                      "first_error": errors[0] if errors else None,
+                                      "workers": workers,
                                       "wall_s": round(_time.time() - t0, 2)}) + "\n")
         except OSError:
             pass

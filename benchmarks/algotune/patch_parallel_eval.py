@@ -29,6 +29,7 @@ Idempotent, keeps a `.orig`, `--revert` undoes it.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import shutil
 import sys
@@ -327,9 +328,17 @@ def main() -> int:
     rc = patch_floor(root)
     if rc:
         return rc
-    rc = patch_oracle(root)
-    if rc:
-        return rc
+    # The ORACLE pass patch is NOT applied by default. Measured 2026-08-20: it fails 100/100 jobs
+    # with `AttributeError: Class 'Solver' not found in solver module` -- `run_isolated_benchmark`
+    # loads a solver module out of `code_dir`, and for the reference pass that directory is the TASK
+    # package, which has no `Solver` class. The serial path reaches its number some other way, and
+    # until that way is identified, a prefetch that always fails and silently falls back is the
+    # silent-empty-answer shape this repo keeps paying for. Set ALGOTUNE_PATCH_ORACLE=1 to apply it
+    # anyway (it is harmless -- it falls back -- but it buys nothing).
+    if os.environ.get("ALGOTUNE_PATCH_ORACLE") == "1":
+        rc = patch_oracle(root)
+        if rc:
+            return rc
 
     text = target.read_text(encoding="utf-8")
     if MARK in text:
