@@ -1072,7 +1072,24 @@ This is the operator's longest engine item and doc 29 F1 answers only its first 
 (`events/types.py:317`, folded `events/replay.py:3704`, appended `engine/orchestrator.py:3080`),
 `engine/widths.py:95::proposal_derived_width` = `max(1, min(pool // widest_declared_gpus,
 ceiling))`. `proposal_width: true` is in the v8/v9/live snapshots — and
-**`run_width_settled` appears 0 times across every event log on this box.** The live run settled
+~~**`run_width_settled` appears 0 times across every event log on this box.**~~ **SUPERSEDED
+2026-08-20 — the mechanism is now PROVEN on disk.** `runs/e5small-dr-unified-v3` carries **two**
+`run_width_settled` rows, and they are the two directions:
+
+* narrowed 2 -> 1, `reason: "the open proposals declare a per-experiment footprint the run's
+  box-derived width cannot serve concurrently"`, evidence `{gpu_pool: 2, widest_declared_gpus: 2,
+  open_proposals: 1, undeclared_proposals: 0, launch_ceiling: 2}` — two 2-GPU experiments do not fit
+  on a 2-GPU box;
+* widened 1 -> 2 on the next proposal, same reason field, evidence identical but
+  `widest_declared_gpus: 1`.
+
+So F1 is BUILT, ENABLED **and OBSERVED**, with the re-pin recorded in both directions and the
+arithmetic legible from the row alone. `e5small-dr-unified-v4` still shows zero, and that is the
+case this section itself predicted: every proposal there declares `gpus: 1`, the launch ceiling is
+already 2, so no re-pin is due. The claim was true when written and false one run later, which is
+doc 45's shape exactly — a recorded fact whose truth lives somewhere it was not re-read.
+
+The original sentence, for the record: the live run settled
 `eval_parallel: 2` at launch and never moved. So the mechanism is built, enabled, and unproven on
 disk; a two-GPU box with one-GPU footprints simply never produces a re-pin.
 
@@ -1205,7 +1222,7 @@ So the contradictions are of three other kinds, and naming them is the point of 
 
 | entry | doc 29 status | today | kind |
 |---|---|---|---|
-| **F1** run width from proposals | BUILT 2026-08-13 | present and enabled (`config.py:504`, `widths.py:95`, `types.py:317`) — and **`run_width_settled` has fired 0 times in every event log on this box**. The operator's actual question was cross-run GPU contention, which F1 never addressed (see **E4**) | N |
+| **F1** run width from proposals | BUILT 2026-08-13, **OBSERVED 2026-08-20** | present and enabled (`config.py:504`, `widths.py:95`, `types.py:317`), and ~~fired 0 times~~ **fired twice in `runs/e5small-dr-unified-v3`** — narrowed 2->1 against a `widest_declared_gpus: 2` proposal and widened back 1->2 on the next. The operator's actual question was cross-run GPU contention, which F1 never addressed (see **E4**) | **Y** |
 | **F2** Developer shell | BUILT 2026-08-14, "deliberately NOT as a shell" | still true, and **doc 29 is now STALE**: `looplab/tools/dev_commands.py` (`cb3433b3`, 2026-08-17) gives the Developer operator-pinned shell commands, defaulting to an EMPTY list | — |
 | **F3** worktree | DECLINED WITH MEASUREMENT | stands; the one follow-up it names is still not done (`engine/workspace.py:179` carries no byte total) | — |
 | **F4** assistant always-on | SHIPPED 2026-08-13 | backend and three routes exist; **the browser cannot ARM a watch** — `ui/src/api.js:1095-1101` has GET and DELETE and no POST | **H** |
