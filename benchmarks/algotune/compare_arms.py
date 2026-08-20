@@ -6,9 +6,13 @@ Reads each arm from the place that arm actually writes, and refuses to invent th
 * **arm A** -> ``<algotune>/reports/agent_summary.json``, which ``AlgoTuner/main.py`` updates as
   ``<task>.<normalized-model>.final_speedup`` at the end of a run. That file also carries the 17
   SHIPPED reference models, so their numbers come along for free as context.
-* **arm B** -> the LoopLab run's own event log, folded, best metric. Never a log scrape: the fold is
-  what decides a run's champion, and a second reading of "what did this run score" is how a report
-  comes to disagree with the product.
+* **arm B** -> ``B-<task>.final.json``, the champion's score on the TEST split, produced once after
+  the run. Every LoopLab node is evaluated on TRAIN (mirroring AlgoTuner's own agent loop), so the
+  run's internal champion metric is a TRAIN number and belongs in the same column as arm A's test
+  result only by mistake. Without ``--final-dir`` the tool falls back to that train metric AND says
+  so in a warning, because a silently mixed-split comparison is worse than no comparison.
+  The champion itself is identified from the FOLD (`extract_champion.py`), never from a directory
+  listing: the fold is what decides a run's champion.
 
 WHAT THE COLUMNS MEAN, AND THE TWO THINGS THEY DO NOT
 -----------------------------------------------------
@@ -70,8 +74,27 @@ def _reference_models(summary_path: Path, task: str) -> dict[str, float]:
     return out
 
 
-def _arm_b(run_dir: Path) -> float | None:
-    """The LoopLab run's champion metric, from the fold — never from stdout."""
+def _arm_b_final(final_json: Path) -> float | None:
+    """Arm B's TEST score: the champion, evaluated once on the graded split after the run.
+
+    This — not the run's own champion metric — is what compares to arm A. Every LoopLab node is
+    evaluated on TRAIN (mirroring AlgoTuner's agent loop), so `state.best().metric` is a TRAIN
+    number and putting it in the same column as arm A's test result would compare two different
+    splits.
+    """
+    try:
+        row = json.loads(final_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = row.get("speedup") if isinstance(row, dict) else None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _arm_b_train(run_dir: Path) -> float | None:
+    """The LoopLab run's own champion metric — a TRAIN number, reported only as context."""
     if not (run_dir / "events.jsonl").exists():
         return None
     try:
@@ -99,6 +122,10 @@ def main() -> int:
     ap.add_argument("--algotune-root", required=True, type=Path)
     ap.add_argument("--runs-root", required=True, type=Path,
                     help="Directory holding <task>/run/ for the LoopLab arm.")
+    ap.add_argument("--final-dir", type=Path, default=None,
+                    help="Directory holding B-<task>.final.json (the champion's TEST score). "
+                         "Without it, arm B's column is its TRAIN metric and is NOT comparable to "
+                         "arm A -- the header says so.")
     ap.add_argument("--model-fragment", default="v4-flash",
                     help="Substring identifying OUR model inside agent_summary.json.")
     ap.add_argument("--reference", action="store_true",
@@ -114,11 +141,16 @@ def main() -> int:
     rows, paired = [], []
     for task in tasks:
         va = a.get(task)
-        vb = _arm_b(args.runs_root / task / "run")
+        vb = (_arm_b_final(args.final_dir / f"B-{task}.final.json") if args.final_dir
+              else _arm_b_train(args.runs_root / task / "run"))
         rows.append((task, va, vb))
         if va is not None and vb is not None:
             paired.append((va, vb))
 
+    if args.final_dir is None:
+        print("WARNING: --final-dir not given, so arm B's column is its TRAIN metric while "
+              "arm A's is a TEST score. Those are different splits and must not be read as "
+              "a comparison.")
     width = max(len(t) for t, _, _ in rows)
     print(f"{'task':<{width}}  {'A: AlgoTuner':>13}  {'B: LoopLab':>11}   winner")
     print("-" * (width + 42))

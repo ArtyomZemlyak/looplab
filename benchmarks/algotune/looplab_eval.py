@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -155,6 +156,11 @@ def main() -> int:
     ap.add_argument("--baseline-times-dir", type=Path, default=DEFAULT_TIMES_DIR,
                     help="Where patch_baseline_cache.py keeps the per-instance reference timings. "
                          "Informational here; the patch owns that path.")
+    ap.add_argument("--subset", choices=("train", "test"), default="train",
+                    help="Dataset half to score on. Default TRAIN, mirroring AlgoTuner's own agent, "
+                         "which iterates on train and touches test only for its final number — "
+                         "scoring every node on test would let this arm optimise against the graded "
+                         "split while the other arm does not. Requires patch_eval_subset.py.")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
     args = ap.parse_args()
 
@@ -184,11 +190,17 @@ def main() -> int:
     # identical run invoked directly returned 0.9963x.
     argv = [sys.executable, str(evaluator), "--models", args.model, "--tasks", args.task]
 
+    # The split is carried in the ENVIRONMENT rather than as a flag: `evaluate_results.py` hardcodes
+    # it at three sites and has no argument for it, so `patch_eval_subset.py` reads this name. An
+    # unpatched checkout ignores it and scores on test, which is upstream's own behaviour.
+    env = dict(os.environ, ALGOTUNE_EVAL_SUBSET=args.subset)
+
     started = time.time()
-    proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True, timeout=args.timeout)
+    proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
+                          timeout=args.timeout, env=env)
     elapsed = round(time.time() - started, 1)
 
-    out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed}
+    out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": args.subset}
 
     if not summary.exists():
         out["error"] = "evaluate_summary.json not produced"

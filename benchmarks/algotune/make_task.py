@@ -102,6 +102,10 @@ def main() -> int:
                 "--task", args.task,
                 "--model", "LoopLab",
                 "--solver", "solver.py",
+                # TRAIN, mirroring AlgoTuner's own agent. Scoring every node on the test split
+                # would let this arm optimise against the set it is graded on while the reference
+                # arm does not -- the champion is scored on test once, after the run.
+                "--subset", "train",
             ],
             "metric": {"kind": "stdout_json", "key": "speedup"},
             "timeout": args.timeout,
