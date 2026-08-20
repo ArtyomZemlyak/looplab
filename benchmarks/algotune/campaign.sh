@@ -226,5 +226,11 @@ done
 wait
 reap_orphan_workers
 echo "[$(date +%H:%M:%S)] ===== arm $ARM COMPLETE ====="
+
+# The runtime disk does not survive a container restart and an arm is hours of measurement that
+# cannot be recomputed. Snapshot at the one moment we know the data just changed. SNAPSHOT=0 skips.
+if [ "${SNAPSHOT:-1}" = "1" ] && [ -x "$REPO/benchmarks/snapshot.sh" ]; then
+  "$REPO/benchmarks/snapshot.sh" || echo "  (snapshot failed; the measurements are still on disk)"
+fi
 echo "summarise with:  python $REPO/benchmarks/algotune/compare_arms.py \\"
 echo "    --algotune-root $AT --runs-root $RUNS_ROOT --final-dir $OUT --reference"
