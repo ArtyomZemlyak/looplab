@@ -1,4 +1,4 @@
-# 44 — Claim surfaces: why a recorded fact goes stale, and what to do about it (2026-08-20)
+# 45 — Claim surfaces: why a recorded fact goes stale, and what to do about it (2026-08-20)
 
 A root-cause pass over seven claim failures measured in the two days to 2026-08-20, an audit of the
 claims aimed at AGENTS (those are the ones that kill runs), and the mechanism built in response.
