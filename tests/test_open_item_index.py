@@ -29,6 +29,8 @@ import re
 from looplab.core.claimpin import (
     predicate_holds,
     read_text as _read,
+    satisfied_only_by_prose,
+    text_without_markers as _text_without_markers,
     tracked_text_files as _tracked_text_files,
 )
 
@@ -198,3 +200,77 @@ def test_the_index_is_not_empty_and_not_a_single_file():
     homes = {p.suffix for p, _ in slugs}
     assert {".py", ".md"} <= homes, (
         f"the index must span code and docs or the prose items escape again; found {homes}")
+
+
+# The three proofs whose literal today occurs ONLY in prose. Each needs re-pointing at the line that
+# DECIDES its item, not at the sentence describing it; until then they can never go green, so they
+# are noise rather than evidence. Listed by name and bounded so the set can only shrink — the same
+# shape `test_file_identity_tiers` uses for its unconverted signatures.
+PROSE_ONLY_PROOFS = {
+    "prompt-bundle-unpinned-across-hot-reload",
+    "no-shared-reserve-commit-run-budget",
+    "claim-legacy-prompt-branches",
+}
+
+
+def test_no_proof_is_satisfiable_only_by_prose():
+    """A falsifier a COMMENT can satisfy is not a falsifier.
+
+    The rule existed before this test and existed only as a comment beside one marker — the guard
+    against comment-satisfiable proofs was itself a comment, which is the exact shape it warns about
+    one level up. Both directions cost something, and differently: an `absent:` literal prose can
+    produce goes GREEN the day someone writes the word (a false shipped), while a `present:` literal
+    only prose carries can never go green at all (a marker stuck open, which teaches readers to skip
+    the index).
+
+    A literal that spans real code and a string constant — `startswith("setup` — is ABOUT the call
+    and is not flagged. That distinction is not cosmetic: the naive question ("does it survive with
+    every string blanked?") reports 5 offenders here, and only 3 of them are real.
+    """
+    offenders = {}
+    for path, kind, slug, window in _iter_markers():
+        proof = _PROOF.search(window)
+        if not proof:
+            continue
+        for pred in proof.group(1).split("+"):
+            for form in ("absent:", "present:"):
+                if not pred.startswith(form):
+                    continue
+                body = pred[len(form):]
+                if "@" not in body:
+                    continue
+                literal, rel = body.rsplit("@", 1)
+                target = ROOT / rel
+                if not target.is_file() or target.suffix != ".py":
+                    continue
+                source = _text_without_markers(target)
+                if satisfied_only_by_prose(target, source, literal):
+                    offenders[slug] = f"{form}{literal}@{rel}"
+
+    new = {s: p for s, p in offenders.items() if s not in PROSE_ONLY_PROOFS}
+    assert not new, (
+        "these proofs are satisfied only by a comment or string — re-point each at the line that "
+        "DECIDES the item:\n  " + "\n  ".join(f"OPEN[{s}] {p}" for s, p in sorted(new.items())))
+    gone = PROSE_ONLY_PROOFS - set(offenders)
+    assert not gone, (
+        "these were re-pointed or deleted — remove them from PROSE_ONLY_PROOFS so the bound keeps "
+        f"shrinking: {sorted(gone)}")
+
+
+def test_the_prose_check_can_actually_fail():
+    """NON-VACUITY, both directions, driven on the real tree rather than on a fixture.
+
+    Without this the test above passes on a broken `satisfied_only_by_prose` that always answers
+    False — which is precisely how the rule spent its life as a comment.
+    """
+    llm = ROOT / "looplab/core/llm.py"
+    assert satisfied_only_by_prose(llm, _text_without_markers(llm), "dollar-cap"), (
+        "a literal whose only occurrences are prose must be caught")
+
+    triage = ROOT / "looplab/engine/triage.py"
+    assert not satisfied_only_by_prose(triage, _text_without_markers(triage), 'startswith("setup'), (
+        "a literal anchored in real code must NOT be flagged, even where it reaches into a string")
+
+    assert not satisfied_only_by_prose(triage, _text_without_markers(triage), "no-such-text-anywhere"), (
+        "a literal that does not occur at all is a DEAD citation, reported by the proof check — "
+        "this one must not also claim it is prose")

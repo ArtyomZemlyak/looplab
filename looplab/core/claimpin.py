@@ -57,7 +57,9 @@ Both halves run in the suite over the repo itself (`tests/test_claim_pins.py`).
 """
 from __future__ import annotations
 
+import io
 import json
+import tokenize
 import re
 import sys
 from pathlib import Path
@@ -142,6 +144,61 @@ def _resolve(rel: str, root: Path, *, allow_absolute: bool) -> tuple[Path | None
                           "repo-relative path, or the suite stops passing on a bare checkout")
         return Path(rel), ""
     return (root / rel).resolve(), ""
+
+
+def prose_spans(path: Path, source: str) -> set:
+    """Character offsets of `source` that sit inside a Python COMMENT or STRING token.
+
+    Empty for a non-Python path and for source that will not tokenize — both mean "we cannot tell",
+    and the caller must then treat every occurrence as code. Failing the other way would let a
+    tokenizer hiccup silently condemn a live pin.
+    """
+    if path.suffix != ".py":
+        return set()
+    offsets, pos = [0], 0
+    for line in source.splitlines(keepends=True):
+        pos += len(line)
+        offsets.append(pos)
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return set()
+    out = set()
+    for tok in toks:
+        if tok.type not in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        (r1, c1), (r2, c2) = tok.start, tok.end
+        if r1 - 1 >= len(offsets) or r2 - 1 >= len(offsets):
+            continue
+        out.update(range(offsets[r1 - 1] + c1, offsets[r2 - 1] + c2))
+    return out
+
+
+def satisfied_only_by_prose(path: Path, source: str, literal: str) -> bool:
+    """Does EVERY occurrence of `literal` lie wholly inside a comment or string?
+
+    THE RULE THIS MAKES ENFORCEABLE. "An `absent:` literal must be one that prose cannot produce"
+    was written as a comment beside a single marker, which is to say the guard against
+    comment-satisfiable proofs was itself a comment. Both directions have a cost and they are
+    different costs: an `absent:` literal a comment can produce goes GREEN the day someone writes the
+    word in prose — a false shipped; a `present:` literal only prose carries can never go green at
+    all — a marker stuck open, which is noise that teaches readers to ignore the index.
+
+    ONE CHARACTER OF REAL CODE ANYWHERE ANCHORS IT. A literal spanning code and a string
+    (`startswith("setup`) is about the call, not about the sentence, and flagging it would refuse
+    exactly the pins that name a branch by the constant it tests — measured while writing this: the
+    naive "does it survive with strings blanked" question flags 5 markers, of which only 3 are real.
+    """
+    mask = prose_spans(path, source)
+    if not mask:
+        return False
+    i, seen = source.find(literal), False
+    while i != -1:
+        seen = True
+        if any(j not in mask for j in range(i, i + len(literal))):
+            return False
+        i = source.find(literal, i + 1)
+    return seen
 
 
 def predicate_holds(pred: str, *, root: Path, allow_absolute: bool = False) -> tuple[bool, str]:
