@@ -487,7 +487,34 @@ def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring()
     handed_on, total = report.diagnosable_handoff[1], report.label_coverage
     assert handed_on > total // 2
     assert report.diagnosable_handoff[0] < handed_on      # there IS headroom to win
+    # A ceiling that ignores what the diagnostician is FORBIDDEN to say is a promise the design
+    # cannot keep. Its answer vocabulary is closed and narrower than the label vocabulary on
+    # purpose — a model may not assert that an engine mechanism it cannot observe fired — so the
+    # report states the unwinnable rows and computes the REACHABLE ceiling, not the arithmetic one.
+    assert triage_score.LIVE_ANSWERABLE_REASONS < set(LABELS), (
+        "the diagnostician may say everything the corpus can label — then nothing is out of reach "
+        "and the reachable ceiling is not measuring anything")
+    # DRIVEN, because how many rows are unwinnable TODAY depends on which partition ships and a
+    # test that asserted a number would be green for the wrong reason on the other side of a merge.
+    # The property is the mechanism: a row handed on whose truth the diagnostician may not give is
+    # counted, and the reachable ceiling drops by exactly that many.
+    forbidden = sorted(set(LABELS) - triage_score.LIVE_ANSWERABLE_REASONS - {LABEL_UNKNOWN})
+    assert forbidden, "nothing is forbidden; see above"
+    target = forbidden[0]
+    marked = [r for r in rows if r["label"]["reason"] == target]
+    assert marked, "no row carries %r, so the drive below proves nothing" % target
+    handed = sorted(triage_score.LIVE_DIAGNOSABLE_REASONS)[0]
+    driven = triage_score.score_dataset(
+        rows, lambda row: handed if row["label"]["reason"] == target else row["label"]["reason"],
+        name="driven", live=True)
+    assert driven.unreachable_by_diagnosis == len(marked)
+    text_driven = triage_score.format_report(driven)
+    reachable = driven.correct + (driven.diagnosable_handoff[1] - driven.diagnosable_handoff[0]
+                                  ) - driven.unreachable_by_diagnosis
+    assert "%d/%d" % (reachable, driven.label_coverage) in text_driven
+
     text = triage_score.format_report(report)
+    assert "REACHABLE CEILING" in text
     assert "HANDED TO THE DIAGNOSTICIAN" in text
     assert "NOT part of any accuracy claim" in text
     # The report must NAME which of production's two partitions it scored: the same number means
@@ -497,6 +524,52 @@ def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring()
     # phrase "handed to the diagnostician" would be a claim about a program that never ran.
     frozen = triage_score.score_dataset(rows, triage_score.frozen_replay_candidate(), name="f")
     assert "HANDED TO THE DIAGNOSTICIAN" not in triage_score.format_report(frozen)
+
+
+def test_the_limits_name_the_repaired_defect_in_the_incumbent():
+    """A corpus that measures a decider containing a since-fixed bug must SAY so, in the artefact.
+
+    Ten of the sixteen `rubertlite-dense-retrieval` terminals were condemned by a stage checker
+    reading only `run.out[-4000:]`; the trajectory veto widened that window, so those nodes would
+    not be condemned today. No label moves — what acquits them is the operator's own
+    reused-and-scored re-run, not the checker's later repair — but a reader who took "10 of 16 were
+    false refusals" as a property of the checker that SHIPS would be quoting a historical rate as a
+    current one. The caveat rides in the header, which is what the report prints, so it cannot be
+    separated from the number.
+    """
+    header = read_dataset(DEFAULT_DATASET)["header"]
+    limits = header["limits"]
+    assert limits == CORPUS_LIMITS
+    assert "DEFECT SINCE REPAIRED" in limits
+    assert "4,000" in limits and "trajectory veto" in limits
+    assert "NOT ONE LABEL MOVES" in limits
+    # And it is printed, not merely stored.
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    report = triage_score.score_dataset(rows, triage_score.recorded_candidate, name="r")
+    assert "DEFECT SINCE REPAIRED" in triage_score.format_report(report, limits=limits)
+
+
+def test_no_row_uses_a_label_the_classifier_cannot_produce():
+    """The load-bearing half of "the vocabulary is the classifier's own", asserted on the ARTEFACT.
+
+    `labels` in the header is a fact about the BUILD TREE and is allowed to lag: the vocabulary
+    grew a member (`unclassified`) between two of this corpus's rebuilds, and a test demanding
+    equality would turn every such addition into a red merge that can only be cleared by rebuilding
+    a dataset whose ROWS did not change. That is the "bench follows the thing it measures" defect
+    one level down, and it is not worth reintroducing to catch a stale header field.
+
+    What must never lag is the direction that can make the corpus incoherent: a row labelled with a
+    reason the classifier cannot produce would be scoring candidates against an answer that does not
+    exist. That is what this asserts, and it is asserted against the live vocabulary.
+    """
+    dataset = read_dataset(DEFAULT_DATASET)
+    used = {r["label"]["reason"] for r in dataset["rows"]}
+    assert used <= set(LABELS), (
+        "the corpus labels rows with reasons this tree cannot produce: %s"
+        % sorted(used - set(LABELS)))
+    # The header's own vocabulary must at least cover what the rows use, or the artefact
+    # contradicts itself without needing the tree at all.
+    assert used <= set(dataset["header"]["labels"])
 
 
 def test_the_frozen_vocabulary_travels_in_the_artefact():

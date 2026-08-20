@@ -324,10 +324,22 @@ HANDED TO THE DIAGNOSTICIAN  (a nomination, not a decision)
   has to win, and are what `--answers` scores. This is NOT part of any accuracy claim above.
 ```
 
-29 rows — 23 `oom`, plus the `diverged`, `not_learning` and `no_metric` rows the residuals cannot
-name — are what a diagnostician has to convert. Getting all 29 would take the corpus to 99.2 %;
-getting none of them leaves it at 74.6 %. **Nobody has run that arm yet.** `--answers cand.jsonl`
-takes `{case_id, reason}` and is how it gets run, offline, over the identical rows.
+Those 29 rows are 22 `oom`, 4 `diverged`, and one each of `not_learning`, `crash` and `no_metric`.
+Getting none of them leaves the corpus at 74.6 %; getting every one it is *allowed* to get takes it
+to **113/118 = 95.8 %**, not to 99.2 %, and the gap is worth stating plainly:
+
+**4 of the 29 have a ground truth the diagnostician may not say.** Their truth is `diverged`, which
+is engine-final and absent from `DIAGNOSED_FAILURE_REASONS` — deliberately, because answering it
+would be a model asserting that a watchdog it cannot observe fired. All four are
+`rubertlite-dense-retrieval` nodes the stage checker caught (`loss=inf` for twenty epochs, `nan`,
+`-1.5e+10`, `-2.35e+08`) in a run that predates the diverge watchdog. The rule is right and the
+rows are unwinnable under it; the honest ceiling is the one that says so. The best available answer
+for them is `not_learning`, which is in the vocabulary and is the wrong cause — "stabilise the
+numerics" and "the objective cannot descend" are different directives — so this is a real residual,
+not a scoring artefact.
+
+**Nobody has run that arm yet.** `--answers cand.jsonl` takes `{case_id, reason}` and is how it
+gets run, offline, over the identical rows.
 
 A caution that comes straight from the numbers below: the diagnostician is being asked to decide
 exactly the rows whose durable evidence is thinnest. On the frozen arm, widening the evidence from
@@ -415,6 +427,15 @@ corpus says so from evidence rather than from a second opinion:
   best. The stage check reads only the last 4,000 characters of the log; it saw a flat loss inside
   the final epoch and called a converged training "no learning progress". Node 1's loss went
   33.9 → 13.3 monotonically and it scored 0.805;
+- **and that window is since fixed.** The trajectory veto (`engine/eval_stages.py`, 2026-08-20)
+  widened what the checker is judged on, so a rerun of those ten today would not be condemned.
+  **No label moves** — what acquits them is the operator's own reused-and-scored re-run, not the
+  checker's later repair — but "10 of 16 were false refusals" is a property of a checker with a
+  broken window, not of the checker that ships, and any rate quoted from these rows *about stage
+  checking* is a historical rate. The failure-**classification** scores are unaffected: they replay
+  a recorded `res` whose stage statuses were written at the time, so a change to the live checker
+  cannot move them — verified, `--arm live` is 88/118 both before and after the veto landed.
+  `CORPUS_LIMITS` carries this in the dataset header, so it prints above every report;
 - 4 of the 16 are `diverged` (`loss=inf` for all 20 epochs; `loss=nan`; `loss=-1.5e+10`;
   `-2.35e+08`), caught by the stage checker only because the diverge watchdog did not exist yet;
 - **exactly one — node 12 — is genuinely `not_learning`**: loss fell 0.986 → 0.0195 monotonically
