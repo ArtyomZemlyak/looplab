@@ -175,6 +175,55 @@ def report(rows: list, answers: dict, name: str) -> list:
     return out
 
 
+def compare(rows: list, captures: list) -> list:
+    """The gap between two arms, ROW BY ROW — which is the price of the thin durable record.
+
+    An aggregate difference of accuracy would hide the shape: a wider window can win a row and lose
+    another at the same score. What is reported is the rows that MOVED, in both directions, and the
+    count of rows where widening added nothing to look at (so the arms are the same question)."""
+    det = deterministic_map(rows)
+    (name_a, ans_a), (name_b, ans_b) = captures
+    out = ["", "=" * 88, "ARM GAP: %s -> %s" % (name_a, name_b), "=" * 88]
+    moved_right, moved_wrong, both_wrong_moved = [], [], []
+    identical_evidence = 0
+    for row in rows:
+        truth = (row.get("label") or {}).get("reason")
+        if truth in (None, triage_corpus.LABEL_UNKNOWN):
+            continue
+        if det[row["case_id"]] not in DIAGNOSABLE_ENGINE_REASONS:
+            continue
+        # BOTH captures must hold this row. An absent case_id is "this arm has not reached it",
+        # which is a fact about the capture; a present row whose `reason` is None is a fact about
+        # the diagnostician. Conflating them makes an unfinished run look like a regression.
+        if row["case_id"] not in ans_a or row["case_id"] not in ans_b:
+            continue
+        on = (row.get("evidence") or {}).get("on_demand") or {}
+        extra = list(on.get("triage_log_reads") or [])
+        if (on.get("stage_log") or {}).get("tail"):
+            extra.append("tail")
+        if not extra:
+            identical_evidence += 1
+        a = (ans_a.get(row["case_id"]) or {}).get("reason")
+        b = (ans_b.get(row["case_id"]) or {}).get("reason")
+        if a == b:
+            continue
+        if b == truth:
+            moved_right.append((row["case_id"], a, b))
+        elif a == truth:
+            moved_wrong.append((row["case_id"], a, b))
+        else:
+            both_wrong_moved.append((row["case_id"], a, b, truth))
+    out += ["  handed rows where widening adds NOTHING to read : %d (the two arms ask the same "
+            "question there)" % identical_evidence,
+            "  widening turned WRONG -> RIGHT                  : %d" % len(moved_right),
+            "  widening turned RIGHT -> WRONG                  : %d" % len(moved_wrong),
+            "  moved between two wrong answers                 : %d" % len(both_wrong_moved)]
+    for label, items in (("-> RIGHT", moved_right), ("-> WRONG", moved_wrong)):
+        for case, a, b in items:
+            out.append("    %-9s %-44s %s -> %s" % (label, case, a, b))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -182,12 +231,15 @@ def main(argv=None) -> int:
     ap.add_argument("--dataset", type=Path, default=triage_corpus.DEFAULT_DATASET)
     args = ap.parse_args(argv)
     rows = triage_corpus.read_dataset(args.dataset)["rows"]
-    lines = []
+    lines, loaded = [], []
     for capture in args.captures:
         answers = load_answers(capture)
         arm = next((str(a.get("arm")) for a in answers.values() if a.get("arm")), "?")
+        loaded.append((arm, answers))
         lines += report(rows, answers, "%s (%s, %d rows captured)"
                         % (capture.name, arm, len(answers)))
+    if len(loaded) == 2:
+        lines += compare(rows, loaded)
     print("\n".join(lines))
     return 0
 
