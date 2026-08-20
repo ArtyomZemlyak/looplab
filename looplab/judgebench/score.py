@@ -28,10 +28,48 @@ The default candidate reads a JSONL of `{"case_id": ..., "status": ...}` — ans
 earlier, replayed with no network. `llm_candidate` builds the live arm out of the repo's own
 `parse_structured`; it is not the default, it is not reachable without being constructed
 explicitly, and calling it spends money per row.
+
+## THE VERDICT IS NOT THE STOP (`Gate`, opt-in)
+
+By default a row's "stop" is `status == "broken"`, and that is the right unit for comparing two
+PROMPTS. It is the wrong unit for the two numbers an operator pays in, because the engine does not
+act on a verdict — it acts on `should_monitor_kill` / `should_monitor_repair`, a conjunction the
+model only supplies two terms of. Measured on this corpus: **all five of the false stops the
+headline reports sit at confidence 0.62-0.75, below the shipped `train_monitor_kill_confidence`
+of 0.8, while 49 of the 53 true stops clear it** — so the engine's own confidence conjunct takes the
+false-stop count from 5 to 0 at a cost of 4 true stops (7 -> 6 wasted attempts caught). A prompt
+change benched against a false-stop number the engine never pays is being read against the wrong
+target, in the expensive direction.
+
+`Gate` models the conjuncts a recorded row can still answer, and REFUSES to model the one it
+cannot:
+
+* **confidence bar** — the model's own number against `threshold`, through the production
+  `_normalize_monitor_confidence`, so a non-finite or non-numeric confidence fails closed here
+  exactly as it does in the engine.
+* **trajectory veto** — re-read from the row's own stored `prompt.trajectory` text (`DIRECTION:
+  descending` with no `ANOMALY:` line), which is what `trajectory_vetoes_kill` answers `True` for.
+  On this corpus it is INERT: 144 of the 144 rows with a measured `descending` curve were judged
+  `healthy`, so it vetoes nothing and moves no number. That is worth reporting rather than
+  assuming — the veto shipped after v7's flat-tail misread, and the four v6 false stops it reads as
+  its motivating cases carry NO measured trajectory at all (the tracker postdates those runs).
+* **NOT the confirm streak.** `_MONITOR_KILL_CONFIRM_TICKS` needs two consecutive `broken` verdicts
+  about the same stage log, and the corpus cannot supply the second one: the arm that schedules a
+  confirmation look at `_MONITOR_CONFIRM_DELAY_S` (30 s) is gated on `_KILL_ELIGIBLE_ROLES`, every
+  recorded alert carries `log_role: work`, so **no confirmation look was ever taken** — measured,
+  the median gap from a `broken` verdict to the next decision about the same attempt is 617.8 s
+  (min 605.5, n=76), i.e. the ordinary cadence. Modelling a streak over ticks ten minutes apart
+  measures a different mechanism on different evidence; for the record it would report 2 of 27
+  wasted attempts caught instead of 7, which is a number about the corpus's spacing and not about
+  the gate.
+
+`ScoreReport.gate` is what the report prints so a gated number can never be quoted as an ungated
+one, and the gate is OFF by default so every baseline in `tests/test_judge_bench.py` is unmoved.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -46,6 +84,73 @@ PRIMARY_LABELS = (LABEL_WASTED, LABEL_PRODUCTIVE)
 # prompt defines it as the non-fatal answer, and Phase 3 (`should_monitor_kill`) claims only
 # `broken`. Changing this constant changes what the bench MEANS, so it is named, not inlined.
 STOP_VERDICTS = frozenset({"broken"})
+
+# The row's own copy of what `trajectory_context` rendered. Read rather than re-derived: the tail
+# the tracker observed is gone, but the SENTENCE the engine wrote from its measurement is stored
+# verbatim in `prompt.trajectory`, and `trajectory_vetoes_kill` is a function of exactly the two
+# facts that sentence carries.
+_TRAJECTORY_DIRECTION_RE = re.compile(r"DIRECTION: (\w+)")
+_TRAJECTORY_ANOMALY = "ANOMALY:"
+
+
+@dataclass(frozen=True)
+class Gate:
+    """The deterministic conjuncts the ENGINE applies after the model has spoken.
+
+    Defaults are the shipped ones (`Settings.train_monitor_kill_confidence`). See the module
+    docstring for what this deliberately does NOT model and why.
+
+    IT READS PRODUCTION ON PURPOSE, and that is the opposite of the sibling bench's frozen arm —
+    worth stating, because the two look like the same decision and are not. `triage_score.py`'s
+    `frozen_replay_candidate` reads NO production name (`_frozen_failure_reason_v1` is a verbatim
+    snapshot) because its job is to record how the OLD decider scored, and an arm that follows the
+    code silently starts measuring a different program the day that code changes. This `Gate` is the
+    other kind — `live_engine_candidate`'s kind. It answers "what would the engine act on TODAY", so
+    it MUST follow `_normalize_monitor_confidence` and the shipped threshold; freezing it would make
+    it lie the first time the gate moved. What stops it drifting SILENTLY is not a snapshot but the
+    `judgebench` entry in `tests/test_cross_package_private_seams.py`, which turns a rename into a
+    red test. If a HISTORICAL gated number is ever wanted, add a frozen arm beside this one rather
+    than freezing this one.
+    """
+    threshold: float = 0.8
+    trajectory_veto: bool = True
+
+    def stops(self, row: dict, status, confidence) -> bool:
+        """Whether this answer would reach an intervention. Pure/deterministic."""
+        if status not in STOP_VERDICTS:
+            return False
+        from looplab.engine.train_monitor import _normalize_monitor_confidence
+        value, valid = _normalize_monitor_confidence(confidence)
+        if not (valid and value >= self.threshold):
+            return False
+        return not (self.trajectory_veto and trajectory_vetoes(row))
+
+    def describe(self) -> str:
+        return ("confidence>=%.2f%s, confirm streak NOT modelled (see module docstring)"
+                % (self.threshold, ", trajectory veto" if self.trajectory_veto else ""))
+
+
+def trajectory_vetoes(row: dict) -> bool:
+    """`trajectory_vetoes_kill` re-read from the row's stored trajectory text. Pure."""
+    text = ((row.get("prompt") or {}).get("trajectory") or "")
+    match = _TRAJECTORY_DIRECTION_RE.search(text)
+    return bool(match and match.group(1) == "descending" and _TRAJECTORY_ANOMALY not in text)
+
+
+def answer_of(value):
+    """A candidate's answer as `(status, confidence)`.
+
+    A bare status string is still an answer — that is what every offline candidate returned before
+    the gate existed, and an ungated score never needs the second half. A candidate that wants to be
+    scored THROUGH the gate answers with a mapping (or any object carrying `.status`/`.confidence`),
+    because the confidence bar is the conjunct that separates this corpus's five false stops from
+    all 49 of its confident true ones and it is not derivable from the status.
+    """
+    if value is None or isinstance(value, str):
+        return value, None
+    if isinstance(value, dict):
+        return value.get("status"), value.get("confidence")
+    return getattr(value, "status", None), getattr(value, "confidence", None)
 
 
 @dataclass
@@ -70,6 +175,9 @@ class ScoreReport:
     by_stage: dict = field(default_factory=dict)
     unanswered: list = field(default_factory=list)
     limits: str = CORPUS_LIMITS
+    # None = a stop is the bare `broken` verdict (the prompt-comparison unit). A `Gate` means the
+    # stop counts are what the ENGINE would have acted on, and `format_report` says so.
+    gate: Optional[Gate] = None
 
     @property
     def label_accuracy(self) -> Optional[float]:
@@ -90,19 +198,43 @@ def _stop(status) -> Optional[bool]:
     return status in STOP_VERDICTS
 
 
-def score_dataset(rows: list, candidate: Callable, *, name: str = "candidate") -> ScoreReport:
+def _stop_of(row, answer, gate: Optional[Gate]):
+    """`(status, stopped)` for one answer, under the gate if there is one.
+
+    A gate with no confidence to weigh is a REFUSAL and not a quiet `False`: scoring it as "did not
+    stop" would hand a candidate that reports no confidence a perfect false-stop record for saying
+    nothing, which is the same defect the `unanswered` branch below exists to stop one field over.
+    """
+    status, confidence = answer_of(answer)
+    if gate is None or status not in VERDICTS:
+        return status, _stop(status)
+    if status in STOP_VERDICTS and confidence is None:
+        raise ValueError(
+            "case %r answered %r with no confidence, and a Gate cannot weigh it — a candidate "
+            "scored through the gate must answer {'status': ..., 'confidence': ...}"
+            % (row.get("case_id"), status))
+    return status, gate.stops(row, status, confidence)
+
+
+def score_dataset(rows: list, candidate: Callable, *, name: str = "candidate",
+                  gate: Optional[Gate] = None) -> ScoreReport:
     """Run `candidate(row) -> status` over the corpus and measure it both ways.
 
     `candidate` returns one of `VERDICTS`, or None for "no answer" — a real failure mode (a parser
-    miss, a refusal), counted in `unanswered` rather than silently scored as a `healthy`.
+    miss, a refusal), counted in `unanswered` rather than silently scored as a `healthy`. It may
+    instead return `{"status": ..., "confidence": ...}`, which is what a `gate` needs (`answer_of`).
+
+    `gate` changes what `false_stop`/`true_stop` COUNT — the engine's intervention rather than the
+    model's verdict — and nothing else: the confusion matrices and the churn number stay keyed on
+    the verdict, because a gate does not change what the candidate SAID.
     """
-    report = ScoreReport(candidate=name, rows=len(rows))
+    report = ScoreReport(candidate=name, rows=len(rows), gate=gate)
     for row in rows:
         label = (row.get("label") or {}).get("label")
         recorded = (row.get("recorded") or {}).get("status")
         stage = (row.get("context") or {}).get("stage")
         report.by_label[label] = report.by_label.get(label, 0) + 1
-        answer = candidate(row)
+        answer, stopped = _stop_of(row, candidate(row), gate)
         if answer not in VERDICTS:
             # An answer OUTSIDE the closed vocabulary is not an answer. Letting it through counted
             # it as `answered` and then, via `_stop` returning None, scored it exactly like
@@ -123,7 +255,7 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "candidate") -
             report.label_coverage += 1
             cell = "%s/%s" % (label, answer)
             report.label_confusion[cell] = report.label_confusion.get(cell, 0) + 1
-            stop = _stop(answer)
+            stop = stopped
             if label == LABEL_WASTED:
                 report.true_stop += int(bool(stop))
                 report.missed_stop += int(not stop)
@@ -133,7 +265,7 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "candidate") -
     return report
 
 
-def per_attempt_report(rows: list, candidate: Callable) -> dict:
+def per_attempt_report(rows: list, candidate: Callable, gate: Optional[Gate] = None) -> dict:
     """The operator's actual question, which the per-decision matrix cannot answer.
 
     A `healthy` at minute ten of an eval that goes bad at hour three is not a mistake — the judge is
@@ -160,7 +292,7 @@ def per_attempt_report(rows: list, candidate: Callable) -> dict:
                                           "first_stop_ts": None,
                                           "attempt_end_ts": context.get("attempt_end_ts")})
         entry["decisions"] += 1
-        if _stop(candidate(row)):
+        if _stop_of(row, candidate(row), gate)[1]:
             entry["stops"] += 1
             ts = prov.get("ts") or 0.0
             if entry["first_stop_ts"] is None or ts < entry["first_stop_ts"]:
@@ -188,13 +320,23 @@ def attempt_totals(attempts: dict) -> dict:
                 sum(e["approx_seconds_saveable"] or 0.0 for e in caught), 1)}
 
 
-def recorded_candidate(row) -> Optional[str]:
-    """The incumbent replaying itself — the baseline every other candidate is read against."""
-    return (row.get("recorded") or {}).get("status")
+def recorded_candidate(row):
+    """The incumbent replaying itself — the baseline every other candidate is read against.
+
+    Answers the MAPPING form, so the incumbent is scorable through a `Gate` without a second
+    candidate function. `answer_of` reduces it to the status everywhere a gate is absent, so every
+    ungated number this function has ever produced is byte-identical.
+    """
+    recorded = row.get("recorded") or {}
+    return {"status": recorded.get("status"), "confidence": recorded.get("confidence")}
 
 
 def jsonl_candidate(path):
-    """Answers captured earlier: one `{"case_id": ..., "status": ...}` per line. Fully offline."""
+    """Answers captured earlier: one `{"case_id": ..., "status": ...}` per line. Fully offline.
+
+    A `confidence` on the line is carried through — that is what makes a captured live arm (the
+    JSONL `llm_candidate` writes) scorable through a `Gate` offline, at no further cost.
+    """
     answers = {}
     with Path(path).open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -202,7 +344,8 @@ def jsonl_candidate(path):
             if not line:
                 continue
             row = json.loads(line)
-            answers[row.get("case_id")] = row.get("status")
+            answers[row.get("case_id")] = {"status": row.get("status"),
+                                           "confidence": row.get("confidence")}
     return lambda row: answers.get(row.get("case_id"))
 
 
@@ -233,7 +376,12 @@ def llm_candidate(client, *, overrides: Optional[dict] = None):
         else:
             messages = messages_of(row)
         verdict = parse_structured(client, messages, TrainingVerdict, "tool_call")
-        return getattr(verdict, "status", None)
+        # The MAPPING form (`answer_of`), so one paid pass is scorable ungated AND through a
+        # `Gate`, and so `fault` — which no recorded row carries, because the field postdates every
+        # preserved run — is captured by the arm that is already spending the money.
+        return {"status": getattr(verdict, "status", None),
+                "confidence": getattr(verdict, "confidence", None),
+                "fault": getattr(verdict, "fault", None)}
 
     return run
 
@@ -246,13 +394,20 @@ def format_report(report: ScoreReport, attempts: Optional[dict] = None) -> str:
                                                       report.answered)]
     accuracy = report.label_accuracy
     lines.append("")
+    if report.gate is not None:
+        # ABOVE the numbers, for the same reason the limits paragraph is: a gated stop count and an
+        # ungated one differ by 5 on this corpus, and a reader who learns which one they are looking
+        # at underneath the number has already quoted it.
+        lines.append("GATED: a stop is what the ENGINE would act on, not what the model SAID —")
+        lines.append("       %s" % report.gate.describe())
     lines.append("AGREEMENT WITH THE LABEL (accuracy) over %d outcome-labelled decisions"
                  % report.label_coverage)
     lines.append("  accuracy            : %s" % ("n/a — nothing labelled" if accuracy is None
                                                  else "%.3f" % accuracy))
-    lines.append("  said broken, finished fine (false stop) : %d" % report.false_stop)
-    lines.append("  never said broken on a wasted run       : %d" % report.missed_stop)
-    lines.append("  said broken on a wasted run             : %d" % report.true_stop)
+    stopped = "would have stopped" if report.gate is not None else "said broken"
+    lines.append("  %s, finished fine (false stop) : %d" % (stopped, report.false_stop))
+    lines.append("  never %s on a wasted run       : %d" % (stopped, report.missed_stop))
+    lines.append("  %s on a wasted run             : %d" % (stopped, report.true_stop))
     lines.append("  let a productive run continue           : %d" % report.true_continue)
     for cell in sorted(report.label_confusion):
         lines.append("    %-28s %d" % (cell, report.label_confusion[cell]))

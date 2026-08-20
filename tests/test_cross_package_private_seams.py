@@ -94,6 +94,16 @@ CROSS_PACKAGE_PRIVATE_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
         # `looplab` subcommand). What the registry buys here is exactly what the bench is for: a
         # rename becomes a red test instead of a bench that silently stops measuring anything.
         "looplab.engine.triage": ("_failure_reason",),
+        # The bench's `Gate` asks whether an answer would have reached an INTERVENTION, and the
+        # confidence conjunct is the one that separates the corpus's five false stops from its 49
+        # confident true ones. Re-implementing `confidence >= threshold` there would be a second
+        # copy of a rule with two live traps in it — a model that answers the STRING `'0.9'` (19 of
+        # the 450 recorded confidences), and `min(1.0, nan) == 1.0`, i.e. a non-finite value
+        # comparing True — and a bench that scores a stop the engine would refuse is measuring the
+        # wrong target in the expensive direction. Declared rather than promoted: the name is
+        # private because the engine owns the rule, and this registry is what makes a rename a red
+        # test instead of a bench that silently drifts from the gate it claims to model.
+        "looplab.engine.train_monitor": ("_normalize_monitor_confidence",),
     },
     "search": {
         # The discarded-prefetch predicate moved DOWN to `core/models.py` on 2026-08-05 so the FOLD

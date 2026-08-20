@@ -1016,3 +1016,85 @@ def test_every_watchdog_tick_loop_reraises_cancellation_before_swallowing():
             assert "Exception" not in names, (
                 f"{name}'s tick loop swallows Exception before re-raising cancellation")
         assert guarded, f"{name}'s tick loop never re-raises cancellation"
+
+
+# ------------------------------- the CONFIRMATION ARM asks the gates, instead of re-listing them
+
+def _armed(spans):
+    return [s for s in spans if s.get("name") == "train_monitor"
+            and s["attributes"].get("kill_armed")]
+
+
+def test_a_work_stage_repair_stop_gets_its_prompt_confirmation_look(tmp_path):
+    """The arm is what makes the two-tick requirement cheap, and until 2026-08-20 it was gated on
+    `_KILL_ELIGIBLE_ROLES` — a list written when a KILL was the only thing a confirmation could
+    reach. `should_monitor_repair` then opened the repair-stop to every judged role, so on exactly
+    the roles it was opened for the second look cost a full cadence instead of
+    `_MONITOR_CONFIRM_DELAY_S`, and on a log that diverged and then went silent it never arrived at
+    all (`unchanged and armed_at is None` continues, and only an arm bypasses that gate).
+
+    Driven through the real loop over a WORK-role stage, which is what every multi-stage pipeline
+    this engine runs resolves to.
+    """
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: 8.8534\nloss: 8.8534\nloss: 8.8534\n")
+    client = _FakeClient({"status": "broken", "fault": "implementation", "confidence": 0.95,
+                          "reason": "the objective as written cannot descend"})
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=True,
+        plan=_PIPELINE_PLAN,                 # train.log is LOG_ROLE_WORK here, not TRAINING
+        until=lambda h: h.kill_signal.get("kill"))
+
+    ticks = [t for t in spans if t.get("name") == "train_monitor"]
+    assert ticks and ticks[0]["attributes"].get("status") == "broken"   # the denominator, first
+    assert _armed(spans), "a repair-stop one confirmation away must arm the prompt re-look"
+    assert host.kill_signal.get("terminal_reason") == _tm.MONITOR_REPAIR_REASON
+    # ...and the role is still what keeps the TERMINAL kill off this stage.
+    assert host.kill_signal.get("terminal_reason") != "monitor_broken"
+
+
+def test_a_verdict_the_gate_will_refuse_on_confidence_does_not_arm(tmp_path):
+    """The other direction, and it is a tightening the old hand-written list did not have: it
+    checked the role and the trajectory and never the CONFIDENCE bar, so a `broken` at 0.3 on a
+    training stage armed, bought a re-look at 30 s and bypassed the changed-digest gate for a kill
+    `should_monitor_kill` refuses anyway. Asking the real predicates cannot drift from them."""
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: nan\n")
+    client = _FakeClient({"status": "broken", "reason": "possibly nan", "confidence": 0.3})
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=True, plan=_TRAIN_PLAN,
+        until=lambda _h: any(t == EV_TRAIN_MONITOR_ALERT for t, _d in _h.store.events),
+        after_until_s=0.15)
+
+    # The DENOMINATOR first: `not _armed([])` is true for a monitor that never ran at all, which is
+    # exactly the vacuous shape this suite has been bitten by three times in one day. Prove the tick
+    # happened and produced the `broken` verdict before reading anything off its absence.
+    ticks = [t for t in spans if t.get("name") == "train_monitor"]
+    assert ticks and ticks[0]["attributes"].get("status") == "broken"
+    assert not _armed(spans), "a confirmation the gate will refuse is a billable re-ask for nothing"
+    assert host.kill_signal.get("kill") is None
+
+
+def test_the_arming_question_is_the_two_gates_with_the_streak_satisfied():
+    """`_confirmation_would_act` grants no authority of its own — it is the same counterfactual
+    shape as the `role_withheld` / `trajectory_veto` receipts beside it, and its truth table is
+    exactly the disjunction of the two predicates it asks."""
+    from looplab.engine.train_monitor import (
+        LOG_ROLE_TRAINING, LOG_ROLE_WORK, TrainingVerdict, _confirmation_would_act)
+
+    bug = TrainingVerdict(status="broken", fault="implementation", reason="r", confidence=0.9)
+    idea = TrainingVerdict(status="broken", fault="hypothesis", reason="r", confidence=0.9)
+    ask = dict(enabled=True, threshold=0.8)
+    # a named bug is repairable on ANY judged role, so it arms on a work stage...
+    assert _confirmation_would_act(bug, log_role=LOG_ROLE_WORK, **ask) is True
+    # ...while a verdict about the IDEA can only ever reach the terminal kill, which needs the role.
+    assert _confirmation_would_act(idea, log_role=LOG_ROLE_WORK, **ask) is False
+    assert _confirmation_would_act(idea, log_role=LOG_ROLE_TRAINING, **ask) is True
+    # every fail-closed conjunct of the two gates still binds through it
+    assert _confirmation_would_act(bug, log_role=LOG_ROLE_TRAINING, enabled=False,
+                                   threshold=0.8) is False
+    assert _confirmation_would_act(bug, log_role=LOG_ROLE_TRAINING, enabled=True,
+                                   threshold=0.95) is False
+    assert _confirmation_would_act(None, log_role=LOG_ROLE_TRAINING, **ask) is False

@@ -3,6 +3,7 @@
     python -m looplab.judgebench extract runs/*             -o tests/data/judge_bench/train_monitor.v1.jsonl.gz
     python -m looplab.judgebench score                       # the incumbent replaying itself
     python -m looplab.judgebench score --answers cand.jsonl  # a candidate's captured answers, offline
+    python -m looplab.judgebench score --gate                # count the ENGINE's stop, not the verdict
 
 The FAILURE-CLASSIFIER bench (`engine/triage.py::_failure_reason` and whatever replaces it) is the
 same two verbs with a `triage-` prefix, over its own dataset and its own labels:
@@ -24,7 +25,7 @@ from pathlib import Path
 from looplab.judgebench.judge_corpus import (
     DEFAULT_DATASET, build_dataset, read_dataset, write_dataset)
 from looplab.judgebench.score import (
-    attempt_totals, format_report, jsonl_candidate, per_attempt_report, recorded_candidate,
+    Gate, attempt_totals, format_report, jsonl_candidate, per_attempt_report, recorded_candidate,
     score_dataset)
 from looplab.judgebench import triage_corpus, triage_score
 
@@ -48,6 +49,13 @@ def main(argv=None) -> int:
                         help="comma-separated label_basis values to drop, e.g. "
                              "'stage_failed' to cut the failures the engine decided over artifacts "
                              "AFTER the stage exited, which the judged log could not show")
+    scorer.add_argument("--gate", action="store_true",
+                        help="count a stop as what the ENGINE would act on (the confidence bar and "
+                             "the measured-trajectory veto) rather than as a bare `broken` verdict "
+                             "— see score.py's Gate for what it deliberately cannot model")
+    scorer.add_argument("--gate-confidence", type=float, default=Gate.threshold,
+                        help="the confidence bar --gate applies (default: the shipped "
+                             "train_monitor_kill_confidence)")
 
     tri_extract = sub.add_parser("extract-triage",
                                  help="rebuild the FAILURE-CLASSIFIER dataset from run directories")
@@ -141,8 +149,9 @@ def main(argv=None) -> int:
                            for d in drop)]
     candidate = recorded_candidate if args.answers is None else jsonl_candidate(args.answers)
     name = "recorded (incumbent)" if args.answers is None else str(args.answers)
-    report = score_dataset(rows, candidate, name=name)
-    sys.stdout.write(format_report(report, per_attempt_report(rows, candidate)))
+    gate = Gate(threshold=args.gate_confidence) if args.gate else None
+    report = score_dataset(rows, candidate, name=name, gate=gate)
+    sys.stdout.write(format_report(report, per_attempt_report(rows, candidate, gate)))
     return 0
 
 
