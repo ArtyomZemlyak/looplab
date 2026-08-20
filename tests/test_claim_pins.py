@@ -239,11 +239,18 @@ def test_a_goal_with_no_pins_is_reported_as_UNCHECKED_not_as_clean(tmp_path, cap
     """
     import json
 
-    from looplab.core.claimpin import _main
+    from looplab.core.claimpin import _main, check_task_goal
 
+    # THE EXIT CODE IS NOT THIS TEST'S BUSINESS, and asserting on it was this test's own defect until
+    # 2026-08-20. `_main` also walks the whole repo, so its return value answers "does this TREE carry
+    # any claim defect at all", while the subject here is "how is a PINLESS GOAL reported". Coupled,
+    # an unrelated dead citation elsewhere in the repository reddened a test about a temp file — an
+    # assertion whose input is far wider than its claim, which is the shape this whole file exists to
+    # prevent. The goal-scoped verdict is asserted below, on `check_task_goal`, whose input is only
+    # the file.
     unpinned = tmp_path / "unpinned.json"
     unpinned.write_text(json.dumps({"task": {"goal": "Batch 8192 fits in 80.6 GiB with checkpointing."}}))
-    assert _main([str(unpinned)]) == 0, "a goal with no pins has no DEFECTS — that is not the point"
+    _main([str(unpinned)])
     out = capsys.readouterr().out
     assert "NO PINS AT ALL" in out and str(unpinned) in out, (
         "a goal carrying no pins must be named as unchecked, not silently folded into a clean count")
@@ -254,8 +261,12 @@ def test_a_goal_with_no_pins_is_reported_as_UNCHECKED_not_as_clean(tmp_path, cap
     pinned.write_text(json.dumps({"task": {"goal": (
         "The e5-small baseline is batch 1750 over 4 GPUs. CLAIM"
         + f"[e5-baseline] decided:`line:e5-small&&batch_size 1750@{bench}`")}}))
-    assert _main([str(pinned)]) == 0
+    _main([str(pinned)])
     out = capsys.readouterr().out
     assert "NO PINS AT ALL" not in out, "a goal that DOES carry a pin must not be reported unchecked"
     assert "1 pin(s) evaluated" in out and str(pinned) in out, (
         "the denominator must name the surface it counted, or it cannot be acted on")
+
+    # ...and the goal-scoped verdicts, which ARE this test's business: one file in, one answer out.
+    assert not check_task_goal(unpinned, root=ROOT), "a pinless goal has no DEFECTS to report"
+    assert not check_task_goal(pinned, root=ROOT), "the pinned goal's claim holds against its file"
