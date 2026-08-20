@@ -13,7 +13,7 @@ itself "the GLOBAL cross-run concept MAP", and so does the run list's `Concepts`
 read different corpora: capsules exist only for runs that finished and published one (measured on
 this box: 3, against 15 tagged runs in the list). Two functions claiming to be one lab's concept map
 is a population disagreement waiting to be rendered. The map is now ONE fold,
-`search/concept_lens.py::concept_map`, which takes per-run concept SETS and lets the caller own the
+`search/concept_lens.py::project_concept_map`, which takes per-run concept SETS and lets the caller own the
 population — capsules for an agent tool, the scoped run rows for the browser.
 
 The two helpers this band ALSO needed — `fingerprint_similarity` and the None-tolerant metric

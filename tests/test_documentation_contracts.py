@@ -58,7 +58,12 @@ def test_index_mentions_every_numbered_document():
     #   42 -> 43 (2026-08-19): the operator-list audit (doc 43). No collision this time — the
     #   number was claimed by checking the glob AND the index table together, which is the
     #   procedure the three earlier collisions existed for.
-    assert len(numbered) == 44, "the derived numbered-document inventory changed"
+    #   43 -> 45 (2026-08-20): TWO documents in one day, and the fourth collision this table has
+    #   had — two agents working in parallel worktrees each claimed 44 by checking the glob and the
+    #   index together, which is the correct procedure and cannot see an unmerged sibling. Resolved
+    #   at the merge by renumbering the second to 45; the procedure is unchanged because nothing
+    #   short of a lock could have prevented it, and a lock on doc numbers costs more than a rename.
+    assert len(numbered) == 45, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

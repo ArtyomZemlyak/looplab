@@ -60,8 +60,13 @@ DATA_GUIDE = (
     '- A dataset task: put a single file/folder in "data_path", and/or several named locations in '
     '"data" ({"<short_name>":"<abs path>", ...}) when there are multiple. A folder is fine as one '
     "entry — the agent reads what's inside.\n"
-    '- A repo task: runtime data goes in "data" ({"<name>":"<abs path>"}) — each is copied to '
-    "./<name> in the eval workdir.\n"
+    # CLAIM[genesis-data-is-mounted] `data` entries are SYMLINKED at ./<name> by default, not copied.
+    # decided:`present:mount: bool = True@looplab/adapters/repo_task.py`
+    # This sentence said "copied" while the bullet eighteen lines below said "mounted (symlinked)
+    # …, never deep-copied" — one prompt, two opposite claims about the same field, and the false
+    # half is the one a reader hits first. `adapters/repo_task.py::DataSpec.mount` defaults True.
+    '- A repo task: runtime data goes in "data" ({"<name>":"<abs path>"}) — each is MOUNTED '
+    "(read-only symlink) at ./<name> in the eval workdir; `mount: false` copies it instead.\n"
     "Use the paths EXACTLY as given (~ and $HOME/$VARS are expanded); never invent a path the user "
     "didn't mention. If they clearly have data but named no location, ask ONE clarifying question in "
     "`reply` instead of guessing."
@@ -84,10 +89,29 @@ REPO_AUTONOMY_GUIDE = (
     "before EVERY eval — use when the agent edits requirements and each node needs its own). Don't set "
     "either if deps are already present.\n"
     "- Hyperparameters: only set `params` bounds when the user wants a specific bounded search; "
+    # CLAIM[genesis-goal-states-limits-not-config] the goal a Genesis writes must not name a device
+    # count or a batch size; the run's own footprint contract owns the first and the experiment
+    # measures the second.
+    # decided:present:CUDA_VISIBLE_DEVICES@looplab/engine/resources.py
+    #        +present:footprint@looplab/agents/roles.py
+    #
+    # THE TWO CLAUSES REMOVED HERE ARE WHERE THE DEFECT ENTERS THE SYSTEM. "use ALL available GPUs
+    # by default" is the `core/hardware.py` claim corrected in the same change, restated in the one
+    # prompt that WRITES goal text — and "Put operational guidance the agent needs (use all GPUs,
+    # …) in the task `goal`" is the instruction to type it into a goal, where nothing checks it and
+    # every later Researcher reads it as settled. Measured: `runs/e5small-dr-unified-v3`'s goal
+    # carried a hand-typed batch recipe labelled VERIFIED that belonged to a DIFFERENT model, and
+    # all three of that run's nodes died of `torch.OutOfMemoryError` chasing it. A goal states the
+    # objective, the constraints and the MEASURED limits of the machine — never the configuration
+    # to use, because the configuration is the experiment.
     "otherwise LEAVE `params` EMPTY and let the coding agent estimate sane values from the model size, "
-    "available GPU memory and any README recipe — and use ALL available GPUs by default.\n"
-    "- Put operational guidance the agent needs (use all GPUs, expected metric, which script to run) in "
-    "the task `goal` in plain words — the coding agent reads it.\n")
+    "the memory it MEASURES on the device it is actually given, and any README recipe.\n"
+    "- Put operational guidance the agent needs (the expected metric, which script to run, what the "
+    "data is) in the task `goal` in plain words — the coding agent reads it. State the OBJECTIVE, "
+    "the CONSTRAINTS and any limit that was actually MEASURED, with the file or run it was measured "
+    "from; never state the configuration to use, a device count, or a batch size copied from a "
+    "benchmark table — those are what the experiment is for, and a number nobody re-derives is "
+    "wrong within days.\n")
 
 
 class _TaskPlan(BaseModel):

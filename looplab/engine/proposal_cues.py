@@ -523,7 +523,20 @@ class ProposalCuesMixin:
             "fewer per hour, each sooner. And if the experiment does not FIT on one device, the "
             "count is not a preference at all — gradient accumulation restores the effective batch "
             "and never the in-batch negative pool. This box's own speedup is UNMEASURED: before "
-            "committing hours to a footprint, measure both with a short fixed-step probe. Whatever "
+            "committing hours to a footprint, measure both with a short fixed-step probe. "
+            # The MEMORY half of the same invitation, and the reason it is here rather than in the
+            # goal text. `_cue_experiment_time_budget` already tells the role to probe per-step TIME
+            # when it is unknown; nothing said the same about memory, so the ceiling arrived as
+            # PROSE somebody typed — and `runs/e5small-dr-unified-v3` died of exactly that, three
+            # nodes chasing a per-device 8192 a sentence in its goal called verified. A measured
+            # ceiling is a fact about (this model, this sequence length, this n_negatives, this
+            # card) and changes when any of the four does, so no typed number can stay true.
+            "The MEMORY ceiling is the same kind of unknown and the same remedy: do NOT size the "
+            "batch from a recipe, a parameter count or a number someone wrote down — run ONE step "
+            "at the batch you intend as the first thing your pipeline does, read the allocator's "
+            "own peak, and size from THAT. It costs seconds against a training that dies hours in "
+            "with no metric, and it is the only number that is about this model on this card. "
+            "Whatever "
             "you declare, the training/eval command must target that SAME count, and a count the "
             "operator's own task statement names wins over this paragraph.")
 
