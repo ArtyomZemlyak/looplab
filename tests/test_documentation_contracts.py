@@ -63,7 +63,8 @@ def test_index_mentions_every_numbered_document():
     #   index together, which is the correct procedure and cannot see an unmerged sibling. Resolved
     #   at the merge by renumbering the second to 45; the procedure is unchanged because nothing
     #   short of a lock could have prevented it, and a lock on doc numbers costs more than a rename.
-    assert len(numbered) == 45, "the derived numbered-document inventory changed"
+    #   45 -> 46 (2026-08-20): the params proposed-vs-run root cause (doc 46).
+    assert len(numbered) == 46, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
