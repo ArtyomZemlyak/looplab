@@ -136,6 +136,48 @@ so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without appr
 campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
 `config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
 
+### Where the wall clock really goes: one process PER TIMED RUN
+
+`isolated_benchmark.py`:
+
+```python
+for idx in range(num_runs):
+    # Each run: one fork does warmup+timed sequentially, then dies
+    proc = ctx.Process(target=_fork_run_worker, ...)
+```
+
+So the run count multiplies **process spawns**, and spawning is ~98 % of the per-instance cost
+(measured: the timed solver calls are 0.1–0.9 s inside ~16 s). A first reading of this mistook one
+`run_isolated_benchmark` **call** for one process and concluded that lowering the run count saved
+~3 %; that was wrong — the saving is close to linear.
+
+**The fork itself must stay.** Warmup deliberately runs a *different* problem from the timed one —
+the worker asserts `Problems are different objects` — so the code paths are warm and the **answer**
+is not. Do N timed calls on one problem inside one process and calls 2…N hit whatever the solver
+cached on call 1: a memoising solver reports near-zero time and an unbounded speedup. The per-run
+fork is anti-cheat, and its cost is paid identically by both arms.
+
+The campaign therefore pins `runs`, `dev_runs` and `eval_runs` all to **3** — the safe half of "stop
+restarting the process" — and pins the benchmark to a fixed CPU set (below).
+
+### Pin the CPUs, and reap the workers
+
+Both arms carry the **same** `taskset` mask (`BENCH_CPUS`, default `0-5`), leaving the rest for the
+campaign driver, the LLM client and the OS. A timing taken on a busy core is not comparable to one
+taken on an idle core, and no amount of averaging recovers that after the fact.
+
+Two traps found doing this:
+
+* **`pkill -f <name>` does not reach multiprocessing forkservers.** Their command line is
+  `python -c "from multiprocessing.forkserver import main; ..."` — no app name, no script name. Ten
+  orphans were alive and burning CPU after a series of restarts, contending on exactly the pinned
+  cores and inflating every timing taken while they were up. The campaign now reaps them at start
+  and after each arm; check `pgrep -f forkserver | wc -l` before trusting any measurement here.
+* **This box presents 8 cores from a 16-core part** (`nproc` 8, `Win32_Processor.NumberOfCores` 8,
+  affinity mask `255`, no `processors=` in `.wslconfig`) — a CCD disabled in firmware, with SMT off.
+  The missing 8 are unavailable to any process, so they cannot be pinned to. Re-enabling them in
+  BIOS would roughly double this machine for a workload that is mostly process spawn.
+
 ### Choose the task set by EVALUATION COST, not by what sounds interesting
 
 The first 20-task list was picked for topic coverage. It could not finish: arm A on `svm` ran
