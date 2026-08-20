@@ -214,6 +214,20 @@ Research only.
 >   outcome cases, confused-deputy/cross-run-scope, repeated stochastic trials with CIs — have no
 >   corpus. (Rung 1 exists and predates this document; see the correction above.)
 >   proof:missing:tests/test_agent_trajectory_corpus.py
+>   **[2026-08-20 — rung 3 is now built for ONE judge, and the amendment is narrow on purpose.]**
+>   `looplab/judgebench/` + `tests/data/judge_bench/train_monitor.v1.jsonl.gz` is a frozen outcome corpus
+>   for the training-log monitor: 450 recorded decisions, each carrying the recorded input, the
+>   recorded verdict and a label derived from what the node did NEXT. It does exactly what this
+>   section's last paragraph asked for — existing traces seeded it after redaction through
+>   `core/redact.py::redact_output_tail`, the same screen persisted tails already pass. It is one
+>   judge of four, it is one task family and one model, and it says so in its own header rather than
+>   only in its docs; the remaining three judges are tracked by the
+>   `judge-bench-covers-one-judge-of-four` item in `docs/BACKLOG.md` §0.19 (spelled without its
+>   marker token here — a slug is declared exactly once and the declaration lives there).
+>   Rungs 2, 4 and 5 are untouched: nothing here scores a TRAJECTORY (which tools were called, in
+>   what order), nothing exercises prompt injection or cross-run scope, and nothing repeats a
+>   stochastic trial — the corpus holds one sample per decision, so it carries no confidence
+>   interval and cannot support one.
 > - **OPEN[three-new-run-planners-no-shared-schema]** CLI, TUI and Web still plan a new run three
 >   ways; no `RunProposal` service or shared schema exists anywhere in `serve/`, and
 >   `engine/genesis.py` says so in production source. proof:absent:RunProposal@looplab/serve
