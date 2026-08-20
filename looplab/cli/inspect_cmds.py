@@ -1,5 +1,5 @@
 """Read-only run diagnostics: `replay` / `speculation-gate` / `timings` / `inspect` / `readmodel` /
-`tensorboard`.
+`tensorboard` / `comparability`.
 
 Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2), then split again (doc 25 CT-01):
 the module had grown to 1700 lines across three unrelated domains while its docstring still claimed
@@ -8,6 +8,11 @@ run's event log plus viewers over that run's sidecars. The Part IV concept/novel
 to `concept_cmds.py`; the cross-run governance commands (durable writes and paid LLM stewards) moved
 to `governance_cmds.py`, where the fact that they MUTATE is stated in the header rather than buried
 200 lines below a "read-only" claim.
+
+`comparability` is the one command here that takes MORE THAN ONE run directory, and it stays in this
+group because every fact it prints is folded from each named run's OWN event log — no model call, no
+write, no cross-run store. What it adds is a REFUSAL over what it read, and a refusal derived from two
+runs' own logs is a diagnostic rather than a durable claim.
 
 Read-only EXCEPT two, and each says which run it touches: `speculation-gate` atomically writes a
 local quality receipt without changing any source run, and `readmodel` atomically republishes the
@@ -32,6 +37,7 @@ from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status)
 from looplab.events.replay import fold
 from looplab.events.types import EV_BUDGET
+from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
 from looplab.cli import (
     _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
@@ -384,6 +390,24 @@ def inspect(run_dir: Path = typer.Argument(...)):
         # summary states the UNKNOWN bucket first for exactly that reason — every log written before
         # 2026-08-19, which is every log on this box, lands there and must not read as clean.
         typer.echo(trust_scan_summary(all_events, [n.id for n in state.evaluated_nodes()]))
+        # WHAT THIS RUN'S BEST NUMBER MAY BE RANKED AGAINST. `_print_result` above prints
+        # "BEST node N: metric=…" and, until 2026-08-20, nothing whatsoever about what that number
+        # was measured against — which is how four recall@100 values from more than one test set came
+        # to be compared out loud on this box. Stated for BOTH answers, like the trust-scan summary
+        # one line up and for the identical reason: an absent key means NOBODY CAN SAY, never "the
+        # same as the other runs", and a line printed only when a key exists would make its absence
+        # invisible on exactly the runs where it matters most. The pairwise refusal lives in
+        # `looplab comparability`, which is where an operator asks about more than one run.
+        _best = state.best()
+        _record = comparability_record_of(_best) if _best is not None else None
+        if _record:
+            _keys = " ".join(f"{name}={value}" for name, value in sorted(_record["keys"].items()))
+            typer.echo(f"comparability: {_record['authority']} {_keys}")
+        else:
+            typer.echo(
+                "comparability: UNKNOWN — this run records no key for what its metric was measured "
+                "against, so its number may not be ranked against any other run's. Declare "
+                "`eval.inputs` on the task (or a `comparison_contract`) to make it decidable.")
 
 
 @app.command()
@@ -818,3 +842,78 @@ def parser_stats(run_dir: Path = typer.Argument(..., help="A run directory (hold
                    f"   won: {', '.join(f'{k}={v}' for k, v in sorted(row['won'].items()))}")
     if damaged:
         typer.echo(f"  ({damaged} damaged span line(s) stepped over)")
+
+
+@app.command()
+def comparability(
+    run_dirs: list[Path] = typer.Argument(..., help="One or more run directories to compare."),
+):
+    """What each run's champion number MAY be ranked against — and a refusal when they may not.
+
+    THE COMMAND THIS BOX NEEDED. `runs/` holds recall@100 values of 0.8776, 0.793426, 0.792082 and
+    0.774207 and they have been compared out loud all day. Some were measured on one test set and
+    some on another; some against one product index and some against a bigger one, which makes
+    recall@100 strictly harder. Nothing in any record said which, and no surface refused. This one
+    does, and it exits NON-ZERO when it refuses so a script cannot ignore it.
+
+    Three answers, and the middle one is the whole point:
+
+      SAME      — the runs recorded the same comparability key at an authority that may certify it
+                  (`measured`: the eval's declared inputs bound to their content digests; or
+                  `declared`: an operator-written `ComparisonContract`). Ranking them is a fact.
+      DIFFERENT — they recorded provably different keys. **REFUSED**, exit 3. The values are each
+                  true of their own measurement; the ordering between them never was.
+      UNKNOWN   — at least one recorded no key, or they agree only at the `inferred` authority
+                  (two task files that merely look alike, which is exactly what the four values
+                  above are). NOT an assent. Exit 4, because a caller that wanted a ranking did not
+                  get one, and the one thing this command may never do is let silence read as yes.
+
+    Read-only: it folds each log and prints. It writes nothing and touches no memory store.
+    """
+    from looplab.engine.comparability import (
+        DIFFERENT, SAME, UNKNOWN, comparability_notice, comparability_status, record_of)
+
+    rows = []
+    for run_dir in run_dirs:
+        events = run_dir / "events.jsonl"
+        if not events.exists():
+            typer.echo(f"{run_dir.name}: no event log — nothing to read a key from.")
+            rows.append((run_dir.name, None, None))
+            continue
+        state = fold(EventStore(events).read_all())
+        best = state.best()
+        record = record_of(best) if best is not None else None
+        rows.append((run_dir.name, best, record))
+        if record is None:
+            # NAME THE FIX, not just the state. `not_declared` is the state every run on this box is
+            # in, so an operator reading this line needs the one edit that changes it — the same rule
+            # `metric_subject.UNBOUND_MESSAGES` follows for the subject side.
+            typer.echo(f"{run_dir.name}: metric="
+                       f"{'—' if best is None else best.robust_metric} "
+                       "comparability=UNKNOWN (no key recorded; declare `eval.inputs` on the task, "
+                       "or a `comparison_contract`, so what this number was measured against is on "
+                       "the record).")
+        else:
+            keys = ", ".join(f"{name}={value}" for name, value in sorted(record["keys"].items()))
+            typer.echo(f"{run_dir.name}: metric="
+                       f"{'—' if best is None else best.robust_metric} "
+                       f"authority={record['authority']} {keys}")
+
+    if len(rows) < 2:
+        return
+    # PAIRWISE, and every pair is stated. A single "these runs are comparable" verdict would hide
+    # which pair failed, and on a portfolio the operator's next question is always WHICH.
+    worst = SAME
+    for index, (name, _best, record) in enumerate(rows):
+        for other_name, _other_best, other_record in rows[index + 1:]:
+            status = comparability_status(record, other_record)
+            if status == SAME:
+                typer.echo(f"  {name} vs {other_name}: SAME evaluation — ranking these is a fact.")
+                continue
+            worst = DIFFERENT if (status == DIFFERENT or worst == DIFFERENT) else UNKNOWN
+            typer.echo(f"  {name} vs {other_name}: {status.upper()} — "
+                       + comparability_notice(record, other_record, other_run_id=other_name))
+    if worst == DIFFERENT:
+        raise typer.Exit(3)
+    if worst == UNKNOWN:
+        raise typer.Exit(4)

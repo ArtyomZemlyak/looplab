@@ -918,6 +918,22 @@ def valid_case_record(case) -> bool:
     return params is None or isinstance(params, dict)
 
 
+def _case_scale(case) -> str:
+    """One case row's comparability partition — `""` for every row written before 2026-08-20.
+
+    A bounded read of a durable, operator-visible JSONL row, so it is total over junk: this file is
+    hand-edited in practice and a row carrying a dict where a string belongs must not raise inside an
+    interprocess lock that a run's finalize is holding.
+
+    IT IS A GROUPING TOKEN AND NOT A VERDICT. `engine/comparability.py::group_token` says why the two
+    are different and why this one is deliberately the coarser of the pair.
+    """
+    if not isinstance(case, dict):
+        return ""
+    value = case.get("comparability")
+    return value[:128] if isinstance(value, str) else ""
+
+
 class JsonlCaseLibrary:
     """THE case store the engine actually uses (I19, ADR-10) — `lessons.py::store_case` builds it.
 
@@ -972,12 +988,28 @@ class JsonlCaseLibrary:
         direction = case.get("direction", "min")
         metric = case.get("metric")
         run_uid = case.get("run_uid")
+        # WHICH EVALUATION THIS CASE'S METRIC IS ON (`engine/comparability.py::group_token`). The
+        # election below is a genuine cross-run metric COMPARISON — `max(measured, key=metric)` over
+        # every case of one `(task_id, direction)` — and it decides which previous run's `params`
+        # the next run is handed as the configuration to beat. `(task_id, direction)` alone does not
+        # establish that two of those numbers are on one scale: on this box a single `repo_task`
+        # header spans recall@100 values measured against more than one test set and more than one
+        # product index, and the bigger corpus makes the number strictly harder.
+        #
+        # ADDITIVE AND INERT ON THE EXISTING STORE, by construction: every case row already written
+        # carries no key, so `_case_scale` answers `""` for all of them, they stay in ONE group and
+        # elect exactly as before. Only a case whose run recorded a key partitions away — and it
+        # partitions away from the unkeyed rows too, because "we have not been shown these are the
+        # same evaluation" is not "they are". `replace_if` is narrowed by the same token so a keyed
+        # write cannot rewrite the unkeyed group's rows out from under it.
+        scale = _case_scale(case)
         if isinstance(run_uid, str) and run_uid:
             # Modern rows are source contributions, not a destructive champion slot. Re-finalizing
             # one run replaces that run's contribution even when reset/replay made it worse; retaining
             # inactive siblings lets the next-best source become active after such a withdrawal.
             group = [c for c in self.cases
-                     if c.get("task_id") == tid and c.get("direction", "min") == direction]
+                     if c.get("task_id") == tid and c.get("direction", "min") == direction
+                     and _case_scale(c) == scale]
             candidates = [c for c in group if c.get("run_uid") != run_uid] + [dict(case)]
             measured = [c for c in candidates if c.get("metric") is not None]
             if measured:
@@ -990,13 +1022,15 @@ class JsonlCaseLibrary:
                 self.path, projected,
                 replace_if=lambda row: (
                     valid_case_record(row) and row.get("task_id") == tid
-                    and row.get("direction", "min") == direction),
+                    and row.get("direction", "min") == direction
+                    and _case_scale(row) == scale),
                 loads=json.loads, dumps=json.dumps,
             )
             self._reload()
             return winner is candidates[-1]
         prev = next((c for c in self.cases
-                     if c.get("task_id") == tid and c.get("direction", "min") == direction), None)
+                     if c.get("task_id") == tid and c.get("direction", "min") == direction
+                     and _case_scale(c) == scale), None)
         if prev is not None:
             # Keep the old case only when both metrics are comparable and the new one is not better.
             # An UNMEASURED new case never displaces a MEASURED stored one: `valid_case_record`

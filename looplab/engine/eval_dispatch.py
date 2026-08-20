@@ -20,6 +20,7 @@ from looplab.engine.speculation_gate import engine_authored_artifacts
 from looplab.events.replay import fold
 from looplab.events.types import (EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
+from looplab.runtime import metric_inputs
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
 # (as `next_start`), so the identity check here MUST see the same object the orchestrator uses.
@@ -721,6 +722,30 @@ class EvalDispatchMixin:
             if (str(getattr(self, "metric_subject", "audit") or "audit") != "off"
                     and getattr(res, "metric_subject", None) is None):
                 res.metric_subject = command_eval.absent_metric_subject()
+            # THE INPUT SIDE — what this number was measured AGAINST (`runtime/metric_inputs.py`).
+            # Bound HERE and not inside `run_command_eval` for two reasons that both point the same
+            # way: the workdir is unambiguously alive at this line (the subject binding needs the
+            # SCORE STAGE's instant and therefore has to live inside the stage loop, an input does
+            # not), and `run_command_eval` is the library boundary — a caller outside the engine has
+            # no `eval.inputs` and must not grow an argument for one.
+            #
+            # AT THE METRIC READ, deliberately, not before the command. A staged pipeline may BUILD
+            # the corpus it then scores against, and a record bound before the first stage would
+            # identify an index that did not exist yet. "As it stands when the number was read" is
+            # the same instant `command_eval` binds a single-command SUBJECT at, and for the same
+            # reason: it is the only instant that is a fact about this number.
+            #
+            # NOT gated on the `metric_subject` rung. That rung decides whether an unbound SUBJECT is
+            # a violation — an enforcement question — and this is a pure record that gates nothing,
+            # excludes nothing and cannot fail a node. Gating it on `off` would silence the input
+            # record for exactly the RESUMED runs whose comparability is hardest to establish.
+            _declared_inputs = metric_inputs.input_declaration(es)
+            if _declared_inputs:
+                try:
+                    res.eval_inputs = metric_inputs.bind_inputs(_declared_inputs, str(workdir))
+                except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
+                    res.eval_inputs = {"inputs_bound": False, "inputs": [],
+                                       "unbound_reason": "unreadable"}
         else:
             # Intra-node sweep nodes run a whole grid in one process, so they need ~N× the
             # single-eval budget. `sweep_timeout_mult` scales the wall-clock for sweep nodes only;

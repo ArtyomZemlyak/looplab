@@ -60,7 +60,17 @@ def test_runtime_holds_only_process_execution_modules():
                      # `expect.files` contract passes). It records onto the stage row and decides
                      # nothing — every POLICY that could read it (a reuse cache, a duplication
                      # report) lives above, which is the same split `metric_subject` is here for.
-                     "stage_identity"}, (
+                     "stage_identity",
+                     # `metric_inputs` (2026-08-20) is `metric_subject`'s MIRROR and belongs here by
+                     # the same clause: it is a stat and a digest the eval path takes at the metric
+                     # read, over the operator's declared `eval.inputs`, and it imports nothing above
+                     # `core` — in fact nothing above `runtime`, since it is `metric_subject.bind_one`
+                     # with two policies inverted (no confinement, no freshness floor, because an
+                     # input is by definition foreign, shared and old). The POLICY over what it
+                     # captures — the comparability KEY, its authorities, and which surfaces refuse
+                     # a cross-key ranking — is `engine/comparability.py`, above this boundary,
+                     # exactly as the `metric_subject` clause above describes for its own half.
+                     "metric_inputs"}, (
         "a module that is not process execution landed in runtime again")
 
 

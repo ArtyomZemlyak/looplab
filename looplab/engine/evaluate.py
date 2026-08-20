@@ -47,6 +47,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
+from looplab.engine.comparability import comparability_record
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.metric_salvage import (DEFAULT_METRIC_SALVAGE, SALVAGE_CAUSE_TRIAGE_ACTION,
                                            cause_repair_context, salvage_gates,
@@ -693,6 +694,33 @@ class EvaluateMixin:
     # event. It deliberately does NOT spend an inline-repair attempt: that budget bounds
     # re-evaluations and this fix buys none.
     metric_salvage_repair: bool = True
+
+    # The run's own recorded task declaration, cached for the comparability key. `None` until first
+    # read; `{}` once a read has failed, so a run without a snapshot pays one stat and not one per
+    # node terminal.
+    _comparability_task: Optional[dict] = None
+
+    def _task_snapshot_for_comparability(self) -> dict:
+        """The run's `task.snapshot.json` as a plain mapping — `{}` when there is none.
+
+        THE SNAPSHOT AND NOT THE LIVE TASK OBJECT, deliberately, and it is the same authority
+        `engine/eval_contract.py` reads for the same reason: the snapshot is what the engine WROTE
+        at setup, it is what a finished run still has on disk months later, and it is therefore the
+        only declaration that a cross-run reader and this node's own terminal can both see. A key
+        derived from an in-memory task would be unverifiable by anything that reads the run
+        afterwards, which is the property the whole record exists for.
+
+        Broad `except`, because every failure mode — no snapshot, bad JSON, a permission error —
+        means the DECLARED and INFERRED families are simply unavailable, and an unavailable family
+        is `unknown`. It may never be a reason a node loses its terminal.
+        """
+        if self._comparability_task is None:
+            try:
+                loaded = orjson.loads((self.run_dir / "task.snapshot.json").read_bytes())
+                self._comparability_task = loaded if isinstance(loaded, dict) else {}
+            except Exception:  # noqa: BLE001 - see the docstring: unreadable is UNKNOWN, not a crash
+                self._comparability_task = {}
+        return self._comparability_task
 
     def _assert_speculative_selection_confirmed(self, state, node) -> None:
         """INVARIANT: a speculative build must never consume an evaluation before its selection
@@ -2992,6 +3020,37 @@ class EvaluateMixin:
                             + unbound_subject_violation_rows(
                                 _subject_prov, res.metric,
                                 str(getattr(self, "metric_subject", "audit") or "audit")))
+                    # THE COMPARABILITY KEY — what this number may be RANKED AGAINST. Merged onto the
+                    # same `metric_provenance` dict as the subject, for the reason recorded one branch
+                    # up: the fold ignores unknown TOP-LEVEL keys, so a second event key would be
+                    # invisible in every replayed `RunState`, which is what the UI, the report, the
+                    # cross-run panel and `looplab inspect` all read.
+                    #
+                    # TWO RECORDS, not one, because they answer different questions and only one of
+                    # them is an identity: `eval_inputs` is the EVIDENCE (which files, which digests,
+                    # and the named reason when one did not bind — what an operator debugging a
+                    # `unknown` key has to look at), `comparability` is the KEY (a digest plus the
+                    # authority it was decided at — what a ranking surface compares). A surface that
+                    # had to re-derive the key from the evidence would be a second copy of
+                    # `comparability_record`, and the first thing to drift.
+                    #
+                    # UNCONDITIONAL, and never a violation. This records what a number may be compared
+                    # with; it does not decide whether the number is sound, so it mints no row, gates
+                    # nothing and cannot cost a node its terminal. `None` — the answer for every task
+                    # that declares neither inputs nor a comparison contract — writes NO key at all
+                    # rather than an empty one, because two empty keys would compare EQUAL and
+                    # "two runs that recorded nothing are the same evaluation" is the exact statement
+                    # this mechanism exists to refuse.
+                    _inputs_prov = getattr(res, "eval_inputs", None)
+                    _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
+                                                inputs_prov=_inputs_prov)
+                    if isinstance(_inputs_prov, dict) or _cmp is not None:
+                        _merged = dict(_eval_payload.get("metric_provenance") or {})
+                        if isinstance(_inputs_prov, dict):
+                            _merged["eval_inputs"] = _inputs_prov
+                        if _cmp is not None:
+                            _merged["comparability"] = _cmp
+                        _eval_payload["metric_provenance"] = _merged
                     self.store.append(EV_NODE_EVALUATED, _eval_payload)
                     # B5 reward-hacking detector + I3 code-leakage scan emit the shared Trust-panel event.
                     # emission does not rewrite the metric, but the folded trust_gate policy

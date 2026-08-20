@@ -78,9 +78,15 @@ export function sourceIntegrityNotice(run = {}) {
 // Idea declares, so the run is publishing a result at coordinates it never occupied. It is the one
 // member that is non-empty on this box's corpus today (v8 node 3, batch_size 8192 declared / 4096 in
 // code, on the champion), which is why the row must be able to say it.
+//
+// The FOURTH member, `mixed_comparability`, is of the third's kind and not the first pair's: it says
+// the run's own evaluated nodes were not all measured against the same data
+// (`looplab/engine/comparability.py`), so the champion won a mixed field. Like `params_overridden`
+// it does not doubt the measurement — it doubts what the measurement is OF.
 export const CHAMPION_CAVEAT_SALVAGED = 'salvaged'
 export const CHAMPION_CAVEAT_TRUST_FLAGGED = 'trust_flagged'
 export const CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = 'params_overridden'
+export const CHAMPION_CAVEAT_MIXED_COMPARABILITY = 'mixed_comparability'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -101,6 +107,7 @@ const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_SALVAGED]: 'salvaged',
   [CHAMPION_CAVEAT_TRUST_FLAGGED]: 'trust-flagged',
   [CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]: 'params overridden',
+  [CHAMPION_CAVEAT_MIXED_COMPARABILITY]: 'mixed comparability',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -124,7 +131,12 @@ export function bestMetricCaveatNotice(run = {}) {
             + 'parameter its own experiment record declares, so the declared configuration is not '
             + 'the one this result was produced under. The run selected on it anyway — the metric '
             + 'itself was measured normally; what is in question is what it is a measurement of.'
-          : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+          : slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY
+            ? 'This run’s own nodes were not all measured against the same evaluation — their '
+              + 'recorded comparability keys provably differ — so this number won a mixed field. '
+              + 'The values are each true of their own measurement; the ordering between them is '
+              + 'not.'
+            : `The server reports a caveat this view has no sentence for: “${slug}”.`))
   return sentences.join(' ')
 }
 
@@ -547,11 +559,98 @@ export function filterRuns(runs = [], {
   return result
 }
 
+// --- THE COMPARABILITY KEY on a run row -----------------------------------------------------------
+// The server's `best_metric_comparability` (`looplab/engine/comparability.py`), which is the answer
+// to the FIRST thing `crossRunRank.js` says this model cannot see: "/api/runs carries no metric NAME,
+// unit, dataset identity or evaluation protocol … two runs of `repo_task` may have optimized
+// recall@100 against different corpora". That was not a hedge — it is the box's actual state, where
+// recall@100 values of 0.8776, 0.793426, 0.792082 and 0.774207 sit in one `repo_task` group and were
+// measured on more than one test set.
+//
+// THE INVERSION, and it is the whole point: an ABSENT key is `unknown` and is NEVER read as "the same
+// as this one". Every run on this box today has no key, so a default of equal would certify the entire
+// corpus as mutually comparable — the exact false statement being acted on. `unknown` is a third
+// value, and `unknown` vs `unknown` is `unknown`: two rows that say nothing have not agreed.
+export const COMPARABILITY_SAME = 'same'
+export const COMPARABILITY_DIFFERENT = 'different'
+export const COMPARABILITY_UNKNOWN = 'unknown'
+
+// Strongest first, mirroring `engine/comparability.py::AUTHORITIES`. Only `measured` (the inputs'
+// content digests) and `declared` (a `ComparisonContract` the operator wrote) may CERTIFY sameness;
+// `inferred` (two task files that merely look alike) may only REFUSE. A weak authority can say no
+// and cannot say yes — which is precisely the asymmetry the same-contract-different-corpus pair
+// needs, since those runs ARE byte-identical by every declaration either of them carries.
+const COMPARABILITY_AUTHORITIES = ['measured', 'declared', 'inferred']
+const COMPARABILITY_CERTIFYING = new Set(['measured', 'declared'])
+
+const commonAuthority = (a, b) => COMPARABILITY_AUTHORITIES.find(
+  name => a?.keys?.[name] && b?.keys?.[name]) || null
+
+const normalizeComparability = (record) => {
+  if (!record || typeof record !== 'object') return null
+  const keys = record.keys
+  if (!keys || typeof keys !== 'object') return null
+  return COMPARABILITY_AUTHORITIES.some(name => keys[name]) ? record : null
+}
+
+export const comparabilityRecord = (run = {}) => normalizeComparability(run?.best_metric_comparability)
+
+// The same record on a NODE, off its folded `metric_provenance` — the identical key the run row
+// publishes for the champion, read one level down. It is on `metric_provenance` and not beside it
+// because the fold ignores unknown TOP-LEVEL keys on `node_evaluated`, so a sibling field would be
+// invisible in every replayed state (`engine/evaluate.py` records the same reason).
+export const nodeComparabilityRecord = (node = {}) => normalizeComparability(
+  node?.metric_provenance && typeof node.metric_provenance === 'object'
+    ? node.metric_provenance.comparability : null)
+
+// Does any PAIR in `records` disagree at a shared authority? The one loop both refusals are written
+// on — the cross-RUN one below and the within-RUN one above it — so a change to what "provably
+// different" means cannot reach one surface and miss the other. Absent keys are filtered out before
+// it runs: an absent key is silence, not a second key, and every node and every run on this box has
+// none, so a refusal that counted silence would fire everywhere and mean nothing.
+const anyKeyConflict = records => records.some((record, i) => records.slice(i + 1).some((other) => {
+  const authority = commonAuthority(record, other)
+  return !!authority && record.keys[authority] !== other.keys[authority]
+}))
+
+// Do these NODES carry provably different keys? The within-run refusal, for a panel that orders or
+// dominates one run's own nodes against each other.
+export const nodesSplitByComparability = (nodes = []) => anyKeyConflict(
+  (Array.isArray(nodes) ? nodes : []).map(nodeComparabilityRecord).filter(Boolean))
+
+// The tri-state, mirroring `engine/comparability.py::comparability_status` so the browser and the
+// engine can never disagree about whether two numbers may be ordered. Reflexivity is NOT assumed:
+// two absent records are `unknown`, not `same`.
+export function comparabilityStatus(a, b) {
+  const left = comparabilityRecord(a)
+  const right = comparabilityRecord(b)
+  if (!left || !right) return COMPARABILITY_UNKNOWN
+  const authority = commonAuthority(left, right)
+  if (!authority) return COMPARABILITY_UNKNOWN
+  if (left.keys[authority] !== right.keys[authority]) return COMPARABILITY_DIFFERENT
+  return COMPARABILITY_CERTIFYING.has(authority) ? COMPARABILITY_SAME : COMPARABILITY_UNKNOWN
+}
+
+// Does this set of RUNS contain a pair whose keys are provably different? The cross-run refusal.
+export const comparabilityConflict = (runs = []) => anyKeyConflict(
+  (Array.isArray(runs) ? runs : []).map(comparabilityRecord).filter(Boolean))
+
+// THE ONE PREDICATE every ranking surface in this tree asks before it orders metrics — the run list's
+// metric sort, `RegistryPanel`, `ParetoPanel`'s cross-run rung and `crossRunRank.js`, which re-tests
+// its own partitions with it precisely so that a tightening here reaches all of them on one commit.
+// That day is this one.
+//
+// FAIL OPEN ON UNKNOWN, and the choice is deliberate rather than timid. Every existing row has no
+// key; refusing on absence would blank the entire corpus and hide legitimate prior results, which is
+// worse than the defect. Refusing on a PROVEN difference costs nothing anyone should want: those
+// numbers are not on one scale and an ordering over them was never a fact. Unknown is instead made
+// VISIBLE — `crossRunRank.js` labels every row's state, so silence is never read as assent.
 export function metricComparable(runs = []) {
   const tasks = new Set(runs.map(run => run.task_id))
   const directions = new Set(runs.map(run => run.direction))
   return runs.length > 0 && tasks.size === 1 && !!runs[0].task_id
     && directions.size === 1 && ['min', 'max'].includes(runs[0].direction)
+    && !comparabilityConflict(runs)
 }
 
 export function sortRuns(runs = [], key = 'time', order = 'desc') {

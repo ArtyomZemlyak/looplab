@@ -493,6 +493,18 @@ class RunResult:
     # DISCARD it; this is the field that stops discarding it. None on the `metric_subject="off"` rung
     # and on every path that never reached a metric read.
     metric_subject: Optional[dict] = None
+    # METRIC INPUTS (`runtime/metric_inputs.py`): the identity of the bytes this number was measured
+    # AGAINST — `{inputs_bound, inputs:[{path, identity, size, digest, digest_mode, kind}],
+    # unbound_reason?}` — bound at the metric read from the operator's `eval.inputs` declaration.
+    #
+    # The MIRROR of `metric_subject` above and the field it could not stand in for: a subject is
+    # confined to the workdir and must be fresh, an input is shared, foreign and old by definition.
+    # It exists because the test set and the product index of the task this box actually runs carry
+    # no version marker, no manifest and no checksum of any kind, so before this field the ONLY
+    # record of which corpus a recall@100 was measured over was a path — and two different corpora
+    # at one path is the routine case here, not the exotic one. None when the task declared no
+    # inputs, which is every task shipped before 2026-08-20.
+    eval_inputs: Optional[dict] = None
 
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's

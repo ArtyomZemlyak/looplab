@@ -2121,6 +2121,144 @@ least one test.
 
 ---
 
+### §0.6b The metric had no INPUT side, so nothing could refuse a cross-corpus comparison (2026-08-20)
+
+✅ **What it was.** `runs/` holds recall@100 values of **0.8776, 0.793426, 0.792082 and 0.774207**,
+compared out loud for a day. Some were measured on one test set and some on another; the product
+index also changed, *independently of the test set*, and a bigger corpus makes recall@100 strictly
+harder. **Nothing in any record said which, and no surface refused.**
+
+**MEASURED, and each finding is a separate hole.**
+
+1. **`node_evaluated.metric_provenance` binds only the OUTPUT side.** `subjects[].path`, `identity`
+   (`file_identity`), `size`, `digest` — what the number is a claim *about*. There was no field of
+   any kind for what it was measured *against*.
+2. **`data_provenance` fires ZERO times.** 0 occurrences across all eight run directories with an
+   event log (4,691 + 2,309 + 133 + 1,624 + 2,539 + 2,456 + 6,415 + 3,330 records). Gated on
+   `if prov:` over `self._assets` (`engine/orchestrator.py:3229-3236`) while
+   `adapters/repo_task.py:1261-1262::assets()` returns `{}` for every repo task. Its §Theme D row is
+   **retracted** above.
+3. **`workspace_fingerprint` is not a fallback.** It records a git HEAD SHA for an editable repo and
+   a `(relpath, size, mtime)` signature for a `data:` mount — never content — and the three
+   dense-retrieval runs declare `data: {}`. Their whole input record is
+   `{"editable:.": "git:d97be313…"}`.
+4. **`core/comparison.py::ComparisonContract` is the right vocabulary and is declared by 0 tasks.**
+   13 typed facets including `dataset_lineage`; optional; **0** of the task snapshots under `runs/`
+   set it. It is also honest about its ceiling in its own words — `"authority": "declared"`,
+   *"equality proves equality of adapter-declared semantics, not an independent fingerprint of the
+   actual dataset/evaluator/budget"*.
+5. **`engine/eval_contract.py` calls the incomparable pair identical.** `e5small-dr-unified-v2` and
+   `-v4` have byte-identical contracts by its rule — same command `python -m vectorsearch.test`, same
+   reader `RECALL@100: ([0-9.]+)`, same editable path — and are exactly the pair that cannot be
+   compared. It is also wired only into the foreign-run *reading* tools and reaches no ranking.
+6. **The two data files carry no identity at all.** Derived from the eval path in
+   `/home/jovyan/data/vectorizer-unified`: `test.parquet` (62,920,840 B) holds only `ARROW:schema` in
+   its parquet key-value metadata and a constant `split` column; `smkt_all.index.parquet`
+   (37,785,295 B, **641,261 rows**) holds no manifest, no checksum, no row-count assertion. Both are
+   **identified by path alone**, so replacing either in place is undetectable from every artefact the
+   eval writes.
+
+**EVERY FACTOR THAT MOVES THE FINAL METRIC WITHOUT THE MODEL CHANGING**, derived from that eval path,
+with where it is decided and whether a finished run can recover it. Config keys are in
+`vectorsearch/configs/config.yaml`, which — because pydantic-settings takes the FIRST source and YAML
+precedes env and CLI — **overrides both**, so `--test.retriever.max_len_doc=512` is silently ignored.
+
+| # | factor | decided | recoverable from a finished run? |
+|---|---|---|---|
+| A1 | test-set **version** | `config.yaml:195 test.test_dataset_version` (= `"2"`) | ✅ the eval writes the whole config to `…/tests/final/config.yaml` |
+| A2 | test-set **root** (S3 vs local) | env `VS_LOCAL_DATA_ROOT` (`config.py:64`, read via `os.environ`) | 🟡 the eval logs it for the INDEX only (`evaluator.py:129`) and never for the test split — but LoopLab's own `config.snapshot.json → settings.eval_env` records it, and it is **not constant across the corpus**: `null` on `rubertlite-dr-unified-v6` (⇒ S3) against `/home/jovyan/data/dr-local` on v8/v9 and e5small-v2/v3/v4 |
+| A3/A4 | resolved test file, and any version marker **inside** it | `evaluator.py:69-70` | ❌ path not logged; the file carries no marker |
+| A5/A6 | test-set size (7,614,946 rows; ~368,842 scored queries) | property of the file | ❌ only the dropped-row count is logged |
+| A7 | query **subsampling / seed** | — | **refuted**: the whole split is evaluated, no seed anywhere in the eval path |
+| B1/B2 | index **type** / **version** (`all`, `2`) | `config.yaml:197-198` | ✅ config + `evaluator.py:128` |
+| B3 | index **path** | `evaluator.py:125-126` + `VS_LOCAL_DATA_ROOT` | ✅ logged verbatim at `evaluator.py:129` |
+| B4 | **corpus size** — 641,261 items; the factor that makes recall@100 harder | property of the file | ✅ logged at `evaluator.py:153` |
+| B6 | index digest / manifest | — | **refuted**: none exists |
+| B8 | what is embedded per doc (`passage: {item_name} + 4 category levels`) | `config.yaml:49-54` | ✅ config |
+| B10 | doc **id assignment** = positional row order of the parquet | `evaluator.py:142-144` | ❌ row order is load-bearing and unrecorded |
+| C1/C2 | **`query:` / `passage:` prefixes** — both confirmed present | `config.yaml:48-54` | ✅ config |
+| C5 | multitask class prefixes (off; if on, the metric becomes a **mean of per-class recalls**) | `config.yaml:26-38` | ✅ config |
+| D2 | inference **precision** = **fp16** | `config.yaml:217` | ✅ config |
+| D5/D6 | **truncation** — `max_len_doc: 256`, `max_len_query: 64` | `config.yaml:229-230` | ✅ config |
+| D8 | corpus encode **batch size** — no `batch_size` passed, so ST's default **32** for the 641k pass | `retriever.py:85-87` | ❌ hardcoded omission |
+| D11 | **query order nondeterminism** — polars `.unique()` does not maintain order | `evaluator.py:344` | ❌ changes batch padding run to run |
+| D12 | **pooling** = CLS | `1_Pooling/config.json` in the model dir | ✅ (an artefact) |
+| D13 | **L2 normalisation** — from the `2_Normalize` module in `modules.json`, never from `encode(normalize_embeddings=…)`, so an agent deleting that module silently changes the metric | model dir | ✅ `final/modules.json` |
+| E2/E3 | **FAISS index type** `Flat_GPU` (exact `IndexFlatIP`) and **inner product** as the similarity | `config.yaml:222`, `index.py:34` | ✅ config |
+| E4 | torch-GPU vs faiss-CPU search backend (recall@1000 differs by 3.5e-7, just under the harness `drift_tolerance` of 1e-6) | `exact_search.py:234-269`, silent OOM downgrade | log line only |
+| E5/E6 | search dtype float64; faiss tie-order convention | `exact_search.py:82,87-102` | ❌ code only |
+| F1/F2 | **judged-positive definition** — label column `qwen_72_v1`, positive set `"esc"` (exact **+ substitute + complement**; only `i` excluded) | `config.yaml:44,56` | ✅ config |
+| F3 | **match key = `item_name` string equality**, not `item_guid` | `evaluator.py:160-164` | ✅ config |
+| F5 | **recall denominator** counts positives absent from the corpus against you | `evaluator.py:166-177` | ❌ code only |
+| F7 | macro average over queries; queries with no positives skipped | `evaluator.py:376,439` | ❌ code only |
+| G1/G2 | **k** = 100 from `recall_top_k`; `max_k`=1000 retrieved | `config.yaml:201` | ✅ config |
+| G8 | harness-side regex + `drift_tolerance` | the task snapshot | ✅ |
+
+**Delivered.** `looplab/runtime/metric_inputs.py` (`eval.inputs` bound to content identity at the
+metric read, through `metric_subject.bind_one` with the two policies INVERTED — no confinement, no
+freshness floor, because an input is by definition foreign, shared and old) and
+`looplab/engine/comparability.py` (the key, its three authorities, and the tri-state). Wired:
+`engine/eval_dispatch.py` binds, `engine/evaluate.py` folds `metric_provenance.eval_inputs` +
+`.comparability`, `engine/champion_caveats.py` gains `mixed_comparability`,
+`serve/run_projections.py` publishes `best_metric_comparability`, `ui/src/runIndex.js::
+metricComparable` refuses a proven cross-key set, `ui/src/crossRunRank.js` sub-partitions each
+`(task_id, direction)` group by key, `ui/src/panels.jsx` banners a split Pareto front,
+`engine/lessons.py::store_case` + `engine/memory.py::JsonlCaseLibrary` elect a cross-run champion
+within one key only, and `looplab comparability` exits 3 on DIFFERENT / 4 on UNKNOWN.
+
+**THE INVERSION IS THE FEATURE.** An absent key reads `unknown`, and `unknown` vs `unknown` is
+`unknown` — never `same`. Two rows that recorded nothing have not agreed. Equality at the `inferred`
+authority is also `unknown`: a weak authority may REFUSE a comparison and may never CERTIFY one,
+which is the only rule that separates v2 from v4. Everything fails open on `unknown` and makes it
+VISIBLE instead — the corpus does not move by one row, verified by
+`tests/test_metric_comparability.py::test_the_existing_case_store_elects_exactly_as_it_did` and
+`ui/test/comparabilityGate.test.js::'the corpus as it stands today does not move by one row'`.
+
+⬜ **What is NOT recoverable, and is therefore `unknown` forever for the runs already on disk.**
+No key can be retro-fitted to `runs/e5small-dr-unified-v{2,3,4}`, `rubertlite-dr-unified-v{6,7,8,9}`
+or `rubertlite-dense-retrieval`. Their logs record no digest of `test.parquet` or
+`smkt_all.index.parquet`; those files carry no internal version marker; and both are reachable at one
+path with different contents at different times. The per-node `…/tests/final/config.yaml` preserved
+under `runs/<run>/nodes/node_N/` *does* keep the config **keys** (A1, B1, B2, C1-C5, D1-D6, D9, E1,
+E2, F1-F3, G1-G4), so the DECLARED half is partially reconstructible by hand — but a declaration is
+`inferred` authority at best and may not certify, and the two things that could actually have
+differed between those numbers (the bytes of the test set and the bytes of the index) are gone.
+**The honest answer is `unknown`, and that is what every surface now prints for them.** Retro-fitting
+a guessed key would be the one failure this whole mechanism exists to prevent.
+
+**And one difference IS already visible in the record, which is the shape of what was being missed.**
+`config.snapshot.json → settings.eval_env` reads `{"VS_LOCAL_DATA_ROOT": "/home/jovyan/data/dr-local"}`
+on `e5small-dr-unified-v{2,3,4}` and `rubertlite-dr-unified-v{8,9}`, and **`null` on
+`rubertlite-dr-unified-v6`** — and `vectorsearch/config.py:53-69::get_dataset_path` branches on
+exactly that variable: set, it reads `…/v{ver}/{split}.parquet` from the local disk; unset, it reads
+`s3:/{datasets.path}/v{ver}/{split}.parquet` from **S3**. So v6's champion (0.727991) was scored
+against a different storage path from v8's (0.762048), the fact was sitting in a snapshot field
+nobody joins on, and no surface refused the comparison. The mtimes are *not* the evidence here and
+should not be quoted as if they were — `smkt_all.index.parquet` (2026-08-11 13:15) and `test.parquet`
+(2026-08-11 08:53) both predate all five unified runs, and a geesefs mtime is not a content claim
+either way. That is the point: **a path and a timestamp are what the record has, and neither is an
+identity.**
+
+⬜ **Still open, in priority order.**
+1. **Nothing yet DECLARES `eval.inputs`.** The field, the binding and every refusal are shipped and
+   the mechanism is therefore INERT on this box until a task sets it — exactly the state
+   `eval.metric.subject` was in for two days. It is one line in the task file
+   (`["/home/jovyan/data/dr-local/v2/test.parquet", "/home/jovyan/data/dr-local/v2/smkt_all.index.parquet"]`)
+   and it is deliberately NOT written into any task goal: the record must make incomparability
+   VISIBLE, which is a different thing from telling an agent what to use. Effort S.
+2. **The `protocol` half has no measured authority.** `k`, normalisation, the prefixes, the positive
+   label set, the pooling mode, the recall denominator — all of them move the metric and all of them
+   live inside the candidate's repo, where a reader would be deciding comparability from bytes the
+   candidate controls. Today they reach the key only through a `comparison_contract` the operator
+   writes (authority `declared`). A sanctioned route for the eval to REPORT its own protocol, signed
+   in a way the candidate cannot forge, is the next rung and is not obviously affordable. Effort L.
+3. **The cross-run STORE rows still carry no key** except `cases.jsonl`. Lessons, research claims,
+   capsules and meta-notes (132 rows on the live store, 0 of which carry any contract identity —
+   §0.6) are written by other paths; `store_case` was stamped because it is the one whose *election*
+   is a metric comparison. Effort S each, and each must ship with a fail-OPEN reader.
+
+---
+
 ### §0.7 The memo's verifier verdicts never reached a single role (2026-08-16)
 
 ✅ **What it was — one line of a renderer, dead for the whole life of the feature.** The deep-research
@@ -4578,6 +4716,28 @@ added: live GPU monitor, policy "why-this-node" (MCTS UCB1), pending-hint feedba
   to the sha256 + `file_identity` of the artefact it is a claim ABOUT, because measured across six
   repo runs 82/83 metrics carried no provenance at all and 2/83 were provably about bytes the node
   did not produce.]
+
+  **[2026-08-20 — RETRACTED, AND THE SCOPE NOTE ABOVE IS WHY. This row's "DONE" was true of the code
+  and false of the corpus: `data_provenance` fires ZERO times.** Counted over every run directory
+  under `runs/` that has an event log — `e5small-dr-unified-v2` (4,691 records), `-v3` (2,309), the
+  live `-v4` (133), `rubertlite-dense-retrieval` (1,624), `rubertlite-dr-unified-v6` (2,539), `-v7`
+  (2,456), `-v8` (6,415), `-v9` (3,330): **0 occurrences in all eight.** The emission is gated on
+  `if prov:` over `self._assets` (`engine/orchestrator.py:3229-3236`, not `:3140-3147` — this row's
+  line numbers had also drifted, as had `replay.py:1552`→`:1675` and `models.py:1148`→`:1453`), and
+  `adapters/repo_task.py:1261-1262::assets()` returns `{}` for every repo task with the comment
+  *"repo/data are tree-mounted, not flat assets"*. So the ONE mechanism aimed at input content has
+  never covered the tasks this box actually runs. The scope note said so and the ✅ did not, which is
+  how a shipped-and-inert mechanism survives a re-derivation: **an emission site is not a record.**
+
+  The claimed fallback does not exist either. `engine/workspace.py::workspace_fingerprint` records a
+  git HEAD SHA for an editable repo and a `(relpath, size, mtime)` shallow signature for a `data:`
+  mount — deliberately NOT content — and the three dense-retrieval runs declare `data: {}`, so they
+  get neither. Their entire input record is `{"editable:.": "git:d97be313…"}`: the SHA of the code
+  tree, which says nothing about a dataset the tree does not track.
+
+  **Superseded by `eval.inputs` + `engine/comparability.py` (2026-08-20)** — the input side bound by
+  CONTENT at the metric read, at absolute paths outside the workdir, which is where the data actually
+  lives. See the ✅ row below.]
 
 ### Theme E · Idea generation & multi-agent ideation
 - ✅ **P1 · E1 novelty/dedup gate (S–M).** Embedding-similarity reject near-duplicate ideas (reuse vector store).

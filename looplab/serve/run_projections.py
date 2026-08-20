@@ -20,6 +20,7 @@ from looplab.core.atomicio import file_identity
 from looplab.core.run_deletion import (RUN_DELETION_FENCE_PREFIX, RunDeletionStorageError,
                                        load_run_deletion_fence, run_deletion_snapshot_token)
 from looplab.engine.champion_caveats import champion_metric_caveats
+from looplab.engine.comparability import record_of
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
 from looplab.events.replay import fold
@@ -130,6 +131,21 @@ def run_summaries(srv, only=None) -> list:
                 # never that a detector ran (`reward_hack_detect` is off by default). Cached WITH the
                 # fold, so it costs one derivation per changed log rather than one per poll.
                 "best_metric_caveats": champion_metric_caveats(st),
+                # WHAT THIS NUMBER MAY BE RANKED AGAINST (`engine/comparability.py`). The row's own
+                # `task_id` + `direction` is what every cross-run surface currently partitions on,
+                # and `ui/src/crossRunRank.js` says in its own words why that is not enough: "a
+                # shared task_id is an operational lookup key … two runs of `repo_task` may have
+                # optimized recall@100 against different corpora". This is the field that lets it
+                # SAY so instead of caveating in prose — one server-side value, not a fix in each of
+                # the thirteen browser surfaces that read this row.
+                #
+                # `None` for every run written before 2026-08-20 and for every task that declares
+                # neither `eval.inputs` nor a `comparison_contract`. `None` is UNKNOWN at every
+                # reader and is NEVER "the same as mine" — an absent key that defaulted to equal
+                # would certify the whole corpus as mutually comparable, which is the false
+                # statement this exists to stop. Read off the CHAMPION's own folded
+                # `metric_provenance`, because the number this row publishes is that node's.
+                "best_metric_comparability": record_of(best) if best is not None else None,
                 "stop_reason": st.stop_reason,
                 # Cached with the fold so liveness polling can cheaply decide whether the
                 # durable-resume reconciler is needed. Without this bit every dashboard poll
