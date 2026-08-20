@@ -722,7 +722,7 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any** of the eleven `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  **any** of the twelve `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
   `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
   <!-- FIXED 2026-08-13 (mega-review, doc 40): this list said "eight" and omitted the last three — it was
