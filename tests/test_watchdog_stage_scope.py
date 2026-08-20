@@ -206,7 +206,20 @@ def test_h1_the_freshest_log_heuristic_hands_the_score_stage_to_the_training_jud
     client = _ScriptedClient({"status": "broken", "reason": "silent CPU fallback, loss never moved",
                               "confidence": 0.95})
     host = _Host(tmp_path, client=client)
-    _drive_train(host, wd, until=lambda _h: client.calls >= 1)
+    # WAIT FOR THE THING THIS TEST ASSERTS, not for the judge CALL that precedes it. `_drive_train`
+    # cancels the task group the instant `until` is true, and the alert is appended LATER in the same
+    # tick — inside a `CancelScope` that is shielded only when a stop or repair was decided, which is
+    # exactly what this case does NOT decide. So `client.calls >= 1` opened a window between "the
+    # judge was called" and "the alert was recorded" for the cancel to land in, and on a slow
+    # filesystem it lands there often: measured 3/12 on master and 6/12 on this branch with
+    # IDENTICAL content on a network mount, against 0/12 for the same content on local disk. The
+    # code was never the variable; the harness was racing itself, which is the one way a guard can
+    # fail that teaches nobody anything.
+    #
+    # This is the idiom the rest of this file already uses (see the `EV_TRAIN_MONITOR_ALERT` waits
+    # below) and it strictly implies the old predicate: no alert is written without a call. The
+    # `client.digests[0]` assertions that follow are therefore unchanged in meaning.
+    _drive_train(host, wd, until=lambda h: h.store.rows(EV_TRAIN_MONITOR_ALERT))
 
     # The judge really is shown the SCORER's output — this is the wrong-log defect, not a theory.
     assert client.calls >= 1
