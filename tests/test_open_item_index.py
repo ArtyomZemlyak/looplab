@@ -37,8 +37,14 @@ _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
 _PROOF = re.compile(r"proof:((?:absent:|present:|missing:)\S+)")
 _MEASURED = re.compile(r"measured:(.{0,400})", re.S)
 
-# The window a marker's own clause must live in. A docstring paragraph and a markdown row both fit;
-# it is deliberately short enough that the clause cannot end up describing the NEXT item.
+# The window a marker's own clause must live in. A docstring paragraph and a markdown row both fit.
+# LENGTH IS NOT WHAT KEEPS A CLAUSE FROM DESCRIBING THE NEXT ITEM, and this comment claimed it was
+# until 2026-08-20: in the bullet-list docs (27, 34) markers sit 150-300 chars apart, so a marker
+# written with NO clause of its own silently borrowed its neighbour's. Measured over this tree by
+# deleting each OPEN marker's own `proof:` clause: 17 of 77 still found one, i.e. 17 markers were
+# one edit away from being checked against a DIFFERENT item's falsifier — the wrong-proof failure
+# this index is worth less than nothing with. `_marker_windows` therefore ends every window at the
+# NEXT marker, and the length is only the outer bound it always was.
 _WINDOW = 900
 
 _SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
@@ -78,11 +84,23 @@ def _text_without_markers(path: Path) -> str:
                               or "measured:" in line))
 
 
+def _marker_windows(text: str):
+    """`(kind, slug, window)` for every marker in `text`, each window ending at the NEXT marker.
+
+    Pure and driven directly by `test_a_markers_proof_window_stops_at_the_next_marker`, because a
+    window that runs on is a green marker with someone else's falsifier — which reads exactly like a
+    verified item and is the one failure this whole file is supposed to make impossible.
+    """
+    starts = [m.start() for m in _MARKER.finditer(text)]
+    for m in _MARKER.finditer(text):
+        nxt = next((s for s in starts if s > m.start()), len(text))
+        yield m.group(1), m.group(2), text[m.end():min(m.end() + _WINDOW, nxt)]
+
+
 def _iter_markers():
     for path in _tracked_text_files():
-        text = _read(path)
-        for m in _MARKER.finditer(text):
-            yield path, m.group(1), m.group(2), text[m.end():m.end() + _WINDOW]
+        for kind, slug, window in _marker_windows(_read(path)):
+            yield path, kind, slug, window
 
 
 def _resolve(rel: str) -> Path:
@@ -161,6 +179,27 @@ def test_every_open_marker_is_well_formed():
             if "docs/" not in body:
                 bad.append(f"{rel}: DECLINED[{slug}] `measured:` clause cites no docs/ page")
     assert not bad, "malformed open-item markers:\n  " + "\n  ".join(bad)
+
+
+def test_a_markers_proof_window_stops_at_the_next_marker():
+    """A marker must carry its OWN falsifier — never inherit the next one's.
+
+    The failure this catches is a false GREEN, which is why it is driven rather than reasoned about:
+    a marker with no clause used to scan forward `_WINDOW` characters and find the following item's
+    `proof:`, so it reported as verified while nothing about it had been checked, and it would have
+    gone RED on the day the OTHER item shipped. Both halves are asserted, because a truncation that
+    also cut a legitimate clause short would silently empty the index instead.
+    """
+    # Assembled rather than written out: this file is itself scanned by the tree walk above, and a
+    # literal marker here would enter the real index (and its `proof:` would be evaluated for real).
+    key, clause = "OPEN", "proof:" + "absent:_beta_symbol@looplab/core/config.py"
+    text = (f"- {key}[alpha-has-no-clause] the sentence about alpha, with no falsifier at all.\n"
+            f"- {key}[beta-has-its-own] {clause}\n")
+    windows = {slug: window for _kind, slug, window in _marker_windows(text)}
+    assert "proof:" not in windows["alpha-has-no-clause"], (
+        "a marker with no clause of its own must not inherit the next marker's proof")
+    assert clause in windows["beta-has-its-own"], (
+        "...and a marker's own clause must still be reachable inside the window")
 
 
 def test_each_slug_is_declared_exactly_once():

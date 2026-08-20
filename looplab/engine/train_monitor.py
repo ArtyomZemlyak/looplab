@@ -944,7 +944,8 @@ def eval_log_plan(stages) -> EvalLogPlan:
       own deterministic divergence kill (`health_check=True` is passed for every declared stage and
       omitted here), so the LLM watchdog is that path's only early stop;
     - a stage the MANIFEST declares as the training loop (`role: "training"`, validated by
-      `command_eval.validate_stages`, at most one per pipeline, never the positional scorer);
+      `command_eval.validate_stages`, at most one per pipeline, never the positional scorer) AND
+      that declares the `expect.files` its authority is spent against — see below;
     - every other pipeline stage is `LOG_ROLE_WORK`: still read, still judged, still alerting — but
       ADVISORY.
 
@@ -992,14 +993,35 @@ def eval_log_plan(stages) -> EvalLogPlan:
     raw = list(stages or [])
     names = tuple(str(s.get("name")) for s in raw
                   if isinstance(s, dict) and s.get("name") is not None)
-    # The manifest's own answer to "which stage is the training loop", when it gave one.
-    # `validate_stages` is the single definition of a valid stage and admits exactly one such
-    # declaration, so this reads at most one name; anything else is a manifest that never reached
-    # here. Read from the CLEANED dicts the engine resolved, never from raw operator/agent text.
-    declared_training = frozenset(
-        str(s.get("name")) for s in raw
-        if isinstance(s, dict) and s.get("name") is not None
-        and str(s.get("role") or "").strip().lower() == STAGE_ROLE_TRAINING)
+    # The manifest's own answer to "which stage is the training loop", when it gave one — mapped to
+    # the artifacts that can SPEND the authority again. `validate_stages` is the single definition of
+    # a valid stage and admits exactly one such declaration, so this reads at most one name; anything
+    # else is a manifest that never reached here. Read from the CLEANED dicts the engine resolved,
+    # never from raw operator/agent text.
+    #
+    # A DECLARATION WITH NO `expect.files` BUYS NOTHING, and that is fail-closed rather than mean.
+    # `training_authority_spent` is the entire price of admitting a declaration: the authority ends
+    # the moment the stage's own promised artifact exists, because a stage that also scores
+    # in-process (`e5small-dr-unified-v2`'s `train.log` ends `RECALL@100: 0.793344`) cannot be taken
+    # at its word about which phase it is in. With no declared artifact there is nothing to observe
+    # and the authority could never be handed back — so the gun would be held over the in-process
+    # scoring phase too, which is the H-1 defect this whole mechanism exists to keep out. Granting
+    # `LOG_ROLE_WORK` instead is exactly the behaviour the manifest had before it declared anything,
+    # and it is VISIBLE: with no `LOG_ROLE_TRAINING` in the plan, every tick's span carries
+    # `kill_reachable: false` from the first one, which is the same signal a pipeline that declared
+    # nothing gets. (Not enforced in `validate_stages` on purpose: refusing the manifest would fail
+    # a node over a permission it did not need, and the stage still runs exactly as declared.)
+    declared_training: dict = {}
+    for stage in raw:
+        if not isinstance(stage, dict) or stage.get("name") is None:
+            continue
+        if str(stage.get("role") or "").strip().lower() != STAGE_ROLE_TRAINING:
+            continue
+        expect = stage.get("expect") or {}
+        files = expect.get("files") if isinstance(expect, dict) else None
+        promised = tuple(str(f) for f in (files or []) if isinstance(f, str))
+        if promised:
+            declared_training[str(stage.get("name"))] = promised
     # A row this cannot name is a broken resolved pipeline (`_resolve_stages` only ever returns
     # `validate_stages`-cleaned dicts), and dropping it would RENUMBER the rest: a 3-stage list with
     # two unusable rows would otherwise collapse to a "one-stage pipeline" and hand the survivor kill
@@ -1032,15 +1054,13 @@ def eval_log_plan(stages) -> EvalLogPlan:
             _claim(_log_name_key(f"{name}.log"), (name, role))
     else:
         _claim(_log_name_key(_SINGLE_COMMAND_LOG), (None, LOG_ROLE_TRAINING))
+    # The artifacts belong to the declaration only if the declaration actually BOUGHT the role: the
+    # positional scorer rule and the `complete` guard both refuse it, and a stage that was refused
+    # must not carry a spend condition for an authority it does not hold.
     artifacts: tuple = ()
-    if declared_training:
-        for stage in raw:
-            if (isinstance(stage, dict) and str(stage.get("name")) in declared_training
-                    and roles.get(_log_name_key(f"{stage.get('name')}.log"), (None, None))[1]
-                    == LOG_ROLE_TRAINING):
-                expect = stage.get("expect") or {}
-                files = expect.get("files") if isinstance(expect, dict) else None
-                artifacts = tuple(str(f) for f in (files or []) if isinstance(f, str))
+    for name, promised in declared_training.items():
+        if roles.get(_log_name_key(f"{name}.log"), (None, None))[1] == LOG_ROLE_TRAINING:
+            artifacts = promised
     return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts)
 
 
@@ -1059,8 +1079,13 @@ def training_authority_spent(workdir, plan: Optional[EvalLogPlan]) -> bool:
     own output contract and the file is an exact filesystem fact.
 
     Fail-closed on I/O trouble: unreadable means the authority is treated as spent (advisory), never
-    as live. `()` artifacts — every path that did not buy the role with a declaration — can never
-    spend it, so the single-command and one-stage evals are untouched.
+    as live. `()` artifacts answer False here, and the reason that is safe is upstream rather than
+    obvious: `eval_log_plan` only ever leaves this empty for a plan whose training role was NOT
+    bought by a declaration — the single-command eval and the one-stage pipeline, which never
+    promised anything whose arrival could end them. A declaration that named no `expect.files` does
+    not reach this function at all, because it is refused `LOG_ROLE_TRAINING` in the first place; an
+    authority with no spend condition is one that outlives the training it was granted over, which
+    is the exact defect this function exists to prevent.
     """
     if plan is None or not plan.training_artifacts:
         return False

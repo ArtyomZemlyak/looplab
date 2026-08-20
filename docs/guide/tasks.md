@@ -154,6 +154,41 @@ one of the two *declarations*. Deleting the `needs` entry is explicitly not a fi
 identical failure into the stage's own loader, later and more expensively. Omit `needs` entirely for a
 stage that reads only the workspace it was seeded with — an empty declaration asserts nothing.
 
+### Declaring which stage is the training loop
+
+**One stage may carry `"role": "training"`, and the only thing it can buy is the power to be
+STOPPED.** The live training watchdog reads a stage log, judges the run's health, and — when
+`train_monitor_kill` is on ([configuration](configuration.md)) — may end a training it can prove is
+broken rather than burn the whole timeout. *Prove* is the hard word. The last stage of a pipeline is
+the scorer by POSITION (that is where the metric is read), and the engine cannot tell which of the
+earlier stages is the training loop, so each of them is judged and reported but stays **advisory**.
+Measured, that left the early stop unreachable for every pipeline this engine actually runs:
+`e5small-dr-unified-v2` node 2 drew 31 `broken` verdicts at confidence 0.85–0.95 over 7.3 hours
+("loss frozen at exactly 8.8534, iqr=0, ~46k steps"), ran all 57,600 steps, and scored
+`RECALL@100 = 0.000000`. The judge was right every tick and held no authority on any tick.
+
+A declaration closes that without reopening what the role rule was built to stop, because it can only
+ever move a stage TOWARD liability: omit `role` and the stage keeps exactly the advisory treatment it
+has today, write it and the only thing bought is that YOUR stage may be stopped — a kill carries no
+repair, no retry and no refunded node slot. At most one stage per pipeline may declare it (two is the
+old "everything that is not `score` is training" rule wearing a declaration, and that is the rule
+that let a `data_prep` log hold a gun), and the positional scorer can never buy it back.
+
+**Declare `expect.files` on the same stage — without it the role is refused.** The authority is
+SPENT the moment the declared artifact appears, and that is the price of admitting a declaration at
+all: v2's `train` stage does not only train, it runs its retrieval evaluation in-process, so
+`RECALL@100: 0.793344` is a line in its own `train.log` — a judge holding a kill while reading
+scorer output, moved INSIDE one stage where no filename can split it. `expect.files` is the
+manifest's own output contract, so "the training is already over" becomes an exact filesystem fact
+rather than a reading of the text; after the artifact exists the verdict is advisory again, exactly
+as if the stage had declared nothing. A `role` with no `expect.files` has nothing to spend it, so it
+could never hand the gun back — it is granted the ordinary advisory role instead. Nothing else
+changes either way: the stage runs exactly as written.
+
+A pipeline where nothing is kill-eligible now says so on every watchdog span (`kill_reachable:
+false`) from its first tick, so "this run cannot be stopped early" is readable before the hours are
+spent rather than after.
+
 ### Declaring an eval's environment
 
 **A stage can declare what it needs SET, and so can the task and the run.** `expect` states what a

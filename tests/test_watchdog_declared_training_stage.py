@@ -254,6 +254,39 @@ def test_d2_a_role_not_bought_by_a_declaration_can_never_be_spent(tmp_path):
     assert training_authority_spent(tmp_path, None) is False
 
 
+def test_d2_a_declaration_with_nothing_to_spend_never_gets_the_gun(tmp_path):
+    """The half D-2 left open: an authority with NO spend condition outlives its training.
+
+    `training_authority_spent` is the entire price of admitting a declaration — the role ends the
+    moment the stage's own promised artifact exists, because v2's `train` stage also scores
+    in-process and a stage that does not distinguish its phases cannot be taken at its word about
+    them. A `role: "training"` with no `expect.files` has nothing to observe, so the authority could
+    never be handed back: it would hold the gun over the in-process scoring phase, which is H-1 with
+    extra steps. `validate_stages` accepts such a manifest (the stage still runs exactly as
+    declared); `eval_log_plan` refuses it the ROLE, which is the advisory behaviour it had before it
+    declared anything — and a plan with no `LOG_ROLE_TRAINING` in it is the one the span already
+    reports as `kill_reachable: false` from its first tick.
+    """
+    bare = [dict(stage) for stage in _V2_STAGES]
+    for stage in bare:
+        stage.pop("expect", None)
+        if stage["name"] == "train":
+            stage["role"] = STAGE_ROLE_TRAINING
+    clean, err = validate_stages(bare)
+    assert err is None, "the manifest itself is valid — only the AUTHORITY is refused"
+
+    plan = eval_log_plan(clean)
+    assert plan.roles["train.log"] == ("train", LOG_ROLE_WORK)
+    assert plan.training_artifacts == ()
+    assert training_authority_spent(tmp_path, plan) is False    # nothing to spend, so never spent
+    # ...and with nothing to spend it, the kill it would otherwise have bought is refused.
+    broken = TrainingVerdict(status="broken", reason="loss frozen at 8.8534", confidence=0.95)
+    assert should_monitor_kill(broken, enabled=True, threshold=0.8,
+                               log_role=plan.roles["train.log"][1], broken_streak=31) is False
+    # The control: the SAME manifest with its output contract restored does buy the role.
+    assert eval_log_plan(_declared(_V2_STAGES)).roles["train.log"] == ("train", LOG_ROLE_TRAINING)
+
+
 def test_d2_an_unreadable_workdir_hands_the_gun_back(tmp_path, monkeypatch):
     """Fail-closed: what cannot be checked counts as spent, never as live. A node workdir is a FUSE
     mount, where a stat can fail for reasons that have nothing to do with the file."""
@@ -450,10 +483,13 @@ def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
     fact about the branch — a reason the operator's `inline_repair_reasons` selects must FALL
     THROUGH, and only an unselected one may take the terminal — so it is read off the tree.
 
-    Driving it instead would mean standing up a whole engine, a sandbox and a real subprocess kill
-    for one boolean; the AST is rung 3 of the ladder and this is what it is for. The behaviour on
-    either side of the branch is driven for real above (`should_monitor_repair`, the claim, the
-    reason on the signal) and below it by the existing repair suites.
+    It is rung 3 of the ladder, and rung 3's blind spot is that it proves the gate is SHAPED right,
+    never that it is REACHED — an unconditional `return` spliced in ahead of it, or `and False` on
+    its test, leaves every assertion below green. This docstring used to price the driven version at
+    "a whole engine, a sandbox and a real subprocess kill for one boolean" and that was wrong: the
+    three tests directly below drive the real `_evaluate` with a stubbed sibling watchdog and a
+    scripted `RunResult`, no sandbox and no subprocess. Keep BOTH — this one names the shape a
+    reader has to preserve, those name the behaviour.
     """
     import ast
 
@@ -492,6 +528,155 @@ def test_f_a_repairable_stop_does_not_terminalize_in_the_kill_branch():
                            for a in assigns), (
         "a tree-killed process exits -9 with no traceback, which `_failure_reason` reads as "
         "oom/crash — the watchdog's own reason must win when it stopped this attempt")
+
+
+# --------------------------------------------------------------- ...and the same join, DRIVEN
+#
+# The AST test above is rung 3, and rung 3 has a documented blind spot this exact branch sits in:
+# it proves the gate is SHAPED right, never that it is REACHED. Both of the mutations that
+# reinstate the original defect leave every assertion in it green — an unconditional `return`
+# inserted into `branch.body` ahead of the gate, and `if reason in self._inline_repair_reasons and
+# False:`. Nothing else in the suite covered the join: every `not_learning` / `monitor_broken` test
+# drives `_monitor_training`, which ends at the kill SIGNAL, and every repair test drives a node
+# that failed on its own exit code. The one thing neither side exercises is the hand-off between
+# them, which is the whole feature.
+#
+# So it is driven here, and the "whole engine, a sandbox and a real subprocess kill" the AST test
+# priced it at is not needed: the watchdog is a stubbed sibling task that CLAIMS the shared signal
+# exactly as `_monitor_training` does (through `claim_watchdog_kill`, the production function), and
+# the eval is a scripted `RunResult` — a tree-killed `-9` with no traceback, which is what a real
+# watchdog kill leaves behind and which `_failure_reason` would read as `oom`/`crash`. Everything
+# between the signal and the terminal is the real `_evaluate`.
+def _drive_watchdog_stop(tmp_path, terminal_reason, **kw):
+    """Stop the FIRST attempt from the watchdog, then let the retry succeed. Returns the log.
+
+    Imported locally: the predicate tests above are pure and must stay importable without the
+    engine, and this is the one case in the file that needs a run.
+    """
+    import anyio
+    from pathlib import Path
+
+    from looplab.adapters.toytask import ToyTask
+    from looplab.core.models import Idea
+    from looplab.engine.orchestrator import Engine
+    from looplab.engine.train_monitor import claim_watchdog_kill
+    from looplab.events.eventstore import EventStore
+    from looplab.runtime.sandbox import RunResult, SubprocessSandbox
+    from looplab.search.policy import GreedyTree
+
+    src = "def solve(x=1.0, y=1.0):\n    return (x-3)**2\n"
+
+    class _Dev:
+        def __init__(self):
+            self.repairs = 0
+
+        def implement(self, idea):
+            return src
+
+        def repair(self, idea, code, error):
+            self.repairs += 1
+            self.last_error = error
+            return src + f"# fix {self.repairs}\n"
+
+    class _Judge:
+        def propose(self, state, parent):
+            return Idea(operator="x", params={"x": 1.0, "y": 1.0})
+
+        def triage_crash(self, node, error, attempt, **_kw):
+            return {"action": "repair", "rationale": "the objective cannot descend as written"}
+
+    dev, run_dir = _Dev(), tmp_path / "run"
+    task_file = Path(__file__).resolve().parents[1] / "examples" / "toy_task.json"
+    eng = Engine(run_dir, task=ToyTask.load(task_file), researcher=_Judge(), developer=dev,
+                 sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+                 auto_install_deps=False, inline_repair=True, **kw)
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0, "y": 1.0}, "rationale": "seed"},
+        "code": src})
+
+    # The command-eval shape, because that is the only path the watchdogs are started on. The eval
+    # itself is scripted, so no sandbox, no subprocess and no stage log are involved.
+    eng._train_monitor = True
+    eng._eval_spec = {"cmd": ["true"], "metric": {"key": "m"}}
+    eng._resolved_stages = lambda *a, **k: []
+    attempts, stopped = {"n": 0}, {"done": False}
+
+    async def _watchdog(node_id, generation, workdir, cancel, ctx, kill_signal, snap, plan):
+        # ONE stop, on the first attempt only — counted HERE rather than off the eval, because the
+        # watchdog is a sibling task and may reach this line before the eval has started. A watchdog
+        # that killed every attempt would prove only that the loop spins.
+        if not stopped["done"]:
+            stopped["done"] = True
+            claim_watchdog_kill(kill_signal, cancel, reason="loss frozen at exactly 8.8534",
+                                terminal_reason=terminal_reason, confidence=0.9)
+
+    def _eval(node, workdir, env=None, profile=None, cancel=None, start_stage=None):
+        attempts["n"] += 1
+        if attempts["n"] == 1:       # tree-killed: -9, no traceback, no metric
+            return RunResult(exit_code=-9, stdout="", stderr="", metric=None, timed_out=False)
+        return RunResult(exit_code=0, stdout="", stderr="", metric=4.0, timed_out=False)
+
+    eng._monitor_training = _watchdog
+    eng._run_eval = _eval
+
+    async def _bounded():
+        with anyio.move_on_after(90) as scope:
+            await eng._evaluate(0, anyio.CapacityLimiter(1), None)
+        return scope.cancelled_caught
+
+    assert not anyio.run(_bounded), "the eval did not terminate"
+    return list(EventStore(run_dir / "events.jsonl").read_all()), dev
+
+
+def _rows(evs, *types):
+    return [e.data for e in evs if e.type in types and e.data.get("node_id") == 0]
+
+
+def test_f_a_repairable_watchdog_stop_reaches_the_developer_and_the_node_is_retried(tmp_path):
+    """THE JOIN, end to end: a `not_learning` stop hands the node back and the retry stands.
+
+    This is what `e5small-dr-unified-v2` node 2 could not buy. `monitor_broken` is not in
+    `FAILURE_REASONS`, so before the fault split a watchdog stop was terminal — no repair, no retry,
+    no refunded slot — and the run recorded 0.0 as the RESULT OF A HYPOTHESIS whose implementation
+    was never checked.
+    """
+    evs, dev = _drive_watchdog_stop(tmp_path, MONITOR_REPAIR_REASON)
+    assert dev.repairs == 1, "the watchdog's own diagnosis must buy exactly one repair here"
+    # The diagnosis reaches the Developer FIRST — the killed process's tail says only that it died.
+    assert "loss frozen at exactly 8.8534" in dev.last_error
+    assert "IMPLEMENTATION rather than the idea" in dev.last_error
+    # ...and the terminal is the RETRY's, not the stop's.
+    assert [e.type for e in evs if e.type in ("node_evaluated", "node_failed")] == ["node_evaluated"]
+    assert _rows(evs, "node_evaluated")[0]["metric"] == 4.0
+    # The watchdog's reason wins over the exit-code classifier, and the DIRECTIVE follows it: `-9`
+    # with no traceback is exactly what `_failure_reason` reads as an OOM, and "reduce memory" is
+    # the wrong instruction for a loss that stopped descending (`crash_repair.py` keys the directive
+    # off the reason, so the wrong reason is a wrong repair however good the Developer is).
+    assert dev.last_error.startswith(f"[failure kind: {MONITOR_REPAIR_REASON}]")
+
+
+def test_f_an_unrepairable_watchdog_stop_still_terminalizes_at_once(tmp_path):
+    """The negative control, and the property the fall-through must not have cost: a verdict the
+    judge attributed to the IDEA ends the node where it always did, with no Developer call."""
+    evs, dev = _drive_watchdog_stop(tmp_path, "monitor_broken")
+    assert dev.repairs == 0 and not _rows(evs, "node_repaired")
+    failed = _rows(evs, "node_failed")
+    assert len(failed) == 1 and failed[0]["reason"] == "monitor_broken"
+    assert not _rows(evs, "node_evaluated")
+
+
+def test_f_an_operator_who_narrows_the_reasons_gets_the_terminal_back(tmp_path):
+    """`inline_repair_reasons` is the operator's answer for every other failure class and it is the
+    answer here too — a `not_learning` the operator excluded takes the terminal branch, carrying its
+    own reason rather than being re-classified into one of the reasons that remain."""
+    evs, dev = _drive_watchdog_stop(
+        tmp_path, MONITOR_REPAIR_REASON, inline_repair_reasons=("crash", "timeout", "oom"))
+    assert dev.repairs == 0 and not _rows(evs, "node_repaired")
+    failed = _rows(evs, "node_failed")
+    assert len(failed) == 1 and failed[0]["reason"] == MONITOR_REPAIR_REASON
 
 
 # ============================================================ G: the judge may read the code
