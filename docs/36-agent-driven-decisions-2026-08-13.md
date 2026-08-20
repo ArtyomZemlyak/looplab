@@ -110,12 +110,17 @@ instead of the memory-reduction directive that exists one branch away, and two o
 returned byte-identical files. Measured across `runs/`: **26 of the 41 text-read failures in the
 five modern runs were out-of-memory failures recorded as `crash`.**
 
-A marker list landed the same day (`triage.py::_is_torch_oom`) and it is the other half, not this
-one. It adds the allocator spellings somebody has now been bitten by, which is all a marker list can
-ever hold, and it reads `res.stderr` — so on **9 of those 26 rows it resolves nothing either**,
-because `torchrun`/`accelerate` swallow the child exception and the whole captured tail is a
-`Root Cause … exitcode: 1` block. This is the rung above: something that can go and READ the stage
-log, and that is answering "what failed" rather than "is this string present".
+**And the measured win is not this change's.** A marker list landed the same day
+(`triage.py::_is_torch_oom`), it scans the whole 64,000-byte `res.stderr` clamp, and replayed over
+`runs/` it resolves **all 26** — including the 9 rows where `torchrun`/`accelerate` swallowed the
+child exception and the recorded 500-character `error_in` is nothing but a `Root Cause … exitcode:
+1` block. This rung adds **zero further reclassifications on today's corpus**, and saying so is the
+point of the entry: the principle is not "an agent would have caught it", because here a literal
+did. What the principle buys is what the literal cannot be extended to — a question with more than
+one right answer per program (`crash` vs `no_metric`), a reader that can open the stage log rather
+than the captured stream, and a rule that does not need a new incident and a new string for the
+next allocator. That case is argued, not measured, and the enforcement below is what makes it safe
+to take on those terms.
 
 **The line that was drawn.** Not "the classifier becomes a model". `_failure_reason` answers two
 different kinds of question and only one of them was ever a guess:

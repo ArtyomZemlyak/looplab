@@ -105,13 +105,16 @@ _V3_OPAQUE_TAIL = (
 
 
 def test_the_v3_allocator_oom_is_reclassified_and_reaches_the_memory_directive():
-    """The incident, end to end over the seam, on the bytes the engine actually captured.
+    """The incident, on the bytes the engine actually recorded for it.
 
-    This is the case a better signature cannot reach, which is why it is the test that matters: the
-    OOM is real, it is in the stage log, and it is not in `res.stderr` — the launcher ate it. Both
-    deterministic rungs are therefore correct and useless here (`exit 1` with a traceback is not the
-    kernel signature; no allocator marker is present), and only a reader that can OPEN THE LOG can
-    answer. The triage judge has had exactly that since 2026-08-15 (`repair_log_tools`)."""
+    HONEST ABOUT WHAT THIS DRIVES. `_V3_OPAQUE_TAIL` is the whole of `node_repaired.error_in`, not
+    the whole of `res.stderr` — the live run's stderr also held the allocator line about a page
+    further up, inside the 64,000-byte clamp, so the marker rung resolves the real row and this test
+    is not evidence that it does not. What it drives is the SHAPE the classification question has
+    when there is no string to match: exit 1, a traceback, a launcher summary that names nothing,
+    and a real cause only a reader of the stage log can state. That shape is one clamp-width away on
+    any chattier stage, it is what `crash` vs `no_metric` looks like all the time, and it is the
+    case a marker list has no answer for."""
     v3 = RunResult(exit_code=1, stdout="", stderr=_V3_OPAQUE_TAIL, metric=None, timed_out=False)
     assert _failure_reason(v3) == "crash", (
         "the deterministic answer, including the allocator markers, on the real captured bytes")

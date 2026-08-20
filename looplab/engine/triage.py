@@ -35,17 +35,25 @@ the exact opposite shape from the KERNEL kill signature the `oom` branch recogni
 root cause" directive instead of the memory-reduction one that exists one branch away and is exactly
 right. Two of those repairs returned byte-identical files.
 
-`_is_torch_oom` above is the other half of that fix and it is not this one: it adds the shapes
-somebody has now been bitten by, and a marker list can only ever hold those. What the JUDGE covers
-is the rest — an allocator spelling nobody enumerated (a host `MemoryError`, a
-`DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside another library's exception),
-and above all a failure whose diagnosis is not in the captured stderr AT ALL. That last case is the
-corpus's dominant one, not an edge: `torchrun`/`accelerate` swallow the child traceback and print
-only a `Root Cause … exitcode: 1` block, so on 9 of the 26 misclassified rows the whole 500-character
-tail that the classifier and the repair prompt both read names nothing whatsoever — and the judge,
-which has had `repair_log_tools` since 2026-08-15, can go and read the stage log where the OOM is.
-The two rungs also disagree in kind: the marker answers "is this string present", the judge answers
-"what failed", which is a question with more than one right answer per program.
+`_is_torch_oom` above is the other half of that fix, it landed the same day, and THE CORPUS WIN
+IS ITS, NOT THIS SEAM'S — said plainly because the opposite claim would be easy to make and is
+false. It scans the whole of `res.stderr` (tail-clamped at 64,000 bytes per stream), and on all 26
+of the misclassified rows in `runs/` the allocator string is inside that window, including the 9
+where `torchrun`/`accelerate` swallowed the child traceback and the recorded 500-character
+`error_in` is nothing but a `Root Cause … exitcode: 1` block. Replayed today, the marker resolves
+every one of them and this seam changes none of them further.
+
+WHAT THIS SEAM IS FOR, then, stated as what it is: not a better OOM detector. Three things a marker
+list structurally cannot do. (1) It answers "what failed", so it covers the readings the marker does
+not touch at all — `crash` vs `no_metric`, and the next failure shape nobody has enumerated (a host
+`MemoryError`, `DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside another
+library's exception); adding each of those is another literal and another incident. (2) It reads
+the STAGE LOG, not the captured stream, so it still answers when a chatty stage pushes the
+diagnosis past the 64,000-byte clamp — the shape the 9 rows above are one clamp-width away from.
+(3) It cannot say "present" about a string that is present for the wrong reason: a script that
+CATCHES an OOM, prints the traceback, backs off and then dies of something else is an `oom` to any
+substring rule and is not one. None of the three is measured on today's corpus; the split, the
+refusal and the record columns below are the part that is enforced rather than hoped for.
 
 What did NOT move is the half a model must never be able to contradict. `_failure_reason` still runs
 first and unchanged on every failure, its AUTHENTICATED verdicts are final and no judge is consulted
@@ -293,9 +301,10 @@ def _failure_reason(res) -> str:
 # one branch over and is exactly right; two of its repairs returned byte-identical files and the run
 # stopped systemic with no metric. Across the five modern runs in `runs/`, 26 of the 41 failures in
 # these three buckets were out-of-memory failures recorded as `crash` — and on 9 of those 26 the
-# whole captured tail is a launcher's opaque `Root Cause … exitcode: 1` block, i.e. no marker list
-# reading `res.stderr` could have resolved them either. See the module header for why `_is_torch_oom`
-# and this seam are two rungs and not two spellings of one.
+# whole recorded 500-character `error_in` is a launcher's opaque `Root Cause … exitcode: 1` block,
+# so the repair was authored, and its rationale written, with no diagnosis in front of either.
+# `_is_torch_oom` above resolves all 26 on the bytes it scans; see the module header for what this
+# seam is for GIVEN that, and for why the corpus win is the marker's and not this one's.
 #
 # WHY THE SPLIT IS WHAT MAKES THE MODEL SAFE HERE, stated as a property and not as a hope. Every
 # member of `metric_salvage.NEVER_SALVAGED_REASONS` — `drift`, `setup`, `timeout`, `diverged` — is

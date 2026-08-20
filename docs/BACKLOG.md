@@ -5603,13 +5603,25 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   **26 of the 41 text-read failures in the five modern runs were out-of-memory failures recorded as
   `crash`** (v2 9, v3 8, v7 1, v8 4, v9 4), including the terminal rows of three dead nodes.
 
-  **The marker list is the other half and does not close this.** `triage.py::_is_torch_oom` landed
-  the same day and adds the allocator spellings somebody has now been bitten by. It reads
-  `res.stderr`, and on **9 of those 26 rows** the whole captured tail is `torchrun`/`accelerate`'s
-  opaque `Root Cause … exitcode: 1` block — the child exception is swallowed by the launcher — so no
-  string match over the captured stream resolves them. Only a reader that can open the STAGE LOG
-  does, and the triage judge has had exactly that since 2026-08-15 (`repair_log_tools`). The two
-  rungs also answer different questions: "is this string present" versus "what failed".
+  **THE CORPUS WIN IS THE MARKER'S, NOT THIS ROW'S, and that is stated first because the opposite
+  claim would be easy to make.** `triage.py::_is_torch_oom` landed the same day, scans the whole
+  64,000-byte `res.stderr` clamp, and replayed over `runs/` resolves **all 26** — including the 9
+  rows where `torchrun`/`accelerate` swallowed the child exception and the recorded 500-character
+  `error_in` is nothing but a `Root Cause … exitcode: 1` block (the allocator string is still inside
+  the clamp, one screen further up). **This change reclassifies nothing further on today's corpus.**
+
+  **What it is for, given that.** Three things a marker list structurally cannot be extended to.
+  (1) It answers *what failed*, so it reaches the readings the marker does not touch at all —
+  `crash` vs `no_metric` — and the next allocator nobody has enumerated (a host `MemoryError`,
+  `DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside another library's
+  exception); each of those is otherwise another literal and another incident first. (2) It reads
+  the STAGE LOG rather than the captured stream (`repair_log_tools`, since 2026-08-15), so it still
+  answers when a chatty stage pushes the diagnosis past the clamp — which the 9 rows above miss by
+  about one clamp width. (3) A substring rule cannot tell a string that is present from a string
+  that is present for the wrong reason: a script that CATCHES an OOM, prints the traceback, backs
+  off and then dies of something else reads as `oom` to any marker and is not one. **None of the
+  three is measured on today's corpus.** What IS enforced rather than hoped for is the split, the
+  refusal of an out-of-vocabulary reason, and the record columns.
 
   **The fix is a LINE, not a model.** `_failure_reason` answers two different kinds of question.
   Eight of its twelve outcomes are **authenticated facts** the engine recorded out of band about what

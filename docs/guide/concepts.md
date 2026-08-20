@@ -759,12 +759,14 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   looking for known strings in the captured stderr, so they are right when a failure says its own
   name there and wrong when it does not. Measured over `runs/`, **26 of the 41 text-read failures in
   the five modern runs were out-of-memory failures labelled `crash`** — `e5small-dr-unified-v3` died
-  with three nodes, zero metrics and eight such rows. The marker list beside this
-  (`triage.py::_is_torch_oom`, landed the same day) now catches the allocator spellings somebody has
-  been bitten by; the judge is what covers the ones nobody wrote down and, above all, the case where
-  the diagnosis is not in the captured stderr at all — on **9 of those 26 rows** the whole
-  500-character tail is `torchrun`/`accelerate`'s opaque `Root Cause … exitcode: 1` block, and only
-  a reader that can open the stage log resolves them. The durable
+  with three nodes, zero metrics and eight such rows. The measured win there belongs to the marker list beside
+  this (`triage.py::_is_torch_oom`, same day), which scans the whole 64 KB `res.stderr` clamp and
+  resolves all 26 — **this rung reclassifies nothing further on today's corpus.** What it adds is
+  what a marker cannot be extended to: it answers *what failed* rather than *is this string
+  present*, so it also reaches `crash` vs `no_metric` and the next allocator nobody has written
+  down; it reads the stage log rather than the captured stream; and it can decline an OOM string a
+  script printed while CATCHING one. That case is argued, not measured — the split, the refusal and
+  the record columns are the enforced part. The durable
   rows now carry `reason_source` and `engine_reason` beside `reason`, so the record says who chose
   the word and never loses the deterministic answer. The **floors** stay underneath: an absolute ceiling of 50 repairs per node — 12 for a
   crash the *rule* path cannot classify, because 50 is the ceiling under a judge that can say "I no
