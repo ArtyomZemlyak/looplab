@@ -741,7 +741,7 @@ class LLMRepoDeveloper:
         # "names what this toolset already holds". A count-publishing block cannot express "how much
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
         messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
@@ -787,7 +787,7 @@ class LLMRepoDeveloper:
             # implement steps CONSUME the stages/plan briefs, but don't
             # contribute (their writes add length faster than signal, and the last step is terminal) —
             # so the ledger stays the 3 exploration briefs (propose/stages/plan), never K-step bloat.
-            run_phase(self.client, CompositeTools([write, EnvInspectTools()] + self._scout_tools(write)),
+            run_phase(self.client, CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write)),
                       messages, self._emit_spec(), label=f"Developer·implement step {idx}/{total}",
                       handoff=False, finalize=lambda a: (a or {}).get("summary", ""),
                       fallback=lambda m: "", **self._session_opts())
@@ -919,6 +919,21 @@ class LLMRepoDeveloper:
                                                       "search ranks results, this does not)."}}}},
                             "required": ["name", "command"]}}},
                         ["stages"])
+
+    def _grader_packages(self) -> tuple:
+        """Installed packages the env inspector must refuse -- `EvalSpec.protect_packages`.
+
+        Read through `_cmd_context`'s own source (the task's `eval_spec`) rather than stashed at
+        construction, so a task whose spec is resolved late still fences. Total and quiet: a task
+        with no eval_spec, or an adapter that raises, fences NOTHING, which is the historical
+        behaviour and the right default -- a fence that guesses would refuse a real dependency.
+        """
+        try:
+            ev = self.task.eval_spec() or {}
+        except Exception:  # noqa: BLE001 - same contract as _cmd_context: no spec => no fence
+            return ()
+        names = ev.get("protect_packages") or ()
+        return tuple(str(n) for n in names if str(n).strip())
 
     def _cmd_context(self) -> tuple[dict, bool]:
         """The operator's scoring contract (eval_spec) + whether one exists. The stages phase shows it to
@@ -1267,7 +1282,7 @@ class LLMRepoDeveloper:
         # "names what this toolset already holds". A count-publishing block cannot express "how much
         # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
         # one exists the honest state is no block rather than an empty string and a false comment.
-        read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
+        read_only = CompositeTools([EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
         messages = [{"role": "system", "content": system},
                     {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
 
@@ -1474,7 +1489,7 @@ class LLMRepoDeveloper:
             # Compose the write/edit tools with read-only ENVIRONMENT INTROSPECTION (pkg_info / py_api /
             # read_installed / grep_installed) so the Developer grounds generated code in the ACTUAL
             # installed API/version instead of guessing (the precision='16-mixed'-on-Lightning-1.5 class).
-            tools = CompositeTools([write, EnvInspectTools()] + self._scout_tools(write))
+            tools = CompositeTools([write, EnvInspectTools(self._grader_packages())] + self._scout_tools(write))
             if is_fresh_repo:
                 # PLAN is the Developer's second sub-phase (its own trace band). IMPLEMENT runs under
                 # the orchestrator's "implement" span (so its generations band there, and non-repo

@@ -717,6 +717,22 @@ class EvalSpec(BaseModel):
     # this model — the Developer has no surface for it, by design. Secrets are REFUSED; see
     # `core/envsafe.py::validate_env_map`, the ONE rule all three declaring levels go through.
     env: dict[str, str] = Field(default_factory=dict)
+    # INSTALLED packages the Developer's environment inspector may not read -- the GRADER FENCE.
+    # `tools/env_inspect.py` answers "what does this installed library look like", and an eval
+    # harness pip-installed into the same venv is, to it, just another library: `read_installed` /
+    # `grep_installed` reach the checker, the timer and the scorer exactly as they reach numpy.
+    # Measured 2026-08-20, an AlgoTune node made 213 of its 216 env-inspection calls against
+    # `AlgoTuner`/`AlgoTuneTasks`, among them `is_solution`, `run_isolated_benchmark` and
+    # `mean_speedup`. Same rule as `runtime/read_fence.py` for file reads and `tools/dev_probe.py`
+    # for the probe: a candidate may not read the code that grades it.
+    #
+    # DECLARED and never derived, for the reason `metric_subject`'s pattern is resolved by the
+    # engine: only the operator, who wrote `command`, knows which distribution is the grader. A
+    # heuristic over names would refuse a legitimate dependency and still miss a grader called
+    # something else. Top-level names; a dotted spelling is normalized, so `AlgoTuner` also fences
+    # `AlgoTuner.utils.isolated_benchmark`. Empty (the default) fences nothing, which is the
+    # historical behaviour byte for byte.
+    protect_packages: list[str] = Field(default_factory=list)
     cwd: str = "."                           # relative to the node eval workdir
     # Freeze the FILE the `command` executes, when the argv names one that the editable source
     # actually ships (`python -m pkg.mod`, `python score.py` — see `entrypoint_candidates`). ON by

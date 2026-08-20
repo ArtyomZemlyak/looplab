@@ -144,6 +144,16 @@ def main() -> int:
                 "--subset", "train",
             ],
             "metric": {"kind": "stdout_json", "key": "speedup"},
+            # THE GRADER FENCE. AlgoTune is `uv pip install -e .` into the same venv the Developer
+            # inspects, so without this `read_installed`/`grep_installed` reach the checker, the
+            # timer and the scorer as easily as they reach numpy -- and measured 2026-08-20, one
+            # node made 213 of its 216 env-inspection calls against exactly these two packages
+            # (`is_solution`, `def run_isolated_benchmark`, `mean_speedup`,
+            # `AlgoTuner.utils.isolated_benchmark`). A solver written after reading the checker is
+            # not a result. `AlgoTuneTasks` is fenced beside `AlgoTuner` because it is where the
+            # task classes and their instance-size parameters live, which is the specific thing the
+            # Developer was hunting for.
+            "protect_packages": ["AlgoTuner", "AlgoTuneTasks"],
             "timeout": args.timeout,
         },
     }

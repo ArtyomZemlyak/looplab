@@ -224,3 +224,50 @@ nothing inside WSL and fails with `fatal: not a git repository`.
 pinning guarantees a lane its own cores against *other lanes*, not against the rest of the box, and
 a co-running load inflates every timing taken while it is up without leaving a trace in the output.
 This is trap 5 in the list above, with a different process on the other end.
+
+---
+
+## 8. The grader fence, and why closing one channel was not enough
+
+Trap 10, and the most expensive one, because it invalidates results rather than wasting time.
+
+`tools/dev_probe.py` fences the execution probe against reading the source tree, and that fence
+exists *because of this benchmark*: an earlier AlgoTune run spent 150 of its 239 tool calls inside
+`run_probe` reading `validation_pipeline.py` and `isolated_benchmark.py` — the checker and the timer
+sitting beside the run. A solver written after reading the checker is not a result.
+
+**The fence held and the behaviour moved.** On 2026-08-20 a `--role-split` run — whose goal told the
+Developer not to use the probe to *choose* an algorithm — made **213 of its 216** env-inspection
+calls against `AlgoTuner` / `AlgoTuneTasks`:
+
+```
+grep_installed  {"package":"AlgoTuner","query":"is_solution"}
+grep_installed  {"package":"AlgoTuner","query":"def run_isolated_benchmark"}
+grep_installed  {"package":"AlgoTuner","query":"mean_speedup"}
+read_installed  {"module":"AlgoTuner.utils.isolated_benchmark","start_line":1070}
+read_installed  {"module":"AlgoTuneTasks.base"}
+```
+
+`read_installed` / `grep_installed` come from `tools/env_inspect.py`, whose whole job is answering
+"what does this installed library look like" — and AlgoTune is `uv pip install -e .` into the same
+venv, so the harness *is* an installed library as far as that tool can tell.
+
+Two things make this worth reading twice:
+
+- **The probe count fell while the harness reads rose.** Probes went 101 → 24 (43% → 8% of tool
+  calls) and env reads went 20 → 216. The constraint bound the TOOL, not the ACTIVITY; the
+  Developer still needed the instance sizes and used whatever channel was open.
+- **The two control runs beside it touched the harness ZERO times** (20 and 16 env reads each). So
+  this is not a route that is always taken — it is one that opens under pressure. A rule that is
+  merely stated in a prompt holds right up until the moment it matters.
+
+Fixed by `EvalSpec.protect_packages`, declared in `make_task.py` as `["AlgoTuner", "AlgoTuneTasks"]`
+and enforced in `EnvInspectTools` before dispatch, on every tool that names a package. It is
+DECLARED rather than derived because only the operator who wrote `eval.command` knows which
+installed distribution is the grader. `tests/test_grader_package_fence.py` drives it, including an
+AST check that no construction site builds the inspector without the fence — a missed site is the
+whole hole for that phase.
+
+**Any number produced before this landed must be read with the question "could this node have read
+the checker?"** For the runs on this box the answer is: the two `discrete_log` controls, no
+(measured, zero harness reads); the `--role-split` run, yes — it is discarded.
