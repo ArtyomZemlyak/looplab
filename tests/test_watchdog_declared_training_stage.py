@@ -174,6 +174,10 @@ def test_d1_a_descending_curve_is_never_killed_even_when_declared(tmp_path):
     assert host.kill_signal == {} and not host.cancel.is_set()
     rows = host.store.rows(EV_TRAIN_MONITOR_ALERT)
     assert any(r.get("trajectory_veto") for r in rows)
+    # NON-VACUITY first: `all(...)` over an empty sequence is True, so without this the assertion
+    # below passes on a drive that produced no rows at all — "the watchdog decided nothing"
+    # spelled identically to "the watchdog never ran".
+    assert rows, "no monitor rows were produced; this negative control would be true of nothing"
     assert all("stop_decided" not in r for r in rows)
 
 
@@ -313,6 +317,8 @@ def test_d3_an_unstoppable_pipeline_is_readable_from_the_first_tick(tmp_path):
     host2 = _Host(other, client=_ScriptedClient(_COLLAPSED), asha_kill=False)
     _drive_train(host2, wd, plan=eval_log_plan(_declared(_V2_STAGES)),
                  until=lambda h: bool(h.kill_signal))
+    assert host2.spans("train_monitor"), (
+        "no train_monitor span was opened; `all(...)` over that empty list is vacuously True")
     assert all("kill_reachable" not in s["attributes"] for s in host2.spans("train_monitor"))
 
 
@@ -339,6 +345,8 @@ def test_d3_a_verdict_that_would_not_have_killed_anyway_claims_nothing(tmp_path)
     host = _Host(tmp_path, asha_kill=False, client=_ScriptedClient(
         {"status": "watch", "confidence": 0.99, "reason": "slow but descending"}))
     _drive_growing(host, wd, plan, [_COLLAPSED_TAIL] * 4, rows_needed=3)
+    assert host.store.rows(EV_TRAIN_MONITOR_ALERT), (
+        "no alert rows at all; this negative control needs something to be negative ABOUT")
     assert all("kill_role_withheld" not in r for r in host.store.rows(EV_TRAIN_MONITOR_ALERT))
 
 

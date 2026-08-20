@@ -155,6 +155,11 @@ def test_a_killable_contract_says_nothing(tmp_path, monkeypatch):
     stub.tracer = _RecordingTracer()
     _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall", "resource_key": "step"}, "max",
               {}, monkeypatch, finals=[0.80, 0.70, 0.60], window=0.12)
+    assert _watched(stub), (
+        "NON-VACUITY: the watchdog opened no span at all, so `not _inert(stub)` is true of\n"
+        "        nothing. This control claims the watchdog RAN and stayed quiet — without this\n"
+        "        line it passes just as well on a loop that never ticked, which is what a\n"
+        "        sleep-based window makes easy to do by accident on a loaded box.")
     assert not _inert(stub)
 
 
@@ -195,7 +200,26 @@ def test_a_log_that_has_not_started_writing_is_not_evidence_of_a_missing_curve(t
     stub.tracer = _RecordingTracer()
     _run_loop(stub, wd, {"kind": "stdout_json", "key": "recall", "resource_key": "step"}, "max",
               {}, monkeypatch, finals=[0.80, 0.70, 0.60], window=0.2)
-    assert not _inert(stub)
+
+    # THE PROPERTY IS THE EMPTINESS, and saying so is the point. This read `assert not _inert(stub)`
+    # until 2026-08-20, which is the sentence "it ran and said nothing" — and it was true of NOTHING,
+    # because on an empty tail the watchdog opens no span at all. Measured 3/3 deterministically, so
+    # it is the design and not a loaded-box flake. A negative control that cannot tell "stayed quiet"
+    # from "never ran" is the vacuous green this file exists to prevent one level down.
+    assert _watched(stub) == [], (
+        f"an empty tail must not even open a span — the stall watchdog owns 'nothing written yet' "
+        f"and this one must not narrate it: {[s.attributes for s in _watched(stub)]}")
+
+    # ...and the harness DOES open spans when there is a sample, so the emptiness above is caused by
+    # the empty log rather than by a loop that never ticked. Same stub, same window, one line of log.
+    live_wd = tmp_path / "node_1"
+    live_wd.mkdir()
+    (live_wd / "train.log").write_text('{"recall": 0.10, "step": 4}\n', encoding="utf-8")
+    live = _AshaStub(kill=True, quantile=0.5, min_siblings=3, cadence=0.005)
+    live.tracer = _RecordingTracer()
+    _run_loop(live, live_wd, {"kind": "stdout_json", "key": "recall", "resource_key": "step"}, "max",
+              {}, monkeypatch, finals=[0.80, 0.70, 0.60], window=0.2)
+    assert _watched(live), "the control itself is broken — this harness opens no spans at all"
 
 
 def test_the_statement_can_never_end_a_node(tmp_path, monkeypatch):
