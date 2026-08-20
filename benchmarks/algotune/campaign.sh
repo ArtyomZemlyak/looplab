@@ -56,7 +56,11 @@ case "$ARM" in A|B) ;; *) echo "ARM must be A or B (got '$ARM')"; exit 2 ;; esac
 # and the OS, and never more lanes than there are tasks.
 NPROC="$(nproc)"
 CORES_PER_LANE="${CORES_PER_LANE:-2}"
-MAX_LANES=$(( (NPROC - 2) / CORES_PER_LANE ))
+# CORE_OFFSET moves every lane up by N cores, so a debug or second campaign can run BESIDE a live
+# one without sharing a core with it. Sharing would silently break the dedicated-core guarantee the
+# timing argument rests on, and the damage would be invisible in the output.
+CORE_OFFSET="${CORE_OFFSET:-0}"
+MAX_LANES=$(( (NPROC - 2 - CORE_OFFSET) / CORES_PER_LANE ))
 [ "$MAX_LANES" -lt 1 ] && MAX_LANES=1
 
 TASKS="${TASKS:-discrete_log multi_dim_knapsack convex_hull rbf_interpolation set_cover_conflicts \
@@ -71,7 +75,7 @@ LANE_COUNT="${LANES:-$MAX_LANES}"
 # One dedicated, non-overlapping core range per lane.
 declare -a LANE_CPUS
 for L in $(seq 0 $((LANE_COUNT - 1))); do
-  LO=$(( L * CORES_PER_LANE ))
+  LO=$(( CORE_OFFSET + L * CORES_PER_LANE ))
   HI=$(( LO + CORES_PER_LANE - 1 ))
   LANE_CPUS[$L]="${LO}-${HI}"
 done
@@ -140,7 +144,7 @@ run_one() {                       # $1 = task, $2 = cpu list
   fi
 }
 
-echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores (of $NPROC) | budget \$$BUDGET_USD"
+echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores from core $CORE_OFFSET (of $NPROC) | budget \$$BUDGET_USD"
 reap_orphan_workers
 
 # One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the
