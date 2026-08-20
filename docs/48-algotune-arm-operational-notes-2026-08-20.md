@@ -187,3 +187,40 @@ is one round rather than seven.
 every `.done` row records them. **Arm B additionally requires a rebase onto master first** — its
 number is a claim about a *version* of LoopLab, and the only version worth benchmarking is the one
 that ships.
+
+---
+
+## 7. Arm B runs from a PINNED CLONE, never from the working tree
+
+`campaign.sh` derives `REPO` from its own location, so an arm launched out of a live checkout
+measures whatever that checkout happens to contain at each moment. The first arm-B debug runs did
+exactly that — reaching the repository at `/mnt/c/Users/.../worktrees/<branch>` while the branch was
+still being edited and rebased. Nothing went wrong, and nothing would have *shown* if it had: a
+LoopLab edit landing between task 3 and task 12 produces a campaign whose rows are not from one
+program, and the output records the arm, not the commit.
+
+So the measurement arm runs from a detached clone on the native filesystem:
+
+```bash
+git clone --no-hardlinks --no-checkout <main-repo> /root/benchmarks/looplab-armb
+cd /root/benchmarks/looplab-armb && git checkout --detach <commit>
+ARM=B CAMPAIGN_OUT=... /root/benchmarks/looplab-armb/benchmarks/algotune/campaign.sh
+```
+
+Three things this buys, in descending order of importance:
+
+1. **The number is a claim about a commit.** `git log --oneline -1` in that tree is the provenance,
+   and `git status` is empty by construction.
+2. **Editing the branch during a campaign is safe.** The suite, a rebase, a review fix — none of it
+   reaches the running arm.
+3. **ext4 instead of the 9p/drvfs mount.** Import-time only, so it is worth little; listed last
+   because it is the reason that is easy to mistake for the point.
+
+Note the clone must come from the **main repository**, not from a git *worktree*: a worktree's
+`.git` is a file naming a Windows path (`C:/Users/.../.git/worktrees/<name>`), which resolves to
+nothing inside WSL and fails with `fatal: not a git repository`.
+
+**Do not launch an arm while the test suite — or anything else — is using the cores.** The lane
+pinning guarantees a lane its own cores against *other lanes*, not against the rest of the box, and
+a co-running load inflates every timing taken while it is up without leaving a trace in the output.
+This is trap 5 in the list above, with a different process on the other end.
