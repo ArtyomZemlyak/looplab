@@ -1,0 +1,168 @@
+#!/bin/bash
+# AlgoTune campaign driver. One ARM per invocation, tasks run in PARALLEL LANES.
+#
+#   ARM=A ./campaign.sh          # the reference loop (AlgoTuner), depends on no LoopLab code
+#   ARM=B ./campaign.sh          # LoopLab, AFTER a rebase onto master (see below)
+#
+# Run `setup_algotune.sh /path/to/AlgoTune` first, on every machine, or the numbers are not the
+# numbers this arm measures.
+#
+# WHY PARALLEL BY TASK AND NOT INSIDE ONE
+# ---------------------------------------
+# `validation_pool.num_workers` parallelises nothing: `BenchmarkPool` is defined in AlgoTuner and
+# instantiated NOWHERE, and the timing path forks one process per timed run and waits for it.
+# Measured 2026-08-20 on an 8-core box: one task-arm draws ~1.3 cores and the machine sat at load
+# 0.7 while a 20-task arm projected to ~35 hours. The parallelism that exists is BETWEEN tasks.
+#
+# WHY THIS DOES NOT CORRUPT THE TIMINGS
+# -------------------------------------
+# The score is a RATIO, baseline_ms / optimized_ms, and both halves are measured inside ONE task.
+# Each lane owns dedicated cores for the whole of that task, so a task never shares a core and its
+# two measurements are taken under identical conditions start to finish. That is stronger than a
+# single unpinned run, where the task floats across every core.
+#
+# Do NOT oversubscribe a lane. A throttled lane still measures its own ratio correctly, but it
+# stops being comparable to a lane that was not throttled -- and cross-task comparison is the whole
+# output. CORES_PER_LANE=2 covers the measured 1.3-core appetite with headroom.
+#
+# THE REGIME IS PART OF THE MEASUREMENT. Arm B must run with the same LANES and CORES_PER_LANE as
+# arm A did, or the two arms were not measured alike; every .done row records both so a mismatch is
+# visible afterwards rather than invisible.
+#
+# BEFORE ARM B: rebase onto master and re-run the suite. Arm B's number is a claim about a VERSION
+# of LoopLab, and the only version worth benchmarking is the one that ships.
+#
+# Concurrency safety, checked rather than assumed:
+#   * AlgoTuner/main.py::update_summary_json takes an exclusive O_CREAT|O_EXCL lock, so lanes may
+#     share reports/agent_summary.json;
+#   * each AlgoTuner run creates its own temporary CODE_DIR;
+#   * looplab_eval.py (arm B) writes a per-pid results dir and summary.
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+AT="${ALGOTUNE_ROOT:-/root/benchmarks/AlgoTune}"
+OUT="${CAMPAIGN_OUT:-/root/benchmarks/campaign}"
+WS="${CAMPAIGN_WS:-/root/benchmarks/looplab_ws}"
+RUNS_ROOT="${CAMPAIGN_RUNS:-/root/benchmarks/camp-runs}"
+BUDGET_USD="${BUDGET_USD:-0.02}"
+HARD_TIMEOUT="${HARD_TIMEOUT:-14400}"
+
+ARM="${ARM:-A}"
+case "$ARM" in A|B) ;; *) echo "ARM must be A or B (got '$ARM')"; exit 2 ;; esac
+[ -d "$AT/AlgoTuner" ] || { echo "no AlgoTune checkout at $AT (set ALGOTUNE_ROOT)"; exit 2; }
+
+# Lanes scale with the machine. Two cores per lane, two cores left for the driver, the LLM client
+# and the OS, and never more lanes than there are tasks.
+NPROC="$(nproc)"
+CORES_PER_LANE="${CORES_PER_LANE:-2}"
+MAX_LANES=$(( (NPROC - 2) / CORES_PER_LANE ))
+[ "$MAX_LANES" -lt 1 ] && MAX_LANES=1
+
+TASKS="${TASKS:-discrete_log multi_dim_knapsack convex_hull rbf_interpolation set_cover_conflicts \
+rectanglepacking min_dominating_set max_common_subgraph queens_with_obstacles \
+max_independent_set_cpsat integer_factorization edge_expansion pagerank \
+count_riemann_zeta_zeros spectral_clustering max_clique_cpsat sparse_eigenvectors_complex \
+kcenters max_weighted_independent_set pde_heat1d}"
+NTASKS="$(echo $TASKS | wc -w)"
+[ "$MAX_LANES" -gt "$NTASKS" ] && MAX_LANES=$NTASKS
+LANE_COUNT="${LANES:-$MAX_LANES}"
+
+# One dedicated, non-overlapping core range per lane.
+declare -a LANE_CPUS
+for L in $(seq 0 $((LANE_COUNT - 1))); do
+  LO=$(( L * CORES_PER_LANE ))
+  HI=$(( LO + CORES_PER_LANE - 1 ))
+  LANE_CPUS[$L]="${LO}-${HI}"
+done
+
+cd "$AT"
+# shellcheck disable=SC1091
+source .venv/bin/activate
+set -a; [ -f .env ] && source .env; set +a
+export DATA_DIR="$AT/data"
+export LOOPLAB_LLM_BASE_URL="${LOOPLAB_LLM_BASE_URL:-https://openrouter.ai/api/v1}"
+export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
+export LOOPLAB_LLM_MODEL="${LOOPLAB_LLM_MODEL:-deepseek/deepseek-v4-flash-0731}"
+export LOOPLAB_LLM_API_KEY="${OPENROUTER_API_KEY:-}"
+export LOOPLAB_LLM_TEMPERATURE='0.0'
+export LOOPLAB_LLM_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false},"reasoning":{"effort":"medium"}}'
+export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
+export PYTHONPATH="$REPO"
+mkdir -p "$OUT" "$WS"
+
+reap_orphan_workers() {
+  # `pkill -f <name>` does not reach a multiprocessing forkserver: its command line carries neither
+  # the app name nor the script name, which is how ten of them once survived a series of restarts
+  # and burned CPU on the very cores a run was pinned to. Reap by module path, and ONLY orphans, so
+  # a live lane's own workers are never touched.
+  for P in $(pgrep -f "multiprocessing.fork[s]erver" 2>/dev/null); do
+    if [ "$(ps -o ppid= -p "$P" 2>/dev/null | tr -d ' ')" = "1" ]; then kill -9 "$P" 2>/dev/null; fi
+  done
+}
+
+run_one() {                       # $1 = task, $2 = cpu list
+  T=$1; CPUS=$2
+  if [ "$ARM" = "A" ]; then
+    if [ -s "$OUT/A-$T.done" ]; then echo "[$CPUS] $T arm A already done"; return; fi
+    S=$(date +%s)
+    timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
+        "openrouter/$LOOPLAB_LLM_MODEL" "$T" > "$OUT/A-$T.log" 2>&1
+    echo "wall=$(( $(date +%s) - S )) cpus=$CPUS lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$OUT/A-$T.done"
+    echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
+  else
+    if [ -s "$OUT/B-$T.done" ]; then echo "[$CPUS] $T arm B already done"; return; fi
+    TASK_ROOT="$RUNS_ROOT/$T"
+    rm -rf "$TASK_ROOT"; mkdir -p "$TASK_ROOT/memory" "$TASK_ROOT/knowledge"
+    python "$REPO/benchmarks/algotune/make_task.py" --algotune-root "$AT" --task "$T" \
+        --out-dir "$WS" >/dev/null 2>&1
+    S=$(date +%s)
+    # Per-task memory and knowledge dirs: LoopLab can mine its own past runs and a shared store,
+    # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
+    # runs to read, measuring a capability the other arm does not have rather than the loop.
+    LOOPLAB_MEMORY_DIR="$TASK_ROOT/memory" LOOPLAB_KNOWLEDGE_DIR="$TASK_ROOT/knowledge" \
+      timeout "$HARD_TIMEOUT" taskset -c "$CPUS" python -m looplab.cli run \
+        "$WS/algotune_$T.json" --out "$TASK_ROOT/run" --backend llm --max-nodes 20 \
+        > "$OUT/B-$T.log" 2>&1
+    # Champion from the FOLD, then ONE scoring pass on TEST: every node above ran on TRAIN, which
+    # is what AlgoTuner's own agent does. Without this the arm optimises against its graded split.
+    if python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
+           --out "$TASK_ROOT/champion_solver.py" >> "$OUT/B-$T.log" 2>&1; then
+      (cd "$TASK_ROOT" && timeout "$HARD_TIMEOUT" taskset -c "$CPUS" \
+          python "$REPO/benchmarks/algotune/looplab_eval.py" --algotune-root "$AT" --task "$T" \
+          --model LoopLabFinal --solver champion_solver.py --subset test) \
+          > "$OUT/B-$T.final.json" 2>>"$OUT/B-$T.log"
+    else
+      echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
+    fi
+    echo "wall=$(( $(date +%s) - S )) cpus=$CPUS lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$OUT/B-$T.done"
+    echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$OUT/B-$T.done"))"
+  fi
+}
+
+echo "arm $ARM | $NTASKS tasks | $LANE_COUNT lanes x $CORES_PER_LANE cores (of $NPROC) | budget \$$BUDGET_USD"
+reap_orphan_workers
+
+# One PID slot per lane, assigned by ACTUAL freeness. Round-robin by index would hand task N+k the
+# same lane whether or not it is still busy, so two tasks would share a core range while another
+# sits idle -- which breaks the dedicated-core guarantee the timing argument rests on.
+declare -a LANE_PID
+for L in $(seq 0 $((LANE_COUNT - 1))); do LANE_PID[$L]=""; done
+
+for T in $TASKS; do
+  SLOT=""
+  while [ -z "$SLOT" ]; do
+    for L in $(seq 0 $((LANE_COUNT - 1))); do
+      if [ -z "${LANE_PID[$L]}" ] || ! kill -0 "${LANE_PID[$L]}" 2>/dev/null; then SLOT=$L; break; fi
+    done
+    [ -z "$SLOT" ] && sleep 5
+  done
+  reap_orphan_workers
+  run_one "$T" "${LANE_CPUS[$SLOT]}" &
+  LANE_PID[$SLOT]=$!
+done
+wait
+reap_orphan_workers
+echo "[$(date +%H:%M:%S)] ===== arm $ARM COMPLETE ====="
+echo "summarise with:  python $REPO/benchmarks/algotune/compare_arms.py \\"
+echo "    --algotune-root $AT --runs-root $RUNS_ROOT --final-dir $OUT --reference"

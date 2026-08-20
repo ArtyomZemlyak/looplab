@@ -29,6 +29,36 @@ single box, for four reasons:
 | `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
 | `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |
 
+## Running this on another machine
+
+Everything a published number depends on is in this directory; nothing lives in a shell history.
+
+```bash
+git clone --depth 1 https://github.com/oripress/AlgoTune.git /srv/AlgoTune
+cd /srv/AlgoTune && uv venv --python 3.11 .venv && uv pip install -e .
+echo "OPENROUTER_API_KEY=sk-or-..." > .env
+
+benchmarks/algotune/setup_algotune.sh /srv/AlgoTune     # idempotent; re-run after any git pull
+ALGOTUNE_ROOT=/srv/AlgoTune ARM=A benchmarks/algotune/campaign.sh
+```
+
+`campaign.sh` sizes itself: `lanes = (nproc - 2) / CORES_PER_LANE`, capped at the task count. On
+this 8-core box that is 3 lanes; on a 90-vCPU server it is 20 — every task at once, so an arm is
+one round (~3 h) instead of seven (~21 h). Two cores per lane covers the measured 1.3-core appetite;
+`CORES_PER_LANE` and `LANES` override it. Do not oversubscribe a lane: a throttled lane still
+measures its own ratio correctly but stops being comparable to one that was not throttled, and
+cross-task comparison is the whole output.
+
+Arm B additionally needs a **rebase onto master first** — its number is a claim about a VERSION of
+LoopLab, and the only version worth benchmarking is the one that ships. Both arms must run with the
+same `LANES` and `CORES_PER_LANE`; every `.done` row records them so a mismatch is visible.
+
+### The model, pinned
+
+Both arms: `deepseek/deepseek-v4-flash-0731` via OpenRouter, provider pinned to `siliconflow/fp8`,
+`temperature 0.0`, `reasoning.effort medium`, spend limit `$0.02` per task-arm. The pin is not
+cosmetic — see "Model pinning" below for what an unpinned slug measured.
+
 ## Setup (once)
 
 AlgoTune is Linux-first and its own pins have rotted; the working recipe on this box is:
