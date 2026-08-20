@@ -26,8 +26,24 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from looplab.core.claimpin import (
+    predicate_holds,
+    read_text as _read,
+    tracked_text_files as _tracked_text_files,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The predicate evaluator, the tree walk and the marker-stripping rule MOVED to
+# `looplab/core/claimpin.py` on 2026-08-20 and are imported rather than re-implemented. The reason
+# is this repo's own most-repeated defect: §0.8 found FOUR implementations of one claim/verdict join
+# and every drift was between the copies. Its sibling guard `tests/test_claim_pins.py` re-derives a
+# different family of markers (`CLAIM[…] … decided:`) with the SAME three predicates plus `line:`,
+# and two evaluators would eventually disagree about what `present:` means — including about the
+# marker-stripping rule, whose absence was a silent FALSE GREEN here until 2026-08-19.
+#
+# The two indexes stay separate because their reds mean OPPOSITE things: red here means the item
+# SHIPPED (delete the marker), red there means the SENTENCE is false (fix the sentence).
 
 # One key. `grep -rn 'OPEN\[' .` is the whole index.
 _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
@@ -41,99 +57,21 @@ _MEASURED = re.compile(r"measured:(.{0,400})", re.S)
 # it is deliberately short enough that the clause cannot end up describing the NEXT item.
 _WINDOW = 900
 
-_SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
-              ".pytest_cache", ".mypy_cache", ".venv", "venv", "build"}
-_TEXT_SUFFIXES = {".py", ".md", ".js", ".jsx", ".html", ".txt", ".toml", ".yml", ".yaml"}
-
-
-def _tracked_text_files() -> list[Path]:
-    out: list[Path] = []
-    stack = [ROOT]
-    while stack:
-        d = stack.pop()
-        for child in d.iterdir():
-            if child.is_symlink():
-                continue
-            if child.is_dir():
-                if child.name not in _SKIP_DIRS and not child.name.endswith(".egg-info"):
-                    stack.append(child)
-            elif child.suffix in _TEXT_SUFFIXES:
-                out.append(child)
-    return sorted(out)
-
-
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def _text_without_markers(path: Path) -> str:
-    """The file as a predicate sees it: every line carrying a marker is removed.
-
-    Both directions matter. Without this an `absent:` proof would be falsified by the very line that
-    states it, and a `present:` proof could be SATISFIED by its own marker text — the "a comment can
-    satisfy the pin" failure this guard exists not to have.
-    """
-    return "\n".join(line for line in _read(path).splitlines()
-                      if not (_MARKER.search(line) or "proof:" in line
-                              or "measured:" in line))
-
 
 def _iter_markers():
-    for path in _tracked_text_files():
+    for path in _tracked_text_files(ROOT):
         text = _read(path)
         for m in _MARKER.finditer(text):
             yield path, m.group(1), m.group(2), text[m.end():m.end() + _WINDOW]
 
 
-def _resolve(rel: str) -> Path:
-    return (ROOT / rel).resolve()
-
-
 def _predicate_holds(pred: str) -> tuple[bool, str]:
-    """Evaluate one predicate against the real tree. Returns (holds, why-not)."""
-    if pred.startswith("missing:"):
-        rel = pred[len("missing:"):]
-        target = _resolve(rel)
-        if target.exists():
-            return False, f"{rel} now EXISTS — the item this proof describes is no longer absent"
-        return True, ""
-    for kind in ("absent:", "present:"):
-        if not pred.startswith(kind):
-            continue
-        body = pred[len(kind):]
-        if "@" not in body:
-            return False, f"malformed predicate {pred!r} — expected <literal>@<path>"
-        literal, rel = body.rsplit("@", 1)
-        target = _resolve(rel)
-        if not target.exists():
-            # A dead citation is this repo's most-measured form of rot (`docs/BACKLOG.md` §0.3: 8 of
-            # 8 line citations dead, 13 corrected inline). An index whose proofs can point at
-            # nothing is the same index the glyphs already were. This is also what makes a slug
-            # SURVIVE A MOVE: the key does not change, the proof is re-pointed under a red test.
-            return False, f"{rel} does not exist — re-point this proof at where the item now lives"
-        if target.is_dir():
-            # The skip check is RELATIVE to the cited directory, not over the absolute path —
-            # fixed 2026-08-19, and the bug it had was a silent false GREEN. `p.parts` on an
-            # absolute path carries every component of wherever this checkout happens to live, and
-            # this repo's own agent worktrees live under `.claude/worktrees/<name>/`, which is in
-            # `_SKIP_DIRS`. So in a worktree EVERY file under a cited directory was filtered out,
-            # `found` was False for all of them, and a directory-form `absent:` predicate held
-            # vacuously while a `present:` one reported a defect as shipped. An index whose proofs
-            # depend on the checkout PATH is the unverified claim this file exists to replace.
-            files = [p for p in target.rglob("*")
-                     if p.is_file() and p.suffix in _TEXT_SUFFIXES
-                     and not any(part in _SKIP_DIRS for part in p.relative_to(target).parts)]
-        else:
-            files = [target]
-        found = any(literal in _text_without_markers(p) for p in files)
-        if kind == "absent:" and found:
-            return False, (f"{literal!r} is now PRESENT in {rel} — this item claims to be open "
-                           f"BECAUSE that was absent, so either it shipped or the proof is wrong")
-        if kind == "present:" and not found:
-            return False, (f"{literal!r} is GONE from {rel} — this item claims to be open BECAUSE "
-                           f"that defect was still there, so either it shipped or the proof moved")
-        return True, ""
-    return False, f"unknown predicate kind in {pred!r} (use absent:/present:/missing:)"
+    """This index's three predicates, evaluated by the shared implementation.
+
+    Repo-relative only (`allow_absolute=False`): the suite must pass against a bare
+    `git archive HEAD` tree, so an open item may never be proved by a path on one box.
+    """
+    return predicate_holds(pred, root=ROOT, allow_absolute=False)
 
 
 def test_every_open_marker_is_well_formed():

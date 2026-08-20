@@ -548,7 +548,7 @@ def _bounded_json_value(value):
 
 
 _MEMORY_EVIDENCE_MAX = 32
-# `engine/lessons_reconcile.py:155-178` writes `evidence_sig` as `v2:a=<attempt>:t=<0|1>:x=<0|1>:...`.
+# `engine/lessons_reconcile.py::_evidence_sig_map` writes `evidence_sig` as `v2:a=<attempt>:t=<0|1>:x=<0|1>:...`.
 # Only the ATTEMPT is republished: the tombstone/abort flags and the outcome are a staleness fence the
 # engine re-derives for itself, and mirroring them onto the wire would invite a client to re-implement
 # `_lesson_evidence_stale` from a projection that is one field short of it.
@@ -653,7 +653,7 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
         # dropped here while `evidence_count` (a scalar the CONSOLIDATION pass writes) survived, which
         # left the UI able to say "3 experiments supported this" and unable to say WHICH — so no
         # surface could answer "what did this experiment teach us". `evidence` is the writers' own
-        # field (`engine/lessons_distill.py:334`, `engine/lessons_reconcile.py:45-57`: "`evidence`
+        # field (`engine/lessons_distill.py::skill_source_digest`, `engine/lessons_reconcile.py::_evidence_sig_map`: "`evidence`
         # [child, parent] IS the credited pair"), and `evidence_sig` binds each id to the exact node
         # ATTEMPT it was distilled against — which is what stops a re-run node from inheriting a
         # lesson drawn from its previous life. Both are bounded identifiers, not prose, so neither

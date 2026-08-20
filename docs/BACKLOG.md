@@ -3913,6 +3913,75 @@ the bench measures the incumbent against itself. The first question it should an
 corpus can only hint at: replay the SAME rows with and without log tools.
 proof:absent:llm_candidate@tests/test_judge_bench.py
 
+### §0.20 A goal sentence nobody could check killed three nodes, and the prompt telling five roles to use every GPU outlived the correction (2026-08-20)
+
+Root cause pass over seven claim failures from the two days to 2026-08-20; the argument, the surface
+inventory, the full agent-facing audit table and the options refused are in
+`docs/44-claim-surfaces-2026-08-20.md`. The shape, in one sentence: **a fact recorded in ONE place
+whose truth lives in ANOTHER, with nothing connecting them.**
+
+**The measurement that decides the mechanism.** Four of the seven were FALSE ON THE DAY THEY WERE
+WRITTEN — §0.1 rows 8 and 10 (closed 2026-08-14, the day the list was written), doc 27's eval-corpus
+banner (both tests it calls missing predate the document), and `runs/e5small-dr-unified-v3`'s goal.
+So an EXPIRY catches none of them: an expiry that has not elapsed is green, and a born-false claim
+is green for its whole window. Age is the wrong primitive. What is actually missing is a
+forcing function at AUTHORING time, because writing a claim costs nothing and checking one costs a
+lookup.
+
+**The cost.** That goal stated the manual e5-small recipe as "16k overall = 8k x 2 GPUs" and
+labelled it VERIFIED. The row belongs to `sergeyzh/rubert-tiny-lite`; the file's own
+`BASELINE — e5-small` block says batch 1750 / `n_gpus` 4 / `n_negatives` 0 -> recall@100 0.89. All
+three of that run's nodes died of `torch.OutOfMemoryError` (recorded as `crash` — §the triage fix
+`50ab168e`) chasing a per-device 8192 that needs ~530 GiB on a 139.8 GiB card.
+
+**Two more, both live on master and both aimed at agents.** `core/hardware.py::operational_attention_points`
+told FIVE roles to "use ALL available GPUs … don't run a tiny single-GPU job on a multi-GPU box" —
+while `engine/resources.py::_resource_request_for_node` gives an undeclared footprint exactly ONE
+device and `_resource_eval_env` fences `CUDA_VISIBLE_DEVICES` to it, and `nvidia-smi` (the tool the
+same bullet recommends) reports the physical box either way. It contradicted, in the SAME prompt,
+the two paragraphs that govern the declaration — which were corrected on 2026-08-19 under
+`Settings.gpu_footprint_cue` while this copy, gated by nothing, outlived the correction. And
+`engine/genesis.py` said `data` entries are "copied to ./<name>" eighteen lines above saying they
+are "mounted (symlinked) …, never deep-copied" (`adapters/repo_task.py::DataSpec.mount` defaults
+True), and instructed the goal author to "Put operational guidance the agent needs (use all GPUs, …)
+in the task `goal`" — the upstream half of the whole defect, since Genesis WRITES goal text.
+
+**Rule 1, adopted from the operator: a constraint of the MACHINE is discovered by the thing that
+runs on it, never asserted in prose an agent reads.** A memory ceiling is a fact about (model,
+sequence length, `n_negatives`, card) and no typed number survives a change to any of the four. This
+repo already applies the rule to TIME — `proposal_cues.py::_cue_experiment_time_budget` asks for a
+short probe when per-step time is unknown — and did not to MEMORY. Both cues now carry the twin.
+`tools/dev_probe.py` cannot host it (rule 4, `CUDA_VISIBLE_DEVICES=""`, deliberately: the host GPU
+lease is one file per OS user and a probe on a device corrupts a SIBLING node's training); the lever
+is a short calibration step at the head of the node's own declared pipeline.
+
+**Rule 2, the guard**: `CLAIM[<slug>] … decided:<predicate>` over `looplab/core/claimpin.py`, with
+`tests/test_open_item_index.py` refactored onto the SAME evaluator (§0.8's four-implementations
+lesson). Its zero-adoption-cost half re-derives all 653 `<mod>.py::<symbol>` citations in `looplab/`
+and refuses the `<mod>.py:NNN` form outright; it found 4 dead symbol citations and 6 live line ones,
+all fixed. `docs/guide/concepts.md`'s inline-repair list enumerated ELEVEN reasons under a sentence
+saying twelve, and the enumeration is now derived from `FAILURE_REASONS`.
+
+OPEN[claim-legacy-prompt-branches] Both pre-correction GPU paragraphs still ship as the
+`gpu_footprint_cue=false` branch AND as what an UNSTAMPED role gets — a bare `LLMResearcher` in a
+library caller reads "declaring MORE than the ceiling does not get this experiment more hardware",
+which the scheduler contradicts. The engine path always stamps, so no run gets it; the byte-for-byte
+restoration is deliberate. What is missing is a decision about whether a false sentence may be the
+off-switch's value at all. proof:present:SERIALISES@looplab/agents/roles.py
+
+OPEN[claim-effective-batch-event] `auto_find_batch_size` is refused as the memory answer on a
+measurement (transformers 4.51.0 keeps the DECLARED `per_device_train_batch_size` on `args` and the
+reduced one only in `trainer_state.json` + a `logger.debug`), so a run would report a batch it never
+trained at. It becomes admissible the moment the EFFECTIVE batch is lifted into a durable LoopLab
+event — an `extra_metrics`-shaped problem, since the number comes off the candidate's own process.
+proof:absent:effective_train_batch@looplab/events/types.py
+
+OPEN[claim-ui-line-citations] Four dead `file.py:NNN` citations survive in `ui/src/` —
+`cardBoardModel.js` cites `core/models.py:349` (that line is `return int(v.strip())`) and
+`cards.py:809` (blank), and `CardBoard.jsx` cites `card_ledger.py:1757`. `citation_defects()` scans
+`looplab/` only; widening it to `ui/` is one argument away, and the fix is to locate by SYMBOL.
+proof:present:cards.py:809@ui/src/cardBoardModel.js
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in

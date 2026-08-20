@@ -283,7 +283,7 @@ def _effective_policy_state(state: RunState) -> RunState:
 
     This IS the Card lane's node universe, so anything that has to predict what the policy will
     propose must hide the same set.  The fold's debug anchor is the one such reader outside this
-    package (``events/replay.py::_card_debug_leaf_children``); it reads the predicate directly from
+    package (``events/card_ledger.py::_card_debug_leaf_children``); it reads the predicate directly from
     ``core/models.py`` rather than reimplementing the filter, because a replay-side copy of it is
     what re-opened the debug-Card runaway twice.
     """

@@ -20,6 +20,7 @@ with nothing red anywhere.
 from __future__ import annotations
 
 import inspect
+import re
 
 from looplab.core.config import Settings
 from looplab.core.models import FAILURE_REASONS
@@ -110,3 +111,45 @@ def test_the_gate_reads_the_setting_rather_than_a_literal():
         "failures buy an inline repair, for every run")
     assert "self._inline_repair" in reads
     assert '"crash", "timeout", "oom"' not in inspect.getsource(evaluate)
+
+
+def test_the_concepts_guide_enumerates_every_failure_reason():
+    """The user guide's inline-repair list must BE `FAILURE_REASONS`, derived, in both directions.
+
+    This paragraph has now miscounted three times, and each miscount is the same shape: a fact
+    recorded in the doc whose truth lives in `core/models.py`, with nothing connecting them. It said
+    "eight" while the registry held eleven (fixed 2026-08-13); a merge left BOTH generations of the
+    bullet in place, one naming eleven and one naming eight (fixed 2026-08-14); and when
+    `not_learning` joined, the SENTENCE was corrected "eleven" -> "twelve" while the LIST under it
+    was not — so the guide introduced a twelve-member set and then named eleven of them, live on
+    master until 2026-08-20. The omitted member is the one the training monitor produces, i.e. the
+    reader most likely to be looking it up found it absent.
+
+    So the count is not pinned and the members are not typed into this test: both are re-derived
+    from the registry. A thirteenth reason makes this red on the commit that adds it, and the fix is
+    one word plus one backticked name in the doc — cheaper than leaving it wrong, which is the
+    property that decides whether a convention survives (CLAUDE.md, the open-item index).
+    """
+    from pathlib import Path
+
+    guide = Path(__file__).resolve().parents[1] / "docs" / "guide" / "concepts.md"
+    text = guide.read_text(encoding="utf-8")
+    anchor = "is eligible for repair **in place** within the same eval"
+    assert anchor in text, "the inline-repair paragraph moved — re-point this guard at it"
+    # The enumeration is the sentence that follows the anchor, up to the end of that bullet.
+    tail = text[text.index(anchor):]
+    listed = {m for m in re.findall(r"`([a-z_]+)`", tail[:600])}
+    named = listed & set(FAILURE_REASONS)
+    missing = sorted(set(FAILURE_REASONS) - named)
+    assert not missing, (
+        f"docs/guide/concepts.md's inline-repair list omits {missing} — it must enumerate all "
+        f"{len(FAILURE_REASONS)} of FAILURE_REASONS")
+    # And the WORD introducing it has to agree with the number of members.
+    words = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
+             14: "fourteen", 15: "fifteen"}
+    expected = words.get(len(FAILURE_REASONS))
+    assert expected, "extend the number-word table for the new registry size"
+    head = text[max(0, text.index(anchor) - 200):text.index(anchor)]
+    assert f"the {expected} `FAILURE_REASONS`" in head, (
+        f"the guide must say 'the {expected} `FAILURE_REASONS`' — the count and the list it "
+        "introduces have disagreed before, in this exact sentence")

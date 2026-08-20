@@ -104,6 +104,7 @@ _LAYOUT = {
     "speculation_gate": "engine",  # the calibrated speculation ENVELOPE + its runtime record (doc 25 ES-01)
     "card_selection": "search",  # Card-backed candidate election and ownership receipts
     "cards": "core",          # card identity: digests, ownership receipts, provenance (doc 25 CO-02)
+    "claimpin": "core",       # the claim/citation predicate evaluator both index guards share (doc 44)
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",

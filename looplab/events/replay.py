@@ -355,7 +355,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `speculation_depth` and its gate receipts. Last-write-wins let a spliced/duplicated second row
     # INVERT the objective or relax the trust gate after nodes already existed — silently rewriting how
     # every prior result is ranked. This gate mirrors the producer exactly: the engine appends
-    # `run_started` only `if not state.run_id` (orchestrator.py:2307), so on any log it wrote this is a
+    # `run_started` only `if not state.run_id` (engine/orchestrator.py::Engine._setup_phase), so on any log it wrote this is a
     # no-op. Keyed on `run_id` rather than "have I seen one" for the same reason: a row that never
     # established identity is not an anchor and must not shadow the real start that follows it.
     if st.run_id:
@@ -2558,7 +2558,7 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         #   * NaN — every `>` comparison against a NaN tuple-head is False, so whichever edge arrived
         #     FIRST would stick forever ([nan, 5.0] keeps nan while [5.0, nan] keeps 5.0).
         #   * ±inf — a `+inf` head would permanently outrank every finite repair while `ConceptFrame`
-        #     drops the same edge (`finite_metric` returns None -> rejected at serve/concept_frame.py:352),
+        #     drops the same edge (`finite_metric` returns None -> rejected at serve/concept_frame.py::bounded_inputs),
         #     so replay and the UI read would disagree with no way to converge.
         # NaN/±inf are unreachable over the event log TODAY — it is orjson end to end: `orjson.dumps`
         # writes a non-finite float as `null` (-> the isinstance guard below yields 0.0) and
@@ -3824,7 +3824,7 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
     st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
     # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
-    # serving `research_requests[research_served]` (engine/research_cadence.py:60). Counting every
+    # serving `research_requests[research_served]` (engine/research_cadence.py::normalized_belief_key). Counting every
     # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
     # `deep_research` request appended afterwards sat at an index the manual trigger would never reach
     # — the operator's "go think hard now" was silently dropped. Clamping to the queue is a no-op on

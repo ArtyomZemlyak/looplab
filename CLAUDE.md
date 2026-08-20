@@ -519,6 +519,70 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   it can carry a falsifier, and **a marker whose proof nobody re-derived is the same unverified
   claim the glyph already was** — which is the whole reason this rule exists. Tag as you re-derive;
   never tag to look complete.
+- **A recorded fact is pinned to the site that DECIDES it, and a machine constraint is MEASURED
+  rather than written down.** The open-item index above answers "what is still open?"; this answers
+  "is what we wrote down still true?", and it is the same disease one surface over. Measured over
+  the two days to 2026-08-20, seven claims failed with one shape: a fact recorded in ONE place whose
+  truth lives in ANOTHER, with nothing connecting them. The expensive one was aimed at an AGENT —
+  `runs/e5small-dr-unified-v3`'s goal stated the manual e5-small recipe as "16k overall = 8k x 2
+  GPUs" and labelled it VERIFIED. That row is `rubert-tiny-lite`'s; the e5-small BASELINE block says
+  batch 1750 on 4 devices. **All three of that run's nodes died of `torch.OutOfMemoryError`** chasing
+  a per-device 8192 that needs ~530 GiB on a 139.8 GiB card. In the same family:
+  `core/hardware.py` told FIVE roles to "use ALL available GPUs" while
+  `engine/resources.py::_resource_request_for_node` gives an undeclared footprint exactly one device
+  and fences `CUDA_VISIBLE_DEVICES` to it — and it contradicted, in the same prompt, the two
+  paragraphs that actually govern the declaration; `engine/genesis.py` said `data` entries are
+  "copied to ./<name>" eighteen lines above saying they are "mounted (symlinked) …, never
+  deep-copied" (`adapters/repo_task.py::DataSpec.mount` defaults True); and `docs/guide/concepts.md`
+  introduced "the twelve `FAILURE_REASONS`" and then enumerated eleven.
+
+  **It is not decay, and that is what decides the mechanism. FOUR of the seven were false ON THE DAY
+  THEY WERE WRITTEN** (two BACKLOG rows whose subject had landed hours earlier, doc 27's eval-corpus
+  banner, and the goal above). An EXPIRY would have caught none of them — an expiry that has not
+  elapsed is green — so age is the wrong primitive. What separates the halves is that **writing a
+  claim costs nothing while checking one costs a lookup, and the lookup is skipped at authoring
+  exactly as it is skipped at reading.** Two rules follow, and they cover different things.
+
+  **Rule 1 — a constraint of the MACHINE is discovered by the thing that runs on it, never asserted
+  in prose an agent reads.** A memory ceiling is a fact about (this model, this sequence length,
+  this `n_negatives`, this card); change any of the four and a typed number is wrong, and nothing in
+  the tree can re-derive it. Even an engine that COMPUTED it and spliced it into the goal would be
+  typing a claim. This repo already does this for TIME — `proposal_cues.py::_cue_experiment_time_budget`
+  tells the role to probe per-step time when it is unknown — and did not for MEMORY, which is the
+  asymmetry that cost three nodes. Both cues now carry the memory twin. Note where the measurement
+  may run: `tools/dev_probe.py` CANNOT (rule 4, `CUDA_VISIBLE_DEVICES=""`, deliberately — the host
+  GPU lease is one file per OS user and a probe allocating on a device corrupts a SIBLING node's
+  training). The lever is a short calibration step at the head of the node's OWN declared pipeline,
+  inside the devices it already reserved.
+
+  **Rule 2 — everything else carries `CLAIM[<slug>] … decided:<predicate>`**, evaluated by
+  `looplab/core/claimpin.py`, which `tests/test_open_item_index.py` now imports too (§0.8: four
+  implementations of one join, and every drift was between the copies). Same slug discipline, same
+  three predicates, plus `line:<a>&&<b>@<path>` — the one addition, because a bare
+  `present:8k x 2gpu@bench.md` HOLDS on that file (the string is there, on rubert's row) and binding
+  two literals to ONE line is what separates "this string occurs" from "this is said about that
+  subject". **A red `test_claim_pins` is the OPPOSITE of a red `test_open_item_index`**: there it
+  means the item shipped, so delete the marker; here it means the SENTENCE IS FALSE, so fix the
+  sentence or fix the code. `decided:` and not `claim:` on a measurement — `claim:` occurs 64 times
+  in this tree already (research claims are domain vocabulary here), the `STILL OPEN` collision.
+
+  The half with **zero adoption cost** is the one nobody opts into: `<mod>.py::<symbol>` is already
+  the house style (653 in `looplab/`, 471 distinct) and `citation_defects()` re-derives every one.
+  A `<mod>.py:NNN` citation is REFUSED rather than resolved — a line number is falsified by any edit
+  above it, which is how §0.3's 8 of 8 went dead. **Locate by SYMBOL.**
+  Two carriers, one evaluator: the suite checks the repo, and
+  `python -m looplab.core.claimpin <task.json>` checks a task GOAL, which no pytest can reach (the
+  file is outside the repo and cites this box). Run it before submitting a run.
+  **Do not put ANSWERS in a goal.** A goal states the objective, the constraints and the MEASURED
+  limits of the machine, with the file or run each was measured from — never the configuration to
+  use, a device count or a batch size copied from a benchmark table. `engine/genesis.py` used to
+  instruct the opposite and that is the upstream half of the whole defect.
+  The known way to defeat rule 2 is to delete the pin and keep the sentence; nothing detects that,
+  which is why the pin is greppable in one command (`grep -rn 'CLAIM\['`) and why the failure
+  message says so. `docs/44-claim-surfaces-2026-08-20.md` holds the audit, the surface inventory and
+  the options refused (an expiry; `auto_find_batch_size`, whose reduced batch survives only in
+  `trainer_state.json` while every saved config keeps the DECLARED one — the same record-vs-reality
+  divergence, reintroduced by the fix for it).
 - Settings are flat on purpose (`LOOPLAB_<FIELD>` env vars map 1:1); never nest or rename fields —
   snapshots and env compat depend on the names.
 - `looplab/sweep.py` is NOT a CLI subcommand — it is a runtime helper imported by *generated*

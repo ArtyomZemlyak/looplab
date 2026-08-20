@@ -116,7 +116,7 @@ re-derived under this rung's OWN contiguous-suffix rule against every YAML in ea
 diverging at node_created, so this route is a Developer-authored defect and not a repair-authored one
 — left open because the rung would have to know which config file the pipeline reads and by what key
 path), and a BARE-name declaration overridden in a conditional branch
-(`rubertlite-dense-retrieval` node 36, `distill_alpha` declared 0.5, `train.py:117` assigning 0.0
+(`rubertlite-dense-retrieval` node 36, `distill_alpha` declared 0.5, its own committed `train.py` assigning 0.0 at line 117
 inside a missing-teacher fallback) — the one corpus instance of exactly the two shapes
 `PARAM_OVERRIDE_MIN_PARTS` and the "not a claim about what ran" wording exist to refuse.
 
