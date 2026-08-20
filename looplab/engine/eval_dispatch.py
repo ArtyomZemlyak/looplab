@@ -617,7 +617,12 @@ class EvalDispatchMixin:
             # It is the derivation only: `_ensure_run_setup`/`_sync_node_deps` above are the
             # dispatcher's own side effects and stay here, where a planner can never reach them.
             cmd, timeout, stages = self._eval_pipeline(node, workdir, profile)
-            check_fn = (self._stage_check_fn(node)            # Phase 3: inter-stage verify (only if any stage asks)
+            # Phase 3: inter-stage verify (only if any stage asks). `root` and `stages` are what let
+            # the checker's `loss_unchanged_from_first_step` verdict be checked against the whole of
+            # this attempt's stage log instead of the 4,000-char tail it is shown — the log lives in
+            # `log_dir` (== `root`, below) and the plan comes from the SAME resolved list this eval
+            # runs, so neither is derived from anything a model said. See `_stage_check_fn`.
+            check_fn = (self._stage_check_fn(node, root, stages)
                         if stages and any(s.get("check") for s in stages) else None)
             cwd = self._sandbox_cwd(workdir, es.get("cwd", "."))
             # PREFLIGHT the resolved chain for a PROTECTED script the workdir doesn't hold, BEFORE any

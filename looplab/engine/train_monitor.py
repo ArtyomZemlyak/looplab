@@ -475,6 +475,134 @@ def summarize_trajectory(windows) -> LossTrajectory:
     return LossTrajectory(net=net, direction=direction, **common)
 
 
+# ------------------------------------------- the SAME trajectory, under the inter-stage stage check
+# WHY THIS EXISTS, re-derived on `runs/rubertlite-dense-retrieval` (2026-08-20).
+#
+# The stage check (`eval_stages.py::_stage_check_fn`, decided in `command_eval.py::_run_stages`) is
+# asked whether a `check`-flagged stage physically succeeded, and one member of its closed verdict
+# vocabulary is `loss_unchanged_from_first_step` — "a loss LITERALLY UNCHANGED from the first
+# training step (genuinely no learning)". What it is HANDED to answer that is `run.out[-4000:]`, and
+# `run.out` is ITSELF already `sandbox._clamp_tail_bytes(out, 64_000)`. Two nested tail clamps: the
+# first training step is not in the window and structurally cannot be, so the question the
+# vocabulary asks is not answerable from the evidence the engine supplies.
+#
+# The corpus says what that costs. Sixteen `node_failed` rows in that run carry `reason: no_metric`
+# from a stage check; TEN of those nodes were later reset by the operator, came back with the train
+# stage `reused` at `seconds 0.0` — the very checkpoint the checker had condemned — and SCORED
+# 0.805, 0.8412, 0.8424, 0.8379, 0.8606, 0.8265, 0.8376, 0.8662, 0.8531, 0.8147 against a run best
+# of 0.8835, i.e. 0.91x-0.98x of best. Node 1's own `train.log` runs `loss=33.9` -> `loss=13.3` over
+# 11,248 logged points in 1,214,400 bytes; its last 4,000 characters contain THREE of those points
+# and all three read `13.3`, which is what "Loss stagnant at 13.3 throughout epoch 19, indicating no
+# learning progress" is a correct reading of. A converged curve's tail is flat, and flat-at-the-end
+# is indistinguishable from never-moved when the end is all you are shown.
+#
+# So this is the same defect `_LOSS_POINT_RE`'s block above describes for the live monitor, one
+# decision over, and it gets the same answer: the engine measures the trajectory itself over the
+# whole of THIS attempt's stage log and the measurement VETOES the refusal. Reused wholesale —
+# `summarize_loss_window`, `summarize_trajectory`, `_anomaly_of`, `attempt_byte_floor`,
+# `eval_log_plan` — because a second reader of these bytes that reduced them differently could
+# disagree with the monitor about the same curve, which is the failure `core/numeric.median` was
+# extracted to prevent.
+#
+# WHY THE PREDICATE IS "MOVED" AND NOT "DESCENDING". The kind names ONE property — unchanged from
+# the first step — so what refutes it is MOVEMENT, in either direction. `rubertlite-dense-retrieval`
+# node 22 is the case that decides it: its loss runs 18.9 -> 17.6 and then climbs smoothly to 32.6
+# and plateaus, so the tail reads `32.0` for thousands of points and the checker wrote "Loss remains
+# constant at 32 across all epochs". The trajectory reads `rising` — emphatically not unchanged —
+# and that node scored 0.8147. A `descending`-only rule keeps 9 of the 10; this keeps all 10.
+#
+# WHAT IT MAY AND MAY NOT DO, the docs/36 line, identical to the epoch floor's. The numbers come
+# from text the candidate's own training script wrote, so this may only ever ACQUIT: it moves the
+# verdict DOWN to `inconclusive` and can never raise one, never fail a stage, and never touch the
+# other hard kinds — `nan_or_inf_loss`, `crash`, `no_artifact_written`, `silent_fallback`,
+# `declared_condition_violated` — which are out of its reach BY NAME. The four genuinely diverged
+# nodes in that corpus (n15 `loss=inf` for 20 epochs, n60 `nan`, n68 `-2e+10`, n74 `-2.35e+08`) name
+# `nan_or_inf_loss` and are refused by the kind test before any curve is read; `anomalous` is the
+# second, independent refusal for a diverged run the model happened to label the other way.
+#
+# WHERE THAT SECOND REFUSAL DOES NOT REACH, measured rather than assumed. Replaying the veto with
+# EVERY loss concern in that corpus forced to `loss_unchanged_from_first_step` — the maximum
+# exposure, i.e. the model naming the wrong kind for a diverged run — n74 is acquitted: its loss
+# runs -2.44e+06 -> -2.35e+08, which is `descending` in signed terms, and `_anomaly_of`'s explosion
+# rung reads `window.maximum` (the least-negative value) so a run diverging NEGATIVE measures 96x its
+# opening scale against a 100x boundary. Left as it is on purpose: lowering
+# `_TRAJECTORY_EXPLOSION_RATIO` or making the rung symmetric would move the LIVE monitor's veto —
+# a different decision, with its own corpus — and 96x is under the boundary either way. What a wrong
+# acquittal costs here is the `score` stage on a model whose metric is then recorded near zero, which
+# is the same cost the paragraph below prices, and the kind test already refuses this row for real.
+#
+# THE ASYMMETRY IT IS CHOSEN ON, from the same corpus and stated as a cost rather than a preference:
+# a wrong "no progress" ended TEN nodes, one of them within 2 % of the run's best, with no repair, no
+# retry and no refunded `max_nodes` slot, at 1,570-4,344 stage seconds each. A wrong "keep going"
+# runs the remaining stages and is caught by the real metric — 65-67 s of `score` on those same
+# nodes, after which the number the search ranks on is the operator's own reader over the protected
+# `score` stage. Two orders of magnitude, and only one of the two is recoverable, so the uncertain
+# case may not be a kill.
+#
+# THE ONE CASE NO LOSS-ONLY RULE CATCHES, named rather than papered over. Node 12 of that run is the
+# single genuine `not_learning` in the whole 122-row `failure_triage.v1` corpus: its loss fell
+# 0.986 -> 0.0195 while validation recall@100 stayed at 0.0028. The loss MOVED, so this rule acquits
+# it, and correctly — it is answering "was the loss unchanged", which is false. "The loss fell and
+# the model still did not learn" is a different question in kind: it needs the OBJECTIVE METRIC, and
+# the stage check runs BEFORE the protected `score` stage that produces it, so the evidence does not
+# exist yet at this decision. Acquitting node 12 costs one `score` stage and the metric then records
+# 0.0028, which is exactly the reader the record is supposed to rest on. That is not a rule this
+# function is missing; it is a rule that belongs downstream of it.
+STAGE_CHECK_TRAJECTORY_KIND = "loss_unchanged_from_first_step"
+# The directions that REFUTE "unchanged from the first step". `flat` does not (it is the absence of
+# evidence either way — see `LossTrajectory.direction`) and neither does `unknown`, so both leave the
+# refusal standing, which is the pre-veto behaviour exactly.
+TRAJECTORY_MOVED_DIRECTIONS = ("descending", "rising")
+
+
+def stage_trajectory_note(trajectory: Optional[LossTrajectory]) -> str:
+    """The engine's one-sentence reading of a measured trajectory, for the stage row. Pure.
+
+    Deliberately carries the NUMBERS and not just the direction: a row saying "the engine disagreed"
+    is unreviewable, and the whole reason this rung exists is that a reader given a reduction instead
+    of a measurement cannot check it.
+
+    BUDGETED, and that is why it is terse. `command_eval` caps `check_inconclusive` at 300
+    characters, and the row must hold BOTH readings — so this half is kept near 170 so the model's
+    own claim (60-110 characters across the corpus) is still there after the clamp. The full
+    measurement, unbounded, is what the MODEL is shown (`trajectory_context`); this is the receipt.
+    The reason the engine could see what the checker could not is in the code and the guide, not
+    repeated on every row."""
+    if trajectory is None or trajectory.windows <= 0:
+        return ""
+    net = "" if trajectory.net is None else f", net {-trajectory.net:+.4g}"
+    noise = "" if trajectory.noise is None else f" vs noise {_fmt_loss(trajectory.noise)}"
+    return (f"the engine read this attempt's whole stage log — {trajectory.points} loss values, "
+            f"{_fmt_loss(trajectory.first)} -> {_fmt_loss(trajectory.last)}{net}{noise}: DIRECTION "
+            f"{trajectory.direction}, so the loss is not unchanged from the first step")
+
+
+def trajectory_acquits_stage_check(kind: str, trajectory: Optional[LossTrajectory]) -> tuple:
+    """`(acquitted, note)` for ONE stage-check verdict. The whole veto, in one statable place.
+
+    FOUR conjuncts, each a separate way to fail closed and leave the refusal exactly as it was:
+      1. the verdict is `loss_unchanged_from_first_step` — every other hard kind is a claim about
+         mechanism that no curve contradicts, and this must never reach them;
+      2. something was measured at all (`windows > 0`): no readable log, an unreadable one, or a
+         stage that logged no loss leaves the model's verdict alone;
+      3. the numbers are not ANOMALOUS — a non-finite loss or grad_norm anywhere in the attempt, or
+         a value 100x the run's opening scale, is evidence a tail genuinely does carry, and a run in
+         that state is not a curve this veto should protect (`_anomaly_of`);
+      4. the loss MOVED (`TRAJECTORY_MOVED_DIRECTIONS`) — the direct refutation of the kind's claim.
+
+    Returns the ENGINE's sentence when it acquits, so the record can say what contradicted the model
+    rather than only that something did."""
+    if str(kind or "") != STAGE_CHECK_TRAJECTORY_KIND:
+        return False, ""
+    if trajectory is None or trajectory.windows <= 0:
+        return False, ""
+    if trajectory.anomalous:
+        return False, ""
+    if trajectory.direction not in TRAJECTORY_MOVED_DIRECTIONS:
+        return False, ""
+    return True, stage_trajectory_note(trajectory)
+
+
 class LossTrajectoryTracker:
     """Accumulates one `LossWindow` per monitor tick and reports the run-scale trajectory.
 
@@ -1415,6 +1543,133 @@ def monitor_log_sources(workdir, plan: Optional[EvalLogPlan] = None,
             continue
         sources.append(LogSource(name=path.name, path=path, role=role, floor=floor))
     return sources
+
+
+# How many windows a FINISHED stage log is reduced to. The monitor's tracker gets one window per
+# tick because it reads a live file it can only ever see the tail of; a stage check runs after the
+# stage has EXITED, so the whole of this attempt's bytes are on disk and the windowing is a choice
+# rather than a constraint. 32 mirrors the tick granularity a multi-hour eval actually produces at
+# `train_monitor_interval_s`, and the direction test only reads the first and last NUMERIC window's
+# medians plus the median of the per-window noise floors, so it is not sensitive to the exact count —
+# what it must not be is 1, which `summarize_trajectory` already refuses ("ONE window is a tail by
+# another name").
+STAGE_TRAJECTORY_WINDOWS = 32
+# ...and the bound on what one window costs in memory, since the window size is derived from the
+# file. A 53.6 MB stage log — the largest in `runs/` — reduces to 32 x 1.67 MB chunks; the floor
+# stops a small log from being cut into 32 slivers that each hold one progress-bar render.
+STAGE_TRAJECTORY_MIN_CHUNK = 65_536
+STAGE_TRAJECTORY_MAX_CHUNK = 4 * 1024 * 1024
+
+
+def read_stage_trajectory(path, *, floor: int = 0,
+                          windows: int = STAGE_TRAJECTORY_WINDOWS) -> LossTrajectory:
+    """Measure the loss trajectory over THIS attempt's bytes of a finished stage log.
+
+    STREAMED, never slurped: the file is read from `floor` to EOF in record-aligned chunks and each
+    chunk is reduced to one `LossWindow` on the way past, so peak memory is one chunk and every byte
+    above the floor is covered. A head+tail read was the obvious cheaper alternative and is refused —
+    `_anomaly_of`'s non-finite rung asks a question about EVERY window, and a `loss=nan` in the middle
+    of a run that recovers is exactly the evidence a bounded read would drop. Measured on the largest
+    stage log in `runs/` (53.6 MB, `e5small-dr-unified-v2` node 2): 2.70 s, ~19.8 MB/s, once per
+    checked stage, on the eval worker thread that is about to block on an LLM call anyway.
+
+    `floor` is `attempt_byte_floor`'s answer and is NOT optional in practice: stage logs are opened
+    `"a"` (`sandbox._tee_drain`), so a repaired or re-run stage appends to its predecessor's bytes and
+    a floorless read splices two curves into one — inventing both a jump and a direction. Driven in
+    `tests/test_stage_trajectory.py`.
+
+    Returns an empty `LossTrajectory` (`windows=0`, `direction="unknown"`) for every failure — no
+    file, no permission, nothing above the floor, no loss value in the bytes. That is the value
+    `trajectory_acquits_stage_check` refuses on, so an unreadable log leaves the checker's verdict
+    exactly as it was."""
+    try:
+        want = max(2, int(windows))
+    except (TypeError, ValueError):
+        want = STAGE_TRAJECTORY_WINDOWS
+    rows: list = []
+    try:
+        with open(path, "rb") as fh:
+            size = max(0, int(os.fstat(fh.fileno()).st_size))
+            start = max(0, int(floor or 0))
+            region = size - start
+            if region <= 0:
+                return LossTrajectory()
+            # ...and never so large that the region is ONE window. `summarize_trajectory` refuses a
+            # direction on a single window ("ONE window is a tail by another name"), so a chunk floor
+            # that swallowed a short log would answer `unknown` about a curve plainly visible in it —
+            # the same silent narrowing as the tail, arriving by a different route. Driven: a 44 KB
+            # eval log is 1 chunk at the bare floor and 2 with this clamp.
+            chunk = max(1, min(max(region // want, STAGE_TRAJECTORY_MIN_CHUNK),
+                               STAGE_TRAJECTORY_MAX_CHUNK, region // 2))
+            fh.seek(start)
+            carry = b""
+            remaining = region
+            while remaining > 0:
+                raw = fh.read(min(chunk, remaining))
+                if not raw:
+                    break
+                remaining -= len(raw)
+                buf = carry + raw
+                # Align on a record boundary — `\n` OR `\r`, because a tqdm bar writes its whole life
+                # into one newline-delimited line (the same rule `tools/log_tools._RECORD_SPLIT`
+                # states). Splitting mid-render would cut a `loss=13.3` in half and lose the point.
+                cut = max(buf.rfind(b"\n"), buf.rfind(b"\r"))
+                if cut < 0:
+                    # No boundary anywhere in this chunk. Split it anyway once the buffer has reached
+                    # a full chunk. A log that never writes `\n` or `\r` is not hypothetical (a
+                    # script printing with `end=""`), and letting the carry grow is the slurp this
+                    # function streams to avoid — worse, a carry bounded at the whole region yields
+                    # ONE window, which `summarize_trajectory` refuses a direction on, so the reader
+                    # would answer `unknown` about a curve it had just read every point of. The
+                    # forced split can cut ONE render in half, costing one loss value per split out
+                    # of thousands.
+                    carry = buf
+                    if len(carry) < chunk:
+                        continue
+                    cut = len(carry) - 1
+                buf, carry = buf[:cut + 1], buf[cut + 1:]
+                window = summarize_loss_window(buf.decode("utf-8", "replace"))
+                if window is not None:
+                    rows.append(window)
+            if carry:
+                window = summarize_loss_window(carry.decode("utf-8", "replace"))
+                if window is not None:
+                    rows.append(window)
+    except (OSError, TypeError, ValueError, OverflowError):
+        return LossTrajectory()
+    return summarize_trajectory(rows)
+
+
+def stage_check_trajectory(workdir, stage: str, *, plan: Optional[EvalLogPlan] = None,
+                           snapshot: Optional[TrainingLogSnapshot] = None) -> LossTrajectory:
+    """The trajectory of the stage the inter-stage checker is about to judge, or an empty one.
+
+    The path is NEVER constructed from anything a model said: `stage` is the resolved pipeline's own
+    stage name, the basename is the one `command_eval._run_stages` writes (`ex.log(f"{name}.log")`),
+    and `plan` — the same `eval_log_plan` the watchdogs use — must agree that this basename belongs
+    to THIS stage. A `LOG_ROLE_AMBIGUOUS` name (two stages folding onto one file, or a stage called
+    `setup` shadowing the dep install's `setup.log`) is refused for the reason `monitor_log_sources`
+    refuses it: bytes nobody can attribute to a phase are not evidence.
+
+    `snapshot` is the pre-attempt `snapshot_training_logs`, taken before any stage of this eval ran,
+    which is what makes `attempt_byte_floor` able to answer at all. With no snapshot the floor is 0
+    and a repaired stage's earlier curve is in scope — so the caller that has one must pass it."""
+    if not str(stage or "").strip():
+        return LossTrajectory()
+    name = f"{stage}.log"
+    if plan is not None:
+        claimed = plan.roles.get(_log_name_key(name))
+        if claimed is None or claimed[0] != stage or claimed[1] == LOG_ROLE_AMBIGUOUS:
+            return LossTrajectory()
+    try:
+        path = Path(workdir) / name
+        with open(path, "rb") as fh:
+            floor = attempt_byte_floor(fh, path, snapshot)
+    except (OSError, TypeError, ValueError, OverflowError):
+        return LossTrajectory()
+    if floor is None:
+        return LossTrajectory()     # fail closed — the boundary could not be established
+    return read_stage_trajectory(path, floor=floor)
 
 
 def read_training_tail(workdir, *, max_read_bytes: int = 131_072,

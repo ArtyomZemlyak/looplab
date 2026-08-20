@@ -1126,7 +1126,7 @@ class EvalStagesMixin:
 
         return _judge
 
-    def _stage_check_fn(self, node):
+    def _stage_check_fn(self, node, workdir=None, stages=None):
         """Phase 3 inter-stage verify: a callback (stage_name, log_tail, expect="") -> verdict|None that
         asks an LLM whether a `check`-flagged stage physically SUCCEEDED (train actually trained + saved a
         checkpoint, no silent fallback) BEFORE the next stage runs. This is a SANITY gate, NOT a
@@ -1153,13 +1153,45 @@ class EvalStagesMixin:
         node 21 was killed after the tightening with "validation recall (0.79) is below previous best
         (0.8491)" — the banned comparison, verbatim. Prose can no longer end a node; only a named
         member of `command_eval.STAGE_CHECK_HARD_KINDS` can. Everything else is `inconclusive` and
-        the pipeline continues."""
+        the pipeline continues.
+
+        `workdir`/`stages` are what let this stop asking an unanswerable question. The tail this
+        callback is handed is `run.out[-4000:]` of a `run.out` that is itself a 64,000-byte tail
+        clamp, so `loss_unchanged_from_first_step` — "unchanged from the FIRST training step" —
+        cannot be decided from it: the first step is not in the window and structurally cannot be.
+        With them, the engine measures the whole of this attempt's stage log itself
+        (`train_monitor.stage_check_trajectory`), HANDS the measurement to the model beside the tail
+        (`trajectory_context`, the same block the live monitor's judge already gets), and vetoes a
+        `loss_unchanged_from_first_step` refusal the measurement contradicts
+        (`trajectory_acquits_stage_check`). See the block above `STAGE_CHECK_TRAJECTORY_KIND` for the
+        ten nodes in `runs/rubertlite-dense-retrieval` this cost and for what the veto may not do.
+        Both are optional so a caller without a workdir (the library shape, and the doubles in the
+        suite) keeps the historical prompt and the historical verdict byte for byte; the ONE
+        production caller (`eval_dispatch._run_eval`) passes both, which
+        `tests/test_stage_trajectory.py` drives end to end rather than asserting."""
         try:
             client = self._reflect_client()
         except Exception:  # noqa: BLE001
             client = None
         if client is None:
             return None
+        # THE "BEFORE", taken HERE and not at check time. Stage logs are opened for APPEND, so by the
+        # time a stage is checked its own bytes are already mixed with any previous attempt's in the
+        # same file — there is nothing left to take a before OF. This runs after `_eval_pipeline` and
+        # before `run_command_eval`, i.e. before any stage of this attempt has written a byte, which
+        # is the same instant `evaluate.py::_evaluate` takes its own snapshot at and for the same
+        # reason (`needs_log_snapshot`). It costs one glob plus a 64-byte read per existing `*.log`,
+        # and only on a pipeline that asked for a check at all.
+        from looplab.engine.train_monitor import (eval_log_plan, snapshot_training_logs,
+                                                  stage_check_trajectory, trajectory_acquits_stage_check,
+                                                  trajectory_context)
+        _log_plan = _log_snapshot = None
+        if workdir is not None:
+            try:
+                _log_plan = eval_log_plan(stages)
+                _log_snapshot = snapshot_training_logs(workdir)
+            except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+                _log_plan = _log_snapshot = None
         idea_text = self._idea_text(node.idea) if node is not None else ""
         # Name the run's OBJECTIVE metric (from the operator's metric reader) so the checker judges the
         # RIGHT number and isn't misled by a bystander scalar in the log (e.g. recall@50 vs the @100 goal).
@@ -1177,6 +1209,17 @@ class EvalStagesMixin:
         # as the fallback lane), and it stays governed by a finite total when the operator sets one.
         @in_llm_lane("engine")
         def _check(stage_name, tail, expect: str = ""):
+            # THE TRAJECTORY, measured before the model is asked, for both of its uses below. An
+            # unreadable log answers `windows=0`, which is the value both uses treat as "no
+            # measurement" — the prompt keeps its historical bytes and the veto never fires.
+            trajectory = None
+            if workdir is not None:
+                try:
+                    trajectory = stage_check_trajectory(workdir, stage_name, plan=_log_plan,
+                                                        snapshot=_log_snapshot)
+                except Exception:  # noqa: BLE001 — an instrument may never take down an eval
+                    trajectory = None
+            measured = trajectory_context(trajectory) if trajectory is not None else ""
             msgs = [{"role": "system", "content":
                      "You are a SANITY checker for ONE stage of an ML eval pipeline, run BEFORE the next "
                      "stage. Decide ONLY whether this stage physically SUCCEEDED and produced a usable "
@@ -1206,11 +1249,34 @@ class EvalStagesMixin:
                      f"The run's objective metric is `{objective}` — ignore other scalars when judging "
                      f"whether the stage worked.\nExperiment: {idea_text[:400]}\n\n"
                      + (f"DECLARED CONDITION for stage '{stage_name}': {expect}\n\n" if expect else "")
+                     + (measured + "\n\n" if measured else "")
                      + f"Stage '{stage_name}' output tail:\n{tail}"}]
             try:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a checker failure must never fail the eval
                 return None
-            return parse_stage_check_reply(out, declared=bool(expect))
+            verdict = parse_stage_check_reply(out, declared=bool(expect))
+            if verdict is None:
+                return None                      # OK — the veto has nothing to acquit
+            # THE VETO. It may only ever move the verdict DOWN to `inconclusive`; the concern keeps
+            # BOTH readings, because a row that cannot say the model and the engine disagreed is a
+            # row the next reader cannot check. `command_eval` records it under
+            # `check_inconclusive` and the pipeline continues.
+            acquitted, note = trajectory_acquits_stage_check(verdict.kind, trajectory)
+            if not acquitted:
+                return verdict
+            from looplab.runtime.command_eval import STAGE_CHECK_INCONCLUSIVE, StageCheckVerdict
+            # The ENGINE's reading FIRST and the model's second, because `command_eval` clamps this
+            # to 300 characters and the direction is the load-bearing word: composed the other way
+            # round, the clamp ate the finding and left a row that only says the checker complained.
+            # The model's half is bounded here rather than left to that clamp, so what is dropped is
+            # a stated choice — its `kind` is preserved whole and its prose is what gets cut.
+            # `parse_stage_check_reply` already prefixes its detail with the kind, so naming it again
+            # would print it twice on every vetoed row; a concern that does NOT carry it still gets it.
+            said = str(verdict.concern or "")
+            if not said.lower().startswith(str(verdict.kind).lower()):
+                said = f"{verdict.kind}: {said}"
+            return StageCheckVerdict(STAGE_CHECK_INCONCLUSIVE,
+                                     f"{note} | checker had answered {said[:120]}"[:300])
 
         return _check
