@@ -367,6 +367,43 @@ _REPO_DEV_REPAIR_BLOCK = (
     "--- eval error (stderr/stdout tail) ---\n")
 
 
+def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
+    """The refusal for a BUILD that wrote nothing, or "" when there is something to evaluate.
+
+    Hoisted out of `_run`'s exit rather than left inline, on CLAUDE.md's tier-2 ground: the rule
+    decides whether a node exists, no call site could reach it to state it, and a rule nobody can
+    state is a rule nobody reviews. Its truth table is `tests/test_empty_build_guard.py`.
+
+    Measured 2026-08-20 on an AlgoTune `discrete_log` run: the implement phase spent 19 generations
+    calling `run_probe` 24 times, `read_file` 8 and `grep` 7 -- and `write_file`/`edit_file` ZERO
+    times. The session ended on its own wall budget, `_run` returned "" (no error), and the engine
+    committed a node whose `node_created.files` is `{}`. Its `solver.py` was the untouched template
+    (`raise NotImplementedError`), the evaluation ran honestly, and the run recorded `speedup: 0.0`
+    after 195 paid calls and $0.18.
+
+    The wasted evaluation is not the cost. A real 0.0 is EVIDENCE -- an idea that was tried and did
+    not work, which the next Researcher turn reads and builds on -- and this one is an empty box
+    wearing its clothes. Nothing downstream could tell them apart.
+
+    The cause is a missing forcing function rather than a confused model: probing is cheap and
+    commits to nothing while writing commits, so with no bound the safe move is always one more
+    probe. `agent_emit_after`/`agent_emit_force` are TURN counts (300/500) and that session ended at
+    19, so neither was ever in play. Fixing the INCENTIVE belongs upstream in the prompt and the
+    emit contract; this rung keeps the failure visible and cheap in the meantime.
+
+    Scoped to a FRESH build. `implement_from` / `repair_from` pre-load the working set from a base,
+    so an unchanged set there is a NO-OP EDIT -- a different fact, already judged one rung over by
+    `engine/repair_verify.py`'s `inert` verdict and bounded by INERT_REPAIR_LIMIT. Convicting it
+    here too would charge one event under two vocabularies that mean different things: "nothing was
+    built" and "nothing was CHANGED".
+    """
+    if error is None and base is None and base_deleted is None and not files and not deleted:
+        return (f"{DEVELOPER_ERROR_PREFIX} the implement session ended without writing or "
+                "deleting a single file, so there is no candidate to evaluate. The working set "
+                "is empty and the workdir would hold the untouched template.)")
+    return ""
+
+
 class LLMRepoDeveloper:
     """In-house LLM developer for repo tasks — no external coding agent (opencode/aider/…) required.
     It reads the repo with the read-only scout tools and AUTHORS the file(s) the eval needs with
@@ -1555,6 +1592,34 @@ class LLMRepoDeveloper:
         from looplab.core.models import is_developer_stuck
         if error is not None and is_developer_stuck(repair_verdict):
             return repair_verdict
+        # A BUILD that wrote NOTHING did not build anything, and must not become a node.
+        #
+        # Measured 2026-08-20 on an AlgoTune `discrete_log` run: the implement phase spent 19
+        # generations calling `run_probe` 24 times, `read_file` 8 and `grep` 7 -- and `write_file` /
+        # `edit_file` ZERO times. The session ended on its own time budget, `_run` returned "" (no
+        # error), `last_files` was `{}`, and the engine committed a node whose `node_created.files`
+        # is the empty dict. Its `solver.py` was therefore the untouched template, `raise
+        # NotImplementedError`; the evaluation ran honestly and recorded `speedup: 0.0` after 195
+        # paid calls and $0.18. Nothing in the loop could tell that apart from an experiment that
+        # was tried and failed -- which is the expensive half, because a real 0.0 is EVIDENCE and
+        # this one is an empty box wearing its clothes.
+        #
+        # The cause is a missing forcing function, not a confused model: probing is cheap and
+        # commits to nothing while writing commits, so with no bound the safe move is always one
+        # more probe. `agent_emit_after`/`agent_emit_force` are TURN counts (300/500) and this
+        # session ended at 19, so neither was ever in play; the session's wall budget cut it first.
+        # Fixing the incentive belongs upstream in the prompt and the emit contract. This is the
+        # rung that keeps its failure VISIBLE and cheap in the meantime.
+        #
+        # Scoped to a FRESH build: `implement_from` and `repair_from` pre-load `write.files` from a
+        # base, so an unchanged working set there is a NO-OP EDIT and a different fact, already
+        # judged one rung over by `engine/repair_verify.py`'s `inert` verdict and its
+        # INERT_REPAIR_LIMIT. Convicting it here too would double-charge the same event under two
+        # vocabularies.
+        refusal = empty_build_refusal(error=error, base=base, base_deleted=base_deleted,
+                                      files=write.files, deleted=write.deleted)
+        if refusal:
+            return refusal
         return ""
 
     def implement(self, idea: Idea) -> str:

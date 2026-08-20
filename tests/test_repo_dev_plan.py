@@ -489,7 +489,16 @@ def test_a_repo_repair_declaring_it_is_stuck_reaches_the_engine(monkeypatch):
     # pauses the RUN through the provider circuit breaker).
     assert not is_developer_error(out) and DEVELOPER_ERROR_PREFIX not in out
 
-    # A FRESH IMPLEMENT IS UNCHANGED. It carries no stuck contract (nothing to be stuck about), so
-    # its summary stays discarded and the return value stays the empty "the files are the answer".
+    # A FRESH IMPLEMENT CARRIES NO STUCK CONTRACT (nothing to be stuck about), so the declaration
+    # must not travel back from it — that is this control's whole point and it is asserted directly.
+    #
+    # It used to be spelled `== ""`, which stopped holding on 2026-08-20 and was RIGHT to stop: this
+    # double replaces the whole tool loop, so no write tool ever runs and the session ends with an
+    # empty working set — which `repo_developer.py::empty_build_refusal` now (correctly) refuses,
+    # because a build that wrote nothing is not a candidate. The property this test guards is
+    # untouched; only the shorthand was over-specified. Both sentinels are checked so a future
+    # change cannot swap one for the other silently.
     calls.clear()
-    assert dev.implement(idea) == ""
+    fresh = dev.implement(idea)
+    assert not is_developer_stuck(fresh), fresh
+    assert DEVELOPER_STUCK_PREFIX not in fresh
