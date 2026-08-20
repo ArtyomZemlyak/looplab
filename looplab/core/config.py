@@ -1802,9 +1802,26 @@ class Settings(BaseSettings):
     # therefore charge one loop for a measurement pass neither one's agent performs, so the arms
     # are equalised on the axis the reference harness itself uses.
     #
-    # Deliberately NOT pinned into `run_started`: the fold never reads it, and a resumed run
-    # re-reads the live value, which is what an operator raising a ceiling to continue a stopped
-    # run expects. Priced calls only — a local model reports no cost and can never trip it.
+    # Deliberately NOT pinned into `run_started`: the fold never reads it, so an already-recorded
+    # run replays identically under either value, and a new unconditional `run_started` key would
+    # revoke every issued speculation-calibration receipt.
+    #
+    # NOT IN `run_started` IS NOT THE SAME AS RE-READ ON RESUME, and this comment claimed it was
+    # until 2026-08-20. The value lands in `config.snapshot.json`, which every `resume` adopts
+    # (`cli/run_cmds.py`, engine invariant #6) -- so `LOOPLAB_LLM_BUDGET_USD=0.40 looplab resume
+    # <dir>` on a run stopped at $0.15 stops again at $0.15. Measured, on the run that produced
+    # this correction. To raise a stopped run's ceiling, edit `llm_budget_usd` in that run's own
+    # `config.snapshot.json` (or use the per-run settings editor, `PUT /api/runs/{id}/config`),
+    # then resume. The refusal message says so, because it is the operator's whole instruction.
+    #
+    # Whether a spend CEILING should be snapshot-pinned at all is a real question and is
+    # deliberately not answered here. `runtime/stage_identity.py` already draws this line for a
+    # stage `timeout` -- "a leash rather than an input" -- and a budget is the same shape: it
+    # bounds what the run may spend, it is not a condition the result was produced under. But
+    # snapshot precedence IS invariant #6, so exempting one field is a change with replay
+    # consequences rather than a comment fix. Stated, not patched.
+    #
+    # Priced calls only -- a local model reports no cost and can never trip it.
     llm_budget_usd: float = Field(default=0.0, ge=0.0)
     # Stop ADVERTISING a tool whose provider reports it holds nothing right now
     # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a

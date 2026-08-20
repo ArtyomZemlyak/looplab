@@ -1765,8 +1765,10 @@ class CostAccountant:
             # knob and not only the arithmetic.
             raise BudgetExceeded(
                 f"LLM spend ceiling reached: ${committed_spent:.4f} of the ${self.limit:.4f} "
-                f"set by `llm_budget_usd`. The run stops here rather than spending more; "
-                f"raise `llm_budget_usd` (or set it to 0 for no limit) and resume to continue.")
+                f"set by `llm_budget_usd`. The run stops here rather than spending more. "
+                f"To continue, raise `llm_budget_usd` in this run's `config.snapshot.json` "
+                f"(0 = no limit) and resume -- an env var will NOT do it, every resume adopts "
+                f"the snapshot (engine invariant #6).")
         return committed_spent
 
     def remaining(self) -> Optional[float]:
