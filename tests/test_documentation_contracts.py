@@ -58,7 +58,7 @@ def test_index_mentions_every_numbered_document():
     #   42 -> 43 (2026-08-19): the operator-list audit (doc 43). No collision this time — the
     #   number was claimed by checking the glob AND the index table together, which is the
     #   procedure the three earlier collisions existed for.
-    assert len(numbered) == 43, "the derived numbered-document inventory changed"
+    assert len(numbered) == 44, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -285,7 +285,12 @@ def test_every_failure_reason_surface_names_all_of_them():
 
     # 2. The concepts bullet: a spelled count AND the members it then lists.
     concepts = (DOCS / "guide" / "concepts.md").read_text(encoding="utf-8")
-    bullet = re.search(r"\*\*any\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)mechanical three",
+    # `\s+` on the tail anchor, not a literal space: this bullet is a wrapped markdown paragraph, and
+    # "mechanical three" straddled the line break the day two branches wrapped it differently. A
+    # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
+    # opposite of what it is for — the rule is about which reasons are named, never about where the
+    # line ends.
+    bullet = re.search(r"\*\*any\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)mechanical\s+three",
                        concepts, re.S)
     assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
     if bullet.group(1) != word:
