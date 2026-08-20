@@ -39,7 +39,12 @@ replay over the stored tail is not always the answer the engine gave. Measured o
 opaque `Root Cause … exitcode: 1` block and 2 are nothing but a progress bar — so `_is_torch_oom`
 replayed over `at_classification` alone scores 0 of 23 OOMs, and over `on_demand` as well it scores
 16. The recorded reason is therefore kept AS the incumbent's answer and never recomputed for the
-primary matrix; `--arm head` and `--arm head-widened` are what separate the RULE from the WINDOW.
+primary matrix; `--arm frozen` and `--arm frozen-widened` are what separate the RULE from the
+WINDOW, and `--arm live` is today's classifier. The frozen arms read a SNAPSHOT of the classifier
+and of its vocabulary (`TORCH_OOM_MARKERS` here, `_frozen_failure_reason_v1` in `triage_score.py`,
+both echoed into the dataset header) rather than production, because the classifier they describe
+was replaced hours after this corpus was cut and an arm that followed production would have gone on
+reporting a different program's score under the label "the incumbent".
 
 ## The label
 
@@ -178,9 +183,18 @@ HIGH_CONFIDENCE_BASES = frozenset({
     "watchdog_sentinel", "stage_timeout", "nonfinite_loss_in_log", "artifact_contract",
     "declared_condition_violated", "terminal_exception", "logged_fatal_error"})
 
-# A COPY of `triage._TORCH_OOM_MARKERS`, on purpose and for the same reason `judge_corpus.VERDICTS`
-# is a copy: a bench that moves when the thing it measures moves cannot detect that it moved. The
-# test asserts the two still agree.
+# A FROZEN SNAPSHOT of `triage._TORCH_OOM_MARKERS` as it stood on 2026-08-20, and it must stay
+# frozen even though that name no longer exists in production — the rule was deleted the same day,
+# because this corpus is what showed both of its producers were reading the failure's own text.
+#
+# It is frozen because it decides LABELS. A label rule that followed production would mean the
+# corpus said something different every time the classifier changed, and then no two scores taken
+# months apart would be comparable — which is the one thing a bench must never lose. The label
+# vocabulary is imported (`FAILURE_REASONS`) because it is the space of ANSWERS; this list is part
+# of the rule that decides TRUTH, and truth was cut once.
+#
+# `tests/test_triage_bench.py::test_the_historical_arm_reads_no_production_name` pins that this
+# stays a snapshot and that production has not quietly grown the name back.
 TORCH_OOM_MARKERS = (
     "OutOfMemoryError", "CUDA out of memory", "HIP out of memory", "XPU out of memory",
 )
@@ -278,6 +292,12 @@ LOG_TAIL_BYTES = 64_000        # what `res.stderr` was clamped to; the window th
 STORED_LOG_TAIL = 6_000        # what is COMMITTED, so the artefact stays small
 STORED_TOOL_READS = 3
 STORED_TOOL_READ_CHARS = 4_000
+
+# The label-side twin of `triage_score.HISTORICAL_AUTHENTICATED_REASONS`, spelled here so the header
+# can carry it without importing the scorer (the corpus module must be readable on its own).
+_HISTORICAL_AUTHENTICATED_REASONS = frozenset({
+    "drift", "timeout", "setup", "diverged", "stalled",
+    "needs_failed", "expect_failed", "check_failed"})
 
 CORPUS_LIMITS = (
     "SCOPE: seven preserved runs of ONE task family (ESCI dense retrieval, two backbones), ONE "
@@ -836,6 +856,18 @@ def build_dataset(run_dirs: Iterable) -> dict:
         "skipped_live_runs": skipped,
         "labels": list(LABELS),
         "label_bases": list(LABEL_BASES),
+        # THE FROZEN VOCABULARY, IN THE ARTEFACT. Whoever reads this file in six months gets the
+        # rule that decided its labels and the partition its historical scores were reported under,
+        # without having to find the commit that was HEAD when it was cut. Production's copies of
+        # both have already moved once (the 2026-08-20 ownership split) and will move again.
+        "frozen_vocabulary": {
+            "as_of": "2026-08-20",
+            "torch_oom_markers": list(TORCH_OOM_MARKERS),
+            "authenticated_reasons": sorted(_HISTORICAL_AUTHENTICATED_REASONS),
+            "note": "a SNAPSHOT of production as it stood when this corpus was cut, not a mirror. "
+                    "The historical arms read these; the live arm reads production. See "
+                    "judgebench/triage_score.py::_frozen_failure_reason_v1.",
+        },
         "high_confidence_bases": sorted(HIGH_CONFIDENCE_BASES),
         "healthy_fraction": HEALTHY_FRACTION,
         "redaction": "core.redact.redact_output_tail(entropy=True)",

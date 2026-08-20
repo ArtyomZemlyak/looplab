@@ -32,19 +32,30 @@ is how a bench is made to say what its author wanted.
 
 * `recorded_candidate` — the reason the engine actually recorded at the time. Zero reconstruction:
   this is the historical incumbent for the code each run was on.
-* `head_replay_candidate` — `engine/triage.py::_failure_reason` re-run TODAY on a `res` rebuilt from
-  the row. What it can and cannot see is stated per field in `REPLAY_SOURCES`, and rows whose
-  `exit_code` is unrecoverable answer `None`, which the report counts as `no-answer` rather than
-  folding into a wrong answer — 4 of 122.
-* `jsonl_candidate` — a candidate's captured answers, offline, no network.
+* `frozen_replay_candidate` — the classifier AS IT STOOD when this corpus was cut, replayed on a
+  `res` rebuilt from the row. **It reads no production name at all** — `_frozen_failure_reason_v1`
+  below is a verbatim snapshot, and so is `HISTORICAL_AUTHENTICATED_REASONS`. That is deliberate and
+  it is the correction of a real defect: until 2026-08-20 this arm imported the live
+  `_failure_reason`, so the day the classifier changed, the arm silently began measuring a different
+  program while still being labelled "the incumbent". A bench may lose many things; the record of
+  how the OLD decider scored is not one of them.
+* `live_engine_candidate` — the classifier at HEAD. This one MUST read production, and it is the arm
+  that makes the bench useful going forward. It scores only the DETERMINISTIC half of today's
+  classifier, because that is the half a bench can run offline: `_failure_reason` now answers
+  structurally from what the engine caused, ran or measured, and hands `crash` / `no_metric` /
+  `check_failed` to a diagnostician that costs a model call. The report prints the handoff count
+  beside the score — those rows are the headroom the diagnostician has to win, and `--answers` is
+  how a real one gets scored on them.
+* `jsonl_candidate` — a candidate's (or a diagnostician's) captured answers, offline, no network.
 
-`--arm head-widened` exists to separate the RULE from the WINDOW, and on this corpus it separates
-them sharply: `_is_torch_oom` scores 0 of 23 OOMs over the durable stderr tail and 16 of 23 once the
-triage agent's own log reads are in front of it. The 7 it still misses are every row whose capture
-was truncated PAST the exception line and kept only the allocator's message body ("Tried to allocate
-8.79 GiB. GPU 0 has a total capacity of 139.80 GiB of which 4.59 GiB is free") — a string
-`_TORCH_OOM_MARKERS` does not list. That is a finding about the marker list, and the bench is the
-only thing that could have produced it.
+`--arm frozen-widened` exists to separate the RULE from the WINDOW, and on this corpus it separated
+them sharply: the frozen `_is_torch_oom` scores 0 of 23 OOMs over the durable stderr tail and 16 of
+23 once the triage agent's own log reads are in front of it. The 7 it still missed were every row
+whose capture was truncated PAST the exception line and kept only the allocator's message body
+("Tried to allocate 8.79 GiB. GPU 0 has a total capacity of 139.80 GiB of which 4.59 GiB is free").
+That finding is why the marker list is gone from production entirely: `oom` is now answer-only, a
+kind no deterministic rule produces, because both of its producers were text rules. The frozen arm
+keeps the measurement that argued for it.
 
 **Agreement between two arms is churn, not accuracy** — the same rule `judge_corpus.py` follows, and
 `ScoreReport` keeps the two in separate fields with no code path that averages them.
@@ -90,7 +101,9 @@ FLAG_GUARDED_REASONS = frozenset({"timeout", "diverged"})
 # The reason that gates the triage-driven dependency install (`_prepare_env_from_triage`).
 ENV_PREP_REASON = "crash"
 
-# A copy of `engine/triage.py::AUTHENTICATED_FAILURE_REASONS` — the half of the vocabulary the
+# A frozen copy of the tuple `engine/triage.py` used to call AUTHENTICATED_FAILURE_REASONS (deleted
+# 2026-08-20 with the ownership split, so this is deliberately NOT a live citation) — the half of
+# the vocabulary the
 # ENGINE observed out of band and no judge may contradict. Reported as its own accuracy because the
 # two halves answer different questions and mixing them flatters both:
 #
@@ -101,8 +114,64 @@ ENV_PREP_REASON = "crash"
 #   * The other half — `crash` / `oom` / `no_metric` (`triage.JUDGED_FAILURE_REASONS`) plus the
 #     `not_learning` only a live judge can name — is inferred from the dead process's TEXT. That is
 #     the whole of what an agentic diagnostician replaces, and it is the number to judge one on.
-AUTHENTICATED_LABELS = frozenset({"drift", "timeout", "setup", "diverged", "stalled",
-                                  "needs_failed", "expect_failed", "check_failed"})
+#
+# FROZEN 2026-08-20, and it may not be re-pointed at production. It was a copy of a tuple that name
+# no longer exists in `engine/triage.py`, and the ownership split that
+# replaced it draws the line in a DIFFERENT place (`check_failed` moved to the diagnosable side,
+# because its "channel" is itself a model reading the candidate's stdout). Both facts are reasons to
+# freeze rather than follow: this partition is a property of the LABELS, which were cut once and do
+# not move, and keeping it fixed is the only way two arms measured months apart remain comparable.
+# The LIVE partition is `LIVE_ENGINE_FINAL_REASONS` / `LIVE_DIAGNOSABLE_REASONS` below, and it is
+# reported separately rather than substituted here.
+HISTORICAL_AUTHENTICATED_REASONS = frozenset({
+    "drift", "timeout", "setup", "diverged", "stalled",
+    "needs_failed", "expect_failed", "check_failed"})
+AUTHENTICATED_LABELS = HISTORICAL_AUTHENTICATED_REASONS   # the name the report and tests use
+
+# The LIVE partition, READ FROM PRODUCTION AT IMPORT and never copied — this is the half that must
+# follow what ships, because scoring what ships is the whole point of the live arm.
+#
+# IT DETECTS THE SHAPE RATHER THAN HARD-IMPORTING ONE, and that is the lesson of this bench applied
+# to the bench itself. Two partitions have shipped inside a week: `AUTHENTICATED_FAILURE_REASONS` /
+# `JUDGED_FAILURE_REASONS` in `engine/triage.py`, and the ownership split
+# (`ENGINE_FINAL_REASONS` / `DIAGNOSABLE_ENGINE_REASONS` in `engine/failure_diagnosis.py`) that
+# replaces them. A live arm that imported either one by name would be an `ImportError` on the other
+# side of that change — which is exactly how this module went red, and exactly what a measurement
+# leg must not do to a merge. So it reads whichever is present and NAMES it, the name is printed in
+# the report above the score, and `tests/test_triage_bench.py` asserts the detected shape agrees
+# with production rather than asserting one shape exists.
+LIVE_SHAPE_OWNERSHIP = "ownership_split"          # engine-final vs diagnosable (2026-08-20 onward)
+LIVE_SHAPE_AUTHENTICATED = "authenticated_judged"  # authenticated vs judged (before it)
+
+
+def live_ownership_split() -> dict:
+    """What production's classifier vocabulary is RIGHT NOW, and which of the two shapes it is."""
+    try:
+        from looplab.engine import failure_diagnosis as _fd
+    except ImportError:
+        from looplab.engine import triage as _tri
+        return {
+            "shape": LIVE_SHAPE_AUTHENTICATED,
+            "engine_final": frozenset(_tri.AUTHENTICATED_FAILURE_REASONS),
+            "diagnosable": frozenset(_tri.JUDGED_FAILURE_REASONS),
+            "answerable": frozenset(_tri.JUDGED_FAILURE_REASONS),
+            "unclassified": None,
+        }
+    return {
+        "shape": LIVE_SHAPE_OWNERSHIP,
+        "engine_final": frozenset(_fd.ENGINE_FINAL_REASONS),
+        "diagnosable": frozenset(_fd.DIAGNOSABLE_ENGINE_REASONS),
+        "answerable": frozenset(_fd.DIAGNOSED_FAILURE_REASONS),
+        "unclassified": _fd.UNCLASSIFIED_REASON,
+    }
+
+
+_LIVE = live_ownership_split()
+LIVE_SHAPE = _LIVE["shape"]
+LIVE_ENGINE_FINAL_REASONS = _LIVE["engine_final"]
+LIVE_DIAGNOSABLE_REASONS = _LIVE["diagnosable"]
+LIVE_ANSWERABLE_REASONS = _LIVE["answerable"]
+LIVE_UNCLASSIFIED_REASON = _LIVE["unclassified"]
 
 ERROR_COSTS = {
     "admits_refused_metric": (
@@ -216,14 +285,87 @@ def replay_result(row: dict, *, widened: bool = False):
     )
 
 
-def head_replay_candidate(*, widened: bool = False) -> Callable:
-    """`engine/triage.py::_failure_reason` re-run today over the rebuilt `res`."""
+# ---------------------------------------------------------------------------------------------
+# THE FROZEN INCUMBENT. A verbatim snapshot of `engine/triage.py::_failure_reason` as it stood on
+# 2026-08-20 when this corpus was cut, kept HERE so the historical arm reads nothing that can move.
+#
+# DO NOT UPDATE THIS FUNCTION. If today's classifier is what you want to measure, that is
+# `live_engine_candidate`. This one exists to keep the numbers 74.6 % / 88.1 % meaning what they
+# meant on the day they were measured — the classifier they describe was deleted hours later, and an
+# arm that had gone on importing the live name would have silently started reporting a different
+# program's score under the label "the incumbent". That is the one failure a bench may not have.
+#
+# Its two text rules are the whole reason it is gone: `_FROZEN_TORCH_OOM_MARKERS` and the
+# `-9/137 with no Traceback` kernel signature. `oom` is now answer-only in production precisely
+# because both of its producers read the failure's own text.
+_FROZEN_TORCH_OOM_MARKERS: tuple[str, ...] = (
+    "OutOfMemoryError", "CUDA out of memory", "HIP out of memory", "XPU out of memory")
+
+
+def _frozen_failure_reason_v1(res) -> str:
+    """The 2026-08-20-morning classifier, verbatim. See the block above before touching it."""
+    if getattr(res, "drift", None) is not None:
+        return "drift"
+    if res.timed_out:
+        return "timeout"
+    if (res.stderr or "").startswith("setup failed:"):
+        return "setup"
+    if getattr(res, "diverged", False):
+        return "diverged"
+    if getattr(res, "stalled", False):
+        return "stalled"
+    if res.exit_code != 0:
+        if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
+            return "oom"
+        if any(marker in (res.stderr or "") for marker in _FROZEN_TORCH_OOM_MARKERS):
+            return "oom"
+        return "crash"
+    _rows = [row for row in (getattr(res, "stages", None) or []) if isinstance(row, dict)]
+    _last = str(_rows[-1].get("status") or "") if _rows else ""
+    if _last == "needs_failed":
+        return "needs_failed"
+    if _last == "expect_failed":
+        return "expect_failed"
+    if _last == "check_failed":
+        return "check_failed"
+    return "no_metric"
+
+
+def frozen_replay_candidate(*, widened: bool = False) -> Callable:
+    """The incumbent as it stood when the corpus was cut. Reads no production name."""
+    def candidate(row: dict) -> Optional[str]:
+        res = replay_result(row, widened=widened)
+        return None if res is None else _frozen_failure_reason_v1(res)
+    return candidate
+
+
+def live_engine_candidate() -> Callable:
+    """`engine/triage.py::_failure_reason` AT HEAD — the deterministic half of today's classifier.
+
+    This is the arm that must follow production, and the import is deliberately not frozen. What it
+    scores is only half of what ships: since 2026-08-20 the classifier answers structurally from what
+    the engine caused, ran or measured, and hands `crash` / `no_metric` / `check_failed` on to a
+    diagnostician that costs a model call and cannot be run inside a test. So this number is not
+    "the new classifier's accuracy" and the report never labels it as one — it is the accuracy of
+    everything decided WITHOUT a model, and `diagnosable_handoff` beside it counts the rows where the
+    answer is a nomination rather than a decision. Those rows are the diagnostician's to win, and
+    `--answers` is how a real one is scored on them.
+    """
     from looplab.engine.triage import _failure_reason
 
     def candidate(row: dict) -> Optional[str]:
-        res = replay_result(row, widened=widened)
+        res = replay_result(row)
         return None if res is None else _failure_reason(res)
     return candidate
+
+
+def head_replay_candidate(*, widened: bool = False) -> Callable:
+    """Deprecated alias kept so an older invocation does not silently change meaning.
+
+    It used to import the live `_failure_reason`; that is now `live_engine_candidate`, and what this
+    name MEANT to its callers — the incumbent replayed — is `frozen_replay_candidate`. It resolves to
+    the frozen one, because a caller that recorded a number from it recorded the incumbent's."""
+    return frozen_replay_candidate(widened=widened)
 
 
 def jsonl_candidate(path) -> Callable:
@@ -265,6 +407,12 @@ class ScoreReport:
     # structurally, versus an inference from the dead process's text. See `AUTHENTICATED_LABELS`.
     authenticated: list = field(default_factory=lambda: [0, 0])   # [correct, total]
     text_read: list = field(default_factory=lambda: [0, 0])
+    # LIVE-ARM ONLY, and it is not a score. Today's classifier answers `crash` / `no_metric` /
+    # `check_failed` as a NOMINATION handed to a diagnostician, not as a decision. This counts those
+    # rows and how many the nomination happens to get right, so "the deterministic half is 74.6 %"
+    # can never be read as "the new classifier is 74.6 %".
+    diagnosable_handoff: list = field(default_factory=lambda: [0, 0])   # [right by luck, handed on]
+    scores_live_classifier: bool = False    # set only by the live arm; gates the handoff block
 
     @property
     def accuracy(self) -> Optional[float]:
@@ -272,8 +420,8 @@ class ScoreReport:
 
 
 def score_dataset(rows: list, candidate: Callable, *, name: str = "?",
-                  high_confidence_only: bool = False) -> ScoreReport:
-    report = ScoreReport(candidate=name, rows=len(rows))
+                  high_confidence_only: bool = False, live: bool = False) -> ScoreReport:
+    report = ScoreReport(candidate=name, rows=len(rows), scores_live_classifier=live)
     for row in rows:
         label = row.get("label") or {}
         truth, basis = label.get("reason"), label.get("basis")
@@ -301,6 +449,9 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "?",
         half = report.authenticated if truth in AUTHENTICATED_LABELS else report.text_read
         half[1] += 1
         half[0] += int(answer == truth)
+        if answer in LIVE_DIAGNOSABLE_REASONS:
+            report.diagnosable_handoff[1] += 1
+            report.diagnosable_handoff[0] += int(answer == truth)
         if row.get("provenance", {}).get("terminal"):
             report.terminal_rows += 1
             report.errors_on_terminal_rows += int(answer != truth)
@@ -336,6 +487,17 @@ def format_report(report: ScoreReport, *, limits: str = CORPUS_LIMITS) -> str:
             ("READ FROM THE TEXT — what a diagnostician replaces", report.text_read)):
         if total:
             out.append("  %-52s %d/%d = %.1f%%" % (name, right, total, 100 * right / total))
+    if report.scores_live_classifier and report.diagnosable_handoff[1]:
+        right, total = report.diagnosable_handoff
+        out += ["",
+                "HANDED TO THE DIAGNOSTICIAN  (a nomination, not a decision)", "-" * 88,
+                "  production's partition today is %r" % LIVE_SHAPE,
+                "  %d of %d labelled rows got an answer in %s"
+                % (total, report.label_coverage, sorted(LIVE_DIAGNOSABLE_REASONS)),
+                "  %d of those %d happen to be right already; the other %d are the headroom a "
+                "diagnostician" % (right, total, total - right),
+                "  has to win, and are what `--answers` scores. This is NOT part of any accuracy "
+                "claim above."]
     out += ["", "CONFUSION  (truth -> answer)", "-" * 88]
     truths = sorted({t for t, _a in report.confusion})
     for truth in truths:

@@ -235,12 +235,88 @@ def test_the_vocabulary_is_the_classifiers_own():
     assert {r["label"]["basis"] for r in dataset["rows"]} <= set(LABEL_BASES)
 
 
-def test_the_copied_production_vocabularies_still_agree():
-    """Two lists are COPIED from production on purpose — a bench that moves when the thing it
-    measures moves cannot detect that it moved. That only works if the copies are checked."""
-    assert triage_corpus.TORCH_OOM_MARKERS == triage._TORCH_OOM_MARKERS
+def test_the_live_arms_vocabularies_still_agree_with_production():
+    """The bench has TWO kinds of reference to production and they are checked differently.
+
+    This test is for the LIVE half only — the names an arm that scores today's classifier must
+    follow, so a drift between the bench's idea of the ownership split and the real one goes red
+    here rather than being discovered as a wrong number. It was originally pointed at the marker
+    list and the authenticated tuple; both of those turned out to belong to the HISTORICAL half,
+    which is why they are now frozen and are asserted by
+    `test_the_historical_arm_reads_no_production_name` instead. A good test that was aimed at the
+    wrong half.
+    """
+    live = triage_score.live_ownership_split()
+    assert live["shape"] in (triage_score.LIVE_SHAPE_OWNERSHIP,
+                             triage_score.LIVE_SHAPE_AUTHENTICATED)
+    # Asserted against whichever partition production actually exposes. Not a skip and not a
+    # fallback that hides a third shape: an unknown shape fails on the line above, and each known
+    # one is checked against its own source of truth below.
+    if live["shape"] == triage_score.LIVE_SHAPE_OWNERSHIP:
+        from looplab.engine import failure_diagnosis as fd
+        assert live["diagnosable"] == frozenset(fd.DIAGNOSABLE_ENGINE_REASONS)
+        assert live["engine_final"] == frozenset(fd.ENGINE_FINAL_REASONS)
+        assert live["answerable"] == frozenset(fd.DIAGNOSED_FAILURE_REASONS)
+        assert live["unclassified"] == fd.UNCLASSIFIED_REASON
+        assert live["unclassified"] in LABELS
+    else:
+        assert live["diagnosable"] == frozenset(triage.JUDGED_FAILURE_REASONS)
+        assert live["engine_final"] == frozenset(triage.AUTHENTICATED_FAILURE_REASONS)
+        assert live["unclassified"] is None
     assert triage_score.NEVER_SALVAGED_REASONS == metric_salvage.NEVER_SALVAGED_REASONS
     assert triage_score.FLAG_GUARDED_REASONS <= triage_score.NEVER_SALVAGED_REASONS
+    # Whatever production may ANSWER must be sayable in the corpus's label vocabulary, or the live
+    # arm is scoring answers the bench has no truth for.
+    assert live["answerable"] <= set(LABELS)
+    assert live["engine_final"] <= set(LABELS)
+
+
+def test_the_historical_arm_reads_no_production_name():
+    """The record of how the OLD decider scored may not move when the classifier does.
+
+    This is the defect the 2026-08-20 ownership split exposed: the "incumbent replayed" arm imported
+    the live `_failure_reason`, so the hour the classifier changed, the arm began measuring a
+    different program while still being labelled the incumbent — and two of its three assertions
+    went red as `AttributeError`, which is the lucky version. The unlucky version is a number that
+    quietly means something else.
+
+    Driven rather than asserted about: monkeypatching production's classifier to a constant must not
+    move the frozen arm by a single row, and must move the live one.
+    """
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    frozen = triage_score.frozen_replay_candidate()
+    before = [frozen(r) for r in rows]
+    live_before = [triage_score.live_engine_candidate()(r) for r in rows]
+
+    original = triage._failure_reason
+    try:
+        triage._failure_reason = lambda res: "setup"
+        assert [frozen(r) for r in rows] == before, "the frozen arm followed production"
+        moved = [triage_score.live_engine_candidate()(r) for r in rows]
+        assert moved != live_before, "the live arm did NOT follow production"
+    finally:
+        triage._failure_reason = original
+    # And the frozen marker list is the bench's OWN literal, not an import that tracks production
+    # or vanishes with it. Driven both ways rather than asserted about, because the interesting
+    # failure is the silent one: production had this name when the corpus was cut, deleted it hours
+    # later, and could grow it back tomorrow with different contents — none of which may move a
+    # label. (`hasattr` is deliberately not the test: whether production HAS the name is production's
+    # business; whether the bench FOLLOWS it is the bench's.)
+    assert triage_score._FROZEN_TORCH_OOM_MARKERS[0] == "OutOfMemoryError"
+    assert triage_corpus.TORCH_OOM_MARKERS == triage_score._FROZEN_TORCH_OOM_MARKERS
+    had = getattr(triage, "_TORCH_OOM_MARKERS", None)
+    try:
+        triage._TORCH_OOM_MARKERS = ("NOT AN OOM MARKER",)
+        assert triage_corpus.TORCH_OOM_MARKERS == triage_score._FROZEN_TORCH_OOM_MARKERS
+        assert [frozen(r) for r in rows] == before
+        # …and the labels the corpus ships do not move either, which is the thing that matters.
+        assert not [r for r in rows
+                    if triage_corpus.rederive_label(r)["reason"] != r["label"]["reason"]]
+    finally:
+        if had is None:
+            delattr(triage, "_TORCH_OOM_MARKERS")
+        else:
+            triage._TORCH_OOM_MARKERS = had
 
 
 def test_the_header_carries_the_caveat_and_the_counts():
@@ -324,8 +400,15 @@ def test_the_two_halves_of_the_vocabulary_are_scored_apart():
     """`check_failed` is decided by the same `res.stages[-1]["status"]` on BOTH sides, so a headline
     that mixed it with `oom` would credit a branch EXISTING as if it were a reading improving. The
     text-read half is the number an agentic diagnostician should be judged on."""
-    assert triage_score.AUTHENTICATED_LABELS == set(triage.AUTHENTICATED_FAILURE_REASONS)
-    assert not (triage_score.AUTHENTICATED_LABELS & set(triage.JUDGED_FAILURE_REASONS))
+    # FROZEN, and pinned as frozen: this partition is a property of the LABELS, which were cut once
+    # and do not move. Production's split moved on 2026-08-20 (`check_failed` crossed to the
+    # diagnosable side) and following it would have made two arms measured months apart
+    # incomparable, which is the opposite of what a bench is for.
+    assert triage_score.AUTHENTICATED_LABELS is triage_score.HISTORICAL_AUTHENTICATED_REASONS
+    assert triage_score.AUTHENTICATED_LABELS == {
+        "drift", "timeout", "setup", "diverged", "stalled",
+        "needs_failed", "expect_failed", "check_failed"}
+    assert triage_score.AUTHENTICATED_LABELS <= set(LABELS)
     rows = read_dataset(DEFAULT_DATASET)["rows"]
     report = triage_score.score_dataset(rows, triage_score.recorded_candidate, name="t")
     assert report.authenticated[1] + report.text_read[1] == report.label_coverage
@@ -381,6 +464,50 @@ def test_a_label_that_reads_the_classifiers_own_field_is_quarantined():
     assert report.text_read[1] > report.authenticated[1]
 
 
+def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring():
+    """The arm that makes the bench useful going forward, and the honesty that has to ride with it.
+
+    Today's classifier is two things: `_failure_reason`, which decides structurally from what the
+    engine caused, ran or measured, and a diagnostician that costs a model call and cannot run
+    inside a test. A bench that scored the first and called the number "the new classifier" would be
+    the same over-claim this file exists to prevent — so the live arm counts the handoff and the
+    report refuses to fold it into the accuracy line.
+    """
+    rows = read_dataset(DEFAULT_DATASET)["rows"]
+    report = triage_score.score_dataset(rows, triage_score.live_engine_candidate(),
+                                        name="live", live=True)
+    assert report.label_coverage == 118
+    # Every answer it gives is either engine-final or an explicit nomination. Nothing else.
+    answered = {a for (_t, a) in report.confusion} - {"<no answer>"}
+    assert answered <= (set(triage_score.LIVE_ENGINE_FINAL_REASONS)
+                        | set(triage_score.LIVE_DIAGNOSABLE_REASONS)
+                        | set(LABELS))
+    # The handoff is real and is the larger part of the corpus, so a number that ignored it would be
+    # describing a minority of the rows.
+    handed_on, total = report.diagnosable_handoff[1], report.label_coverage
+    assert handed_on > total // 2
+    assert report.diagnosable_handoff[0] < handed_on      # there IS headroom to win
+    text = triage_score.format_report(report)
+    assert "HANDED TO THE DIAGNOSTICIAN" in text
+    assert "NOT part of any accuracy claim" in text
+    # The report must NAME which of production's two partitions it scored: the same number means
+    # different things under them, and a reader six months from now has no other way to tell.
+    assert repr(triage_score.LIVE_SHAPE) in text
+    # And the block does NOT appear on an arm that is not scoring the live classifier, where the
+    # phrase "handed to the diagnostician" would be a claim about a program that never ran.
+    frozen = triage_score.score_dataset(rows, triage_score.frozen_replay_candidate(), name="f")
+    assert "HANDED TO THE DIAGNOSTICIAN" not in triage_score.format_report(frozen)
+
+
+def test_the_frozen_vocabulary_travels_in_the_artefact():
+    """A snapshot that lives only in a module is a snapshot the next reader has to go find."""
+    header = read_dataset(DEFAULT_DATASET)["header"]
+    frozen = header["frozen_vocabulary"]
+    assert frozen["torch_oom_markers"] == list(triage_corpus.TORCH_OOM_MARKERS)
+    assert set(frozen["authenticated_reasons"]) == triage_score.HISTORICAL_AUTHENTICATED_REASONS
+    assert frozen["as_of"] == "2026-08-20"
+
+
 def test_the_head_replay_never_reads_the_recorded_reason():
     """The second arm is only honest if nothing it rebuilds comes from the answer it is being
     compared against. Driven: rewriting every recorded reason to nonsense must not move it."""
@@ -392,19 +519,48 @@ def test_the_head_replay_never_reads_the_recorded_reason():
     assert [head(r) for r in rows] == before
 
 
-def test_the_marker_rule_scores_zero_over_the_durable_tail():
-    """The finding the bench exists to be able to state, pinned so it cannot quietly stop being
-    checked: `_is_torch_oom` gets NO OOM right over the 500-char record and most of them right once
-    the log reads are in front of it. The win is the window, not only the rule."""
+def test_the_durable_record_cannot_support_an_oom_determination():
+    """A property of the RECORD, not of any classifier — which is what it was really measuring.
+
+    It used to say "`_is_torch_oom` scores 0 of 23 over the durable tail". That rule is deleted:
+    `oom` is answer-only in production now, precisely BECAUSE both of its producers read the
+    failure's own text. So the classifier-shaped half of the finding has no subject any more, and
+    the half that survives is the one that was always load-bearing: **not one of the 122 preserved
+    stderr tails contains an allocator marker at all.** `node_repaired.error_in` is 500 characters
+    and `res.stderr` was clamped at 64,000, so what reached disk cannot decide an OOM by any rule,
+    present or future. Every `oom` label in this corpus therefore rests on evidence OUTSIDE
+    `at_classification` — the triage agent's own log reads, or a stage log paired to the attempt.
+
+    That is the standing consequence for anyone replaying this corpus: a candidate handed only
+    `evidence.at_classification` is strictly worse informed than the engine was, and it is filed as
+    the durable-record task (`the record does not preserve what the decider saw`).
+    """
     rows = read_dataset(DEFAULT_DATASET)["rows"]
+    tails = [r["evidence"]["at_classification"]["stderr_tail"] for r in rows]
+    assert len(tails) == 122
+    assert not [t for t in tails
+                if any(m in t for m in triage_corpus.TORCH_OOM_MARKERS)], (
+        "a preserved tail now carries an allocator marker; the finding has changed and the "
+        "durable-record task may be closable")
+
     ooms = [r for r in rows if r["label"]["reason"] == "oom"]
-    narrow = triage_score.head_replay_candidate(widened=False)
-    wide = triage_score.head_replay_candidate(widened=True)
+    assert len(ooms) == 23
+    # Every one of them is labelled from something the durable tail does not hold.
+    outside = [r for r in ooms
+               if r["label"]["basis"] == "oom_marker_in_evidence"
+               or r["label"]["basis"] == "allocator_message_in_stderr"]
+    assert len(outside) == len(ooms)
+    from_the_tail_alone = [r for r in ooms if r["label"]["basis"] == "oom_marker_in_evidence"
+                           and any(m in r["evidence"]["at_classification"]["stderr_tail"]
+                                   for m in triage_corpus.TORCH_OOM_MARKERS)]
+    assert not from_the_tail_alone
+
+    # And the consequence, driven: the widened evidence recovers OOMs the durable tail cannot, on
+    # the frozen incumbent, which is the arm whose 0-of-23 measurement argued for deleting the rule.
+    narrow = triage_score.frozen_replay_candidate(widened=False)
+    wide = triage_score.frozen_replay_candidate(widened=True)
     assert sum(1 for r in ooms if narrow(r) == "oom") == 0
     assert sum(1 for r in ooms if wide(r) == "oom") > len(ooms) // 2
-    assert not [r for r in rows
-                if any(m in r["evidence"]["at_classification"]["stderr_tail"]
-                       for m in triage_corpus.TORCH_OOM_MARKERS)]
 
 
 def test_an_unpaired_stage_log_is_never_stored(tmp_path):
