@@ -87,7 +87,28 @@ class _Judge:
         for marker, verdict in self.script.items():
             if marker in error:
                 return dict(verdict)
-        return dict(self.default)
+        out = dict(self.default)
+        # IT ANSWERS THE SECOND QUESTION TOO (2026-08-20), by ECHOING the tagged kind — which is
+        # exactly what the shipped prompt asks a real judge to do ("If the tagged kind is right,
+        # repeat it") and what `crash_repair._triage_crash` puts `[failure kind: <reason>]` at the
+        # head of `error` for.
+        #
+        # WITHOUT THIS the double is a diagnostician that was ASKED and said nothing readable, which
+        # `failure_diagnosis.diagnosed_failure_reason` correctly records as `unclassified` — so every
+        # test in this file and in `test_repair_judgment.py` that asserts a durable `reason` would be
+        # asserting against a NON-ANSWER rather than against the thing it is about (the stop
+        # decision, the critic, the budget). Weakening those assertions would have hidden the
+        # classification path instead of exercising it.
+        #
+        # A caller that WANTS the non-answer path passes an explicit `default`/`script` verdict or
+        # its own seam, and is unaffected — see `test_a_live_model_answering_garbage_stops_the_node`
+        # and `test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider`, which both
+        # deliberately keep the older shape.
+        if "failure_kind" not in out:
+            tag = str(error or "").partition("[failure kind: ")[2].partition("]")[0].strip()
+            if tag:
+                out["failure_kind"] = tag
+        return out
 
 
 class _StopWhenCircling(_Judge):

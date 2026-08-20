@@ -422,6 +422,12 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         # the two answers it is being asked to tell apart. `reason` is `_failure_reason`'s
         # classification, which reads the sandbox's out-of-band watchdog flags and never the stderr
         # sentinel (`c862045c`) — so it is the one column here the candidate cannot write.
+        # `engine_reason` rides beside it on the same `in`-guard, so a resumed critic reads the
+        # ENGINE's column exactly as an in-process one does. Absent on a pre-2026-08-20 row, where
+        # `reason` was the engine's own answer anyway — `repair_judgment.authenticated_cause` is the
+        # one place that fallback is spelled.
+        if "engine_reason" in d:
+            row["engine_reason"] = str(d.get("engine_reason") or "")
         if "reason" in d:
             row["reason"] = str(d.get("reason") or "")
         if "changed" in d:
@@ -2820,6 +2826,12 @@ class EvaluateMixin:
                     **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
                        if _param_overrides else {}),
                     "reason": reason,
+                    # THE ENGINE'S OWN COLUMN, beside the one a diagnostician may have chosen, so the
+                    # F8 critic's `cause` is a fact and not a verdict — see
+                    # `repair_judgment.authenticated_cause` for why `c862045c` makes this mandatory
+                    # rather than tidy. The in-process row and the durable one must carry the same
+                    # pair, or a chain judged before a resume and after it compares different columns.
+                    "engine_reason": _engine_reason,
                     "stages_passed": _depth})
                 # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
                 # means the engine compared the bytes and nothing moved: the files this loop is about
