@@ -770,9 +770,24 @@ def test_the_license_is_priced_at_the_chains_largest_declaration_not_its_latest(
     assert stop is not None                  # the pre-fix answer: abandoned on a cheaper manifest
     assert "1800s" in stop and "600s" in stop, stop
 
-    # ...and the engine takes the max, so the chain keeps the license it earned.
-    assert repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=max(big, small),
-                                   retrain_cap=cap) is None
+    # ...and the engine prices against a RUNNING MAXIMUM over the chain's declarations, so the
+    # license survives a later, smaller one. Driven by simulating the accumulator over a real
+    # sequence rather than by restating the first assertion: `max(big, small)` IS `big`, so the line
+    # this replaces asserted `f(big) is None` for the second time and added nothing. Two orders,
+    # because a running maximum is order-insensitive and a "keep the latest" bug is not.
+    for declarations in ([big, small], [small, big], [big, small, small]):
+        high = 0.0
+        for declared in declarations:
+            high = max(high, declared)
+        assert repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=high,
+                                       retrain_cap=cap) is None, declarations
+
+    # The negative control the assertions above cannot supply: a chain that only ever declared the
+    # SMALL pipeline really is stopped. Without this, every line here would pass on a rule that
+    # never stops anything.
+    only_small = repair_redone_work_stop(chain_seconds=spent, pipeline_seconds=small,
+                                         retrain_cap=cap)
+    assert only_small is not None, "the stop must still fire when the license was never earned"
 
 
 def test_the_engine_feeds_that_floor_a_running_maximum_and_not_the_latest_pipeline():
@@ -797,3 +812,19 @@ def test_the_engine_feeds_that_floor_a_running_maximum_and_not_the_latest_pipeli
               and any(getattr(t, "id", None) == "chain_pipeline_s" for t in n.targets)
               and isinstance(n.value, ast.Call) and getattr(n.value.func, "id", "") == "max"]
     assert len(maxima) == 1, ast.unparse(tree)[:200]
+
+    # ...AND ITS OPERANDS, which this test did not constrain until 2026-08-20. "is a call to `max`"
+    # is satisfied by `max(chain_pipeline_s, chain_pipeline_s)` (the accumulator never rises) and by
+    # `max(_pipeline_s, _pipeline_s)` (the pre-fix "latest manifest" pricing this whole rung exists
+    # to replace). Both restore the defect while leaving every assertion above green, which is the
+    # same shape as a positive substring pin: the guard names the mechanism and not the property.
+    #
+    # The property is that the new value is folded INTO the accumulator: one operand must be
+    # `chain_pipeline_s` itself, and at least one other must be a DIFFERENT expression.
+    operands = [ast.unparse(a) for a in maxima[0].value.args]
+    assert "chain_pipeline_s" in operands, (
+        f"the accumulator is not an operand of its own max — {operands} is a rebinding, not a "
+        "running maximum")
+    assert len(set(operands)) > 1, (
+        f"`max` is applied to one repeated expression {operands}; a running maximum has to fold in "
+        "the freshly resolved pipeline cost")
