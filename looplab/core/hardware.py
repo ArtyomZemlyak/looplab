@@ -321,11 +321,47 @@ def operational_attention_points(*, include_env: bool = True) -> str:
     return head + (
         "Operational attention points (consider these and adapt to the task — they are cues, not "
         "rigid rules):\n"
-        "- HARDWARE: check the CPU/GPU actually available (via a gpu_info tool when you have one, "
-        "else nvidia-smi) and plan experiments, "
-        "parallelism, batch sizes and precision from it. By DEFAULT use ALL available GPUs (e.g. "
-        "`--gpus <N>` / DataParallel/DDP for N GPUs) unless the task says otherwise; don't leave GPUs "
-        "idle or run a tiny single-GPU job on a multi-GPU box without reason.\n"
+        # CLAIM[hardware-brief-not-a-device-policy] this bullet describes the BOX and must not tell a
+        # role how many devices to use: the run's own footprint contract owns that, and an
+        # experiment is fenced to what the scheduler reserved.
+        # decided:present:CUDA_VISIBLE_DEVICES@looplab/engine/resources.py
+        #        +present:footprint@looplab/agents/roles.py
+        #
+        # WHAT THIS BULLET USED TO SAY, and why it was a defect rather than a difference of
+        # emphasis. It read: "By DEFAULT use ALL available GPUs (e.g. `--gpus <N>` / DataParallel/DDP
+        # for N GPUs) unless the task says otherwise; don't leave GPUs idle or run a tiny single-GPU
+        # job on a multi-GPU box without reason." That is FALSE about the machine an experiment runs
+        # on, in two ways at once. (1) `engine/resources.py::_resource_request_for_node` gives an
+        # UNDECLARED footprint exactly ONE device whenever the run evaluates in parallel, and
+        # `_resource_eval_env` fences the child's `CUDA_VISIBLE_DEVICES` to precisely the reserved
+        # ids — so "use all available GPUs" instructs the role to write `--gpus 2` into a command
+        # that will only ever SEE one. (2) The very tool this bullet recommends cannot tell the role
+        # otherwise: `nvidia-smi` reports the PHYSICAL box regardless of `CUDA_VISIBLE_DEVICES`, as
+        # `engine/resources.py` records in its own comment. And it contradicted, in the SAME prompt,
+        # both paragraphs that actually govern the decision — `agents/roles.py::footprint_guidance`
+        # and `engine/proposal_cues.py::_gpu_budget_hint_text`, which say `gpus=1` is the ordinary
+        # declaration. Those two are gated by `Settings.gpu_footprint_cue` and were corrected on
+        # 2026-08-19; this copy is gated by NOTHING and reaches five roles
+        # (`agents/roles.py`, `adapters/repo_developer.py`, `engine/genesis.py`,
+        # `serve/llm_context.py`, `serve/routers/genesis.py`), so it outlived the correction.
+        # The rule it is replaced by is the operator's: A CONSTRAINT OF THE MACHINE IS DISCOVERED BY
+        # THE THING THAT RUNS ON IT, never asserted in prose an agent reads. The box's inventory is
+        # still stated (it is a real orientation fact); what a given experiment GETS is not, because
+        # only the reservation knows that and only the process inside it can measure the rest.
+        # `include_env=False` drops the environment line, so this must not say "the line above":
+        # a sentence that is only true in one of two call modes is the same defect one size down.
+        "- HARDWARE: whatever `nvidia-smi` or an environment line reports is the BOX, and that is "
+        "NOT what one experiment gets: an "
+        "evaluation is fenced to the devices the scheduler reserved for it "
+        "(`CUDA_VISIBLE_DEVICES`), and `nvidia-smi` reports the physical box either way — so never "
+        "infer a device count, a batch size or a memory ceiling from it. How many devices this "
+        "experiment may declare is stated by the run's own footprint/GPU-budget paragraph, which "
+        "wins over this bullet. Everything else that depends on the hardware — the memory ceiling, "
+        "per-step time, whether a batch fits at all — is CHEAPER TO MEASURE THAN TO GUESS: read the "
+        "device count and free memory from inside the process that will train, and run one step at "
+        "the size you intend before committing hours to it. A number measured in the run is about "
+        "this model on this card; a number copied from a recipe or a benchmark table is about "
+        "somebody else's.\n"
         "- REPO/DATA SIZE: before copying or seeding, check how big the repo and datasets are. Copy "
         "only what's needed (usually the source code); never deep-copy multi-GB artifacts (model "
         "checkpoints, datasets) into a workspace — reference large read-only inputs by absolute path "

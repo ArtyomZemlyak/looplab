@@ -1,7 +1,7 @@
 """EngineOptions — the Engine's pure-config knobs as one frozen bundle (BACKLOG §4).
 
 Before this module, every engine knob cost FOUR edits: a `Settings` field, a ~1-line passthrough in
-`cli.py::_engine`, an `Engine.__init__` keyword, and a `self._x` assign. The Settings→Engine
+`cli/__init__.py::_engine`, an `Engine.__init__` keyword, and a `self._x` assign. The Settings→Engine
 passthrough is now a single `options=EngineOptions.from_settings(settings)`; the Engine resolves each
 knob as: explicitly passed kwarg > `options` field > default (see `_UNSET` below). The
 ~100 existing `Engine(...)` keyword call sites keep working unchanged.
@@ -284,7 +284,7 @@ class EngineOptions:
 
     @classmethod
     def from_settings(cls, s: "Settings") -> "EngineOptions":
-        """Build the bundle from a `Settings` — the exact Settings→Engine mapping cli.py::_engine
+        """Build the bundle from a `Settings` — the exact Settings→Engine mapping cli/__init__.py::_engine
         used to spell out kwarg-by-kwarg. Every field is a straight `settings.<name>` copy (direct
         attribute access on purpose: a missing Settings field should fail loudly, exactly like the
         old literal passthrough did), except the `_RENAMES` entries. Anything cli.py derives with

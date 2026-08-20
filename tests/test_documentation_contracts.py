@@ -58,7 +58,13 @@ def test_index_mentions_every_numbered_document():
     #   42 -> 43 (2026-08-19): the operator-list audit (doc 43). No collision this time — the
     #   number was claimed by checking the glob AND the index table together, which is the
     #   procedure the three earlier collisions existed for.
-    assert len(numbered) == 43, "the derived numbered-document inventory changed"
+    #   43 -> 45 (2026-08-20): TWO documents in one day, and the fourth collision this table has
+    #   had — two agents working in parallel worktrees each claimed 44 by checking the glob and the
+    #   index together, which is the correct procedure and cannot see an unmerged sibling. Resolved
+    #   at the merge by renumbering the second to 45; the procedure is unchanged because nothing
+    #   short of a lock could have prevented it, and a lock on doc numbers costs more than a rename.
+    #   45 -> 46 (2026-08-20): the params proposed-vs-run root cause (doc 46).
+    assert len(numbered) == 46, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
@@ -233,3 +239,82 @@ def test_the_package_map_names_each_package_exactly_once():
         f"{duplicated} appear more than once in CLAUDE.md's package map. Two rows for one package "
         "means a reader — and a splice — takes whichever comes first, and the other copy's content "
         "is invisible. Merge them into one row rather than adding a second.")
+
+
+# The number-words the three surfaces below spell out. Short on purpose: a registry that outgrew
+# this map would be a registry whose enumerations should stop being written by hand at all.
+_COUNT_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen"}
+
+
+def test_every_failure_reason_surface_names_all_of_them():
+    """The three places that ENUMERATE `FAILURE_REASONS`, derived from the registry.
+
+    This is the repo's most-repeated documentation defect and it has now recurred inside its own
+    fix. The list is written out in prose three times; each time a reason is added, all three go
+    stale, and each correction so far has been a hand-count of a hand-list:
+
+      * 2026-08-13 — concepts.md said "eight" and omitted `diverged`/`stalled`/`needs_failed`;
+      * 2026-08-14 — a merge left BOTH generations of that bullet in place, one naming eleven and
+        one naming eight;
+      * 2026-08-20 (`2933423c`) — the count was corrected to "twelve" and the LIST left at eleven,
+        so the sentence miscounted its own enumeration. `not_learning` had been in the registry
+        since `364cef55` the previous day, and `50ab168e` edited the settings row that omits it
+        without noticing.
+
+    `tests/test_config_docs_sync.py` cannot catch any of this: it asserts every `Settings` field is
+    NAMED somewhere in configuration.md and never reads a DEFAULT — which CLAUDE.md's docs-sync rule
+    explicitly requires to be correct ("every `Settings` field must have a row with the CORRECT
+    default"). The settings table's own row for `inline_repair_reasons` prints that default as a
+    JSON array, so here it is parsed and compared to the tuple.
+
+    Additive-only by construction: adding a reason fails this until the three surfaces name it, and
+    nothing here penalises REMOVING one.
+    """
+    from looplab.core.models import FAILURE_REASONS
+
+    reasons = list(FAILURE_REASONS)
+    word = _COUNT_WORDS.get(len(reasons))
+    assert word, f"FAILURE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
+    problems = []
+
+    # 1. The settings table's DEFAULT cell, parsed as the JSON array it is printed as.
+    config = (DOCS / "guide" / "configuration.md").read_text(encoding="utf-8")
+    row = [line for line in config.splitlines() if line.startswith("| `inline_repair_reasons`")]
+    assert len(row) == 1, "the inline_repair_reasons settings row moved or was duplicated"
+    arrays = re.findall(r"`(\[\"crash\"[^`]*\])`", row[0])
+    assert len(arrays) == 1, "the inline_repair_reasons row no longer prints its default as an array"
+    documented = json.loads(arrays[0])
+    if documented != reasons:
+        problems.append(
+            f"docs/guide/configuration.md `inline_repair_reasons` default is {documented} but "
+            f"`core/models.py::FAILURE_REASONS` is {reasons}")
+
+    # 2. The concepts bullet: a spelled count AND the members it then lists.
+    concepts = (DOCS / "guide" / "concepts.md").read_text(encoding="utf-8")
+    # `\s+` on the tail anchor, not a literal space: this bullet is a wrapped markdown paragraph, and
+    # "mechanical three" straddled the line break the day two branches wrapped it differently. A
+    # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
+    # opposite of what it is for — the rule is about which reasons are named, never about where the
+    # line ends.
+    bullet = re.search(r"\*\*any\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)mechanical\s+three",
+                       concepts, re.S)
+    assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
+    if bullet.group(1) != word:
+        problems.append(f"docs/guide/concepts.md says '{bullet.group(1)}' FAILURE_REASONS, not '{word}'")
+    missing = [r for r in reasons if f"`{r}`" not in bullet.group(2)]
+    if missing:
+        problems.append(f"docs/guide/concepts.md's inline-repair list omits {missing}")
+
+    # 3. The process diagram (CLAUDE.md: stale diagram is a bug, in the SAME change).
+    diagram = (DOCS / "infographic" / "agent-architecture.html").read_text(encoding="utf-8")
+    block = re.search(r"reasons = ALL (\w+) FAILURE_REASONS by default \(([^)]*)\)", diagram)
+    assert block, "the diagram's inline-repair block moved — re-derive this check"
+    if block.group(1).lower() != word:
+        problems.append(f"the process diagram says 'ALL {block.group(1)}', not '{word.upper()}'")
+    missing = [r for r in reasons if r not in block.group(2)]
+    if missing:
+        problems.append(f"the process diagram's inline-repair list omits {missing}")
+
+    assert not problems, (
+        "FAILURE_REASONS surfaces disagree with the registry — update them in the SAME change as "
+        "the registry (CLAUDE.md docs-sync rule):\n  " + "\n  ".join(problems))

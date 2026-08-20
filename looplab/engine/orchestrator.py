@@ -2935,7 +2935,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         """The declared `gpus` of every OPEN proposal — one entry per Card the run could run next.
 
         `selection_ready` is the population, and it is the right one because it is the SAME predicate
-        the Card queue selects from (`card_reservation.py::_reserve_card_build`): the width is being
+        the Card queue selects from (`card_reservation.py::_reserve_node_build`): the width is being
         derived from work this run can actually dispatch, not from every Card the board has ever held.
         A card already owned by a node, terminal, stale or in flight is not a proposal to run one more
         experiment concurrently — it is an experiment already running or already done, and counting it
@@ -4745,7 +4745,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         "_store_concept_curation": ("lessons", "enrichment"),
         "_store_claim_curation": ("lessons", "enrichment"),
         "_store_task_facets": ("lessons", "enrichment"),
-        # --- holdout (looplab/trust/holdout.py::HoldoutGrader)
+        # --- holdout (engine/holdout.py::HoldoutGrader)
         "_graded_output_name": ("holdout", None),
         "_apply_host_grade": ("holdout", None),
         "_host_score_split": ("holdout", None),

@@ -26,8 +26,26 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from looplab.core.claimpin import (
+    predicate_holds,
+    read_text as _read,
+    satisfied_only_by_prose,
+    text_without_markers as _text_without_markers,
+    tracked_text_files as _tracked_text_files,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The predicate evaluator, the tree walk and the marker-stripping rule MOVED to
+# `looplab/core/claimpin.py` on 2026-08-20 and are imported rather than re-implemented. The reason
+# is this repo's own most-repeated defect: §0.8 found FOUR implementations of one claim/verdict join
+# and every drift was between the copies. Its sibling guard `tests/test_claim_pins.py` re-derives a
+# different family of markers (`CLAIM[…] … decided:`) with the SAME three predicates plus `line:`,
+# and two evaluators would eventually disagree about what `present:` means — including about the
+# marker-stripping rule, whose absence was a silent FALSE GREEN here until 2026-08-19.
+#
+# The two indexes stay separate because their reds mean OPPOSITE things: red here means the item
+# SHIPPED (delete the marker), red there means the SENTENCE is false (fix the sentence).
 
 # One key. `grep -rn 'OPEN\[' .` is the whole index.
 _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
@@ -37,103 +55,48 @@ _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
 _PROOF = re.compile(r"proof:((?:absent:|present:|missing:)\S+)")
 _MEASURED = re.compile(r"measured:(.{0,400})", re.S)
 
-# The window a marker's own clause must live in. A docstring paragraph and a markdown row both fit;
-# it is deliberately short enough that the clause cannot end up describing the NEXT item.
+# The window a marker's own clause must live in. A docstring paragraph and a markdown row both fit.
+# LENGTH IS NOT WHAT KEEPS A CLAUSE FROM DESCRIBING THE NEXT ITEM, and this comment claimed it was
+# until 2026-08-20: in the bullet-list docs (27, 34) markers sit 150-300 chars apart, so a marker
+# written with NO clause of its own silently borrowed its neighbour's. Measured over this tree by
+# deleting each OPEN marker's own `proof:` clause: 17 of 77 still found one, i.e. 17 markers were
+# one edit away from being checked against a DIFFERENT item's falsifier — the wrong-proof failure
+# this index is worth less than nothing with. `_marker_windows` therefore ends every window at the
+# NEXT marker, and the length is only the outer bound it always was.
 _WINDOW = 900
 
-_SKIP_DIRS = {".git", ".claude", "runs", "node_modules", "dist", "site", "__pycache__",
-              ".pytest_cache", ".mypy_cache", ".venv", "venv", "build"}
-_TEXT_SUFFIXES = {".py", ".md", ".js", ".jsx", ".html", ".txt", ".toml", ".yml", ".yaml"}
 
+def _marker_windows(text: str):
+    """`(kind, slug, window)` for every marker in `text`, each window ending at the NEXT marker.
 
-def _tracked_text_files() -> list[Path]:
-    out: list[Path] = []
-    stack = [ROOT]
-    while stack:
-        d = stack.pop()
-        for child in d.iterdir():
-            if child.is_symlink():
-                continue
-            if child.is_dir():
-                if child.name not in _SKIP_DIRS and not child.name.endswith(".egg-info"):
-                    stack.append(child)
-            elif child.suffix in _TEXT_SUFFIXES:
-                out.append(child)
-    return sorted(out)
-
-
-def _read(path: Path) -> str:
-    return path.read_text(encoding="utf-8-sig", errors="replace")
-
-
-def _text_without_markers(path: Path) -> str:
-    """The file as a predicate sees it: every line carrying a marker is removed.
-
-    Both directions matter. Without this an `absent:` proof would be falsified by the very line that
-    states it, and a `present:` proof could be SATISFIED by its own marker text — the "a comment can
-    satisfy the pin" failure this guard exists not to have.
+    Pure and driven directly by `test_a_markers_proof_window_stops_at_the_next_marker`, because a
+    window that runs on is a green marker with someone else's falsifier — which reads exactly like a
+    verified item and is the one failure this whole file is supposed to make impossible.
     """
-    return "\n".join(line for line in _read(path).splitlines()
-                      if not (_MARKER.search(line) or "proof:" in line
-                              or "measured:" in line))
+    starts = [m.start() for m in _MARKER.finditer(text)]
+    for m in _MARKER.finditer(text):
+        nxt = next((s for s in starts if s > m.start()), len(text))
+        yield m.group(1), m.group(2), text[m.end():min(m.end() + _WINDOW, nxt)]
 
 
 def _iter_markers():
-    for path in _tracked_text_files():
-        text = _read(path)
-        for m in _MARKER.finditer(text):
-            yield path, m.group(1), m.group(2), text[m.end():m.end() + _WINDOW]
-
-
-def _resolve(rel: str) -> Path:
-    return (ROOT / rel).resolve()
+    # BOTH halves, and they are independent: `_tracked_text_files(ROOT)` is the shared evaluator's
+    # rooted walk (one implementation for OPEN and CLAIM), while `_marker_windows` is what stops a
+    # window at the NEXT marker. Dropping either one restores a distinct false green — the first a
+    # walk that skips by absolute path inside a worktree, the second a marker checked against its
+    # neighbour's falsifier.
+    for path in _tracked_text_files(ROOT):
+        for kind, slug, window in _marker_windows(_read(path)):
+            yield path, kind, slug, window
 
 
 def _predicate_holds(pred: str) -> tuple[bool, str]:
-    """Evaluate one predicate against the real tree. Returns (holds, why-not)."""
-    if pred.startswith("missing:"):
-        rel = pred[len("missing:"):]
-        target = _resolve(rel)
-        if target.exists():
-            return False, f"{rel} now EXISTS — the item this proof describes is no longer absent"
-        return True, ""
-    for kind in ("absent:", "present:"):
-        if not pred.startswith(kind):
-            continue
-        body = pred[len(kind):]
-        if "@" not in body:
-            return False, f"malformed predicate {pred!r} — expected <literal>@<path>"
-        literal, rel = body.rsplit("@", 1)
-        target = _resolve(rel)
-        if not target.exists():
-            # A dead citation is this repo's most-measured form of rot (`docs/BACKLOG.md` §0.3: 8 of
-            # 8 line citations dead, 13 corrected inline). An index whose proofs can point at
-            # nothing is the same index the glyphs already were. This is also what makes a slug
-            # SURVIVE A MOVE: the key does not change, the proof is re-pointed under a red test.
-            return False, f"{rel} does not exist — re-point this proof at where the item now lives"
-        if target.is_dir():
-            # The skip check is RELATIVE to the cited directory, not over the absolute path —
-            # fixed 2026-08-19, and the bug it had was a silent false GREEN. `p.parts` on an
-            # absolute path carries every component of wherever this checkout happens to live, and
-            # this repo's own agent worktrees live under `.claude/worktrees/<name>/`, which is in
-            # `_SKIP_DIRS`. So in a worktree EVERY file under a cited directory was filtered out,
-            # `found` was False for all of them, and a directory-form `absent:` predicate held
-            # vacuously while a `present:` one reported a defect as shipped. An index whose proofs
-            # depend on the checkout PATH is the unverified claim this file exists to replace.
-            files = [p for p in target.rglob("*")
-                     if p.is_file() and p.suffix in _TEXT_SUFFIXES
-                     and not any(part in _SKIP_DIRS for part in p.relative_to(target).parts)]
-        else:
-            files = [target]
-        found = any(literal in _text_without_markers(p) for p in files)
-        if kind == "absent:" and found:
-            return False, (f"{literal!r} is now PRESENT in {rel} — this item claims to be open "
-                           f"BECAUSE that was absent, so either it shipped or the proof is wrong")
-        if kind == "present:" and not found:
-            return False, (f"{literal!r} is GONE from {rel} — this item claims to be open BECAUSE "
-                           f"that defect was still there, so either it shipped or the proof moved")
-        return True, ""
-    return False, f"unknown predicate kind in {pred!r} (use absent:/present:/missing:)"
+    """This index's three predicates, evaluated by the shared implementation.
+
+    Repo-relative only (`allow_absolute=False`): the suite must pass against a bare
+    `git archive HEAD` tree, so an open item may never be proved by a path on one box.
+    """
+    return predicate_holds(pred, root=ROOT, allow_absolute=False)
 
 
 def test_every_open_marker_is_well_formed():
@@ -161,6 +124,27 @@ def test_every_open_marker_is_well_formed():
             if "docs/" not in body:
                 bad.append(f"{rel}: DECLINED[{slug}] `measured:` clause cites no docs/ page")
     assert not bad, "malformed open-item markers:\n  " + "\n  ".join(bad)
+
+
+def test_a_markers_proof_window_stops_at_the_next_marker():
+    """A marker must carry its OWN falsifier — never inherit the next one's.
+
+    The failure this catches is a false GREEN, which is why it is driven rather than reasoned about:
+    a marker with no clause used to scan forward `_WINDOW` characters and find the following item's
+    `proof:`, so it reported as verified while nothing about it had been checked, and it would have
+    gone RED on the day the OTHER item shipped. Both halves are asserted, because a truncation that
+    also cut a legitimate clause short would silently empty the index instead.
+    """
+    # Assembled rather than written out: this file is itself scanned by the tree walk above, and a
+    # literal marker here would enter the real index (and its `proof:` would be evaluated for real).
+    key, clause = "OPEN", "proof:" + "absent:_beta_symbol@looplab/core/config.py"
+    text = (f"- {key}[alpha-has-no-clause] the sentence about alpha, with no falsifier at all.\n"
+            f"- {key}[beta-has-its-own] {clause}\n")
+    windows = {slug: window for _kind, slug, window in _marker_windows(text)}
+    assert "proof:" not in windows["alpha-has-no-clause"], (
+        "a marker with no clause of its own must not inherit the next marker's proof")
+    assert clause in windows["beta-has-its-own"], (
+        "...and a marker's own clause must still be reachable inside the window")
 
 
 def test_each_slug_is_declared_exactly_once():
@@ -216,3 +200,77 @@ def test_the_index_is_not_empty_and_not_a_single_file():
     homes = {p.suffix for p, _ in slugs}
     assert {".py", ".md"} <= homes, (
         f"the index must span code and docs or the prose items escape again; found {homes}")
+
+
+# The three proofs whose literal today occurs ONLY in prose. Each needs re-pointing at the line that
+# DECIDES its item, not at the sentence describing it; until then they can never go green, so they
+# are noise rather than evidence. Listed by name and bounded so the set can only shrink — the same
+# shape `test_file_identity_tiers` uses for its unconverted signatures.
+PROSE_ONLY_PROOFS = {
+    "prompt-bundle-unpinned-across-hot-reload",
+    "no-shared-reserve-commit-run-budget",
+    "claim-legacy-prompt-branches",
+}
+
+
+def test_no_proof_is_satisfiable_only_by_prose():
+    """A falsifier a COMMENT can satisfy is not a falsifier.
+
+    The rule existed before this test and existed only as a comment beside one marker — the guard
+    against comment-satisfiable proofs was itself a comment, which is the exact shape it warns about
+    one level up. Both directions cost something, and differently: an `absent:` literal prose can
+    produce goes GREEN the day someone writes the word (a false shipped), while a `present:` literal
+    only prose carries can never go green at all (a marker stuck open, which teaches readers to skip
+    the index).
+
+    A literal that spans real code and a string constant — `startswith("setup` — is ABOUT the call
+    and is not flagged. That distinction is not cosmetic: the naive question ("does it survive with
+    every string blanked?") reports 5 offenders here, and only 3 of them are real.
+    """
+    offenders = {}
+    for path, kind, slug, window in _iter_markers():
+        proof = _PROOF.search(window)
+        if not proof:
+            continue
+        for pred in proof.group(1).split("+"):
+            for form in ("absent:", "present:"):
+                if not pred.startswith(form):
+                    continue
+                body = pred[len(form):]
+                if "@" not in body:
+                    continue
+                literal, rel = body.rsplit("@", 1)
+                target = ROOT / rel
+                if not target.is_file() or target.suffix != ".py":
+                    continue
+                source = _text_without_markers(target)
+                if satisfied_only_by_prose(target, source, literal):
+                    offenders[slug] = f"{form}{literal}@{rel}"
+
+    new = {s: p for s, p in offenders.items() if s not in PROSE_ONLY_PROOFS}
+    assert not new, (
+        "these proofs are satisfied only by a comment or string — re-point each at the line that "
+        "DECIDES the item:\n  " + "\n  ".join(f"OPEN[{s}] {p}" for s, p in sorted(new.items())))
+    gone = PROSE_ONLY_PROOFS - set(offenders)
+    assert not gone, (
+        "these were re-pointed or deleted — remove them from PROSE_ONLY_PROOFS so the bound keeps "
+        f"shrinking: {sorted(gone)}")
+
+
+def test_the_prose_check_can_actually_fail():
+    """NON-VACUITY, both directions, driven on the real tree rather than on a fixture.
+
+    Without this the test above passes on a broken `satisfied_only_by_prose` that always answers
+    False — which is precisely how the rule spent its life as a comment.
+    """
+    llm = ROOT / "looplab/core/llm.py"
+    assert satisfied_only_by_prose(llm, _text_without_markers(llm), "dollar-cap"), (
+        "a literal whose only occurrences are prose must be caught")
+
+    triage = ROOT / "looplab/engine/triage.py"
+    assert not satisfied_only_by_prose(triage, _text_without_markers(triage), 'startswith("setup'), (
+        "a literal anchored in real code must NOT be flagged, even where it reaches into a string")
+
+    assert not satisfied_only_by_prose(triage, _text_without_markers(triage), "no-such-text-anywhere"), (
+        "a literal that does not occur at all is a DEAD citation, reported by the proof check — "
+        "this one must not also claim it is prose")

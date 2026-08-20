@@ -145,7 +145,7 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
         # Part-V tools its own contract promises. `role` is a parameter for the same reason: this
         # constructor also serves the STRATEGIST, and a hard-coded "researcher" made
         # `_role_lessons` filter every developer-tagged production lesson out of its claims/Atlas/
-        # search (an unknown role deliberately sees all roles — cross_run_tools.py:324).
+        # search (an unknown role deliberately sees all roles — tools/cross_run_tools.py::CrossRunTools).
         providers.append(CrossRunTools(settings.memory_dir, role=role, audience="run"))
     if core_only:
         return providers

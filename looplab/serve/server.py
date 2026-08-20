@@ -284,7 +284,7 @@ def _unauth_api_ok(p: str) -> bool:
     ``EventSource``.
     """
     return (p in _SAFE_UNAUTH_API
-            # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
+            # The share route (routers/assistant.py::assistant_shared_header) is INTENTIONALLY untokened and returns
             # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
             # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
             or p == "/api/assistant/shared"

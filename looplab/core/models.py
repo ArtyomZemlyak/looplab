@@ -2052,7 +2052,7 @@ def node_counts_toward_card_budget(state: "RunState", node: Node) -> bool:
     UNIVERSE.  ``card_selection._effective_policy_state`` builds the state the policy sees by
     filtering ``state.nodes`` through exactly this predicate, so "did this node spend budget" and
     "can the policy still see this node" are one fact by construction.  The fold's debug anchor
-    (``events/replay.py::_card_debug_leaf_children``) has to answer that same question — a child the
+    (``events/card_ledger.py::_card_debug_leaf_children``) has to answer that same question — a child the
     policy cannot see does not end its failed parent's life as a debuggable leaf — and ``events`` may
     not import ``search``.  A replay-side copy is how the two views came to disagree twice: first
     about a discarded prefetch, then about a tombstoned / constraint-gated / trust-gated child.

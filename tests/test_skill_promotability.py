@@ -90,11 +90,18 @@ def test_refusing_a_skill_does_not_refuse_the_LESSON():
     from looplab.engine import lessons_distill
 
     source = inspect.getsource(lessons_distill)
-    gate = source[source.index("for h in final.research_cards():"):]
-    gate = gate[:gate.index("skills.append")]
-    assert "promotable_skill_statement(h.statement)" in gate
+    assert _gate_call_line(source) is not None, (
+        "the skill gate is no longer a CALL to promotable_skill_statement inside the "
+        "research_cards loop — if it moved, re-point this check at where it now lives")
     # …and the gate sits AFTER the lessons are appended, so the append is not inside it.
-    assert source.index("self._e._append_lessons") < source.index("promotable_skill_statement")
+    #
+    # BY AST LINE, NOT `source.index`. Until 2026-08-20 this read
+    # `source.index("self._e._append_lessons") < source.index("promotable_skill_statement")`, and
+    # `str.index` finds the FIRST occurrence — which for that name is the IMPORT (line 277), not the
+    # gate (line 343). So it asserted 266 < 277, a fact about where the import is written, and no
+    # move of the real gate could ever redden it. The import is not a Call node, so asking the AST
+    # for calls cannot make that mistake.
+    assert _append_lessons_line(source) < _gate_call_line(source)
 
 
 def test_the_word_node_alone_is_not_disqualifying():
@@ -480,3 +487,81 @@ def test_the_eligibility_RULE_is_unchanged_only_its_silence_is(tmp_path):
                    verdict="supported", best_delta=None, evidence=[0])})
     assert note["n_skills"] == 0 and note["skills"] == []
     assert not sorted((mem / "skills").glob("auto-*.md"))
+
+
+# --- AST helpers: the gate is a CALL, and a call is not a substring -------------------------------
+# Both of these exist because the checks below used to be satisfiable by text that does not run. A
+# positive substring pin is met by `# was: promotable_skill_statement(h.statement)` in a comment, and
+# a `source.index` on a name that also appears in an import measures the import. Neither could go red
+# for the change it claimed to guard.
+
+
+def _calls_named(source: str, name: str):
+    """Line numbers of every real CALL to `name` — imports and mentions in prose are not calls."""
+    import ast
+
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        spelled = func.id if isinstance(func, ast.Name) else (
+            func.attr if isinstance(func, ast.Attribute) else None)
+        if spelled == name:
+            out.append(node.lineno)
+    return sorted(out)
+
+
+def _gate_call_line(source: str):
+    """The gate's line: a call to `promotable_skill_statement` lexically inside a `for` loop whose
+    iterator is `final.research_cards()`. Returns None when no such call exists at all."""
+    import ast
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For):
+            continue
+        it = node.iter
+        if not (isinstance(it, ast.Call) and isinstance(it.func, ast.Attribute)
+                and it.func.attr == "research_cards"):
+            continue
+        inner = [c for sub in node.body for c in ast.walk(sub)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                 and c.func.id == "promotable_skill_statement"]
+        if inner:
+            return min(c.lineno for c in inner)
+    return None
+
+
+def _append_lessons_line(source: str) -> int:
+    lines = _calls_named(source, "_append_lessons")
+    assert lines, "no call to `_append_lessons` — re-point this check"
+    return lines[0]
+
+
+def test_the_gate_check_can_actually_fail():
+    """NON-VACUITY, driven: the two assertions above must go red on a tree where the gate is gone.
+
+    They are what proves the skill tier is gated while the lesson tier is not, and both of their
+    earlier spellings passed on a tree where the gate had been deleted — one because a comment
+    satisfies a substring, the other because it was reading the import's line number. A guard that
+    cannot fail is not evidence, so this drives the failure rather than describing it.
+    """
+    import inspect
+
+    from looplab.engine import lessons_distill
+
+    source = inspect.getsource(lessons_distill)
+    assert _gate_call_line(source) is not None, "sanity: the real tree HAS the gate"
+
+    # 1. Commenting the call out — what defeats a substring pin — must be seen.
+    commented = source.replace("if not promotable_skill_statement(h.statement):",
+                               "if False:  # was: promotable_skill_statement(h.statement)")
+    assert commented != source, "the gate's spelling moved; re-derive this mutation"
+    assert _gate_call_line(commented) is None, (
+        "a commented-out gate still reads as a gate — the check is satisfiable by text that "
+        "does not run")
+
+    # 2. The import alone must NOT read as a gate, which is the exact confusion `source.index` made.
+    assert _gate_call_line(
+        "from looplab.engine.lessons import promotable_skill_statement\n") is None

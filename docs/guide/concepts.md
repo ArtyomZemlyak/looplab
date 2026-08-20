@@ -755,7 +755,13 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
        reconciliation; the settings table already listed all eleven.
        FIXED AGAIN 2026-08-14: a merge had left BOTH generations of this bullet in place — a
        "**debug / repair**" one naming eleven reasons, directly under a "**repair**" one naming
-       eight, three lines after the prose that says the debug operator no longer exists. -->
+       eight, three lines after the prose that says the debug operator no longer exists.
+       FIXED AGAIN 2026-08-20: the sentence was corrected "eleven" -> "twelve" when `not_learning`
+       joined the registry, and the LIST under it was not — so the count and the enumeration it
+       introduces disagreed, in the paragraph whose own history is two earlier miscounts. The
+       enumeration is now DERIVED by `tests/test_inline_repair_reason_coverage.py::
+       test_the_concepts_guide_enumerates_every_failure_reason`, which is why a third miscount
+       cannot ship: the words stay hand-written, the SET is re-derived from `FAILURE_REASONS`. -->
   An in-place repair doesn't consume the node budget;
   deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once

@@ -355,7 +355,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `speculation_depth` and its gate receipts. Last-write-wins let a spliced/duplicated second row
     # INVERT the objective or relax the trust gate after nodes already existed — silently rewriting how
     # every prior result is ranked. This gate mirrors the producer exactly: the engine appends
-    # `run_started` only `if not state.run_id` (orchestrator.py:2307), so on any log it wrote this is a
+    # `run_started` only `if not state.run_id` (engine/orchestrator.py::Engine._setup_phase), so on any log it wrote this is a
     # no-op. Keyed on `run_id` rather than "have I seen one" for the same reason: a row that never
     # established identity is not an anchor and must not shadow the real start that follows it.
     if st.run_id:
@@ -1102,14 +1102,9 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # carried a repair counter, so a writer-side column would answer this only for rows written
         # after the change while the four affected runs already on disk stayed unattributable.
         #
-        # MAX, not `+= 1`, and it is the row's OWN durable ordinal: this makes the counter
-        # idempotent under a duplicate or re-folded row (invariant #5 — the fold must not be
-        # order/duplication-sensitive), and it inherits `_durable_repair_ledger`'s own accounting
-        # for free, since a `salvage_cause_fix` row deliberately RE-STATES the ordinal it follows
-        # ("the ORDINAL this row FOLLOWS, not a new one" — `engine/evaluate.py`) and therefore
-        # charges no epoch here either. A row with no `attempt` (or a non-int/bool one — `True` is
-        # an `int` in python and would read as epoch 1) falls back to advancing by one, which is
-        # what a log written before the ordinal existed can support.
+        # It is the row's OWN durable ordinal, and a row with no `attempt` (or a non-int/bool one
+        # — `True` is an `int` in python and would read as epoch 1) falls back to advancing by
+        # one, which is what a log written before the ordinal existed can support.
         # WHY NOT PLAIN `max`. The ordinal only rises monotonically since `_durable_repair_ledger`;
         # before it the engine restarted `attempt` per PROCESS, and that function's own measured
         # corpus is eight durable rows reading [1,2,1,2,1,2,1,2]. Under `max` that log ends at
@@ -1137,6 +1132,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                     n.repairs = _ordinal
                 else:
                     n.repairs += 1
+
 
 def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) -> None:
     """Make every surviving incumbent comparable on the newly-hidden partition.
@@ -2558,7 +2554,7 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         #   * NaN — every `>` comparison against a NaN tuple-head is False, so whichever edge arrived
         #     FIRST would stick forever ([nan, 5.0] keeps nan while [5.0, nan] keeps 5.0).
         #   * ±inf — a `+inf` head would permanently outrank every finite repair while `ConceptFrame`
-        #     drops the same edge (`finite_metric` returns None -> rejected at serve/concept_frame.py:352),
+        #     drops the same edge (`finite_metric` returns None -> rejected at serve/concept_frame.py::bounded_inputs),
         #     so replay and the UI read would disagree with no way to converge.
         # NaN/±inf are unreachable over the event log TODAY — it is orjson end to end: `orjson.dumps`
         # writes a non-finite float as `null` (-> the isinstance guard below yields 0.0) and
@@ -3824,7 +3820,7 @@ def _on_research_completed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     # instead of manufacturing a complete receipt from an already-truncated legacy projection.
     st.research.append(sanitize_research_memo_payload(d.get("memo") or d, add_receipts=False))
     # `research_served` indexes `research_requests`: the engine only sets `served_manual` while
-    # serving `research_requests[research_served]` (engine/research_cadence.py:60). Counting every
+    # serving `research_requests[research_served]` (engine/research_cadence.py::normalized_belief_key). Counting every
     # such row unconditionally let a duplicate/orphan completion push the cursor PAST the queue, so a
     # `deep_research` request appended afterwards sat at an index the manual trigger would never reach
     # — the operator's "go think hard now" was silently dropped. Clamping to the queue is a no-op on
