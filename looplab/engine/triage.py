@@ -106,6 +106,49 @@ def _shallow_fingerprint(path) -> str:
     return f"dir:{n}:{newest}"
 
 
+# The allocator-OOM markers, and the ONE place they are spelled. Two families on purpose:
+# `OutOfMemoryError` is the EXCEPTION CLASS (`torch.OutOfMemoryError` since torch 2.4,
+# `torch.cuda.OutOfMemoryError` before it), and the `<device> out of memory` line is the allocator's
+# own message, which is also what the pre-2.0 `RuntimeError` spelling carries. Either alone is
+# enough: a build can raise the class without the message, and a wrapped or re-raised error can
+# carry the message without the class name. `java.lang.OutOfMemoryError` matches the first too,
+# which is correct — it is an out-of-memory failure and wants the same directive.
+_TORCH_OOM_MARKERS: tuple[str, ...] = (
+    "OutOfMemoryError",
+    "CUDA out of memory",
+    "HIP out of memory",
+    "XPU out of memory",
+)
+
+
+def _is_torch_oom(stderr) -> bool:
+    """Did the candidate's own allocator raise an out-of-memory error?
+
+    WHY THIS ONE READS THE TEXT, when the two watchdog verdicts one branch up deliberately do not.
+    The rule this file follows is "read the authenticated out-of-band flag where one exists", and
+    for a watchdog one does: the ENGINE issued that kill, so `run_argv`'s `signals` records it and
+    the stderr sentinel is redundant AND forgeable. There is no such flag here and there cannot be
+    one — the engine did not cause this exit, the candidate's own process raised, caught nothing,
+    and died. Nothing out of band observed it. (Device-level free memory is not a substitute: it is
+    sampled after the process is gone, when the allocation has already been released.)
+
+    So the text is the only evidence, and it is acceptable HERE because of where an `oom` can
+    travel. Checked against every consumer of the literal: `crash_repair.py`'s directive branch,
+    `_rule_triage`'s rationale, and membership in `Settings.inline_repair_reasons` — all three route
+    a REPAIR. It is NOT in `metric_salvage.py::NEVER_SALVAGED_REASONS`, so it cannot suppress a
+    metric the eval really produced, and `_rule_triage` bounds it by the same `max_attempts` as a
+    `crash`, so it buys no extra attempts. A forged `oom` therefore costs ONE repair round pointed
+    at memory instead of at the real bug — the same thing a wrong guess costs — and can never admit
+    a metric, move a champion, clear a violation or change a selection.
+
+    Note the ASYMMETRY with the mirror defect (`tests/test_watchdog_kill_is_not_an_oom.py`): there,
+    reading the text would have OVER-claimed `oom` on a kill the engine itself caused and knew
+    about. Here the text is the only witness to a fact nothing else recorded.
+    """
+    err = stderr or ""
+    return any(m in err for m in _TORCH_OOM_MARKERS)
+
+
 def _failure_reason(res) -> str:
     """Classify why an eval produced no usable metric, so the audit trail distinguishes a
     crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
@@ -141,6 +184,19 @@ def _failure_reason(res) -> str:
         # eval. Heuristic: the SIGKILL signature with no real traceback in stderr (a timeout-kill is
         # also SIGKILL but `res.timed_out` already returned "timeout" above, so it never reaches here).
         if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
+            return "oom"
+        # THE ALLOCATOR'S OWN OOM IS THE OPPOSITE SHAPE, and the branch above can never match it.
+        # A `torch.OutOfMemoryError` is RAISED inside the candidate: it prints a full Python
+        # traceback and exits 1. So every conjunct of the kernel signature is false, and a GPU
+        # exhaustion — the most common way a training eval dies on this box — fell through to
+        # `crash`, whose directive is "diagnose the root cause" while `crash_repair.py`'s `oom`
+        # branch, which says "return a script that fits in LESS memory", was never reached.
+        # Measured on `runs/e5small-dr-unified-v3`: all THREE nodes died of `torch.OutOfMemoryError`
+        # and all three `node_failed` rows read `reason: crash`; two of the repairs they bought
+        # returned byte-identical files, and the run then stopped on the systemic-failure rule
+        # having never produced a metric. Its predecessor `-v2` walked a batch down 8192 -> 2048 ->
+        # 1024 -> 512 across four attempts and 11,735 s to find the same answer by hand.
+        if _is_torch_oom(res.stderr):
             return "oom"
         return "crash"
     # A declared-contract failure is its OWN reason. Both contract branches in
@@ -484,7 +540,8 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     # separate reasons is that "reduce memory" is the wrong instruction for both.
     if reason in ("timeout", "oom", "diverged", "stalled", "not_learning") and attempt <= max_attempts:
         why = {"timeout": "timeout — reduce compute to fit the budget (rule-based)",
-               "oom": "OOM-killed — reduce memory: batch/model size or subsample to fit the pod limit (rule-based)",
+               "oom": "out of memory (kernel OOM-kill or a torch allocator raise) — reduce memory: "
+                      "per-device batch, model size, sequence length or a subsample (rule-based)",
                "diverged": "health-check killed it — the loss/grad_norm went non-finite; stabilise the "
                            "objective (LR, warmup, grad clipping, epsilons), do NOT cut memory (rule-based)",
                "stalled": "stall watchdog killed it — the stage was alive and silent; remove the hang or "

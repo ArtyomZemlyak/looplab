@@ -792,6 +792,15 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # not "run cleanly and print nothing", it ran and then failed a contract its own manifest
 # declared. Measured cost of the conflation — rubertlite-dr-unified-v5 node 0 died as
 # `no_metric` having printed its metric, and the operator was told the command printed none.
+# `oom` covers TWO signatures that look nothing alike and it needs both, because it shipped with only
+# the first: the KERNEL kill (SIGKILL, exit -9/137, no traceback) and the ALLOCATOR raise
+# (`torch.OutOfMemoryError`, a full traceback, exit 1). The second matches none of the first's
+# conjuncts, so until 2026-08-20 every GPU exhaustion was classified `crash` and the Developer got
+# "diagnose the root cause" instead of "fit in less memory" — measured on `runs/e5small-dr-unified-v3`,
+# where all three nodes OOMed, all three recorded `reason: crash`, and the run stopped systemic having
+# produced no metric. They stay ONE reason because the directive is the same one ("cut the memory")
+# and neither `crash_repair.py` nor `_rule_triage` has anything different to say to them; what the
+# text had to gain was the traceback, which only the second shape has.
 # `diverged` and `stalled` are the two WATCHDOG verdicts, and they are separate members for the same
 # reason: both are tree-kills the ENGINE issued, so both exit -9 with no traceback — byte-identical to
 # the kernel OOM signature `_failure_reason` recognises. Measured cost of that conflation on

@@ -487,18 +487,38 @@ class CrashRepairMixin:
                     "rounds, fewer epochs, fewer CV folds or seeds, early stopping, a smaller/lighter "
                     "model, capped n_jobs, or a subsample — keep the approach, cut the cost.")
         if reason == "oom":
-            # The OOM-kill usually leaves NO Python traceback (the kernel SIGKILLs the process — that's
-            # how _failure_reason recognised it), so a "diagnose the root cause" directive has nothing
-            # to read. Give the actionable memory-reduction directive instead, mirroring the timeout one.
+            # TWO SHAPES REACH THIS ONE DIRECTIVE and the text has to fit both, because it used to
+            # describe only the first. (a) the KERNEL kill — a cgroup limit, SIGKILL, usually no
+            # Python traceback; (b) the ALLOCATOR's own `torch.OutOfMemoryError`, which is the
+            # opposite: a raised exception with a FULL traceback that names the failing line and the
+            # exact allocation. Saying "typically with no Python traceback" to a Developer holding
+            # (b)'s traceback invites it to distrust the one piece of evidence that says which
+            # tensor was being allocated and how much was already resident.
+            # The accumulation clause is also WRONG for (b) as it was worded: under HF/accelerate
+            # `gradient_accumulation_steps` does not divide `per_device_train_batch_size`, it
+            # MULTIPLIES the effective batch, so "use accumulation instead" applied to a per-device
+            # batch is a no-op that reads as a fix. Measured on `runs/e5small-dr-unified-v3`: three
+            # nodes declared batch 8192 with accumulation 2 and all three OOMed at the same
+            # allocation, on 1 GPU and on 2 alike.
             return ("[failure kind: oom]\n" + error + "\n"
-                    "The script was KILLED by the out-of-memory killer — it exceeded the available "
-                    "RAM/VRAM (e.g. a JupyterHub pod's cgroup memory limit) before producing a metric, "
-                    "typically with no Python traceback. The IDEA is fine — it was just too "
-                    "memory-hungry. Return a corrected, complete script that fits in LESS memory: a "
-                    "smaller batch size, a lighter/smaller model, fewer features or a subsample of the "
-                    "rows, gradient accumulation instead of one large batch, lower precision "
-                    "(float16/bfloat16), or freeing large intermediates — keep the approach, cut the "
-                    "memory.")
+                    "The script ran out of memory before producing a metric — either the "
+                    "out-of-memory KILLER stopped it (a cgroup RAM limit; usually no Python "
+                    "traceback) or the GPU allocator itself raised (`torch.OutOfMemoryError` / "
+                    "`CUDA out of memory`, which DOES leave a full traceback). The IDEA is fine — it "
+                    "was just too memory-hungry. Return a corrected, complete script that fits in "
+                    "LESS memory: a smaller batch size, a lighter/smaller model, fewer features or a "
+                    "subsample of the rows, gradient checkpointing, a shorter sequence length, lower "
+                    "precision (float16/bfloat16), or freeing large intermediates — keep the "
+                    "approach, cut the memory.\n"
+                    "If a traceback IS present, READ IT before choosing: it names the line that was "
+                    "allocating, how much it asked for, and how much of the device was already in "
+                    "use — that says whether the fix is the batch, the model or a tensor being held. "
+                    "Two traps on the numbers. The batch size in a config is usually PER DEVICE, so "
+                    "adding GPUs does not shrink it and the same per-device batch OOMs identically "
+                    "on 1 device or 8. And `gradient_accumulation_steps` MULTIPLIES the effective "
+                    "batch — it does not divide the per-device one — so raising it frees NOTHING; to "
+                    "keep an effective batch while cutting memory you must divide the per-device "
+                    "batch and raise accumulation by the same factor.")
         if reason == "diverged":
             # The directive that must be said FIRST is the negative one. This kill and an OOM kill are
             # the same SIGKILL with the same absent traceback, so a model reading only the exit code
