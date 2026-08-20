@@ -136,6 +136,43 @@ so $1 buys ~1,000 messages; one svm run went 3,462 s / ~16 messages without appr
 campaign uses **$0.02 on both arms** (~20 messages, ~1 h per task-arm): AlgoTuner's
 `config.yaml global.spend_limit`, and LoopLab's `LOOPLAB_LLM_BUDGET_USD`.
 
+### Choose the task set by EVALUATION COST, not by what sounds interesting
+
+The first 20-task list was picked for topic coverage. It could not finish: arm A on `svm` ran
+**4 h 24 m**, was cut by the safety net at 12 of ~20 messages, and wrote no result — ~22 minutes per
+agent message, i.e. ~7 h to spend one arm's budget, ~280 h for 40 task-arms.
+
+The cost is knowable in advance and free. `reports/generation.json` carries, for all 154 tasks,
+`baseline_runs[*].eval_duration_ms` — one full evaluation pass on the authors' machine. This box
+measures ~14–19x slower than that reference (`svm` 65 s there, ~15 min here; `discrete_log` 35 s
+there, 668 s here cold / 215 s warm), so the ranking transfers even though the absolute numbers do
+not.
+
+**The mean is not the story — the worst case is.** The old list carried `btsp` at **772 s per pass**,
+i.e. ~3 h for a SINGLE evaluation here, so that task-arm could never finish inside any sane net.
+
+```bash
+python - <<'EOF'
+import json, statistics
+d = json.load(open("reports/generation.json"))
+rows = []
+for task, meta in d.items():
+    runs = (meta or {}).get("baseline_runs") or {}
+    durs = [r["eval_duration_ms"] for r in runs.values()
+            if isinstance(r, dict) and r.get("success") and r.get("eval_duration_ms")]
+    if durs:
+        rows.append((statistics.median(durs) / 1000.0, task))
+for cost, task in sorted(rows)[:20]:
+    print(f"{task:<32} {cost:6.1f}s")
+EOF
+```
+
+The campaign uses the 20 cheapest: worst case **60 s** instead of 772 s, total 957 s instead of
+1882 s, and 14 of the 20 originally chosen tasks survive. Cost is the ONLY axis this selection uses
+and it is applied identically to both arms, so it cannot favour either — and the set still spans
+number theory, combinatorial optimisation, geometry, interpolation, graphs, clustering, sparse linear
+algebra and PDEs.
+
 ### Three defects that made the bridge score 0.0 for everything
 
 All three were found by validating end to end rather than by inspection, and any one of them alone
