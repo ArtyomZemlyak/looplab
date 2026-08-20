@@ -51,6 +51,21 @@ def test_every_reason_anything_can_produce_is_in_the_registry():
         f"registry names {set(FAILURE_REASONS) - producible}, which no producer ever emits")
 
 
+def test_the_triage_judge_is_not_a_third_producer():
+    """Since 2026-08-20 a MODEL may also choose a `reason` — the three
+    `triage.py::JUDGED_FAILURE_REASONS` the classifier could only infer from the failure's own text.
+    It is deliberately not a producer: the vocabulary is a SUBSET of what `_failure_reason` already
+    returns, so the derivation above stays total and every reason a judge can name is still
+    selectable by `inline_repair_reasons`. A widening here — a judge allowed to name a kind the
+    classifier cannot — would make that failure class silently unrepairable, which is this file's
+    whole subject. `tests/test_triage_llm_failure_classifier.py` owns the rest of that contract."""
+    source = inspect.getsource(triage._failure_reason)
+    returned = {line.split('return', 1)[1].split('#')[0].strip().strip('"\'')
+                for line in source.splitlines() if line.strip().startswith('return ')}
+    assert set(triage.JUDGED_FAILURE_REASONS) <= returned
+    assert set(triage.JUDGED_FAILURE_REASONS) <= set(Settings().inline_repair_reasons)
+
+
 def test_the_shipped_default_repairs_every_one_of_them():
     assert set(Settings().inline_repair_reasons) == set(FAILURE_REASONS)
     assert "no_metric" in Settings().inline_repair_reasons, (

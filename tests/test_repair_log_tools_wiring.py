@@ -445,12 +445,31 @@ def test_the_turn_grant_is_additive_and_never_caps_an_unlimited_budget():
 
 # ------------------------------------------------------------------------------ the trust line
 def test_looking_cannot_widen_what_the_verdict_may_SAY():
-    """docs/36. The tools widen this judge's CONTEXT; what it may ANSWER is unchanged, so no metric,
-    champion, selectability or violation can move because a model read a log. Driven, not pinned: a
-    seam that has just read the log and tries to say something outside the vocabulary — including a
-    different failure `reason`, or a metric — is normalized to the same three keys it always was."""
-    from looplab.engine.triage import AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION
+    """docs/36. The tools widen this judge's CONTEXT; what it may ANSWER stays a closed vocabulary,
+    so no metric, champion, selectability or violation can move because a model read a log. Driven,
+    not pinned: a seam that has just read the log and tries to say something outside the vocabulary
+    — a metric, a selectability claim, a bare `reason` key — is normalized away.
+
+    THE VERDICT GAINED A FOURTH KEY ON 2026-08-20 and this test is where that has to be argued,
+    because until then the property was spelled "it may not name a failure `reason` at all".
+    `failure_kind` is a reason, deliberately — see `tests/test_triage_llm_failure_classifier.py` for
+    the incident — and it is admissible for reasons the raw `reason` key below is not:
+
+      * it is a CLOSED vocabulary read off `triage.py::JUDGED_FAILURE_REASONS`, and only the three
+        kinds the engine itself inferred from the dead process's TEXT. Every AUTHENTICATED
+        classification — both watchdog verdicts, the deadline, the drift refusal, the stage-contract
+        statuses — is outside it and unreachable from the wire;
+      * those three are disjoint from `metric_salvage.NEVER_SALVAGED_REASONS`, so the answer cannot
+        move a number into or out of the record, which is what the paragraph above is really about.
+
+    The junk keys are unchanged and still dropped, and `reason` — the ENGINE's own column — is still
+    among them: naming the field the engine writes is not the same permission as answering the
+    question the engine asked."""
+    from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                       JUDGED_FAILURE_REASONS, judged_failure_reason)
+    from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
     assert set(AGENT_TRIAGE_ACTIONS) == {"repair", "abandon", "reject_idea"}
+    assert set(JUDGED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == set()
 
     class _Overreaching:
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):
@@ -462,8 +481,22 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
     state = RunState()
     eng = _EngineStub(_Overreaching())
     out = eng._triage_crash(state, object(), "boom", 1, reason="timeout", log_tools=object())
-    assert set(out) == {"action", "rationale", "missing_dependency"}
+    assert set(out) == {"action", "failure_kind", "rationale", "missing_dependency"}
     assert out["action"] in AGENT_TRIAGE_ACTIONS and "finished all 15 epochs" in out["rationale"]
+    # It said `reason: ok`, and that is not the field it was asked about: the kind is empty, so the
+    # engine keeps its own — and `timeout` is AUTHENTICATED, so nothing here could have moved it
+    # even if the seam had filled the field in.
+    assert out["failure_kind"] == ""
+    assert judged_failure_reason("timeout", out)[0] == "timeout"
+
+    class _Relabelling(_Overreaching):
+        def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):
+            return {"action": "repair", "rationale": "r", "failure_kind": "diverged"}
+
+    relabel = _EngineStub(_Relabelling())._triage_crash(state, object(), "boom", 1, reason="crash",
+                                                       log_tools=object())
+    assert judged_failure_reason("crash", relabel)[0] == "crash", (
+        "a watchdog verdict is not in the judge's vocabulary and may not be reached by writing it")
 
     class _Inventing(_Overreaching):
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):

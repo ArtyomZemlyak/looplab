@@ -170,7 +170,19 @@ class CrashRepairMixin:
                       depth: Optional[int] = None, attempts_left: Optional[int] = None,
                       log_tools=None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
-        {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str}.
+        {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str,
+        "failure_kind": str}.
+
+        `failure_kind` is the second question this one call answers since 2026-08-20 — what the
+        failure WAS, over the three kinds `_failure_reason` can only read out of the dead process's
+        own text (`triage.py::JUDGED_FAILURE_REASONS`). It costs NO extra call: the loop already
+        makes exactly one triage call per failed attempt and this judge is already handed the
+        evidence the question needs. It is uncoerced here on purpose — the fallback for an absent or
+        out-of-vocabulary value is the engine's deterministic classification for THIS eval, which
+        only the caller holds, so `triage.judged_failure_reason` is the one place the refusal is
+        spelled. Every path below that does not return an AGENT verdict (the rule fallback, the two
+        fail-closed degradations) leaves it absent, and absent means "the engine keeps its own
+        answer".
 
         THIS IS THE STOPPING RULE for the inline-repair loop, not merely a repair-vs-reject
         classifier. The unified agent decides (it can consult the run via its pilot tools —
@@ -309,7 +321,15 @@ class CrashRepairMixin:
                 # verdict, so it is carried here rather than re-derived downstream. It fails
                 # closed to "" = no install, and the engine never acts on it alone (see
                 # runtime/deps.py::triage_install_candidates).
+                # `failure_kind` rides in the SAME narrowed bag as `missing_dependency` and for the
+                # same reason: it is part of the verdict, so it is carried here rather than
+                # re-derived downstream. It fails closed to "" — an absent key, an older duck-typed
+                # seam, a model that ignored the field — and "" is refused by
+                # `triage.judged_failure_reason`, which keeps the engine's own classification. It is
+                # NOT coerced here: the fallback is `_failure_reason`'s answer for THIS eval, which
+                # this frame does not hold and the caller does.
                 return {"action": out["action"],
+                        "failure_kind": str(out.get("failure_kind", "")).strip().lower()[:40],
                         "rationale": str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP],
                         "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
             # A TRANSPORT FAILURE OBSERVED ONE LAYER DOWN. `UnifiedAgent.triage_crash`'s `_fallback`

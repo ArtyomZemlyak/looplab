@@ -722,9 +722,10 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any** of the eleven `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  **any** of the twelve `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
-  `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
+  `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning` — not only the mechanical
+  three.
   <!-- FIXED 2026-08-13 (mega-review, doc 40): this list said "eight" and omitted the last three — it was
        written on a branch where 8 was correct and merged beside the registry widening without
        reconciliation; the settings table already listed all eleven.
@@ -743,9 +744,29 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   third repair on, only whether successive attempts are addressing different causes or circling one.
   A count could answer neither question: `rubert-dr-0804` wore 369 distinct error signatures on one
   broken registry, and v6 node 5 halved a batch size three times against an OOM that never happened.
-  None of the three may decide *what the result was* — every stop terminalizes carrying the eval's
-  own authenticated failure reason, so no model's word moves a metric, a champion, selectability or a
-  violation. The **floors** stay underneath: an absolute ceiling of 50 repairs per node — 12 for a
+  None of the three may decide *what the result was* — no model's word moves a metric, a champion,
+  selectability or a violation.
+  **Since 2026-08-20 the same judge also says WHAT FAILED, over half of the vocabulary.** The
+  classification splits in two. Eight reasons are **authenticated facts** the engine recorded out of
+  band about what *it* did — `diverged` and `stalled` (the watchdogs' `signals`), `timeout` (its own
+  clock), `drift` (the cross-reader's refusal), `setup`, and the three stage-contract statuses — and
+  those are final: the judge is not asked about one and could not be read if it answered. Three are
+  **readings** of the dead process's own text — `crash`, `oom`, `no_metric` — and those go to the
+  judge, over a closed vocabulary, on the triage call the loop already pays for. It costs no extra
+  call and it is safe for the record by construction: every reason that suppresses a metric
+  (`NEVER_SALVAGED_REASONS`) is on the authenticated side, so a judged reason can move a directive
+  and never a number. What it fixes: the three readings are matched by
+  looking for known strings in the captured stderr, so they are right when a failure says its own
+  name there and wrong when it does not. Measured over `runs/`, **26 of the 41 text-read failures in
+  the five modern runs were out-of-memory failures labelled `crash`** — `e5small-dr-unified-v3` died
+  with three nodes, zero metrics and eight such rows. The marker list beside this
+  (`triage.py::_is_torch_oom`, landed the same day) now catches the allocator spellings somebody has
+  been bitten by; the judge is what covers the ones nobody wrote down and, above all, the case where
+  the diagnosis is not in the captured stderr at all — on **9 of those 26 rows** the whole
+  500-character tail is `torchrun`/`accelerate`'s opaque `Root Cause … exitcode: 1` block, and only
+  a reader that can open the stage log resolves them. The durable
+  rows now carry `reason_source` and `engine_reason` beside `reason`, so the record says who chose
+  the word and never loses the deterministic answer. The **floors** stay underneath: an absolute ceiling of 50 repairs per node — 12 for a
   crash the *rule* path cannot classify, because 50 is the ceiling under a judge that can say "I no
   longer know how to fix this" and there is no judge on that branch — the eval-time
   budget, `systemic_failure_stop`, and the money ceiling. Both the budget and that history are read

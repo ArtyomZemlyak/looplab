@@ -79,9 +79,9 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
     if _WATCH_LIMITER is None:
         _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
     return _WATCH_LIMITER
-from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
+from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION, REASON_SOURCE_ENGINE,
                                    UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   _failure_reason, repair_artifact_defect)
+                                   _failure_reason, judged_failure_reason, repair_artifact_defect)
 # The repair-verification rung: did this repair do what its rationale said? A LEAF (pure functions
 # over bytes the loop already holds — no engine state, no events, no model), imported here rather
 # than re-derived, because the same verdict has to be written to the durable row, read back off the
@@ -1749,6 +1749,16 @@ class EvaluateMixin:
             declaration_repaired = None
             err = ""
             reason = "crash"
+            # WHO CHOSE `reason`, and what the ENGINE's own answer was — the two columns that keep
+            # the durable rows honest now that a model may re-read three of the twelve
+            # classifications (`triage.py`'s fact/reading split). `_engine_reason` is set beside
+            # every classification and is never overwritten by a judge, so the authenticated column
+            # survives on the row whatever the model said and any audit can still be run against it.
+            # Both default to the engine, which is what every path that never reaches a judge —
+            # no `unified_agent`, a dead transport, an unreadable verdict, a floor stop, a reason the
+            # operator excluded from `inline_repair_reasons` — leaves them at.
+            _reason_source = REASON_SOURCE_ENGINE
+            _engine_reason = reason
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
             # attempt — what failed, what the fix claimed it would do, and which files it actually
             # touched. Rows made in THIS process are appended from loop locals (every field is already
@@ -2013,6 +2023,10 @@ class EvaluateMixin:
                 # documents, and it would send the Developer to halve a batch size that was never
                 # the problem.
                 reason = watchdog_reason or _failure_reason(res)
+                # Re-stamped per ATTEMPT, beside the classification it describes: a chain whose
+                # third attempt is judged and whose fourth is not must not carry the third's
+                # attribution into the fourth's row.
+                _engine_reason, _reason_source = reason, REASON_SOURCE_ENGINE
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
@@ -2267,11 +2281,45 @@ class EvaluateMixin:
                                             attempts_left=_repair_attempts_left(attempt, _repair_cap),
                                             log_tools=_repair_tools)
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
+                # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
+                # verdict this attempt already paid for, and before every branch below that
+                # consumes `reason`: the directive `_repair_error_context` renders, the
+                # triage-driven install (which a judged `oom` now correctly suppresses — "a too-slow
+                # or too-big run is never fixed by installing something", as that branch's own
+                # comment says), the judge history the F8 critic compares causes across, and the
+                # durable rows. It is deliberately BELOW the `inline_repair_reasons` gate and below
+                # `_salvage_eval_metric`, both of which run on the deterministic answer: the loop
+                # recomputes `reason` from `_failure_reason(res)` at the top of every attempt, so no
+                # judged reason can switch inline repair on or off, and none can reach salvage.
+                #
+                # `judged_failure_reason` is the whole rule and it is deliberately not restated
+                # here: an AUTHENTICATED classification (the two watchdog verdicts, the engine's own
+                # clock, the drift refusal, the stage-contract statuses, the setup short-circuit) is
+                # returned unchanged and the judge's answer is not consulted at all, so the model
+                # cannot contradict a fact the engine holds out of band. Only the three the engine
+                # READ from the dead process's text can move, and those three are disjoint from
+                # `metric_salvage.NEVER_SALVAGED_REASONS`, which is why nothing about salvage
+                # depends on this line — `_salvage_eval_metric` above ran on the deterministic
+                # answer and would answer identically either way.
+                #
+                # BELOW the two engine verdicts' handling by construction rather than by ordering:
+                # `unanswerable` and `unreadable` are not in `AGENT_TRIAGE_ACTIONS`, so a call that
+                # could not produce a stop decision has not produced a classification either and
+                # this returns the engine's own. `reject_idea` overwrites `reason` two branches down
+                # with `idea_rejected`, which is the engine's word for "the lineage is wrong" and
+                # not a classification of the eval at all — it stays the last word, and
+                # `_reason_source` below records that the engine chose it.
+                reason, _reason_source = judged_failure_reason(reason, triage)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
                     break
                 if action == "reject_idea":   # the idea itself is wrong -> mark the lineage; steer to a new idea
                     reason = "idea_rejected"
+                    # Not a classification of the eval — it is the ENGINE's word for "this lineage
+                    # is wrong", set from the action and not from `failure_kind`. So the attribution
+                    # goes back to the engine even though a model's verdict is what triggered it:
+                    # `reason_source` answers "who classified the failure", and nobody did here.
+                    _reason_source = REASON_SOURCE_ENGINE
                     triage_outcome = ("reject_idea", triage.get("rationale", ""))
                     break
                 # A JUDGE THAT PRODUCED NO USABLE VERDICT, in the two shapes that are not the same
@@ -2513,6 +2561,7 @@ class EvaluateMixin:
                     triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
                                                  "repaired code was produced")
                     reason = "developer_crash"
+                    _reason_source = REASON_SOURCE_ENGINE   # the engine observed the dead provider
                     err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
                            f"repaired. Its last eval error was: {err[-200:]}]")
                     await self._auto_pause_provider_failure(
@@ -2605,11 +2654,22 @@ class EvaluateMixin:
                         # it is capped for event-payload hygiene and not for trust.
                         **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
                            if _param_overrides else {}),
-                        # The AUTHENTICATED cause of the failure this repair answers — F8's critic
-                        # compares causes across attempts, and the only trustworthy source of "what
-                        # kind of failure was that" is `_failure_reason` over the sandbox's
-                        # out-of-band signals. Additive (invariant #5); the fold ignores it.
+                        # The cause of the failure this repair answers — F8's critic compares
+                        # causes across attempts. Additive (invariant #5); the fold ignores it.
+                        #
+                        # It used to be described here as "the AUTHENTICATED cause", and since
+                        # 2026-08-20 that is true of `engine_reason` and of `reason` only when
+                        # `reason_source` says `engine`: a judge may re-read the three kinds
+                        # `_failure_reason` inferred from the dead process's TEXT (`triage.py`'s
+                        # fact/reading split), and `crash` was the wrong word for every one of the
+                        # 25 out-of-memory failures in `runs/`. The three columns are written
+                        # together so the row never has to be interpreted: what the engine acted on,
+                        # who chose it, and what the deterministic classifier said. The
+                        # authenticated column is never overwritten, so a reader that wants the old
+                        # guarantee reads `engine_reason` and gets exactly it.
                         "reason": reason,
+                        "reason_source": _reason_source,
+                        "engine_reason": _engine_reason,
                         # The wall-clock of the eval this repair answers. Additive (invariant #5);
                         # the fold ignores it. It is what makes the COST floor durable across a
                         # resume — see `_durable_repair_seconds`, which sums these rows, and
@@ -2985,8 +3045,15 @@ class EvaluateMixin:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
                     # if the crash-triage agent judged the idea fundamentally wrong).
                     sp.set("error_reason", reason)
+                    # `reason_source`/`engine_reason` ride on the terminal for the same reason
+                    # they ride on `node_repaired`: `reason` is the RECORD of what this node died
+                    # of, and since a judge may re-read three of the twelve classifications the
+                    # record has to say who chose the word. Additive (invariant #5) and
+                    # fold-ignored; an ABSENT pair on an older row means "nobody looked", which is
+                    # deliberately not the same fact as `engine`.
                     data = {"node_id": node_id, "generation": generation,
-                            "error": err, "reason": reason, "eval_seconds": total_eval}
+                            "error": err, "reason": reason, "eval_seconds": total_eval,
+                            "reason_source": _reason_source, "engine_reason": _engine_reason}
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:
