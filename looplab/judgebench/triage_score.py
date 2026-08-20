@@ -412,6 +412,11 @@ class ScoreReport:
     # rows and how many the nomination happens to get right, so "the deterministic half is 74.6 %"
     # can never be read as "the new classifier is 74.6 %".
     diagnosable_handoff: list = field(default_factory=lambda: [0, 0])   # [right by luck, handed on]
+    # Of the rows handed on, how many have a TRUTH the diagnostician is not permitted to give. Its
+    # answer vocabulary is closed and deliberately narrower than the label vocabulary — a model may
+    # not assert that an engine mechanism it cannot observe fired — so these rows are unwinnable by
+    # construction and a ceiling computed without them is a promise the design cannot keep.
+    unreachable_by_diagnosis: int = 0
     scores_live_classifier: bool = False    # set only by the live arm; gates the handoff block
 
     @property
@@ -452,6 +457,8 @@ def score_dataset(rows: list, candidate: Callable, *, name: str = "?",
         if answer in LIVE_DIAGNOSABLE_REASONS:
             report.diagnosable_handoff[1] += 1
             report.diagnosable_handoff[0] += int(answer == truth)
+            if answer != truth and truth not in LIVE_ANSWERABLE_REASONS:
+                report.unreachable_by_diagnosis += 1
         if row.get("provenance", {}).get("terminal"):
             report.terminal_rows += 1
             report.errors_on_terminal_rows += int(answer != truth)
@@ -498,6 +505,13 @@ def format_report(report: ScoreReport, *, limits: str = CORPUS_LIMITS) -> str:
                 "diagnostician" % (right, total, total - right),
                 "  has to win, and are what `--answers` scores. This is NOT part of any accuracy "
                 "claim above."]
+        reachable = report.correct + (total - right) - report.unreachable_by_diagnosis
+        out += ["  of that headroom, %d have a TRUTH the diagnostician may not give (outside its "
+                "closed" % report.unreachable_by_diagnosis,
+                "  answer vocabulary), so they are unwinnable by construction",
+                "  REACHABLE CEILING if it wins every row it is allowed to: %d/%d = %.1f%%"
+                % (reachable, report.label_coverage,
+                   100 * reachable / max(1, report.label_coverage))]
     out += ["", "CONFUSION  (truth -> answer)", "-" * 88]
     truths = sorted({t for t, _a in report.confusion})
     for truth in truths:

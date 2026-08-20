@@ -487,7 +487,34 @@ def test_the_live_arm_scores_todays_classifier_and_says_what_it_is_not_scoring()
     handed_on, total = report.diagnosable_handoff[1], report.label_coverage
     assert handed_on > total // 2
     assert report.diagnosable_handoff[0] < handed_on      # there IS headroom to win
+    # A ceiling that ignores what the diagnostician is FORBIDDEN to say is a promise the design
+    # cannot keep. Its answer vocabulary is closed and narrower than the label vocabulary on
+    # purpose — a model may not assert that an engine mechanism it cannot observe fired — so the
+    # report states the unwinnable rows and computes the REACHABLE ceiling, not the arithmetic one.
+    assert triage_score.LIVE_ANSWERABLE_REASONS < set(LABELS), (
+        "the diagnostician may say everything the corpus can label — then nothing is out of reach "
+        "and the reachable ceiling is not measuring anything")
+    # DRIVEN, because how many rows are unwinnable TODAY depends on which partition ships and a
+    # test that asserted a number would be green for the wrong reason on the other side of a merge.
+    # The property is the mechanism: a row handed on whose truth the diagnostician may not give is
+    # counted, and the reachable ceiling drops by exactly that many.
+    forbidden = sorted(set(LABELS) - triage_score.LIVE_ANSWERABLE_REASONS - {LABEL_UNKNOWN})
+    assert forbidden, "nothing is forbidden; see above"
+    target = forbidden[0]
+    marked = [r for r in rows if r["label"]["reason"] == target]
+    assert marked, "no row carries %r, so the drive below proves nothing" % target
+    handed = sorted(triage_score.LIVE_DIAGNOSABLE_REASONS)[0]
+    driven = triage_score.score_dataset(
+        rows, lambda row: handed if row["label"]["reason"] == target else row["label"]["reason"],
+        name="driven", live=True)
+    assert driven.unreachable_by_diagnosis == len(marked)
+    text_driven = triage_score.format_report(driven)
+    reachable = driven.correct + (driven.diagnosable_handoff[1] - driven.diagnosable_handoff[0]
+                                  ) - driven.unreachable_by_diagnosis
+    assert "%d/%d" % (reachable, driven.label_coverage) in text_driven
+
     text = triage_score.format_report(report)
+    assert "REACHABLE CEILING" in text
     assert "HANDED TO THE DIAGNOSTICIAN" in text
     assert "NOT part of any accuracy claim" in text
     # The report must NAME which of production's two partitions it scored: the same number means

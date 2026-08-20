@@ -324,10 +324,22 @@ HANDED TO THE DIAGNOSTICIAN  (a nomination, not a decision)
   has to win, and are what `--answers` scores. This is NOT part of any accuracy claim above.
 ```
 
-29 rows — 23 `oom`, plus the `diverged`, `not_learning` and `no_metric` rows the residuals cannot
-name — are what a diagnostician has to convert. Getting all 29 would take the corpus to 99.2 %;
-getting none of them leaves it at 74.6 %. **Nobody has run that arm yet.** `--answers cand.jsonl`
-takes `{case_id, reason}` and is how it gets run, offline, over the identical rows.
+Those 29 rows are 22 `oom`, 4 `diverged`, and one each of `not_learning`, `crash` and `no_metric`.
+Getting none of them leaves the corpus at 74.6 %; getting every one it is *allowed* to get takes it
+to **113/118 = 95.8 %**, not to 99.2 %, and the gap is worth stating plainly:
+
+**4 of the 29 have a ground truth the diagnostician may not say.** Their truth is `diverged`, which
+is engine-final and absent from `DIAGNOSED_FAILURE_REASONS` — deliberately, because answering it
+would be a model asserting that a watchdog it cannot observe fired. All four are
+`rubertlite-dense-retrieval` nodes the stage checker caught (`loss=inf` for twenty epochs, `nan`,
+`-1.5e+10`, `-2.35e+08`) in a run that predates the diverge watchdog. The rule is right and the
+rows are unwinnable under it; the honest ceiling is the one that says so. The best available answer
+for them is `not_learning`, which is in the vocabulary and is the wrong cause — "stabilise the
+numerics" and "the objective cannot descend" are different directives — so this is a real residual,
+not a scoring artefact.
+
+**Nobody has run that arm yet.** `--answers cand.jsonl` takes `{case_id, reason}` and is how it
+gets run, offline, over the identical rows.
 
 A caution that comes straight from the numbers below: the diagnostician is being asked to decide
 exactly the rows whose durable evidence is thinnest. On the frozen arm, widening the evidence from
