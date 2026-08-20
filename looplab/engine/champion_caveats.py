@@ -270,6 +270,14 @@ def applied_params_diverged(provenance) -> bool:
     `rubertlite-dr-unified-v8` node 8 declares batch 8192 / 15 epochs and its own committed carrier
     AGREES with the declaration, while the config the process resolved says 4096 / 8.
 
+    A CONFLICT COUNTS, and that is the half worth stating. `conflicts` are coordinates two of the
+    node's OWN carriers give different numbers for — its config says 8192 and its `train.py` says
+    4096 — which the record deliberately refuses to settle. That is not a cleaner state than a
+    divergence, it is a worse one: the run cannot say what the number is filed under at all. Reading
+    only `diverged` would answer "no caveat" about exactly the champion this whole change is about
+    (`rubertlite-dr-unified-v8` node 3, 0.762048, whose two carriers disagree on `batch_size` and
+    `gradient_accumulation_steps`), which is the vacuous green one layer up.
+
     READER-SIDE DEFAULTS, invariant #5: every metric recorded before 2026-08-20 carries no
     `applied_params` key at all and answers False here, so no preserved run gains a caveat from this
     branch and the byte rung decides them exactly as it did.
@@ -277,5 +285,5 @@ def applied_params_diverged(provenance) -> bool:
     record = provenance.get("applied_params") if isinstance(provenance, dict) else None
     if not isinstance(record, dict):
         return False
-    rows = record.get("diverged")
-    return isinstance(rows, (list, tuple)) and len(rows) > 0
+    return any(isinstance(record.get(field), (list, tuple)) and len(record[field]) > 0
+               for field in ("diverged", "conflicts"))

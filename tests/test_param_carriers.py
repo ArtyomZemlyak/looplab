@@ -505,3 +505,133 @@ def test_every_registered_document_suffix_actually_parses(suffix):
     text = ('{"a": {"b": 3}}' if suffix == ".json" else "a:\n  b: 3\n")
     paths = param_carriers.document_numeric_paths("f" + suffix, text)
     assert paths[("a", "b")][0] == 3.0
+
+
+# --------------------------------------------------------------------------------------------
+# TWO CARRIER FAMILIES IN ONE NODE — the applied record may not settle a disagreement
+# --------------------------------------------------------------------------------------------
+
+# `rubertlite-dr-unified-v8` node 3's real shape, reduced: the config says 8192 and the training
+# script mutates the loaded object to 4096. It is the CHAMPION of that run at 0.762048.
+_CONFLICT_YAML = "train:\n  training:\n    batch_size: 8192\n    n_epochs: 15\n"
+_CONFLICT_PY = ("import yaml\n"
+                "config = load()\n"
+                "config.train.training.batch_size = 4096   # halved to fit the card\n"
+                "config.train.training.n_epochs = 8\n")
+_CONFLICT_PARAMS = {"train.training.batch_size": 8192.0, "train.training.n_epochs": 15.0}
+
+
+def test_the_applied_record_reads_a_PYTHON_carrier_too(tmp_path):
+    """A task whose parameters live in Python must be answerable. `rubertlite-dense-retrieval`'s
+    workspaces hold flat `dataset.py`/`loss.py`/`metrics.py` and NO configuration document at all —
+    a record that only read documents would have nothing to say about that whole task shape, which
+    is the same "written for one task shape" defect one layer up from the one being fixed."""
+    wd = _workdir(tmp_path, **{"train.py": "cfg.train.training.n_epochs = 4\n"})
+    rec = applied_params.bind_applied_params({"train.training.n_epochs": 15.0}, wd,
+                                             carriers=["train.py"])
+    assert rec["checked"] == 1
+    assert [(r["param"], r["applied"], r["file"]) for r in rec["diverged"]] == [
+        ("train.training.n_epochs", 4.0, "train.py")]
+    # NEGATIVE CONTROL: the same Python carrier agreeing is checked and silent, not unchecked.
+    ok = _workdir(tmp_path / "ok", **{"train.py": "cfg.train.training.n_epochs = 15\n"})
+    rec_ok = applied_params.bind_applied_params({"train.training.n_epochs": 15.0}, ok,
+                                                carriers=["train.py"])
+    assert rec_ok["checked"] == 1 and rec_ok["diverged"] == []
+
+
+def test_two_carriers_that_disagree_are_a_CONFLICT_and_are_never_settled(tmp_path):
+    """THE RULE, and getting it wrong is this module committing the defect it exists to end.
+
+    Static bytes cannot order a YAML load against a `.py` line that mutates the loaded object, and
+    the naive reading — "the config file is the config" — is measurably WRONG here: over `runs/`,
+    14 declared coordinates conflict, 9 on nodes that recorded a metric, and on the two that the
+    run's own RESOLVED config settles uniquely it is the PYTHON carrier that ran (v8 node 8: config
+    8192 / 15 epochs, `train.py` 4096 / 8, the process resolved 4096 / 8)."""
+    wd = _workdir(tmp_path, **{_CARRIER: _CONFLICT_YAML, "vectorsearch/train.py": _CONFLICT_PY})
+    rec = applied_params.bind_applied_params(_CONFLICT_PARAMS, wd,
+                                             carriers=[_CARRIER, "vectorsearch/train.py"])
+    # NOT settled: the coordinate is absent from `applied` and `checked` does not count it.
+    assert rec["applied"] == {} and rec["checked"] == 0
+    assert rec["diverged"] == []
+    assert set(rec["unresolved"].values()) == {applied_params.UNRESOLVED_CONFLICT}
+    rows = {row["param"]: row for row in rec["conflicts"]}
+    assert set(rows) == set(_CONFLICT_PARAMS)
+    # BOTH readings ride, each naming the file it came from — the record is what an operator uses
+    # to find out which line to change.
+    assert {(r["applied"], r["file"]) for r in rows["train.training.batch_size"]["readings"]} == {
+        (8192.0, _CARRIER), (4096.0, "vectorsearch/train.py")}
+    # …and `checked == 0` with `declared == 2` is exactly the distinction that must survive: this is
+    # NOT the same record as "both carriers agreed".
+    assert rec["declared"] == 2
+
+
+def test_two_carriers_that_AGREE_settle_the_coordinate(tmp_path):
+    """NEGATIVE CONTROL for the conflict rule. Without it, a rung that called every two-carrier node
+    a conflict would pass the test above and be useless."""
+    same_py = "config.train.training.batch_size = 8192\nconfig.train.training.n_epochs = 15\n"
+    wd = _workdir(tmp_path, **{_CARRIER: _CONFLICT_YAML, "vectorsearch/train.py": same_py})
+    rec = applied_params.bind_applied_params(_CONFLICT_PARAMS, wd,
+                                             carriers=[_CARRIER, "vectorsearch/train.py"])
+    assert "conflicts" not in rec
+    assert rec["checked"] == 2 and rec["applied"] == {"train.training.batch_size": 8192.0,
+                                                      "train.training.n_epochs": 15.0}
+    assert rec["diverged"] == []      # they also agree with the DECLARATION
+
+
+def test_the_resolved_config_is_what_settles_a_conflict(tmp_path):
+    """The empirical case for the stronger tier, and it is stronger than the defaults argument: the
+    resolved document is the only artifact that can say which of two committed carriers ran."""
+    wd = _workdir(tmp_path, **{
+        _CARRIER: _CONFLICT_YAML,
+        "vectorsearch/train.py": _CONFLICT_PY,
+        "exp/run/final/config.yaml": '{"train": {"training": {"batch_size": 4096, "n_epochs": 8}}}'})
+    rec = applied_params.bind_applied_params(
+        _CONFLICT_PARAMS, wd, carriers=[_CARRIER, "vectorsearch/train.py"],
+        applied_config_glob="exp/*/final/config.yaml")
+    assert rec["authority"] == applied_params.APPLIED_RESOLVED
+    assert "conflicts" not in rec and rec["checked"] == 2
+    assert {(r["param"], r["applied"]) for r in rec["diverged"]} == {
+        ("train.training.batch_size", 4096.0), ("train.training.n_epochs", 8.0)}
+
+
+def test_the_resolved_config_is_json_inside_a_yaml_filename(tmp_path):
+    """MEASURED on this box: the eval writes JSON into a `.yaml` name (`{\n  "version": null, …`).
+    JSON is a YAML subset so the composer reads it, and a line-oriented reader would not — which is
+    why the extractor is a PARSER and the format test is the suffix, not the first byte."""
+    body = '{"train": {"training": {"n_epochs": 3, "batch_size": 512}}}'
+    paths = param_carriers.document_numeric_paths("final/config.yaml", body)
+    assert paths[("train", "training", "n_epochs")][0] == 3.0
+    assert paths[("train", "training", "batch_size")][0] == 512.0
+
+
+def test_a_conflict_caveats_the_champion(tmp_path):
+    """A conflict is not a cleaner state than a divergence — the run cannot say what the number is
+    filed under at all — so it must not read as an unqualified champion."""
+    assert applied_params_diverged(
+        {"applied_params": {"diverged": [], "conflicts": [{"param": "a.b"}], "checked": 0}}) is True
+    # NEGATIVE CONTROL: an empty conflict list with everything checked is clean.
+    assert applied_params_diverged(
+        {"applied_params": {"diverged": [], "conflicts": [], "checked": 9}}) is False
+
+
+def test_the_two_carrier_kind_dispatchers_agree(tmp_path):
+    """`runtime` may not import `engine`, so the carrier-kind rule is spelled twice. Two copies of
+    one rule is this repo's most-measured defect, so they are pinned against each other over the
+    REGISTRY rather than each against a literal list."""
+    from looplab.engine import repair_verify
+    for suffix in param_carriers.DOCUMENT_SUFFIXES + (".py", ".txt", ".md", ""):
+        mine = applied_params._carrier_kind("f" + suffix)
+        theirs = repair_verify._carrier_kind("f" + suffix)
+        assert (mine is None) == (theirs is None), suffix
+        if mine is not None:
+            assert mine == theirs, suffix
+
+
+def test_the_python_extractor_is_one_object_in_both_homes():
+    """The move to `core/param_carriers.py` is a MOVE and never a copy: a second body is how the
+    guard and the record come to disagree about what a Python carrier says, and it would also make
+    every existing monkeypatch through `repair_verify` a silent no-op."""
+    from looplab.engine import repair_verify
+    assert repair_verify._assigned_numeric_paths is param_carriers.python_numeric_paths
+    assert repair_verify._numeric_literal is param_carriers.numeric_literal
+    assert repair_verify._assignment_target_parts is param_carriers.assignment_target_parts

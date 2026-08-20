@@ -657,7 +657,17 @@ read 0.005; taking the resolver's word for it dropped two real divergences on
 `rubertlite-dr-unified-v8` node 12 (metric 0.761400), a ten-fold change in the loss temperature. A
 QUOTED scalar is never coerced, and JSON is never coerced at all.
 
-Corpus effect: **24 of the 57 folded nodes** now carry at least one row (12 of them metric-bearing),
+**The `.py` reading is not removed and it is not vestigial.** `rubertlite-dense-retrieval` is a
+different task shape whose node workspaces hold flat `dataset.py`/`loss.py`/`metrics.py` and no
+configuration document at all, and its Python carriers keep exactly the treatment they had. Two
+things about that run are worth recording rather than assuming: its folded nodes declare **zero**
+`Idea.params`, so this rung is silent there because the DECLARATION is empty and not because of a
+carrier; and across the whole corpus, of the 54 nodes that do carry a comparable declaration,
+**51 hold both a Python and a document carrier, 3 hold a document only, and none holds Python
+only or neither**. So no node on this box is answerable from Python alone — which is why the
+interesting case turned out to be the two families DISAGREEING, not one of them being absent.
+
+Corpus effect: **24 of the 58 folded nodes** now carry at least one row (12 of them metric-bearing),
 41 rows from the YAML carrier and the pre-existing 12 from `.py`, and **zero** from
 `looplab_stages.json` — the other committed document. Two champions are caveated where one was:
 `e5small-dr-unified-v2` node 1 joins `rubertlite-dr-unified-v8` node 3. `champion_metric_caveats`
@@ -676,13 +686,28 @@ the **metric read**, and folds it onto `node_evaluated.metric_provenance.applied
             "applied_config_glob": "vectorsearch/experiments/*/final/config.yaml" }
 ```
 
+The carrier set is derived from the FORMAT of each file the engine committed, not from a task
+declaration and not from a path. That is deliberate: the carrier is chosen by the *Developer* at
+build time — v8 node 12 moved a parameter into `merge_nodes.py` — so an operator declaring a carrier
+list at submit time could not know where the value would end up. What a suffix registry costs when a
+third format arrives (TOML, `.ini`, an `.env`) is one extractor returning `{parts: (value, line)}`
+and one entry in `DOCUMENT_SUFFIXES`: no call-site change, no policy change, and
+`test_every_registered_document_suffix_actually_parses` already goes red if a suffix is registered
+without a working extractor. What no suffix registry can reach is a value **no file states** — one
+computed at runtime, read from the environment, or passed on the command line. That is not a gap a
+better file list closes; it is the reason the applied record below is bound at the metric read.
+
 Two authorities. `committed` reads the carriers the engine itself staged, re-read from the workdir at
 the metric read; it needs no declaration and fires on all 52 corpus nodes that have a config carrier,
 which is the whole reason it exists — a record that only fires once the operator has declared
 something is the literal-`subject` defect again. `resolved` reads the configuration **the eval
 process wrote**, elected only by the glob above, and is the stronger source because it is
 post-resolution: defaults filled in, environment and command line layered, types coerced (170 leaves
-against the input config's 149).
+against the input config's 149). It is written as **JSON inside a `.yaml` filename** — the file
+begins `{\n  "version": null,` — which a line-oriented reader would miss entirely and a parser reads
+without noticing, JSON being a YAML subset; that is one more reason the extractor is a parser and the
+format test is the suffix rather than the first byte. Coverage on this box is not the limiting
+factor: **28 of the 29 scored nodes** have at least one.
 
 Why both, in numbers. Over `runs/` the two agree on **341 of 345** declared keys where both answer.
 The four that differ are the argument: `rubertlite-dr-unified-v8` node 8 declares batch 8192 / 15
@@ -699,6 +724,24 @@ resolved their own. Two matches is `ambiguous`, zero is `missing`, an older one 
 REFUSAL that falls back to `committed` and records *why* (`resolved_refused`). A list of patterns is
 refused at submit for the same reason: a number has one applied configuration, and choosing between
 two documents that disagree is exactly what this declaration exists to refuse.
+
+**Two carriers of one node may DISAGREE, and the record does not settle it.** `train.py` mutating the
+object the YAML just loaded is the ordinary case here, and static bytes cannot order the two.
+Measured over `runs/`: **14 declared coordinates have a Python carrier and a document carrier that
+state different numbers, 9 of them on nodes that recorded a metric**, including
+`rubertlite-dr-unified-v8` node 3 — that run's champion at 0.762048, whose config says
+`batch_size: 8192` while `vectorsearch/train.py:31` sets 4096. The naive reading ("the config file
+is the config") is measurably **wrong**: on the two conflicts the run's own resolved config settles
+uniquely, it is the **Python** carrier that ran (node 8: config 8192 / 15 epochs, `train.py` 4096 /
+8, the process resolved 4096 / 8). So a conflicted coordinate is left out of `applied`, rides in
+`conflicts` with *every* reading and the file and line each came from, and is named `conflict` in
+`unresolved`. It also raises the champion caveat: a run that cannot say what its number is filed
+under is not in a cleaner state than one that can.
+
+**And this is what the `resolved` tier is really for.** Declaring one `applied_config_glob` on the
+repo task takes the corpus from **7 conflicted records to 0** (39 of the 42 records bind at
+`resolved`; 2 refuse `ambiguous`, 1 `missing`, all three falling back to `committed` with the reason
+recorded). The defaults argument is secondary to that one.
 
 **It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
 thing — the champion's own config says so in a comment beside the line — and must still run, still

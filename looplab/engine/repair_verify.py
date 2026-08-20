@@ -715,131 +715,21 @@ class ParamOverride:
                 "file": self.path, "line": self.line}
 
 
-def _numeric_literal(node):
-    """The float value of a numeric literal AST node (`4096`, `-1`, `0.5`), else None.
-
-    `ast.UnaryOp(USub)` is spelled out because a negative literal is not one node in Python's
-    grammar. Anything with a NAME or a CALL in it is not a literal and is not resolved — see the
-    docstring's fourth bound. Bools are excluded: `True` is `isinstance(int)` and comparing it to a
-    declared `1.0` would report agreement nobody wrote."""
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        inner = _numeric_literal(node.operand)
-        return None if inner is None else -inner
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
-            and not isinstance(node.value, bool):
-        val = float(node.value)
-        # `1e400` parses to `inf` and a huge int overflows the conversion; either would ride onto a
-        # durable event as a bare `Infinity`, which is not JSON. Same rule as the declared side.
-        return val if math.isfinite(val) else None
-    return None
-
-
-def _assignment_target_parts(node):
-    """The dotted path an assignment TARGET names, outermost-last, or None if it names no path.
-
-    `config.train.training.batch_size` -> `["config", "train", "training", "batch_size"]`, and
-    `cfg["train"]["training"]["batch_size"]` -> the same tail, because a config object reached by
-    attribute and one reached by key are the same declaration to the reader this serves. A subscript
-    whose index is not a plain string constant (`row[i]`) makes the whole target unreadable and
-    answers None — a partial path would silently match on its suffix, which is the one thing the
-    suffix rule below cannot survive."""
-    parts: list = []
-    cur = node
-    while True:
-        if isinstance(cur, ast.Attribute):
-            parts.append(cur.attr)
-            cur = cur.value
-        elif isinstance(cur, ast.Subscript):
-            key = cur.slice
-            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                return None
-            parts.append(key.value)
-            cur = cur.value
-        elif isinstance(cur, ast.Name):
-            parts.append(cur.id)
-            break
-        else:
-            return None                       # a call, a literal, a tuple — names no stable path
-    parts.reverse()
-    return parts
-
-
-def _assigned_numeric_paths(source: str) -> dict:
-    """`(dotted path) -> (value, line)` for every numeric-literal assignment in one Python source.
-
-    LAST WRITE WINS on a repeated path, matching what the interpreter would do if both ran in order —
-    and if they are in exclusive branches the rung is over-reading either way, which is the residual
-    the docstring states rather than guesses at. Unparseable source answers `{}`: an agent may commit
-    anything, and a `SyntaxError` is not evidence about a parameter.
-
-    **SOURCE ORDER IS RESOLVED EXPLICITLY, and it is not a tidy-up.** `ast.walk` is BREADTH-FIRST, so
-    it yields every module-level statement before anything nested inside one, and "last write" under
-    it means DEEPEST-then-latest rather than last-in-the-file. That inverts the rule this docstring
-    states, in the direction the whole rung is not allowed to fail in: a node whose module-level
-    `cfg.train.training.batch_size = 8192` AGREES with its declaration is convicted anyway when a
-    helper `def` earlier in the file carries a different default, because the nested assignment is
-    visited last and overwrites the agreeing one. That row reaches `champion_caveats` as
-    `params_overridden` on the run's best number. It also hands an adversarial candidate both
-    directions for free — a one-line decoy `def _unused(): cfg.a.b = <the declared value>`, nested
-    ANYWHERE in the file, outranks a real module-level divergence and answers "agrees" — and it
-    breaks `declared_param_overrides`' baseline attribution, which acquits only on an EQUAL prior
-    value: a repair that merely DELETES a dead helper carrying `1024`, over a module body that said
-    `4096` before and after, was charged with introducing the 4096 (driven; `tests/
-    test_repair_verification.py` keeps all three). So the nodes are sorted by `(lineno, col_offset)`
-    before the dict is written, and the dict then means what it says. (Textual order still is not execution
-    order — a nested `def` may run after the module body — which is exactly why the module docstring
-    says this is a statement about two artifacts and never "this is what ran".)
-
-    Walks `Assign` and `AnnAssign` (`config.train.batch_size: int = 4096`) and deliberately NOT
-    `AugAssign`: `x += 1` carries no absolute value to compare a declaration against.
-    """
-    try:
-        tree = ast.parse(source or "")
-    except (SyntaxError, ValueError, RecursionError, MemoryError):  # noqa: BLE001 — not evidence
-        return {}
-    found: list = []
-    # SCOPE DEPTH per statement: 0 for the module body, +1 inside every `def`/`class`/`lambda`.
-    # Computed here rather than inferred from `col_offset`, which a continuation line or a
-    # module-level `if` would both get wrong.
-    depth_of: dict = {}
-
-    def _mark(node, depth: int) -> None:
-        for child in ast.iter_child_nodes(node):
-            deeper = depth + isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                                ast.ClassDef, ast.Lambda))
-            depth_of[id(child)] = deeper
-            _mark(child, deeper)
-
-    depth_of[id(tree)] = 0
-    _mark(tree, 0)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        else:
-            continue
-        val = _numeric_literal(value)
-        if val is None:
-            continue
-        found.append((depth_of.get(id(node), 0), getattr(node, "lineno", 0),
-                      getattr(node, "col_offset", 0), targets, val))
-    out: dict = {}
-    # SHALLOWEST WINS, then latest. `out[key] = ...` is last-write-wins, so the sort runs DEEPEST
-    # first and the module body last: an assignment in the module body certainly executes, one
-    # inside a `def` only if something calls it, and letting the second outrank the first is what
-    # made a one-line `def _unused(): cfg.a.b = <declared value>` — placed ANYWHERE in the file —
-    # a free acquittal, and a nested default a free conviction of an agreeing module body. Within
-    # ONE depth the rule is unchanged and is textual: later overwrites earlier. (Textual order still
-    # is not execution order, which is exactly why the module docstring says this compares two
-    # artifacts and never claims "this is what ran".)
-    for _depth, lineno, _col, targets, val in sorted(
-            found, key=lambda f: (-f[0], f[1], f[2])):
-        for tgt in targets:
-            parts = _assignment_target_parts(tgt)
-            if parts:
-                out[tuple(parts)] = (val, lineno)
-    return out
+# The Python extractor MOVED to `core/param_carriers.py` on 2026-08-20 and is re-exported here.
+#
+# It moved because it stopped being this rung's private helper: `runtime/applied_params.py` binds the
+# APPLIED configuration at the metric read and must read a Python carrier for exactly the reason this
+# rung must — measured over `runs/`, 14 declared coordinates have a Python carrier and a document
+# carrier that STATE DIFFERENT NUMBERS, 9 of them on nodes that recorded a metric, including
+# `rubertlite-dr-unified-v8` node 3, the champion at 0.762048. A record built on one family alone
+# publishes the other family's number. `runtime` may not import `engine`, so the ONE extractor had to
+# go below both; the alternative was a second copy, which is this repo's most-measured defect.
+#
+# RE-EXPORTED, not re-implemented: the names below are the SAME objects, so every existing importer
+# and every monkeypatch through `repair_verify` still reaches the one body.
+_numeric_literal = param_carriers.numeric_literal
+_assignment_target_parts = param_carriers.assignment_target_parts
+_assigned_numeric_paths = param_carriers.python_numeric_paths
 
 
 # --- WHICH FILES DECIDE A VALUE (the carrier rule) -----------------------------------------------

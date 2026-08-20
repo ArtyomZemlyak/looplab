@@ -118,6 +118,13 @@ APPLIED_AUTHORITIES = (APPLIED_RESOLVED, APPLIED_COMMITTED)
 # "the declared one was ambiguous" send an operator to two different places.
 RESOLVED_REFUSALS = ("not_declared", "missing", "ambiguous", "stale", "unreadable", "escapes")
 
+# A coordinate two of this node's own carriers state DIFFERENT numbers for. Deliberately its own
+# word beside `param_carriers.UNRESOLVED_*`: `ambiguous` means one document names the coordinate
+# twice, `conflict` means two carriers name it once each and disagree, and the remedies are
+# different — the first is a vaguer declaration, the second is a repo that sets one value in two
+# places. It is never settled here; see the conflict rule in `bind_applied_params`.
+UNRESOLVED_CONFLICT = "conflict"
+
 # Committed carriers read for one node. A working set naming more configuration documents than this
 # is a repository, not a configuration; over the ceiling the rest are unread, which can only
 # UNDER-report. The largest real working set on this box names ONE.
@@ -160,6 +167,35 @@ def declared_numeric_params(params) -> dict:
         if len(out) >= MAX_APPLIED_KEYS:
             break
     return out
+
+
+_KIND_PYTHON = "python"
+_KIND_DOCUMENT = "document"
+
+
+def _carrier_kind(path):
+    """`_KIND_PYTHON` / `_KIND_DOCUMENT` for a carrier this record can read, else None.
+
+    MIRRORS `engine/repair_verify.py::_carrier_kind` and is a second spelling for one reason only:
+    `runtime` may not import `engine`. `tests/test_param_carriers.py` pins the two to agree on every
+    registered suffix, which is what stops the mirror from becoming a drift.
+    """
+    name = str(path or "")
+    if name.endswith(".py"):
+        return _KIND_PYTHON
+    if param_carriers.is_document_carrier(name):
+        return _KIND_DOCUMENT
+    return None
+
+
+def _offer(readings: dict, key: str, value: float, rel: str, line: int, how: str) -> None:
+    """Record one carrier's reading of one coordinate. FIRST file to state a given VALUE keeps it.
+
+    Deduplicating on the value and not on the key is the whole point: two carriers that AGREE
+    collapse to one reading and settle the coordinate, two that disagree stay two and become a
+    `conflict`. A first-wins-by-key loop cannot tell those apart.
+    """
+    readings.setdefault(key, {}).setdefault(float(value), (rel, int(line), how))
 
 
 def _read(path) -> Optional[str]:
@@ -239,8 +275,7 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
         wanted = [(str(row.get("path") or ""), row)]
     else:
         wanted = [(str(p), None) for p in (carriers or [])
-                  if isinstance(p, str) and param_carriers.is_document_carrier(p)][
-                      :MAX_COMMITTED_CARRIERS]
+                  if isinstance(p, str) and _carrier_kind(p)][:MAX_COMMITTED_CARRIERS]
     if not wanted:
         return None
 
@@ -248,6 +283,11 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
     where: dict = {}
     unresolved: dict = {}
     read_rows: list = []
+    # key -> {value: (file, line, how)} — EVERY reading, from every carrier, before anything is
+    # settled. Accumulated rather than first-wins because "two carriers disagree" is a fact the
+    # record owes the reader and a first-wins loop destroys it silently.
+    readings: dict = {}
+    conflicts: list = []
     for rel, bound in wanted:
         target = bind_one(workdir, rel, since=None, confine=confine) if bound is None else bound
         if not target.get("bound"):
@@ -261,22 +301,22 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
             read_rows.append(target)
             continue
         read_rows.append(target)
-        paths = param_carriers.document_numeric_paths(rel, text)
+        kind = _carrier_kind(rel)
+        paths = (param_carriers.python_numeric_paths(text) if kind == _KIND_PYTHON
+                 else param_carriers.document_numeric_paths(rel, text))
         for key in declared:
-            if key in applied:
-                # FIRST CARRIER THAT ANSWERS WINS, and the carriers are visited in the order the
-                # caller listed them. A later document may not overwrite an earlier answer, because
-                # nothing here can rank two staged carriers and picking by position at least makes
-                # the record REPRODUCIBLE from the same call.
-                #
-                # THE POPULATION THAT COULD HAVE MADE THIS BITE IS EMPTY, and structurally rather
-                # than by luck: every node's working set names exactly TWO documents,
-                # `looplab_stages.json` and the config, and the manifest is `{"stages": [ … ]}` —
-                # a SEQUENCE, which the extractor stops at, so it contributes ZERO paths. Measured:
-                # of the 41 divergence rows over `runs/`, `looplab_stages.json` produces none.
+            parts = tuple(p for p in key.split(".") if p)
+            if kind == _KIND_PYTHON:
+                # TARGET-FIRST, the Python rule: the tree is incomplete, so several assignments may
+                # reach one coordinate and every one of them is a real assignment. Two values from
+                # one file is already a disagreement this record may not settle.
+                hits = param_carriers.resolve_declaration_python(paths, parts)
+                for value, line in sorted(hits.items()):
+                    _offer(readings, key, value, rel, int(line), param_carriers.MATCH_SUFFIX)
+                if not hits and key not in readings:
+                    unresolved.setdefault(key, param_carriers.UNRESOLVED_ABSENT)
                 continue
-            got, line, how = param_carriers.resolve_declaration(
-                paths, tuple(p for p in key.split(".") if p))
+            got, line, how = param_carriers.resolve_declaration(paths, parts)
             if got is None:
                 # An `ambiguous` refusal OUTRANKS a later `absent`: it is a fact about the
                 # DECLARATION, not about one file, and letting the next document settle it would be
@@ -284,10 +324,34 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
                 if unresolved.get(key) != param_carriers.UNRESOLVED_AMBIGUOUS:
                     unresolved[key] = how
                 continue
-            applied[key] = got
-            where[key] = (rel, int(line), how)
+            _offer(readings, key, got, rel, int(line), how)
             unresolved.pop(key, None)
-    if not applied:
+
+    # THE CONFLICT RULE, and it is the one thing this record must not get wrong. Two carriers of ONE
+    # node that state DIFFERENT numbers for one declared coordinate are not a tie to break: static
+    # bytes cannot order a YAML load against a `.py` assignment that mutates the loaded object, and
+    # the corpus proves the naive reading ("the config file is the config") is WRONG — measured over
+    # `runs/`, 14 coordinates conflict, 9 on nodes that recorded a metric, and on the two the run's
+    # own RESOLVED config settles uniquely the PYTHON carrier is what ran (v8 node 8: the config says
+    # 8192 / 15 epochs, `train.py` says 4096 / 8, the process resolved 4096 / 8). Picking the
+    # document would have published the champion's number at coordinates it never occupied — the
+    # exact defect this module exists to end, committed by the module itself.
+    #
+    # So a conflicted coordinate is NOT in `applied`; it rides in `conflicts` with EVERY reading and
+    # the file each came from, and `unresolved` names it `conflict`. Surfaced, never settled.
+    for key, seen in readings.items():
+        if len(seen) == 1:
+            value = next(iter(seen))
+            rel, line, how = seen[value]
+            applied[key] = value
+            where[key] = (rel, line, how)
+            unresolved.pop(key, None)
+        else:
+            unresolved[key] = UNRESOLVED_CONFLICT
+            conflicts.append({"param": key, "declared": declared[key],
+                              "readings": [{"applied": v, "file": seen[v][0], "line": seen[v][1]}
+                                           for v in sorted(seen)]})
+    if not applied and not conflicts:
         return None
 
     diverged = [{"param": key, "declared": declared[key], "applied": applied[key],
@@ -302,6 +366,8 @@ def bind_applied_params(params, workdir, *, carriers=(), applied_config_glob=Non
                     "checked": len(applied),
                     "applied": dict(sorted(applied.items())),
                     "diverged": diverged}
+    if conflicts:
+        record["conflicts"] = sorted(conflicts, key=lambda row: row["param"])
     if unresolved:
         record["unresolved"] = dict(sorted(unresolved.items()))
     if authority != APPLIED_RESOLVED:
