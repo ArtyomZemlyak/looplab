@@ -1523,6 +1523,87 @@ class SpeculativeSelectionContext:
 NO_SPECULATIVE_CONTEXT = SpeculativeSelectionContext()
 
 
+def _asha_mask_is_unsound(
+    state: RunState,
+    policy: object,
+    ignored_pending: frozenset[int],
+    reopened_node_ids: frozenset[int],
+) -> bool:
+    """Whether hiding `ignored_pending` from an ASHA POLICY VIEW would make that view answer for a
+    bracket it cannot know yet.
+
+    THIS IS A PROPERTY OF THE MASKED VIEW, NOT OF THE QUERY, and stating it that way is the whole of
+    backlog F1g's remaining defect. Both conditions below were `return [], []` at the TOP of
+    `_speculative_selection` until 2026-08-20, so an ASHA-family run answered NOTHING to any
+    speculative query while one of its own in-flight Nodes was masked — including the occupancy-paced
+    production query, whose entire purpose is to produce while an in-flight Node holds a slot. The
+    two facts that make that a defect rather than a conservative choice:
+
+      * MEASURED. `runs/e5small-dr-unified-v4` (the Strategist moved it to `bohb`, which is
+        `ASHAPolicy`) held GPU 0 dark for 5 h 19 m — 09:45:42 to 15:04:57 on 2026-08-20 — with node
+        1 evaluating on GPU 1, node 0 terminal, node 2 killed by the freshness gate and NOTHING
+        selectable. `occupancy_due(inflight=1, queued=0, width=2)` read True for the whole of it and
+        `_occupancy_paced_creates` returned `[]` on all 130 of the loop's turns in that window. The
+        run then built node 3 in the same MINUTE as node 1's terminal. Replayed over the corpus:
+        8.03 starved hours in the five runs that had this pace at all, of which 5.94 are this
+        predicate firing, 2.08 the promotion clause below, and **0.00 in every GreedyTree and
+        EvolutionaryPolicy run** — the lanes always answered there.
+      * THE HAZARD IS REAL BUT NARROWER THAN THE GUARD WAS. What it protects against is the POLICY
+        being asked to choose over a board it cannot see: `_speculative_policy_state` literally
+        deletes the masked Nodes out of `nodes` for ASHA, so an unresolved rung-0 root looks like a
+        rung-0 vacancy and the policy answers with a replacement draft. That view is built at ONE
+        place, the discretionary lane. Every lane above it answers from the UNMASKED board — and the
+        forced SEED prefix in particular computes its ASHA census as
+        `sum(1 for node in state.nodes.values() if not node.parent_ids and ...)`, over the whole
+        board, so the masked root is STILL COUNTED and the prefix cannot overfill rung 0 by masking.
+        On the run above that census read 2 seeded against a target of 3: the one draft it was
+        refusing to authorise was the seed the run was missing, not a duplicate of the one running.
+
+    So the guard keeps its meaning and loses its reach: consulted where the masked view is built,
+    not where the unmasked board answers. Nothing here widens what any lane may DECIDE — the forced
+    seed prefix is the same authority `card_next_actions` uses on the serial path, asked the same
+    way — and the promotion clause is unchanged in force.
+
+    Two conditions, kept separate because they are different unsoundnesses:
+
+    1. AN UNRESOLVED RUNG-0 ROOT IS MASKED. It has no metric, so ASHA cannot know the survivor set,
+       and the masked view reads its slot as free. `reopened_node_ids` exempts the freshness caller,
+       which deliberately reopens its own subject into the population and is therefore not masking
+       it. Promotion children have parents and may still fill other already-decided same-rung slots.
+    2. A MASKED PROMOTION HAS NO EXACT DURABLE ACTION. Masking an unresolved promotion whose Card
+       does not carry `("improve", its parents)` would make the parent look unexpanded and permit a
+       duplicate same-rung child.
+
+    OPEN[asha-promotion-mask-blocks-all-production] clause 2 still refuses the WHOLE discretionary
+    lane, so an ASHA run whose seeding is complete and whose in-flight promotion carries no exact
+    durable action produces nothing at all while a slot is free — measured at 2.08 starved hours
+    over 6 intervals on `runs/rubertlite-dr-unified-v8`, the entire residue after the clause-1 fix.
+    Whether an UNMASKED policy query plus a filter over the masked node's own action is sound here
+    is not measured, and refusing on an unmeasured alternative is the correct default; what is not
+    correct is leaving the number unrecorded.
+    proof:present:asha_mask_unsound@looplab/search/card_selection.py
+    """
+    if _builtin_policy_name(policy) != "ASHAPolicy":
+        return False
+    if not reopened_node_ids and any(
+        (node := state.nodes.get(node_id)) is not None
+        and node.status is NodeStatus.pending
+        and not node.parent_ids
+        for node_id in ignored_pending
+    ):
+        return True
+    for node_id in ignored_pending:
+        node = state.nodes.get(node_id)
+        if node is None or node.status is not NodeStatus.pending or not node.parent_ids:
+            continue
+        card_id = node.idea.card_id
+        card = state.cards.get(card_id) if isinstance(card_id, str) else None
+        key = _action_key(card_action(card) or {}) if card is not None else None
+        if key != ("improve", tuple(node.parent_ids)):
+            return True
+    return False
+
+
 def _speculative_selection(
     state: RunState,
     policy: object,
@@ -1561,29 +1642,11 @@ def _speculative_selection(
             if owned_node_id not in reopened_node_ids
         )
 
-    asha = _builtin_policy_name(policy) == "ASHAPolicy"
-    if not reopened_node_ids and asha and any(
-        (node := selection_state.nodes.get(node_id)) is not None
-        and node.status is NodeStatus.pending
-        and not node.parent_ids
-        for node_id in ignored_pending
-    ):
-        # An unresolved rung-0 root has no metric, so ASHA cannot know the survivor set yet. Hiding
-        # it from next_actions would make the policy emit a replacement draft and overfill rung0.
-        # Promotion children have parents and may still fill other already-decided same-rung slots.
-        return [], []
-    if asha:
-        for node_id in ignored_pending:
-            node = selection_state.nodes.get(node_id)
-            if node is None or node.status is not NodeStatus.pending or not node.parent_ids:
-                continue
-            card_id = node.idea.card_id
-            card = selection_state.cards.get(card_id) if isinstance(card_id, str) else None
-            key = _action_key(card_action(card) or {}) if card is not None else None
-            if key != ("improve", tuple(node.parent_ids)):
-                # Masking an unresolved promotion without its exact durable action would make the
-                # parent look unexpanded and permit a duplicate same-rung child.
-                return [], []
+    # WHETHER THE MASKED POLICY VIEW WOULD ANSWER UNSOUNDLY. Computed here, where the mask is
+    # settled, and CONSULTED below at the one lane that builds that view — see
+    # `_asha_mask_is_unsound` for why it is not a return.
+    asha_mask_unsound = _asha_mask_is_unsound(
+        selection_state, policy, ignored_pending, reopened_node_ids)
     # Outstanding requests and build markers reserve capacity before they become Node rows.  Committed
     # excluded Cards already have evidence and are therefore already included in card_budget_used.
     effective_limit = max(
@@ -1633,6 +1696,12 @@ def _speculative_selection(
         if any(card_id not in eligible_by_id for card_id in forced_ids):
             return [], []
         return [eligible_by_id[card_id] for card_id in forced_ids], forced
+
+    # THE DISCRETIONARY LANE, and the ONE lane that hands the POLICY a masked view. Everything above
+    # answered from the UNMASKED board; from here down `_speculative_policy_state` deletes the masked
+    # Nodes out of what ASHA reads, which is precisely the unsoundness `_asha_mask_is_unsound` names.
+    if asha_mask_unsound:
+        return [], []
 
     reserved_asha_actions: set[tuple[str, tuple[int, ...]]] = set()
     if _builtin_policy_name(policy) == "ASHAPolicy":
