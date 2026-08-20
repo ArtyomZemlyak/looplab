@@ -168,7 +168,13 @@ def test_the_concepts_guide_enumerates_every_failure_reason():
     from pathlib import Path
 
     guide = Path(__file__).resolve().parents[1] / "docs" / "guide" / "concepts.md"
-    text = guide.read_text(encoding="utf-8")
+    raw = guide.read_text(encoding="utf-8")
+    # WHITESPACE-NORMALIZED, because a prose anchor that a REFLOW can break is a guard people learn
+    # to edit rather than read — the lesson master landed in `009e70a0` for the registry-derivation
+    # check, and this sentence proved it again the same day: adding `unclassified` pushed "eval"
+    # onto the next line and reddened a doc that was CORRECT. The property is the sentence, not its
+    # line breaks; what must not drift is the list, which is checked below against the registry.
+    text = re.sub(r"\s+", " ", raw)
     anchor = "is eligible for repair **in place** within the same eval"
     assert anchor in text, "the inline-repair paragraph moved — re-point this guard at it"
     # The enumeration is the sentence that follows the anchor, up to the end of that bullet.

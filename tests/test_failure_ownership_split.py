@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,123 @@ from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
 from looplab.runtime.sandbox import RunResult
 
 _OOM = {"action": "repair", "failure_kind": "oom", "rationale": "torch.OutOfMemoryError in the log"}
+
+
+def _dedented(fn) -> str:
+    """A method's source, dedented so `ast.parse` accepts it."""
+    return textwrap.dedent(inspect.getsource(fn))
+
+
+def _payload_stamps(src: str) -> dict[str, set[str]]:
+    """Every `"<key>": <expr>` the source really BUILDS, as `{key: {unparsed expr, …}}`.
+
+    Two node shapes, because the engine writes its payloads both ways: `ast.Dict` pairs (the
+    `node_repaired` literal, including the ones inside `**({...} if … else {})`) and
+    `<target>[<key>] = <expr>` assignments (the `node_failed` path, which adds its evidence keys
+    conditionally after the dict is built).
+
+    A COMMENT PRODUCES NEITHER NODE, which is the whole point — `test_a_commented_out_stamp_is_seen`
+    drives exactly that."""
+    out: dict[str, set[str]] = {}
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    out.setdefault(k.value, set()).add(ast.unparse(v))
+        elif isinstance(node, ast.Assign):
+            for tgt in node.targets:
+                if (isinstance(tgt, ast.Subscript) and isinstance(tgt.slice, ast.Constant)
+                        and isinstance(tgt.slice.value, str)):
+                    out.setdefault(tgt.slice.value, set()).add(ast.unparse(node.value))
+    return out
+
+
+def _tuple_assign_targets(src: str, func: str) -> list[tuple[str, ...]]:
+    """The target tuples of every `a, b = <func>(...)` in the source.
+
+    Asserted instead of the RENDERED line, whose spelling changes under any reformat — a guard that
+    reddens on a line wrap is a guard people learn to edit rather than read."""
+    found = []
+    for node in ast.walk(ast.parse(src)):
+        if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+            continue
+        called = node.value.func
+        name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", "")
+        if name != func:
+            continue
+        for tgt in node.targets:
+            if isinstance(tgt, ast.Tuple):
+                found.append(tuple(el.id for el in tgt.elts if isinstance(el, ast.Name)))
+    return found
+
+
+def _enum_sources(src: str) -> set[str]:
+    """Every `"enum": <expr>` value in a JSON-schema dict, unparsed."""
+    out = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == "enum":
+                    out.add(ast.unparse(v))
+    return out
+
+
+def _drop_stamp(src: str, key: str, value: str, *, expect: int) -> str:
+    """Remove every `"<key>": <value>` PAIR from the code, leaving its text in a trailing comment.
+
+    THE MUTATION THE AST REWRITE EXISTS TO SURVIVE, in the shape it really takes: the stamp stops
+    being built and a comment quoting the line it replaced remains. That is CLAUDE.md's cheapest
+    mutation, and it is exactly what a substring pin cannot see.
+
+    IT REMOVES THE PAIR RATHER THAN COMMENTING THE LINE, because the engine writes stamps in two
+    shapes and only one of them survives a line comment: the `node_failed` terminal packs
+    `"reason_source": _reason_source, "engine_reason": _engine_reason}` with the closing brace on
+    the same line, so commenting it makes the source unparseable and the driver would then fail for
+    a reason that has nothing to do with the property. `expect` pins how many writers there are,
+    checked rather than assumed, so a needle that silently matches a subset cannot pass — which is
+    the mistake this helper was written twice to avoid."""
+    pair = f'"{key}": {value}'
+    lines = src.splitlines()
+    hits = [i for i, ln in enumerate(lines) if pair in ln and not ln.lstrip().startswith("#")]
+    assert len(hits) == expect, (
+        f"{pair!r} matched {len(hits)} live lines, expected {expect} — re-derive the mutation "
+        f"rather than loosening it; a partial mutation leaves this driver proving nothing")
+    for i in hits:
+        line = lines[i]
+        indent = " " * (len(line) - len(line.lstrip()))
+        if line.strip() in (pair + ",", pair):
+            lines[i] = f"{indent}# {line.strip()}"
+            continue
+        for variant in (", " + pair, pair + ", ", pair + ",", pair):
+            if variant in line:
+                lines[i] = line.replace(variant, "", 1) + f"  # {pair}"
+                break
+        else:                                    # pragma: no cover - refuse rather than guess
+            raise AssertionError(f"cannot remove {pair!r} from {line!r} without guessing")
+    return "\n".join(lines)
+
+
+def _comment_out(src: str, needle: str, *, expect: int = None) -> str:
+    """Comment out EVERY live line containing `needle`, keeping its text in the comment.
+
+    THE MUTATION THESE GUARDS EXIST TO SURVIVE, and the one CLAUDE.md names as the cheapest: delete
+    the code, leave a comment holding the pinned literal.
+
+    EVERY line and not the first, because a stamp written on more than one row is only really gone
+    when all of them are — commenting one of two would leave the AST check correctly green and the
+    driver would then be proving nothing. `expect` pins the count where the number is itself part of
+    the property (the ownership rule is applied exactly once); it is checked rather than assumed,
+    so this helper can never silently mutate nothing and pass."""
+    lines = src.splitlines()
+    hits = [i for i, ln in enumerate(lines)
+            if needle in ln and not ln.lstrip().startswith("#")]
+    assert hits, f"{needle!r} matched no live line; the mutation would be a no-op"
+    if expect is not None:
+        assert len(hits) == expect, f"{needle!r} matched {len(hits)} live lines, expected {expect}"
+    for i in hits:
+        indent = len(lines[i]) - len(lines[i].lstrip())
+        lines[i] = " " * indent + "# " + lines[i].lstrip()
+    return "\n".join(lines)
 
 
 def _classifier_vocabulary() -> set[str]:
@@ -579,13 +697,26 @@ def test_producible_and_selectable_are_still_the_same_set_across_all_four_produc
 
 def test_the_emit_schema_reads_the_vocabulary_from_the_registry():
     """The same rule `action`'s enum follows and for the same reason: a re-spelled literal in the
-    agent would be a typo the engine's `inline_repair_reasons` gate keys on. Source-pinned, because
-    the schema is built inside a method that needs a live client to reach."""
+    agent would be a typo the engine's `inline_repair_reasons` gate keys on. Source-derived, because
+    the schema is built inside a method that needs a live client to reach.
+
+    BY AST, NOT SUBSTRING (2026-08-20). The property is "the enum is a CALL over the registry name",
+    and that is a node — `ast.Call(func=Name('list'), args=[Name(<registry>)])`. A substring pin
+    could not tell that from a comment quoting it, and the thing it must catch is precisely someone
+    re-spelling the vocabulary as a literal list."""
     from looplab.agents import unified_agent
 
-    src = inspect.getsource(unified_agent.UnifiedAgent.triage_crash)
-    assert '"enum": list(DIAGNOSED_FAILURE_REASONS)' in src
-    assert '"enum": list(EVIDENCE_SOURCES)' in src
+    src = _dedented(unified_agent.UnifiedAgent.triage_crash)
+    enums = _enum_sources(src)
+    assert "list(DIAGNOSED_FAILURE_REASONS)" in enums
+    assert "list(EVIDENCE_SOURCES)" in enums
+    assert "list(AGENT_TRIAGE_ACTIONS)" in enums, "the action enum follows the same rule"
+    # …and NONE of them is a re-spelled literal. Derived from the nodes, so it holds however the
+    # literal is spelled or wrapped.
+    for value in enums:
+        assert value.startswith("list("), f"an enum was re-spelled rather than read: {value}"
+    # The NEGATIVE pins stay substrings on purpose (CLAUDE.md): what must not come back is the TEXT,
+    # and a commented-out copy is as much of a drift risk as a live one.
     assert '"enum": ["crash"' not in src and "'crash', 'oom'" not in src
 
 
@@ -607,15 +738,85 @@ def test_the_engine_loop_stamps_who_chose_the_reason_and_what_it_read():
     terminal, so once a model may choose it the row has to say so — and it has to keep the engine's
     own answer beside it, or the structural classification is destroyed by the very change that made
     it optional. Additive with reader-side defaults (invariant #5): the evidence keys are OMITTED
-    when nobody was asked, so an old row folds unchanged."""
+    when nobody was asked, so an old row folds unchanged.
+
+    BY AST, NOT SUBSTRING (2026-08-20), and this test is why the rule is worth stating twice. It
+    asserted five rendered lines over `inspect.getsource`, and `evaluate.py` names `engine_reason`
+    fourteen times — mostly in prose. A future comment quoting the line it replaced would have kept
+    all five green over a loop that stamps nothing. What is asserted now is the KEY -> VALUE
+    MAPPING the source really builds, which is an `ast.Dict` pair or a `Subscript` assignment and is
+    unforgeable by prose: a comment produces neither node.
+    `test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substring` drives it."""
     from looplab.engine import evaluate as ev
 
-    src = inspect.getsource(ev.EvaluateMixin._evaluate)
-    assert '"reason_source": _reason_source' in src
-    assert '"engine_reason": _engine_reason' in src
-    assert "reason, _reason_source = diagnosed_failure_reason(reason, triage)" in src
-    assert '"reason_evidence": _evidence' in src
-    assert '"reason_evidence_resolved": _evidence_resolved' in src
+    stamps = _payload_stamps(_dedented(ev.EvaluateMixin._evaluate))
+    # WHO chose the reason, and WHAT the engine independently held — the two columns that keep the
+    # durable rows honest now that a model may pick `reason`.
+    assert "_reason_source" in stamps.get("reason_source", set())
+    assert "_engine_reason" in stamps.get("engine_reason", set())
+    # WHERE it looked, and whether the citation resolved. Both are written on BOTH terminals, and
+    # the `node_failed` path adds them by subscript assignment rather than in the literal.
+    assert "_evidence" in stamps.get("reason_evidence", set())
+    assert "_evidence_resolved" in stamps.get("reason_evidence_resolved", set())
+    # …and `reason` itself is the loop variable, never a literal, on the rows that carry a source.
+    assert "reason" in stamps.get("reason", set())
+
+    # THE RULE IS APPLIED, as a call whose two targets are the pair. Asserted as an `ast.Assign`
+    # rather than as the rendered line, whose spelling changes under any reformat.
+    targets = _tuple_assign_targets(_dedented(ev.EvaluateMixin._evaluate),
+                                    "diagnosed_failure_reason")
+    assert targets == [("reason", "_reason_source")], (
+        f"the ownership rule must be applied exactly once, to both columns; found {targets}")
+
+
+def test_a_commented_out_stamp_is_seen_by_the_ast_check_and_missed_by_a_substring():
+    """THE DRIVER, and without it the rewrite above could still be vacuous and nobody would know.
+
+    It performs the exact mutation CLAUDE.md names as the cheapest one — delete the code, leave a
+    comment carrying the pinned literal — and asserts BOTH halves of why the rewrite was needed:
+    the AST check sees the loss, and the substring pin it replaced does not. The second assertion is
+    the one that matters, because it is the evidence that this was a real defect rather than a
+    stylistic preference.
+
+    Six separate mechanisms in this repo were found shipping a vacuous green on 2026-08-20. This
+    file guards the change that removed text-matching from the engine, so a text-matching guard here
+    would have been the seventh."""
+    from looplab.engine import evaluate as ev
+
+    src = _dedented(ev.EvaluateMixin._evaluate)
+    assert "_engine_reason" in _payload_stamps(src).get("engine_reason", set()), "precondition"
+
+    # BOTH rows that carry it — `node_repaired` and the `node_failed` terminal — because a stamp is
+    # only gone when every writer of it is, and a half-mutation would leave this driver proving
+    # nothing while looking like it passed.
+    # ALL THREE WRITERS — `node_repaired`, the repair-log row the F8 critic reads, and the
+    # `node_failed` terminal — because a stamp is only gone when every writer of it is, and a
+    # partial mutation would leave this driver looking like it passed while proving nothing. The
+    # count is pinned for exactly that reason: the first draft of this test used a needle with a
+    # trailing comma, silently hit two of the three, and the check stayed correctly green.
+    mutated = _drop_stamp(src, "engine_reason", "_engine_reason", expect=3)
+    # the AST check REDDENS: the mapping is gone because a comment is not a node…
+    assert "_engine_reason" not in _payload_stamps(mutated).get("engine_reason", set()), (
+        "the AST check cannot see a stamp that stopped being built — it is vacuous")
+    # …while the substring pin this replaced stays GREEN over the very same mutation.
+    assert '"engine_reason": _engine_reason' in mutated, (
+        "if the old pin also reddened here, the rewrite bought nothing and this test should say so")
+
+    # The same, for the rule application itself.
+    assert _tuple_assign_targets(src, "diagnosed_failure_reason") == [("reason", "_reason_source")]
+    gone = _comment_out(src, "reason, _reason_source = diagnosed_failure_reason(reason, triage)",
+                        expect=1)
+    assert _tuple_assign_targets(gone, "diagnosed_failure_reason") == [], (
+        "the rule could be deleted without this guard noticing")
+    assert "reason, _reason_source = diagnosed_failure_reason(reason, triage)" in gone
+
+    # And for the enum: the realistic drift there is a RE-SPELLED literal, not a deletion.
+    from looplab.agents import unified_agent
+    schema = _dedented(unified_agent.UnifiedAgent.triage_crash)
+    respelled = schema.replace("list(DIAGNOSED_FAILURE_REASONS)",
+                               '["crash", "oom", "no_metric", "check_failed", "not_learning"]', 1)
+    assert "list(DIAGNOSED_FAILURE_REASONS)" not in _enum_sources(respelled), (
+        "a vocabulary re-spelled as a literal must redden — that is the typo the registry exists for")
 
 
 def test_the_diagnostician_gets_the_code_the_eval_actually_ran():
