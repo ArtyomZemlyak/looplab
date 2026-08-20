@@ -579,6 +579,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         train_monitor_kill = _opt("train_monitor_kill")
         train_monitor_kill_confidence = _opt("train_monitor_kill_confidence")
         train_monitor_tools = _opt("train_monitor_tools")
+        train_monitor_contract = _opt("train_monitor_contract")
         repair_log_tools = _opt("repair_log_tools")
         asha_live = _opt("asha_live")
         asha_live_kill = _opt("asha_live_kill")
@@ -1091,6 +1092,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # a slice. Read by `train_monitor.monitor_log_tools`, the ONE place the two watchdogs build
         # their provider, so both honour one switch.
         self._train_monitor_tools = bool(train_monitor_tools)
+        # Whether the monitor is shown the watched stage's own declared contract and the engine's
+        # live schedule reading. Read by `_monitor_training`, the ONE place that builds the tick's
+        # user message. Its own switch and not `train_monitor_tools`': that one buys paid round
+        # trips, this one buys nothing but two sentences on a call already being made.
+        self._train_monitor_contract = bool(train_monitor_contract)
         # Whether the CRASH/TIMEOUT TRIAGE judge may LOOK at the dead eval's stage logs instead of
         # diagnosing from `_eval_failure_text`'s 500-char stderr tail. Read by
         # `train_monitor.repair_log_tools`, the ONE place the repair path builds its provider — the

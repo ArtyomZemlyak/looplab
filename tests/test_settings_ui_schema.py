@@ -100,7 +100,15 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 182
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 183
+    # 218 -> 219 Settings and 182 -> 183 catalogued rows on 2026-08-20:
+    # `train_monitor_contract`, whether the live training-log watchdog is shown the stage's
+    # own declared contract (`expect.assert` / `expect.files`) and the engine's reading of
+    # the schedule the trainer configured. A row rather than an uncurated omission for the
+    # reason `train_monitor_tools` beside it is one — it changes what the evidence for a
+    # paid, node-ending judgement IS, and it changes a PROMPT, which is a contract here, so
+    # an operator must be able to see the switch that restores the historical bytes. Unlike
+    # that neighbour it buys NO extra round trips: it is text in a message already sent.
     # 213 -> 214 Settings and 180 -> 181 catalogued rows on 2026-08-18: `cadence_while_evaluating`,
     # whether the node-count cadences may fire at a creation decision point that still has an
     # evaluation in flight (backlog F1i). A row rather than an uncurated omission on both of this
@@ -151,7 +159,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 215
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 216
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

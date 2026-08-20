@@ -80,6 +80,13 @@ class EngineOptions:
     # ON is already opting into the paid verdict, and the slice it would otherwise get was measured
     # insufficient — see the Settings field's comment.
     train_monitor_tools: bool = True
+    # Show the monitor the watched stage's own DECLARED CONTRACT plus the engine's live reading of
+    # the schedule the trainer configured (`train_monitor.stage_contract_context`). NOT a
+    # divergence, on both of the grounds the two rows above use AND a third: it is a modifier on
+    # `train_monitor` (False here), it adds NO call at all — it is text in a message the monitor
+    # already sends — and it is EVIDENCE, so no gate, kill, repair-stop or selection can move on
+    # it. A bare `EngineOptions` caller gets no monitor, therefore no prompt, therefore nothing.
+    train_monitor_contract: bool = True
     # Let the CRASH/TIMEOUT triage judge query the failed eval's stage logs instead of deciding from
     # `res.stderr[-500:]`. NOT a divergence for the same reason as the row above and one more: it is a
     # modifier on a call the engine ALREADY makes once per failed attempt (`_triage_crash`), so a bare

@@ -246,8 +246,14 @@ def test_prompt_splits_round_trip_exactly(dataset):
             continue
         exact += 1
         assert "messages" not in row, row["case_id"]       # and exact rows must not duplicate it
-        assert judge_corpus._split_prompt(render_prompt(row["prompt"])) == row["prompt"], \
-            row["case_id"]
+        # A NEW ingredient is additive with a reader-side default, exactly as an event field is
+        # (CLAUDE.md invariant 5): `contract` shipped 2026-08-20 and no preserved row carries it, so
+        # the re-split legitimately gains that key with an EMPTY value. Every key the row does carry
+        # must still come back byte-identical, and a new key that came back NON-empty would mean the
+        # splitter had carved an ingredient out of one of them — which is the drift this guards.
+        resplit = judge_corpus._split_prompt(render_prompt(row["prompt"]))
+        assert {k: resplit[k] for k in row["prompt"]} == row["prompt"], row["case_id"]
+        assert not any(resplit[k] for k in resplit if k not in row["prompt"]), row["case_id"]
         assert messages_of(row) == render_prompt(row["prompt"]), row["case_id"]
         assert row["prompt"]["digest"], row["case_id"]
     assert exact == len(dataset["rows"])
@@ -303,6 +309,67 @@ def test_the_replay_seam_still_renders_the_ENGINES_prompt():
     from looplab.engine.train_monitor import _MONITOR_SYSTEM
     assert render_prompt({**parts, "system": _MONITOR_SYSTEM, "look_invitation": ""}) == \
         engine_messages
+
+
+def test_the_declared_contract_is_its_OWN_ingredient_not_part_of_trajectory():
+    """The contract block (shipped 2026-08-20) sits between the stage identity and the trajectory.
+
+    It needs its own name because `llm_candidate(overrides=...)` benches a prompt change by
+    REPLACING one ingredient: if the split folded the contract into `trajectory`, every trajectory
+    A/B would silently also delete the contract and the number would be about a prompt nobody
+    proposed. Driven end to end through the real `_training_verdict`, with a negative control — the
+    same message WITHOUT a contract must split to `contract == ""` and re-render byte for byte, so a
+    splitter that always claimed one would go red here too.
+    """
+    from looplab.engine.train_monitor import TrainingMonitorMixin, _MONITOR_SYSTEM
+    from looplab.judgebench.judge_corpus import CONTRACT_PREFIX, _split_prompt
+
+    sent = []
+
+    class _Client:
+        def complete_tool(self, messages, schema):
+            sent.append(messages)
+            return {"status": "healthy", "reason": "r", "confidence": 0.5}
+
+    class _Host(TrainingMonitorMixin):
+        class developer:
+            client = _Client()
+
+    # The REAL producer, not a hand-written string: what must hold is that the block the engine
+    # actually emits is the one the splitter can name, and both HALVES of the declaration have to
+    # produce it — a header that appeared only when an `assert` was present would leave a
+    # files-only stage's contract silently folded into `trajectory`, which is the exact drift this
+    # ingredient exists to prevent and which no round-trip assertion can see.
+    from looplab.engine.train_monitor import StageDeclaration, stage_contract_context
+    for declaration in (StageDeclaration(assertion="all 15 epochs completed"),
+                        StageDeclaration(files=("x/final/model.safetensors",)),
+                        StageDeclaration(assertion="all 15 epochs completed",
+                                         files=("x/final/model.safetensors",))):
+        assert stage_contract_context(declaration, "").startswith(CONTRACT_PREFIX)
+    contract = stage_contract_context(
+        StageDeclaration(assertion="all 15 epochs completed", files=("x/final/model.safetensors",)),
+        "")
+    _Host()._training_verdict("loss: 1.0\n", "CTX",
+                              "This is the live log of pipeline stage 'train' (stage 1 of 2; "
+                              "the pipeline is train -> score).",
+                              "TRAJ", None, contract_text=contract)
+    parts = _split_prompt(sent[-1])
+    assert parts["prompt_split_exact"] is True
+    assert parts["contract"] == contract
+    assert parts["trajectory"] == "TRAJ"           # the contract did NOT leak into it
+    assert render_prompt(parts) == sent[-1]
+
+    _Host()._training_verdict("loss: 1.0\n", "CTX",
+                              "This is the live log of pipeline stage 'train' (stage 1 of 2; "
+                              "the pipeline is train -> score).",
+                              "TRAJ", None)
+    bare = _split_prompt(sent[-1])
+    assert bare["prompt_split_exact"] is True
+    assert bare["contract"] == ""
+    assert bare["trajectory"] == "TRAJ"
+    assert render_prompt(bare) == sent[-1]
+    # ...and the two messages differ by exactly the block, which is what ADDITIVE has to mean here.
+    assert sent[-2][1]["content"].replace(contract + "\n\n", "") == sent[-1][1]["content"]
 
 
 def test_corpus_limits_travel_with_the_artifact(dataset):

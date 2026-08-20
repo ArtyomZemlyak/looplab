@@ -54,7 +54,7 @@ one. `CORPUS_LIMITS` states this in the dataset header itself, so the caveat tra
 from __future__ import annotations
 
 from looplab.judgebench.judge_corpus import (
-    CORPUS_LIMITS, DATASET_SCHEMA, LABELS, LABEL_BUDGET_EXHAUSTED, LABEL_PRODUCTIVE,
+    CONTRACT_PREFIX, CORPUS_LIMITS, DATASET_SCHEMA, LABELS, LABEL_BUDGET_EXHAUSTED, LABEL_PRODUCTIVE,
     LABEL_UNKNOWN, LABEL_WASTED, build_dataset, extract_run, messages_of, read_dataset,
     write_dataset)
 from looplab.judgebench.score import (
@@ -72,7 +72,7 @@ __all__ = [
     "build_triage_dataset", "cost_of", "derive_triage_label", "extract_triage_run",
     "head_replay_candidate", "read_triage_dataset", "rederive_triage_label",
     "score_triage_dataset", "write_triage_dataset",
-    "CORPUS_LIMITS", "DATASET_SCHEMA", "Gate", "LABELS", "LABEL_BUDGET_EXHAUSTED",
+    "CONTRACT_PREFIX", "CORPUS_LIMITS", "DATASET_SCHEMA", "Gate", "LABELS", "LABEL_BUDGET_EXHAUSTED",
     "LABEL_PRODUCTIVE",
     "LABEL_UNKNOWN", "LABEL_WASTED", "ScoreReport", "build_dataset", "extract_run", "messages_of",
     "per_attempt_report", "attempt_totals", "read_dataset", "score_dataset",

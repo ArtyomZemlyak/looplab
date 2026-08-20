@@ -158,6 +158,15 @@ _STAGE_CONTEXT_PREFIXES = (
     "This eval runs the pipeline ",
 )
 _STAGE_NAME_RE = re.compile(r"pipeline stage '([^']+)' \(stage (\d+) of (\d+); the pipeline is ([^)]*)\)")
+# The DECLARED-CONTRACT block (`train_monitor.stage_contract_context`, shipped 2026-08-20), which
+# sits between the stage identity and the trajectory. It gets its OWN ingredient rather than being
+# swallowed into `trajectory`, and that is not tidiness: `llm_candidate(overrides=...)` benches a
+# prompt change by REPLACING one ingredient, so a `trajectory` field that silently carried two
+# blocks would make every trajectory override also delete the contract — a prompt A/B measuring
+# something nobody asked for. The prefix is unconditional in the producer for exactly this reason;
+# an ingredient identified by two alternative openings is one rewording away from matching neither.
+# Rows recorded before this shipped carry "" here and re-render byte for byte.
+CONTRACT_PREFIX = "THIS STAGE'S OWN DECLARED CONTRACT"
 
 # Travels IN the artefact, printed by every report and stored in the dataset header, because a
 # caveat that lives only in a doc is a caveat nobody reading the number sees.
@@ -204,7 +213,7 @@ def _split_prompt(messages: list) -> dict:
     the ingredients do not reproduce the message, so only `messages` is safe to replay.
     """
     out = {"prompt_split_exact": False, "system": "", "context": "", "stage_context": "",
-           "trajectory": "", "look_invitation": "", "digest": ""}
+           "contract": "", "trajectory": "", "look_invitation": "", "digest": ""}
     if not (isinstance(messages, list) and len(messages) == 2):
         return out
     system = messages[0].get("content") or ""
@@ -226,7 +235,10 @@ def _split_prompt(messages: list) -> dict:
     if stage_at is not None:
         out["stage_context"] = remaining[stage_at]
         out["context"] = "\n\n".join(remaining[:stage_at])
-        out["trajectory"] = "\n\n".join(remaining[stage_at + 1:])
+        after = remaining[stage_at + 1:]
+        if after and after[0].startswith(CONTRACT_PREFIX):
+            out["contract"] = after.pop(0)
+        out["trajectory"] = "\n\n".join(after)
     else:
         out["context"] = "\n\n".join(remaining)
     out["prompt_split_exact"] = render_prompt(out) == messages
@@ -240,7 +252,9 @@ def render_prompt(parts: dict) -> list:
     row's `prompt` with `system` (or any other ingredient) replaced and it produces the message list
     the candidate should be asked, over the same recorded evidence.
     """
-    pieces = [parts.get(k) or "" for k in ("context", "stage_context", "trajectory",
+    # The ORDER is the producer's: `_training_verdict` splices contract between the stage identity
+    # and the trajectory, because a contract the stage cannot meet makes a healthy curve irrelevant.
+    pieces = [parts.get(k) or "" for k in ("context", "stage_context", "contract", "trajectory",
                                            "look_invitation")]
     body = "".join(p + "\n\n" for p in pieces if p)
     user = body + _TAIL_HEADER + (parts.get("digest") or "") + _TAIL_FOOTER

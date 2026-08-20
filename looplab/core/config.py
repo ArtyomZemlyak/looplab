@@ -550,6 +550,22 @@ class Settings(BaseSettings):
     # bounded: up to `train_monitor._MONITOR_LOOK_TURNS` extra round trips per tick, and a default
     # tool read is a 256 KiB seek (~12 ms) — see that module's measured cost table.
     train_monitor_tools: bool = True
+    # Show the live monitor the watched stage's OWN DECLARED CONTRACT (`expect.assert` /
+    # `expect.files`) plus the engine's deterministic reading of the schedule the trainer configured
+    # (`train_monitor.stage_contract_context`). ON because the bench says this is the class the
+    # judge cannot see: over the committed 450-decision corpus it calls a degenerate CURVE `broken`
+    # 48 of 53 times (91 %) and a stage that EXITED 0 and was then failed by the engine on its own
+    # declaration 2 of 38 times (5 %) — and 13.4 h of the 20.1 h an oracle could still save on that
+    # corpus sits in that second class. It costs ZERO extra provider calls: it is text in the user
+    # message of a tick the monitor already pays for, spliced at the same position pattern as
+    # `stage_context`/`trajectory_context`, and `false` restores the historical message byte for
+    # byte. It widens EVIDENCE only (docs/36) — `should_monitor_kill`, `should_monitor_repair`, the
+    # kill-eligible roles and the deterministic trajectory veto are untouched. Deliberately NO
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row, on `memo_verdict_cue`'s ground: it makes no paid call,
+    # mounts no intervention, changes no concurrency and no selection policy, so a resumed run gains
+    # nothing it did not consent to. (`train_monitor_tools` has a row because it DOES add paid
+    # round trips; that is the distinction, not symmetry.)
+    train_monitor_contract: bool = True
     # The same permission for the CRASH/TIMEOUT TRIAGE judge — the role whose whole job is "why did
     # this stage die", and the only one still deciding it from a slice. What it is handed is
     # `_eval_failure_text`'s `res.stderr[-500:]`: five hundred CHARACTERS, not the watchdog's 128 KiB.

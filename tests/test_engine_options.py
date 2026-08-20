@@ -46,6 +46,7 @@ ATTR_BY_FIELD = {
     "train_monitor_kill": "_train_monitor_kill",
     "train_monitor_kill_confidence": "_train_monitor_kill_confidence",
     "train_monitor_tools": "_train_monitor_tools",
+    "train_monitor_contract": "_train_monitor_contract",
     "repair_log_tools": "_repair_log_tools",
     "asha_live": "_asha_live",
     "asha_live_kill": "_asha_live_kill",
