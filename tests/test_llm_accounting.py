@@ -103,7 +103,12 @@ def test_accountant_sink_runs_once_before_budget_exception():
     deltas = []
     acc = CostAccountant(limit=0.1, on_delta=deltas.append)
 
-    with pytest.raises(BudgetExceeded, match="spent .* >= budget"):
+    # The message is the OPERATOR-FACING line (cli/__init__.py prints it at the refusal boundary),
+    # so it names the knob rather than only the arithmetic. This regex said `spent .* >= budget` and
+    # was RED on this branch: the commit that rewrote the message left the expectation behind. Match
+    # the two things an operator has to be able to read off it -- the ceiling that stopped the run
+    # and the name of the knob that sets it -- not the whole sentence, which is prose.
+    with pytest.raises(BudgetExceeded, match=r"spend ceiling reached.*llm_budget_usd"):
         acc.add(0.2, usage=None)
 
     # Provider accounting was committed and delivered once even though enforcement aborts afterward.

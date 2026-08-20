@@ -115,11 +115,19 @@ def test_the_guidance_still_reaches_the_developer_that_writes_the_code():
         "an operator override must replace the persona body, not be merged into it")
     # What may follow it is exactly the CODE-OWNED suffixes, appended AFTER `render()` on purpose
     # (see `_system_body`): an override replaces the PERSONA and must not be able to drop a rule the
-    # code is responsible for. Asserting equality here would have made adding any such rule look
-    # like a regression; asserting the prefix plus a closed set of suffixes keeps the real property
-    # — nothing else leaks in — while letting the code own its own contracts.
-    from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
-    assert body == "OPERATOR BODY" + _CONTEXT_BEFORE_TOOLS_RULE, (
+    # code is responsible for. The Developer currently owns NO such suffix — `_system_body` states
+    # why at length: `developer_probe=False` must reproduce the historical prompt byte for byte, and
+    # the context-before-tools rule is the one that A/B'd to nothing while the same knowledge as
+    # DATA moved cold-start tool calls 41.3 -> 17.7. So the closed set is empty, and the assertion
+    # is that NOTHING follows the override.
+    #
+    # This assertion said `== "OPERATOR BODY" + _CONTEXT_BEFORE_TOOLS_RULE` and was RED on this
+    # branch before any rebase: the commit that stopped appending the rule left the expectation
+    # behind. Keeping the shape (prefix + a named, closed suffix set) rather than loosening it to
+    # `startswith` is deliberate — an empty set still forbids anything leaking in, which is the
+    # property, and the next code-owned suffix has one obvious place to be named.
+    _CODE_OWNED_SUFFIXES = ""
+    assert body == "OPERATOR BODY" + _CODE_OWNED_SUFFIXES, (
         "the override carried something other than the code-owned suffixes")
     # ...and the assembly must still ASK for the body. AST, not a substring: a commented-out call
     # would satisfy a regex while the model received no guidance at all.
