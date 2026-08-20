@@ -1,0 +1,192 @@
+
+========================================================================================
+ARM: cand.durable.jsonl (durable, 122 rows captured)
+========================================================================================
+
+SCORE over 118 labelled rows
+  deterministic half (engine only) : 88/118 = 74.6%
+  with the diagnostician           : 97/118 = 82.2%
+  reachable ceiling                : 113/118 = 95.8%   (headroom 29, unwinnable 4)
+
+THE 94 HANDED ROWS (65 already right structurally, 29 the headroom)
+  won   (engine wrong -> diagnostician right) : 20
+  lost  (engine right -> diagnostician wrong) : 11
+  still wrong                                 : 9
+  no answer captured                          : 0
+    WON    e5small-dr-unified-v2/n0/s1180               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n0/s1296               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n1/s1327               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n0/s1385               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n1/s1511               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n2/s1877               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n7/s3567               engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n0/s685                engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n1/s1348               engine=crash         -> oom
+    WON    rubertlite-dense-retrieval/n12/s174          engine=check_failed  -> not_learning
+    WON    rubertlite-dense-retrieval/n1/s325           engine=check_failed  -> crash
+    WON    rubertlite-dr-unified-v7/n1/s759             engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n3/s1983            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n8/s4014            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n10/s4495           engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n10/s4570           engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n0/s734             engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n5/s2889            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n5/s2938            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n6/s3194            engine=crash         -> oom
+    LOST   e5small-dr-unified-v3/n0/s461                engine=crash         -> oom
+    LOST   rubertlite-dense-retrieval/n1/s19            engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n5/s82            engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n8/s122           engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n9/s133           engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n16/s221          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n17/s236          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n19/s259          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n21/s303          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n22/s311          engine=check_failed  -> crash
+    LOST   rubertlite-dr-unified-v9/n1/s1367            engine=check_failed  -> not_learning
+    STILL WRONG (engine -> answer, truth):
+      e5small-dr-unified-v2/n1/s1263               crash         -> crash         truth=oom
+      e5small-dr-unified-v3/n0/s573                crash         -> crash         truth=oom
+      e5small-dr-unified-v3/n1/s1219               crash         -> crash         truth=oom
+      e5small-dr-unified-v3/n2/s1894               crash         -> crash         truth=oom
+      rubertlite-dense-retrieval/n15/s212          check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n40/s593          check_failed  -> crash         truth=no_metric
+      rubertlite-dense-retrieval/n60/s861          check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n68/s1009         check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n74/s1091         check_failed  -> not_learning  truth=diverged
+
+CONFUSION over the handed rows (truth -> answer)
+  truth=check_failed   n=15  correct=5    not_learning:9  crash:1
+  truth=crash          n=51  correct=50   oom:1
+  truth=diverged       n=4   correct=0    not_learning:4
+  truth=no_metric      n=1   correct=0    crash:1
+  truth=not_learning   n=1   correct=1    -
+  truth=oom            n=22  correct=18   crash:4
+
+CITATION QUALITY over 95 asked rows
+  evidence_source     : {'error': 78, 'log': 5, 'none': 8, 'code': 4}
+  evidence_resolved   : {'None': 86, 'False': 5, 'True': 4}   (None = nothing filesystem-shaped was cited)
+  filesystem citations: 9 of 95 asked (9.5%); resolved 4 = 44.4% of those
+  carried a quote     : 88 of 95 (92.6%)
+
+THE UNWINNABLE ROWS (truth outside DIAGNOSED_FAILURE_REASONS)
+  rubertlite-dense-retrieval/n15/s212          truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      The tagged kind is check_failed (another model judged the loss inf), but the true failure is the training objective diverging — loss went to inf late in trainin
+  rubertlite-dense-retrieval/n60/s861          truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      Node 60's run produced NaN loss throughout training. This is a diverged/non-finite objective, not a crash or OOM. The fix is to stabilise the objective (lower L
+  rubertlite-dense-retrieval/n68/s1009         truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      A loss of -2e10 is not a crash bug — it is numerical divergence of the objective (the tagged kind check_failed is the engine's verdict; the real failure is the 
+  rubertlite-dense-retrieval/n74/s1091         truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      The CCR experiment (node 74) diverged to -2.35e+08 — a numerical instability, not a fundamental flaw in the idea. CCR adds an entropy term on log-softmax; if im
+
+COST, MEASURED, per DECISION (the 95 rows a model was asked about)
+  provider calls  : 262 total, 2.76 per decision
+  wall seconds    : 2726 total, 28.7 per decision (median 21.0)
+  prompt tokens   : 1613067 total, 16979 per decision
+  completion      : 85993 total, 905 per decision
+  priced calls    : 0 of 262 — `cost` is a floor wherever these disagree
+
+========================================================================================
+ARM: cand.widened.jsonl (widened, 122 rows captured)
+========================================================================================
+
+SCORE over 118 labelled rows
+  deterministic half (engine only) : 88/118 = 74.6%
+  with the diagnostician           : 102/118 = 86.4%
+  reachable ceiling                : 113/118 = 95.8%   (headroom 29, unwinnable 4)
+
+THE 94 HANDED ROWS (65 already right structurally, 29 the headroom)
+  won   (engine wrong -> diagnostician right) : 24
+  lost  (engine right -> diagnostician wrong) : 10
+  still wrong                                 : 5
+  no answer captured                          : 0
+    WON    e5small-dr-unified-v2/n0/s1180               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n1/s1263               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n0/s1296               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n1/s1327               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n0/s1385               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n1/s1511               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n2/s1877               engine=crash         -> oom
+    WON    e5small-dr-unified-v2/n7/s3567               engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n0/s573                engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n0/s685                engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n1/s1219               engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n1/s1348               engine=crash         -> oom
+    WON    e5small-dr-unified-v3/n2/s1894               engine=crash         -> oom
+    WON    rubertlite-dense-retrieval/n12/s174          engine=check_failed  -> not_learning
+    WON    rubertlite-dense-retrieval/n1/s325           engine=check_failed  -> crash
+    WON    rubertlite-dr-unified-v7/n1/s759             engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n3/s1983            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n8/s4014            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n10/s4495           engine=crash         -> oom
+    WON    rubertlite-dr-unified-v8/n10/s4570           engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n0/s734             engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n5/s2889            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n5/s2938            engine=crash         -> oom
+    WON    rubertlite-dr-unified-v9/n6/s3194            engine=crash         -> oom
+    LOST   rubertlite-dense-retrieval/n5/s82            engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n8/s122           engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n14/s199          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n17/s236          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n19/s259          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n21/s303          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n22/s311          engine=check_failed  -> not_learning
+    LOST   rubertlite-dense-retrieval/n41/s606          engine=crash         -> unclassified
+    LOST   rubertlite-dr-unified-v9/n1/s1267            engine=check_failed  -> crash
+    LOST   rubertlite-dr-unified-v9/n1/s1367            engine=check_failed  -> crash
+    STILL WRONG (engine -> answer, truth):
+      rubertlite-dense-retrieval/n15/s212          check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n40/s593          check_failed  -> check_failed  truth=no_metric
+      rubertlite-dense-retrieval/n60/s861          check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n68/s1009         check_failed  -> not_learning  truth=diverged
+      rubertlite-dense-retrieval/n74/s1091         check_failed  -> not_learning  truth=diverged
+
+CONFUSION over the handed rows (truth -> answer)
+  truth=check_failed   n=15  correct=6    not_learning:7  crash:2
+  truth=crash          n=51  correct=50   unclassified:1
+  truth=diverged       n=4   correct=0    not_learning:4
+  truth=no_metric      n=1   correct=0    check_failed:1
+  truth=not_learning   n=1   correct=1    -
+  truth=oom            n=22  correct=22   -
+
+CITATION QUALITY over 95 asked rows
+  evidence_source     : {'log': 19, 'error': 69, 'none': 5, 'code': 2}
+  evidence_resolved   : {'True': 18, 'None': 74, 'False': 3}   (None = nothing filesystem-shaped was cited)
+  filesystem citations: 21 of 95 asked (22.1%); resolved 18 = 85.7% of those
+  carried a quote     : 90 of 95 (94.7%)
+
+THE UNWINNABLE ROWS (truth outside DIAGNOSED_FAILURE_REASONS)
+  rubertlite-dense-retrieval/n15/s212          truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      Node 15's loss diverged to inf in epoch 19 (tagged check_failed, but the real mechanism is a training objective that blew up numerically). The trial was a sharp
+  rubertlite-dense-retrieval/n60/s861          truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      The run is node 60, the "temperature cool-down schedule" hypothesis (start temp=0.05, anneal to 0.005). Training ran to epoch 59/60 (nearly finished) then the l
+  rubertlite-dense-retrieval/n68/s1009         truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      The loss diverged to -2e+10 at epoch 59 (the LAST epoch of a 60-epoch run), and only after the validation recall had already been printed (calc_dr_recall shows 
+  rubertlite-dense-retrieval/n74/s1091         truth=diverged   engine=check_failed  answered=not_learning  evidence=error
+      This is node 74, the CCR (Contrastive Confidence Regularization) experiment. A loss diverging to -2.35e+08 is a numerical instability in the new loss term, not 
+
+COST, MEASURED, per DECISION (the 95 rows a model was asked about)
+  provider calls  : 262 total, 2.76 per decision
+  wall seconds    : 4172 total, 43.9 per decision (median 28.4)
+  prompt tokens   : 1987613 total, 20922 per decision
+  completion      : 125875 total, 1325 per decision
+  priced calls    : 0 of 262 — `cost` is a floor wherever these disagree
+
+========================================================================================
+ARM GAP: durable -> widened
+========================================================================================
+  handed rows where widening adds NOTHING to read : 7 (the two arms ask the same question there)
+  widening turned WRONG -> RIGHT                  : 8
+  widening turned RIGHT -> WRONG                  : 3
+  moved between two wrong answers                 : 3
+    -> RIGHT  e5small-dr-unified-v2/n1/s1263               crash -> oom
+    -> RIGHT  e5small-dr-unified-v3/n0/s461                oom -> crash
+    -> RIGHT  e5small-dr-unified-v3/n0/s573                crash -> oom
+    -> RIGHT  e5small-dr-unified-v3/n1/s1219               crash -> oom
+    -> RIGHT  e5small-dr-unified-v3/n2/s1894               crash -> oom
+    -> RIGHT  rubertlite-dense-retrieval/n1/s19            not_learning -> check_failed
+    -> RIGHT  rubertlite-dense-retrieval/n9/s133           not_learning -> check_failed
+    -> RIGHT  rubertlite-dense-retrieval/n16/s221          not_learning -> check_failed
+    -> WRONG  rubertlite-dense-retrieval/n14/s199          check_failed -> not_learning
+    -> WRONG  rubertlite-dense-retrieval/n41/s606          crash -> unclassified
+    -> WRONG  rubertlite-dr-unified-v9/n1/s1267            check_failed -> crash
