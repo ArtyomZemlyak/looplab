@@ -297,10 +297,14 @@ python -m looplab.judgebench score --gate                    # count the ENGINE'
 `score` makes **no network call**. A candidate is supplied as a JSONL of `{"case_id", "status"}`.
 
 To bench a *changed prompt* rather than a changed model, every row stores the prompt split back into
-the ingredients the engine assembled it from (`system`, `context`, `stage_context`, `trajectory`,
-`look_invitation`, `digest`), verified by re-joining byte for byte — all 450 rows split exactly. Swap
-one ingredient, re-render with `render_prompt`, and the candidate answers over the *same recorded
-evidence*. `score.llm_candidate` is that arm; **constructing it is the decision to spend money**, one
+the ingredients the engine assembled it from (`system`, `context`, `stage_context`, `contract`,
+`trajectory`, `look_invitation`, `digest`), verified by re-joining byte for byte — all 450 rows split
+exactly. Swap one ingredient, re-render with `render_prompt`, and the candidate answers over the
+*same recorded evidence*. `contract` is the newest and every preserved row carries it EMPTY: the
+declared-contract block (`train_monitor.stage_contract_context`, 2026-08-20) postdates every run in
+the corpus. It is a named ingredient rather than part of `trajectory` for the reason the split exists
+at all — an override replaces ONE ingredient, and a `trajectory` field carrying two blocks would make
+every trajectory A/B silently delete the contract too. `score.llm_candidate` is that arm; **constructing it is the decision to spend money**, one
 provider call per row, and it is not the default.
 
 ## The dataset

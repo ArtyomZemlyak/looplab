@@ -43,7 +43,7 @@ import math
 import os
 import re
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -64,7 +64,8 @@ from looplab.core.numeric import median as _median
 # Two names deliberately, not one shared constant: the manifest key is a contract with the agent
 # and the operator, the log role is a contract with every reader of the durable alert row, and a
 # test pins that they still agree. `engine` imports `runtime` throughout, never the reverse.
-from looplab.runtime.command_eval import STAGE_ROLE_TRAINING
+from looplab.runtime.command_eval import (
+    DECLARED_EPOCH_TOLERANCE, STAGE_ROLE_TRAINING, declared_epoch_target)
 from looplab.events.types import (
     LOG_ROLE_AMBIGUOUS,
     LOG_ROLE_SCORE,
@@ -244,6 +245,11 @@ _GRAD_NORM_NONFINITE_RE = re.compile(
 # is the one thing a plateau reading most needs and the tail states nowhere: "flat at epoch 21 of 50"
 # and "flat at epoch 49 of 50" are different facts about the same numbers.
 _PROGRESS_RE = re.compile(r"(?<![\d./])(\d{1,9})\s*/\s*(\d{1,9})(?![\d.])")
+# ONE record, whichever way the writer ended it. A tqdm bar rewrites its line with `\r` and writes
+# no `\n` for hours, so splitting on newlines alone puts a whole multi-hour run in one record —
+# the same rule `tools/log_tools.py` and `runtime/sandbox._StageHealthMonitor` already keep, and
+# the reason `schedule_reading` can pair a step counter with the epoch printed beside it.
+_BREAK_RE = re.compile(r"[\r\n]")
 
 # An observed value at least this many times the run's own opening scale is an EXPLOSION, not a
 # reading of the same curve. Deliberately generous: the point is to notice `1.2e25` beside `63.8`,
@@ -515,10 +521,50 @@ def summarize_trajectory(windows) -> LossTrajectory:
 # from text the candidate's own training script wrote, so this may only ever ACQUIT: it moves the
 # verdict DOWN to `inconclusive` and can never raise one, never fail a stage, and never touch the
 # other hard kinds — `nan_or_inf_loss`, `crash`, `no_artifact_written`, `silent_fallback`,
-# `declared_condition_violated` — which are out of its reach BY NAME. The four genuinely diverged
-# nodes in that corpus (n15 `loss=inf` for 20 epochs, n60 `nan`, n68 `-2e+10`, n74 `-2.35e+08`) name
-# `nan_or_inf_loss` and are refused by the kind test before any curve is read; `anomalous` is the
-# second, independent refusal for a diverged run the model happened to label the other way.
+# `declared_condition_violated` — which are out of its reach BY NAME. The four nodes in that corpus
+# the run condemned as diverged (n15 `loss=inf` for 20 epochs, n60 `nan`, n68 `-2e+10`, n74
+# `-2.35e+08`) name `nan_or_inf_loss` and are refused by the kind test before any curve is read;
+# `anomalous` is the second, independent refusal for a diverged run the model happened to label the
+# other way.
+#
+# **"THE FOUR GENUINELY DIVERGED NODES" IS THE PART OF THIS THAT WAS WRONG, and the correction is
+# what decides the paragraph below** (re-derived 2026-08-20 from the preserved logs). n74 is not
+# diverged. Sampled at the same fractions of its own log, its curve and the curve of n48 — the run's
+# CHAMPION at 0.8835 — agree to three significant figures at every point: both open at
+# `loss=-2.44e+06` on step 1, pass -2.72e+07/-2.73e+07 at 2 %, -1.81e+08/-1.80e+08 at 25 %, and both
+# END at -2.32e+08. That family's loss legitimately runs to ~2.5e8: measured over all 249 stage logs
+# on this box, 28 reach |loss| >= 1e8 and 26 of them produced a metric, sixteen of those above 0.87.
+# n39 opens at a friendly `10.2`, ends at `-9.74e+08`, and scored 0.8654. What condemned n74 was an
+# end-of-stage LLM checker reading a big negative number, i.e. the same heuristic a magnitude rung
+# would be.
+#
+# DECLINED[explosion-rung-cannot-be-magnitude-symmetric] measured: n74 5.64x / n48 (champion,
+# 0.8835) 5.65x, peaks 2.54e+08 vs 2.53e+08; n39 127,626,459x and scored 0.8654; n68 1.00x —
+# docs/47-early-stop-blind-classes-2026-08-20.md
+#
+# Those ratios are `_anomaly_of`'s own arithmetic over one 20-tick windowing of each whole log, and
+# 28 of the 249 stage logs on this box reach |loss| >= 1e8 with 26 of them producing a metric, 16
+# of those above 0.87.
+#
+# Making the explosion rung read the MAGNITUDE at both ends of a window, or adding an absolute
+# |loss| bar beside the ratio, is refused permanently rather than postponed. The BUG IS REAL:
+# `abs(window.maximum)` is the SIGNED max, so for an all-negative loss it inspects the value
+# NEAREST zero, and driven on the preserved logs n74 measures `direction=descending, anomaly=''`,
+# so `trajectory_vetoes_kill` returns True and that node was IMMUNE to every `broken` verdict for
+# the rest of its life. Correcting it is measurably worse than leaving it, and every variant fails
+# on a DIFFERENT node of the same four:
+#   * a MAGNITUDE bar cannot separate n74 (peak 2.54e+08) from n48 (2.53e+08) at any value;
+#   * the RATIO cannot either (5.64x vs 5.65x, and the champion is higher) — and it already fires
+#     on n39, which runs 7.71 -> -9.84e+08 and scored 0.8654, i.e. the shipped 100x boundary is
+#     ALREADY a false positive waiting on that node's shape;
+#   * neither can ever see n68, the one node that is plausibly broken on its own terms
+#     (`rdrop_loss` collapses to 0.000), because it opened at -1.5e+10 and never moved: 1.00x.
+# An `anomaly` can only make things END — it withdraws `trajectory_vetoes_kill`'s protection AND
+# blocks `trajectory_acquits_stage_check` — so a bar that catches n74 kills n48. The ratios above
+# are windowing-dependent (a different tick schedule gives different window medians), which is why
+# they are quoted WITH their derivation and why the older `96x` figure a few lines up is not
+# reproducible from any stated method; what does not move is the ORDERING, and the ordering is what
+# refuses the rung.
 #
 # WHERE THAT SECOND REFUSAL DOES NOT REACH, measured rather than assumed. Replaying the veto with
 # EVERY loss concern in that corpus forced to `loss_unchanged_from_first_step` — the maximum
@@ -553,6 +599,178 @@ STAGE_CHECK_TRAJECTORY_KIND = "loss_unchanged_from_first_step"
 # evidence either way — see `LossTrajectory.direction`) and neither does `unknown`, so both leave the
 # refusal standing, which is the pre-veto behaviour exactly.
 TRAJECTORY_MOVED_DIRECTIONS = ("descending", "rising")
+
+
+# ---------------------------------------------------------------------------------------------
+# THE DECLARED CONTRACT, READ LIVE.
+#
+# Everything above this line watches the CURVE, and measured over the committed 450-decision bench
+# that is the only failure the judge sees: on the 53 decisions whose node trained fine and scored
+# ~0 (`node_metric_degenerate`) the recorded judge said `broken` 48 times (91 %), and on the 38
+# whose stage EXITED 0 and was then failed by the engine on its own declared contract it said
+# `broken` twice (5 %). Those 38 are not a prompt problem. The stage really did train; what failed
+# was the promise it made about itself — and the engine has held that promise, in
+# `stage.expect.assert`, since before the stage started, and never showed it to the judge.
+#
+# Re-derived 2026-08-20 over the four `check_failed` attempts the bench records as missed, ALL of
+# them `declared_condition_violated`: three declared an epoch count the trainer's own configuration
+# could never reach, and each one ECHOED that configuration in the first 30 KB of a multi-hour log —
+# `"n_epochs": 8` against a declared 15 (v8 node 8, 14,105 s), `"n_epochs": 6` against 10 (v8 node
+# 9, 8,355 s), `"n_epochs": 1` against 50 (v9 node 1, 3,933 s and again 4,001 s). The engine paid
+# 8.2 h to reach, at the end, a conclusion its own manifest made available at the start.
+#
+# WHAT THIS IS AND IS NOT. It is EVIDENCE: two more sentences in the user message of a call the
+# monitor already makes, at the same splice position as `stage_context` and `trajectory_context`,
+# costing zero extra provider calls. It is NOT authority — `should_monitor_kill`'s conjuncts,
+# `should_monitor_repair`'s, the kill-eligible roles and the deterministic trajectory veto are all
+# untouched, and nothing here can mint a metric, a champion, a violation or a selection (docs/36).
+#
+# THE CLASS THIS DOES NOT REACH, named rather than papered over. 4.96 h of that 20.1 h sits in
+# the 11 attempts that CRASHED (exit 1), and the reason the judge sees ~5 % of them is NOT that
+# the traceback is in another file — `runtime/sandbox.py::_tee_drain` runs one pump per stream
+# into ONE `<stage>.log`, and all six crash logs checked (v9 n0/n6, v2 n2/n7, v8 n3 `mine.log`,
+# v8 n10) hold the traceback where the judge already reads. A crash is SELF-TERMINATING: the
+# process is dead by the time the traceback exists and `_triage_crash` acts on it at exit, so
+# that 4.96 h is only reachable if the crash was PREDICTABLE from earlier output.
+# OPEN[crash-predictability-unmeasured] nobody has measured whether it was. The measurement is
+# where in each attempt's OWN byte range (`attempt_byte_floor` to the end) the first traceback
+# lands: a traceback in the last 1 % means nothing was saveable and this class closes as a
+# refusal, while a broad distribution means there is a rung here. It belongs in the bench
+# corpus builder beside the labels it would qualify, because a claim about lead time has to be
+# re-derivable from the same dataset as the claim about the miss.
+# proof:absent:crash_lead_time@looplab/judgebench/judge_corpus.py
+#
+# The SHORTFALL reading below shares `command_eval`'s parser and `command_eval`'s tolerance on
+# purpose. `epoch_floor_acquits` is the same fact read at the END, and the pair must not be able to
+# disagree: a stage the floor would ACQUIT (`rubertlite-dr-unified-v9` node 0, whose trainer
+# reported 14.87 of a declared 15 because HF sizes `max_steps` from a floored updates-per-epoch)
+# must not be reported live as short. Driven: over that node's 11 recorded decisions this reads a
+# ceiling of 14.87-14.92 and says nothing, on all 11.
+_SCHEDULE_EPOCH_RE = re.compile(
+    r"(?<![A-Za-z0-9_])['\"]?epoch['\"]?\s*[:=]\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
+# The reported epoch is rounded (the HF Trainer logs 2 decimal places), and projecting it to the end
+# of the schedule multiplies that rounding by `total/done`. Refuse to read a ceiling whose own
+# half-width is at or above half an epoch: at that resolution "short by one epoch" is not a
+# statement the numbers support. Half an epoch and not a tenth because the SHORTFALL bar is a whole
+# declared epoch (`DECLARED_EPOCH_TOLERANCE`), so this is the point at which the two can collide.
+_SCHEDULE_MAX_HALF_WIDTH = 0.5
+
+
+@dataclass(frozen=True)
+class ScheduleReading:
+    """What the trainer's own progress records say its FULL schedule is, in epochs.
+
+    `epochs` is `epoch * total / done` — the trainer reports both halves itself, and their ratio is
+    the only thing here that is derived. Immutable and JSON-safe.
+    """
+
+    epochs: float
+    done: int
+    total: int
+    epoch: float
+
+
+def schedule_reading(text: str) -> Optional[ScheduleReading]:
+    """The epoch ceiling of the schedule the trainer actually configured, or None. Pure.
+
+    THE PAIR MUST COME FROM ONE RECORD, and that is the whole subtlety. Measured 2026-08-15, 109 of
+    the 109 stage logs in `runs/` above 200 KB carry more than one progress-bar lane, so taking "the
+    last `k/N` seen" and "the last `epoch:` seen" independently pairs a step counter with an epoch
+    from a DIFFERENT bar. Driven on the committed bench: the loose pairing reads
+    `rubertlite-dr-unified-v8` node 13 — a completed 10-epoch training that scored 0.716575 — as a
+    4.02-epoch schedule, by pairing a finished `313/313` dataloader bar with a training log dict.
+    That is one false stop against a run whose champion is worth ~9 h, and the same-record rule
+    takes it to zero: over all 450 recorded decisions this fires on 12, all of them `wasted`.
+
+    Everything it reads is text the candidate's own training script wrote, exactly like the loss
+    trajectory one section up, and like that measurement it is REPORTED, never acted on.
+    """
+    best = None
+    for record in _BREAK_RE.split(text or ""):
+        match = None
+        for match in _PROGRESS_RE.finditer(record):
+            pass                                  # the LAST counter in the record wins
+        if match is None:
+            continue
+        done, total = int(match.group(1)), int(match.group(2))
+        if not (total > 0 and 0 < done <= total):
+            continue
+        found = _SCHEDULE_EPOCH_RE.search(record)
+        if found is None:
+            continue
+        try:
+            epoch = float(found.group(1))
+        except (TypeError, ValueError):            # pragma: no cover — the group is a float literal
+            continue
+        if epoch <= 0:
+            # `epoch: 0.0` is the first few logged steps of ANY schedule and divides to nothing.
+            continue
+        if 0.005 * total / done > _SCHEDULE_MAX_HALF_WIDTH:
+            continue
+        best = ScheduleReading(epochs=epoch * total / done, done=done, total=total, epoch=epoch)
+    return best
+
+
+def declared_schedule_shortfall(assertion: str, text: str) -> Optional[tuple]:
+    """`(target, reading)` when the stage's DECLARED epoch count is a whole epoch or more above the
+    schedule the trainer configured, else None. Pure/deterministic.
+
+    Fail-closed four ways, each its own conjunct: no single declared target (`declared_epoch_target`
+    returns None for zero or two, for the reason stated there), no readable schedule, a schedule
+    whose rounding cannot support the claim (`schedule_reading`), and a shortfall inside
+    `DECLARED_EPOCH_TOLERANCE` — the SAME bar `declared_epoch_completion` applies at the end, so the
+    live rung can never say `short` about a stage the end-of-run floor would acquit.
+    """
+    target = declared_epoch_target(assertion)
+    if target is None:
+        return None
+    reading = schedule_reading(text)
+    if reading is None:
+        return None
+    if reading.epochs > target - DECLARED_EPOCH_TOLERANCE:
+        return None
+    return target, reading
+
+
+def stage_contract_context(declaration: Optional["StageDeclaration"], text: str) -> str:
+    """The watched stage's own declared contract, plus the live schedule reading, as prompt text.
+
+    "" when the stage declared nothing, which reproduces the historical message byte for byte — the
+    same additive discipline `trajectory_context` and `_LOOK_INVITATION` keep, and the reason
+    `train_monitor_contract=false` is a byte-for-byte restore rather than a behaviour flag.
+
+    The declaration is quoted, not summarised, and it is labelled as the CANDIDATE's own promise:
+    the judge must be able to tell "the engine will check this" from "the engine believes this".
+    A judge told only the shortfall would be told an answer; told the promise and the reading, it
+    can see that a training which is otherwise perfectly healthy is nonetheless going to be thrown
+    away, which is precisely the state the 38 exit-0 decisions were in.
+    """
+    if declaration is None or not (declaration.assertion or declaration.files):
+        return ""
+    # The header is UNCONDITIONAL and its literal is `judgebench.judge_corpus.CONTRACT_PREFIX`, so
+    # this block is a NAMED ingredient of the recorded prompt rather than something that silently
+    # becomes part of `trajectory` when the bench splits a future run's message. A block whose first
+    # line depended on which half of the declaration was present would need two prefixes, and a
+    # splitter with two prefixes for one ingredient is one rewording away from finding neither.
+    lines = ["THIS STAGE'S OWN DECLARED CONTRACT (from its manifest; the engine CHECKS it after the "
+             "stage exits, and a stage that exits 0 still FAILS if it is not met):"]
+    if declaration.assertion:
+        lines.append("  it must be true that: %r" % declaration.assertion)
+    if declaration.files:
+        lines.append("  it must also produce: " + ", ".join(declaration.files))
+    shortfall = declared_schedule_shortfall(declaration.assertion, text)
+    if shortfall is not None:
+        target, reading = shortfall
+        lines.append(
+            f"  ENGINE READING: at step {reading.done}/{reading.total} the trainer reports epoch "
+            f"{reading.epoch:g}, so its configured schedule is about {reading.epochs:.2f} epochs "
+            f"in total — a whole epoch or more below the {target} this stage declared. If that is "
+            "right, this stage will be failed on its own declaration however well it trains, and "
+            "the remaining hours buy nothing. Check it against the run's own configuration (the "
+            "log's first page usually echoes it) before you call it.")
+    lines.append("A run that is training perfectly can still be WASTED because it cannot meet what "
+                 "it promised; that is a different judgement from the curve, and both are yours.")
+    return "\n".join(lines)
 
 
 def stage_trajectory_note(trajectory: Optional[LossTrajectory]) -> str:
@@ -1063,6 +1281,19 @@ def _is_scorer_stage(name: str, *, index: int, total: int) -> bool:
 
 
 @dataclass(frozen=True)
+class StageDeclaration:
+    """What ONE stage promised about itself, read from the CLEANED manifest the engine resolved.
+
+    Both fields are the candidate's own text. That is the point and also the whole of the trust
+    argument: the engine is going to CHECK this promise the moment the stage exits, so showing it to
+    the live judge widens no trusted set — it names the bar the stage is already being held to.
+    """
+
+    assertion: str = ""
+    files: tuple = ()
+
+
+@dataclass(frozen=True)
 class EvalLogPlan:
     """Every log file ONE eval attempt can write, mapped to the stage that writes it and its role.
 
@@ -1077,6 +1308,15 @@ class EvalLogPlan:
     # training role was not bought by a declaration (single command, one-stage pipeline), so that
     # path keeps its behaviour byte-for-byte.
     training_artifacts: tuple = ()
+    # stage name -> what that stage PROMISED about itself (`expect.assert` / `expect.files`), for
+    # every stage that promised anything. Deliberately NOT the same map as `training_artifacts`:
+    # that one is the spend condition for an AUTHORITY and is therefore granted only where the
+    # `role: "training"` declaration survived every refusal, while this is EVIDENCE and belongs to
+    # whichever stage the tick is actually watching — including a `mine` or a `data_prep` stage,
+    # which the engine will fail on its declaration exactly as readily. LAST in the field order
+    # because every existing construction is keyword-only and it must stay that way for a
+    # positional one too.
+    declarations: dict = field(default_factory=dict)
 
 
 def eval_log_plan(stages) -> EvalLogPlan:
@@ -1165,14 +1405,27 @@ def eval_log_plan(stages) -> EvalLogPlan:
     # nothing gets. (Not enforced in `validate_stages` on purpose: refusing the manifest would fail
     # a node over a permission it did not need, and the stage still runs exactly as declared.)
     declared_training: dict = {}
+    # ...and, beside it, EVERY stage's own promise, for `stage_contract_context`. Two separate maps
+    # over one loop because they answer different questions and must not inherit each other's
+    # refusals: `declared_training` is an AUTHORITY grant and is withheld from a stage with no
+    # `expect.files`, from the positional scorer and from an incompletely resolved pipeline;
+    # `declarations` is EVIDENCE about the bar `verify_stage_artifacts` and the inter-stage checker
+    # are already going to hold that stage to, and withholding it from a stage that promised
+    # something would hide a check the engine is certainly going to run.
+    declarations: dict = {}
     for stage in raw:
         if not isinstance(stage, dict) or stage.get("name") is None:
-            continue
-        if str(stage.get("role") or "").strip().lower() != STAGE_ROLE_TRAINING:
             continue
         expect = stage.get("expect") or {}
         files = expect.get("files") if isinstance(expect, dict) else None
         promised = tuple(str(f) for f in (files or []) if isinstance(f, str))
+        assertion = expect.get("assert") if isinstance(expect, dict) else None
+        assertion = str(assertion) if isinstance(assertion, str) else ""
+        if promised or assertion:
+            declarations[str(stage.get("name"))] = StageDeclaration(assertion=assertion,
+                                                                    files=promised)
+        if str(stage.get("role") or "").strip().lower() != STAGE_ROLE_TRAINING:
+            continue
         if promised:
             declared_training[str(stage.get("name"))] = promised
     # A row this cannot name is a broken resolved pipeline (`_resolve_stages` only ever returns
@@ -1214,7 +1467,8 @@ def eval_log_plan(stages) -> EvalLogPlan:
     for name, promised in declared_training.items():
         if roles.get(_log_name_key(f"{name}.log"), (None, None))[1] == LOG_ROLE_TRAINING:
             artifacts = promised
-    return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts)
+    return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts,
+                       declarations=declarations)
 
 
 def training_authority_spent(workdir, plan: Optional[EvalLogPlan]) -> bool:
@@ -1957,7 +2211,8 @@ class TrainingMonitorMixin:
         return cfg
 
     def _training_verdict(self, digest: str, context: str, stage_context: str = "",
-                          trajectory_text: str = "", tools=None) -> Optional[TrainingVerdict]:
+                          trajectory_text: str = "", tools=None,
+                          contract_text: str = "") -> Optional[TrainingVerdict]:
         """One-shot LLM judgment of the live log (SYNC — the caller runs it in a worker thread). Uses the
         Developer's client (the Developer wrote the loop, so it knows what its own logs should look like)
         with a fresh, STATELESS structured call — it never mutates the shared role object, so it is safe to
@@ -1978,6 +2233,15 @@ class TrainingMonitorMixin:
         multi-hour run — see the trajectory section above for the two live cases where that produced a
         confident "not learning" about a run that had descended 4.73 and 1.41 respectively.
 
+        `contract_text` (from `stage_contract_context`) is the FIFTH such layer and the only one that
+        is not about the CURVE. Measured over the committed 450-decision bench, the judge answers
+        `broken` on 48 of the 53 decisions whose node trained fine and scored ~0 (91 %) and on 2 of
+        the 38 whose stage EXITED 0 and was then failed by the engine on its own declared contract
+        (5 %) — and 13.4 h of the 20.1 h an oracle could still save sits in that second class. The
+        judge was never blind there; it was never told the contract existed. Sits immediately below
+        the stage identity because it is a fact about the SAME stage, and above the trajectory
+        because it can make a perfectly healthy curve irrelevant.
+
         `tools` (from `monitor_log_tools`) is the FOURTH such layer and the one that stops the engine
         choosing for the judge what it is allowed to see. The three above are all still fixed slices;
         this one lets the judge ASK — tail the log further back, read its start, search it for a
@@ -1997,6 +2261,7 @@ class TrainingMonitorMixin:
             {"role": "system", "content": _MONITOR_SYSTEM},
             {"role": "user", "content": ((context + "\n\n") if context else "")
              + ((stage_context + "\n\n") if stage_context else "")
+             + ((contract_text + "\n\n") if contract_text else "")
              + ((trajectory_text + "\n\n") if trajectory_text else "")
              + ((_LOOK_INVITATION + "\n\n") if tools is not None else "")
              + "LIVE TRAINING LOG (recent tail):\n" + digest
@@ -2223,6 +2488,18 @@ class TrainingMonitorMixin:
                         # timeouts remain the upper bound for this ownership hand-off.
                         stage_text = monitor_stage_context(resolved, log_plan)
                         trajectory_text = trajectory_context(trajectory)
+                        # The watched stage's own declared contract, and the engine's live reading of
+                        # whether the trainer's configured schedule can meet it. `resolved.stage` is
+                        # the stage this tick's bytes came from — never the pipeline's, never the
+                        # declared training stage's — so a tick reading `mine.log` is shown `mine`'s
+                        # promise and nothing else. Empty for a stage that promised nothing, which
+                        # is the historical message byte for byte.
+                        contract_text = ""
+                        if (getattr(self, "_train_monitor_contract", True)
+                                and log_plan is not None and resolved is not None
+                                and resolved.stage is not None):
+                            contract_text = stage_contract_context(
+                                log_plan.declarations.get(resolved.stage), tail)
 
                         def _judge():
                             """The paid call AND the source derivation it needs, both in the worker.
@@ -2243,7 +2520,8 @@ class TrainingMonitorMixin:
                             """
                             return self._training_verdict(
                                 tail, context, stage_text, trajectory_text,
-                                monitor_tools(self, workdir, log_plan, log_snapshot))
+                                monitor_tools(self, workdir, log_plan, log_snapshot),
+                                contract_text=contract_text)
 
                         verdict = await anyio.to_thread.run_sync(
                             _judge, abandon_on_cancel=False)

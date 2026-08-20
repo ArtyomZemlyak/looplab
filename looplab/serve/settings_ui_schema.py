@@ -25,7 +25,7 @@ from looplab.core.config import Settings
 # Pydantic model so the browser never maintains a second, drifting copy of validation truth.
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 182
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 183
 # DERIVED, and deliberately no longer a hand-pinned review gate: a bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
 # decides every ASHA early stop — shipped with no row and no review (15b7822f took this constant
@@ -125,7 +125,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # `coverage_snapshot` and ZERO classifier `node_concepts` between them, because none of them ever
 # reached a moment with no pending node. It buys no extra passes per node count and its output is
 # fenced out of the graded-novelty evidence channel, so nothing it enables can reach selection.)
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f82f25193639ea722669d38a336a5128b608e5ae97ba7e7a748fe85b24da3b10"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "40c8f0ef98efe79823598a342a9fedb94845ed0290db3a3d564622d8599d6829"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")

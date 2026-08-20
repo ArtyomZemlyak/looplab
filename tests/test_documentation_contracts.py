@@ -64,7 +64,12 @@ def test_index_mentions_every_numbered_document():
     #   at the merge by renumbering the second to 45; the procedure is unchanged because nothing
     #   short of a lock could have prevented it, and a lock on doc numbers costs more than a rename.
     #   45 -> 46 (2026-08-20): the params proposed-vs-run root cause (doc 46).
-    assert len(numbered) == 46, "the derived numbered-document inventory changed"
+    #   46 -> 47 (2026-08-20): the early-stop blind-class audit. FIFTH collision, same day
+    #   and the same cause as the fourth: 46 was claimed by checking the glob and the index
+    #   together while a sibling worktree held an unmerged `46-`. Renumbered to 47 —
+    #   glob, index row, index first column, mkdocs nav and the two in-tree citations
+    #   (`CLAUDE.md`, the DECLINED marker in `engine/train_monitor.py`) together.
+    assert len(numbered) == 47, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

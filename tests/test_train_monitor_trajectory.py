@@ -329,6 +329,38 @@ def test_the_durable_row_carries_the_measurement_not_a_judgement():
         "this row states what the loss DID; the verdict beside it states what a model concluded"
 
 
+def _stub_signature(stub):
+    """An `inspect.Signature` for a stub read out of the AST (never imported).
+
+    Read rather than imported because these stubs are nested inside their own tests and are not
+    reachable as module attributes. Every parameter kind the suite's stubs use is carried —
+    positional, `*args`, keyword-only, `**kwargs` — because `bind` is only a real check if the
+    signature it binds against is the real one.
+    """
+    import inspect
+
+    args = stub.args
+    kinds = inspect.Parameter
+    parameters = []
+    positional = list(args.posonlyargs) + list(args.args)
+    # `args.defaults` covers the LAST n positional parameters; everything before them is required.
+    filled = ([inspect.Parameter.empty] * (len(positional) - len(args.defaults))
+              + [None] * len(args.defaults))
+    for arg, default in zip(args.posonlyargs, filled):
+        parameters.append(kinds(arg.arg, kinds.POSITIONAL_ONLY, default=default))
+    for arg, default in zip(args.args, filled[len(args.posonlyargs):]):
+        parameters.append(kinds(arg.arg, kinds.POSITIONAL_OR_KEYWORD, default=default))
+    if args.vararg is not None:
+        parameters.append(kinds(args.vararg.arg, kinds.VAR_POSITIONAL))
+    for arg, node in zip(args.kwonlyargs, args.kw_defaults):
+        parameters.append(kinds(arg.arg, kinds.KEYWORD_ONLY,
+                                default=inspect.Parameter.empty if node is None else None))
+    if args.kwarg is not None:
+        parameters.append(kinds(args.kwarg.arg, kinds.VAR_KEYWORD))
+    parameters = [p for p in parameters if p.name != "self"]
+    return inspect.Signature(parameters)
+
+
 def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
     """The loop calls `_training_verdict` POSITIONALLY, and every test that substitutes a stub for it
     re-declares that signature by hand.
@@ -343,8 +375,17 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
     `to_thread.run_sync` as a callable plus its arguments, and since the log-tools derivation was
     pushed into the worker (it globs + fstats the workdir, and as a `run_sync` ARGUMENT it ran on the
     event-loop thread) it is CALLED inside a closure the worker runs instead. Both are the same fact
-    — N positional arguments reaching that method — so the finder takes either rather than pinning
-    the dispatch shape, which is not the property.
+    — the arguments reaching that method — so the finder takes either rather than pinning the
+    dispatch shape, which is not the property.
+
+    **KEYWORDS COUNT TOO, and until 2026-08-20 they did not.** This assertion counted POSITIONAL
+    arguments, which is the MECHANISM the first two breakages happened to use and not the property.
+    Adding `contract_text=contract_text` as a KEYWORD left `passed` at 5, kept every assertion here
+    green, and turned `test_monitor_cancellation_joins_the_paid_verdict_worker` into a 15-minute
+    hang for the THIRD time — the exact failure this test's own docstring describes, walked into by
+    the guard that was written to prevent it. The property is that the loop's call, however it is
+    spelled, BINDS against every stub, so the check is now an `inspect.Signature.bind` of the real
+    call against each stub's real parameter list.
     """
     import ast
     import inspect
@@ -354,6 +395,7 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
 
     tree = function_tree(_tm.TrainingMonitorMixin._monitor_training)
     passed = None
+    keywords: list = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -361,16 +403,14 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
         first = node.args[0] if node.args else None
         if isinstance(func, ast.Attribute) and func.attr == "_training_verdict":
             passed = len(node.args)            # called directly, in the worker's closure
+            keywords = [k.arg for k in node.keywords if k.arg]
         elif isinstance(first, ast.Attribute) and first.attr == "_training_verdict":
             passed = len(node.args) - 1        # everything after the callable itself
+            keywords = [k.arg for k in node.keywords if k.arg]
     assert passed is not None, "the loop must still call _training_verdict on a worker thread"
-    parameters = inspect.signature(_tm.TrainingMonitorMixin._training_verdict).parameters
-    positional = [n for n, p in parameters.items()
-                  if n != "self" and p.kind is p.POSITIONAL_OR_KEYWORD]
-    required = [n for n in positional if parameters[n].default is inspect.Parameter.empty]
-    assert len(required) <= passed <= len(positional), (
-        f"the loop passes {passed} positional arguments; _training_verdict takes "
-        f"{len(required)}..{len(positional)}")
+    real = inspect.signature(_tm.TrainingMonitorMixin._training_verdict)
+    # BIND, do not count. The real method is the first thing the call must fit.
+    real.bind(None, *[None] * passed, **{name: None for name in keywords})
 
     # ...and the same bound over every STUB the suite substitutes for it. Binding the loop against
     # the real signature is only half the rule and it is the half that was already true both times
@@ -394,15 +434,16 @@ def test_the_loop_and_the_verdict_helper_agree_on_the_positional_contract():
             stub = functions.get(node.value.id)
             if stub is None:                    # not a def in this file (a lambda, an import) — skip
                 continue
-            args = stub.args
-            names = [a.arg for a in args.posonlyargs + args.args if a.arg != "self"]
-            defaulted = len(args.defaults)
-            stub_required = len(names) - defaulted
             stubs += 1
-            assert stub_required <= passed <= len(names), (
-                f"{path.name}::{stub.name} accepts {stub_required}..{len(names)} positional "
-                f"arguments; the loop passes {passed}. A short stub raises TypeError inside the "
-                "monitor's own per-tick `except Exception: continue`, so the test HANGS instead of "
+            signature = _stub_signature(stub)
+            try:
+                signature.bind(*[None] * passed, **{name: None for name in keywords})
+            except TypeError as exc:
+                raise AssertionError(
+                    f"{path.name}::{stub.name}{signature} cannot accept the loop's call "
+                    f"({passed} positional, keywords {sorted(keywords)}): {exc}. A stub the call "
+                    "does not fit raises TypeError inside the monitor's own per-tick "
+                    "`except Exception: continue`, so the test HANGS instead of "
                 "failing.")
     assert stubs, "no _training_verdict stub found — this half of the guard went vacuous"
 

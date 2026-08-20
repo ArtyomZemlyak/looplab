@@ -93,7 +93,14 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   Verified as the paragraph prescribes rather than by bumping the number: the catalogue was
   //   182 keys and removing exactly `gpu_footprint_cue` gave back 181, so this is one real
   //   addition with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 182)
+  //   182 -> 183 (2026-08-20): `train_monitor_contract` — whether the live training-log
+  //   watchdog is shown the stage's OWN declared contract (`expect.assert` / `expect.files`)
+  //   and the engine's reading of the schedule the trainer configured. THIRTEENTH occurrence,
+  //   and the Python guard caught it first for the ninth consecutive time. Verified as the
+  //   paragraph prescribes rather than by bumping the number: the catalogue was 183 keys and
+  //   removing exactly `train_monitor_contract` gave back 182, so this is one real addition
+  //   with nothing renamed away underneath it.
+  assert.equal(Object.keys(schema.fieldByKey).length, 183)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')

@@ -2663,6 +2663,22 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
         # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
         # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
         # print 'nan'; the stall watchdog is output-based and safe for any command).
+        # OPEN[single-command-eval-has-no-divergence-watchdog] the ONE eval path with no
+        # deterministic divergence kill at all.
+        # proof:absent:single_command_divergence_watch@looplab/core/config.py
+        #
+        # The stated reason above is about a SCORER, while this branch's own first line says the
+        # command IS the training. `engine/train_monitor.py::eval_log_plan` already relies on that
+        # asymmetry in the opposite direction: it grants `LOG_ROLE_TRAINING` here precisely because
+        # the LLM watchdog is this path's only early stop. What it needs before it can flip is the
+        # false-positive number nobody has taken — how often a scoring phase inside a
+        # single-command eval prints a `loss`/`grad_norm` immediately followed by nan/inf, which is
+        # what `_StageHealthMonitor._PAT` actually matches. Every single-command run preserved here
+        # (`rubertlite-dense-retrieval` node 7, `rubert-dr-0804`, `rubert-dr-0807`) is evidence for
+        # that count. The proof is over the FIX's own symbol and not over this comment: adding
+        # `health_check=True` to the call below would leave every word of this paragraph in place,
+        # so a text predicate here could never go red. The fix needs an operator switch, because
+        # the false-positive population is a property of the deployment's scorers.
         # `run.signals` is the AUTHENTICATED watchdog verdict, exactly as the staged branch above uses
         # it. `err` mixes the watchdog's marker with the CANDIDATE's own stderr, so
         # `STALL_SENTINEL in err` is forgeable: a solution that prints its metric, echoes the

@@ -70,7 +70,18 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               other — the same shape as the 2026-08-13 merge recorded below, and with the same
 #               answer: neither branch's digest was ever correct for the shipped tree, so this is
 #               re-measured ONCE over the merged map rather than picked from a side.
-_EXPECTED_DIGEST = "sha256:305065ac19dd168c8be7cddc24aabd20b53f528176e5bdb306d116d209a954d5"
+#   2026-08-20  + train_monitor_contract  (a NEW FIELD, so this is the "field set changed too"
+#               branch and both pins move together). It shows the live training watchdog the
+#               watched stage's own declared contract plus the engine's reading of the
+#               schedule the trainer configured. It buys no paid call and no authority —
+#               it is text in a message the monitor already sends — but a calibration
+#               REPLICATE is an assertion about the whole envelope, and a replicate run with
+#               the contract in the judge's prompt can reach a different verdict on the same
+#               node than one run without it. Old receipts SHOULD stop verifying, and the
+#               revocation costs nothing that was not already spent:
+#               `speculation_implementation_digest` hashes every shipped `.py` and this
+#               change moves it regardless.
+_EXPECTED_DIGEST = "sha256:7670c4d95046721af9764ce0b68c07886a317ef71f3ab5b8c23d58792b8d2e6f"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -354,7 +365,12 @@ _EXPECTED_DIGEST = "sha256:305065ac19dd168c8be7cddc24aabd20b53f528176e5bdb306d11
 #               verifying, and the revocation costs nothing that was not already spent:
 #               `speculation_implementation_digest` hashes every shipped `.py` and this change moves
 #               it regardless.
-_EXPECTED_FIELD_COUNT = 212
+#   2026-08-20  + train_monitor_contract (212 -> 213). The "field set changed too" branch, and
+#               verified by DIFFING THE FIELD SET rather than reading the count, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated
+#               assignments against master reports exactly [train_monitor_contract] added
+#               and [] removed, so no +1/-1 pair is hiding behind the new integer.
+_EXPECTED_FIELD_COUNT = 213
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

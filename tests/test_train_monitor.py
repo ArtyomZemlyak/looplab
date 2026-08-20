@@ -161,7 +161,8 @@ def test_monitor_cancellation_joins_the_paid_verdict_worker(tmp_path):
         # AGAIN — the guard in `test_train_monitor_trajectory.py` bound the loop to the real
         # signature and never looked at the stubs, so it stayed green through both. It now derives
         # this stub too. Keep it in step with the signature.
-        def _blocking_verdict(digest, context, stage_context="", trajectory_text="", tools=None):
+        def _blocking_verdict(digest, context, stage_context="", trajectory_text="", tools=None,
+                              contract_text=""):
             started.set()
             release.wait()
             worker_finished.set()
@@ -306,7 +307,8 @@ def test_the_log_tools_derivation_happens_off_the_event_loop_thread(tmp_path):
         host._train_monitor_tools = True
         judged = threading.Event()
 
-        def _verdict(digest, context, stage_context="", trajectory_text="", tools=None):
+        def _verdict(digest, context, stage_context="", trajectory_text="", tools=None,
+                     contract_text=""):
             judged.set()
             return None
 
