@@ -5655,3 +5655,87 @@ POSITIVE marker (absent means no) forwarded read-through by `WrapsDeveloper`, ex
 `honors_idea_space`. Making the selection read `last_files` instead was considered and refused on the
 683/683 number above: a selector with measured discrimination of zero is the unverified claim this
 file exists to end. `tests/test_best_of_n.py` drives the broken selection AND the refusal.
+
+## The classifier decided from TEXT what the engine already knew, and where it did not know, it guessed
+
+  **[2026-08-20 — the sibling of the 2026-08-05 heuristic deletion, found by the same failure.**
+  `engine/triage.py`'s header records why two heuristics were removed on 2026-08-05 — *"a bound that
+  depends on the TEXT QUALITY of a program's error output is not a bound"*, after one of them ran
+  1,741 repairs because an identifier happened to be Cyrillic — and moved the STOPPING decision to
+  the triage model. The CLASSIFICATION stayed a rule in the same file, and it has now failed the
+  same way.
+
+  `runs/e5small-dr-unified-v3` finished with **three nodes, zero metrics and the systemic-failure
+  stop**. All three died of `torch.OutOfMemoryError`. `_failure_reason`'s `oom` branch recognises
+  exactly one signature — the KERNEL kill, `exit_code in (-9, 137)` with no `Traceback` — and an
+  allocator OOM is its mirror image: it *raises*, prints a full traceback and exits 1, so every
+  conjunct is false. All eight `node_repaired` rows read `reason: crash`; the Developer got
+  "diagnose the root cause" instead of the memory-reduction directive that exists one branch away
+  and is exactly right; two of the repairs returned byte-identical files. Replayed over `runs/`:
+  **26 of the 41 text-read failures in the five modern runs were out-of-memory failures recorded as
+  `crash`** (v2 9, v3 8, v7 1, v8 4, v9 4), including the terminal rows of three dead nodes.
+
+  **THE CORPUS WIN IS THE MARKER'S, NOT THIS ROW'S, and that is stated first because the opposite
+  claim would be easy to make.** `triage.py::_is_torch_oom` landed the same day, scans the whole
+  64,000-byte `res.stderr` clamp, and replayed over `runs/` resolves **all 26** — including the 9
+  rows where `torchrun`/`accelerate` swallowed the child exception and the recorded 500-character
+  `error_in` is nothing but a `Root Cause … exitcode: 1` block (the allocator string is still inside
+  the clamp, one screen further up). **This change reclassifies nothing further on today's corpus.**
+
+  **What it is for, given that.** Three things a marker list structurally cannot be extended to.
+  (1) It answers *what failed*, so it reaches the readings the marker does not touch at all —
+  `crash` vs `no_metric` — and the next allocator nobody has enumerated (a host `MemoryError`,
+  `DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside another library's
+  exception); each of those is otherwise another literal and another incident first. (2) It reads
+  the STAGE LOG rather than the captured stream (`repair_log_tools`, since 2026-08-15), so it still
+  answers when a chatty stage pushes the diagnosis past the clamp — which the 9 rows above miss by
+  about one clamp width. (3) A substring rule cannot tell a string that is present from a string
+  that is present for the wrong reason: a script that CATCHES an OOM, prints the traceback, backs
+  off and then dies of something else reads as `oom` to any marker and is not one. **None of the
+  three is measured on today's corpus.** What IS enforced rather than hoped for is the split, the
+  refusal of an out-of-vocabulary reason, and the record columns.
+
+  **The fix is a LINE, not a model.** `_failure_reason` answers two different kinds of question.
+  Eight of its twelve outcomes are **authenticated facts** the engine recorded out of band about what
+  *it* did — `diverged`/`stalled` from `run_argv`'s `signals`, `timeout` from its own clock, `drift`
+  from the cross-reader's refusal, `setup` from its own short-circuit, and the three stage-contract
+  statuses `_run_stages` reports structurally — and those are **final**: the judge is not consulted
+  about one and `judged_failure_reason` would not read an answer about one if it arrived. That is
+  what keeps this from re-creating `tests/test_watchdog_kill_is_not_an_oom.py`'s incident from the
+  other side. Three are **readings** of the dead process's own text (`crash`, `oom`, `no_metric`) and
+  go to the judge over a closed vocabulary; a reason outside it is refused and the engine keeps its
+  own answer, because `Settings.inline_repair_reasons` selects on that vocabulary and an invented
+  reason would silently make a failure class unrepairable.
+
+  **Why the split is the safety argument.** `reason` is not only a "what happens next" input:
+  `metric_salvage.NEVER_SALVAGED_REASONS` reads it, and salvage decides whether a number enters the
+  RECORD. Every member of that set (`drift`, `setup`, `timeout`, `diverged`) is on the authenticated
+  side and none of the three judged reasons is in it, so a model's answer cannot move a node into or
+  out of the salvage refusal in either direction. `tests/test_triage_llm_failure_classifier.py`
+  asserts the disjointness rather than restating it.
+
+  **The record says who chose the word.** `node_repaired` and `node_failed` carry `reason_source`
+  (`engine`/`triage`) and `engine_reason` (the deterministic classification, kept whatever the model
+  said) beside `reason`. That is the `at_pending` shape — an ENGINE-written column recording what the
+  engine independently held beside a model-derived value — and deliberately not the
+  `TrainingVerdict.fault` shape, which is a field the model emits and so cannot witness that a model
+  wrote it. The authenticated column is never destroyed, so the corpus replay above stays runnable
+  against future logs.
+
+  **It costs no extra call.** The judge is already consulted exactly once per failed attempt, is
+  already handed the evidence the question needs (the error text, the repair history, and since
+  2026-08-15 the stage logs), so the classification rides on that emit as a `failure_kind` property.
+  Corpus rate: 6–52 failed attempts per run, median ~11 — a separate ask would have added that many
+  triage calls per run to re-read a string the judge has already read.
+
+  **STILL OPEN, and named rather than done.** (1) The `setup` branch is the one authenticated reason
+  that is *read from text* — `stderr.startswith("setup failed:")`, an engine-authored prefix in front
+  of the candidate's own bytes — so a candidate whose stderr opens with those twelve characters is
+  classified `setup`. It stays on the authenticated side because losing it is the only direction that
+  OPENS a salvage gate, but the honest fix is a flag on `RunResult` from
+  `command_eval.run_command_eval`'s early return, which is a different seam. (2) The 16 `no_metric`
+  terminals in `runs/rubertlite-dense-retrieval` are all *"stage 'train' failed verification: loss
+  constant at 14.8"* — 12 `not_learning` and 3 `diverged` in everything but the word. Under today's
+  code they classify as `check_failed`, an authenticated fact, so the judge is never asked; the
+  check-stage judge already names the cause in prose and the vocabulary flattens it. Whether
+  `check_failed` should carry that judge's own attribution is the next question of this shape.]

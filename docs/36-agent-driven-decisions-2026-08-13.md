@@ -96,6 +96,58 @@ What it must not become: an unbounded spend with no floor. The bound moves from 
 plus a judgment, and `systemic_failure_stop` (a run where nothing has ever worked stops) stays as the
 floor beneath both.
 
+## Worked example, 2026-08-20 · the failure CLASSIFIER, split down the middle
+
+The paragraph above says `c862045c` "leaves open the rung above it". This is that rung, and it is
+recorded here because the *shape of the answer* is the reusable part, not the feature.
+
+**What happened.** `runs/e5small-dr-unified-v3` finished with three nodes, zero metrics and the
+systemic-failure stop. All three died of `torch.OutOfMemoryError`. `_failure_reason`'s `oom` branch
+recognises exactly one signature — the KERNEL kill, `exit_code in (-9, 137)` with no `Traceback` —
+and an allocator OOM is its mirror image: it raises, prints a full traceback, exits 1. So every one
+of the eight `node_repaired` rows read `reason: crash`, the Developer got "diagnose the root cause"
+instead of the memory-reduction directive that exists one branch away, and two of its repairs
+returned byte-identical files. Measured across `runs/`: **26 of the 41 text-read failures in the
+five modern runs were out-of-memory failures recorded as `crash`.**
+
+**And the measured win is not this change's.** A marker list landed the same day
+(`triage.py::_is_torch_oom`), it scans the whole 64,000-byte `res.stderr` clamp, and replayed over
+`runs/` it resolves **all 26** — including the 9 rows where `torchrun`/`accelerate` swallowed the
+child exception and the recorded 500-character `error_in` is nothing but a `Root Cause … exitcode:
+1` block. This rung adds **zero further reclassifications on today's corpus**, and saying so is the
+point of the entry: the principle is not "an agent would have caught it", because here a literal
+did. What the principle buys is what the literal cannot be extended to — a question with more than
+one right answer per program (`crash` vs `no_metric`), a reader that can open the stage log rather
+than the captured stream, and a rule that does not need a new incident and a new string for the
+next allocator. That case is argued, not measured, and the enforcement below is what makes it safe
+to take on those terms.
+
+**The line that was drawn.** Not "the classifier becomes a model". `_failure_reason` answers two
+different kinds of question and only one of them was ever a guess:
+
+| | who decides | why |
+|---|---|---|
+| `diverged` · `stalled` · `timeout` · `drift` · `setup` · `needs_failed` · `expect_failed` · `check_failed` | **the engine, finally** | its own record of what IT did — `run_argv`'s out-of-band `signals`, its own clock, the cross-reader's refusal, the structural stage-contract statuses. The judge is not asked and could not be read if it answered |
+| `crash` · `oom` · `no_metric` | **the triage judge**, over a closed vocabulary | the three residual buckets, inferred from text the candidate wrote. Nothing out of band saw them |
+
+**Why the split IS the safety argument, and not a promise.** `reason` is not only a "what next"
+input — `metric_salvage.NEVER_SALVAGED_REASONS` reads it, and salvage decides whether a number
+enters the record. Every member of that set is on the authenticated side and none of the three
+judged reasons is in it, so a model's answer cannot move a node into or out of the salvage refusal
+in either direction. That is corollary 2 as a checkable property: the action space widened, the
+trusted set did not, and a test asserts the disjointness rather than a comment claiming it.
+
+**The record half.** A model-chosen reason does reach the durable rows, so the rows say who chose
+it: `reason_source` (`engine`/`triage`) and `engine_reason` (the deterministic classification, kept
+whatever the model said) ride beside `reason` on `node_repaired` and `node_failed`. That is the
+`at_pending` shape — an ENGINE-written column recording what the engine independently held beside a
+model-derived value — and deliberately not the `TrainingVerdict.fault` shape, which is a field the
+model emits and therefore cannot witness that a model wrote it.
+
+**The cost was zero.** The judge is already consulted once per failed attempt and already holds the
+evidence (the error text, the repair history, the stage logs), so the classification rides on that
+emit as a `failure_kind` property rather than as a second call.
+
 ## Where to look for more of these
 
 The operator's standing instruction is to find these sites and improve them, not to wait to be
@@ -104,6 +156,8 @@ something whose right answer depends on context.** Known candidates, none of the
 
 - the repair-attempt bound and the inline-repair reason set (F8 above);
 - `engine/triage.py`'s verdict vocabulary — a closed enum choosing the fate of a failed node;
+  **the sibling question, "what FAILED", was assessed and split on 2026-08-20 — see the worked
+  example above;**
 - the stall/timeout ladders, which read elapsed time and not whether anything is progressing;
 - the anti-stuck counter, defeated once already by an error whose signature changed every attempt;
 - stage-contract failures (`needs_failed`, `expect_failed`), where "the declaration is wrong and I

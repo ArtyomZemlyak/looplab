@@ -377,8 +377,30 @@ class UnifiedAgent(WrapsDeveloper):
         "availability check — put ONLY that distribution's name in `missing_dependency` (e.g. "
         "\"accelerate\"); the engine installs it and re-runs. Leave it empty for anything you would "
         "fix by editing code.\n"
-        "Consult the run if useful (read the code, find analogous experiments), then call "
-        "`triage_crash` exactly once with your `action` and a one-sentence `rationale`."
+        "YOU ALSO SAY WHAT THE FAILURE WAS (`failure_kind`), and the tagged kind above is a GUESS "
+        "wherever it says 'crash', 'oom' or 'no_metric'. Those three are all the engine can infer "
+        "from the dead process's own text, and it infers them by matching a short list of strings "
+        "in the captured stderr. So it is right whenever the failure says its own name there and "
+        "wrong whenever it does not — most often for an OUT-OF-MEMORY failure, which is the "
+        "expensive mislabel because it costs the memory-reduction directive and sends the repair "
+        "looking for a bug that is not there. Two shapes to watch for: an allocator whose spelling "
+        "is not on that list (a host `MemoryError`, `DefaultCPUAllocator: can't allocate memory`, an "
+        "OOM re-raised inside another library's exception), and — far more common here — a launcher "
+        "(torchrun/accelerate) that SWALLOWS the child exception and shows only a "
+        "'Root Cause ... exitcode: 1' block. In that case the tail below names nothing at all and "
+        "the real cause is further up the stage LOG: go and read it before you answer.\n"
+        "  - 'oom': the run ran out of memory (device or host), however it died.\n"
+        "  - 'crash': it failed for some other reason — a bug, a bad argument, a missing file, an "
+        "assertion the script itself raised.\n"
+        "  - 'no_metric': it completed and simply never produced the number.\n"
+        "Choose from those THREE only. The other kinds — timeout, diverged, stalled, drift, setup "
+        "and the stage-contract failures — are facts the ENGINE recorded out of band about what IT "
+        "did, they are never in question here, and you will not be asked about one. If the tagged "
+        "kind is right, repeat it; `failure_kind` is not a licence to relabel a failure into "
+        "whatever your fix is aimed at.\n"
+        "Consult the run if useful (read the code, find analogous experiments, read the stage logs), "
+        "then call `triage_crash` exactly once with your `action`, your `failure_kind` and a "
+        "one-sentence `rationale`."
     )
 
     # The sentence that tells the triage judge the stderr tail is not all it may have. Spliced ONLY
@@ -424,7 +446,8 @@ class UnifiedAgent(WrapsDeveloper):
     def triage_crash(self, node, error: str, attempt: int, *, state: Optional[RunState] = None,
                      brief: str = "", history: str = "", stages_passed: Optional[int] = None,
                      attempts_left: Optional[int] = None, tools=None) -> Optional[dict]:
-        """Decide what to do with a just-crashed node: returns ``{"action", "rationale"}`` where
+        """Decide what to do with a just-crashed node: returns ``{"action", "failure_kind",
+        "rationale"}`` where
         action ∈ {repair, abandon, reject_idea} — or one of the engine's two fail-closed verdicts
         when this call could not produce one of those (see the bottom of this docstring) — or
         ``None`` when no pilot model is wired (the engine
@@ -454,6 +477,25 @@ class UnifiedAgent(WrapsDeveloper):
         is what the candidate's own script wrote, which is `engine/metric_salvage.py`'s rule two
         packages over.
 
+        `failure_kind` (2026-08-20) is the SECOND question this one call now answers, and it is a
+        second question and not a widening of the first: what the failure WAS, over the three kinds
+        the engine can only infer from the dead process's own text
+        (`engine/triage.py::JUDGED_FAILURE_REASONS`). It rides on this emit rather than on a call of
+        its own because the classification is already being paid for — this judge is consulted once
+        per failed attempt, is handed exactly the evidence the question needs (the error text, the
+        repair history, and since 2026-08-15 the stage logs themselves), and a separate ask would
+        double the loop's triage calls to re-read a string it has already read. The engine's own
+        deterministic classification arrives tagged at the head of `error` and is the fallback for
+        everything this field can fail at, so a model that never emits it answers exactly as before.
+
+        WHAT IT MAY NOT SAY is the point: the enum holds only the three READ kinds. The
+        AUTHENTICATED ones — timeout, diverged, stalled, drift, setup, the stage-contract statuses —
+        are the engine's own record of what it did, the engine never asks about one, and
+        `judged_failure_reason` would not read an answer about one if it arrived. That is what keeps
+        this from re-creating the v6 node 5 incident from the other direction, and it is what makes
+        the field safe for the RECORD: the three it may say are disjoint from
+        `metric_salvage.NEVER_SALVAGED_REASONS`, so no metric can move on it.
+
         NEITHER degradation path answers "repair", and they answer DIFFERENT things: `_finalize`'s
         out-of-enum branch says `unreadable` (the model is alive, this node stops) and `_fallback`
         says `unanswerable` with the engine-side transport marker (the endpoint is gone, the run
@@ -466,7 +508,8 @@ class UnifiedAgent(WrapsDeveloper):
         # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
         # `agents` -> `search` rule and adds no import-time edge upward.
         from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
-                                           TRIAGE_RATIONALE_CAP, TRIAGE_TRANSPORT_FAILURE_KEY,
+                                           JUDGED_FAILURE_REASONS, TRIAGE_RATIONALE_CAP,
+                                           TRIAGE_TRANSPORT_FAILURE_KEY,
                                            UNANSWERABLE_TRIAGE_ACTION)
         code_tail = (getattr(node, "code", "") or "")[-1500:]
         budget = ("" if attempts_left is None else
@@ -486,7 +529,8 @@ class UnifiedAgent(WrapsDeveloper):
                 f"--- ERROR (stderr tail) ---\n{error}\n"
                 + (f"{history}\n" if history else "") +
                 f"--- CODE (tail) ---\n{code_tail}\n"
-                "Choose: repair, reject_idea, or abandon.").strip()},
+                "Choose an action (repair, reject_idea, abandon) AND, if the kind tagged above is "
+                "crash/oom/no_metric, the failure_kind you believe it really was.").strip()},
         ]
         emit_spec = {"type": "function", "function": {
             "name": "triage_crash",
@@ -508,6 +552,21 @@ class UnifiedAgent(WrapsDeveloper):
                                        "description": "Distribution name to install, ONLY when the "
                                                       "crash is caused by a library that is not "
                                                       "installed. Empty otherwise."},
+                # WHAT THE FAILURE ACTUALLY WAS, and only over the three kinds the engine reads out
+                # of the failure's own text (`engine/triage.py::JUDGED_FAILURE_REASONS`). The enum
+                # is read from that registry and never re-spelled here, for the same reason
+                # `action`'s is: `Settings.inline_repair_reasons` selects on these exact strings, so
+                # an invented one would silently make a failure class unrepairable. Every
+                # AUTHENTICATED kind is absent by construction — the engine never asks about one and
+                # `judged_failure_reason` would not read an answer about one — so a model cannot
+                # relabel a watchdog kill, a deadline, a drift rejection or a stage-contract failure
+                # into something the memory playbook answers, which is precisely the incident
+                # `tests/test_watchdog_kill_is_not_an_oom.py` exists to prevent.
+                "failure_kind": {"type": "string", "enum": list(JUDGED_FAILURE_REASONS),
+                                 "description": "What this failure really was, chosen from the "
+                                                "three the engine can only GUESS at from the error "
+                                                "text. Repeat the tagged kind when it is right; "
+                                                "correct it when the log says otherwise."},
                 "rationale": {"type": "string"}},
                 "required": ["action"]}}}
 
@@ -545,7 +604,13 @@ class UnifiedAgent(WrapsDeveloper):
             # caps that must not disagree may not be two literals. Every durable SINK still clips
             # independently at its own 300 (`node_repaired.rationale`, `node_failed.triage_rationale`)
             # — no durable bytes move, only what the engine reads before it writes them.
+            # `failure_kind` rides back RAW and lower-cased, never coerced here: the fallback for an
+            # unreadable one is the ENGINE's own deterministic classification, which this layer does
+            # not have. `engine/triage.py::judged_failure_reason` holds both halves and is the one
+            # place the refusal is spelled. An absent key travels as "" and lands on the same
+            # fallback, so a model that ignores the field answers exactly as it did before.
             return {"action": action,
+                    "failure_kind": str((args or {}).get("failure_kind", "")).strip().lower()[:40],
                     "rationale": str((args or {}).get("rationale", ""))[:TRIAGE_RATIONALE_CAP],
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 
