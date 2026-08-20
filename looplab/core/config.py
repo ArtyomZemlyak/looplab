@@ -1809,7 +1809,8 @@ class Settings(BaseSettings):
     # Stop ADVERTISING a tool whose provider reports it holds nothing right now
     # (`tools/_base.py::INVENTORY_CONTRACT`). It is the offer that is withheld, never the route: a
     # withheld tool still dispatches if the model calls it, so nothing becomes unreachable, and the
-    # filter is re-evaluated every turn so a tool reappears the moment it has something.
+    # filter is re-evaluated per PHASE (`drive_tool_loop` composes its spec list once per
+    # invocation), so a tool reappears at the next phase rather than the next turn.
     #
     # Only a DECISIVE zero hides anything. `UNKNOWN` -- the provider could not count -- always keeps
     # the tool offered, which is the same asymmetry the published counts carry: an over-offer costs

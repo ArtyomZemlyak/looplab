@@ -160,6 +160,35 @@ def mount_sources(repo_spec: Optional[dict]) -> list:
     return out
 
 
+def machine_read_tiers() -> list:
+    """`[(path, mode)]` for the tiers that belong to the MACHINE rather than to one eval: the
+    interpreter, the model cache, and the default tiers.
+
+    Extracted so the two things that fence a python child share ONE derivation. `derive()` builds
+    the eval launcher's allow-list; `tools/dev_probe.py::_interpreter_allow` builds the Developer
+    probe's. The probe had its own hand-written copy that listed the interpreter and omitted the
+    model cache entirely -- so a confined probe running `AutoModel.from_pretrained(...)` was refused
+    `~/.cache/huggingface/...` and died on a deliberately non-`OSError` refusal that a library's
+    `except OSError` fallback cannot catch. `_CACHE_ENV` and the `~/.cache` row exist here precisely
+    because "a base-model download is a read every repo task makes", and a second list is how one of
+    them silently stops being true.
+
+    Returns paths UNNORMALIZED; each caller passes them through its own fence's root rule.
+    """
+    tiers: list = [(sys.prefix, "read"), (sys.base_prefix, "read")]
+    try:
+        tiers.append((os.path.dirname(os.path.realpath(sys.executable)), "read"))
+    except (OSError, ValueError, TypeError):
+        pass
+    for var in _CACHE_ENV:
+        value = os.environ.get(var)
+        if value:
+            tiers.append((value, "read"))
+    tiers.append((os.path.join(os.path.expanduser("~"), ".cache"), "read"))
+    tiers.extend(_DEFAULT_TIERS)
+    return [(path, mode) for path, mode in tiers if path]
+
+
 def derive(*, workdir, run_dir=None, repo_spec: Optional[dict] = None,
            needs: Iterable = (), extra: Iterable = ()) -> list:
     """The whole allow-list for one eval launch, as an ordered, de-duplicated `[(path, mode)]`.
@@ -190,16 +219,7 @@ def derive(*, workdir, run_dir=None, repo_spec: Optional[dict] = None,
     # The interpreter itself. Without `sys.prefix` (site-packages) and `sys.base_prefix` (the stdlib
     # of a venv's base) the child python does not reach `import`; without `sys.executable`'s directory
     # a venv's `bin/python -> ../../bin/python3` cannot be exec'd.
-    _add(out, sys.prefix, "read")
-    _add(out, sys.base_prefix, "read")
-    try:
-        _add(out, os.path.dirname(os.path.realpath(sys.executable)), "read")
-    except (OSError, ValueError, TypeError):
-        pass
-    for var in _CACHE_ENV:
-        _add(out, os.environ.get(var), "read")
-    _add(out, os.path.join(os.path.expanduser("~"), ".cache"), "read")
-    for path, mode in _DEFAULT_TIERS:
+    for path, mode in machine_read_tiers():
         _add(out, path, mode)
     del needs   # see the docstring: workdir-relative by construction, so it adds no rule
     return list(out.items())

@@ -34,7 +34,11 @@ def _cold_start_toolset(tmp_path):
     knowledge.mkdir()
     runs = tmp_path / "runs"
     runs.mkdir()
+    # A real run always carries a task id. Without one, SiblingRunTools correctly reports UNKNOWN
+    # scope rather than a decisive 0 (see the dedicated test below), which is a different case from
+    # "the stores are empty" and would make the zero-assertion below test the wrong thing.
     state = RunState(goal="g", direction="max")
+    state.task_id = "toy_quadratic"
     run_tools = RunTools()
     run_tools.bind_state(state)
     return CompositeTools([
@@ -42,9 +46,14 @@ def _cold_start_toolset(tmp_path):
         DataTools(_RepoTask()),
         CrossRunTools(memory, audience="portfolio"),
         KnowledgeTools(str(knowledge)),
-        SiblingRunTools(runs),
-        AllRunsTools(runs),
+        _bound(SiblingRunTools(runs), state),
+        _bound(AllRunsTools(runs), state),
     ])
+
+
+def _bound(provider, state):
+    provider.bind_state(state)
+    return provider
 
 
 # The tools that produced the empty tail this whole mechanism exists for, measured 2026-08-19 over
@@ -110,6 +119,23 @@ def test_a_shadowed_provider_never_supplies_the_count_for_a_name_it_cannot_serve
     tools = CompositeTools([First(), Second()])
     assert tools.execute("dup", {}) == "first"
     assert tools.inventory() == {"dup": 0}, "the count must come from the provider that answers"
+
+
+def test_a_row_for_a_tool_the_composite_does_not_route_is_dropped():
+    """The route filter in `CompositeTools.inventory` needs a provider that NAMES a tool it does
+    not OFFER — otherwise the filter is unexercised and the assertion above passes on dict
+    insertion order instead. Verified by mutation: deleting the filter used to break no test."""
+    class Ghost:
+        def specs(self):
+            return [{"type": "function", "function": {"name": "real", "parameters": {}}}]
+
+        def execute(self, name, args):
+            return ""
+
+        def inventory(self):
+            return {"real": 0, "ghost": 0}      # `ghost` is routed by nobody
+
+    assert CompositeTools([Ghost()]).inventory() == {"real": 0}
 
 
 def test_a_provider_that_raises_contributes_nothing_rather_than_a_zero():
@@ -179,14 +205,17 @@ def test_an_unreadable_cross_run_store_is_unknown_not_empty(tmp_path, monkeypatc
     memory.mkdir()
     (memory / "lessons.jsonl").write_text("{}\n", encoding="utf-8")
 
-    real_open = type(memory).open
+    # Patch the BUILTIN open, which is what `jsonl_row_count` uses — the counter reads bytes rather
+    # than going through `Path.open`, so patching the latter no longer reaches it.
+    import builtins
+    real_open = builtins.open
 
-    def _boom(self, *a, **k):
-        if self.name == "lessons.jsonl":
+    def _boom(path, *a, **k):
+        if str(path).endswith("lessons.jsonl"):
             raise OSError("denied")
-        return real_open(self, *a, **k)
+        return real_open(path, *a, **k)
 
-    monkeypatch.setattr(type(memory), "open", _boom)
+    monkeypatch.setattr(builtins, "open", _boom)
     rows = CrossRunTools(memory, audience="portfolio").inventory()
     assert isinstance(rows["cross_run_search"], str) and "unreadable" in rows["cross_run_search"]
     # `cross_run_prior_attempts` reads only the capsule store, which is still readable.
@@ -271,18 +300,43 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     import ast
     import pathlib
 
-    root = pathlib.Path(looplab_agents.__file__).parent
+    # EVERY package that composes a toolset, not just `agents/`. Scoped to agents/ this guard was
+    # green while `adapters/repo_developer.py` (four phases), `serve/routers/boss.py`, `engine/`
+    # and `cli/` all built `CompositeTools` by hand — i.e. the exact defect it describes was live
+    # in nine files, four of them the Developer's own phases.
+    root = pathlib.Path(looplab_agents.__file__).parent.parent
     offenders = []
-    for path in sorted(root.glob("*.py")):
+    for path in sorted(root.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "CompositeTools"
                     and not any(kw.arg == "hide_empty_tools" for kw in node.keywords)):
                 offenders.append(f"{path.name}:{node.lineno}")
-    assert not offenders, (
-        "these build a toolset without going through `compose_tools`, so they cannot honour "
-        f"hide_empty_tools: {offenders}")
+    # DECLARED EXEMPTIONS, two-way. Widening the scan from `agents/` to the whole package exposed
+    # nine more hand-rolled composites; listing them is honest where a narrower glob was not, and
+    # the two-way assertion means a NEW bypass goes red and a FIXED one must be struck off here.
+    #
+    # The four `repo_developer.py` sites are the ones that genuinely should route through
+    # `compose_tools`: they are run-scoped agent phases and they silently ignore
+    # `hide_empty_tools`. They stay listed rather than quietly tolerated, because the flag is off
+    # by default and plumbing settings into the Developer is a change of its own.
+    #
+    # The rest are not run phases: `serve/assistant.py`, `serve/routers/boss.py` and
+    # `serve/routers/genesis.py` are operator surfaces, `engine/genesis.py` runs before a run
+    # exists, `engine/train_monitor.py` composes a watchdog's read-only log tools, `cli/__init__.py`
+    # is a one-shot command, and `tools/run_tools.py` builds a delegate for a foreign run.
+    declared = {
+        "repo_developer.py", "__init__.py", "genesis.py", "train_monitor.py",
+        "assistant.py", "boss.py", "run_tools.py",
+    }
+    found = {name.split(":")[0] for name in offenders}
+    assert found <= declared, (
+        "a NEW hand-rolled toolset appeared, so it cannot honour hide_empty_tools: "
+        f"{sorted(found - declared)}")
+    assert declared <= found | {""}, (
+        "a declared exemption no longer bypasses `compose_tools` — strike it off this list: "
+        f"{sorted(declared - found)}")
 
 
 def test_schema_and_profile_do_not_refer_the_model_into_equally_empty_tools():

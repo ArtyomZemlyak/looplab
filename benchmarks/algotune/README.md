@@ -22,7 +22,9 @@ single box, for four reasons:
 |---|---|
 | `looplab_eval.py` | The eval bridge. Copies a candidate `solver.py` into `results/<model>/<task>/`, runs **AlgoTune's own** `evaluate_results.py`, prints `speedup` as stdout JSON. Holds the parity cache (below). |
 | `make_task.py` | Generates a LoopLab `repo` task spec + workspace for one AlgoTune task. |
-| `run_evaluator.py` | Runs AlgoTune's evaluator with a **disk-backed** baseline cache. Without it the reference pass is re-measured in a fresh interpreter on **every node** — see Parity below. |
+| `patch_baseline_cache.py` | Patches `BaselineManager` on disk to give it a **persistent** baseline cache. Without it the reference pass is re-measured on **every node** — see Parity below. Idempotent, keeps a `.orig`, `--revert` undoes it. |
+| `patch_eval_subset.py` | Patches `evaluate_results.py` to honour `ALGOTUNE_EVAL_SUBSET`, so the LoopLab arm can iterate on **train** like AlgoTuner's own agent. **Required** — without it every node is scored on test. |
+| `extract_champion.py` | Writes the champion node's `solver.py` out of a run's folded event log, for the final test scoring. |
 | `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from the LoopLab run's folded event log. A missing arm prints `--`, never `0`. |
 | `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
 | `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |
@@ -54,6 +56,21 @@ patch both:
 sed -i 's/for module_name, module in sys.modules.items():/for module_name, module in list(sys.modules.items()):/g' \
     AlgoTuner/utils/isolated_benchmark.py
 ```
+
+### The two patches this arm REQUIRES
+
+Neither is optional, and skipping the second is silent:
+
+```bash
+python benchmarks/algotune/patch_eval_subset.py    --algotune-root /path/to/AlgoTune
+python benchmarks/algotune/patch_baseline_cache.py --algotune-root /path/to/AlgoTune
+```
+
+`patch_eval_subset.py` is what makes `--subset train` mean anything. `evaluate_results.py` hardcodes
+`subset="test"` at three sites; unpatched, it ignores `ALGOTUNE_EVAL_SUBSET` and scores **every
+LoopLab node on the test split** while `looplab_eval.py` still stamps `"subset": "train"` into its
+output — so the train/test leak is present *and* the recorded provenance says it was closed. Both
+scripts are idempotent, keep a `.orig`, and support `--revert`.
 
 ## Running an arm
 

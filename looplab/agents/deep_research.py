@@ -266,7 +266,6 @@ def state_brief(state: RunState, max_nodes: int = 40) -> str:
         discard_counts: dict[str, int] = {}
         for node in predispatch_discards:
             reason = failure_text(node, max_chars=80, fallback="unknown")
-
             discard_counts[reason] = discard_counts.get(reason, 0) + 1
         ranked_reasons = sorted(discard_counts.items(), key=lambda item: (-item[1], item[0]))
         shown_reasons = ranked_reasons[:5]

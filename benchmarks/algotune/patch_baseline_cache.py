@@ -47,6 +47,12 @@ import argparse
 import shutil
 from pathlib import Path
 
+_NO_KEY_CLASS = """class _LooplabNoCacheKey(Exception):
+    \"\"\"No task name to key the baseline cache on -- measure, never share a key.\"\"\"
+
+
+"""
+
 MARKER = "# --- LOOPLAB PERSISTENT BASELINE CACHE (benchmarks/algotune/patch_baseline_cache.py) ---"
 
 ANCHOR = """        with self._lock:
@@ -66,7 +72,14 @@ PATCH = '''        {marker}
         if not force_regenerate and not test_mode and max_samples is None:
             try:
                 import json as _ll_json, os as _ll_os
-                _ll_task = getattr(getattr(self, "task_instance", None), "task_name", None) or "task"
+                _ll_task = getattr(getattr(self, "task_instance", None), "task_name", None)
+                # FAIL CLOSED on an unknown task name. The fallback used to be the literal "task",
+                # which collapses every such task onto ONE cache file -- so task B's reference
+                # timings become the denominator of task A's speedup, silently, with the log
+                # printing "cache HIT". That is exactly the cross-task reuse this module's docstring
+                # forbids, and the only safe answer is to skip the cache and measure.
+                if not _ll_task:
+                    raise _LooplabNoCacheKey()
                 _ll_key = _ll_os.path.join(_ll_cache_dir, f"{{_ll_task}}__{{subset}}.json")
                 if _ll_os.path.exists(_ll_key):
                     with open(_ll_key, "r", encoding="utf-8") as _ll_fh:
@@ -76,6 +89,9 @@ PATCH = '''        {marker}
                                      _ll_key, len(_ll_times))
                         self._cache[subset] = _ll_times
                         return _ll_times
+            except _LooplabNoCacheKey:
+                logging.info("LOOPLAB baseline cache SKIPPED: no task name to key on")
+                _ll_key = None
             except Exception as _ll_exc:            # noqa: BLE001 - a cache miss must never fail a run
                 logging.warning("LOOPLAB baseline cache unreadable (%s); re-measuring", _ll_exc)
                 _ll_key = None
@@ -143,6 +159,7 @@ def main() -> int:
     args.cache_dir.mkdir(parents=True, exist_ok=True)
     patched = source.replace(
         ANCHOR, PATCH.format(marker=MARKER, cache_dir=str(args.cache_dir)), 1)
+    patched = patched.replace("class BaselineManager", _NO_KEY_CLASS + "class BaselineManager", 1)
     patched = patched.replace(WRITE_ANCHOR, WRITE_PATCH, 1)
     target.write_text(patched, encoding="utf-8")
     print(f"patched {target}\n  cache dir: {args.cache_dir}\n  backup:    {backup.name}")

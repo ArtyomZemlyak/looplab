@@ -1181,12 +1181,27 @@ class SiblingRunTools(ForeignRunReader):
         that boundary rather than a second, looser reading of it. Zero siblings makes all four
         tools structurally empty, which is the whole of the default single-run case.
         """
+        names = ("list_sibling_runs", "read_sibling_experiment",
+                 "read_sibling_code", "find_analogous_across_runs")
+        # NO TASK ID IS UNKNOWN SCOPE, NOT ZERO SIBLINGS. `_sibling_ids` returns [] there because
+        # "absence of an authoritative task id is UNKNOWN scope, not permission to widen" -- and
+        # publishing that as a decisive 0 is the int-vs-str substitution `INVENTORY_CONTRACT`
+        # forbids: with `hide_empty_tools` it withholds all four tools because the provider does not
+        # know its task, not because the root is empty.
+        if not self.task_id:
+            return {name: "sibling scope unknown (no bound task id)" for name in names}
+        # An UPPER BOUND from the directory listing, deliberately NOT `_sibling_ids()`. That helper
+        # FOLDS every candidate run's event log to filter by task, which this file's own comment
+        # measures at ~2,500 ms warm on the 59-run corpus and warns to re-measure "if a future
+        # caller pays it somewhere a fold is not already happening". This caller is on the
+        # synchronous prompt-assembly path of every phase, so it may not fold: an over-count costs
+        # one call the model would have made anyway, while the ZERO -- the only decisive value --
+        # is still exact, because no candidate ids means no siblings whatever their task.
         try:
-            ids = len(self._sibling_ids())
+            ids = sum(1 for rid in self._runs.run_ids() if rid != self.self_run_id)
         except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
             return {}
-        return {"list_sibling_runs": ids, "read_sibling_experiment": ids,
-                "read_sibling_code": ids, "find_analogous_across_runs": ids}
+        return {name: ids for name in names}
 
     def _scope_denial(self, run_id: str, st: RunState) -> str:
         """The same-task boundary, fail-CLOSED. Discovery is same-task scoped, but a DIRECT read takes
@@ -1449,6 +1464,15 @@ class DataTools:
         self._inventory_cache: Optional[dict] = None
 
     def bind_state(self, state: RunState, parent=None) -> None:
+        # Drop the inventory cache: it is computed from `assets()` AND from `state.data_profile`,
+        # both of which move as a run materializes its data. Cached across a rebind, a transient
+        # adapter error pinned `read_asset=UNKNOWN(...)` for the provider's whole life, and a first
+        # call before the mounts landed pinned `read_asset=0` -- which under `hide_empty_tools`
+        # withheld all three data tools for the rest of the run.
+        if state is not self.state:
+            self._inventory_cache = None
+        if state is not self.state:
+            self._inventory_cache = None
         self.state = state
 
     def inventory(self) -> dict[str, int | str]:
@@ -1473,13 +1497,17 @@ class DataTools:
                       if isinstance(assets[name], str) and name.lower().endswith((".csv", ".tsv"))]
             # `data_schema` reads `columns()` and FALLS BACK to a parsed table, so it has something
             # to say when either exists; `data_profile` only ever derives from a table.
+            # `_profile()` answers from `state.data_profile` FIRST and only falls back to a parsed
+            # table, so counting tables alone published a decisive 0 for a tool that would have
+            # returned a full column profile -- the "an under-count would suppress a call that had
+            # an answer" direction `INVENTORY_CONTRACT` forbids.
+            recorded = getattr(self.state, "data_profile", None) if self.state else None
             rows: dict[str, int | str] = {
                 "read_asset": len(assets),
-                "data_schema": len(columns) or (len(tables) and -1) or 0,
-                "data_profile": len(tables),
+                "data_schema": (len(columns) if columns
+                                else ("inferred from a table, not counted" if tables else 0)),
+                "data_profile": (len(recorded) if recorded else len(tables)),
             }
-            if rows["data_schema"] == -1:            # no declared columns, but a table to infer from
-                rows["data_schema"] = "inferred from a table, not counted"
         except Exception as exc:  # noqa: BLE001 - an adapter that raises is UNKNOWN, never zero
             reason = f"task data unavailable: {type(exc).__name__}"
             rows = {"read_asset": reason, "data_schema": reason, "data_profile": reason}

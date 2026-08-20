@@ -108,8 +108,14 @@ def test_a_probe_may_still_read_its_own_workdir(tmp_path):
     Scoped to the probe's OWN directory, which is what it was always really asserting: the file it
     used to reach lived outside, and reaching outside is now refused on purpose (see the companion
     test)."""
-    out = _probe("import pathlib; p = pathlib.Path('mine.txt'); print('cwd-read-ok')")
-    assert "exit=0" in out and "cwd-read-ok" in out
+    # It must actually OPEN something. `pathlib.Path('mine.txt')` only constructs a path object and
+    # raises no `open` audit event at all, so the previous form passed unchanged even if the confine
+    # fence refused every read in the probe's own workdir -- exactly the regression it claims to
+    # guard. Write then read, both inside the probe's disposable cwd.
+    out = _probe("import pathlib\n"
+                 "pathlib.Path('mine.txt').write_text('hello')\n"
+                 "print('cwd-read-ok:', pathlib.Path('mine.txt').read_text())")
+    assert "exit=0" in out and "cwd-read-ok: hello" in out
 
 
 def test_a_probe_cannot_read_outside_its_own_workdir(outside):

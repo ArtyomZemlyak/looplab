@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.agents.answered_by_context import answered_by_context
 from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
 from looplab.core.parse import LLMClient
@@ -727,9 +726,15 @@ class LLMRepoDeveloper:
         # Composed BEFORE the messages, because the user turn names what this toolset already holds
         # (`agents/answered_by_context.py`). Composition only reads each provider's `specs()`, so the
         # reorder costs nothing and changes no dispatch.
+        # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
+        # block is built from providers' optional `inventory()` hook, and none of this toolset's
+        # providers (`EnvInspectTools`, `RepoScoutTools`, `DevCommandTools`, `DevProbeTools`)
+        # implements it -- so it rendered "" at every call while its comment claimed the user turn
+        # "names what this toolset already holds". A count-publishing block cannot express "how much
+        # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
+        # one exists the honest state is no block rather than an empty string and a false comment.
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
-        messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": plan_user + answered_by_context(read_only)}]
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": plan_user}]
         try:
             # Full session budget — same contract as every other phase: the soft nudge at
             # agent_emit_after (300) and the forced emit at agent_emit_force (500) ride in via
@@ -1247,10 +1252,16 @@ class LLMRepoDeveloper:
         reserved = ("score",)   # `score` is ALWAYS the engine-appended final stage — consume-side reserves it too
         # scouts read the LIVE overlay (the parent solution on improve/merge), not the pristine repo.
         # Composed first so the user turn can name what it already holds — see the plan phase above.
+        # NO `answered_by_context` HERE, deliberately. It was spliced in and measured INERT: the
+        # block is built from providers' optional `inventory()` hook, and none of this toolset's
+        # providers (`EnvInspectTools`, `RepoScoutTools`, `DevCommandTools`, `DevProbeTools`)
+        # implements it -- so it rendered "" at every call while its comment claimed the user turn
+        # "names what this toolset already holds". A count-publishing block cannot express "how much
+        # is under this repo path" anyway; giving the scouts a real inventory is the fix, and until
+        # one exists the honest state is no block rather than an empty string and a false comment.
         read_only = CompositeTools([EnvInspectTools()] + self._scout_tools(write))
         messages = [{"role": "system", "content": system},
-                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)
-                                               + answered_by_context(read_only)}]
+                    {"role": "user", "content": self._stages_user(idea, ev, has_cmd)}]
 
         def _validate(args):                      # bounce a malformed manifest back to the model
             stages = (args or {}).get("stages")

@@ -2295,6 +2295,42 @@ def validate_bound_profiles(
             "LLM credential preflight failed: " + render_credential_failures(failures))
 
 
+_RUN_ACCOUNTANT_ATTR = "_looplab_run_accountant"
+
+
+def run_cost_accountant(settings) -> "CostAccountant":
+    """The ONE `CostAccountant` every client built from these `settings` shares.
+
+    `llm_budget_usd` is documented as a ceiling on "this run's LLM calls", and a per-CLIENT
+    accountant cannot be that. A run builds many clients -- one per role target
+    (`llm_credential_consumers` lists researcher/propose/implement/repair/pilot/strategy plus the
+    default), the history compressor, the Memora abstract/embed pair, the deep researcher --
+    which is exactly why `engine/costs.py::find_cost_accountants` exists to walk and dedupe them.
+    Measured before this fix: two clients from ONE `Settings` produced two accountants, each with
+    `limit=1.0`, so the effective ceiling was 2.0 and a real run's was N x whatever the operator
+    typed. `BudgetExceeded` then fired only when a SINGLE client passed the limit on its own.
+
+    Cached on the settings OBJECT, which is the run's own identity here: a `Settings` is built once
+    per run and handed to every factory. `object.__setattr__` because pydantic does not accept a
+    stray attribute, and a module-level map keyed by `id()` would alias across runs once an id is
+    reused. A caller that builds a fresh `Settings` per client is asking for separate budgets and
+    gets them -- there is no run to share.
+
+    Cost accounting for a run whose ceiling is 0.0 (no limit) is unchanged: the accountant is still
+    shared, which only makes `find_cost_accountants` dedupe to one entry instead of N.
+    """
+    existing = getattr(settings, _RUN_ACCOUNTANT_ATTR, None)
+    if isinstance(existing, CostAccountant):
+        return existing
+    accountant = CostAccountant(
+        limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None))
+    try:
+        object.__setattr__(settings, _RUN_ACCOUNTANT_ATTR, accountant)
+    except Exception:  # noqa: BLE001 - an exotic settings object still gets a working accountant
+        pass
+    return accountant
+
+
 def make_llm_client(settings, *, model: str | None = None,
                     base_url: str | None = None,
                     timeout: float | None = None,
@@ -2344,8 +2380,7 @@ def make_llm_client(settings, *, model: str | None = None,
         model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
         # `llm_budget_usd` 0.0 = no ceiling, which is what every historical caller got.
-        accountant=CostAccountant(
-            limit=(float(getattr(settings, "llm_budget_usd", 0.0) or 0.0) or None)),
+        accountant=run_cost_accountant(settings),
         guided_json=getattr(settings, "llm_guided_json", False),   # H1 constrained decoding
         reasoning=reasoning,                                        # provider-aware thinking toggle
         stream=(getattr(settings, "llm_stream", True) if stream is None else stream),

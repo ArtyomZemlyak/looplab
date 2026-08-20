@@ -24,7 +24,7 @@ from pathlib import Path
 
 from looplab.core.atomicio import file_identity
 from looplab.core.text import normalize_text
-from looplab.tools._base import RESULT_CAP, fn_spec
+from looplab.tools._base import RESULT_CAP, fn_spec, jsonl_row_count
 from looplab.trust.cross_run import (
     LessonScope, cross_run_text, scope_terms, valid_live_direction)
 
@@ -307,8 +307,7 @@ class CrossRunTools:
                 if not path.exists():
                     rows[filename] = 0     # an absent store is a KNOWN-empty one
                     continue
-                with path.open("r", encoding="utf-8", errors="replace") as handle:
-                    rows[filename] = sum(1 for line in handle if line.strip())
+                rows[filename] = jsonl_row_count(path)
             except OSError as exc:
                 unknown[filename] = f"unreadable store: {type(exc).__name__}"
         out: dict[str, int | str] = {}

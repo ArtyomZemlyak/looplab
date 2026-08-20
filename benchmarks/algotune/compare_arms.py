@@ -33,8 +33,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
+
+
+def _to_float(value):
+    """`looplab.core.parse.to_float(finite=True)` — "the one spelling of COERCING scalar parsing",
+    which also rejects NaN/inf. Four hand-rolled copies of this lived here; `float("inf")` parses
+    fine and would have been printed as a speedup and averaged into the arm means."""
+    from looplab.core.parse import to_float
+    return to_float(value, finite=True)
 
 
 def _arm_a(summary_path: Path, model_fragment: str) -> dict[str, float | None]:
@@ -50,13 +57,15 @@ def _arm_a(summary_path: Path, model_fragment: str) -> dict[str, float | None]:
         for name, row in models.items():
             if model_fragment.lower() not in str(name).lower():
                 continue
-            raw = (row or {}).get("final_speedup")
-            try:
-                out[task] = float(raw)
-            except (TypeError, ValueError):
-                # "N/A" and "Error" are the harness's own words for "no number", and they are not
-                # zero -- see the module docstring.
-                out[task] = None
+            # `row` is not guaranteed to be a dict: the harness writes the WORDS "N/A"/"Error"
+            # for a non-number, and `("N/A" or {}).get(...)` raises AttributeError, which the
+            # float guard below does not catch -- it killed the whole comparison with a traceback
+            # instead of printing the `--` this tool promises for a missing arm.
+            raw = row.get("final_speedup") if isinstance(row, dict) else None
+            # "N/A" and "Error" are the harness's own words for "no number", and they are not zero.
+            # `finite=True` additionally rejects NaN/inf, which would otherwise print as a speedup
+            # and poison the mean.
+            out[task] = _to_float(raw)
     return out
 
 
@@ -65,12 +74,13 @@ def _reference_models(summary_path: Path, task: str) -> dict[str, float]:
         data = json.loads(summary_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if not isinstance(data, dict):
+        return {}
     out = {}
     for name, row in (data.get(task) or {}).items():
-        try:
-            out[str(name)] = float((row or {}).get("final_speedup"))
-        except (TypeError, ValueError):
-            continue
+        value = _to_float(row.get("final_speedup") if isinstance(row, dict) else None)
+        if value is not None:
+            out[str(name)] = value
     return out
 
 
@@ -86,11 +96,7 @@ def _arm_b_final(final_json: Path) -> float | None:
         row = json.loads(final_json.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    value = row.get("speedup") if isinstance(row, dict) else None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
+    return _to_float(row.get("speedup") if isinstance(row, dict) else None)
 
 
 def _arm_b_train(run_dir: Path) -> float | None:
@@ -104,12 +110,7 @@ def _arm_b_train(run_dir: Path) -> float | None:
     except Exception:                       # noqa: BLE001 - a broken run is "no number", not a crash
         return None
     best = state.best()
-    if best is None or best.metric is None:
-        return None
-    try:
-        return float(best.metric)
-    except (TypeError, ValueError):
-        return None
+    return _to_float(best.metric) if best is not None else None
 
 
 def _fmt(value: float | None) -> str:

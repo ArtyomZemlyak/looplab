@@ -16,7 +16,7 @@ from looplab.core.atomicio import atomic_write_text
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.core.redact import redact_persisted_text
 from looplab.core import _pathsafe
-from looplab.tools._base import clip, fn_spec
+from looplab.tools._base import clip, fn_spec, jsonl_row_count
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, authorize, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
@@ -463,11 +463,8 @@ class KnowledgeTools:
             notes = len(glob_files("*.md", str(self.dir))) if self.dir else 0
             # Cases are indexed INTO the same "kb" index as the notes, so there is no separate
             # index to count -- read the store's own rows, the same window `_build_index` reads.
-            if self.cases_path and self.cases_path.exists():
-                with self.cases_path.open("r", encoding="utf-8", errors="replace") as handle:
-                    cases = sum(1 for line in handle if line.strip())
-            else:
-                cases = 0
+            cases = (jsonl_row_count(self.cases_path)
+                     if self.cases_path and self.cases_path.exists() else 0)
         except Exception as exc:  # noqa: BLE001 - a prompt must never fail on an optional receipt
             reason = f"knowledge store unavailable: {type(exc).__name__}"
             return {name: reason for name in ("kb_search", "grep", "list_notes", "read_note")}

@@ -175,11 +175,19 @@ def main() -> int:
         print(json.dumps({"speedup": 0.0, "error": f"no solver at {src}"}))
         return 0
 
-    dest_dir = root / "results" / args.model / args.task
+    # A PER-INVOCATION model name, because LoopLab evaluates nodes CONCURRENTLY (`eval_parallel`).
+    # With the fixed `--model LoopLab`, two nodes copied their solvers over one another in
+    # `results/LoopLab/<task>/`, and each `summary.unlink()` deleted the summary the other was about
+    # to read -- so a node could record its sibling's speedup as its own, or find no summary and
+    # score 0.0. The suffix keeps the runs apart; `--model` still names the family for reporting.
+    model_dir = f"{args.model}-{os.getpid()}"
+    dest_dir = root / "results" / model_dir / args.task
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_dir / "solver.py")
 
-    summary = root / "reports" / "evaluate_summary.json"
+    # The summary path is per-invocation for the same reason: `evaluate_results.py` writes one
+    # shared `reports/evaluate_summary.json`, so concurrent bridges would read each other's.
+    summary = root / "reports" / f"evaluate_summary.{os.getpid()}.json"
     if summary.exists():
         summary.unlink()
 
@@ -188,7 +196,8 @@ def main() -> int:
     # 2026-08-19, importing AlgoTuner in this process before the evaluator builds its worker pool
     # crashed every evaluation ("A process in the process pool was terminated abruptly"), while the
     # identical run invoked directly returned 0.9963x.
-    argv = [sys.executable, str(evaluator), "--models", args.model, "--tasks", args.task]
+    argv = [sys.executable, str(evaluator), "--models", model_dir, "--tasks", args.task,
+            "--output", str(summary)]
 
     # The split is carried in the ENVIRONMENT rather than as a flag: `evaluate_results.py` hardcodes
     # it at three sites and has no argument for it, so `patch_eval_subset.py` reads this name. An
@@ -196,8 +205,22 @@ def main() -> int:
     env = dict(os.environ, ALGOTUNE_EVAL_SUBSET=args.subset)
 
     started = time.time()
-    proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
-                          timeout=args.timeout, env=env)
+    try:
+        proc = subprocess.run(argv, cwd=str(root), capture_output=True, text=True,
+                              timeout=args.timeout, env=env)
+    except subprocess.TimeoutExpired as exc:
+        # EVERY other failure path here prints `{"speedup": 0.0, "error": ...}` so LoopLab's
+        # `stdout_json` reader gets a number. This one used to let the exception escape, so the one
+        # failure the `--timeout` flag exists for was the only one that printed NOTHING -- the node
+        # then recorded "no metric" rather than a scored-zero, which `metric_salvage` DISCARDS
+        # instead of counting as a failed solver. A timed-out solver is a wrong solver, not a
+        # missing measurement.
+        print(json.dumps({"speedup": 0.0, "eval_seconds": round(time.time() - started, 1),
+                          "subset": args.subset,
+                          "error": f"evaluator exceeded --timeout {args.timeout}s",
+                          "stderr_tail": (exc.stderr or b"")[-1000:].decode("utf-8", "replace")
+                          if isinstance(exc.stderr, bytes) else (exc.stderr or "")[-1000:]}))
+        return 0
     elapsed = round(time.time() - started, 1)
 
     out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": args.subset}
@@ -210,7 +233,7 @@ def main() -> int:
 
     try:
         record = _find_result(json.loads(summary.read_text(encoding="utf-8")),
-                              args.task, args.model)
+                              args.task, model_dir)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"unreadable summary: {type(exc).__name__}: {exc}"
         print(json.dumps(out))

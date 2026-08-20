@@ -87,7 +87,13 @@ _TRAILER = (
     "evaluation landed), not because an earlier answer looked empty."
 )
 
-_LEAD = "already answered by this snapshot (a call returns the same, no need to spend one): "
+# The lead. It states what the rows ARE, and deliberately does NOT claim that calling any of them
+# is pointless: only a ZERO is decisive, and the first version's "a call returns the same, no need
+# to spend one" said otherwise about every row -- including `cross_run_search=41`, where the tool
+# holds 41 records the prompt never carried. Saying "a call returns the same" there is the
+# under-count direction this module exists to prevent, one sentence earlier than the trailer that
+# corrects it.
+_LEAD = "how much each of your tools holds right now, measured while this turn was assembled: "
 
 
 def answered_by_context(tools) -> str:
@@ -98,6 +104,30 @@ def answered_by_context(tools) -> str:
     anyway, while a fabricated row costs a call that would have found something.
     """
     rows = collect_inventory(tools) if tools is not None else {}
+    rows = {name: value for name, value in rows.items() if name in _offered(tools)}
     if not rows:
         return ""
-    return _LEAD + render_inventory(rows) + _TRAILER
+    # Leading blank line: `_state_brief` ends mid-sentence without one, so without this the block is
+    # glued onto "...a merge inherits all actual parents." and stops reading as its own section --
+    # which is the whole of its measured value. Every comparable code-owned splice in `roles.py`
+    # (`_UNTRUSTED_MEMORY_RULE`, `_CONTEXT_BEFORE_TOOLS_RULE`) opens the same way.
+    return chr(10) * 2 + _LEAD + render_inventory(rows) + _TRAILER
+
+
+def _offered(tools) -> frozenset:
+    """The tool names this turn's request will actually carry.
+
+    The block must never name a tool the model was not offered. Under `hide_empty_tools` the offer
+    is filtered on the SAME zeros this block publishes, so an unfiltered block described a surface
+    the endpoint never received -- measured on a cold-start repo run, `specs()` offered nothing
+    while the block named `read_asset`, `data_schema` and `data_profile`, and the trailer then told
+    the model to re-read them. A provider with no `specs()` at all is treated as offering
+    everything it reports, which is the pre-existing behaviour for a bare provider.
+    """
+    getter = getattr(tools, "specs", None)
+    if not callable(getter):
+        return frozenset(collect_inventory(tools))
+    try:
+        return frozenset((spec.get("function") or {}).get("name") for spec in getter() or ())
+    except Exception:  # noqa: BLE001 - a prompt must never fail on an optional receipt
+        return frozenset(collect_inventory(tools))

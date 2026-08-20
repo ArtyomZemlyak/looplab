@@ -692,6 +692,7 @@ Give the agentic Researcher extra context and tools:
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root). Fails **closed**: with no authoritative task id — an unbound provider, or a legacy log whose `run_started` carried none — it lists and serves nothing, rather than widening to every task |
 | `all_runs_tools` | (on) Read-only tools over every run **under this run-root**, across ALL tasks — read any experiment's code + result to reuse it. Bound to the configured run-root, not the machine, so absence here is not machine-wide absence |
+| `hide_empty_tools` | `false` | Stop ADVERTISING a tool whose provider reports it holds nothing right now. Only the OFFER is withheld — a hidden tool still dispatches if called — and the check is re-made once per agent PHASE. Only a definite `0` hides; a store that could not be counted stays offered. The prompt publishes the same counts either way. |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 

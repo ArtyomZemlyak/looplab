@@ -77,7 +77,13 @@ class CompositeTools:
                 except Exception as exc:  # noqa: BLE001 - metadata must not disable a legacy tool
                     _LOG.warning("ignoring invalid capability metadata from %s: %s",
                                  type(p).__name__, exc)
-            for spec in p.specs():
+            # `all_specs()` when the provider has one, i.e. when it is itself a CompositeTools.
+            # `specs()` on a hide-enabled nested composite is already FILTERED, and routing off a
+            # filtered list bakes the filter into THIS object's `_route` -- which would make a
+            # withheld tool genuinely undispatchable and break the "the offer is withheld, never the
+            # route" invariant `specs()` documents. Measured before this fix: an outer composite
+            # over a hide-enabled pilot answered `(unknown tool: read_asset)` instead of running it.
+            for spec in (p.all_specs() if callable(getattr(p, "all_specs", None)) else p.specs()):
                 fname = (spec.get("function") or {}).get("name")
                 if not fname:
                     continue
@@ -108,6 +114,15 @@ class CompositeTools:
         self._manifest, self.manifest_hash = capability_manifest(
             self._specs, self._capabilities.values())
 
+    def all_specs(self) -> list[dict]:
+        """Every spec this composite ROUTES, unfiltered — what a wrapping composite must build from.
+
+        `specs()` is the OFFER and may withhold; `_route` is the reach and never does. A caller that
+        composes this object into a bigger one needs the reach, or the outer object inherits an
+        offer-time filter as a routing decision.
+        """
+        return list(self._specs)
+
     def specs(self) -> list[dict]:
         """The tools to OFFER this turn.
 
@@ -119,7 +134,15 @@ class CompositeTools:
         `hide_empty_tools` is off by default and the reason is the caching: this object is built
         ONCE per role, so a filter applied in `__init__` would hide a tool for the whole run on the
         strength of what was true at construction — `list_experiments` would vanish at node 0 and
-        never come back. Re-asking here makes the offer track the run.
+        never come back. Re-asking here makes the offer track the PHASE.
+
+        NOT the turn, and the difference matters: `drive_tool_loop` computes `tool_specs` once per
+        invocation (see its `_compose_loop_tool_specs` call) and reuses that list for every turn, so
+        a tool that gains content mid-phase stays withheld until the next phase. An earlier version
+        of this docstring and of the `hide_empty_tools` setting claimed "re-evaluated every turn",
+        which the code never did. Recomputing per turn would put the whole provider sweep on every
+        turn of every phase; the phase boundary is where it is affordable, and the flag is off by
+        default partly for this reason.
         """
         if not self.hide_empty_tools:
             return list(self._specs)

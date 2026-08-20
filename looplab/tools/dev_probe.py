@@ -649,7 +649,31 @@ class DevProbeTools:
             paths.add(site.getusersitepackages())
         except Exception:  # noqa: BLE001
             pass
-        return tuple(sorted(p for p in paths if p))
+        # The MODEL CACHE and the temp dir, from the same derivation the eval launcher uses rather
+        # than a second hand-written list. `read_allowlist` exists because "a base-model download is
+        # a read every repo task makes"; without those tiers a confined probe doing
+        # `AutoModel.from_pretrained(...)` is refused `~/.cache/huggingface/...` and dies on a
+        # non-OSError that library `except OSError` fallbacks cannot catch -- i.e. the probe is
+        # broken for the most ordinary thing a Developer would check.
+        try:
+            from looplab.runtime import read_allowlist
+            paths.update(path for path, _mode in read_allowlist.machine_read_tiers())
+        except Exception:  # noqa: BLE001 - the interpreter tiers above still let python start
+            pass
+        # NORMALIZED through the fence's own rule. These entries are appended AFTER `fence_inputs`
+        # has run, so they skip the `_norm_root` every other root and allow entry goes through --
+        # and under `_CONFINE` the hot path is a bare `p.startswith(_ALLOW)`. Without the trailing
+        # separator an allow entry `/opt/venv` also admits `/opt/venv-secrets`, which is exactly the
+        # `/srcfoo` vs `/src` bug `_norm_root`'s docstring says it exists to prevent; without the
+        # realpath a symlinked venv fails its own compare and the probe is refused its stdlib.
+        normalized = []
+        for raw in paths:
+            if not raw:
+                continue
+            norm = read_fence._norm_root(raw)
+            if norm:
+                normalized.append(norm)
+        return tuple(sorted(set(normalized)))
 
     def _replicate(self, work: Path) -> str:
         """Materialize the node's staged files into the probe's cwd, bounded.

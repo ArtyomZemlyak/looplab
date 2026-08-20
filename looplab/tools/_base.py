@@ -359,6 +359,26 @@ def fn_spec(name: str, description: str, props: dict, required: Optional[list] =
 # FAIL-CLOSED. A provider that raises, returns a wrong-shaped value, or simply omits the hook
 # contributes NOTHING to the block rather than a zero. Absence of a row is silence, and silence
 # costs at most the call that would have happened anyway.
+def jsonl_row_count(path) -> int:
+    """Non-blank rows in a JSONL store, splitting ONLY on a newline.
+
+    `for line in open(path)` splits on a bare `\r` too, which `core/jsonlio.py` and
+    `core/memory_window.py` both document as deliberately NOT a record boundary -- so a
+    text-mode count disagrees with the reader the tool actually uses. Measured: a store whose
+    middle record embeds a bare `\r` counted 4 rows here and 3 source lines there, and that
+    count is what the prompt publishes and what `hide_empty_tools` withholds a tool on.
+
+    Read as BYTES rather than through `read_jsonl_lenient_with_health`, whose `source_lines`
+    is the same number: this runs on the synchronous prompt-assembly path and must not pay a
+    full parse of every row to publish one integer.
+
+    Raises `OSError` on an unreadable store -- the caller turns that into an UNKNOWN reason,
+    which must never be collapsed into a zero.
+    """
+    with open(path, 'rb') as handle:
+        return sum(1 for row in handle.read().split(b'\n') if row.strip())
+
+
 INVENTORY_CONTRACT = "int = a count the provider stands behind; str = the reason it has none"
 
 
