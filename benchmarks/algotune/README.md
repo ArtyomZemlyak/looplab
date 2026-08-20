@@ -25,6 +25,10 @@ single box, for four reasons:
 | `patch_baseline_cache.py` | Patches `BaselineManager` on disk to give it a **persistent** baseline cache. Without it the reference pass is re-measured on **every node** — see Parity below. Idempotent, keeps a `.orig`, `--revert` undoes it. |
 | `patch_eval_subset.py` | Patches `evaluate_results.py` to honour `ALGOTUNE_EVAL_SUBSET`, so the LoopLab arm can iterate on **train** like AlgoTuner's own agent. **Required** — without it every node is scored on test. |
 | `extract_champion.py` | Writes the champion node's `solver.py` out of a run's folded event log, for the final test scoring. |
+| `setup_algotune.sh` | Applies every deviation from upstream a published number depends on. Idempotent; run on each machine and after any `git pull` in the checkout. |
+| `campaign.sh` | The campaign driver. `ARM=A` / `ARM=B`, one arm per invocation, tasks in parallel lanes sized to the machine. |
+| `pick_tasks.py` | Ranks all 154 tasks by evaluation cost — how the 20-task list was chosen, committed so the choice is reproducible. |
+| `campaign_status.py` | Live status while a campaign runs: what finished vs what actually SCORED (`N/A` is neither a zero nor a low score). |
 | `compare_arms.py` | Summarises a campaign: arm A from `reports/agent_summary.json`, arm B from the LoopLab run's folded event log. A missing arm prints `--`, never `0`. |
 | `.baseline_cache.json` | Written at runtime; the per-task AGGREGATE baseline (stabilises the denominator). Not committed. |
 | `.baseline_times/` | Written at runtime; the per-INSTANCE reference timings (saves the wall clock). Not committed. |

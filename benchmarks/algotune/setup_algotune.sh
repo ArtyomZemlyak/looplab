@@ -55,21 +55,36 @@ python3 - "$AT" <<'PY'
 import pathlib, sys
 p = pathlib.Path(sys.argv[1]) / "AlgoTuner/utils/isolated_benchmark.py"
 s = p.read_text(encoding="utf-8")
-old = ('                if (\n                    module_file\n                    and any(\n'
-       '                        part in module_file for part in ["llm_src", "AlgoTune", "/tmp/", "solver"]\n'
-       '                    )\n                ):')
-new = ('                if (\n                    module_file\n'
-       '                    and "site-packages" not in module_file\n'
-       '                    and "dist-packages" not in module_file\n                    and any(\n'
-       '                        part in module_file for part in ["llm_src", "AlgoTune", "/tmp/", "solver"]\n'
-       '                    )\n                ):')
-if "site-packages" in s and "dist-packages" in s:
+if '"site-packages" not in module_file' in s:
     print("   already narrowed")
-elif old in s:
-    p.write_text(s.replace(old, new, 1), encoding="utf-8"); print("   narrowed")
-else:
-    print("   WARNING: upstream shape changed; narrow the filter by hand")
+    raise SystemExit(0)
+# Anchored on the UPSTREAM single-line form. An earlier version of this script guessed a
+# multi-line shape, did not match, and printed nothing an operator would read as a failure --
+# leaving the 6.5x oracle slowdown in place on a fresh machine. Hence the verify-or-fail below.
+old = ('                if module_file and any(\n'
+       '                    part in module_file for part in ["llm_src", "AlgoTune", "/tmp/", "solver"]')
+new = ('                if (\n'
+       '                    module_file\n'
+       '                    and "site-packages" not in module_file\n'
+       '                    and "dist-packages" not in module_file\n'
+       '                    and any(\n'
+       '                        part in module_file\n'
+       '                        for part in ["llm_src", "AlgoTune", "/tmp/", "solver"]\n'
+       '                    )')
+if old not in s:
+    raise SystemExit("   FAILED: upstream shape changed; narrow the filter by hand "
+                     "(see README, 'Known upstream bug')")
+s = s.replace(old, new, 1)
+# close the `if (` that the replacement opened: the original line ended with `):` two lines down
+s = s.replace(new + '\n                ):', new + '\n                ):', 1)
+p.write_text(s, encoding="utf-8")
+if '"site-packages" not in module_file' not in p.read_text(encoding="utf-8"):
+    raise SystemExit("   FAILED: narrowing did not take")
+print("   narrowed")
 PY
+python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" \
+    "$AT/AlgoTuner/utils/isolated_benchmark.py" \
+    || { echo "   FAILED: patched isolated_benchmark.py does not parse"; exit 1; }
 
 echo "== 3-6/7  config.yaml"
 python3 - "$AT" <<'PY'
