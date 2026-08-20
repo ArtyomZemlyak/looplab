@@ -32,38 +32,58 @@ def test_every_reason_anything_can_produce_is_in_the_registry():
     """Derived from the PRODUCERS' own source, not from a second hand-written list. A reason a
     producer can emit and this registry has forgotten is exactly the shape of the original defect.
 
-    There are TWO producers since 2026-08-18, and the second is why this is no longer phrased about
-    "the classifier". `_failure_reason` reads a finished process's exit code and signals; the live
-    training watchdog names `train_monitor.MONITOR_REPAIR_REASON` on a stage it stopped MID-RUN
-    because the judge attributed the fault to the implementation. Nothing about that reason can come
-    out of an exit code — the process it describes was killed by us and exits like every other kill
-    — so demanding that `_failure_reason` return it would mean inventing a signal for a fact the
-    engine already knows out of band, which is the defect `test_watchdog_kill_is_not_an_oom.py`
-    exists to prevent. The invariant is unchanged and still total: producible <=> selectable."""
+    FOUR producers since 2026-08-20, and enumerating them is the whole of this test — each was
+    added because the previous phrasing had silently stopped being total:
+
+      1. `_failure_reason`, the STRUCTURAL classifier, reading fields the engine itself set.
+      2. the live training watchdog, naming `train_monitor.MONITOR_REPAIR_REASON` on a stage it
+         stopped MID-RUN. Nothing about that reason can come out of an exit code — the process it
+         describes was killed by us and exits like every other kill — so demanding it from
+         `_failure_reason` would mean inventing a signal for a fact the engine already holds out of
+         band, the defect `test_watchdog_kill_is_not_an_oom.py` exists to prevent.
+      3. the DIAGNOSTICIAN (`failure_diagnosis.DIAGNOSED_FAILURE_REASONS`). It is a real producer
+         and not a re-reader: `oom` and `not_learning` are ANSWER-ONLY, i.e. no engine code path can
+         emit them at all, so leaving it out of this derivation would report the registry as naming
+         two reasons "no producer ever emits" — which is exactly what went red when the text rules
+         that used to produce `oom` were deleted.
+      4. the ENGINE, minting `UNCLASSIFIED_REASON` when producer 3 was wired, asked, and could not
+         answer.
+
+    The invariant is unchanged and still total: producible <=> selectable. A reason a producer can
+    emit and this registry has forgotten is a failure class that silently stops being repairable."""
     source = inspect.getsource(triage._failure_reason)
     returned = {line.split('return', 1)[1].split('#')[0].strip().strip('"\'')
                 for line in source.splitlines() if line.strip().startswith('return ')}
     assert returned, "the classifier stopped returning literals; re-derive this test"
-    producible = returned | {MONITOR_REPAIR_REASON}
+    producible = (returned | {MONITOR_REPAIR_REASON}
+                  | set(triage.DIAGNOSED_FAILURE_REASONS) | {triage.UNCLASSIFIED_REASON})
     assert producible <= set(FAILURE_REASONS), (
         f"a producer can emit {producible - set(FAILURE_REASONS)}, which no setting can select")
     assert set(FAILURE_REASONS) == producible, (
         f"registry names {set(FAILURE_REASONS) - producible}, which no producer ever emits")
 
 
-def test_the_triage_judge_is_not_a_third_producer():
-    """Since 2026-08-20 a MODEL may also choose a `reason` — the three
-    `triage.py::JUDGED_FAILURE_REASONS` the classifier could only infer from the failure's own text.
-    It is deliberately not a producer: the vocabulary is a SUBSET of what `_failure_reason` already
-    returns, so the derivation above stays total and every reason a judge can name is still
-    selectable by `inline_repair_reasons`. A widening here — a judge allowed to name a kind the
-    classifier cannot — would make that failure class silently unrepairable, which is this file's
-    whole subject. `tests/test_triage_llm_failure_classifier.py` owns the rest of that contract."""
+def test_the_diagnostician_IS_a_producer_and_every_kind_it_may_name_is_selectable():
+    """THE CORRECTION TO THIS FILE'S OWN 2026-08-20 CLAIM, which was that a judge "is deliberately
+    not a producer" because its vocabulary was a SUBSET of what `_failure_reason` returns. That was
+    true of the half-measure and is false now: deleting the two text rules removed `oom`'s only
+    producers, so the diagnostician is the ONLY thing that can name it, and `not_learning` is
+    likewise unreachable from any exit code.
+
+    What this file exists to protect is unchanged and is the second assertion: whatever can name a
+    reason, every reason must stay selectable by `inline_repair_reasons`, or that failure class
+    silently stops being repairable with nothing red anywhere.
+    `tests/test_failure_ownership_split.py` owns the rest of that contract."""
     source = inspect.getsource(triage._failure_reason)
     returned = {line.split('return', 1)[1].split('#')[0].strip().strip('"\'')
                 for line in source.splitlines() if line.strip().startswith('return ')}
-    assert set(triage.JUDGED_FAILURE_REASONS) <= returned
-    assert set(triage.JUDGED_FAILURE_REASONS) <= set(Settings().inline_repair_reasons)
+    assert set(triage.DIAGNOSED_ONLY_REASONS) & returned == set(), (
+        "an ANSWER-ONLY kind is one no engine path produces; if the classifier can return it, it "
+        "is not answer-only and the split needs re-deriving")
+    assert set(triage.DIAGNOSED_FAILURE_REASONS) <= set(Settings().inline_repair_reasons)
+    assert triage.UNCLASSIFIED_REASON in set(Settings().inline_repair_reasons), (
+        "a failure nobody could name must still be repairable, or a flapping provider throws away "
+        "a node")
 
 
 def test_the_shipped_default_repairs_every_one_of_them():

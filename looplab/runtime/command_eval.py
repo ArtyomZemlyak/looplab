@@ -2788,8 +2788,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                                          log_path=_log("setup.log"))
         to = _timed_out(to, rc, is_docker)
         if rc != 0 or to:
+            # `setup_failed` is the AUTHENTICATED half and the prefix below is the readable half.
+            # This branch is the only place in the tree that knows a SETUP command failed, and until
+            # 2026-08-20 it published that knowledge only as twelve characters of stderr, which the
+            # classifier then parsed back out — see `RunResult.setup_failed` and
+            # `engine/failure_diagnosis.py` for the rule and for what the round trip cost.
             return RunResult(exit_code=rc, stdout=out, stderr="setup failed:\n" + err,
-                             metric=None, timed_out=to)
+                             metric=None, timed_out=to, setup_failed=True)
     # Freshness gate (§6.3): the eval's OWN work starts now (after setup, which installs deps, not
     # results). Every FILE-based metric/constraint reader below must find a source file written at/after
     # this instant — a stale artifact left by a prior attempt in a reused workdir is rejected, so a

@@ -1476,12 +1476,19 @@ def test_the_triage_providers_construction_does_not_park_the_engine_loop(tmp_pat
                 await eng._evaluate(0, _anyio.CapacityLimiter(1), None)
             done.set()
 
-    original = _ev.repair_log_tools
-    _ev.repair_log_tools = _slow_provider
+    # THE SEAM MOVED ON 2026-08-20 and this is the whole reason the assertion below is worded as
+    # it is. The repair path now builds `failure_diagnosis.diagnosis_tools`, which composes the log
+    # tools with `RepoScoutTools` over the node workdir — and BOTH halves are why the hand-off has
+    # to stay off the loop: `monitor_log_sources` globs and opens every stage log, and
+    # `RepoScoutTools` resolves its roots, which stats. Patching the old name would have resolved
+    # and reached nothing; `assert calls` is what turned that into a red test instead of a green one
+    # covering a path production no longer takes.
+    original = _ev.diagnosis_tools
+    _ev.diagnosis_tools = _slow_provider
     try:
         anyio.run(_main)
     finally:
-        _ev.repair_log_tools = original
+        _ev.diagnosis_tools = original
 
     assert calls, "the repair loop never built a triage provider — the test proved nothing"
     # The loop must have made progress DURING each block. One tick per 10 ms of a 250 ms block is

@@ -70,7 +70,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               other — the same shape as the 2026-08-13 merge recorded below, and with the same
 #               answer: neither branch's digest was ever correct for the shipped tree, so this is
 #               re-measured ONCE over the merged map rather than picked from a side.
-_EXPECTED_DIGEST = "sha256:16d6005d4e64326158b925d75526907ff34cdddcb5df828aa953858000bb4f6c"
+_EXPECTED_DIGEST = "sha256:305065ac19dd168c8be7cddc24aabd20b53f528176e5bdb306d116d209a954d5"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -332,6 +332,28 @@ _EXPECTED_DIGEST = "sha256:16d6005d4e64326158b925d75526907ff34cdddcb5df828aa9538
 #               verifying, and the revocation costs nothing that was not already spent —
 #               `speculation_implementation_digest` hashes every shipped `.py` and this change
 #               moves it regardless.
+#   2026-08-20  inline_repair_reasons gained `unclassified` (12 -> 13 members). **The 'field set
+#               UNCHANGED' branch again**, and the SECOND time this exact default has moved it —
+#               the first is in the first history block above — so the precedent for reading it as
+#               case (2) rather than as the refactor the assertion message warns about is this
+#               field's own. The DERIVATION did not move: `_declared_settings_json_defaults` reads
+#               `Settings`' declared defaults, the default is bound BY IDENTITY to
+#               `core/models.py::FAILURE_REASONS`, and that registry is what gained a member.
+#               VERIFIED BY DIFFING THE FIELD SET AGAINST MASTER, NOT FROM THE COUNT, as the
+#               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated assignments in
+#               both trees reports [] added and [] removed, so `_EXPECTED_FIELD_COUNT` STAYS at 212
+#               and a +1/-1 cannot be hiding behind an unchanged integer. Only the digest moves.
+#               IT IS NOT INERT FOR A CALIBRATION REPLICATE, and that is what makes re-pinning right
+#               rather than merely necessary. `unclassified` is what `engine/evaluate.py` records
+#               when the failure DIAGNOSTICIAN was wired, asked, and could not answer, and its
+#               presence in this list is what keeps such a node repairable at all — under a TIGHTER
+#               bound than the reason it replaces (`triage._RULE_BLIND_CRASH_ATTEMPTS`, 12, rather
+#               than the caller's cap). So a replicate calibrated before it and one calibrated after
+#               can spend a different number of EVALUATIONS on the same failing node, which is
+#               precisely what a speculation receipt asserts about. Old receipts SHOULD stop
+#               verifying, and the revocation costs nothing that was not already spent:
+#               `speculation_implementation_digest` hashes every shipped `.py` and this change moves
+#               it regardless.
 _EXPECTED_FIELD_COUNT = 212
 
 

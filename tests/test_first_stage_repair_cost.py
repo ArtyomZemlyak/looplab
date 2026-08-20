@@ -386,14 +386,33 @@ def test_the_cost_floor_licenses_the_original_run_plus_what_the_cap_pays_for():
 
 
 # --------------------------------------------------------- the bound on repairing BLIND (2026-08-15)
-def test_the_blind_branch_is_bounded_and_the_mechanical_one_is_not():
-    """`_rule_triage`'s truth table across the two crash branches.
+def test_there_is_ONE_crash_bound_and_the_text_no_longer_chooses_which():
+    """`_rule_triage`'s truth table across the crash branch — ONE branch since 2026-08-20, not two.
 
     F5's change is kept — a `crash` the rule path cannot classify still buys a repair rather than an
     instant abandon, which is the whole point of the branch (a `RuntimeError` one edit would fix must
-    not end a node just because no marker matched). What it gains is a bound of its own, because in
-    the configuration this function exists for there is nothing else: no triage judge, no critic, and
+    not end a node just because nothing recognised it). What it gains is a bound, because in the
+    configuration this function exists for there is nothing else: no triage judge, no critic, and
     `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`' `inline_repair_attempts: 0` resolves to the engine's 50.
+
+    **THE SECOND BRANCH IS DELETED AND THIS TEST NOW HOLDS ITS ABSENCE.** `_MECHANICAL_MARKERS`
+    scanned stderr for `ImportError`/`NameError`/`TypeError`/"has no attribute"/… and, on a hit,
+    granted the caller's full cap instead of the blind 12. That is a bound that depends on the TEXT
+    QUALITY of a program's error output, which is exactly what `engine/triage.py`'s own header says
+    is not a bound — the 2026-08-05 finding, kept alive in the one branch that chose an ACTION
+    rather than a classification. A Cyrillic identifier, a blank stderr, a launcher that swallows the
+    child exception and any non-English traceback all read as "not mechanical" and silently got the
+    shorter budget; a `RuntimeError` whose message happened to contain the word `TypeError` got the
+    longer one.
+
+    **THE DELETION COSTS NOTHING MEASURABLE, and that is why it is a deletion rather than a better
+    scanner.** Re-derived over every `node_repaired` row in `runs/` (2026-08-20): 50 nodes have a
+    repair chain, the MEDIAN is 2, the MAXIMUM is 5, and ZERO chains are longer than 12 — so the
+    split separated 12 from 50 while nothing on this box ever reached 6. The longest chain on record
+    anywhere, `rubert-dr-0805` node 0's eight repairs (six of them the stale-dependency migrations
+    this branch existed to protect), also clears 12. `_RULE_BLIND_CRASH_ATTEMPTS` was calibrated
+    against exactly that chain plus room for one half again as long, which is what makes it the
+    single bound rather than the shorter of two.
     """
     from looplab.engine.triage import _rule_triage
 
@@ -406,16 +425,31 @@ def test_the_blind_branch_is_bounded_and_the_mechanical_one_is_not():
     assert stopped["action"] == "abandon"
     assert "cannot classify" in stopped["rationale"] and f"{blind} blind" in stopped["rationale"]
 
-    # A MECHANICAL crash names what to change in its own traceback, so the rule path is not guessing
-    # and keeps the caller's cap. The six stale-dependency migrations of `rubert-dr-0805` node 0 are
-    # all this shape, and shortening them is how a node dies before its research question.
-    assert _rule_triage("crash", "ImportError: no name", blind + 1, 50)["action"] == "repair"
-    assert _rule_triage("crash", "ImportError: no name", 51, 50)["action"] == "abandon"
+    # THE TEXT NO LONGER CHOOSES THE BUDGET. A traceback that names a Python exception class gets
+    # exactly the bound a `RuntimeError` gets — which is the whole change, driven rather than
+    # asserted about source: every marker the deleted list held, at the same attempt, same answer.
+    for marker in ("ImportError: no name", "ModuleNotFoundError: no module named 'x'",
+                   "NameError: name 'x' is not defined", "AttributeError: has no attribute",
+                   "SyntaxError: bad", "TypeError: unexpected keyword argument"):
+        assert _rule_triage("crash", marker, blind, 50)["action"] == "repair"
+        assert _rule_triage("crash", marker, blind + 1, 50)["action"] == "abandon", (
+            f"{marker!r} still buys a wider budget than a crash nobody could name")
+    # …and the same holds for the shapes the marker list could never see, which is the other half of
+    # why it was not a bound: a Cyrillic identifier and an empty stderr.
+    for unseeable in ("ImportError: не удалось импортировать модуль", ""):
+        assert _rule_triage("crash", unseeable, blind, 50)["action"] == "repair"
+        assert _rule_triage("crash", unseeable, blind + 1, 50)["action"] == "abandon"
 
     # Never a WIDENING: an operator who spelled a smaller cap keeps it, and the message says which.
     tight = _rule_triage("crash", "RuntimeError: x", 3, 2)
     assert tight["action"] == "abandon" and "2 blind" in tight["rationale"]
     assert _rule_triage("crash", "RuntimeError: x", 2, 2)["action"] == "repair"
+
+    # `unclassified` — a WIRED diagnostician that could not answer — shares the blind branch by
+    # design, because a failure nobody could name is the definition of repairing blind.
+    from looplab.engine.failure_diagnosis import UNCLASSIFIED_REASON
+    assert _rule_triage(UNCLASSIFIED_REASON, "", 1, 50)["action"] == "repair"
+    assert _rule_triage(UNCLASSIFIED_REASON, "", blind + 1, 50)["action"] == "abandon"
 
     # And nothing else moved: a non-crash reason still ends the node here exactly as before.
     for reason in ("drift", "no_metric", "idea_rejected"):

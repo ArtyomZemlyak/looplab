@@ -24,11 +24,26 @@ together, because the resolutions point in OPPOSITE directions. There, a kill th
 being diagnosed from the exit code the engine itself caused, and the fix was to stop guessing at the
 text and read the authenticated out-of-band `signals` flag. Here there IS no flag and there cannot
 be one — the engine did not cause this exit; the candidate's own process raised and died, and nothing
-out of band observed it. The text is the only witness, and `_is_torch_oom`'s docstring carries the
-argument for why that is acceptable at this one site: every consumer of the `oom` literal routes a
-REPAIR, `oom` is absent from `metric_salvage.NEVER_SALVAGED_REASONS`, and `_rule_triage` bounds it by
-the same `max_attempts` as a `crash` — so a forged `oom` costs one repair round aimed at memory and
-can never admit a metric, move a champion or change a selection.
+out of band observed it.
+
+**WHO ANSWERS IT MOVED ON 2026-08-20, AND THE PROPERTY DID NOT.** The first fix was a MARKER LIST
+(`_is_torch_oom`) scanning `res.stderr` for `OutOfMemoryError` / `CUDA out of memory`, and it
+resolved all 26 misclassified rows in `runs/`. That win was real and it is not the reason the marker
+is gone. It is gone because it was TEXT WITH THE LAST WORD: nothing downstream re-checks a `reason`,
+so a list is exactly as good as its own spelling, and a host `MemoryError`, an OOM re-raised inside
+another library's exception, and the torchrun `Root Cause ... exitcode: 1` block that NINE of those
+26 rows ARE, are each another literal and another incident. `engine/failure_diagnosis.py` states the
+general rule and this codebase's own precedent for it (`runtime/deps.py`: text NOMINATES,
+`is_present` DECIDES).
+
+So `oom` is now ANSWER-ONLY — no engine producer can name it at all — and this file's job changed
+with it. What it drives is (a) that the ENGINE's honest residual on the real corpus is `crash`,
+(b) that a diagnosis of `oom` reaches the memory directive that exists one branch away, and (c) that
+every bound the marker's safety argument rested on is still standing, now guarding a model's answer
+instead of a regex's: every consumer of the `oom` literal routes a REPAIR, `oom` is absent from
+`metric_salvage.NEVER_SALVAGED_REASONS`, and `_rule_triage` bounds it by the same `max_attempts` as
+a `crash` — so a WRONG `oom` costs one repair round aimed at memory and can never admit a metric,
+move a champion or change a selection.
 
 The corpus in `tests/fixtures/torch_oom_stderr_corpus.json` is the REAL stderr of those three nodes,
 copied out of the read-only run directory. It carries all three shapes that matter: two DDP failures
@@ -43,15 +58,18 @@ with a `[rank0]:` prefix, ahead of the elastic wrapper's summary — and the mar
 `torchrun --redirects` it would not be, the parent would hold only the wrapper, and the honest answer
 is `crash`; `test_an_elastic_wrapper_with_no_cause_stays_a_crash` pins that rather than guessing.
 
-The REMAINING gap is a different one and is not fixed here. What the Developer is HANDED is
-`res.stderr[-500:]` (`evaluate.py::_eval_failure_text`), and on a DDP failure those 500 characters
-are pure elastic wrapper: the durable `node_failed.error` on all three v3 nodes is 522 bytes ending
-`traceback : To enable traceback see: ...`, with no allocation size, no device total and no
-`OutOfMemoryError` anywhere in it. So the reason and its directive are the ONLY channel carrying the
-diagnosis; the numbers that say WHICH fix to make (asked-for bytes vs already-resident bytes) never
-reach the model at all.
-    OPEN[oom-evidence-not-in-repair-text] a torch OOM's allocation numbers never reach the
-    Developer: the repair text is a 500-char stderr tail that a DDP wrapper fills entirely.
+The REMAINING gap is a different one and is only PARTLY closed. What the Developer is HANDED is
+still `res.stderr[-500:]` (`evaluate.py::_eval_failure_text`), and on a DDP failure those 500
+characters are pure elastic wrapper: the durable `node_failed.error` on all three v3 nodes is 522
+bytes ending `traceback : To enable traceback see: ...`, with no allocation size, no device total
+and no `OutOfMemoryError` anywhere in it. What changed on 2026-08-20 is that the DIAGNOSTICIAN can
+now go and get them — `read_log` over the whole stage log plus `RepoScoutTools` over the node's
+workdir — so the numbers are REACHABLE where before they were not present anywhere in the loop. The
+splice itself is unchanged, so the item stays open and its proof still holds; what moved is that a
+remedy now exists for a judge that chooses to spend a turn on it.
+    OPEN[oom-evidence-not-in-repair-text] a torch OOM's allocation numbers are still not PUSHED to
+    the Developer: the repair text is a 500-char stderr tail that a DDP wrapper fills entirely.
+    The diagnostician can now PULL them (`repair_log_tools`), which is a remedy and not a fix.
     proof:present:res.stderr[-500:]@looplab/engine/evaluate.py
 """
 from __future__ import annotations
@@ -66,7 +84,9 @@ import pytest
 from looplab.core.models import FAILURE_REASONS
 from looplab.engine.crash_repair import CrashRepairMixin
 from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
-from looplab.engine.triage import _failure_reason, _is_torch_oom, _rule_triage
+from looplab.engine.failure_diagnosis import (DIAGNOSED_FAILURE_REASONS, REASON_SOURCE_ENGINE,
+                                              REASON_SOURCE_TRIAGE, diagnosed_failure_reason)
+from looplab.engine.triage import _failure_reason, _rule_triage
 from looplab.runtime.command_eval import run_command_eval
 from looplab.runtime.sandbox import RunResult
 
@@ -85,19 +105,41 @@ def _res(stderr, exit_code=1, **kw):
 # --------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("node", sorted(_CORPUS))
-def test_the_real_v3_oom_stderr_is_classified_oom(node):
-    """Every node of the run this was found on, verbatim.
+def test_the_real_v3_oom_stderr_is_a_crash_to_the_engine_and_an_oom_to_the_diagnostician(node):
+    """Every node of the run this was found on, verbatim, through BOTH rungs.
 
-    Note what is asserted BESIDES the reason — exit 1 and a `Traceback` PRESENT. Those two are the
+    Note what is asserted besides the reasons — exit 1 and a `Traceback` PRESENT. Those two are the
     exact negation of the kernel-OOM premise, so their presence is what makes the test meaningful:
-    the classifier is handed the signature the old branch structurally could not match."""
+    this is the signature the original branch structurally could not match.
+
+    `crash` from the engine is not a regression, it is the honest answer: the process exited
+    non-zero and nothing out of band saw why. The engine no longer has ANY way to say `oom` — see
+    `test_the_engine_can_no_longer_say_oom` below — and that is the change, not a side effect of
+    it."""
     err = _CORPUS[node]
     assert "Traceback" in err, "no traceback: this fixture no longer covers the raised-OOM shape"
     assert "torch.OutOfMemoryError" in err
 
     res = _res(err)
     assert res.exit_code not in (-9, 137), "a SIGKILL would be the OTHER shape"
-    assert _failure_reason(res) == "oom"
+    assert _failure_reason(res) == "crash", "the engine's honest structural residual"
+
+    diagnosed = {"action": "repair", "failure_kind": "oom",
+                 "rationale": "torch.OutOfMemoryError, 139.10 GiB in use of 139.80 GiB"}
+    assert diagnosed_failure_reason(_failure_reason(res), diagnosed) == ("oom",
+                                                                        REASON_SOURCE_TRIAGE)
+
+
+def test_the_engine_can_no_longer_say_oom():
+    """The deleted rules, driven rather than asserted about source text. Both of `oom`'s producers
+    were text: the KERNEL signature (exit -9/137 with no traceback) and the allocator MARKER list.
+    Neither survives, so no `RunResult` at all classifies as `oom`."""
+    for res in (_res("", exit_code=-9),                              # the kernel signature
+                _res("", exit_code=137),
+                _res(_CORPUS[sorted(_CORPUS)[0]]),                   # the marker list's own corpus
+                _res("torch.OutOfMemoryError: CUDA out of memory")):
+        assert _failure_reason(res) == "crash"
+    assert "oom" in DIAGNOSED_FAILURE_REASONS, "…and it is the diagnostician's word now"
 
 
 def test_both_ddp_and_single_process_shapes_are_in_the_corpus():
@@ -112,37 +154,37 @@ def test_both_ddp_and_single_process_shapes_are_in_the_corpus():
     assert ddp and plain, f"corpus lost a shape: ddp={ddp} plain={plain}"
     for k in ddp:
         assert "[rank0]:" in _CORPUS[k]
+    # Both shapes are the SAME question to the engine now — which is the point of the residual, and
+    # is why the corpus is kept: the two shapes are what a diagnostician must tell apart, and a
+    # regression that only handles one is invisible at this rung.
     for res in (_res(_CORPUS[ddp[0]]), _res(_CORPUS[plain[0]])):
-        assert _failure_reason(res) == "oom"
+        assert _failure_reason(res) == "crash"
 
 
-def test_it_survives_the_tail_clamp_the_classifier_actually_reads():
-    """WHERE the classifier can see this, which is the whole question for a DDP failure.
+def test_the_evidence_is_in_the_stream_but_not_in_the_slice_anyone_is_handed():
+    """THE MEASUREMENT THAT DECIDES WHERE THIS QUESTION BELONGS, and it cuts both ways.
 
     `sandbox.run_argv` clamps each stream to `max_output_bytes` (64,000) as a TAIL, and the rank
-    tracebacks are printed BEFORE the elastic wrapper's summary — so the thing to check is that the
-    marker is still inside the last 64,000 bytes and was not pushed out by the wrapper. It is, for
-    all three real logs. (This is also why the fix belongs in the classifier and not in the error
-    TEXT: see the test below.)"""
+    tracebacks print BEFORE the elastic wrapper's summary — so the allocator line IS inside the
+    64,000 bytes for all three real logs. But `evaluate.py::_eval_failure_text` hands the judge
+    `res.stderr[-500:]`, and on a DDP failure those 500 characters are pure elastic wrapper: the
+    durable `node_failed.error` on all three v3 nodes is 522 bytes of `Root Cause ... traceback :
+    To enable traceback see: ...` with no allocation, no size and no `OutOfMemoryError` in it.
+
+    So a marker list reading the 64 KiB stream could resolve these and a judge reading the 500-char
+    splice could not — which is exactly why the answer is neither. It is TOOLS: the diagnostician
+    reads the stage log itself (`repair_log_tools`), unbounded by either slice, and cites what it
+    found. The open item in this file's HEADER (slug `oom-evidence-not-in-repair-text`) is the
+    residue — spelled without the bracket form on purpose, because a slug must be DECLARED
+    exactly once and `tests/test_open_item_index.py` counts every occurrence of the key as a
+    declaration."""
     for node, err in _CORPUS.items():
-        assert _is_torch_oom(err[-64_000:]), f"{node}: marker outside the clamp the classifier reads"
-
-
-def test_the_developer_error_text_does_NOT_carry_the_marker():
-    """Why classifying it correctly is what fixes this, rather than "let the model read the log".
-
-    `evaluate.py::_eval_failure_text` builds the Developer's error from `res.stderr[-500:]`, and on
-    a DDP failure those 500 characters are pure elastic wrapper — the durable `node_failed.error` on
-    all three v3 nodes is 522 bytes of `Root Cause ... traceback : To enable traceback see: ...` and
-    contains no allocation, no size and no `OutOfMemoryError`. So the model cannot recover the kind
-    from the text it is handed; the DIRECTIVE, which is keyed on `reason`, is the channel that
-    carries it."""
-    for node, err in _CORPUS.items():
+        assert "OutOfMemoryError" in err[-64_000:], (
+            f"{node}: the evidence left the stream the engine captures at all")
         if "ChildFailedError" in err:
-            assert not _is_torch_oom(err[-500:]), (
-                f"{node}: the 500-char tail now carries the marker — if that is a deliberate change "
-                "to the tail rule, this test's premise moved and the reason is no longer the only "
-                "channel")
+            assert "OutOfMemoryError" not in err[-500:], (
+                f"{node}: the 500-char tail now carries the evidence — if that is a deliberate "
+                "change to the tail rule, this test's premise moved")
 
 
 # --------------------------------------------------------------------------------------------
@@ -161,14 +203,18 @@ _RAISING = (
 _PLAIN_CRASH = "raise ValueError('the model config names a column that is not in the frame')\n"
 
 
-def test_a_real_raised_oom_stage_is_classified_oom():
-    """The whole chain: a real stage that really raises, really run, really classified."""
+def test_a_real_raised_oom_stage_is_a_crash_the_diagnostician_can_rename():
+    """The whole chain: a real stage that really raises, really run, really classified — and then
+    really re-decided. The point of driving it is that the two rungs meet on a real `RunResult`,
+    not on a hand-built one."""
     res = run_command_eval([sys.executable, "-c", "print(1)"], "/tmp", 60, _M,
                            stages=[{"name": "train", "command": [sys.executable, "-c", _RAISING],
                                     "timeout": 60}])
     assert res.exit_code == 1 and "Traceback" in (res.stderr or "")
     assert not res.timed_out and not getattr(res, "stalled", False)
-    assert _failure_reason(res) == "oom"
+    assert _failure_reason(res) == "crash"
+    verdict = {"action": "repair", "failure_kind": "oom", "rationale": "the allocator raised"}
+    assert diagnosed_failure_reason(_failure_reason(res), verdict)[0] == "oom"
 
 
 def test_a_real_ordinary_crash_is_still_a_crash():
@@ -198,8 +244,14 @@ def test_an_elastic_wrapper_with_no_cause_stays_a_crash():
                "  rank : 0 (local_rank: 0)\n  exitcode : 1 (pid: 2799581)\n"
                "  error_file: <N/A>\n  traceback : To enable traceback see: "
                "https://pytorch.org/docs/stable/elastic/errors.html\n")
-    assert not _is_torch_oom(wrapper)
     assert _failure_reason(_res(wrapper)) == "crash"
+    # And a DIAGNOSTICIAN handed only this may not invent one either — it is asked, it looks, and if
+    # the rank log is gone the honest answer is still `crash`. What is different from the marker
+    # rung is that it CAN look: `repair_log_tools` reaches the per-rank files `--redirects` wrote,
+    # which is the one place the cause survives. That is the difference between "cannot see it" and
+    # "must guess".
+    honest = {"action": "repair", "failure_kind": "crash", "rationale": "the child died; no cause"}
+    assert diagnosed_failure_reason(_failure_reason(_res(wrapper)), honest)[0] == "crash"
 
 
 def test_the_watchdog_verdicts_still_outrank_the_text():
@@ -213,28 +265,58 @@ def test_the_watchdog_verdicts_still_outrank_the_text():
     assert _failure_reason(_res(err, exit_code=-9, stalled=True)) == "stalled"
     assert _failure_reason(RunResult(exit_code=-9, stdout="", stderr=err, metric=None,
                                      timed_out=True)) == "timeout"
+    # …AND THEY OUTRANK THE MODEL, which is the same door one rung up. A diagnostician handed a
+    # diverged training that also printed an allocator line may well answer `oom`; it is never
+    # asked, because all three are ENGINE-FINAL. This is `test_watchdog_kill_is_not_an_oom.py`'s
+    # property restated against a verdict instead of a heuristic.
+    said_oom = {"action": "repair", "failure_kind": "oom", "rationale": "it says out of memory"}
+    for res in (_res(err, exit_code=-9, diverged=True), _res(err, exit_code=-9, stalled=True)):
+        assert diagnosed_failure_reason(_failure_reason(res), said_oom)[1] == REASON_SOURCE_ENGINE
 
 
 def test_a_kernel_oom_and_a_clean_run_are_unchanged():
-    """Both ends of the pre-existing behaviour."""
-    assert _failure_reason(_res("", exit_code=-9)) == "oom"
+    """Both ends of the behaviour, with the two that MOVED called out.
+
+    The kernel OOM-kill is now `crash`: its signature was `exit -9 with no traceback`, which is
+    byte-identical to what both watchdogs' tree-kills produce, so it was a conflation and not merely
+    a guess — and the two watchdogs already read authenticated flags above it. The `setup failed:`
+    prefix no longer decides anything either; `RunResult.setup_failed` does."""
+    assert _failure_reason(_res("", exit_code=-9)) == "crash"
     assert _failure_reason(_res("Traceback (most recent call last):")) == "crash"
-    assert _failure_reason(_res("setup failed:\nno module named torch")) == "setup"
+    assert _failure_reason(_res("setup failed:\nno module named torch")) == "crash", (
+        "the candidate's own stderr may not claim the engine's setup step failed")
+    assert _failure_reason(_res("setup failed:\nno module named torch",
+                                setup_failed=True)) == "setup"
     assert _failure_reason(RunResult(exit_code=0, stdout="", stderr="", metric=None,
                                      timed_out=False)) == "no_metric"
 
 
-def test_the_classifier_stays_pure():
+def test_the_classifier_stays_pure_and_reads_only_engine_written_fields():
     """`triage.py`'s module docstring promises these helpers do no I/O, which is what makes them
-    replay-safe — and it is also the reason the elastic-wrapper case above cannot be resolved by
-    reading the rank's log file. Pin it by AST so a future "just open the log" cannot land quietly."""
+    replay-safe — and it is also why the elastic-wrapper case above cannot be resolved HERE by
+    reading the rank's log file. That is the diagnostician's job, and it is a different rung with a
+    different budget.
+
+    Re-pointed at `_failure_reason` itself (2026-08-20), which is strictly stronger than the old
+    pin on the deleted `_is_torch_oom`: it also asserts the classifier reads no TEXT. Every
+    attribute it touches on `res` is a field the ENGINE set, and `stderr`/`stdout` are absent from
+    that set — which is the ownership split expressed as the classifier's own read surface."""
     import looplab.engine.triage as triage
     tree = ast.parse(Path(triage.__file__).read_text())
     fn = next(n for n in ast.walk(tree)
-              if isinstance(n, ast.FunctionDef) and n.name == "_is_torch_oom")
+              if isinstance(n, ast.FunctionDef) and n.name == "_failure_reason")
     called = {n.func.id for n in ast.walk(fn)
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert not ({"open", "eval", "exec", "__import__"} & called), called
+    # The read surface, by AST. `stderr` is the one that must never come back.
+    attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+    literals = {n.value for n in ast.walk(fn)
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "stderr" not in attrs and "stdout" not in attrs, (
+        f"the classifier is reading the candidate's own output again: {attrs}")
+    assert not ({"startswith", "endswith", "find", "lower", "split"} & attrs), (
+        f"a string operation is back in the classifier: {attrs}")
+    assert "Traceback" not in literals and "setup failed:" not in literals
 
 
 # --------------------------------------------------------------------------------------------
@@ -285,8 +367,9 @@ def test_the_no_judge_path_repairs_it_and_does_not_promise_a_pod_limit():
 
 
 def test_an_oom_still_cannot_suppress_a_metric_or_buy_extra_attempts():
-    """The two properties `_is_torch_oom`'s docstring rests on when it argues that reading forgeable
-    text is acceptable here. If either moves, that argument is void and this reads as the guard."""
+    """The two properties that used to justify a MARKER reading forgeable text, and that now bound
+    a MODEL's answer instead. The argument is the same either way and so is the guard: whatever
+    names `oom`, being wrong about it must cost exactly one repair round pointed at memory."""
     assert "oom" not in NEVER_SALVAGED_REASONS, (
         "an `oom` can now suppress a salvaged metric — reading candidate text to reach it is no "
         "longer a repair-only decision")
