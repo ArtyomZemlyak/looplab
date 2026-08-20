@@ -922,6 +922,37 @@ it). Each stage gets its own span + `<name>.log` and a pass/fail (`stage_finishe
   repair cut `n_epochs`), v8 node 9 (5.99 of 10) and v9 node 1 (1.0 of 50) all keep their refusals,
   and all three had reached `100 %` of their own shrunken step schedule — which is why the boundary
   is the trainer's own final *epoch* against the *declaration* and never the progress bar.
+  Since 2026-08-20 there is a **second deterministic floor, under the one verdict the checker's own
+  window cannot answer**. `loss_unchanged_from_first_step` asks whether the loss moved from the FIRST
+  training step, and what the checker is handed is `run.out[-4000:]` of a `run.out` that is already a
+  64,000-byte tail clamp — the first step is not in that window and structurally cannot be. Measured
+  on `runs/rubertlite-dense-retrieval`: 16 `node_failed` rows carry `reason: no_metric` from a stage
+  check and **ten of those nodes were not failures at all** — the operator reset each one, the `train`
+  stage came back `reused` at `seconds 0.0` (the very checkpoint the checker had condemned) and it
+  scored 0.805–0.8662 against a run best of 0.8835, i.e. 0.91×–0.98× of best. Node 1's `train.log` is
+  1,214,400 bytes and runs `loss=33.9 → 13.3` over 11,248 logged points; its last 4,000 characters
+  hold **three** of them and all three read `13.3`. A converged curve's tail is flat, and
+  flat-at-the-end is indistinguishable from never-moved when the end is all you are shown. So the
+  engine measures the trajectory itself over the whole of *this attempt's* stage log — streamed from
+  `train_monitor.attempt_byte_floor` (stage logs are opened for append, so a repaired stage's earlier
+  curve is not this one's) and reduced by the same `summarize_loss_window` / `summarize_trajectory`
+  the live training monitor uses — then does two things with it: the measurement is **handed to the
+  checker** in its own prompt (`trajectory_context`, the block the monitor's judge already gets), and
+  a `loss_unchanged_from_first_step` refusal it contradicts degrades to `inconclusive`, with both
+  readings on the row. The predicate is **moved**, not *descending*: node 22's loss ran 18.9 → 17.6
+  and then climbed to 32.6 and plateaued, so its tail read a constant `32.0` — and it scored 0.8147.
+  Like the epoch floor it may only ever ACQUIT, and the other hard kinds are out of its reach by
+  name, so the four genuinely diverged nodes (`loss=inf`, `nan`, `-1.5e+10`, `-2.35e+08`) keep their
+  refusals; a non-finite loss or an explosion anywhere in the attempt withdraws the veto as a second,
+  independent refusal. **The asymmetry is stated as a cost**: a wrong "no progress" ended ten nodes
+  at 1,570–4,344 stage seconds each with no repair, no retry and no refunded `max_nodes` slot, while
+  a wrong "keep going" runs the remaining stages and is caught by the real metric — 65–67 s of
+  `score` on those same nodes. **One case no loss-only rule can catch, and it is a different question
+  in kind**: node 12's loss fell 0.986 → 0.0195 while validation recall@100 stayed at 0.0028. The
+  loss moved, so this rung acquits it — correctly, because "was the loss unchanged" is false. "The
+  loss fell and the model still did not learn" needs the objective metric, and the stage check runs
+  *before* the protected `score` stage that produces it, so that judgement belongs downstream, where
+  it costs one scoring stage and lands in the operator's own reader.
 
 The operator's `cmd` is the **authoritative, non-rewritable scoring stage** and its stdout is where the
 trusted metric reader reads. The Developer's STAGES phase supplies only the stages that run BEFORE it
