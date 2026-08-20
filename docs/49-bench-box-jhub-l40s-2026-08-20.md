@@ -166,3 +166,104 @@ ARM=A benchmarks/algotune/campaign.sh
 **Probe the endpoint before every campaign, with a nonce.** doc 47 §5a's rule — the catalogue is not
 evidence — has a second edge here: on a caching gateway, the *probe itself* is not evidence unless
 each call is unique.
+
+---
+
+## 7. Timing a task's instances AT ONCE — what 90 cores actually buy
+
+The original box had 8 cores and doc 47 called that its handicap. This one has the opposite problem:
+the arena spends ~97 % of its wall clock in the per-instance timing pass (an arm-A run made **5 LLM
+calls in 40 minutes**), and that pass walked instances one at a time. Not a decision anybody made —
+the harness's own pool class, `BenchmarkPool`, is defined and instantiated **nowhere**.
+
+### Measure whether the timer still reads the same number, then parallelise
+
+`benchmarks/algotune/probe_parallel_timing.py`, same instances at 1 / 8 / 24 / 48 concurrent workers,
+each pinned to its own core:
+
+| task | serial | 48-way | median inflation | p90 | cores per instance |
+|---|---:|---:|---:|---:|---:|
+| discrete_log | 4.3 s | 1.0 s | 1.04× | 1.18× | **1.0** |
+| convex_hull | 6.1 s | 0.9 s | 0.99× | 1.01× | **1.0** |
+| spectral_clustering | 106.7 s | 5.8 s | 1.01× | 1.09× | **1.0** |
+
+Two things had to be true and are. **One instance uses one core** — the harness sets
+`OMP/MKL/OPENBLAS_NUM_THREADS=1` itself, so one-per-core is not oversubscription. And the score is a
+RATIO whose halves both run through this path, so the few per cent that does appear cancels.
+
+Shipped as `patch_parallel_eval.py` + `parallel_eval.py`: instances are prefetched through a pool
+whose workers each claim one core **out of the mask the process already holds** (a lane is pinned
+with `taskset`; a pool that picked core numbers of its own would walk onto cores another lane is
+timing on). `ALGOTUNE_EVAL_WORKERS` unset or 1 leaves upstream behaviour bit-for-bit, and it applies
+to both arms because both evaluate through this harness.
+
+Measured effect: the instance pass on `discrete_log` goes **~130 s → 2.35 s**, a whole scorer run
+132 s → 23 s, and `spectral_clustering` 348 s → 45 s.
+
+### Three things this cost, all of which are the finding
+
+1. **Threads do not work.** The first pool was threads, reasoning that `evaluate_single` waits on
+   the child the harness forks per timed run. 100 instances took **109.6 s** against ~130 s serial.
+   Enough of it holds the GIL. A forked pool does it in 2.35 s.
+2. **The pool silently never ran, twice.** `multiprocessing.Pool` pickles its initializer and mapped
+   function *even under fork*, so a closure raises, the caller catches, and the run falls back to
+   serial reporting nothing — while the harness's logging config swallows our own warning. The fix
+   was module-level functions; the thing that made it *findable* was a breadcrumb file. Without it,
+   "the pool ran and did not help" and "the pool never ran" are indistinguishable and have opposite
+   fixes.
+3. **The per-run timeout floor is a startup allowance, not a solver bound** — upstream's own comment
+   says so. Under concurrency startup costs more, and at 24 workers the floor fired **94 times**;
+   ONE timeout makes a whole task `N/A`, because 100 % instance validity is required for any speedup
+   at all. `ALGOTUNE_MIN_TIMEOUT_S` makes it tunable, defaulting to upstream's value.
+
+### What is NOT established, and was briefly claimed here
+
+An earlier draft of this section said the metric is regime-sensitive, on the strength of the same
+shipped solver scoring 1.09× / 1.43× / 1.78× under different pairings of contended halves. **That
+does not follow.** The same box then produced **1.0007 and 1.6318 in the SAME regime** on the same
+task — which is the spread doc 47 §5f already recorded for `discrete_log` (1.0006 then 1.4468 on
+consecutive runs). One task at n=1 cannot separate a regime effect from that noise; the honest
+reading is the one doc 47 already prescribes — **read the aggregate over 20 tasks, never a row.**
+
+The wall-clock win is not affected by any of this: it was measured directly, inside the pool, by the
+breadcrumb.
+
+### The ORACLE half ships OFF
+
+`prefetch_oracle` reproduces the serial path's isolated call for the REFERENCE timing and every job
+returns `AttributeError: Class 'Solver' not found in solver module` — `run_isolated_benchmark` loads
+a solver module out of `code_dir`, and for the reference pass that directory is the task package,
+which has no `Solver` class. The serial loop reaches its number some other way. Gated behind
+`ALGOTUNE_PATCH_ORACLE=1` rather than deleted, because the *campaign* spends real time in that pass
+(unlike the scorer path, where some tasks' datasets ship `median_oracle_time_ms`), and it is one
+identified call away from working.
+
+## 8. The campaign as launched, 2026-08-20
+
+```
+20 tasks | 4 lanes x 22 cores (of 96, quota 90) | ALGOTUNE_EVAL_WORKERS=auto | $0.02 per task-arm
+model gateway/deepseek-v4-flash through the meter, per-task paths
+```
+
+Few lanes, many cores per lane — the shape instance-level parallelism makes possible, and it retires
+the endpoint problem as a side effect: **4 lanes x 0.12 rpm = 0.5 requests/min against a 50/min
+limit**, where 20 lanes of arm B would have sat at ~41. Measured per-lane demand, from the smoke
+runs: arm A 0.12 rpm (peak 3/min), arm B 2.05 rpm (peak 9/min).
+
+Arm B runs from `/var/tmp/looplab-bench/looplab-armb`, detached at a commit rebased onto master, per
+doc 48 §7. The rebase cost two conflicts, and the second is worth recording: `settings_ui_schema.json`
+is a 150 KB single line, merged programmatically by inserting this branch's two fields into master's
+document; and `test_calibration_profile_home.py` arrived with **two adjacent `_EXPECTED_FIELD_COUNT`
+statements** (212 from master, 213 from the branch) of which Python silently uses the last — the
+vacuous-guard shape that file's own header warns about, and the second time this table has produced
+it at a merge. Collapsed to one and re-measured over the rebased tree: 214 fields, digest
+`838bdfda…`.
+
+### Unattended operation
+
+`run_both_arms.sh` waits out arm A, records the suite verdict, runs arm B in the SAME regime, then
+summarises and snapshots — because arm B must start when arm A frees the cores and nobody is awake
+at that moment. `benchmarks/watchdog.sh` restarts the meter if it stops answering (both arms fail on
+connection refused, and a failed task-arm writes no score) and RECORDS everything else — disk,
+orphaned forkservers, a campaign that is alive but whose logs stopped growing. It repairs one thing
+and reports the rest, because an unattended repair of a measurement is worse than a gap in one.
