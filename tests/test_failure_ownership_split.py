@@ -982,7 +982,8 @@ def test_the_kind_and_its_evidence_survive_the_engines_intake_and_junk_beside_th
 
     out = _EngineStub(_Judge())._triage_crash(RunState(), object(), "boom", 1, reason="crash")
     assert set(out) == {"action", "failure_kind", "rationale", "missing_dependency",
-                        "evidence_source", "evidence_locator", "evidence_quote"}
+                        "evidence_source", "evidence_locator", "evidence_quote", "findings",
+                        "summary"}
     assert diagnosed_failure_reason("crash", out) == ("oom", REASON_SOURCE_TRIAGE)
     assert coerce_evidence(out) == {"source": EVIDENCE_SOURCE_LOG, "locator": "train.log",
                                     "quote": "CUDA out of memory"}

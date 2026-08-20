@@ -307,10 +307,17 @@ def test_tools_off_reproduces_the_historical_ask_byte_for_byte(tmp_path):
     a = without.messages[0][1]["content"]
     b = with_tools.messages[0][1]["content"]
     assert a != b
+    # BOTH tool-conditional blocks are absent with the tools off, and they are two because they ask
+    # for two different things — permission to LOOK, and the record to write once it has looked.
+    # The findings ask rides the same condition deliberately: with no tools this role has read
+    # nothing the prompt did not splice into it, so it would be summarizing the tail back to the
+    # engine that spliced it.
     assert UnifiedAgent._REPAIR_LOOK_INVITATION + "\n" not in a
-    # ...and the ONLY difference is the invitation, spliced at the position pattern `budget`/`depth`
+    assert UnifiedAgent._REPAIR_FINDINGS_INVITATION + "\n" not in a
+    # ...and the ONLY difference is those two, spliced at the position pattern `budget`/`depth`
     # already use: additive, immediately above the evidence block, nothing else reworded or moved.
-    assert b.replace(UnifiedAgent._REPAIR_LOOK_INVITATION + "\n", "", 1) == a
+    stripped = b.replace(UnifiedAgent._REPAIR_LOOK_INVITATION + "\n", "", 1)
+    assert stripped.replace(UnifiedAgent._REPAIR_FINDINGS_INVITATION + "\n", "", 1) == a
     # The system prompt is untouched in both directions.
     assert without.messages[0][0] == with_tools.messages[0][0]
 
@@ -504,7 +511,11 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
     eng = _EngineStub(_Overreaching())
     out = eng._triage_crash(state, object(), "boom", 1, reason="timeout", log_tools=object())
     assert set(out) == {"action", "failure_kind", "rationale", "missing_dependency",
-                        "evidence_source", "evidence_locator", "evidence_quote"}
+                        "evidence_source", "evidence_locator", "evidence_quote", "findings",
+                        "summary"}
+    # A seam that returned no `findings` at all reports an EMPTY list, not an absent key: the intake
+    # rebuild is a fixed key list, so "it did not say" is spelled the same way `failure_kind`'s "" is.
+    assert out["findings"] == []
     assert out["action"] in AGENT_TRIAGE_ACTIONS and "finished all 15 epochs" in out["rationale"]
     # It said `reason: ok`, and that is not the field it was asked about, so the kind is empty. And
     # `timeout` is ENGINE-FINAL, so the verdict is not consulted AT ALL — which is why this stays

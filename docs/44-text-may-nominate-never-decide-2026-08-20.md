@@ -89,6 +89,76 @@ failure-path cost and could contradict the directive it is building. Its verdict
 `{source, locator, quote}`, and the engine re-resolves the locator inside the workdir fence and
 stamps `reason_evidence_resolved`.
 
+### What that verdict RECORDS (2026-08-21)
+
+One citation was not the record, and the corpus says so: replayed over the committed 122-row
+`failure_triage.v1`, **not one** preserved stderr tail contains a torch allocator marker
+(`oom_marker_in_evidence` 0/16, `allocator_message_in_stderr` 0/7), because a tqdm bar pads the last
+~440 characters of an OOM'd training run and `_eval_failure_text` keeps 500. Widening the evidence
+to this role's own log reads moves **16 rows** (88/118 → 104/118 for the frozen classifier).
+
+**The obvious fix — preserve more stderr — was refused, and the refusal is the design.** The bytes
+were never lost: `sandbox._tee_drain` writes `<workdir>/<stage>.log` and nothing deletes it, 787 MB
+across the eight preserved runs including one that finished long ago. Preserving the engine's whole
+64 KB `res.stderr` clamp on every failure was measured at **+8.8 MB, +27 %** over the 32.7 MB of
+existing event log for the 138 failure-bearing rows — and it still reaches none of those 16, whose
+answer is in a stage log rather than in stderr at all.
+
+What was missing was the ACCOUNT. By the time the diagnostician answers it has already read the
+logs, the config and the code the eval ran, and every bit of that was discarded when the call
+returned. It now writes two additive, fold-ignored columns on `node_repaired` and `node_failed`
+(invariant #5):
+
+* **`reason_summary`** — what failed and BECAUSE OF WHAT, with the numbers and names INLINE: the
+  allocation size, the parameter and its value, the stage, the epoch, the exception type. The bar is
+  about CONTENT, not length: *"see train.log:41233"* is a failed summary even when that citation is
+  exactly right.
+* **`reason_findings`** — the trail, `{source, locator, quote, means}` per entry, each re-resolved
+  by CALLING `evidence_citation_resolves` rather than restating it (one fence, not a second
+  spelling) and stamped `resolved` (True / False / None).
+
+**Why the summary carries the weight, and why there is no machinery around dead links.** A citation
+may die. That is not a reason to build a content digest, a gone-versus-changed discriminator or a
+pruning policy — it is the reason the summary must stand alone. A finding whose citation does not
+resolve is MARKED and KEPT: the finding stands on its own text, and a reader owed the account is not
+owed a working link. The inverse ordering — a pointer where the account should be — is the record
+that rots, and no amount of link machinery saves it.
+
+**And a summary is the agent's ACCOUNT, not the evidence.** If the diagnostician is wrong, its
+summary is wrong in exactly the same way and no reader can tell from the summary alone. That is what
+the citations are for and why the two halves are kept in separate blocks on the row: `summary` and
+`means` are for READING, `quote` and `locator` are for CHECKING, `resolved` is the engine's and not
+the model's.
+
+Cost, both directions: **no prompt growth** (the 500-character `err` handed to the repair prompt and
+to the judge's history is byte-identical — `tests/test_diagnosis_record.py` pins it as an equality,
+not a budget) and a bounded record (`FINDINGS_CAP` 6 × 3 × 300 plus a 1,200-character summary,
+~6.8 KB worst case per failure row, +2.9 % over the preserved corpus if every diagnosis fills every
+field, which no real one does).
+
+**One defect was found and closed on the way through.** `reason_evidence` was NOT redacted —
+`evidence_quote` is by its own schema description "the one line that settles it, quoted", i.e. bytes
+a model copied out of a stage log, landing on a durable row that travels into `events.jsonl`, the
+trace, the UI and every export. That is the eighth persisted output channel and the same defect the
+C2 sweep closed for `node_failed.triage_rationale` one field over. All of `summary` / `locator` /
+`quote` / `means` now go through `Engine._redact` BEFORE their cap, which matters: measured over the
+257 preserved stage and console logs, a 500-character window carries **0** redaction masks while a
+wider read carries 3 at 8 KB, 36 at 16 KB (including a real `password`) and 384 at 64 KB — and this
+role reads with TOOLS, so its quotable window is the whole file.
+
+**What is NOT measured, and by what.** `score-triage` is byte-identical in every arm after this
+change (recorded 76/118, frozen 88/118, frozen-widened 104/118, live 88/118) — correctly, because
+the classifier did not move and this is about the RECORD, not about who decides. What DID move is
+what a candidate replaying the record can reach: **0 of 122 corpus rows carry an allocator marker in
+the durable 500-character record, and 16 carry one in what the diagnostician read** and now writes
+down; 36 of the 122 labels rest on evidence the durable record cannot show at all (16
+`oom_marker_in_evidence`, 10 `reused_stage_later_scored`, 7 `allocator_message_in_stderr`, 3
+`nonfinite_loss_in_log`). Those numbers are a PROXY: `triage_corpus.build_dataset` reads `error_in`
+and the triage spans, not `reason_summary`/`reason_findings`, so no cut of the bench can yet score a
+candidate on the new columns directly. Teaching the extractor to carry them is the one follow-up
+that would make this claim checkable rather than argued — it is not done here, and until it is, the
+`frozen-widened` arm is the closest thing to a measurement of the new record.
+
 **What did NOT get solved, stated because the rule above demands it.** There is still no out-of-band
 probe of a failure KIND. Every candidate is either the text rule that was deleted, or a fact already
 known false of the case that motivated this (a `torch.OutOfMemoryError` RAISES — full traceback, exit

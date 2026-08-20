@@ -331,6 +331,35 @@ EVIDENCE_SOURCES: tuple[str, ...] = (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG,
 # 300 every other model-authored string on those rows wears.
 EVIDENCE_LOCATOR_CAP = 300
 EVIDENCE_QUOTE_CAP = 300
+# What each finding MEANT — the reading, not the bytes. Same 300 for the same reason.
+FINDING_MEANS_CAP = 300
+
+# HOW MANY FINDINGS ONE DIAGNOSIS MAY RECORD. Six, and the number is a row-size budget rather than a
+# statement about how much looking is enough: six findings at 3 x 300 characters is ~5.6 KB worst
+# case on a durable row, and over the 138 failure-bearing rows in the eight preserved runs (37
+# `node_failed` + 101 `node_repaired`) that is +745 KB worst case against 32.7 MB of existing event
+# log — +2.3 %, and only if every diagnosis fills every field, which no real one does (a cited line
+# is ~100 characters). Extra findings are DROPPED FROM THE END rather than the answer being refused:
+# the first citations are the ones the model reached for first.
+FINDINGS_CAP = 6
+
+# THE SUMMARY — the one field on this row that has to work with nothing else in front of it.
+#
+# 1200, and the number follows directly from what it is FOR. A summary's job is the causal statement
+# with its facts INLINE: the allocation size, the parameter and the value it had, which stage, which
+# epoch, the exception type. "See train.log:41233" is a failed summary even when the citation
+# resolves perfectly, and a cap that only fits a sentence is a cap that produces exactly that. The
+# 93 full triage rationales in the preserved corpus run 121-690 characters (median 330, p90 460), so
+# a summary carrying the same prose PLUS its numbers has room at 1200 and a model that answers with
+# an essay is still bounded. Deliberately smaller than `triage.TRIAGE_RATIONALE_CAP` (2000): the
+# rationale is read by `repair_verify` to check a fix against its claims and is allowed to be a
+# list of intentions; this is the account a human reads a week later.
+#
+# WHY THIS FIELD CARRIES THE WEIGHT, and it is the whole shape of the design: the citations beside
+# it are a CONVENIENCE for whoever wants to dig, and a link may die. That is not a reason to build
+# machinery around dead links — it is the reason the summary has to stand alone. Every fact worth
+# recovering has to be IN here, not pointed at from here.
+DIAGNOSIS_SUMMARY_CAP = 1200
 
 # The ADDITIONAL turn grant that comes with the code scouts, over and above
 # `unified_agent.UnifiedAgent._REPAIR_LOOK_TURNS` (4, which is the log tools' grant). THREE, and the
@@ -360,25 +389,140 @@ def coerce_failure_kind(value, fallback: str) -> str:
     return v if v in DIAGNOSED_FAILURE_REASONS else str(fallback)
 
 
-def coerce_evidence(verdict) -> dict:
+def _screened(value, cap: int, redact=None) -> str:
+    """One model-authored string on its way to a durable row: REDACT, then strip, then cap.
+
+    The order is the 2026-08-14 C2 ruling restated (`node_failed.triage_rationale` carries the same
+    comment): masking after the cut can be truncated away, so the screen runs on the whole string
+    and the cap runs on what the screen produced. `redact` is a callable the ENGINE supplies —
+    `audit.Engine._redact` — and is None in the pure unit tests that only exercise the shaping.
+    Total over junk, like everything else on this path."""
+    try:
+        text = str(value or "")
+    except Exception:  # noqa: BLE001 - a diagnostic must never perturb the terminal being written
+        return ""
+    if not text:
+        return ""
+    if redact is not None:
+        try:
+            text = str(redact(text) or "")
+        except Exception:  # noqa: BLE001 - a redactor that raises must not lose the terminal…
+            return ""      # …but it must also never fail OPEN and let the raw text through
+    return text.strip()[:cap]
+
+
+def coerce_evidence(verdict, redact=None) -> dict:
     """The diagnostician's citation, normalized to `{source, locator, quote}` and never raising.
 
     Total over junk on purpose — this runs on the eval loop's failure path, where a raise costs the
     terminal being written. An unrecognised source, an absent key, a non-dict verdict and a model
     that cited nothing all collapse to `EVIDENCE_SOURCE_NONE` with empty strings, which is a
-    perfectly good durable row meaning "it did not say where it looked"."""
+    perfectly good durable row meaning "it did not say where it looked".
+
+    `redact` IS NOT OPTIONAL FOR A PRODUCTION CALLER, and its absence here was the eighth persisted
+    output channel — the same defect the C2 sweep found in `node_failed.triage_rationale` and fixed
+    on the row directly above this one. `evidence_quote` is by its own schema description "the one
+    line that settles it, quoted", i.e. bytes copied verbatim out of a stage log by a model, landing
+    on a durable row that travels into `events.jsonl`, the trace, the UI and every export. A model
+    restating what it read is a laundering channel, and this one was open. `engine/evaluate.py`
+    passes `self._redact`; a caller that passes nothing gets the shaping only and says so."""
     if not isinstance(verdict, dict):
         return {"source": EVIDENCE_SOURCE_NONE, "locator": "", "quote": ""}
     src = str(verdict.get("evidence_source", "") or "").strip().lower()
     if src not in EVIDENCE_SOURCES:
         src = EVIDENCE_SOURCE_NONE
-    loc = str(verdict.get("evidence_locator", "") or "").strip()[:EVIDENCE_LOCATOR_CAP]
-    quote = str(verdict.get("evidence_quote", "") or "").strip()[:EVIDENCE_QUOTE_CAP]
+    loc = _screened(verdict.get("evidence_locator", ""), EVIDENCE_LOCATOR_CAP, redact)
+    quote = _screened(verdict.get("evidence_quote", ""), EVIDENCE_QUOTE_CAP, redact)
     # A source with nothing to point at is not a citation. Collapsing it here rather than at the
     # sink means the durable row and the re-check agree about what "cited" means.
     if src in (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG) and not loc:
         src = EVIDENCE_SOURCE_NONE
     return {"source": src, "locator": loc, "quote": quote}
+
+
+def coerce_diagnosis_summary(verdict, redact=None) -> str:
+    """THE SELF-SUFFICIENT ACCOUNT of what failed and why — the one field on the durable row that has
+    to work with nothing else in front of it. `""` when the diagnostician did not write one.
+
+    **THE BAR, and it is a bar on CONTENT rather than on length.** A reader opening this row a week
+    later, with no workdir, no logs, no run and no tools, must be able to say what happened and
+    because of what. That means the numbers and the names are INLINE — the allocation size, the
+    parameter and the value it had, which stage, which epoch, the exception type — and not merely
+    pointed at. `"see train.log:41233"` has failed this bar even when the citation resolves
+    perfectly, because the citation is a convenience for digging further and this is the record.
+
+    IT IS NOT `rationale` AND THE TWO MUST NOT BE MERGED. `rationale` is what the model proposes to
+    DO, is read back by `repair_verify.verify_repair` to check a fix against its own claims, and is
+    written fix-first. This is what HAPPENED, is read by a human, and is written cause-first. One
+    string doing both is how `repair_verify` came to be graded on a truncated prefix.
+
+    Redacted before the cap, like every other model-authored string on these rows — see
+    `coerce_evidence` for why that ordering is not optional and what it closes."""
+    if not isinstance(verdict, dict):
+        return ""
+    return _screened(verdict.get("summary", ""), DIAGNOSIS_SUMMARY_CAP, redact)
+
+
+def coerce_findings(verdict, redact=None) -> list:
+    """EVERYTHING the diagnostician says it looked at, as an ordered list of
+    `{source, locator, quote, means}` — the plural of `coerce_evidence`, never raising.
+
+    THESE ARE A CONVENIENCE, NOT THE RECORD. The record is `coerce_diagnosis_summary`; this is the
+    trail for whoever wants to check it or dig further. Reading the order the other way round — a
+    summary that points at findings instead of stating the facts — is the failure mode the summary's
+    bar exists to prevent.
+
+    WHY THEY ARE WORTH KEEPING ANYWAY. By the time it answers, the diagnostician has read the stage
+    logs, the config and the code the eval actually ran, and all of that is discarded when the call
+    returns. One `{source, locator, quote}` records ONE of those looks. Measured on the 122-row
+    `failure_triage.v1` corpus: widening the evidence from the durable 500-character stderr tail to
+    this role's own log reads moves 16 rows (88/118 -> 104/118 for the frozen classifier), and those
+    16 are rows whose answer is in a STAGE LOG — which is also why the fix is citations into files
+    that are still on disk (787 MB of them across the eight preserved runs) rather than a wider
+    slice of preserved stderr, which reaches none of them.
+
+    `means` is the one field with no analogue in the singular contract: `quote` says what was there,
+    `means` says why it bears on this failure. Both are the AGENT'S ACCOUNT and are wrong exactly
+    when the agent is — `quote` + `locator` are what a reader CHECKS them with, and
+    `resolve_findings` stamps every item with whether its citation still resolves so nothing has to
+    be taken on trust. All three go through `redact` — see `coerce_evidence`.
+
+    The FIRST element is the primary citation (`evidence_*`) when there is one, so a reader
+    iterating this list never has to also remember to look at `reason_evidence`; duplicates are
+    dropped by `(source, locator, quote)` so a model that repeats itself does not spend the cap."""
+    primary = coerce_evidence(verdict, redact)
+    out: list = []
+    seen: set = set()
+    if primary["source"] != EVIDENCE_SOURCE_NONE or primary["quote"]:
+        out.append({**primary, "means": ""})
+        seen.add((primary["source"], primary["locator"], primary["quote"]))
+    raw = verdict.get("findings") if isinstance(verdict, dict) else None
+    if not isinstance(raw, (list, tuple)):
+        raw = ()
+    for item in raw:
+        if len(out) >= FINDINGS_CAP:
+            break
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("source", "") or "").strip().lower()
+        if src not in EVIDENCE_SOURCES:
+            src = EVIDENCE_SOURCE_NONE
+        loc = _screened(item.get("locator", ""), EVIDENCE_LOCATOR_CAP, redact)
+        quote = _screened(item.get("quote", ""), EVIDENCE_QUOTE_CAP, redact)
+        means = _screened(item.get("means", ""), FINDING_MEANS_CAP, redact)
+        if src in (EVIDENCE_SOURCE_CODE, EVIDENCE_SOURCE_LOG) and not loc:
+            src = EVIDENCE_SOURCE_NONE
+        # A finding that points nowhere AND says nothing is not a finding. `means` alone is enough
+        # to keep one — "the log stops mid-epoch with no exception" is a real observation with
+        # nothing to quote — and it will be stamped `resolved: None`, which is the honest reading.
+        if src == EVIDENCE_SOURCE_NONE and not quote and not means:
+            continue
+        key = (src, loc, quote)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"source": src, "locator": loc, "quote": quote, "means": means})
+    return out
 
 
 def evidence_citation_resolves(evidence, workdir) -> bool | None:
@@ -411,9 +555,10 @@ def evidence_citation_resolves(evidence, workdir) -> bool | None:
     # `path:line` — the shape the prompt asks for. Split from the RIGHT and only on an all-digit
     # tail, so a Windows-ish `C:\...` or a colon inside a directory name is not mistaken for a line
     # number. This is text SHAPING, not text DECIDING: whatever it produces is then resolved against
-    # the real filesystem, which is what answers.
+    # the real filesystem, which is what answers. A `path:start-end` BYTE RANGE is shaped the same
+    # way (`_is_span`): the range is a hint to a later reader and is never what decides the path.
     head, sep, tail = loc.rpartition(":")
-    path_text = head if (sep and tail.isdigit() and head) else loc
+    path_text = head if (sep and head and _is_span(tail)) else loc
     try:
         root = Path(workdir).resolve()
         if not root.is_dir():
@@ -432,6 +577,49 @@ def evidence_citation_resolves(evidence, workdir) -> bool | None:
         # A malformed path, a NUL byte, a symlink loop, a dead mount. All mean the same thing to the
         # record: the citation did not resolve.
         return False
+
+
+def _is_span(text: str) -> bool:
+    """`426` or `8290-33089` — a line number or a byte range, and nothing else.
+
+    Widened from the original `tail.isdigit()` for the range spelling the findings prompt asks for.
+    Deliberately NOT a general "does it look numeric" test: it decides whether a trailing `:...` is
+    a LOCATION or part of the PATH, and admitting `C:\\Users` there would resolve a different file."""
+    if text.isdigit():
+        return True
+    a, sep, b = text.partition("-")
+    return bool(sep and a.isdigit() and b.isdigit())
+
+
+def resolve_findings(findings, workdir) -> list:
+    """Stamp every finding with the engine's own re-resolution of its citation — never raising, and
+    never dropping one.
+
+    Each item gains `resolved`: True / False / None — the same three answers, from the same rule,
+    by CALLING `evidence_citation_resolves` rather than restating it, because the locator is
+    model-authored text reaching a filesystem call and two spellings of a fence is how one of them
+    gets loosened. It is free — the engine already resolves the singular citation on this very line
+    — and that is exactly the extent of the apparatus this deserves.
+
+    **A CITATION THAT DOES NOT RESOLVE IS MARKED AND KEPT.** Not dropped, not retried, and not a
+    failure of anything: the FINDING is the valuable part and it stands on its own text. Dropping it
+    would hide the one thing a reader most needs to know about an account they cannot otherwise
+    check, and retrying would be building machinery around a link the record does not depend on.
+
+    WHY THAT IS ENOUGH, and it is one design rather than two decisions: **because a link may die,
+    the SUMMARY has to stand alone.** Every number and name worth recovering is inline in
+    `reason_summary` (see `coerce_diagnosis_summary` for the bar); the citations are a convenience
+    for whoever wants to dig further. A record that inverted those — a pointer where the account
+    should be — is the one that rots, and no amount of digesting, re-resolving or pruning-policy
+    machinery would save it. Deliberately NOT built here: a content digest (a whole-file hash over
+    787 MB of preserved stage logs, answering "changed" on every ordinary append, which is no
+    answer), a gone-vs-changed discriminator, or any retry."""
+    out: list = []
+    for item in (findings or []):
+        if not isinstance(item, dict):
+            continue
+        out.append({**item, "resolved": evidence_citation_resolves(item, workdir)})
+    return out
 
 
 def diagnosed_failure_reason(deterministic: str, verdict) -> tuple[str, str]:

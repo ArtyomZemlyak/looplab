@@ -93,9 +93,11 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
 # docstring for which reasons are the engine's own and which are the diagnostician's, for the
 # measurement behind the line, and for why the diagnostician IS the triage call rather than a second
 # agent (8.7 provider calls per failure, already paid).
-from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_evidence,
+from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_diagnosis_summary,
+                                              coerce_evidence, coerce_findings,
                                               diagnosed_failure_reason, diagnosis_tools,
-                                              engine_observed_facts, evidence_citation_resolves)
+                                              engine_observed_facts, evidence_citation_resolves,
+                                              resolve_findings)
 # NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
 # This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
 # whole point of the rule living in one pure function. A site here that set one of them by hand
@@ -1819,6 +1821,13 @@ class EvaluateMixin:
             # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
             _evidence = None
             _evidence_resolved = None
+            # …and the ACCOUNT plus the trail behind it, on the same rule. `None`/`None` and not
+            # `""`/`[]`, deliberately: an empty summary and an empty list are a diagnostician that
+            # was asked and wrote nothing down, which is a real and different answer from one that
+            # was never asked. The durable rows omit the keys in both cases and an old row omits
+            # them too — the reader-side default (invariant #5) is "nobody looked".
+            _summary = None
+            _findings = None
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
             # attempt — what failed, what the fix claimed it would do, and which files it actually
             # touched. Rows made in THIS process are appended from loop locals (every field is already
@@ -2089,8 +2098,13 @@ class EvaluateMixin:
                 _engine_reason, _reason_source = reason, REASON_SOURCE_ENGINE
                 # …and the diagnostician's citation with them, for the identical reason: a chain
                 # whose third attempt was diagnosed and whose fourth was not must not carry the
-                # third's evidence into the fourth's durable row.
+                # third's evidence into the fourth's durable row. The SUMMARY and the findings are
+                # reset here for a sharper version of the same reason: a stale summary is an account
+                # of a DIFFERENT failure written in confident prose on this attempt's row, which is
+                # strictly worse than an absent one — a reader cannot tell it apart from a correct
+                # one, and that is exactly the property the summary is trusted for.
                 _evidence, _evidence_resolved = None, None
+                _summary, _findings = None, None
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
@@ -2400,8 +2414,40 @@ class EvaluateMixin:
                 # `unclassified` would lose it, and the rate at which a live model mis-formats a
                 # citation is not yet known here. The number becomes countable on the durable rows;
                 # promoting it to a gate is a decision for whoever reads that number.
-                _evidence = coerce_evidence(triage)
+                #
+                # REDACTED, and its absence here was the EIGHTH persisted output channel — the same
+                # defect the C2 sweep found in `node_failed.triage_rationale` and closed on the very
+                # next screen down, missed one field over. `evidence_quote` is by its own schema
+                # description "the one line that settles it, quoted": bytes a model copied verbatim
+                # out of a stage log, landing on a durable row that travels into `events.jsonl`, the
+                # trace, the UI and every export. Measured over the preserved stage logs, a 500-char
+                # window is where a model can quote from safely by accident (0 masks across 257
+                # logs) and anything wider is not (3 at 8 KB, 36 at 16 KB, 384 at 64 KB) — and this
+                # role now reads with TOOLS, so its quotable window is the whole file. The screen
+                # runs BEFORE the 300-char cap, like both siblings, so masking cannot be truncated
+                # away; `coerce_evidence`/`coerce_findings` own that ordering.
+                _evidence = coerce_evidence(triage, self._redact)
                 _evidence_resolved = evidence_citation_resolves(_evidence, workdir)
+                # WHAT ACTUALLY HAPPENED, IN PROSE A READER CAN USE WITH NOTHING ELSE IN FRONT OF
+                # THEM. This is the deliverable and the rest of this block is its trail: the
+                # diagnostician has just read the stage logs, the config and the program the eval
+                # ran, and until now every bit of that was discarded when the call returned. The
+                # bytes were never the thing that was lost — 787 MB of stage logs sit in `runs/`
+                # across the eight preserved runs and nothing deletes them — what was lost is the
+                # causal statement and the numbers in it. See `coerce_diagnosis_summary` for the
+                # bar, which is about CONTENT: a summary that points at a log instead of naming the
+                # allocation size, the parameter, the stage and the exception has failed it.
+                _summary = coerce_diagnosis_summary(triage, self._redact)
+                # …and the trail behind it, each citation re-resolved inside the workdir fence by
+                # the same rule the singular one above uses. FREE — the resolution was already being
+                # done for `reason_evidence` — and deliberately nothing more than that: a citation
+                # that does not resolve is MARKED and kept, never retried and never dropped, because
+                # the finding stands on its own text and the summary stands without any of it.
+                #
+                # THE PROMPT IS UNTOUCHED BY ALL OF THIS. `err` is byte-identical to what it always
+                # was, and this whole block runs AFTER the triage call it describes — nothing here
+                # is spliced into anything the engine pays for.
+                _findings = resolve_findings(coerce_findings(triage, self._redact), workdir)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
                     break
@@ -2797,6 +2843,19 @@ class EvaluateMixin:
                         **({"reason_evidence": _evidence} if _evidence else {}),
                         **({"reason_evidence_resolved": _evidence_resolved}
                            if _evidence_resolved is not None else {}),
+                        # WHAT HAPPENED, IN PROSE — same additive, fold-ignored, omitted-when-absent
+                        # rule as the pair above, and the absence means the same thing: nobody was
+                        # asked. This is the column that makes the row readable a week later
+                        # without the run, and it is deliberately NOT `rationale`, which says what
+                        # the repair intends to DO and is read back by `repair_verify`.
+                        **({"reason_summary": _summary} if _summary else {}),
+                        # …and the trail behind it, same rule again. Each item carries the model's
+                        # account (`source`/`locator`/`quote`/`means`) beside the ENGINE's
+                        # re-resolution of it (`resolved`), so a reader never has to guess which
+                        # part the model could have written. A citation that did not resolve is
+                        # MARKED `resolved: false` and KEPT: the finding stands on its own text, and
+                        # a reader owed the summary above is not owed a working link.
+                        **({"reason_findings": _findings} if _findings else {}),
                         # The wall-clock of the eval this repair answers. Additive (invariant #5);
                         # the fold ignores it. It is what makes the COST floor durable across a
                         # resume — see `_durable_repair_seconds`, which sums these rows, and
@@ -3226,6 +3285,15 @@ class EvaluateMixin:
                         data["reason_evidence"] = _evidence
                     if _evidence_resolved is not None:
                         data["reason_evidence_resolved"] = _evidence_resolved
+                    # THE ACCOUNT AND ITS TRAIL, on the same rule as on `node_repaired` above. This
+                    # is the row a whole run is audited from and the row most likely to be read
+                    # after everything else is gone, which is exactly why the SUMMARY has to carry
+                    # the numbers itself rather than point at a log — the logs do survive, but a
+                    # record whose meaning depends on that is a record that can rot.
+                    if _summary:
+                        data["reason_summary"] = _summary
+                    if _findings:
+                        data["reason_findings"] = _findings
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:
