@@ -151,6 +151,7 @@ nav:
       - Web UI: guide/ui.md
       - Deployment: guide/deployment.md
       - Live scenarios: guide/live-scenarios.md
+      - Judge bench: guide/judge-bench.md
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md

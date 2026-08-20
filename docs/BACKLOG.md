@@ -3841,6 +3841,78 @@ retirement has to be observed by `ensure_started` under `_start_lock`, or a watc
 window between "the loop decided to stop" and "the thread ended" is never serviced — a watch that
 silently does not watch, which is the failure the whole module exists to prevent.
 
+### §0.19 Every prompt edit in this repo was unmeasured, and for one judge it no longer is (2026-08-20)
+
+**The standing problem.** The training-log monitor's kill authority was changed twice in one week.
+Nothing said whether either change made it better or worse, because there was no way to ask. The
+same is true of every other judge prompt here: `render(prompts, key, default)` is overridable, prompt
+strings are contracts, and not one of them has a number attached.
+
+**The material was already on disk, and the missing piece was never the data.** `spans.jsonl`
+records both the `input` and the `output` of every `generation` span — 3,950 with both in
+`runs/e5small-dr-unified-v2` alone. What was missing is the LABEL, and the label does not exist for
+every judge. Two disjoint classes, and the split is the whole design:
+
+* **Outcome-labelled.** The run itself later supplies a fact the judge did not author. The monitor
+  called a node `broken`; the node then scored `0.0`. A correctness claim is possible.
+* **Unlabelled, permanently.** The novelty gate REJECTS an idea, so the idea is never run and
+  nothing on disk says whether it would have worked. It can be scored only for CONSISTENCY with the
+  old verdict — a score maximised by reproducing the old model's mistakes. **A consistency number
+  presented as an accuracy number is the failure mode this whole thing has to avoid**, so the
+  scorer keeps them in two fields, prints them under two headings, and has no code path that
+  averages them; `label_accuracy` returns `None` rather than `0.0` where nothing is labelled,
+  because "no evidence" and "always wrong" are different answers.
+
+**What shipped.** `looplab/judgebench/` + `tests/data/judge_bench/train_monitor.v1.jsonl.gz` (450
+decisions, 278 KB gzipped from 4.8 MB raw) + `docs/guide/judge-bench.md`. Committed rather than
+generated on demand on one fact: `runs/` is not in the repository, so an on-demand dataset cannot be
+read by a reviewer judging a prompt change, cannot gate a merge and cannot be diffed. It is derived
+and never hand-edited — `test_every_label_rederives` recomputes every label from the row's own
+stored facts through the production rule, offline, with no corpus present.
+
+**Three label decisions that each moved the headline, and each is arguable:**
+
+1. **Stage status alone is not the label.** `e5small-dr-unified-v2` node 2 trained 6.4 h, the stage
+   exited `ok`, and the model scored `0.0`. That is the case the judge exists for and a
+   stage-status label scores it `productive`.
+2. **`timeout` is its own class, excluded from accuracy.** 60 of 450 decisions. The compute was
+   wasted, but the judge's own system prompt tells it a slow-but-progressing run is `watch`, not
+   `broken` — charging those as missed stops penalises it for obeying its instructions.
+3. **`ts - seconds` is not a stage's window.** Every `stage_finished` row of an eval attempt is
+   flushed together at the END (measured spread inside a burst: < 0.15 s, on a `mine` that ran an
+   hour), so placing a decision by that arithmetic put 32 of 168 decisions in the wrong attempt or
+   in none. Attempts are clustered from the bursts instead.
+
+**The incumbent's numbers, which are now the baseline every candidate is read against.** Over 354
+outcome-labelled decisions: accuracy **0.701**; it said `broken` about a run that finished fine
+**5 times**, and never said `broken` about a wasted run 101 times. Per eval attempt — the unit
+compute is paid in — **7 of 27 wasted attempts caught, 3 of 49 productive attempts falsely stopped,
+≈18.9 h saveable.** On the case it exists for it is strong: of 53 decisions watching a training that
+completed and produced a dead model, **48 called it `broken`**. **4 of the 5 false alarms are the
+two runs where the judge had no log tools** — suggestive of the tools change being the fix, but a
+CONFOUND and not an A/B, because those are different runs with a different failure mix. Separating
+the two needs the same rows replayed both ways, which is the live arm.
+
+**What this corpus cannot answer, stated in the artefact itself and not only here:** seven runs, one
+task family, one operator, one judge model (`deepseek-v4-flash`, 450 of 450). `CORPUS_LIMITS` is
+stored in the dataset header and printed above every report, because a caveat that lives only in a
+doc is a caveat nobody reading the number sees. A prompt optimised against this corpus will overfit
+it.
+
+OPEN[judge-bench-covers-one-judge-of-four] the bench exists for the training-log monitor only.
+Failure triage is the next one and is outcome-labelled, but it is SMALLER than the span count
+suggests — 1,634 recorded `triage` generation spans are **104 decisions**, because one agentic
+decision is a ~16-turn tool loop. The repair critic has **7 decisions in the whole corpus** and a
+bench on it would report noise with a decimal point. The novelty gate can never be scored for
+correctness at all. proof:absent:extract_triage@looplab/judgebench/judge_corpus.py
+
+OPEN[judge-bench-has-no-live-replay-arm] `score.llm_candidate` exists and is deliberately not the
+default, but nothing has ever been replayed through it, so no candidate — a changed prompt, a
+different model — has yet been measured against the baseline the corpus now fixes. Until that runs,
+the bench measures the incumbent against itself. The first question it should answer is the one the
+corpus can only hint at: replay the SAME rows with and without log tools.
+proof:absent:llm_candidate@tests/test_judge_bench.py
+
 ## ★ Shipped 2026-06-24 (this session) — ~43 roadmap items, config-first, all in the UI
 
 Branch `feat/adaptive-search-intelligence`, ~30 commits. All **config-first** (every knob in
