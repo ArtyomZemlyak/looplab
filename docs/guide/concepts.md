@@ -722,10 +722,34 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any** of the twelve `FAILURE_REASONS` is eligible for repair **in place** within the same eval
-  (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
-  `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning` — not only the mechanical
-  three.
+  **any** of the thirteen `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `unclassified`,
+  `expect_failed`, `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning` — not only
+  the mechanical three.
+
+  **WHO SAYS WHICH ONE IT WAS, since 2026-08-20** (`engine/failure_diagnosis.py`). The engine
+  classifies only what it CAUSED, RAN or MEASURED and remembers doing — its own clock (`timeout`),
+  its three watchdogs' kills (`diverged`/`stalled`/`not_learning`), its cross-reader (`drift`), the
+  return code of the setup command it ran (`setup`), and its own `stat` of a stage's declared input
+  and output (`needs_failed`/`expect_failed`). Everything else is diagnosed by an AGENT that can
+  read the dead eval's stage logs AND the code that wrote them, and that must cite the file, line or
+  log record it stood on. The engine's own structural answer stays on the row beside it
+  (`engine_reason`) and `reason_source` says who chose the word.
+
+  The engine still HANDS OVER what it saw. `engine_observed_facts` states the exit status and
+  whether the process wrote anything at all — a fact `_eval_failure_text` surfaced only when stderr
+  was blank, so a pod cgroup OOM-kill leaving a `Killed` line used to reach the judge as that one
+  word. It states the fact and never the conclusion; a hint phrased as a verdict would be the
+  deleted rule wearing a prompt.
+
+  Two consequences worth knowing. `check_failed` is DIAGNOSABLE while the two filesystem contracts
+  are not, because a `check_failed` row is written from another MODEL's reading of the stage's
+  output — measured, 21 such rows in `runs/` hide at least three different real causes, 16 of them a
+  training that never learned. And `oom` is now ANSWER-ONLY: both of the engine's ways of naming it
+  were text rules over the candidate's own stderr, both are deleted, so an out-of-memory failure is
+  `crash` until something actually looks. `unclassified` is what the engine records when the
+  diagnostician was wired, was asked, and could not answer — it repairs blind under a tighter bound,
+  never suppresses a salvaged metric, and buys no extra attempts.
   <!-- FIXED 2026-08-13 (mega-review, doc 40): this list said "eight" and omitted the last three — it was
        written on a branch where 8 was correct and merged beside the registry widening without
        reconciliation; the settings table already listed all eleven.

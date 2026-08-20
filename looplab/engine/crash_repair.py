@@ -168,21 +168,27 @@ class CrashRepairMixin:
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
                       reason: str = "crash", *, repair_log=None,
                       depth: Optional[int] = None, attempts_left: Optional[int] = None,
-                      log_tools=None) -> dict:
+                      log_tools=None, engine_facts: str = "") -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str,
         "failure_kind": str}.
 
-        `failure_kind` is the second question this one call answers since 2026-08-20 — what the
-        failure WAS, over the three kinds `_failure_reason` can only read out of the dead process's
-        own text (`triage.py::JUDGED_FAILURE_REASONS`). It costs NO extra call: the loop already
-        makes exactly one triage call per failed attempt and this judge is already handed the
-        evidence the question needs. It is uncoerced here on purpose — the fallback for an absent or
-        out-of-vocabulary value is the engine's deterministic classification for THIS eval, which
-        only the caller holds, so `triage.judged_failure_reason` is the one place the refusal is
-        spelled. Every path below that does not return an AGENT verdict (the rule fallback, the two
-        fail-closed degradations) leaves it absent, and absent means "the engine keeps its own
-        answer".
+        `failure_kind` and the three `evidence_*` fields make this call the FAILURE DIAGNOSTICIAN
+        since 2026-08-20 — what the failure WAS, over
+        `engine/failure_diagnosis.py::DIAGNOSED_FAILURE_REASONS`, and what it stood on. It costs NO
+        extra provider call: the loop already makes exactly one triage call per failed attempt (an
+        already-agentic one, measured at 8.82 calls per failure across v8+v9+v3) and this judge is
+        already handed the evidence the question needs. All four are uncoerced here on purpose — the
+        fallback for an absent or out-of-vocabulary kind is a decision only the CALLER can make,
+        because it holds the engine's own answer for THIS eval, and the evidence locator can only be
+        re-resolved against a workdir this frame does not have. `failure_diagnosis` is where both
+        are spelled.
+
+        WHAT AN ABSENT KIND MEANS CHANGED WITH IT. The rule fallback below is unaffected — it stamps
+        `DIAGNOSIS_UNAVAILABLE_KEY`, which says "no diagnostician was wired" and keeps the engine's
+        answer. But an AGENT verdict with no readable kind is now `unclassified`: something was
+        asked and could not answer, and a row that recorded the engine's residual instead would be
+        indistinguishable from one where the diagnostician agreed.
 
         THIS IS THE STOPPING RULE for the inline-repair loop, not merely a repair-vs-reject
         classifier. The unified agent decides (it can consult the run via its pilot tools —
@@ -246,7 +252,8 @@ class CrashRepairMixin:
             # ending the node on an answer nobody could read.
             for _round in range(1 + _TRIAGE_REASK_LIMIT):
                 verdict = self._ask_triage(fn, state, node, tagged, attempt, reason,
-                                           repair_log, depth, attempts_left, log_tools)
+                                           repair_log, depth, attempts_left, log_tools,
+                                           engine_facts)
                 if verdict["action"] in AGENT_TRIAGE_ACTIONS:
                     return verdict
             return verdict
@@ -265,7 +272,7 @@ class CrashRepairMixin:
                             _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
-                    repair_log, depth, attempts_left, log_tools=None) -> dict:
+                    repair_log, depth, attempts_left, log_tools=None, engine_facts: str = "") -> dict:
         """ONE ask of the wired judge, normalized to a `TRIAGE_ACTIONS` verdict.
 
         Split out of `_triage_crash` so the re-ask above is a loop over a single, total function
@@ -310,9 +317,15 @@ class CrashRepairMixin:
             # would read like the safety and is not it — `_accepted_kwargs` is — and the two spellings
             # are indistinguishable to a new seam, whose `tools=None` default and an explicit `None`
             # are the same value. One rule for the whole bag is the reviewable one.
+            # `engine_facts` rides in the SAME narrowed bag as the four before it, and for the
+            # identical reason stated above: `triage_crash` is a DUCK-TYPED seam, so an argument
+            # passed unconditionally to an implementation written against an older signature raises
+            # TypeError, which the fail-closed handler below reads as a dead provider — a stopped
+            # node PLUS a RUN-level pause. `_accepted_kwargs` is the safety; listing it here
+            # unconditionally like the rest is what keeps one rule for the whole bag.
             extra = {"history": _format_repair_log(repair_log),
                      "stages_passed": depth, "attempts_left": attempts_left,
-                     "tools": log_tools}
+                     "tools": log_tools, "engine_facts": engine_facts}
             with self.tracer.span("triage", attempt=attempt, reason=reason):
                 out = fn(node, tagged, attempt, state=state, brief=brief,
                          **_accepted_kwargs(fn, extra))
@@ -321,15 +334,32 @@ class CrashRepairMixin:
                 # verdict, so it is carried here rather than re-derived downstream. It fails
                 # closed to "" = no install, and the engine never acts on it alone (see
                 # runtime/deps.py::triage_install_candidates).
-                # `failure_kind` rides in the SAME narrowed bag as `missing_dependency` and for the
-                # same reason: it is part of the verdict, so it is carried here rather than
-                # re-derived downstream. It fails closed to "" — an absent key, an older duck-typed
-                # seam, a model that ignored the field — and "" is refused by
-                # `triage.judged_failure_reason`, which keeps the engine's own classification. It is
-                # NOT coerced here: the fallback is `_failure_reason`'s answer for THIS eval, which
-                # this frame does not hold and the caller does.
+                # `failure_kind` and the three `evidence_*` fields ride in the SAME narrowed bag
+                # as `missing_dependency` and for the same reason: they are part of the verdict, so
+                # they are carried here rather than re-derived downstream. The kind fails closed to
+                # "" — an absent key, an older duck-typed seam, a model that ignored the field — and
+                # "" is refused by `failure_diagnosis.diagnosed_failure_reason`, which answers
+                # `unclassified` for a DIAGNOSABLE reason (something was asked and said nothing
+                # readable) and keeps the engine's own answer for an ENGINE-FINAL one (nobody was
+                # asked). None is coerced here: the kind's fallback is `_failure_reason`'s answer
+                # for THIS eval and the evidence's check is a workdir resolution, and this frame
+                # holds neither.
+                # THE REBUILD IS THE UNFORGEABILITY, and it is why the two engine-side markers
+                # (`TRIAGE_TRANSPORT_FAILURE_KEY`, `failure_diagnosis.DIAGNOSIS_UNAVAILABLE_KEY`)
+                # can never arrive from the wire: the dict below is constructed from a FIXED key
+                # list, so whatever a model emitted under those names is simply not carried.
+                # Adding a key here is therefore a decision about what a model may say.
+                #
+                # The three `evidence_*` fields join `failure_kind` in that bag (2026-08-20). They
+                # are carried RAW and uninterpreted for the same reason it is: the engine
+                # re-resolves the locator against the workdir, which only the eval frame holds, so
+                # `failure_diagnosis.coerce_evidence` / `evidence_citation_resolves` are the one
+                # place the normalization and the check are spelled.
                 return {"action": out["action"],
                         "failure_kind": str(out.get("failure_kind", "")).strip().lower()[:40],
+                        "evidence_source": str(out.get("evidence_source", "")).strip().lower()[:16],
+                        "evidence_locator": str(out.get("evidence_locator", ""))[:300],
+                        "evidence_quote": str(out.get("evidence_quote", ""))[:300],
                         "rationale": str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP],
                         "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
             # A TRANSPORT FAILURE OBSERVED ONE LAYER DOWN. `UnifiedAgent.triage_crash`'s `_fallback`

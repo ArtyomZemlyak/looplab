@@ -61,7 +61,12 @@ from looplab.engine.options import _UNSET
 from looplab.engine.repair_judgment import (CRITIC_STOP, critic_due, critic_evidence,
                                             declared_pipeline_seconds, developer_stuck_contract,
                                             repair_floor_stop, repair_redone_work_stop)
-from looplab.engine.train_monitor import (eval_log_plan, needs_log_snapshot, repair_log_tools,
+# `repair_log_tools` is deliberately NOT imported here any more (2026-08-20): the repair path now
+# builds `failure_diagnosis.diagnosis_tools`, which COMPOSES it with the workdir code scouts, so a
+# name bound here would be a decoy patch seam — a test monkeypatching `evaluate.repair_log_tools`
+# would resolve and reach nothing while production went on calling the real one one module over.
+# That is the silent-narrowing shape `orchestrator.py`'s `fold` seam comment warns about.
+from looplab.engine.train_monitor import (eval_log_plan, needs_log_snapshot,
                                           snapshot_training_logs)
 
 # Watchdog/monitor ticks get their OWN thread pool, separate from anyio's shared 40-token default.
@@ -80,9 +85,24 @@ def _watch_limiter() -> "anyio.CapacityLimiter":
     if _WATCH_LIMITER is None:
         _WATCH_LIMITER = anyio.CapacityLimiter(_WATCH_THREADS)
     return _WATCH_LIMITER
-from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION, REASON_SOURCE_ENGINE,
+from looplab.engine.triage import (_MAX_DEP_ROUNDS, DEFAULT_TRIAGE_ACTION,
                                    UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   _failure_reason, judged_failure_reason, repair_artifact_defect)
+                                   _failure_reason, repair_artifact_defect)
+# THE OWNERSHIP SPLIT, imported from its own module rather than through `triage`'s re-export: this
+# file is the one CALLER of the rule, so it should name the module that owns it. See that module's
+# docstring for which reasons are the engine's own and which are the diagnostician's, for the
+# measurement behind the line, and for why the diagnostician IS the triage call rather than a second
+# agent (8.7 provider calls per failure, already paid).
+from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, coerce_evidence,
+                                              diagnosed_failure_reason, diagnosis_tools,
+                                              engine_observed_facts, evidence_citation_resolves)
+# NOTE what is deliberately NOT imported here: `UNCLASSIFIED_REASON` and `REASON_SOURCE_UNDIAGNOSED`.
+# This file never spells either — `diagnosed_failure_reason` returns them as a PAIR, which is the
+# whole point of the rule living in one pure function. A site here that set one of them by hand
+# would be a second implementation of "the diagnostician could not answer", and the two would drift.
+# `REASON_SOURCE_ENGINE` is imported because the loop really does have to stamp it in three places
+# the rule never sees: the loop-local default, the per-attempt re-stamp, and the two engine-authored
+# reasons (`idea_rejected`, `developer_crash`) that are not classifications of the eval at all.
 # The repair-verification rung: did this repair do what its rationale said? A LEAF (pure functions
 # over bytes the loop already holds — no engine state, no events, no model), imported here rather
 # than re-derived, because the same verdict has to be written to the durable row, read back off the
@@ -403,6 +423,12 @@ def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, 
         # the two answers it is being asked to tell apart. `reason` is `_failure_reason`'s
         # classification, which reads the sandbox's out-of-band watchdog flags and never the stderr
         # sentinel (`c862045c`) — so it is the one column here the candidate cannot write.
+        # `engine_reason` rides beside it on the same `in`-guard, so a resumed critic reads the
+        # ENGINE's column exactly as an in-process one does. Absent on a pre-2026-08-20 row, where
+        # `reason` was the engine's own answer anyway — `repair_judgment.authenticated_cause` is the
+        # one place that fallback is spelled.
+        if "engine_reason" in d:
+            row["engine_reason"] = str(d.get("engine_reason") or "")
         if "reason" in d:
             row["reason"] = str(d.get("reason") or "")
         if "changed" in d:
@@ -1787,6 +1813,12 @@ class EvaluateMixin:
             # operator excluded from `inline_repair_reasons` — leaves them at.
             _reason_source = REASON_SOURCE_ENGINE
             _engine_reason = reason
+            # WHERE THE DIAGNOSTICIAN LOOKED, or None on every path that never consulted one. Both
+            # are OMITTED from a durable row when None rather than written empty: an absent key
+            # means "nobody was asked", which is deliberately not the same fact as "asked and cited
+            # nothing" (`failure_diagnosis.EVIDENCE_SOURCE_NONE`).
+            _evidence = None
+            _evidence_resolved = None
             # THE EVIDENCE THE JUDGE DECIDES ON: this node's repair history, newest last. One row per
             # attempt — what failed, what the fix claimed it would do, and which files it actually
             # touched. Rows made in THIS process are appended from loop locals (every field is already
@@ -2055,6 +2087,10 @@ class EvaluateMixin:
                 # third attempt is judged and whose fourth is not must not carry the third's
                 # attribution into the fourth's row.
                 _engine_reason, _reason_source = reason, REASON_SOURCE_ENGINE
+                # …and the diagnostician's citation with them, for the identical reason: a chain
+                # whose third attempt was diagnosed and whose fourth was not must not carry the
+                # third's evidence into the fourth's durable row.
+                _evidence, _evidence_resolved = None, None
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
@@ -2300,14 +2336,23 @@ class EvaluateMixin:
                 # returns a fresh provider — so a pause/abort may drop it without leaving anything
                 # half-done. The paid call BELOW is the opposite case and is deliberately untouched
                 # here (see `_repair_critic`'s comment for the convention those three share).
+                #
+                # SINCE 2026-08-20 IT IS ALSO THE CODE, not only the logs: `diagnosis_tools`
+                # composes `repair_log_tools` with `RepoScoutTools` rooted at the node WORKDIR, the
+                # same pair `train_monitor.monitor_tools` hands the live watchdog and for the same
+                # reason — a log can show a loss frozen and only the source says whether the
+                # objective can descend as written. Logs go FIRST in the composite so a name
+                # collision cannot shadow `read_log`, which is the only reader that knows this
+                # attempt's byte floor.
                 _repair_tools = await anyio.to_thread.run_sync(
-                    repair_log_tools, self, workdir, _log_plan, _log_snapshot,
+                    diagnosis_tools, self, workdir, _log_plan, _log_snapshot,
                     abandon_on_cancel=True)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
                                             attempts_left=_repair_attempts_left(attempt, _repair_cap),
-                                            log_tools=_repair_tools)
+                                            log_tools=_repair_tools,
+                                            engine_facts=engine_observed_facts(res))
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
                 # verdict this attempt already paid for, and before every branch below that
@@ -2320,24 +2365,43 @@ class EvaluateMixin:
                 # recomputes `reason` from `_failure_reason(res)` at the top of every attempt, so no
                 # judged reason can switch inline repair on or off, and none can reach salvage.
                 #
-                # `judged_failure_reason` is the whole rule and it is deliberately not restated
-                # here: an AUTHENTICATED classification (the two watchdog verdicts, the engine's own
-                # clock, the drift refusal, the stage-contract statuses, the setup short-circuit) is
-                # returned unchanged and the judge's answer is not consulted at all, so the model
-                # cannot contradict a fact the engine holds out of band. Only the three the engine
-                # READ from the dead process's text can move, and those three are disjoint from
-                # `metric_salvage.NEVER_SALVAGED_REASONS`, which is why nothing about salvage
-                # depends on this line — `_salvage_eval_metric` above ran on the deterministic
-                # answer and would answer identically either way.
+                # `diagnosed_failure_reason` is the whole rule and it is deliberately not
+                # restated here: an ENGINE-FINAL classification — the three watchdog verdicts, the
+                # engine's own clock, the drift refusal, the setup flag, the two filesystem stage
+                # contracts — is returned unchanged and the diagnostician's answer is not consulted
+                # at all, so a model cannot contradict a fact the engine holds out of band.
+                #
+                # WHAT SALVAGE DEPENDS ON IS THE ORDERING, NOT THE VOCABULARY, and that is worth
+                # stating because the vocabulary argument got weaker on 2026-08-20 while the
+                # containment did not move. `_salvage_eval_metric` above ran on the DETERMINISTIC
+                # answer, several branches earlier, and the loop recomputes `reason` from
+                # `_failure_reason(res)` at the top of every attempt — so no diagnosed reason has
+                # ever reached the salvage gate or the `inline_repair_reasons` gate, whatever it
+                # says. `failure_diagnosis` keeps the disjointness from
+                # `metric_salvage.NEVER_SALVAGED_REASONS` as a second, independent guarantee.
                 #
                 # BELOW the two engine verdicts' handling by construction rather than by ordering:
                 # `unanswerable` and `unreadable` are not in `AGENT_TRIAGE_ACTIONS`, so a call that
-                # could not produce a stop decision has not produced a classification either and
-                # this returns the engine's own. `reject_idea` overwrites `reason` two branches down
-                # with `idea_rejected`, which is the engine's word for "the lineage is wrong" and
-                # not a classification of the eval at all — it stays the last word, and
-                # `_reason_source` below records that the engine chose it.
-                reason, _reason_source = judged_failure_reason(reason, triage)
+                # could not produce a stop decision has not produced a classification either — and
+                # since 2026-08-20 that answers `unclassified` rather than silently keeping the
+                # engine's residual, because a diagnostician that FAILED and one that AGREED must
+                # not write the same row. `reject_idea` overwrites `reason` two branches down with
+                # `idea_rejected`, which is the engine's word for "the lineage is wrong" and not a
+                # classification of the eval at all — it stays the last word, and `_reason_source`
+                # below records that the engine chose it.
+                reason, _reason_source = diagnosed_failure_reason(reason, triage)
+                # WHERE THE DIAGNOSTICIAN SAID IT LOOKED, and whether that citation resolves. The
+                # evidence is not decoration: no out-of-band probe exists for a failure KIND (see
+                # `failure_diagnosis`' EVIDENCE section for why every candidate is either the text
+                # rule just deleted or unavailable), so a re-resolvable citation is the strongest
+                # thing available and is what makes a wrong verdict auditable afterwards.
+                #
+                # It RECORDS and never REFUSES: demoting an uncited-but-correct diagnosis to
+                # `unclassified` would lose it, and the rate at which a live model mis-formats a
+                # citation is not yet known here. The number becomes countable on the durable rows;
+                # promoting it to a gate is a decision for whoever reads that number.
+                _evidence = coerce_evidence(triage)
+                _evidence_resolved = evidence_citation_resolves(_evidence, workdir)
                 if action == "abandon":
                     triage_outcome = ("abandon", triage.get("rationale", ""))
                     break
@@ -2406,13 +2470,33 @@ class EvaluateMixin:
                 # be what stops the engine from making the node runnable. Bounded by the same
                 # `_MAX_DEP_ROUNDS` + once-per-module `_dep_attempted` cache; the fail-closed
                 # conditions live with the extraction (runtime/deps.py).
-                # Gated on `reason == "crash"` like its traceback-driven sibling above, which it was
-                # not: `inline_repair_reasons` also admits `timeout` and `oom`, whose `err` is
-                # whatever the killed process last wrote — so a training run killed at the deadline
-                # after logging an early import warning could be read as unresolved-name shaped and
-                # drive a pip install into the shared eval interpreter. A too-slow or too-big run is
-                # never fixed by installing something.
-                if self._auto_install_deps and reason == "crash" and dep_rounds < _MAX_DEP_ROUNDS:
+                # GATED ON THE ENGINE'S OWN ANSWER (`_engine_reason`), NOT ON THE DIAGNOSIS, and
+                # the distinction became load-bearing on 2026-08-20. The gate exists because
+                # `inline_repair_reasons` also admits `timeout` and the watchdog kills, whose `err`
+                # is whatever the killed process last wrote — so a training run killed at the
+                # deadline after logging an early import warning could be read as unresolved-name
+                # shaped and drive a pip install into the SHARED eval interpreter. A too-slow or
+                # too-big run is never fixed by installing something.
+                #
+                # That is a statement about what the ENGINE observed, so it must read the engine's
+                # column. Keying it on `reason` — which `diagnosed_failure_reason` has just
+                # rewritten one branch above — put a side effect on the shared interpreter under a
+                # model's control in BOTH directions, and the first one showed up as a red test
+                # immediately: a judge that answered `repair` + `missing_dependency="accelerate"`
+                # with no `failure_kind` mints `unclassified`, and the install it had just asked for
+                # silently did not happen. The mirror is worse and is why this is not fixed by
+                # widening the tuple — a judge could otherwise ENABLE an install by answering
+                # `crash` about a deadline the engine's own clock recorded.
+                #
+                # What is deliberately NOT preserved is the half-measure's claim that a judged `oom`
+                # "correctly suppresses" the install. It never carried weight: `deps.
+                # triage_install_candidates` already fails closed on `unresolved_name_failure`, the
+                # curated allowlist and (at the caller) `is_present`, and an allocator traceback is
+                # not unresolved-name shaped, so it offers nothing to install whatever the kind says.
+                # Text may NOMINATE — the rationale still has to name the distribution — and the
+                # engine's own facts DECIDE.
+                if (self._auto_install_deps and _engine_reason == "crash"
+                        and dep_rounds < _MAX_DEP_ROUNDS):
                     installed = await anyio.to_thread.run_sync(
                         self._prepare_env_from_triage, triage, err)
                     if installed:
@@ -2589,7 +2673,12 @@ class EvaluateMixin:
                     triage_outcome = ("abandon", "the repair CALL failed at the provider — no "
                                                  "repaired code was produced")
                     reason = "developer_crash"
-                    _reason_source = REASON_SOURCE_ENGINE   # the engine observed the dead provider
+                    # `REASON_SOURCE_ENGINE`, and it stays that after the 2026-08-20 split: the
+                    # engine observed the dead provider itself, and `developer_crash` is its OWN
+                    # word for "this node's Developer session died", not a classification of the
+                    # eval that anyone was asked about. A diagnostician's non-answer is a different
+                    # fact and is recorded as `unclassified`/`undiagnosed` where it happens, above.
+                    _reason_source = REASON_SOURCE_ENGINE
                     err = (f"{_dev_err}\n[the Developer's own session failed, so this node was never "
                            f"repaired. Its last eval error was: {err[-200:]}]")
                     await self._auto_pause_provider_failure(
@@ -2698,6 +2787,16 @@ class EvaluateMixin:
                         "reason": reason,
                         "reason_source": _reason_source,
                         "engine_reason": _engine_reason,
+                        # THE EVIDENCE THE DIAGNOSIS STANDS ON — `{source, locator, quote}` plus the
+                        # engine's own re-resolution of the citation. Additive and fold-ignored
+                        # (invariant #5); OMITTED when the diagnostician was never consulted, so an
+                        # absent key on an old row means "nobody was asked" rather than "asked and
+                        # cited nothing". This is what makes a wrong classification auditable after
+                        # the fact, which is the only check available here — see
+                        # `engine/failure_diagnosis.py` for why no probe of the CONCLUSION exists.
+                        **({"reason_evidence": _evidence} if _evidence else {}),
+                        **({"reason_evidence_resolved": _evidence_resolved}
+                           if _evidence_resolved is not None else {}),
                         # The wall-clock of the eval this repair answers. Additive (invariant #5);
                         # the fold ignores it. It is what makes the COST floor durable across a
                         # resume — see `_durable_repair_seconds`, which sums these rows, and
@@ -2755,6 +2854,12 @@ class EvaluateMixin:
                     **({"param_overrides": _param_overrides[:PARAM_OVERRIDE_CAP]}
                        if _param_overrides else {}),
                     "reason": reason,
+                    # THE ENGINE'S OWN COLUMN, beside the one a diagnostician may have chosen, so the
+                    # F8 critic's `cause` is a fact and not a verdict — see
+                    # `repair_judgment.authenticated_cause` for why `c862045c` makes this mandatory
+                    # rather than tidy. The in-process row and the durable one must carry the same
+                    # pair, or a chain judged before a resume and after it compares different columns.
+                    "engine_reason": _engine_reason,
                     "stages_passed": _depth})
                 # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
                 # means the engine compared the bytes and nothing moved: the files this loop is about
@@ -3113,6 +3218,14 @@ class EvaluateMixin:
                     data = {"node_id": node_id, "generation": generation,
                             "error": err, "reason": reason, "eval_seconds": total_eval,
                             "reason_source": _reason_source, "engine_reason": _engine_reason}
+                    # The diagnostician's citation rides the TERMINAL too, on the same additive,
+                    # omitted-when-absent rule as on `node_repaired` above: the terminal is the row a
+                    # whole run is audited from, and "who said this and what did they read" is
+                    # exactly the question an audit asks of it.
+                    if _evidence:
+                        data["reason_evidence"] = _evidence
+                    if _evidence_resolved is not None:
+                        data["reason_evidence_resolved"] = _evidence_resolved
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage
                     if triage_outcome is not None:

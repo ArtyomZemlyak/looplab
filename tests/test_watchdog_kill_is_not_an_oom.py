@@ -105,11 +105,35 @@ def test_divergence_outranks_a_stall_in_the_classifier_too():
     assert _failure_reason(both) == "diverged"
 
 
-def test_a_real_kernel_oom_is_still_an_oom():
-    """The control. Nothing above may be bought by making the OOM branch unreachable — a genuine
-    cgroup kill has neither watchdog flag set and must keep its memory-reduction directive."""
+def test_a_real_kernel_oom_is_no_longer_claimed_by_the_classifier_at_all():
+    """THE CONTROL, AND IT INVERTED ON 2026-08-20 — read this one carefully, because "the OOM branch
+    became unreachable" was the exact regression this test was written to forbid, and it is now what
+    shipped.
+
+    What it forbade was making the branch unreachable AS A SIDE EFFECT of widening the watchdogs:
+    every conjunct of the kernel signature (`exit -9`, no `Traceback`) is ALSO true of a tree-kill,
+    so a fix that resolved the ambiguity by shadowing the OOM would have silently sent genuine
+    cgroup kills down the wrong directive. That is still forbidden and the file's other tests still
+    hold it.
+
+    What happened instead is that the ambiguity was resolved in the only direction that removes it:
+    the signature was DELETED, because it never distinguished the two cases in the first place —
+    `exit -9 with no traceback` is not evidence of memory exhaustion, it is evidence that something
+    SIGKILLed the process, and the only reason the engine can tell WHICH is that it records its own
+    kills out of band. So the honest residual for a kill nothing of ours issued is `crash`, and
+    whether it was memory is a question for something that can look (`engine/failure_diagnosis.py`).
+
+    The memory-reduction directive is not lost: `oom` remains in the vocabulary and a diagnostician
+    that reads the log and finds the OOM-killer's own record reaches it exactly as before."""
     killed = RunResult(exit_code=-9, stdout="", stderr="", metric=None, timed_out=False)
-    assert _failure_reason(killed) == "oom"
+    assert _failure_reason(killed) == "crash"
+    # …and it is a DIAGNOSABLE crash, i.e. one the engine hands on rather than keeps.
+    from looplab.engine.failure_diagnosis import (DIAGNOSABLE_ENGINE_REASONS,
+                                                  REASON_SOURCE_TRIAGE, diagnosed_failure_reason)
+    assert "crash" in DIAGNOSABLE_ENGINE_REASONS
+    looked = {"action": "repair", "failure_kind": "oom",
+              "rationale": "dmesg shows the cgroup OOM killer took this pid"}
+    assert diagnosed_failure_reason("crash", looked) == ("oom", REASON_SOURCE_TRIAGE)
 
     with_traceback = RunResult(exit_code=1, stdout="", stderr="Traceback (most recent call last):",
                                metric=None, timed_out=False)

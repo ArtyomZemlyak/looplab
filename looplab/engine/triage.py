@@ -3,8 +3,10 @@ workspace drift fingerprinting (`_dir_fingerprint` / `_shallow_fingerprint`), fa
 classification (`_failure_reason`), the triage-verdict contract (`TRIAGE_ACTIONS` /
 `coerce_triage_action` / `is_transport_failure_verdict`), the "did the repair CALL produce a repair"
 predicate
-(`repair_artifact_defect`), the deterministic crash-triage fallback (`_rule_triage` +
-`_MECHANICAL_MARKERS`), the env-prep round bound (`_MAX_DEP_ROUNDS`), the judge re-ask bound
+(`repair_artifact_defect`), the deterministic crash-triage fallback (`_rule_triage`, whose
+`_MECHANICAL_MARKERS` stderr scan was DELETED on 2026-08-20 — see its obituary below), the
+ownership split re-exported from its home in `engine/failure_diagnosis.py`,
+the env-prep round bound (`_MAX_DEP_ROUNDS`), the judge re-ask bound
 (`_TRIAGE_REASK_LIMIT`), and the D1 holdout partition
 (`_holdout_indices`). All are pure module-level functions/constants — no engine state, no
 event-log writes — so they stay trivially replay-safe. The orchestrator re-exports them under the
@@ -24,43 +26,30 @@ now belongs to the triage model (`engine/evaluate.py`, consulted once per attemp
 history), with `inline_repair_attempts` as a hard operator backstop — and the two-ledger split is
 gone because a budget is about time and money, not about whose fault a repair was.
 
-AND SINCE 2026-08-20 THE CLASSIFICATION HAS MOVED THE SAME WAY, for the same reason and only as far
-as the same argument reaches. That change moved the STOPPING decision to the judge and left
-`_failure_reason` untouched, so a second rule over the TEXT QUALITY of a program's error output
-survived in the same module that documents why the first one had to go — and it failed identically.
-`runs/e5small-dr-unified-v3` finished with three nodes, zero metrics and the systemic-failure stop;
-all three died of `torch.OutOfMemoryError`, which RAISES (full traceback, exit 1) and is therefore
-the exact opposite shape from the KERNEL kill signature the `oom` branch recognised, so all eight
-`node_repaired` rows read `reason: crash` and the Developer was handed the generic "diagnose the
-root cause" directive instead of the memory-reduction one that exists one branch away and is exactly
-right. Two of those repairs returned byte-identical files.
+AND SINCE 2026-08-20 THE CLASSIFICATION HAS MOVED THE SAME WAY, twice, and the second move is what
+shipped. The first cut let a judge RE-READ the three kinds the classifier inferred from text
+(`crash`/`oom`/`no_metric`) while keeping the text rules themselves; the second deleted every text
+rule in this file and made the split a question of OWNERSHIP rather than of confidence. The whole
+argument, the per-reason table and the measurements are in `engine/failure_diagnosis.py`'s module
+docstring, which is the one place they are written down; what belongs HERE is only what a reader of
+`_failure_reason` needs:
 
-`_is_torch_oom` above is the other half of that fix, it landed the same day, and THE CORPUS WIN
-IS ITS, NOT THIS SEAM'S — said plainly because the opposite claim would be easy to make and is
-false. It scans the whole of `res.stderr` (tail-clamped at 64,000 bytes per stream), and on all 26
-of the misclassified rows in `runs/` the allocator string is inside that window, including the 9
-where `torchrun`/`accelerate` swallowed the child traceback and the recorded 500-character
-`error_in` is nothing but a `Root Cause … exitcode: 1` block. Replayed today, the marker resolves
-every one of them and this seam changes none of them further.
+  * every branch of `_failure_reason` now reads a field the ENGINE set — its clock, its watchdogs'
+    out-of-band signals, its cross-reader, the return code of the setup command it ran, the
+    filesystem contracts its stage runner checked, and the process exit code. None parses a message.
+  * `crash` and `no_metric` survive as honest STRUCTURAL residuals and say nothing about the cause.
+    They, plus `oom` and `check_failed`, are `DIAGNOSABLE_ENGINE_REASONS` — handed to the
+    diagnostician as evidence rather than kept as answers.
+  * the deleted rules are named with their obituaries in place, so that nobody reinstates one from
+    the corpus win it really did produce: the `setup failed:` stderr prefix (replaced by
+    `RunResult.setup_failed`, an out-of-band flag on the branch that already knew), the `-9/137 +
+    no-Traceback` kernel-OOM signature, `_is_torch_oom`'s allocator marker list, and
+    `_MECHANICAL_MARKERS`.
 
-WHAT THIS SEAM IS FOR, then, stated as what it is: not a better OOM detector. Three things a marker
-list structurally cannot do. (1) It answers "what failed", so it covers the readings the marker does
-not touch at all — `crash` vs `no_metric`, and the next failure shape nobody has enumerated (a host
-`MemoryError`, `DefaultCPUAllocator: can't allocate memory`, an OOM re-raised inside another
-library's exception); adding each of those is another literal and another incident. (2) It reads
-the STAGE LOG, not the captured stream, so it still answers when a chatty stage pushes the
-diagnosis past the 64,000-byte clamp — the shape the 9 rows above are one clamp-width away from.
-(3) It cannot say "present" about a string that is present for the wrong reason: a script that
-CATCHES an OOM, prints the traceback, backs off and then dies of something else is an `oom` to any
-substring rule and is not one. None of the three is measured on today's corpus; the split, the
-refusal and the record columns below are the part that is enforced rather than hoped for.
-
-What did NOT move is the half a model must never be able to contradict. `_failure_reason` still runs
-first and unchanged on every failure, its AUTHENTICATED verdicts are final and no judge is consulted
-about them, and it remains the whole answer whenever no judge is wired, the transport fails, or the
-verdict is unreadable. See the fact/reading split beside it for the membership of each side —
-derived from that function's own branches — and for the disjointness from
-`metric_salvage.NEVER_SALVAGED_REASONS` that is why no metric can move on a model's word here."""
+The rule the whole change generalizes, and the one to apply to any new reason before routing it:
+**text may NOMINATE, it may never DECIDE** — which is what `runtime/deps.py::triage_install_
+candidates` (nominate) and `is_present` (decide) had already converged on, and whose absence
+`crash_repair._prepare_env` records the cost of."""
 from __future__ import annotations
 
 import ast
@@ -144,76 +133,67 @@ def _shallow_fingerprint(path) -> str:
     return f"dir:{n}:{newest}"
 
 
-# The allocator-OOM markers, and the ONE place they are spelled. Two families on purpose:
-# `OutOfMemoryError` is the EXCEPTION CLASS (`torch.OutOfMemoryError` since torch 2.4,
-# `torch.cuda.OutOfMemoryError` before it), and the `<device> out of memory` line is the allocator's
-# own message, which is also what the pre-2.0 `RuntimeError` spelling carries. Either alone is
-# enough: a build can raise the class without the message, and a wrapped or re-raised error can
-# carry the message without the class name. `java.lang.OutOfMemoryError` matches the first too,
-# which is correct — it is an out-of-memory failure and wants the same directive.
-_TORCH_OOM_MARKERS: tuple[str, ...] = (
-    "OutOfMemoryError",
-    "CUDA out of memory",
-    "HIP out of memory",
-    "XPU out of memory",
-)
-
-
-def _is_torch_oom(stderr) -> bool:
-    """Did the candidate's own allocator raise an out-of-memory error?
-
-    WHY THIS ONE READS THE TEXT, when the two watchdog verdicts one branch up deliberately do not.
-    The rule this file follows is "read the authenticated out-of-band flag where one exists", and
-    for a watchdog one does: the ENGINE issued that kill, so `run_argv`'s `signals` records it and
-    the stderr sentinel is redundant AND forgeable. There is no such flag here and there cannot be
-    one — the engine did not cause this exit, the candidate's own process raised, caught nothing,
-    and died. Nothing out of band observed it. (Device-level free memory is not a substitute: it is
-    sampled after the process is gone, when the allocation has already been released.)
-
-    So the text is the only evidence, and it is acceptable HERE because of where an `oom` can
-    travel. Checked against every consumer of the literal: `crash_repair.py`'s directive branch,
-    `_rule_triage`'s rationale, and membership in `Settings.inline_repair_reasons` — all three route
-    a REPAIR. It is NOT in `metric_salvage.py::NEVER_SALVAGED_REASONS`, so it cannot suppress a
-    metric the eval really produced, and `_rule_triage` bounds it by the same `max_attempts` as a
-    `crash`, so it buys no extra attempts. A forged `oom` therefore costs ONE repair round pointed
-    at memory instead of at the real bug — the same thing a wrong guess costs — and can never admit
-    a metric, move a champion, clear a violation or change a selection.
-
-    Note the ASYMMETRY with the mirror defect (`tests/test_watchdog_kill_is_not_an_oom.py`): there,
-    reading the text would have OVER-claimed `oom` on a kill the engine itself caused and knew
-    about. Here the text is the only witness to a fact nothing else recorded.
-    """
-    err = stderr or ""
-    return any(m in err for m in _TORCH_OOM_MARKERS)
+# THE ALLOCATOR-OOM MARKER SCAN IS GONE (2026-08-20), and this note is here so nobody
+# reinstates it from the corpus win it really did produce. `_TORCH_OOM_MARKERS` + `_is_torch_oom`
+# resolved all 26 of the out-of-memory failures that `runs/` records as `crash`, and that number is
+# real. It was still the wrong instrument, for the reason `engine/failure_diagnosis.py` states in
+# full: it was TEXT WITH THE LAST WORD. Nothing downstream re-checked it, and a marker list is
+# exactly as good as its own spelling — a host `MemoryError`, `DefaultCPUAllocator: can't allocate
+# memory`, an OOM re-raised inside another library's exception and a torchrun launcher that swallows
+# the child exception into an opaque `Root Cause ... exitcode: 1` block are all out-of-memory
+# failures the list cannot see, and 9 of those same 26 rows are precisely that launcher block.
+#
+# The kernel signature it sat beside (`exit_code in (-9, 137)` AND `"Traceback" not in stderr`) is
+# gone with it, and that one was measurably WRONG rather than merely incomplete: a
+# `torch.OutOfMemoryError` RAISES, so it prints a full traceback and exits 1, i.e. every conjunct of
+# the signature is false for the most common way a training eval dies on this box.
+#
+# What replaced them is not a longer list. `crash` stays as the engine's honest STRUCTURAL residual
+# ("the process exited non-zero"), and the question of what it died OF goes to the diagnostician,
+# which is asked once per failure, can read the whole stage log and the code that wrote it, and must
+# cite what it stood on. `runtime/deps.py`'s regexes are deliberately NOT touched by any of this —
+# there, text NOMINATES and `is_present` DECIDES, which is the discipline this change generalizes.
 
 
 def _failure_reason(res) -> str:
-    """Classify why an eval produced no usable metric, so the audit trail distinguishes a
-    crash from a timeout from a missing-deps setup failure from a drift rejection from a clean
-    run that simply printed no metric. Ordered most-specific first. (The "idea_rejected" reason
-    is NOT classified here — it is set by `_evaluate` when the crash-triage agent judges the idea
-    fundamentally wrong, which ends the node. It used to steer `debug_action` away from that
-    lineage; F5 deleted the Debug node on 2026-08-13 and NO failed leaf is bred from now, so what
-    still reads the reason is the fold's historical debug-anchor map,
-    `events/card_ledger.py::_card_debuggable_leaf_candidate_ids`.)
+    """Classify why an eval produced no usable metric — STRUCTURALLY, from what the ENGINE itself
+    recorded, and never from the failure's own text. Ordered most-specific first.
 
-    DETERMINISTIC AND UNCHANGED, and since 2026-08-20 that is a role rather than an absence: this is
-    the whole classification for every AUTHENTICATED failure, and the FALLBACK for the three read
-    from text — no judge wired, a transport failure, an unreadable verdict all land back here. The
-    split and the seam that consults a judge over it are directly below this function; nothing about
-    the branches here moved, including the literals, which `tests/test_inline_repair_reason_coverage`
-    derives this function's vocabulary from."""
+    Every branch below reads a field the engine set: its own clock (`timed_out`), its own watchdogs'
+    out-of-band signals (`diverged`/`stalled`), its own cross-reader (`drift`), the return code of
+    the SETUP command it launched (`setup_failed`), the filesystem contracts its own stage runner
+    checked (`stages[-1]["status"]`), and the exit code of the process it started. Not one of them
+    parses a message. The two rules that did — the `setup failed:` stderr prefix and the two OOM
+    signatures — were deleted on 2026-08-20; see the note above and
+    `engine/failure_diagnosis.py`'s module docstring for the rule that replaced them.
+
+    THE LAST TWO BRANCHES ARE RESIDUALS, NOT DIAGNOSES, and that is the whole reason the
+    diagnostician exists. `crash` says only "this process exited non-zero" and `no_metric` only "it
+    exited zero and no reader found a number"; both are true and neither says what happened.
+    `failure_diagnosis.DIAGNOSABLE_ENGINE_REASONS` is the set of answers this function produces that
+    are handed on as EVIDENCE rather than kept as answers.
+
+    ("idea_rejected" is NOT classified here — it is set by `_evaluate` when the triage agent judges
+    the idea fundamentally wrong, which ends the node. What still reads it is the fold's historical
+    debug-anchor map, `events/card_ledger.py::_card_debuggable_leaf_candidate_ids`.
+    `unclassified` is not produced here either: it is minted by `_evaluate` when a WIRED
+    diagnostician could not answer, which is a fact about the diagnostician and not about the eval.)"""
     if getattr(res, "drift", None) is not None:
         return "drift"
     if res.timed_out:
         return "timeout"
-    if (res.stderr or "").startswith("setup failed:"):
+    # THE SETUP FLAG, not the stderr prefix. `run_command_eval` sets `setup_failed` on the branch
+    # where it has just observed the setup command IT ran exit non-zero or time out; reading the
+    # twelve-character prefix it also writes was a fact making a round trip through a channel the
+    # candidate writes too, and `setup` is in `NEVER_SALVAGED_REASONS`, so a stderr opening with
+    # those characters could suppress a metric the eval really produced.
+    if getattr(res, "setup_failed", False):
         return "setup"
-    # The two WATCHDOG verdicts come BEFORE the exit-code heuristics, because the engine caused the
-    # exit code it would otherwise be reading: both watchdogs tree-kill, so both land on exactly the
-    # `-9 with no traceback` signature the OOM branch below recognises. Read the authenticated flags
-    # (`runtime/command_eval.py` fills them from `run_argv`'s out-of-band `signals`), never the stderr
-    # sentinels — those are mixed into the candidate's own output and are forgeable.
+    # The two WATCHDOG verdicts come BEFORE the exit-code branch, because the engine caused the exit
+    # code it would otherwise be reading: both watchdogs tree-kill. Read the authenticated flags
+    # (`runtime/command_eval.py` fills them from `run_argv`'s out-of-band `signals`), never the
+    # stderr sentinels beside them — those are mixed into the candidate's own output and are
+    # forgeable.
     # Divergence outranks a stall: a run that logs non-finite records and then goes silent is
     # stall-killed first and the drain confirms the divergence afterwards, which is the same
     # precedence `command_eval._salvageable_stall` applies to the salvage gate.
@@ -222,35 +202,19 @@ def _failure_reason(res) -> str:
     if getattr(res, "stalled", False):
         return "stalled"
     if res.exit_code != 0:
-        # OOM-kill: on a memory-capped pod (a JupyterHub cgroup limit) the kernel SIGKILLs a too-big
-        # eval — exit -9 (POSIX, Python returns -signal) or 137 (128+9) — with little/no Python
-        # traceback. Distinguish it from an ordinary crash so it's triaged as REPAIRABLE (reduce
-        # memory: batch/model size, subsample) instead of a silent abandon that recurs on every heavy
-        # eval. Heuristic: the SIGKILL signature with no real traceback in stderr (a timeout-kill is
-        # also SIGKILL but `res.timed_out` already returned "timeout" above, so it never reaches here).
-        if res.exit_code in (-9, 137) and "Traceback" not in (res.stderr or ""):
-            return "oom"
-        # THE ALLOCATOR'S OWN OOM IS THE OPPOSITE SHAPE, and the branch above can never match it.
-        # A `torch.OutOfMemoryError` is RAISED inside the candidate: it prints a full Python
-        # traceback and exits 1. So every conjunct of the kernel signature is false, and a GPU
-        # exhaustion — the most common way a training eval dies on this box — fell through to
-        # `crash`, whose directive is "diagnose the root cause" while `crash_repair.py`'s `oom`
-        # branch, which says "return a script that fits in LESS memory", was never reached.
-        # Measured on `runs/e5small-dr-unified-v3`: all THREE nodes died of `torch.OutOfMemoryError`
-        # and all three `node_failed` rows read `reason: crash`; two of the repairs they bought
-        # returned byte-identical files, and the run then stopped on the systemic-failure rule
-        # having never produced a metric. Its predecessor `-v2` walked a batch down 8192 -> 2048 ->
-        # 1024 -> 512 across four attempts and 11,735 s to find the same answer by hand.
-        if _is_torch_oom(res.stderr):
-            return "oom"
-        return "crash"
+        return "crash"          # the process died; nothing out of band saw WHY
     # A declared-contract failure is its OWN reason. Both contract branches in
-    # `runtime/command_eval.py::_run_stages` report `exit_code=0`, so without this they landed here
+    # `runtime/command_eval.py::_run_stages` report `exit_code=0`, so without this they landed below
     # and a stage that failed its artifact or assertion contract was reported as "the command
     # printed no metric" — about a stage that had printed one. The literals are spelled out rather
     # than returned through the variable so the registry cross-check in
     # `tests/test_inline_repair_reason_coverage.py` can still derive this function's vocabulary from
     # its own source.
+    #
+    # Note the three are NOT all on the same side of the ownership split, and the difference is
+    # WHO checked: `needs_failed`/`expect_failed` come from the engine's own `stat` of a declared
+    # input/output, while `check_failed` comes from `_call_stage_check`, i.e. from ANOTHER MODEL's
+    # reading of the candidate's own stdout. Only the third is diagnosable.
     _rows = [row for row in (getattr(res, "stages", None) or []) if isinstance(row, dict)]
     _last = str(_rows[-1].get("status") or "") if _rows else ""
     if _last == "needs_failed":
@@ -262,144 +226,36 @@ def _failure_reason(res) -> str:
     return "no_metric"          # exit 0 but no parseable metric emitted
 
 
-# --- WHO MAY SAY WHAT FAILED: the fact/reading split -------------------------------------------
-# `_failure_reason` above answers TWO different kinds of question in one function, and until
-# 2026-08-20 they were treated as one. Both halves are named here, from that function's own
-# branches, because the line between them is the whole safety argument for letting a model answer
-# the second half:
+# --- WHO MAY SAY WHAT FAILED: the ownership split ----------------------------------------------
+# The vocabulary, the rule and the whole argument live in `engine/failure_diagnosis.py`, beside the
+# diagnostician they govern. They are re-exported HERE, next to `_failure_reason`, because a reader
+# of the classifier has to be able to see which of its answers are final and which are handed on —
+# and because `agents/unified_agent.py`'s deferred import and the engine's own imports have named
+# `engine.triage` for both halves since the seam shipped. Both spellings resolve to the SAME
+# objects; there is no second definition anywhere.
 #
-#   AUTHENTICATED — the engine's own record of what IT did or observed out of band. The candidate
-#   cannot produce these bytes and a model may not contradict them:
-#     drift          `res.drift`, the independent cross-reader's refusal (`command_eval._drift`)
-#     timeout        `res.timed_out`, the engine's own clock
-#     diverged       `res.diverged`  ) both from `run_argv`'s out-of-band `signals` dict — the
-#     stalled        `res.stalled`   ) watchdog verdicts, NEVER the stderr sentinel beside them
-#     needs_failed   ) the three stage-contract statuses `_run_stages` reports STRUCTURALLY on
-#     expect_failed  ) `res.stages[-1]["status"]`; all three exit 0, so there is no text to read
-#     check_failed   )
-#     setup          the `setup failed:` prefix `run_command_eval` itself writes on the early return
-#                    from a failed SETUP command. It reads text, and that is a known seam (a
-#                    candidate whose own stderr opens with those twelve characters is classified
-#                    `setup`) — but it stays on this side because the prefix is ENGINE-authored and
-#                    because `setup` is in `metric_salvage.NEVER_SALVAGED_REASONS`: it is the one
-#                    reading whose loss would OPEN a gate rather than close one.
-#
-#   READ FROM THE FAILURE'S OWN TEXT — the three residual buckets. Nothing out of band saw these;
-#   the engine is inferring a cause from what the dead process wrote:
-#     oom        `exit_code in (-9, 137)` AND the word `Traceback` absent from stderr
-#     crash      any other non-zero exit — the residual
-#     no_metric  exit 0, no contract failure, nothing the readers could parse — the other residual
-#
-# THIS IS DOC 36's TABLE APPLIED TO ONE FUNCTION, and the 2026-08-05 precedent in this module's
-# header applied to CLASSIFICATION instead of to stopping: "a bound that depends on the TEXT
-# QUALITY of a program's error output is not a bound" retired the error-signature normalizer and
-# moved the STOP decision to the triage model. The three buckets above are the same kind of rule
-# and were left behind, and they failed the same way. Measured on `runs/e5small-dr-unified-v3`: all
-# three nodes died of `torch.OutOfMemoryError`, which RAISES — a full traceback, exit 1 — so every
-# conjunct of the `oom` branch was false and all eight `node_repaired` rows read `reason: crash`.
-# The Developer got "diagnose the root cause" instead of the memory-reduction directive that exists
-# one branch over and is exactly right; two of its repairs returned byte-identical files and the run
-# stopped systemic with no metric. Across the five modern runs in `runs/`, 26 of the 41 failures in
-# these three buckets were out-of-memory failures recorded as `crash` — and on 9 of those 26 the
-# whole recorded 500-character `error_in` is a launcher's opaque `Root Cause … exitcode: 1` block,
-# so the repair was authored, and its rationale written, with no diagnosis in front of either.
-# `_is_torch_oom` above resolves all 26 on the bytes it scans; see the module header for what this
-# seam is for GIVEN that, and for why the corpus win is the marker's and not this one's.
-#
-# WHY THE SPLIT IS WHAT MAKES THE MODEL SAFE HERE, stated as a property and not as a hope. Every
-# member of `metric_salvage.NEVER_SALVAGED_REASONS` — `drift`, `setup`, `timeout`, `diverged` — is
-# on the AUTHENTICATED side, and no member of `JUDGED_FAILURE_REASONS` is in it. So a judge's answer
-# cannot move a node into or out of the salvage refusal in either direction: it cannot suppress a
-# metric the eval really produced, and — the direction that matters — it cannot admit one the trust
-# gate refused. `tests/test_triage_llm_failure_classifier.py` asserts that disjointness rather than
-# restating it, so a future member of either tuple has to argue with a test.
-#
-# WHAT A JUDGED REASON REACHES: the repair directive (`crash_repair._repair_error_context`), the
-# triage-driven dependency install (`_prepare_env_from_triage`, gated on `crash`), the judge history
-# the F8 critic compares causes across, and the durable `node_repaired`/`node_failed` rows. The
-# first three are doc 36's top row — what happens NEXT. The fourth is the RECORD, so the record says
-# who chose it: see `REASON_SOURCE_*`.
-#
-# WHAT IT DOES NOT REACH, and this one is worth stating because it looks like it should: the
-# `inline_repair_reasons` gate. That gate is evaluated ABOVE the triage call, on a `reason` the
-# attempt loop recomputes from `_failure_reason(res)` at the top of every attempt — so an operator
-# who narrowed the set is gated on the ENGINE's answer every single time, and no judged reason can
-# switch inline repair on or off for a failure. Nor does it reach `_salvage_eval_metric`, which is
-# also called above it and is why the disjointness below is a property of the code and not only of
-# the vocabulary.
-AUTHENTICATED_FAILURE_REASONS: tuple[str, ...] = (
-    "drift", "timeout", "setup", "diverged", "stalled",
-    "needs_failed", "expect_failed", "check_failed")
-
-# The CLOSED vocabulary a triage judge may answer the classification question with. A member of
-# `FAILURE_REASONS` outside this tuple is REFUSED, not accepted, and the refusal is not cosmetic:
-# `Settings.inline_repair_reasons` selects on this vocabulary, so an invented reason would silently
-# disable inline repair for that failure — the failure class would become unrepairable with nothing
-# red anywhere, which is the exact drift `tests/test_inline_repair_reason_coverage.py` exists for.
-#
-# It is deliberately a SUBSET of what `_failure_reason` already returns, and not a superset: the
-# judge re-reads a reading, it never adds a producer. That keeps the coverage test's derivation
-# (`inspect.getsource(_failure_reason)` -> the literals it returns) TRUE — the set of reasons
-# anything can produce is unchanged by this whole feature.
-JUDGED_FAILURE_REASONS: tuple[str, ...] = ("crash", "oom", "no_metric")
-
-# WHO CHOSE THE `reason` ON A DURABLE ROW. Stamped by the engine beside the value, never by the
-# model, and this is the `at_pending` SHAPE rather than the `TrainingVerdict.fault` one — the two
-# existing spellings of "a model was involved here". `fault` is a field the MODEL emits, so it can
-# describe its own judgement but cannot witness that it made one; `at_pending` is a column the
-# ENGINE writes beside a model-derived row recording what the engine independently held at that
-# instant, which is the only shape that answers "who chose this". The row keeps BOTH: `reason` is
-# what the engine acted on and `engine_reason` is the deterministic classification it would have
-# used, so the authenticated column is never destroyed and any audit — including the corpus replay
-# that motivated this change — can still be run against it. Absent on an old row means "nobody
-# looked", which is not the same fact as `engine`.
-REASON_SOURCE_ENGINE = "engine"
-REASON_SOURCE_TRIAGE = "triage"
-
-
-def coerce_failure_reason(value, fallback: str) -> str:
-    """Normalize a judge-supplied failure kind to a member of `JUDGED_FAILURE_REASONS`, failing
-    closed to `fallback` (the engine's own deterministic answer).
-
-    The classification twin of `coerce_triage_action`, and it fails closed to a DIFFERENT kind of
-    thing for a stated reason. An unreadable ACTION has no deterministic answer available — the
-    whole point of a wired judge is that the rule path cannot form the stop decision — so that
-    coercion fails to a verdict meaning "nobody could read this". An unreadable KIND does have one:
-    `_failure_reason` just produced it. So this refuses the value and keeps the engine's, which
-    costs nothing and is exactly today's behaviour."""
-    v = str(value or "").strip().lower()
-    return v if v in JUDGED_FAILURE_REASONS else str(fallback)
-
-
-def judged_failure_reason(deterministic: str, verdict) -> tuple[str, str]:
-    """`(reason, source)` — the classification after the judge has been consulted.
-
-    THE WHOLE RULE, in one pure function, so that "an authenticated fact overrides the model" is a
-    property of one readable expression rather than of a condition spread across the eval loop:
-
-      * a deterministic verdict OUTSIDE `JUDGED_FAILURE_REASONS` is returned unchanged and the
-        judge's answer is not even looked at. That is the override, and it is spelled as "the model
-        is never asked to contradict a fact" rather than as "the model's answer is discarded if it
-        contradicts a fact" — the two behave identically and only the first is checkable by reading
-        this function.
-      * a verdict that is not a readable dict, carries no `failure_kind`, or carries one outside the
-        vocabulary falls back to `deterministic`, byte-for-byte today's behaviour. So does a
-        transport failure and an unreadable action: both arrive here as verdicts whose `action` is
-        an ENGINE verdict rather than an agent one, and a call that could not produce a stop
-        decision has not produced a classification either.
-      * otherwise the judge's kind is the reason, and the source says so.
-
-    Total over junk on purpose — this runs on the eval loop's failure path, where a raise would cost
-    the terminal that is being written."""
-    if deterministic not in JUDGED_FAILURE_REASONS:
-        return str(deterministic), REASON_SOURCE_ENGINE
-    if not isinstance(verdict, dict):
-        return str(deterministic), REASON_SOURCE_ENGINE
-    if str(verdict.get("action", "")).strip().lower() not in AGENT_TRIAGE_ACTIONS:
-        return str(deterministic), REASON_SOURCE_ENGINE
-    judged = coerce_failure_reason(verdict.get("failure_kind"), deterministic)
-    return judged, (REASON_SOURCE_TRIAGE if judged != deterministic else REASON_SOURCE_ENGINE)
-
+# `judged_failure_reason` / `JUDGED_FAILURE_REASONS` / `coerce_failure_reason` (2026-08-20, one day)
+# are GONE rather than aliased. They named a narrower rule — "a judge may re-read the three kinds
+# the engine inferred from text" — and the new one is not a superset of it in the direction that
+# matters: `diagnosed_failure_reason` can now answer `unclassified`, which the old name's callers
+# would silently mishandle. A renamed rule with changed semantics must break its callers.
+from looplab.engine.failure_diagnosis import (       # noqa: E402,F401  (re-export beside its classifier)
+    DIAGNOSABLE_ENGINE_REASONS,
+    DIAGNOSED_ENGINE_FINAL_OVERLAP,
+    DIAGNOSED_FAILURE_REASONS,
+    DIAGNOSED_ONLY_REASONS,
+    DIAGNOSIS_UNAVAILABLE_KEY,
+    ENGINE_FINAL_REASONS,
+    EVIDENCE_SOURCES,
+    REASON_SOURCE_ENGINE,
+    REASON_SOURCE_TRIAGE,
+    REASON_SOURCE_UNDIAGNOSED,
+    REASON_SOURCES,
+    UNCLASSIFIED_REASON,
+    coerce_evidence,
+    coerce_failure_kind,
+    diagnosed_failure_reason,
+)
 
 # --- Did the repair CALL produce a repair at all? ----------------------------------------------
 # `core/models.py::is_developer_error` answers this for ONE shape: LoopLab's own in-band
@@ -505,14 +361,25 @@ _MAX_DEP_ROUNDS = 6
 # repairs.
 _TRIAGE_REASK_LIMIT = 1
 
-# Mechanical-failure signatures: a crash whose stderr matches one of these is almost always a
-# code/runtime defect (bad import, removed/renamed API, typo) — repairable in place from the
-# traceback alone. Used by the deterministic crash-triage fallback when no LLM agent is wired.
-_MECHANICAL_MARKERS = (
-    "ImportError", "ModuleNotFoundError", "NameError", "AttributeError", "SyntaxError",
-    "IndentationError", "TypeError", "unexpected keyword argument", "has no attribute",
-    "is not defined", "no attribute",
-)
+# `_MECHANICAL_MARKERS` IS GONE (2026-08-20) — the last text rule in this file, and the one that
+# chose an ACTION rather than a classification. It scanned stderr for `ImportError`/`NameError`/
+# `TypeError`/"has no attribute"/… and, on a hit, let the no-judge path repair up to the caller's
+# full `max_attempts` instead of the tighter blind bound below.
+#
+# So it was a bound that depended on the TEXT QUALITY of a program's error output, which is exactly
+# what this module's header says is not a bound — the 2026-08-05 finding, still true, applied to the
+# one branch that had kept it. A Cyrillic identifier, a launcher that swallows the child exception,
+# a blank stderr and any traceback in a language other than English all read as "not mechanical" and
+# silently got the shorter budget; a `RuntimeError` whose message happens to contain the word
+# `TypeError` got the longer one.
+#
+# COLLAPSING THE TWO BOUNDS COSTS NOTHING MEASURABLE, which is why the fix is a deletion and not a
+# better scanner. `_RULE_BLIND_CRASH_ATTEMPTS` is 12, calibrated against the longest legitimate
+# chain on record — `runs/rubert-dr-0805` node 0, eight repairs, of which the six stale-dependency
+# migrations are the very MECHANICAL crashes this marker list existed to grant the wider budget —
+# plus room for a chain half again as long. Twelve clears it, so every chain the markers protected
+# is still clear of the one bound that remains.
+
 
 # THE BOUND ON REPAIRING BLIND, i.e. on the branch F5 added below — a `crash` this path can say
 # NOTHING about, repaired anyway because abandoning it outright throws away a node one edit would
@@ -701,11 +568,9 @@ def coerce_triage_action(value) -> str:
 
 
 def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> dict:
-    """Deterministic crash-triage fallback (no LLM): repair a clear MECHANICAL crash — or a TIMEOUT
-    (too slow, not a wrong idea -> reduce compute) — while attempts remain, otherwise abandon.
-    Conservatively NEVER returns "reject_idea" — killing a whole idea lineage is a strong call
-    reserved for the LLM agent, so the rule path stays safe with the unified agent off (it only ever
-    repairs obvious mechanical crashes / timeouts or abandons).
+    """Deterministic crash-triage fallback (no LLM): repair while attempts remain, otherwise
+    abandon. Conservatively NEVER returns "reject_idea" — killing a whole idea lineage is a strong
+    call reserved for the LLM agent, so the rule path stays safe with the unified agent off.
 
     THE NO-JUDGE PATH, and only that. It runs when no triage model is WIRED (`unified_agent` off),
     which is a configuration, not a failure — so it is allowed to keep repairing, bounded by the
@@ -714,14 +579,30 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
     "the provider is dead" and "the operator runs without a triage model" call for opposite
     behaviour and conflating them is what let a dead provider drive an unbounded repair loop.
 
+    It is ALSO the one producer of `failure_diagnosis.DIAGNOSIS_UNAVAILABLE_KEY`, and that marker is
+    load-bearing rather than decorative. The verdict this returns is shaped exactly like a model's —
+    a dict with an `action` in `AGENT_TRIAGE_ACTIONS` — so without a marker saying "nobody was
+    asked", `diagnosed_failure_reason` would read a rule-path `repair` as a diagnostician that
+    answered with no `failure_kind`, i.e. mint `unclassified` on EVERY offline, toy and
+    `unified_agent=false` run. The marker is unforgeable from the wire by construction:
+    `crash_repair._ask_triage` rebuilds an agent verdict from a fixed key list, so no model output
+    can set it. `error` is accepted and deliberately unread — the signature is a duck-typed seam
+    with several callers, and the text is precisely what this path stopped consulting.
+
     This path cannot express the stop decision the model makes — it has no memory of the repair
     history — so `max_attempts` is doing all the work here, which is exactly why the backstop is not
     optional."""
-    err = error or ""
     # The two watchdog verdicts join timeout/oom here because they are the same KIND of fact: the run
     # was stopped by a resource or health rule, not by a mistaken idea, so the deterministic path can
     # safely say "repair" without a judge. Each carries its OWN rationale — the whole reason they are
     # separate reasons is that "reduce memory" is the wrong instruction for both.
+    #
+    # THE `oom` ARM IS UNREACHABLE ON THIS PATH SINCE 2026-08-20 and is kept deliberately. Both of
+    # `_failure_reason`'s `oom` producers were text rules and both were deleted, so with no judge
+    # wired nothing can classify a failure as `oom` any more — the allocator OOMs that used to land
+    # here arrive as `crash` and take the blind branch below. It stays because this is the ONE place
+    # the rule path spells the memory-reduction directive, and a future router that does carry a
+    # diagnosed reason here must find it rather than fall silently to "no judge wired".
     if reason in ("timeout", "oom", "diverged", "stalled", "not_learning") and attempt <= max_attempts:
         why = {"timeout": "timeout — reduce compute to fit the budget (rule-based)",
                "oom": "out of memory (kernel OOM-kill or a torch allocator raise) — reduce memory: "
@@ -733,40 +614,41 @@ def _rule_triage(reason: str, error: str, attempt: int, max_attempts: int) -> di
                "not_learning": "training watchdog killed it — the loss stopped moving and the judge "
                                "named the implementation; make the objective able to descend, do NOT "
                                "cut memory (rule-based)"}[reason]
-        return {"action": "repair", "rationale": why}
-    mechanical = any(s in err for s in _MECHANICAL_MARKERS)
-    if reason == "crash" and mechanical and attempt <= max_attempts:
-        return {"action": "repair", "rationale": "mechanical crash (rule-based)"}
-    # A NON-MECHANICAL CRASH IS NOW REPAIRED TOO, while attempts remain — changed 2026-08-13 with F5,
-    # and only because F5 removed what this branch used to defer to. `abandon` here was the
-    # conservative answer on the reasoning that killing a lineage is a strong call reserved for the
-    # LLM agent; what made it conservative rather than merely lossy is that an abandoned node then
-    # got a DEBUG NODE, which handed the same failure to the same Developer with a fresh node's
-    # budget. With the Debug node deleted, the identical verdict means "throw the node away", so the
-    # cautious spelling became the destructive one — a `RuntimeError` (not in `_MECHANICAL_MARKERS`)
-    # ends a node that one repair would have fixed.
+        return {"action": "repair", "rationale": why, DIAGNOSIS_UNAVAILABLE_KEY: True}
+    # A CRASH IS REPAIRED BLIND, while attempts remain — changed 2026-08-13 with F5, and only because
+    # F5 removed what this branch used to defer to. `abandon` here was the conservative answer on the
+    # reasoning that killing a lineage is a strong call reserved for the LLM agent; what made it
+    # conservative rather than merely lossy is that an abandoned node then got a DEBUG NODE, which
+    # handed the same failure to the same Developer with a fresh node's budget. With the Debug node
+    # deleted, the identical verdict means "throw the node away", so the cautious spelling became the
+    # destructive one — a `RuntimeError` ends a node that one repair would have fixed.
     #
-    # This is not "repair forever": `max_attempts` is the caller's effective cap and the floors in
-    # `engine/repair_judgment.py` sit under it. And it applies ONLY to a `crash` — the reason set is
-    # unchanged, so a drift rejection or an `idea_rejected` still ends the node here as before. The
-    # rule path still never returns `reject_idea`: condemning a whole lineage remains the model's
-    # call, and this path has no way to form it.
+    # `unclassified` joins it (2026-08-20) and lands on exactly this branch by design: a failure a
+    # WIRED diagnostician could not name is the definition of repairing blind, so it gets the blind
+    # bound and never the caller's full cap. It buys no extra attempt — the same `min` with
+    # `max_attempts` — and it is in `FAILURE_REASONS`, so an operator who narrowed
+    # `inline_repair_reasons` still governs it. (Reaching this branch AT ALL requires a wired judge,
+    # which contradicts this function's own precondition, so it is unreachable in practice today;
+    # it is spelled anyway because the alternative is the catch-all `abandon` below, and a value
+    # meaning "nobody could say" must not be the one thing that ends a node outright.)
     #
-    # ...AND IT HAS A BOUND OF ITS OWN, because "the floors sit under it" was measured to be one
-    # floor in the configuration that reaches here (see `_RULE_BLIND_CRASH_ATTEMPTS` for the three
-    # that are inert and the 51 evaluations that fall out of it). Repairing blind is worth a bounded
-    # number of tries and is not worth fifty; the mechanical branch above is untouched.
-    if reason == "crash" and not mechanical:
+    # THE SINGLE BOUND, since `_MECHANICAL_MARKERS` was deleted: there is no longer a wider budget
+    # for a crash whose text names a Python exception class. See that constant's obituary above for
+    # why 12 still clears every legitimate chain in the corpus.
+    if reason in ("crash", UNCLASSIFIED_REASON):
         blind_cap = min(int(max_attempts), _RULE_BLIND_CRASH_ATTEMPTS)
         if attempt <= blind_cap:
             return {"action": "repair",
-                    "rationale": "crash with attempts remaining and no judge wired (rule-based)"}
+                    "rationale": "crash with attempts remaining and no judge wired (rule-based)",
+                    DIAGNOSIS_UNAVAILABLE_KEY: True}
         # Named separately from the catch-all below: an operator reading this terminal must be able
         # to tell "your cap ran out" from "nothing here could say what to change next", because the
         # remedies are different (raise the cap vs wire a triage model).
         return {"action": "abandon",
                 "rationale": (f"a crash this rule path cannot classify has had its {blind_cap} blind "
                               f"repair attempt(s) and no triage model is wired to decide what to "
-                              f"change next (rule-based)")}
+                              f"change next (rule-based)"),
+                DIAGNOSIS_UNAVAILABLE_KEY: True}
     return {"action": "abandon",
-            "rationale": "non-repairable failure or attempts exhausted (rule-based)"}
+            "rationale": "non-repairable failure or attempts exhausted (rule-based)",
+            DIAGNOSIS_UNAVAILABLE_KEY: True}

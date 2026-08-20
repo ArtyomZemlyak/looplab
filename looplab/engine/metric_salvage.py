@@ -239,6 +239,20 @@ def unbound_subject_violation_rows(prov, metric, mode: str) -> list:
 # number produced by a numerically broken run, and under `metric_salvage="select"` that number is
 # selectable. `res.diverged` is not consulted anywhere else in this module, so this set is the
 # whole rule.
+#
+# WHAT IS DELIBERATELY ABSENT, and since 2026-08-20 the absences are a stated property rather than
+# an oversight (`engine/failure_diagnosis.py`). EVERY member of this set is ENGINE-FINAL — the
+# engine caused, ran or measured the thing it names — and no reason a DIAGNOSTICIAN may answer is in
+# it. That is checked in both directions by `tests/test_failure_ownership_split.py`, and it is what
+# lets a model re-read a failure at all: its answer can move a node neither INTO this refusal nor,
+# the direction that actually costs something, OUT of it.
+#
+# `unclassified` in particular must never be added. It means the diagnostician was wired, was asked,
+# and could not answer — a fact about the PROVIDER, not about the eval — so suppressing a metric the
+# eval really produced on the strength of it would let a flapping endpoint discard a measured
+# result. `oom` stays out for its own older reason (a memory failure says nothing about whether the
+# number that was already printed is real), and `setup` is IN, which is why its classification had
+# to stop reading a stderr prefix the candidate can write: see `RunResult.setup_failed`.
 NEVER_SALVAGED_REASONS = frozenset({"drift", "setup", "timeout", "diverged"})
 
 # Stage statuses that VETO salvage even when a reader can find a number.

@@ -337,6 +337,41 @@ def developer_stuck_contract(prefix: str) -> str:
 
 _TRAJECTORY_HEADER = "--- THIS NODE'S REPAIR TRAJECTORY (oldest first) ---"
 
+def authenticated_cause(row) -> str:
+    """The cause of ONE attempt as the ENGINE classified it — `""` when the row does not record one.
+
+    THE ONE PLACE THE CRITIC'S COLUMN IS RESOLVED, and it exists because `c862045c` must not be
+    undone by accident. That commit took the stderr sentinel away from the failure classifier
+    because a party that can write "what kind of failure this was" can make three different causes
+    look like one, or one look like three, and DRIVE THE STOP DECISION EITHER WAY. The critic
+    compares this column across attempts to tell a chain that is MOVING from one that is CIRCLING,
+    so it is a TRUSTED input and not a description.
+
+    Since 2026-08-20 a DIAGNOSTICIAN may choose `node_repaired.reason`, so `reason` is no longer
+    that column: a model answering inconsistently makes one cause look like three, and a flapping
+    provider emitting `unclassified` every attempt makes three look like one — which reads as
+    circling and stops a chain that was progressing. `engine_reason` is the engine's own structural
+    classification, written beside `reason` and never overwritten by a judge, and it is what the
+    critic must read.
+
+    THE RULE THIS SHARES WITH THE TRIAGE-DRIVEN INSTALL, which had the identical defect and the
+    identical fix: **a GATE keyed on the cause reads the ENGINE's column; only the DIRECTIVE and the
+    RECORD read the diagnosis.**
+
+    Reader-side default (invariant #5): `engine_reason` is absent on every row written before
+    2026-08-20, and on those rows `reason` WAS the engine's own answer — so falling back to it is
+    exactly right and no historical row changes meaning. A row recording NEITHER answers `""`, which
+    the callers render as "(not recorded)" rather than guessing, because "we do not know" and "it was
+    the same as last time" are the two answers the critic is being asked to tell apart."""
+    if not isinstance(row, dict):
+        return ""
+    for key in ("engine_reason", "reason"):
+        val = str(row.get(key) or "").strip()
+        if val:
+            return val
+    return ""
+
+
 # Said to the model, once, above the rows. It is not decoration: the whole reason this renderer
 # exists separately from `crash_repair._format_repair_log` is to name which column is authority and
 # which is the candidate's own text, so a critic cannot be steered by a banner the failing script
@@ -374,7 +409,7 @@ def format_repair_trajectory(rows) -> str:
         changed = ("(not recorded — this attempt predates the change-set column)"
                    if "changed" not in r
                    else ", ".join(str(c) for c in (r.get("changed") or [])) or "nothing")
-        cause = str(r.get("reason") or "").strip() or "(not recorded — this attempt predates the cause column)"
+        cause = authenticated_cause(r) or "(not recorded — this attempt predates the cause column)"
         out.append(
             f"attempt {r.get('attempt')}: cause = {cause} | pipeline stages passed before the "
             f"failure: {r.get('stages_passed')}\n"
@@ -412,7 +447,7 @@ def critic_evidence(rows) -> list[dict]:
     for r in (rows or [])[-_VERDICT_EVIDENCE_ROWS:]:
         if not isinstance(r, dict):
             continue
-        cause = str(r.get("reason") or "").strip()
+        cause = authenticated_cause(r)
         out.append({
             "attempt": r.get("attempt"),
             # Absent stays absent, exactly as `_durable_repair_ledger` keeps it: `None` is "we do not

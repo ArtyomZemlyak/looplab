@@ -161,6 +161,11 @@ _LAYOUT = {
     "eventstore": "events",
     "evaluate": "engine",
     "engine_proc": "serve",
+    # WHO MAY SAY WHAT A FAILED EVAL FAILED OF (2026-08-20) — the ownership split, the
+    # diagnostician's contract and `unclassified`. Registered here for the reason the shim exists
+    # at all: these modules are PATCH SEAMS, and a name this map has forgotten resolves to a
+    # second module object, which would make every existing monkeypatch a silent no-op.
+    "failure_diagnosis": "engine",
     "finalize_scope": "events",   # the finalize-scope read side (doc 25 XP-07)
     "finalize_protocol": "events",  # finalize step/suffix vocabulary, writer+readers (doc 25 SE-01)
     "finalize": "engine",

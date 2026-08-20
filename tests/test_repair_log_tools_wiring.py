@@ -413,9 +413,20 @@ def test_an_older_triage_seam_never_sees_the_new_keyword():
 
 
 def test_the_turn_grant_is_additive_and_never_caps_an_unlimited_budget():
-    """The cost bound. Four extra turns over a FINITE operator budget; an operator who configured no
-    turn cap keeps none — the loop is bounded there by `agent_emit_after`/`agent_emit_force`."""
-    assert UnifiedAgent._REPAIR_LOOK_TURNS == 4
+    """The cost bound. SEVEN extra turns over a FINITE operator budget since 2026-08-20 — four for
+    the log tools and three for the workdir CODE scouts that joined them — and an operator who
+    configured no turn cap still keeps none, because the loop is bounded there by
+    `agent_emit_after`/`agent_emit_force`.
+
+    The three are `failure_diagnosis.DIAGNOSIS_CODE_LOOK_TURNS` and the number is
+    `train_monitor._MONITOR_LOOK_TURNS`' own 6 -> 9 argument applied to the identical toolset one
+    role over: attributing a cause to the implementation costs a `grep` to find the file that sets a
+    parameter, a `read_file` to read it, and possibly a second page. The sum is asserted against its
+    derivation in `tests/test_failure_ownership_split.py`, because `agents` may not import `engine`
+    at module scope and the class-body default therefore has to be a literal."""
+    from looplab.engine.failure_diagnosis import DIAGNOSIS_CODE_LOOK_TURNS
+
+    assert UnifiedAgent._REPAIR_LOOK_TURNS == 4 + DIAGNOSIS_CODE_LOOK_TURNS == 7
     assert UnifiedAgent._REPAIR_LOOK_TURNS < tm._MONITOR_LOOK_TURNS
 
     seen = {}
@@ -440,7 +451,12 @@ def test_the_turn_grant_is_additive_and_never_caps_an_unlimited_budget():
                      agent_max_turns=10).triage_crash(node, "boom", 1)
     finally:
         agent_mod.drive_tool_loop = original
-    assert seen == {0: 14, 1: 0, 2: 10}
+    # 10 + 7 with tools / unlimited stays unlimited / 10 unchanged with no tools. The first was
+    # 14 until 2026-08-20; the grant went 4 -> 7 when the workdir CODE scouts joined the log tools.
+    # The middle entry is the one that must never move: `max_turns=0` means UNLIMITED, and `0 + n`
+    # would silently turn an operator's "no turn cap" into a cap of n.
+    assert seen == {0: 10 + UnifiedAgent._REPAIR_LOOK_TURNS, 1: 0, 2: 10}
+    assert seen[0] == 17
 
 
 # ------------------------------------------------------------------------------ the trust line
@@ -450,26 +466,32 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
     not pinned: a seam that has just read the log and tries to say something outside the vocabulary
     — a metric, a selectability claim, a bare `reason` key — is normalized away.
 
-    THE VERDICT GAINED A FOURTH KEY ON 2026-08-20 and this test is where that has to be argued,
-    because until then the property was spelled "it may not name a failure `reason` at all".
-    `failure_kind` is a reason, deliberately — see `tests/test_triage_llm_failure_classifier.py` for
-    the incident — and it is admissible for reasons the raw `reason` key below is not:
+    THE VERDICT GAINED FOUR MORE KEYS ACROSS 2026-08-20 and this test is where that has to be
+    argued, because until then the property was spelled "it may not name a failure `reason` at all".
+    `failure_kind` is a reason, deliberately — see `tests/test_failure_ownership_split.py` for the
+    incident — and it is admissible for reasons the raw `reason` key below is not:
 
-      * it is a CLOSED vocabulary read off `triage.py::JUDGED_FAILURE_REASONS`, and only the three
-        kinds the engine itself inferred from the dead process's TEXT. Every AUTHENTICATED
-        classification — both watchdog verdicts, the deadline, the drift refusal, the stage-contract
-        statuses — is outside it and unreachable from the wire;
-      * those three are disjoint from `metric_salvage.NEVER_SALVAGED_REASONS`, so the answer cannot
-        move a number into or out of the record, which is what the paragraph above is really about.
+      * it is a CLOSED vocabulary read off `failure_diagnosis.DIAGNOSED_FAILURE_REASONS`. Every
+        ENGINE-FINAL classification — the three watchdog verdicts, the deadline, the drift refusal,
+        the setup flag, the two filesystem stage contracts — is unreachable from the wire, because
+        `diagnosed_failure_reason` does not even consult a verdict about one;
+      * the vocabulary is disjoint from `metric_salvage.NEVER_SALVAGED_REASONS`, so the answer
+        cannot move a number into or out of the record, which is what the paragraph above is really
+        about. That disjointness is a SECOND guarantee, not the only one: salvage is decided
+        branches earlier on the engine's own answer.
+
+    The three `evidence_*` keys are the other addition and they widen nothing at all — they are
+    text the engine RE-RESOLVES against the workdir and records, never a claim it acts on.
 
     The junk keys are unchanged and still dropped, and `reason` — the ENGINE's own column — is still
     among them: naming the field the engine writes is not the same permission as answering the
     question the engine asked."""
     from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
-                                       JUDGED_FAILURE_REASONS, judged_failure_reason)
+                                       DIAGNOSED_FAILURE_REASONS, UNCLASSIFIED_REASON,
+                                       diagnosed_failure_reason)
     from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
     assert set(AGENT_TRIAGE_ACTIONS) == {"repair", "abandon", "reject_idea"}
-    assert set(JUDGED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == set()
+    assert set(DIAGNOSED_FAILURE_REASONS) & set(NEVER_SALVAGED_REASONS) == set()
 
     class _Overreaching:
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):
@@ -481,13 +503,18 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
     state = RunState()
     eng = _EngineStub(_Overreaching())
     out = eng._triage_crash(state, object(), "boom", 1, reason="timeout", log_tools=object())
-    assert set(out) == {"action", "failure_kind", "rationale", "missing_dependency"}
+    assert set(out) == {"action", "failure_kind", "rationale", "missing_dependency",
+                        "evidence_source", "evidence_locator", "evidence_quote"}
     assert out["action"] in AGENT_TRIAGE_ACTIONS and "finished all 15 epochs" in out["rationale"]
-    # It said `reason: ok`, and that is not the field it was asked about: the kind is empty, so the
-    # engine keeps its own — and `timeout` is AUTHENTICATED, so nothing here could have moved it
-    # even if the seam had filled the field in.
+    # It said `reason: ok`, and that is not the field it was asked about, so the kind is empty. And
+    # `timeout` is ENGINE-FINAL, so the verdict is not consulted AT ALL — which is why this stays
+    # `timeout` with the ENGINE as its source rather than becoming `unclassified`. That asymmetry
+    # is the point: a non-answer is only a failed diagnosis where a diagnosis was being asked for.
     assert out["failure_kind"] == ""
-    assert judged_failure_reason("timeout", out)[0] == "timeout"
+    assert diagnosed_failure_reason("timeout", out) == ("timeout", "engine")
+    # …whereas the same empty answer about a DIAGNOSABLE reason is a diagnostician that did not
+    # answer, and the record says so instead of quietly keeping the residual.
+    assert diagnosed_failure_reason("crash", out)[0] == UNCLASSIFIED_REASON
 
     class _Relabelling(_Overreaching):
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):
@@ -495,8 +522,10 @@ def test_looking_cannot_widen_what_the_verdict_may_SAY():
 
     relabel = _EngineStub(_Relabelling())._triage_crash(state, object(), "boom", 1, reason="crash",
                                                        log_tools=object())
-    assert judged_failure_reason("crash", relabel)[0] == "crash", (
-        "a watchdog verdict is not in the judge's vocabulary and may not be reached by writing it")
+    assert diagnosed_failure_reason("crash", relabel)[0] == UNCLASSIFIED_REASON, (
+        "a watchdog verdict is not in the diagnostician's vocabulary and may not be reached by "
+        "writing it — the answer is refused, and refusing it is a non-answer, not a free pass "
+        "back to the engine's own word")
 
     class _Inventing(_Overreaching):
         def triage_crash(self, node, error, attempt, *, state=None, brief="", tools=None, **kw):

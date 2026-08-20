@@ -816,7 +816,17 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # and being in this tuple is exactly what buys the Developer a look at its own code instead of a
 # terminal verdict against a hypothesis that was never tested. Like `needs_failed`, it needs no
 # legacy row: no pre-field node could produce it, so there is no historical treatment to preserve.
+# `unclassified` (2026-08-20) is the THIRTEENTH, and it is the only member no classifier produces:
+# `triage._failure_reason` cannot return it and no watchdog names it. It is minted by
+# `engine/evaluate.py` when the failure DIAGNOSTICIAN was wired, was asked, and did not answer
+# readably — see `engine/failure_diagnosis.py::UNCLASSIFIED_REASON` for the four properties that
+# make it safe to route (bounded blind repair, never in `NEVER_SALVAGED_REASONS`, no extra attempt,
+# and countable through `REASON_SOURCE_UNDIAGNOSED`). It is in this tuple, and therefore in the
+# default `Settings.inline_repair_reasons`, because a node must not be thrown away over a flapping
+# provider; `tests/test_inline_repair_reason_coverage.py` derives the producer set from all THREE
+# producers rather than from the classifier alone.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
+                                    "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
                                     "needs_failed", "not_learning")
 

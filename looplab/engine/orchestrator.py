@@ -95,7 +95,12 @@ from looplab.engine.workspace import WorkspaceSeeder
 # (& friends) stay importable — tests import them from this module path. (`_normalize_error_sig`
 # was re-exported here too until 2026-08-05; the error-signature guard it served was replaced by
 # the triage model's own stop decision — see `engine/triage.py`'s module docstring.)
-from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
+# `_MECHANICAL_MARKERS` was re-exported here too until 2026-08-20, when the stderr marker scan that
+# chose the no-judge path's repair budget was DELETED — a bound on the text quality of a program's
+# error output, i.e. the very thing the paragraph above says was already retired once. The name is
+# gone rather than aliased: a test still importing it must go red, because what it guarded no longer
+# exists in any spelling. See `engine/triage.py`'s obituary for that constant.
+from looplab.engine.triage import (_MAX_DEP_ROUNDS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _rule_triage, _shallow_fingerprint)
 from looplab.core.models import (

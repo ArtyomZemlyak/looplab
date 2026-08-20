@@ -167,24 +167,76 @@ def test_run_root_honors_env(monkeypatch):
     assert _run_root() == "/data/looplab"
 
 
-def test_oom_kill_classified_as_repairable_oom():
-    """A pod cgroup-memory OOM-kill (SIGKILL → exit -9/137, no Python traceback) must classify as a
-    distinct, REPAIRABLE 'oom' — not a generic 'crash' that the rule path abandons. An ordinary
-    nonzero exit WITH a traceback stays 'crash'."""
+def test_the_pod_oom_kill_reaches_a_diagnostician_that_can_still_see_the_kill():
+    """A pod cgroup-memory OOM-kill (SIGKILL -> exit -9/137, no Python traceback) must still end in
+    the memory-reduction directive rather than a generic abandon. WHO DECIDES THAT CHANGED on
+    2026-08-20 and this test drives the new answer end to end, because the property is specific to
+    this deployment: `jupyterhub-ml-azemlyak-test` is the host in the v3 corpus stderr, and a
+    memory-capped pod SIGKILLing a too-big eval is a recurring failure here, not a corner case.
+
+    THE ENGINE NO LONGER CLAIMS IT, and that is right on the ownership question: the KERNEL issued
+    that kill, the engine did not, and nothing of ours observed it — so "was this a memory kill?" is
+    a judgement, not a fact. The rule that used to answer it (`exit_code in (-9, 137)` AND
+    `"Traceback" not in stderr`) was also a measured CONFLATION: both watchdog tree-kills produce
+    byte-identical evidence, which on v6 node 5 bought three memory-reduction rounds for a run that
+    was diverging.
+
+    BUT THE ENGINE MUST STILL HAND OVER WHAT IT SAW. `_eval_failure_text` surfaces `exit=` only in
+    its blank-stderr fallback, so a `137` with a "Killed" line was handing the judge that one word
+    and nothing else — the diagnostician could not see the kill at all, and the capability would
+    have been lost rather than moved. `engine_observed_facts` is the fix, and it is the `setup`
+    lesson one rung along: a fact the engine holds must not be left to be re-inferred from the
+    candidate's own text.
+
+    AND THE INFERENCE IS NOW STRONGER THAN THE RULE IT REPLACES, which is the part worth keeping in
+    front of a future reader. The one confounder that made `exit -9, no output` a bad rule — the
+    watchdog kills — is excluded BY CONSTRUCTION before the diagnostician is asked, because a
+    watchdog kill is ENGINE-FINAL and never put to a model. Same signal, minus its confounder, in
+    front of something that can also read the log and the batch size in the code.
+    """
     from types import SimpleNamespace
+    from looplab.engine.failure_diagnosis import (REASON_SOURCE_ENGINE, REASON_SOURCE_TRIAGE,
+                                                  diagnosed_failure_reason, engine_observed_facts)
     from looplab.engine.orchestrator import _failure_reason, _rule_triage
 
-    def res(exit_code, stderr, timed_out=False):
-        return SimpleNamespace(drift=None, timed_out=timed_out, stderr=stderr, exit_code=exit_code)
+    def res(exit_code, stderr, timed_out=False, **kw):
+        return SimpleNamespace(drift=None, timed_out=timed_out, stderr=stderr,
+                               exit_code=exit_code, **kw)
 
-    assert _failure_reason(res(-9, "")) == "oom"          # POSIX SIGKILL, no traceback
-    assert _failure_reason(res(137, "Killed")) == "oom"   # 128+9, kernel "Killed" line, no traceback
-    assert _failure_reason(res(-9, "Traceback (most recent call last):\n...")) == "crash"  # real crash
-    assert _failure_reason(res(1, "ValueError: x")) == "crash"
-    # a timeout-kill is also SIGKILL but is caught earlier as 'timeout', never 'oom'
+    # 1. THE ENGINE'S HONEST RESIDUAL. All four are `crash` — "the process exited non-zero" — and
+    #    the two kill shapes are no longer distinguished from an ordinary failure by their TEXT.
+    for r in (res(-9, ""), res(137, "Killed"),
+              res(-9, "Traceback (most recent call last):\n..."), res(1, "ValueError: x")):
+        assert _failure_reason(r) == "crash"
+    # ...and a deadline kill is STILL caught earlier and is still ENGINE-FINAL: the engine's own
+    # clock fired, so no model is asked and none could move it.
     assert _failure_reason(res(-9, "", timed_out=True)) == "timeout"
-    # and 'oom' is triaged as a repair (reduce memory), like 'timeout'
+    assert diagnosed_failure_reason("timeout", {"action": "repair", "failure_kind": "oom"}) == (
+        "timeout", REASON_SOURCE_ENGINE)
+
+    # 2. THE KILL IS STILL VISIBLE, because the engine states what it observed instead of leaving it
+    #    to be read out of the candidate's own bytes. Both shapes, including the one whose stderr is
+    #    non-empty and therefore never reached `_eval_failure_text`'s `exit=` fallback.
+    for r, expect in ((res(-9, ""), "SIGKILL"), (res(137, "Killed"), "SIGKILL")):
+        facts = engine_observed_facts(r)
+        assert expect in facts and "exit code" in facts
+        assert "No watchdog of ours claimed this run" in facts, (
+            "the excluded confounder is what makes the remaining inference sound; say it")
+    # It states the FACT and never the conclusion — a hint phrased as a verdict is the deleted rule
+    # wearing a prompt.
+    assert "oom" not in engine_observed_facts(res(-9, "")).lower()
+    assert "memory" not in engine_observed_facts(res(-9, "")).lower()
+
+    # 3. AND THE DIAGNOSIS STILL REACHES THE MEMORY DIRECTIVE.
+    verdict = {"action": "repair", "failure_kind": "oom",
+               "rationale": "SIGKILL with no output on a run no watchdog claimed: cgroup OOM"}
+    assert diagnosed_failure_reason(_failure_reason(res(-9, "")), verdict) == (
+        "oom", REASON_SOURCE_TRIAGE)
     assert _rule_triage("oom", "", attempt=1, max_attempts=1)["action"] == "repair"
+
+    # 4. WITH NO DIAGNOSTICIAN WIRED nothing regresses into an abandon: the rule path repairs a
+    #    `crash` blind, which is what a memory-capped pod's kill now takes.
+    assert _rule_triage("crash", "", attempt=1, max_attempts=12)["action"] == "repair"
 
 
 def test_deps_install_stops_after_repeated_egress_timeouts(monkeypatch):

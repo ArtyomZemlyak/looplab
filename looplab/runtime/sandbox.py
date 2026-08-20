@@ -506,6 +506,22 @@ class RunResult:
     # inputs, which is every task shipped before 2026-08-20.
     eval_inputs: Optional[dict] = None
 
+    # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
+    # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it
+    # exists for the identical reason (2026-08-20).
+    #
+    # `run_command_eval` KNEW this: it had just read `rc` from the setup step it launched. It then
+    # threw that knowledge into `stderr` as the literal `"setup failed:\n"` and
+    # `triage.py::_failure_reason` read it back with `.startswith()`. A fact the engine holds,
+    # round-tripped through a channel the CANDIDATE also writes — the same forgeability the
+    # `diverged` comment three fields up warns about, one branch down. And it is not free: `setup`
+    # is in `metric_salvage.NEVER_SALVAGED_REASONS`, so a candidate whose training script happened
+    # to begin its stderr with those twelve characters had a metric it really produced SUPPRESSED.
+    #
+    # The stderr prefix STAYS, because it is what a human reads in the durable row — but nothing
+    # DECIDES from it any more. See `engine/failure_diagnosis.py` for the general rule.
+    setup_failed: bool = False
+
 
 # Distinctive sentinels in the killed stage's stderr, so command_eval/the orchestrator (and run_argv's
 # own docker cleanup) can tell a parent-initiated STALL/DIVERGE kill apart from any other non-zero exit

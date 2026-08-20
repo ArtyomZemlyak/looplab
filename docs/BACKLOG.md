@@ -5957,8 +5957,39 @@ file exists to end. `tests/test_best_of_n.py` drives the broken selection AND th
   `metric_salvage.NEVER_SALVAGED_REASONS` reads it, and salvage decides whether a number enters the
   RECORD. Every member of that set (`drift`, `setup`, `timeout`, `diverged`) is on the authenticated
   side and none of the three judged reasons is in it, so a model's answer cannot move a node into or
-  out of the salvage refusal in either direction. `tests/test_triage_llm_failure_classifier.py`
+  out of the salvage refusal in either direction. `tests/test_failure_ownership_split.py`
   asserts the disjointness rather than restating it.
+
+  **[2026-08-20, later the same day — the split was re-cut on OWNERSHIP and every text rule in
+  `_failure_reason` was deleted.]** The half-measure above kept the text rules and let a judge
+  RE-READ their three answers. That was the wrong axis: the defect is not that the rules used
+  regexes, it is that in that one function **text got the LAST WORD** — nothing downstream re-checks
+  a `reason`, while everywhere else in this tree that text touches a decision, `runtime/deps.py`
+  already had the answer (a traceback and a model's prose NOMINATE a distribution; `is_present`
+  DECIDES by spawning the eval interpreter). So the question became *"does an out-of-band channel
+  exist?"*, and four things moved:
+
+  * **`setup` came back to the ENGINE, and got stronger.** `run_command_eval` had just read the setup
+    step's `rc`, threw it into stderr as `"setup failed:\n"`, and the classifier read it back with
+    `.startswith()` — a fact round-tripping through a channel the CANDIDATE also writes, and since
+    `setup` is in `NEVER_SALVAGED_REASONS`, a training script whose stderr opened with those twelve
+    characters had a metric it really produced SUPPRESSED. `RunResult.setup_failed` replaces it.
+  * **`check_failed` MOVED to the diagnostician and `needs_failed`/`expect_failed` did NOT.** The
+    first is written from `_call_stage_check`, i.e. another MODEL's reading of the stage's stdout;
+    the other two are the engine's own `stat`. Measured: 21 `check_failed` rows in `runs/` hide at
+    least three different real causes (16 of them a training that never learned), against 8 of 8
+    `expect_failed` rows whose repair rationale AGREES with the label.
+  * **`oom` became ANSWER-ONLY.** Both of its producers were text rules, so no engine path can name
+    it at all; an out-of-memory failure is now `crash` until something looks. The marker list did
+    resolve all 26 misclassified corpus rows and that win was real — it is not why it went.
+  * **`unclassified`** is the new thirteenth `FAILURE_REASON`, minted when a WIRED diagnostician was
+    asked and could not answer, so that a failed diagnosis and a confirmed one stop writing the same
+    row.
+
+  The diagnostician is the triage call rather than a second agent, argued from the meter: that call
+  already spends **8.82 provider calls per failure** (335 calls / 38 decisions / 6,898 s across
+  v8+v9+v3, 3.3 % of a run's generations), so a separate agent doubles the failure-path cost and can
+  contradict the directive it is building. See `looplab/engine/failure_diagnosis.py`.
 
   **The record says who chose the word.** `node_repaired` and `node_failed` carry `reason_source`
   (`engine`/`triage`) and `engine_reason` (the deterministic classification, kept whatever the model

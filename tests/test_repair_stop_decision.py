@@ -42,6 +42,7 @@ import anyio
 import pytest
 
 from looplab.adapters.toytask import ToyTask
+from looplab.engine.failure_diagnosis import REASON_SOURCE_UNDIAGNOSED, UNCLASSIFIED_REASON
 from looplab.core.models import Idea, NodeStatus
 from looplab.engine.orchestrator import Engine, _rule_triage
 from looplab.engine.evaluate import (_UNLIMITED_REPAIR_CEILING, _durable_repair_ledger,
@@ -86,7 +87,28 @@ class _Judge:
         for marker, verdict in self.script.items():
             if marker in error:
                 return dict(verdict)
-        return dict(self.default)
+        out = dict(self.default)
+        # IT ANSWERS THE SECOND QUESTION TOO (2026-08-20), by ECHOING the tagged kind — which is
+        # exactly what the shipped prompt asks a real judge to do ("If the tagged kind is right,
+        # repeat it") and what `crash_repair._triage_crash` puts `[failure kind: <reason>]` at the
+        # head of `error` for.
+        #
+        # WITHOUT THIS the double is a diagnostician that was ASKED and said nothing readable, which
+        # `failure_diagnosis.diagnosed_failure_reason` correctly records as `unclassified` — so every
+        # test in this file and in `test_repair_judgment.py` that asserts a durable `reason` would be
+        # asserting against a NON-ANSWER rather than against the thing it is about (the stop
+        # decision, the critic, the budget). Weakening those assertions would have hidden the
+        # classification path instead of exercising it.
+        #
+        # A caller that WANTS the non-answer path passes an explicit `default`/`script` verdict or
+        # its own seam, and is unaffected — see `test_a_live_model_answering_garbage_stops_the_node`
+        # and `test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider`, which both
+        # deliberately keep the older shape.
+        if "failure_kind" not in out:
+            tag = str(error or "").partition("[failure kind: ")[2].partition("]")[0].strip()
+            if tag:
+                out["failure_kind"] = tag
+        return out
 
 
 class _StopWhenCircling(_Judge):
@@ -482,7 +504,17 @@ def test_a_live_model_answering_garbage_stops_the_node_but_not_the_run(tmp_path,
     assert _repairs(evs) == []                       # still nothing repaired blind …
     assert len(judge.calls) == 1 + _TRIAGE_REASK_LIMIT       # … and still re-asked first
     terminal = _terminals(evs)
-    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    # `unclassified` since 2026-08-20, and the CHANGE is the point rather than an accident: the
+    # judge was WIRED and ASKED and produced nothing readable, so the row says that instead of
+    # keeping the engine's `crash` residual, which read identically to a judge that agreed. What
+    # this test has always been about is the fail-closed SET and it is unchanged — NOT
+    # `developer_crash`, and no run-level pause.
+    assert len(terminal) == 1
+    assert terminal[0].data["reason"] == UNCLASSIFIED_REASON
+    assert terminal[0].data["reason"] != "developer_crash"
+    assert terminal[0].data.get("reason_source") == REASON_SOURCE_UNDIAGNOSED
+    assert terminal[0].data.get("engine_reason") == "crash", (
+        "the engine's own structural answer must survive on the row whatever the judge did")
     assert [e for e in evs if e.type == "pause"] == []                    # and NO run-level pause
     assert fold(evs).paused is False
     assert "could not read" in terminal[0].data["triage_rationale"]
@@ -569,7 +601,17 @@ def test_a_live_endpoint_that_never_emits_stops_the_node_but_not_the_run(tmp_pat
     assert client.calls > 0, "the harness must actually reach the endpoint"
     assert _repairs(evs) == []                       # still nothing repaired blind …
     terminal = _terminals(evs)
-    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    # `unclassified` since 2026-08-20, and the CHANGE is the point rather than an accident: the
+    # judge was WIRED and ASKED and produced nothing readable, so the row says that instead of
+    # keeping the engine's `crash` residual, which read identically to a judge that agreed. What
+    # this test has always been about is the fail-closed SET and it is unchanged — NOT
+    # `developer_crash`, and no run-level pause.
+    assert len(terminal) == 1
+    assert terminal[0].data["reason"] == UNCLASSIFIED_REASON
+    assert terminal[0].data["reason"] != "developer_crash"
+    assert terminal[0].data.get("reason_source") == REASON_SOURCE_UNDIAGNOSED
+    assert terminal[0].data.get("engine_reason") == "crash", (
+        "the engine's own structural answer must survive on the row whatever the judge did")
     assert [e for e in evs if e.type == "pause"] == []                    # and NO run-level pause
     assert fold(evs).paused is False
     assert "could not read" in terminal[0].data["triage_rationale"]
@@ -600,7 +642,17 @@ def test_an_older_triage_crash_signature_is_not_read_as_a_dead_provider(tmp_path
     assert judge.calls == 3                          # it was really consulted, three times
     assert len(_repairs(evs)) == 2
     terminal = _terminals(evs)
-    assert len(terminal) == 1 and terminal[0].data["reason"] == "crash"   # NOT developer_crash
+    # `unclassified` since 2026-08-20, and the CHANGE is the point rather than an accident: the
+    # judge was WIRED and ASKED and produced nothing readable, so the row says that instead of
+    # keeping the engine's `crash` residual, which read identically to a judge that agreed. What
+    # this test has always been about is the fail-closed SET and it is unchanged — NOT
+    # `developer_crash`, and no run-level pause.
+    assert len(terminal) == 1
+    assert terminal[0].data["reason"] == UNCLASSIFIED_REASON
+    assert terminal[0].data["reason"] != "developer_crash"
+    assert terminal[0].data.get("reason_source") == REASON_SOURCE_UNDIAGNOSED
+    assert terminal[0].data.get("engine_reason") == "crash", (
+        "the engine's own structural answer must survive on the row whatever the judge did")
     assert [e for e in evs if e.type == "pause"] == []                    # and no spurious pause
 
     # A `**kwargs` implementation gets the full evidence, as the new signature does.
