@@ -223,3 +223,39 @@ def test_the_task_goal_carrier_catches_the_defect_that_killed_a_run(tmp_path):
                  f"{bench}`")
     task.write_text(json.dumps({"task": {"goal": true_goal}}))
     assert not check_task_goal(task, root=ROOT), "the CORRECTED sentence must pass"
+
+
+def test_a_goal_with_no_pins_is_reported_as_UNCHECKED_not_as_clean(tmp_path, capsys):
+    """`0 claim defect(s)` over ZERO pins must never read like `every claim checks out`.
+
+    DRIVEN THROUGH `_main`, not asserted about a helper, because the defect lives in what the
+    OPERATOR sees. Measured 2026-08-20 the first time this checker was pointed at the live e5 task:
+    it answered a bare "0 claim defect(s)" about a goal carrying no pins at all — i.e. about exactly
+    the sentences whose falsity had cost three nodes days earlier. A checker that cannot say "I
+    checked nothing" reproduces, in the tool built to abolish it, the vacuous green this whole
+    convention is for; it is the same shape as an open-item marker inheriting its neighbour's
+    falsifier. Both halves are asserted, because a denominator that also failed to appear for a goal
+    that DOES carry pins would just be noise the reader learns to skip.
+    """
+    import json
+
+    from looplab.core.claimpin import _main
+
+    unpinned = tmp_path / "unpinned.json"
+    unpinned.write_text(json.dumps({"task": {"goal": "Batch 8192 fits in 80.6 GiB with checkpointing."}}))
+    assert _main([str(unpinned)]) == 0, "a goal with no pins has no DEFECTS — that is not the point"
+    out = capsys.readouterr().out
+    assert "NO PINS AT ALL" in out and str(unpinned) in out, (
+        "a goal carrying no pins must be named as unchecked, not silently folded into a clean count")
+
+    bench = tmp_path / "bench.md"
+    bench.write_text("| e5-small-en-ru BASELINE; batch_size 1750, n_gpus 4 | 0.89 |\n")
+    pinned = tmp_path / "pinned.json"
+    pinned.write_text(json.dumps({"task": {"goal": (
+        "The e5-small baseline is batch 1750 over 4 GPUs. CLAIM"
+        + f"[e5-baseline] decided:`line:e5-small&&batch_size 1750@{bench}`")}}))
+    assert _main([str(pinned)]) == 0
+    out = capsys.readouterr().out
+    assert "NO PINS AT ALL" not in out, "a goal that DOES carry a pin must not be reported unchecked"
+    assert "1 pin(s) evaluated" in out and str(pinned) in out, (
+        "the denominator must name the surface it counted, or it cannot be acted on")

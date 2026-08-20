@@ -377,14 +377,45 @@ def citation_defects(root: Path, subtrees: tuple[str, ...] = ("looplab",)) -> li
     return out
 
 
+def count_claims(text: str) -> int:
+    """How many `CLAIM[…]` pins one blob of text carries, defects or not."""
+    return sum(1 for _ in iter_claims(text))
+
+
+def goal_claim_count(task_path: Path) -> int:
+    """Pins in a task JSON's goal — `-1` when the file or its goal cannot be read at all."""
+    try:
+        blob = json.loads(read_text(task_path))
+    except Exception:                                         # noqa: BLE001 — report, never raise
+        return -1
+    task = blob.get("task", blob) if isinstance(blob, dict) else {}
+    return count_claims(str((task or {}).get("goal", "") or ""))
+
+
 def _main(argv: list[str]) -> int:
     root = Path(__file__).resolve().parents[2]
     problems = check_tree(root) + citation_defects(root)
+    # A DENOMINATOR, because "0 defects" over ZERO pins reads exactly like "every claim checks out"
+    # and means the opposite. Found 2026-08-20 the first time this was pointed at the live e5 task:
+    # it answered "0 claim defect(s)" about a goal carrying no pins at all, i.e. about the very
+    # sentences whose falsity cost three nodes. A checker that cannot say "I checked nothing" is the
+    # vacuous green this convention exists to abolish — the same defect the open-item index had when
+    # a marker inherited its neighbour's falsifier.
+    surfaces = [(f"repo tree ({root})", sum(count_claims(read_text(p)) for p in tracked_text_files(root)))]
     for arg in argv:
         problems.extend(check_task_goal(Path(arg), root=root))
+        surfaces.append((f"{arg} (task.goal)", goal_claim_count(Path(arg))))
     for line in problems:
         print(line)
-    print(f"\n{len(problems)} claim defect(s).")
+    print()
+    for label, n in surfaces:
+        if n < 0:
+            print(f"  UNREADABLE — no pins could be counted: {label}")
+        elif n == 0:
+            print(f"  NO PINS AT ALL — nothing was checked here: {label}")
+        else:
+            print(f"  {n} pin(s) evaluated: {label}")
+    print(f"\n{len(problems)} claim defect(s) over {sum(max(0, n) for _, n in surfaces)} pin(s).")
     return 1 if problems else 0
 
 
