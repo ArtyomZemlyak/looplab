@@ -71,6 +71,12 @@ PROMPT_KEYS: tuple[str, ...] = (
     # `repair_log_tools=false` must keep reproducing the historical message byte for byte, which it
     # cannot if the sentence lives inside a prompt that is always rendered.
     "triage_look_invitation",
+    # The other half of that look: the sentence that asks the triage judge to write down WHAT IT
+    # FOUND AND WHERE, as `findings`. A separate key for both of `triage_look_invitation`'s reasons
+    # and for one of its own — it is the ask that fills a durable column, so an operator who wants
+    # the record shaped differently (fewer entries, a house citation format) must be able to reword
+    # it without touching the diagnosis prompt the verdict itself comes from.
+    "triage_findings_invitation",
     "deep_research_system", "foresight_system", "merge_system", "bestofn_judge_system",
     # The concept-vocabulary consolidation prompt (doc 25 SE-10). A SEPARATE key from
     # `merge_system`: consolidating an axis/slug vocabulary is a different job from the generic

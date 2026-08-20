@@ -450,6 +450,43 @@ class UnifiedAgent(WrapsDeveloper):
         "This matters most for a TIMEOUT: 'cut the epochs' is the wrong fix for a run that already "
         "finished its epochs, and it silently changes the experiment the node was built to measure.")
 
+    # THE OTHER HALF OF THE LOOK: write down what you found, so the looking survives the call.
+    #
+    # Spliced under exactly the same condition as `_REPAIR_LOOK_INVITATION` and in the same shape
+    # (empty string when absent), so `repair_log_tools=false` still reproduces the historical prompt
+    # byte for byte. That condition is the whole argument for asking here rather than in the base
+    # directive: without tools this role has read nothing the prompt did not already splice into it,
+    # so it would be summarizing the tail back to the engine that spliced it. With tools it has just
+    # read the stage logs, the config and the program the eval ran, and ALL of that is discarded the
+    # moment the call returns — the engine keeps one `{source, locator, quote}` and the model's own
+    # tool transcript is not durable state.
+    #
+    # THE SUMMARY LEADS AND THE CITATIONS FOLLOW, and that order IS the design. The bytes are not
+    # lost — 787 MB of stage logs across the eight preserved runs, `<workdir>/<stage>.log` written
+    # by `sandbox._tee_drain`, nothing deletes them — so what a record owes a reader is the CAUSAL
+    # STATEMENT, with its numbers, that they can act on without opening any of it. A link may die;
+    # that is not a reason to build machinery around dead links, it is the reason the summary must
+    # stand alone. The findings are then exactly what they are: the trail, for whoever wants to dig.
+    #
+    # It is also the cheapest possible fix for what the corpus measures. On the 122-row
+    # `failure_triage.v1` corpus, widening the evidence from the durable 500-character stderr tail
+    # to this role's own log reads moves 16 rows — and those 16 are rows whose answer is in a stage
+    # log, which no amount of preserving more STDERR reaches. This role has already read those logs.
+    _REPAIR_FINDINGS_INVITATION = (
+        "NOW WRITE THE RECORD. `summary` is the one thing here a person will actually read: say what "
+        "failed and BECAUSE OF WHAT, with the numbers and names INLINE — the allocation size, the "
+        "parameter and the value it had, which stage, which epoch, the exception type. Write it for "
+        "someone a week from now who has this row and nothing else: no workdir, no logs, no tools. "
+        "\"See train.log:41233\" is a failed summary even if that line is exactly right.\n"
+        "THEN the trail, in `findings`, most decisive first — one entry per thing you actually "
+        "opened, `{source, locator, quote, means}`, where `quote` is the line verbatim and `means` "
+        "is what it tells you about this failure. That is a convenience for whoever wants to check "
+        "you or dig further; it is not where the facts live, and a fact that is only in a `quote` "
+        "is a fact you did not record. Use the `path:line` or `path:startbyte-endbyte` your tools "
+        "gave you rather than a remembered one — the engine re-resolves every locator against the "
+        "workdir and marks the ones that did not resolve. Do NOT pad the list: an entry you did not "
+        "read is worse than a short list, because it is the part a reader cannot check.")
+
     # The turn grant that comes with those tools, and it is deliberately NOT the watchdog's
     # `_MONITOR_LOOK_TURNS=6`, which is that judge's WHOLE budget for a call with nothing else to
     # spend it on. This is ADDITIVE over a budget the operator already sized for the pilot tools
@@ -562,7 +599,10 @@ class UnifiedAgent(WrapsDeveloper):
         # (stdlib-only at module scope), so this cannot cycle; keeping it call-local mirrors the
         # `agents` -> `search` rule and adds no import-time edge upward.
         from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
-                                           DIAGNOSED_FAILURE_REASONS, EVIDENCE_SOURCES,
+                                           DIAGNOSED_FAILURE_REASONS, DIAGNOSIS_SUMMARY_CAP,
+                                           EVIDENCE_LOCATOR_CAP,
+                                           EVIDENCE_QUOTE_CAP, EVIDENCE_SOURCES,
+                                           FINDINGS_CAP, FINDING_MEANS_CAP,
                                            TRIAGE_RATIONALE_CAP,
                                            TRIAGE_TRANSPORT_FAILURE_KEY,
                                            UNANSWERABLE_TRIAGE_ACTION)
@@ -574,7 +614,9 @@ class UnifiedAgent(WrapsDeveloper):
         # Same shape as the two lines above it (empty string when the thing it describes is absent),
         # which is what makes `tools=None` byte-identical to the historical prompt.
         look = ("" if tools is None else
-                render(self.prompts, "triage_look_invitation", self._REPAIR_LOOK_INVITATION) + "\n")
+                render(self.prompts, "triage_look_invitation", self._REPAIR_LOOK_INVITATION) + "\n"
+                + render(self.prompts, "triage_findings_invitation",
+                         self._REPAIR_FINDINGS_INVITATION) + "\n")
         # WHAT THE ENGINE ITSELF OBSERVED, spliced in the same shape as `budget`/`depth`/`look` —
         # empty string when absent, so an older caller reproduces the historical prompt byte for
         # byte. It carries the exit status and whether the process wrote anything at all, which
@@ -653,6 +695,38 @@ class UnifiedAgent(WrapsDeveloper):
                                                     "name the evidence is at. Workdir-relative."},
                 "evidence_quote": {"type": "string",
                                    "description": "The one line that settles it, quoted."},
+                # THE ACCOUNT A HUMAN READS, and the one field here that must work with nothing else
+                # in front of it. Its description carries the BAR rather than a word count, because
+                # the failure it is written against is a summary that points instead of stating:
+                # a reader a week later has no workdir, and the citations below may not resolve.
+                # `failure_diagnosis.coerce_diagnosis_summary` owns the cap and the redaction.
+                "summary": {"type": "string",
+                            "description": "What failed and BECAUSE OF WHAT, in prose a reader with "
+                                           "no access to this run can act on. Put the numbers and "
+                                           "names INLINE — the allocation size, the parameter and "
+                                           "its value, the stage, the epoch, the exception type. "
+                                           "Not a pointer to where they can be found."},
+                # THE TRAIL BEHIND THAT ACCOUNT — a convenience for whoever wants to check or dig,
+                # never a substitute for saying it in `summary`. By the time this call answers it has
+                # read the stage logs, the config and the code the eval ran; the three singular
+                # fields above record ONE of those looks and drop the rest.
+                # `failure_diagnosis.coerce_findings` bounds this at `FINDINGS_CAP` and re-resolves
+                # every locator, so a long or invented list costs a dropped tail entry rather than an
+                # unbounded durable row.
+                "findings": {
+                    "type": "array",
+                    "description": "Everything you actually looked at that bears on this, most "
+                                   "decisive first. Not a summary of your reasoning — one entry "
+                                   "per thing you READ.",
+                    "items": {"type": "object", "properties": {
+                        "source": {"type": "string", "enum": list(EVIDENCE_SOURCES)},
+                        "locator": {"type": "string",
+                                    "description": "Workdir-relative path, optionally `path:line` "
+                                                   "or `path:startbyte-endbyte`."},
+                        "quote": {"type": "string",
+                                  "description": "The line you read there, verbatim."},
+                        "means": {"type": "string",
+                                  "description": "What that line tells you about this failure."}}}},
                 "rationale": {"type": "string"}},
                 "required": ["action"]}}}
 
@@ -703,11 +777,30 @@ class UnifiedAgent(WrapsDeveloper):
             # reason: the engine re-resolves the locator against the workdir it owns, and this frame
             # holds no workdir. The caps are `failure_diagnosis`' durable-row caps, imported rather
             # than re-spelled.
+            #
+            # `summary` and `findings` ride in the SAME bag and under the same rule. Both are bounded
+            # HERE too, not only in `failure_diagnosis`, because this frame is where an unbounded
+            # emit first becomes an in-process object: a model that answers with ten thousand
+            # findings must not be able to make the engine hold them while it decides to drop them.
+            # Intake bounds shape only — every semantic decision (what counts as a citation, the
+            # dedup, the REDACTION, the workdir resolution) is the engine's, one layer up. Note the
+            # summary is NOT redacted here and must not be: masking before a cap is the rule
+            # (`_screened`), and this layer holds no redactor, so capping it here and masking it
+            # there would put the cut on the wrong side of the screen.
+            findings = (args or {}).get("findings")
+            findings = findings if isinstance(findings, (list, tuple)) else ()
             return {"action": action,
+                    "summary": str((args or {}).get("summary", ""))[:DIAGNOSIS_SUMMARY_CAP],
                     "failure_kind": str((args or {}).get("failure_kind", "")).strip().lower()[:40],
                     "evidence_source": str((args or {}).get("evidence_source", "")).strip().lower()[:16],
                     "evidence_locator": str((args or {}).get("evidence_locator", ""))[:300],
                     "evidence_quote": str((args or {}).get("evidence_quote", ""))[:300],
+                    "findings": [
+                        {"source": str((f or {}).get("source", "")).strip().lower()[:16],
+                         "locator": str((f or {}).get("locator", ""))[:EVIDENCE_LOCATOR_CAP],
+                         "quote": str((f or {}).get("quote", ""))[:EVIDENCE_QUOTE_CAP],
+                         "means": str((f or {}).get("means", ""))[:FINDING_MEANS_CAP]}
+                        for f in findings[:FINDINGS_CAP] if isinstance(f, dict)],
                     "rationale": str((args or {}).get("rationale", ""))[:TRIAGE_RATIONALE_CAP],
                     "missing_dependency": str((args or {}).get("missing_dependency", ""))[:100]}
 

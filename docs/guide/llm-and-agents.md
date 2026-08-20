@@ -723,6 +723,7 @@ stripped). A missing file falls back to the built-in default.
 | `pilot_system` | The unified agent's action pilot (chooses the next macro action) |
 | `triage_system` | The unified agent's crash triage (retry / repair / abandon) |
 | `triage_look_invitation` | The sentence that tells crash triage its 500-char stderr tail may be about a DIFFERENT PHASE than the one it is diagnosing. Spliced only when `repair_log_tools` actually wired the log tools, so it is a separate key: with the tools off the historical ask is reproduced byte for byte |
+| `triage_findings_invitation` | The other half of that look: the ask that turns what crash triage READ into what the run RECORDS — a self-sufficient `summary` (the causal statement with its numbers inline) plus `findings`, the trail of `{source, locator, quote, means}` behind it. Spliced under the same condition as `triage_look_invitation` and for the same byte-for-byte reason; a separate key so an operator can reshape the record without touching the diagnosis prompt |
 | `foresight_system` | The foresight ranker (predict-before-execute idea/hypothesis prioritization) |
 | `bestofn_judge_system` | The best-of-N judge (picks the best of N candidate implementations) |
 | `merge_system` | The hybrid-merge adjudicator (lesson & hypothesis-board consolidation); `$kind` and `$detail` vars |

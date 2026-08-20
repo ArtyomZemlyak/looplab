@@ -23,6 +23,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 from looplab.core.models import RunState, normalize_researcher_footprint
 from looplab.engine.triage import (AGENT_TRIAGE_ACTIONS, DEFAULT_TRIAGE_ACTION,
+                                   DIAGNOSIS_SUMMARY_CAP, FINDINGS_CAP,
                                    TRIAGE_RATIONALE_CAP, UNANSWERABLE_TRIAGE_ACTION, _rule_triage,
                                    _TRIAGE_REASK_LIMIT, coerce_triage_action,
                                    is_transport_failure_verdict)
@@ -355,11 +356,25 @@ class CrashRepairMixin:
                 # re-resolves the locator against the workdir, which only the eval frame holds, so
                 # `failure_diagnosis.coerce_evidence` / `evidence_citation_resolves` are the one
                 # place the normalization and the check are spelled.
+                #
+                # `summary` and `findings` join them under the identical rule. The SUMMARY is the
+                # one a reader actually reads — what failed and because of what, with its numbers
+                # inline — and the findings are the trail behind it; neither is normalized here,
+                # because `failure_diagnosis.coerce_diagnosis_summary`/`coerce_findings` are the one
+                # place the cap, the dedup, the REDACTION and the "what counts as a citation" rule
+                # are spelled, and this frame holds neither the workdir they will be resolved
+                # against nor the engine's redactor. A non-list from an older duck-typed seam
+                # travels as `[]` and an absent summary as `""` — both read as "it did not say",
+                # exactly like `failure_kind`'s "".
+                _found = out.get("findings")
                 return {"action": out["action"],
                         "failure_kind": str(out.get("failure_kind", "")).strip().lower()[:40],
+                        "summary": str(out.get("summary", ""))[:DIAGNOSIS_SUMMARY_CAP],
                         "evidence_source": str(out.get("evidence_source", "")).strip().lower()[:16],
                         "evidence_locator": str(out.get("evidence_locator", ""))[:300],
                         "evidence_quote": str(out.get("evidence_quote", ""))[:300],
+                        "findings": ([f for f in _found[:FINDINGS_CAP] if isinstance(f, dict)]
+                                     if isinstance(_found, (list, tuple)) else []),
                         "rationale": str(out.get("rationale", ""))[:_TRIAGE_RATIONALE_CAP],
                         "missing_dependency": str(out.get("missing_dependency", ""))[:100]}
             # A TRANSPORT FAILURE OBSERVED ONE LAYER DOWN. `UnifiedAgent.triage_crash`'s `_fallback`
