@@ -245,8 +245,27 @@ strings torch itself printed — 16 on a marker, 7 on the allocator's message bo
 | arm | accuracy | agreement with the recorded reason |
 |---|---|---|
 | `recorded` — the incumbent as it actually ran, zero reconstruction | **76/118 = 64.4 %** | 100 % by construction |
-| `--arm head` — `_failure_reason` at HEAD over the durable ~500-char stderr tail | **88/118 = 74.6 %** | 82.9 % |
-| `--arm head-widened` — the same rule, plus the triage agent's own log reads | **104/118 = 88.1 %** | 69.2 % |
+| `--arm frozen` — the 2026-08-20 classifier, over the durable ~500-char stderr tail | **88/118 = 74.6 %** | 82.9 % |
+| `--arm frozen-widened` — the same rule, plus the triage agent's own log reads | **104/118 = 88.1 %** | 69.2 % |
+| `--arm live` — `_failure_reason` at HEAD (the deterministic half, whatever ships) | **88/118 = 74.6 %** | 82.9 % |
+
+**The two kinds of reference to production, and why they are treated differently.** `frozen` reads
+no production name at all: `triage_score._frozen_failure_reason_v1` is a verbatim snapshot of the
+classifier as it stood when this corpus was cut, and `HISTORICAL_AUTHENTICATED_REASONS` and
+`TORCH_OOM_MARKERS` are frozen beside it (and copied into the dataset header, so they travel with
+the artefact). That is the correction of a real defect: this arm used to import the live
+`_failure_reason`, so when the ownership split landed hours later the arm silently began measuring a
+different program while still being labelled "the incumbent". A bench may lose many things; the
+record of how the old decider scored is not one of them. `live` is the opposite and must follow
+production, because scoring what ships is the point of it — and it **detects** production's
+partition rather than importing one by name. Two have shipped inside a week
+(`AUTHENTICATED_FAILURE_REASONS` / `JUDGED_FAILURE_REASONS`, and the ownership split's
+`ENGINE_FINAL_REASONS` / `DIAGNOSABLE_ENGINE_REASONS`), and an arm that hard-imported either would
+be an `ImportError` on the other side of that change — which is how this module went red in the
+first place, and is not something a measurement leg may do to a merge. The report prints the
+detected shape above the score, because the same number means different things under the two. `--arm head` / `--arm head-widened` are
+deprecated aliases that resolve to the frozen arms — which is what they meant when their numbers
+were recorded.
 
 The second column is the same churn measure the monitor bench keeps in its own field: it is
 maximised by a candidate that reproduces every one of the incumbent's mistakes, and nothing in
@@ -270,19 +289,54 @@ the report prints it separately and it is the number to judge a candidate on:
 | arm | authenticated | read from the text |
 |---|---|---|
 | `recorded` | 24/42 = 57.1 % | **52/76 = 68.4 %** |
-| `--arm head` | 38/42 = 90.5 % | **50/76 = 65.8 %** |
-| `--arm head-widened` | 38/42 = 90.5 % | **66/76 = 86.8 %** |
+| `--arm frozen` (= `--arm live`, identical on every row) | 38/42 = 90.5 % | **50/76 = 65.8 %** |
+| `--arm frozen-widened` | 38/42 = 90.5 % | **66/76 = 86.8 %** |
 
-Read the middle row before quoting the headline. HEAD's +10.2 points overall is almost entirely the
+Read the middle row before quoting the headline. The +10.2 points overall is almost entirely the
 authenticated half — the `check_failed` branch existing, which is a real 2026-08 fix and is how the
-ten `no_metric` terminals below got their right answer. **On the text-read half HEAD is 2 rows WORSE
-than the classifier that actually ran**, and it only pulls ahead when it is handed evidence the
+ten `no_metric` terminals below got their right answer. **On the text-read half both the frozen and the live classifier are 2 rows WORSE
+than the one that actually ran**, and it only pulls ahead when it is handed evidence the
 durable record does not contain. A single accuracy number hides that completely, which is the same
 reason this bench refuses a weighted cost total.
 
-### The sharpest finding: the marker rule's win is the window
+### Did replacing the regexes help? The first real answer
 
-`_is_torch_oom` (landed 2026-08-20) scores **0 of 23** OOMs replayed over the durable stderr tail,
+The classifier is being split by OWNERSHIP: the engine answers only what it caused, ran or measured,
+and `crash` / `no_metric` / `check_failed` become nominations handed to a diagnostician. Scored on
+these 118 labelled rows — with the split merged on top of this corpus — **the deterministic half of
+the new classifier answers exactly what the old one did: 88/118 = 74.6 %, and identical answers on
+all 122 rows.** Not one row moved.
+
+That is not a disappointment; it is the measurement the ownership argument never had, and it says
+precisely where the change's value has to come from. The two rules that were deleted (`_is_torch_oom`
+and the `-9/137`-with-no-traceback kernel signature) decided **nothing** on this corpus: the marker
+rule already scored 0 of 23 over the durable record, and the kernel signature was shadowed on every
+row by a watchdog branch above it. Deleting them cost no accuracy and removed two text rules — the
+right trade on principle, with the accuracy column now on the record rather than assumed.
+
+**All of the upside is in the handoff, and it is large.** The live report prints it and refuses to
+fold it into the accuracy line:
+
+```
+HANDED TO THE DIAGNOSTICIAN  (a nomination, not a decision)
+  94 of 118 labelled rows got an answer in ['check_failed', 'crash', 'no_metric']
+  65 of those 94 happen to be right already; the other 29 are the headroom a diagnostician
+  has to win, and are what `--answers` scores. This is NOT part of any accuracy claim above.
+```
+
+29 rows — 23 `oom`, plus the `diverged`, `not_learning` and `no_metric` rows the residuals cannot
+name — are what a diagnostician has to convert. Getting all 29 would take the corpus to 99.2 %;
+getting none of them leaves it at 74.6 %. **Nobody has run that arm yet.** `--answers cand.jsonl`
+takes `{case_id, reason}` and is how it gets run, offline, over the identical rows.
+
+A caution that comes straight from the numbers below: the diagnostician is being asked to decide
+exactly the rows whose durable evidence is thinnest. On the frozen arm, widening the evidence from
+the 500-char tail to the triage agent's own log reads moved 16 rows; that is the same evidence a
+diagnostician needs, and it is not in the durable record.
+
+### The sharpest finding: the marker rule's win was the window
+
+`_is_torch_oom` (landed and deleted on 2026-08-20) scored **0 of 23** OOMs replayed over the durable stderr tail,
 and **16 of 23** once the triage agent's own log reads are in front of it. **Not one of the 122
 recorded stderr tails contains any `_TORCH_OOM_MARKERS` string** — what survived to disk is
 `node_repaired.error_in`, 500 characters, not the 64,000-byte stream `_failure_reason` actually
@@ -313,7 +367,7 @@ Confusion matrix of `recorded` (truth → answer), 118 labelled rows:
 
 Cost totals: `generic_for_specific` 28, `wrong_within_group` 10, `opposed_directive` 3, no answer 1.
 
-At HEAD (`--arm head`) the shape moves rather than shrinking: `check_failed` 15/15, `crash` 50/51
+At HEAD (`--arm live`, byte-identical to `--arm frozen` on this corpus) the shape moves rather than shrinking: `check_failed` 15/15, `crash` 50/51
 (1 → `check_failed`), `diverged` 6/10 (4 → `check_failed`), `expect_failed` 9/9, `timeout` 6/6,
 `stalled` 2/2 — and `oom` **0 of 23** (22 → `crash`, 1 unanswerable), `no_metric` 0/1,
 `not_learning` 0/1. The `check_failed` column is a later fix working; the `oom` column is the window.
@@ -403,10 +457,11 @@ failures cannot see a defect whose whole shape is a node succeeding at the wrong
 ### Using it
 
 ```bash
-python -m looplab.judgebench score-triage                      # the reason each run actually recorded
-python -m looplab.judgebench score-triage --arm head           # _failure_reason replayed at HEAD, durable stderr tail
-python -m looplab.judgebench score-triage --arm head-widened   # ... with the triage agent's own log reads too
-python -m looplab.judgebench score-triage --answers cand.jsonl # a candidate's captured answers, offline
+python -m looplab.judgebench score-triage                        # the reason each run actually recorded
+python -m looplab.judgebench score-triage --arm frozen          # the 2026-08-20 incumbent, durable stderr tail
+python -m looplab.judgebench score-triage --arm frozen-widened  # ... with the triage agent's own log reads too
+python -m looplab.judgebench score-triage --arm live            # _failure_reason at HEAD (deterministic half)
+python -m looplab.judgebench score-triage --answers cand.jsonl  # a diagnostician's captured answers, offline
 python -m looplab.judgebench extract-triage runs/* -o tests/data/judge_bench/failure_triage.v1.jsonl.gz
 ```
 

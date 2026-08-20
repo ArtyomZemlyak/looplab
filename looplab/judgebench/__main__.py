@@ -56,13 +56,18 @@ def main(argv=None) -> int:
 
     tri_score = sub.add_parser("score-triage", help="score a failure classifier offline")
     tri_score.add_argument("--dataset", type=Path, default=triage_corpus.DEFAULT_DATASET)
-    tri_score.add_argument("--arm", choices=("recorded", "head", "head-widened"),
+    tri_score.add_argument("--arm", choices=("recorded", "frozen", "frozen-widened", "live",
+                                            "head", "head-widened"),
                            default="recorded",
                            help="'recorded' is the reason each run actually recorded (zero "
-                                "reconstruction); 'head' replays `_failure_reason` today over the "
-                                "durable stderr tail; 'head-widened' gives that replay the triage "
-                                "agent's own log reads as well, which is what isolates how much of "
-                                "the marker rule's win is the WINDOW rather than the rule")
+                                "reconstruction); 'frozen' replays the classifier AS IT STOOD when "
+                                "the corpus was cut, over the durable stderr tail, and reads no "
+                                "production name so its number cannot drift; 'frozen-widened' gives "
+                                "that replay the triage agent's own log reads as well, which "
+                                "isolates the WINDOW from the rule; 'live' is `_failure_reason` at "
+                                "HEAD — the DETERMINISTIC half of today's classifier, with the "
+                                "diagnostician handoff counted beside it. 'head'/'head-widened' are "
+                                "deprecated aliases for the frozen arms, which is what they meant")
     tri_score.add_argument("--answers", type=Path, default=None,
                            help="JSONL of {case_id,reason}; overrides --arm")
     tri_score.add_argument("--run", default=None, help="only rows from this run")
@@ -87,16 +92,26 @@ def main(argv=None) -> int:
         rows = dataset["rows"]
         if args.run:
             rows = [r for r in rows if r["provenance"]["run"] == args.run]
+        arm = {"head": "frozen", "head-widened": "frozen-widened"}.get(args.arm, args.arm)
+        if arm != args.arm:
+            sys.stderr.write("--arm %s is a deprecated alias for --arm %s: it used to import the "
+                             "LIVE classifier, which now means a different program than when that "
+                             "number was recorded\n" % (args.arm, arm))
         if args.answers is not None:
             candidate, name = triage_score.jsonl_candidate(args.answers), str(args.answers)
-        elif args.arm == "recorded":
+        elif arm == "recorded":
             candidate, name = triage_score.recorded_candidate, "recorded (the incumbent as it ran)"
+        elif arm == "live":
+            candidate = triage_score.live_engine_candidate()
+            name = "_failure_reason at HEAD (deterministic half of today's classifier)"
         else:
-            widened = args.arm == "head-widened"
-            candidate = triage_score.head_replay_candidate(widened=widened)
-            name = "_failure_reason at HEAD (%s stderr)" % ("widened" if widened else "durable tail")
+            widened = arm == "frozen-widened"
+            candidate = triage_score.frozen_replay_candidate(widened=widened)
+            name = ("the frozen 2026-08-20 incumbent (%s stderr)"
+                    % ("widened" if widened else "durable tail"))
         report = triage_score.score_dataset(
-            rows, candidate, name=name, high_confidence_only=args.high_confidence_only)
+            rows, candidate, name=name, high_confidence_only=args.high_confidence_only,
+            live=(arm == "live" and args.answers is None))
         sys.stdout.write(triage_score.format_report(
             report, limits=dataset["header"].get("limits", "")))
         return 0
