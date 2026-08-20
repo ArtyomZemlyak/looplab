@@ -114,7 +114,7 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   # six as complete with no score.
   #   0        - the run ended on its own (a score, or the harness's own N/A)
   #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
-  #              rather than retried forever, but it produces no number (see docs/44)
+  #              rather than retried forever, but it produces no number (see docs/48)
   #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
   case "$RC" in
     0|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;

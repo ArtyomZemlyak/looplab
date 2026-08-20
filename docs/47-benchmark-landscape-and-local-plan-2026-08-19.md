@@ -906,7 +906,7 @@ which alone would have produced a campaign of zeros indistinguishable from a bad
 2. **The summary reader was keyed on fields nothing writes.** The file is
    `{"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}` — no `task_name`, no `speedup`, value a
    string — and `looplab_eval.py` searched for `task_name`/`speedup`. It reported `speedup: 0.0` on
-   a summary that had just been written successfully. This is the same defect class doc 43's own
+   a summary that had just been written successfully. This is the same defect class doc 47's own
    subject matter keeps producing: *a reader keyed on a field nothing writes is a silent empty
    answer, not a red test.*
 
