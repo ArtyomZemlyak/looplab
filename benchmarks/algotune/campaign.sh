@@ -101,7 +101,15 @@ export LOOPLAB_LLM_TEMPERATURE='0.0'
 # The provider pin and the effort level are OpenRouter controls. On an endpoint that serves one
 # deployment and exposes no reasoning channel they control nothing, and a box profile sets this to
 # '{}' rather than leave a dead parameter in the record where a reader would take it for live.
-export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-{\"provider\":{\"order\":[\"siliconflow/fp8\"],\"allow_fallbacks\":false},\"reasoning\":{\"effort\":\"medium\"}}}"
+#
+# The default is held in its own single-quoted variable and NOT inlined as `${VAR:-{...}}`: bash
+# ends a `${...}` expansion at the first unquoted `}`, so the inline form truncated BOTH the
+# override (`{}` came out as `{},"reasoning":...`) and the default itself (which lost the brace
+# closing `provider` and shipped malformed JSON). Measured 2026-08-20 -- arm B died at
+# `SettingsError: error parsing value for field "llm_reasoning_extra"`, which is the loud version;
+# the default's silent corruption is the half that would have travelled into a campaign.
+DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false},"reasoning":{"effort":"medium"}}'
+export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-$DEFAULT_REASONING_EXTRA}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
 export PYTHONPATH="$REPO"
 mkdir -p "$OUT" "$WS"
