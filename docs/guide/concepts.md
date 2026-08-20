@@ -724,13 +724,17 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   retry an experiment that just failed). Since 2026-08-12
   **any** of the twelve `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `expect_failed`,
-  `check_failed`, `diverged`, `stalled`, `needs_failed` — not only the mechanical three.
+  `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning` — not only the mechanical three.
   <!-- FIXED 2026-08-13 (mega-review, doc 40): this list said "eight" and omitted the last three — it was
        written on a branch where 8 was correct and merged beside the registry widening without
        reconciliation; the settings table already listed all eleven.
        FIXED AGAIN 2026-08-14: a merge had left BOTH generations of this bullet in place — a
        "**debug / repair**" one naming eleven reasons, directly under a "**repair**" one naming
-       eight, three lines after the prose that says the debug operator no longer exists. -->
+       eight, three lines after the prose that says the debug operator no longer exists.
+       FIXED AGAIN 2026-08-20: 2933423c corrected the COUNT to twelve and left the LIST at eleven,
+       so the sentence counted its own enumeration wrong — the same drift, inside its own fix.
+       `tests/test_documentation_contracts.py::test_every_failure_reason_surface_names_all_of_them`
+       now derives both the count-word and the members from `core/models.py::FAILURE_REASONS`. -->
   An in-place repair doesn't consume the node budget;
   deeper failures get a structured "reproduce then fix" directive (`deep_repair`).
   **What stops the repair loop is a model, not a heuristic**: the crash-triage model is asked once

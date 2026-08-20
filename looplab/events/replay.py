@@ -1102,14 +1102,9 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # carried a repair counter, so a writer-side column would answer this only for rows written
         # after the change while the four affected runs already on disk stayed unattributable.
         #
-        # MAX, not `+= 1`, and it is the row's OWN durable ordinal: this makes the counter
-        # idempotent under a duplicate or re-folded row (invariant #5 — the fold must not be
-        # order/duplication-sensitive), and it inherits `_durable_repair_ledger`'s own accounting
-        # for free, since a `salvage_cause_fix` row deliberately RE-STATES the ordinal it follows
-        # ("the ORDINAL this row FOLLOWS, not a new one" — `engine/evaluate.py`) and therefore
-        # charges no epoch here either. A row with no `attempt` (or a non-int/bool one — `True` is
-        # an `int` in python and would read as epoch 1) falls back to advancing by one, which is
-        # what a log written before the ordinal existed can support.
+        # It is the row's OWN durable ordinal, and a row with no `attempt` (or a non-int/bool one
+        # — `True` is an `int` in python and would read as epoch 1) falls back to advancing by
+        # one, which is what a log written before the ordinal existed can support.
         # WHY NOT PLAIN `max`. The ordinal only rises monotonically since `_durable_repair_ledger`;
         # before it the engine restarted `attempt` per PROCESS, and that function's own measured
         # corpus is eight durable rows reading [1,2,1,2,1,2,1,2]. Under `max` that log ends at
@@ -1137,6 +1132,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                     n.repairs = _ordinal
                 else:
                     n.repairs += 1
+
 
 def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) -> None:
     """Make every surviving incumbent comparable on the newly-hidden partition.

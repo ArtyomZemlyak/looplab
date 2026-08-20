@@ -481,11 +481,17 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 
   **The count in this paragraph comes from the guard's own parser, never from a person.** A
   hand-written `21 (18 OPEN, 3 DECLINED)` stood here on 2026-08-19 and was wrong within the
-  hour — the exact drift the index exists to end, inside the paragraph describing it.
+  hour — the exact drift the index exists to end, inside the paragraph describing it. The
+  per-pool counts below are POINT-IN-TIME and are not machine-checked, deliberately: pinning them
+  would make closing an item cost a test edit, which is the `147/39/2/0` trap named just above.
+  Re-derive rather than trust them — `grep -c 'OPEN\[' <file>` is the whole parser. Doing exactly
+  that on 2026-08-20 found doc 25's count below had said 32 since the day it was written, against 31
+  in the tree at every commit.
 
   **Coverage is still PARTIAL and says so. Doc 25's ledger is now re-derived (2026-08-19):** its 41
-  PARTIALLY RESOLVED/DEFERRED findings were each checked against the tree and carry 32 `OPEN[…]` and
-  8 `DECLINED[…]` markers, and ONE closed — `ES-04`'s named remaining arm (the calibration-envelope
+  PARTIALLY RESOLVED/DEFERRED findings were each checked against the tree and carry 31 `OPEN[…]` and
+  8 `DECLINED[…]` markers (two of the 40 open-pool findings deliberately point at another finding's
+  slug rather than minting one — `TO-03`, `TO-09`), and ONE closed — `ES-04`'s named remaining arm (the calibration-envelope
   closures) shipped in `9f7c0a22` on 2026-08-05, the same day the entry saying it had not was
   written, and the 2026-08-08 reconciliation did not catch it. Its heading is flipped to RESOLVED
   and the rollup is 148/38/2/0. **The rollup guard is no longer a pin**: `test_documentation_
