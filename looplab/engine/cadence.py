@@ -181,6 +181,20 @@ def occupancy_due(inflight: int, queued: int, width: int) -> bool:
     due until the board empties again. The one direction that does compose is the honest one — work
     produced here becomes a Node, `n` advances, and the node-count cadences become due because a node
     really was created.
+
+    BEING DUE IS NOT THE SAME AS PRODUCING, and this rule read as due for five hours and nineteen
+    minutes while producing nothing (`runs/e5small-dr-unified-v4`, 2026-08-20: node 0 scored
+    0.758851, node 1 held GPU 1, node 2 was killed by the freshness gate having never been admitted,
+    and GPU 0 sat dark from 09:45:42 to 15:04:57 — 130 outer-loop turns, `inflight=1 queued=0
+    width=2` on every one of them, and `phase_progress` for node 3 in the same MINUTE as node 1's
+    terminal). The pace was never the defect: `_occupancy_paced_creates` asks the SESSION's own
+    producer lanes with the running Nodes masked, and for an ASHA-family policy
+    `card_selection._speculative_selection` answered `[], []` to every masked query naming an
+    unresolved rung-0 root — see `card_selection.py::_asha_mask_is_unsound`, which is now consulted
+    at the one lane that reads a masked POLICY view rather than at the whole query. Replayed over
+    every run on this box that had this pace: 8.03 starved hours, 5.94 of them that predicate,
+    0.00 in every GreedyTree and EvolutionaryPolicy run. `tests/test_occupancy_pace_under_asha.py`
+    drives it, and an AST check that this function is CALLED would have been green throughout.
     """
 
     return inflight > 0 and (inflight + queued) < max(1, width)
