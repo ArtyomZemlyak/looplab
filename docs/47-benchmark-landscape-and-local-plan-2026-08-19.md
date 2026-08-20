@@ -1,4 +1,4 @@
-# LoopLab — Benchmark Landscape + a Local Test Plan (2026-08-19)
+# 47. LoopLab — Benchmark Landscape + a Local Test Plan (2026-08-19)
 
 > **Status: analysis + measurement.** Point-in-time external sweep in the
 > [doc 13](13-external-works-analysis-2026-07.md) / [doc 41](41-external-works-synergy-2026-08-14.md)

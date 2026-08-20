@@ -298,16 +298,21 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     fail this, and a live one must not pass it.
     """
     import ast
-    import pathlib
+
+    from _source_scan import iter_trees
 
     # EVERY package that composes a toolset, not just `agents/`. Scoped to agents/ this guard was
     # green while `adapters/repo_developer.py` (four phases), `serve/routers/boss.py`, `engine/`
     # and `cli/` all built `CompositeTools` by hand — i.e. the exact defect it describes was live
     # in nine files, four of them the Developer's own phases.
-    root = pathlib.Path(looplab_agents.__file__).parent.parent
+    #
+    # The walk is `_source_scan`'s (doc 25 XP-10) rather than a private `rglob`: the copies of that
+    # walk had already diverged on DECODING, and this one had hard-coded `encoding="utf-8"`, so a
+    # single BOM'd or cp1252 source anywhere in the package would have turned this guard from a
+    # refusal into a `UnicodeDecodeError` at collection -- red for the wrong reason, and green the
+    # moment somebody widened the `except`.
     offenders = []
-    for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path, tree in iter_trees():
         for node in ast.walk(tree):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "CompositeTools"

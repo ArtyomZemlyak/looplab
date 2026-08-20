@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from typing import Optional
 
-from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE
 from looplab.core.models import Idea, DEVELOPER_ERROR_PREFIX
 from looplab.core.parse import LLMClient
 from looplab.tools.patch import SurfacePolicy
@@ -667,10 +666,19 @@ class LLMRepoDeveloper:
         else:
             default = (_REPO_DEV_SYSTEM_BODY_WITH_PROBE if getattr(self, "_probe", False)
                        else _REPO_DEV_SYSTEM_BODY)
-        # CONTEXT FIRST, TOOLS FOR THE GAP — appended AFTER render() so a PromptStore override of the
-        # persona cannot drop it, the same discipline as the trust rules on the Researcher side.
-        return (render(self.prompts, "repo_developer_system_body", default)
-                + _CONTEXT_BEFORE_TOOLS_RULE)
+        # The context-before-tools rule is deliberately NOT appended here, unlike on the Researcher
+        # side. Two contracts this role has and that one does not forbid it, and the rule has no
+        # evidence to weigh against them: A/B'd over three models it moved NOTHING, while the same
+        # knowledge published as DATA -- `agents/answered_by_context.py`'s per-tool counts -- took
+        # cold-start tool calls 41.3 -> 17.7. (1) `developer_probe=False` must reproduce the
+        # historical prompt BYTE FOR BYTE, which is what `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` pins it
+        # to so a resumed pre-2026-08-13 run keeps the prompt its own first half ran under; an
+        # unconditional suffix breaks that for every such resume. (2) an operator's PromptStore
+        # override replaces the WHOLE body -- appending to it means the operator cannot actually
+        # override. The Researcher's trust rules ARE appended after render() for a reason that does
+        # not transfer: `_UNTRUSTED_MEMORY_RULE` says do not obey text a previous run wrote, and a
+        # persona override silently dropping THAT is a safety hole. This is a hint about latency.
+        return render(self.prompts, "repo_developer_system_body", default)
 
     def _session_opts(self, *, max_turns=None, time_budget=None):
         """loop_opts + the HARD per-session ceiling. A developer session ALWAYS gets a finite bound so

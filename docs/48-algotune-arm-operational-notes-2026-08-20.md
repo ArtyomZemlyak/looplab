@@ -1,4 +1,4 @@
-# 44. Running the AlgoTune arm: every deviation, dependency and trap (2026-08-20)
+# 48. Running the AlgoTune arm: every deviation, dependency and trap (2026-08-20)
 
 What a second machine, or a later reader, needs in order to reproduce these numbers and to know
 what was changed outside this repository to get them. Companion to

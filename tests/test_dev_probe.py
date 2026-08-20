@@ -111,10 +111,17 @@ def test_a_probe_may_still_read_its_own_workdir(tmp_path):
     # It must actually OPEN something. `pathlib.Path('mine.txt')` only constructs a path object and
     # raises no `open` audit event at all, so the previous form passed unchanged even if the confine
     # fence refused every read in the probe's own workdir -- exactly the regression it claims to
-    # guard. Write then read, both inside the probe's disposable cwd.
-    out = _probe("import pathlib\n"
-                 "pathlib.Path('mine.txt').write_text('hello')\n"
-                 "print('cwd-read-ok:', pathlib.Path('mine.txt').read_text())")
+    # guard.
+    #
+    # The file is STAGED rather than written by the probe. Writing it here was this test's own
+    # bug: rule 2 is "it cannot write. Anywhere." -- the probe's own cwd included, because a probe
+    # that could write its workspace would make `node_created.files` stop being the whole record
+    # of what the Developer built. So the write was refused, the probe exited 1, and the read this
+    # test exists to pin was never reached. It went unnoticed because it is red only where the
+    # rest of the suite is already red for the platform -- which is the argument for reading a
+    # DIFF against master rather than a failure count.
+    out = DevProbeTools(timeout_s=30, staged=_Staged({"mine.txt": "hello"})).execute(
+        "run_probe", {"code": "print('cwd-read-ok:', open('mine.txt').read())"})
     assert "exit=0" in out and "cwd-read-ok: hello" in out
 
 
