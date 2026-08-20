@@ -397,6 +397,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         if best is None:
             return
         lib = JsonlCaseLibrary(Path(self._e.memory_dir) / "cases.jsonl")
+        from looplab.engine.comparability import group_token, record_of
         from looplab.engine.concept_shelf import state_concepts
         case = {
             "task_id": final.task_id,
@@ -416,11 +417,23 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             # The WINNER's concepts, not the run's: a case IS the winning configuration, so recording
             # everything the run touched would over-claim exactly the way `state_concepts` refuses to.
             "concepts": state_concepts(final, [best.id]),
+            # WHAT THIS CASE'S METRIC WAS MEASURED AGAINST (`engine/comparability.py`). A case is the
+            # one memory tier whose whole purpose is to hand a PREVIOUS run's number to the NEXT one,
+            # and until this field the cross-run champion election in `JsonlCaseLibrary._add_locked`
+            # grouped on `(task_id, direction)` alone — so a case measured on one test set could be
+            # elected active over a case measured on another, and the winning `params` then reached
+            # the new run's prompt as the configuration to beat.
+            #
+            # `""` when the champion recorded no key, which is every case row already in the store.
+            # Those keep grouping together and electing exactly as they did before, and a KEYED case
+            # forms its own group rather than joining theirs — see `group_token` for why that
+            # asymmetry is the point rather than a conservatism.
+            "comparability": group_token(record_of(best)),
         }
         # An empty value is dropped rather than persisted: absence is the wire shape the shelf reads as
         # "not tagged", and `""`/`[]` would pin the row as durably-untagged and block the run fallback.
         lib.add({key: value for key, value in case.items()
-                 if value or key not in ("run_id", "run_uid", "concepts")})
+                 if value or key not in ("run_id", "run_uid", "concepts", "comparability")})
 
     def store_concept_capsule(self, final: RunState) -> None:
         """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared

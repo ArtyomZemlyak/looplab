@@ -11,6 +11,7 @@ looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the raw launch snapshot + current folded best result
+looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
 looplab speculation-gate Validate paired Card-speculation evidence and publish the rollout receipt
@@ -489,6 +490,29 @@ It closes with the run's **trust-scan summary** — how many evaluated nodes car
 receipt, and what each bucket means. The unknown bucket is stated first and deliberately: a log
 written before 2026-08-19 has no receipts, and "no receipt" means *nobody can say whether anything
 looked*, never "clean". See [Evaluation rigor](concepts.md#trust-the-sandbox).
+
+## `comparability`
+
+Print, for each run directory, the comparability key its champion's number carries — and **refuse**
+when two of them may not be ranked against each other.
+
+```bash
+looplab comparability runs/e5small-dr-unified-v2 runs/rubertlite-dr-unified-v8
+```
+
+Exit codes are the answer, so a script cannot ignore them:
+
+| exit | verdict | meaning |
+|---|---|---|
+| `0` | `SAME` | the runs recorded the same key at an authority that may certify it (`measured` — the eval's declared `eval.inputs` bound to their content digests; or `declared` — an operator-written `comparison_contract`). Ranking them is a fact |
+| `3` | `DIFFERENT` | provably different keys. **Refused.** Each value is still printed — it is true of its own measurement — but the ordering between them never was |
+| `4` | `UNKNOWN` | at least one recorded no key, or they agree only at the `inferred` authority (two task files that merely look alike). **Not an assent**: a caller that asked for a ranking did not get one |
+
+Every run directory written before 2026-08-20 answers `UNKNOWN`, and that is the honest answer rather
+than a gap to be papered over — see [Tasks → `eval.inputs`](tasks.md) for the two ways to make it
+decidable, and for the inversion (`unknown` is never `same`) that the whole mechanism turns on.
+
+Read-only: it folds each log and prints. It writes nothing and touches no memory store.
 
 ## `replay`
 

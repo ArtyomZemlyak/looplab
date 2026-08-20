@@ -69,8 +69,29 @@
 //     rescale, which is the normalized-score objection again wearing a line chart. Worth building when
 //     the summary row carries the series; the shape of `groupTrajectoryGap` below is left as the note.
 import {
-  bestMetricCaveatNotice, bestMetricCaveats, metricComparable, sourceIncomplete,
+  COMPARABILITY_UNKNOWN, bestMetricCaveatNotice, bestMetricCaveats, comparabilityRecord,
+  metricComparable, sourceIncomplete,
 } from './runIndex.js'
+
+// THE COMPARABILITY PARTITION, added 2026-08-20, and it is refusal 1 below finally becoming a rule
+// instead of a caveat. A (task_id, direction) bucket is SUB-PARTITIONED by the comparability key its
+// rows carry (`looplab/engine/comparability.py`), so a ranking is published only over runs whose
+// numbers were measured against the same evaluation — and every subset that falls out is still on
+// screen, named, with its values shown, which is this module's own rule for a subset it may not rank.
+//
+// UNKNOWN IS ITS OWN PARTITION AND NOT A WILDCARD. Every run on this box today has no key, so they
+// all land in one `unknown` partition together and rank exactly as they did before this shipped —
+// the corpus does not move by one row. The moment ONE run declares `eval.inputs` it LEAVES that
+// partition rather than joining it: a keyed run and an unkeyed run have not been shown to measure the
+// same thing, and this is the surface on which that must be visible rather than assumed. The split
+// IS the finding, and it is the one the four recall@100 values on this box needed.
+const partitionKey = (run) => {
+  const record = comparabilityRecord(run)
+  if (!record) return ''
+  const authority = String(record.authority || '')
+  const key = record.keys?.[authority]
+  return key ? `${authority}:${key}` : ''
+}
 
 // Render backstop. `run_summaries` folds every run directory on the box, and the panel is a table.
 const MAX_GROUP_ROWS = 100
@@ -114,8 +135,14 @@ export function crossRunGroups(runs = [], { limit = MAX_GROUP_ROWS } = {}) {
     if (!taskId || !['min', 'max'].includes(direction)) { unidentified.push(run); continue }
     // NUL-separated: a task id is an opaque operator string and may contain spaces, and a key two
     // different (task, direction) pairs could both spell is a key that merges two objectives.
-    const key = `${taskId} ${direction}`
-    if (!buckets.has(key)) buckets.set(key, { key, taskId, direction, members: [] })
+    // The partition rides in the SAME NUL-separated key for the same reason the pair does: it is
+    // an opaque digest string, and a separator two different partitions could both spell is a
+    // key that merges two evaluations — which is the exact merge this partition exists to undo.
+    const partition = partitionKey(run)
+    const key = `${taskId} ${direction} ${partition}`
+    if (!buckets.has(key)) {
+      buckets.set(key, { key, taskId, direction, partition, members: [] })
+    }
     buckets.get(key).members.push({ run, ...metric })
   }
 
@@ -236,6 +263,11 @@ function buildGroup(bucket, limit) {
     key: bucket.key,
     taskId: bucket.taskId,
     direction,
+    // WHICH evaluation this group's numbers were measured against — `''` when no run in it recorded
+    // one. Carried so the render can NAME the partition: showing an operator two groups of one task
+    // with no account of why they are two would be a worse silence than the one this replaced.
+    partition: bucket.partition || '',
+    comparability: bucket.partition ? String(bucket.partition).split(':')[0] : COMPARABILITY_UNKNOWN,
     size: entries.length,
     ranked: ordered.length,
     integrityExcluded: unranked.length,
@@ -295,6 +327,21 @@ export function groupClaim(group) {
     + 'SUBJECT is not recorded on this row (docs 31/35: two nodes here recorded 0.224975 for a '
     + 'checkpoint neither of them trained).',
   ]
+  // THE COMPARABILITY STATE OF THE PARTITION, added 2026-08-20. It is stated for BOTH answers and
+  // never omitted, because the whole defect this closes is that silence read as agreement: an
+  // operator looking at four recall@100 values in one `repo_task` group had nothing on the screen
+  // telling them that some were measured on one test set and some on another. Refusal 1 above stays
+  // verbatim and stays true either way — the metric NAME and UNIT are still not on this row; what
+  // changed is that the DATA and the PROTOCOL can now be decidable, and the group says which it is.
+  refusals.push(group.partition
+    ? `These ${group.size} run(s) share a recorded comparability key (${group.partition}), so their `
+      + 'numbers were measured against the same declared evaluation inputs. Runs of this same task '
+      + 'that recorded a DIFFERENT key, or none at all, are in their own group above or below — they '
+      + 'are deliberately not ranked against these.'
+    : 'No run in this group records a comparability key, so it is UNKNOWN whether they were measured '
+      + 'against the same test set, the same corpus or the same protocol — and unknown is not the '
+      + 'same as yes. On this box a `repo_task` group has held recall@100 values measured on more '
+      + 'than one test set. Declare `eval.inputs` on the task to make this decidable.')
   if (group.caveatedCount > 0) {
     // The COUNT and the LEADERSHIP are two different facts and the sentence says both: a caveated
     // also-ran is a footnote, a caveated leader is the answer to "which configuration should I

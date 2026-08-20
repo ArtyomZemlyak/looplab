@@ -161,11 +161,28 @@ from __future__ import annotations
 #                   it never occupied. Derived from the DECLARATION and the committed BYTES, never
 #                   from any text an agent wrote — `engine/repair_verify.py::declared_param_
 #                   overrides` owns the rule and its bounds; this is a call to it, not a second copy.
+#   mixed_comparability — this run's OWN evaluated nodes carry PROVABLY DIFFERENT comparability keys
+#                   (`engine/comparability.py`), so the champion is the winner of a field that was
+#                   not all measured against the same data. Like `params_overridden` this is not a
+#                   claim about HOW the number was measured but about WHAT IT IS A NUMBER FOR: a
+#                   selector that ordered 0.79 measured on one test set against 0.77 measured on
+#                   another has not chosen the better model, and no rung in the tree could tell.
+#
+#                   IT IS `DIFFERENT` AND NEVER `UNKNOWN`, which is what makes the member nearly
+#                   free and is the reason it is safe to ship. Inside one run the key is constant by
+#                   construction — one task snapshot, one input declaration, one contract — so the
+#                   normal answer is a single key and the loop finds no pair. An UNKNOWN key (every
+#                   node of every run written before 2026-08-20, and every task that declares no
+#                   `eval.inputs`) contributes nothing here: silence is not a second key, and
+#                   caveating it would fire this member on all 46 run directories on this box and
+#                   therefore mean nothing. The cross-run surfaces are where `unknown` must be
+#                   VISIBLE; within one run only a contradiction is news.
 CHAMPION_CAVEAT_SALVAGED = "salvaged"
 CHAMPION_CAVEAT_TRUST_FLAGGED = "trust_flagged"
 CHAMPION_CAVEAT_PARAMS_OVERRIDDEN = "params_overridden"
+CHAMPION_CAVEAT_MIXED_COMPARABILITY = "mixed_comparability"
 CHAMPION_CAVEATS = (CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
-                    CHAMPION_CAVEAT_PARAMS_OVERRIDDEN)
+                    CHAMPION_CAVEAT_PARAMS_OVERRIDDEN, CHAMPION_CAVEAT_MIXED_COMPARABILITY)
 
 
 def champion_metric_caveats(state) -> list[str]:
@@ -185,6 +202,7 @@ def champion_metric_caveats(state) -> list[str]:
     # Function-local, mirroring `memory.unreliable_metric_ids`' own imports of these same two: this
     # module is imported by a `serve` PROJECTION, and neither predicate is needed to build a run row
     # that has no champion. It is a cost decision, not a cycle one — `engine` may import `events`.
+    from looplab.engine.comparability import run_split_by_key
     from looplab.engine.metric_salvage import metric_unmeasured
     from looplab.engine.repair_verify import declared_param_overrides
     from looplab.events.replay import flagged_node_ids, hard_flagged_ids
@@ -224,4 +242,14 @@ def champion_metric_caveats(state) -> list[str]:
                                 getattr(best, "files", None) or {},
                                 code=getattr(best, "code", "") or ""):
         out.append(CHAMPION_CAVEAT_PARAMS_OVERRIDDEN)
+
+    # COMPARABILITY. Asked of the FOLD alone — every key rides on `node.metric_provenance`, which
+    # `_on_node_evaluated` folds — so it is recomputed identically by any replay and needs no event
+    # of its own, exactly like the coordinates member above. It is a claim about the run's whole
+    # POPULATION and not about the champion's own record, which is why it is spelled over
+    # `state.nodes` and not over `best`: the defect is that the field was mixed, and the champion is
+    # merely the row that inherits it.
+    nodes = getattr(state, "nodes", None)
+    if run_split_by_key(list(nodes.values()) if isinstance(nodes, dict) else (nodes or [])):
+        out.append(CHAMPION_CAVEAT_MIXED_COMPARABILITY)
     return out

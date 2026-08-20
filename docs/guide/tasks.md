@@ -388,6 +388,104 @@ path) and names the operator for the other (the declaration itself is wrong). Re
 deliberately kept: the artifact is produced by the agent's own pipeline, unlike a missing **protected
 script**, which no edit can ever create and which the engine refuses without asking for a repair.
 
+**The metric must also say what it was measured AGAINST — `eval.inputs`.** `subject` is the *output*
+side: which artefact the number is a claim about. `inputs` is the mirror: which **bytes** the number was
+measured against — the test set, the product index, an id map, a frozen judged-positive table. Every one
+of those can move the final metric with the model unchanged, and none of them is a fact about the model.
+
+```json
+"eval": { "command": ["python", "-m", "vectorsearch.test"],
+          "metric": { "kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)" },
+          "inputs": ["/home/jovyan/data/dr-local/v2/test.parquet",
+                     "/home/jovyan/data/dr-local/v2/smkt_all.index.parquet"] }
+```
+
+Each entry is bound at the metric read to its content identity — the same `(dev, ino, size, mtime_ns,
+ctime_ns)` tuple plus a sha256 that `subject` uses, through the same binder — and the result folds onto
+`node_evaluated.metric_provenance.eval_inputs`. A digest over those identities, plus the task's
+`comparison_contract` when it has one and its evaluation contract when it does not, becomes
+`metric_provenance.comparability`: the **comparability key**.
+
+Three rules differ from `subject`, and each of them is the opposite of the corresponding subject rule
+because an input is the opposite kind of thing:
+
+* **paths may be absolute**, and are resolved against the node workdir only when relative. A subject
+  must be confined because it is by definition something *this node produced*; an input is by definition
+  something the node did **not** produce and shares with every other node and every other run. On this
+  box the dense-retrieval test set and product index live at `/home/jovyan/data/dr-local/v2/` and are
+  mounted into no workdir at all, so a confinement rule copied from `subject` would refuse every real
+  input in the corpus. It is safe because `eval` is the **operator's** spec — the agent cannot author or
+  edit it (`protect_entrypoint`), so an absolute path here is the operator naming their own file;
+* **there is no freshness floor.** An input predates the attempt by definition; `stale` is a claim about
+  an artefact nobody chose to reuse, and every input is one everybody chose to reuse;
+* **no globs.** `subject_glob` exists because the pipeline names its own output directory and the
+  operator cannot write the literal at submit time. The operator *chose* these paths, so a pattern could
+  only introduce the `ambiguous` outcome on the one declaration whose entire job is to be unambiguous.
+
+**Declaring nothing is not an error, and it is not a default of "comparable".** It records `unknown`,
+which every ranking surface renders as *these are observations, not a ranking* — never as agreement.
+That is the state every task shipped before 2026-08-20 is in.
+
+**The comparability key, and the inversion that is the whole point.** Two numbers may be ordered only
+when their keys agree at an authority that may certify. There are three, strongest first:
+
+| authority | material | equality proves | may certify? |
+|---|---|---|---|
+| `measured` | the content digests of `eval.inputs` | the numbers were measured against the same bytes | **yes** |
+| `declared` | the task's `comparison_contract.contract_id` (13 facets: `dataset_lineage`, `split_or_candidate_pool_lineage`, `evaluator_uid`/`_version`, `population`, `filter`, `metric_uid`, `unit`, `aggregation`, `cutoff`, `measurement_phase`, `uncertainty_protocol`, `constraints_digest`) | the *operator* asserted the same 13 facets | **yes** — a human made that claim |
+| `inferred` | the eval command + metric reader + declared paths (`engine/eval_contract.py`) | two task **files** match | **no** |
+
+Inequality is `different` at *every* authority, including `inferred`: two runs whose eval command or
+metric reader differ are provably not on one scale. Equality at `inferred` alone is `unknown`, and that
+asymmetry is the mechanism's reason for existing — `e5small-dr-unified-v2` and `-v4` have byte-identical
+task snapshots (same command, same reader, same editable path) and are exactly the pair that cannot be
+compared. **A weak authority may refuse a comparison; it may never certify one.**
+
+An **absent** key is `unknown`, and `unknown` vs `unknown` is `unknown` — never `same`. Two rows that
+recorded nothing have not agreed about anything. This is not a nicety: every run on this box has no key,
+so a rule that defaulted absent-to-equal would certify the whole corpus as mutually comparable.
+
+**The key must be the content, never the path.** Two different indexes written to one path, and one
+index reached through a mount, a symlink and an absolute path, are both routine. A key over paths calls
+the first pair identical and the second pair different — wrong in both directions on exactly the corpus
+it exists for. The declaration names a path; the key is the digest.
+
+**Where the key is enforced.** It never moves a number and never makes a node infeasible; it refuses
+*orderings*:
+
+* **within a run** — `champion_metric_caveats` adds `mixed_comparability` when the run's own evaluated
+  nodes carry provably different keys, so the portfolio row says the champion won a mixed field. It
+  fires on `different` and never on `unknown`: inside one run the key is constant by construction, so a
+  member that caveated silence would fire on every run and mean nothing;
+* **across runs** — `/api/runs` publishes `best_metric_comparability`, and `ui/src/runIndex.js::
+  metricComparable` (the one predicate the run list's metric sort, the solution registry, the Pareto
+  panel's cross-run rung and `crossRunRank.js` all ask) refuses a set containing two provably different
+  keys. The cross-run panel sub-partitions each `(task_id, direction)` group by key, so a ranking is
+  published only inside a partition and every other subset stays on screen, named and unranked;
+* **the Pareto front** — a banner when one run's nodes split by key, because dominance is a pairwise
+  metric comparison and a front over points that do not share an axis is not a front;
+* **the warm start** — `store_case` stamps the key on every new case row and `JsonlCaseLibrary` elects
+  its cross-run champion **within one key only**, so a case measured on one test set can no longer be
+  elected `active` over one measured on another and hand its `params` to the next run as the
+  configuration to beat;
+* **`looplab comparability <run> [<run>…]`** — prints each run's key and exits **3** on a proven
+  difference, **4** on `unknown`. Unknown is not success: a caller that asked for a ranking did not get
+  one, and the one thing that command may never do is let silence read as yes.
+
+All of it **fails open on `unknown`**. Every existing row has no key, so refusing on absence would blank
+the corpus and hide legitimate prior results, which is worse than the defect. Refusing on a *proven*
+difference costs nothing anyone should want. Unknown is instead made **visible** — every surface labels
+it — so silence is never read as assent.
+
+**What the key cannot see, and must not grow a reader for.** `k`, L2 normalisation, the `query:`/
+`passage:` prefixes, the similarity metric, the judged-positive label set, the pooling mode, the
+inference dtype, the recall denominator convention — every one of these can move the final metric with
+the model unchanged, and every one of them lives inside the candidate's own repository. A rule that
+parsed the candidate's config would be deciding comparability from bytes the candidate controls. They
+reach the key by exactly two sanctioned routes: a **file** the operator names in `eval.inputs` (its
+content decides), or a **facet** the operator writes into `comparison_contract` (their word decides, and
+the record says `declared`). Anything else is `unknown`, on purpose, and `unknown` is visible.
+
 **Every stage records what it RAN ON and what it MADE — the stage identity.** Since 2026-08-17 the
 engine derives two facts per stage and writes them onto the `stage_finished` row. Neither gates
 anything, neither costs a model call, and nothing in the loop branches on either:
@@ -993,6 +1091,7 @@ success is the **repo's own eval command + metric** — never a metric the agent
 | `eval.params_style` | `none` (default) or `cli_overrides` |
 | `eval.metrics` | Extra **named** readers reported alongside the primary, for audit/observability: `{"latency_ms": {"kind": "stdout_json", "key": "latency"}}`. A `file_*` reader here needs its own `path` — without one it is silently dropped and the node just reports no value under that name. **This is not the only way a value reaches `extra_metrics`, and the difference is now on the record.** Every OTHER numeric key on the primary metric's own stdout JSON line is AUTO-CAPTURED too — no declaration, no reader spec, no `adapter` refusal — which is how all 1,642 secondary metrics in this box's preserved runs got there, 1,636 of them the four keys of a CUDA probe (one a schema VERSION number). `node_evaluated` now carries `extra_metrics_provenance` (`{name: "declared"|"auto"|"engine"}`) beside the values, and every surface that shows a secondary metric says which channel it came through; a value with no tag is from a run recorded before 2026-08-14 and reads `unknown`, never `declared`. `engine` names a key the engine's OWN spliced instrumentation declared and its source authenticates — trustworthy, and still a diagnostic rather than a result. Set `auto_extra_metrics: false` to record only what YOUR readers produced (plus that engine instrumentation, which was never the candidate's) |
 | `eval.constraints` | Reader specs carrying a `max`/`min` bound. A node that violates any (or whose constraint value can't be read) is still measured but **excluded from best-selection** — "optimize the metric subject to `latency_ms <= 100`". Operator-owned (trust boundary). A `file_*` reader here needs its own `path`: an unverifiable constraint counts as a violation, so a pathless one excludes *every* node |
+| `eval.inputs` | The files whose CONTENT decides the metric independently of the model — the test set, the product index, an id map. Bound to their content identity at the metric read and digested into `metric_provenance.comparability`, the **comparability key** every ranking surface consults before it orders two numbers. Paths may be ABSOLUTE (the opposite rule to `metric.subject`: an input is by definition not produced by this node), there is no freshness floor, and no globs. Empty is not "comparable by default" — it records `unknown`, which is never read as agreement |
 | `eval.cross_check` | An INDEPENDENT built-in reader (`stdout_json`/`stdout_regex`/`file_json`/`file_regex` — never `adapter`) that re-reads the same metric from a source the agent can't forge. Used by `eval_trust_mode="ratify_freeze_drift"`; `None` disables it. A `file_*` reader here needs its own `path`: the drift check fails closed, so a pathless one discards *every* node's metric |
 | `eval.drift_tolerance` | Tolerance for the `cross_check` comparison (default `1e-6`; must be finite and ≥ 0) |
 

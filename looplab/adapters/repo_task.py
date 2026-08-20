@@ -792,6 +792,28 @@ class EvalSpec(BaseModel):
     # "optimize the metric subject to latency_ms <= 100". Operator-owned (trust boundary).
     metrics: dict[str, dict] = Field(default_factory=dict)
     constraints: list[dict] = Field(default_factory=list)
+    # WHAT THE NUMBER IS MEASURED AGAINST — the operator's list of the files whose CONTENT decides
+    # the metric independently of the model: the test set, the product index, an id map, a frozen
+    # judged-positive table. Each is bound to its content identity at the metric read
+    # (`runtime/metric_inputs.py`) and folds into `metric_provenance.comparability`, which is what
+    # every ranking surface consults before it orders two numbers (`engine/comparability.py`).
+    #
+    # Paths may be ABSOLUTE and are resolved against the node workdir when relative — the opposite
+    # rule to `metric.subject`, which must be confined. An input is by definition something this node
+    # did NOT produce and shares with every other node and run; requiring it inside the workdir would
+    # refuse every real one. That is safe precisely because this is the operator's spec: the agent
+    # cannot author or edit it (`protect_entrypoint`), so an absolute path here is the operator
+    # naming their own file, not a candidate reaching out of its sandbox.
+    #
+    # DECLARING NOTHING IS NOT AN ERROR AND NOT A DEFAULT COMPARABILITY. It records `unknown`, which
+    # every surface renders as "these numbers are observations, not a ranking" — never as agreement.
+    # That is the state every task shipped before 2026-08-20 is in, including the ones whose numbers
+    # this box has been comparing.
+    #
+    # NO GLOBS, unlike `metric.subject_glob`: the operator chose these paths and they are stable for
+    # the whole run, so a pattern could only introduce the `ambiguous` outcome on the one declaration
+    # whose entire job is to be unambiguous.
+    inputs: list[str] = Field(default_factory=list)
 
     @field_validator("profiles", mode="before")
     @classmethod

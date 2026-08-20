@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
+from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MIXED_COMPARABILITY,
+                                             CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
                                              CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
                                              CHAMPION_CAVEATS, champion_metric_caveats)
 from looplab.engine.memory import unreliable_metric_ids
@@ -42,6 +43,14 @@ pytest.importorskip("fastapi")
 # its row under every rung but `off`, which is why the whole corpus flips nothing under `select`.
 SALVAGE = SalvagedMetric(metric=0.81, condition="artifact_contract", source="declared_reader",
                          reader="stdout_regex", stage="train", producer=OPERATOR_PRODUCED)
+
+# Two comparability records that are PROVABLY different at a certifying authority — the shape
+# `engine/comparability.py::comparability_record` writes when a task declares `eval.inputs` and the
+# corpus underneath it changed. Written as literals rather than bound from disk because this file is
+# about the CAVEAT VOCABULARY; the binding itself is driven end-to-end in
+# `tests/test_metric_comparability.py`.
+_KEY_A = {"version": 1, "authority": "measured", "keys": {"measured": "aaaaaaaaaaaaaaaa"}}
+_KEY_B = {"version": 1, "authority": "measured", "keys": {"measured": "bbbbbbbbbbbbbbbb"}}
 
 
 def _run(tmp_path, name, *, nodes, trust_gate="audit", hacks=()):
@@ -194,12 +203,17 @@ def test_every_caveat_rides_together_in_vocabulary_order(tmp_path):
     defined below with the third member; a node can be salvaged, flagged AND diverging at once.)"""
     srv = _run(tmp_path, "both", nodes=[
         {"id": 0, "metric": 0.81, "violations": SALVAGE.violation_rows("select"),
-         "provenance": SALVAGE.as_event(), "params": _V8_PARAMS,
-         "files": {"vectorsearch/train.py": _V8_OVERRIDING_TRAIN_PY}}],
+         "provenance": {**SALVAGE.as_event(), "comparability": _KEY_A}, "params": _V8_PARAMS,
+         "files": {"vectorsearch/train.py": _V8_OVERRIDING_TRAIN_PY}},
+        # The FOURTH member needs a second node, because it is the one caveat that is a claim about
+        # the run's POPULATION rather than about the champion's own record: node 1 loses on metric
+        # and was measured against different data, so the champion won a mixed field.
+        {"id": 1, "metric": 0.50, "provenance": {"comparability": _KEY_B}}],
         trust_gate="audit", hacks=[(0, "protected_missing")])
     row = _row(srv, "both")
     assert row["best_metric_caveats"] == [CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
-                                          CHAMPION_CAVEAT_PARAMS_OVERRIDDEN]
+                                          CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
+                                          CHAMPION_CAVEAT_MIXED_COMPARABILITY]
     assert list(CHAMPION_CAVEATS) == row["best_metric_caveats"], "the registry IS the order"
 
 

@@ -143,6 +143,14 @@ _LAYOUT = {
     "errors": "core",
     "eval_dispatch": "engine",
     "eval_contract": "engine",  # what a run's numbers were measured BY (docs/BACKLOG.md §0.6)
+    "comparability": "engine",  # THE COMPARABILITY KEY: what two numbers must SHARE before their
+    #                             values may be ordered — the composition of the measured inputs,
+    #                             the declared ComparisonContract and the inferred eval contract,
+    #                             plus the tri-state where an absent key is `unknown` and never
+    #                             `same` (docs/BACKLOG.md §0.6b). It is POLICY over the runtime's
+    #                             `metric_inputs` capture, which is the same split `metric_subject`
+    #                             already has between what the eval records and what the engine
+    #                             decides with it.
     "fence": "core",           # the shared durable writer-fence protocol (doc 25 CO-01)
     "judge": "trust",         # one structured-judge invocation (doc 25 CT-09)
     "factory": "agents",      # the agent/role composition root (doc 25 RA-01)
@@ -249,6 +257,10 @@ _LAYOUT = {
     "read_fence": "runtime",   # the source-tree read fence: the generated per-run sitecustomize
     "metric_subject": "runtime",   # what a recorded metric is a claim ABOUT: the subject
     #                              binding the eval captures at the score stage's start
+    "metric_inputs": "runtime",    # the MIRROR: what a recorded metric was measured AGAINST — the
+    #                              content identity of the operator's declared `eval.inputs`,
+    #                              captured at the metric read by the SAME binder with the two
+    #                              policies inverted (no confinement, no freshness floor)
     "read_allowlist": "runtime",   # the ONE derivation of what an eval may read, from the
     #                              operator's declared mounts
     "landlock": "runtime",         # the kernel read allow-list applied at the launch

@@ -50,7 +50,16 @@ GROUPS = {
                      # actually do" from a sidecar the run wrote itself — here, which parser
                      # answered each structured ask, which is the evidence `Settings.llm_parser`
                      # has to be decided on.
-                     "landlock-check", "stage-dups", "parser-stats"},
+                     # `comparability` is the ONE command here that takes MORE THAN ONE run, and
+                     # it is still this group's contract rather than a cross-run governance one:
+                     # every fact it prints is folded from each named run's OWN event log, it calls
+                     # no model, writes nothing, and reads no cross-run store — the same three
+                     # clauses that keep `landlock-check` and `stage-dups` here. What it adds is a
+                     # REFUSAL over what it read (exit 3 on provably different comparability keys,
+                     # 4 on unknown), and a refusal derived from two runs' own logs is a diagnostic,
+                     # not a durable claim. It is not in `governance_cmds` for exactly the reason
+                     # that group exists: it spends no money and authors no cross-run memory.
+                     "landlock-check", "stage-dups", "parser-stats", "comparability"},
     "concept_cmds": {"concept-coverage", "asset-brief", "lock-in", "board-dedup",
                      "research-targets", "novelty-recall", "lesson-guard"},
     "governance_cmds": {"cross-run-concepts", "cross-run-index", "concept-merge", "concept-split",

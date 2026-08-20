@@ -18,7 +18,7 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { driftStatus, leakageStatus, rewardHackStatus, OBJECTIVE_SOURCE_LABEL,
   objectiveMetricSource, objectiveSourceCaveated, objectiveSourceHelp } from './trustSemantics.js'
-import { bestMetricCaveatLabel, metricComparable, sortRuns } from './runIndex.js'
+import { bestMetricCaveatLabel, metricComparable, nodesSplitByComparability, sortRuns } from './runIndex.js'
 import { crossRunGroups, groupClaim, rankCoverage } from './crossRunRank.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -837,6 +837,19 @@ export function ParetoPanel({ state, onClose, onSelect }) {
                 {displaced.map(n => `#${n.id} (${fmt(n.confirmed_mean ?? n.metric)})`).join(', ')}{' '}
                 {displaced.length === 1 ? 'is' : 'are'} non-dominated on measured objectives alone.</>}
             </div>
+          </div>}
+          {/* THE FRONT MAY BE OVER INCOMPARABLE POINTS, which no caveat above can express: every
+              sentence there is about how ONE node's number was produced, and this is about whether
+              two of them are on one axis at all. Dominance is a pairwise metric comparison, so a run
+              whose nodes were measured against different data has a front that is not a front —
+              #3 does not dominate #5 if #5 was scored on a harder corpus. Fires only on a PROVEN
+              difference (`looplab/engine/comparability.py`): every node on this box records no key,
+              and a banner over silence would show on every run and mean nothing. */}
+          {nodesSplitByComparability(nodes) && <div className="warn" style={{ marginTop: 8 }}>
+            ⚠ This run&rsquo;s nodes were <b>not all measured against the same evaluation</b> — their
+            recorded comparability keys provably differ. Dominance between two such nodes is not a
+            fact, so this front orders points that do not share an axis. Each value is still true of
+            its own measurement; the front is not.
           </div>}
           {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
             ⚠ {[...unverified].join(', ')} {unverified.size === 1 ? 'is' : 'are'} not a declared
@@ -2487,7 +2500,14 @@ export function CrossRunPanel({ state, onClose }) {
       {groups.map(group => {
         const claim = groupClaim(group)
         return <div key={group.key} className="notice resource-warning" role="status">
-          <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}.</b>
+          {/* THE PARTITION IS NAMED IN THE HEADER. One task ID can now produce more than one group,
+              and an operator shown two groups of `repo_task` with no account of why they are two
+              would be worse off than before the split. `evaluation unrecorded` is deliberately the
+              wording for the absent case rather than a blank: it is a state, not a missing field. */}
+          <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}
+            {' · '}{group.partition
+              ? <span title="these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs">evaluation {group.partition}</span>
+              : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}.</b>
           <span> {claim.claim}</span>
           <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
             {claim.refusals.map((line, i) => <li key={i} className="muted">{line}</li>)}
@@ -2524,9 +2544,11 @@ export function CrossRunPanel({ state, onClose }) {
       {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
         This server holds {coverage.runs} run{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns} of
         them sit in {coverage.comparableGroups} comparable group{coverage.comparableGroups === 1 ? '' : 's'}.
-        {' '}{coverage.noMetric} recorded no metric and {coverage.singletonTasks} task/direction
+        {' '}{coverage.noMetric} recorded no metric and {coverage.singletonTasks} task/direction/evaluation
         {' '}combination{coverage.singletonTasks === 1 ? ' is' : 's are'} the only run of their kind, so
-        nothing on this box ranks them.
+        nothing on this box ranks them. {/* EVALUATION is the third term since 2026-08-20: a group is
+          partitioned by comparability key as well, so a task with several runs can hold several
+          singletons — which is the finding, not a rounding error in this sentence. */}
         {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
       </div>}
     </Panel>
