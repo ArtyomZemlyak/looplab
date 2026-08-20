@@ -170,8 +170,12 @@ run_one() {                       # $1 = task, $2 = cpu list
     if [ -s "$OUT/B-$T.done" ]; then echo "[$CPUS] $T arm B already done"; return; fi
     TASK_ROOT="$RUNS_ROOT/$T"
     rm -rf "$TASK_ROOT"; mkdir -p "$TASK_ROOT/memory" "$TASK_ROOT/knowledge"
+    # MAKE_TASK_ARGS carries goal VARIANTS (e.g. --role-split). A pass-through rather than a knob
+    # per variant: the goal is this experiment's independent variable, and every value of it has
+    # to be readable off the `task.snapshot.json` the run preserves for itself.
+    # shellcheck disable=SC2086
     python "$REPO/benchmarks/algotune/make_task.py" --algotune-root "$AT" --task "$T" \
-        --out-dir "$WS" >/dev/null 2>&1
+        --out-dir "$WS" ${MAKE_TASK_ARGS:-} >/dev/null 2>&1
     S=$(date +%s)
     # Per-task memory and knowledge dirs: LoopLab can mine its own past runs and a shared store,
     # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
