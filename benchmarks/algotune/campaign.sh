@@ -105,6 +105,23 @@ reap_orphan_workers() {
   done
 }
 
+record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus
+  RC=$2
+  # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
+  # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
+  # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
+  # markers over live runs -- one of them 230 minutes in -- and the resume would have treated all
+  # six as complete with no score.
+  #   0        - the run ended on its own (a score, or the harness's own N/A)
+  #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
+  #              rather than retried forever, but it produces no number (see docs/44)
+  #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
+  case "$RC" in
+    0|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;
+    *)     echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed" ;;
+  esac
+}
+
 run_one() {                       # $1 = task, $2 = cpu list
   T=$1; CPUS=$2
   if [ "$ARM" = "A" ]; then
@@ -112,8 +129,9 @@ run_one() {                       # $1 = task, $2 = cpu list
     S=$(date +%s)
     timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "openrouter/$LOOPLAB_LLM_MODEL" "$T" > "$OUT/A-$T.log" 2>&1
-    echo "wall=$(( $(date +%s) - S )) cpus=$CPUS lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$OUT/A-$T.done"
-    echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
+    RC=$?
+    record_done "$OUT/A-$T.done" "$RC" "$S" "$CPUS"
+    [ -s "$OUT/A-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
   else
     if [ -s "$OUT/B-$T.done" ]; then echo "[$CPUS] $T arm B already done"; return; fi
     TASK_ROOT="$RUNS_ROOT/$T"
@@ -128,6 +146,7 @@ run_one() {                       # $1 = task, $2 = cpu list
       timeout "$HARD_TIMEOUT" taskset -c "$CPUS" python -m looplab.cli run \
         "$WS/algotune_$T.json" --out "$TASK_ROOT/run" --backend llm --max-nodes 20 \
         > "$OUT/B-$T.log" 2>&1
+    RC=$?   # captured HERE: the champion extraction and the test scoring below both clobber $?
     # Champion from the FOLD, then ONE scoring pass on TEST: every node above ran on TRAIN, which
     # is what AlgoTuner's own agent does. Without this the arm optimises against its graded split.
     if python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
@@ -139,8 +158,8 @@ run_one() {                       # $1 = task, $2 = cpu list
     else
       echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
     fi
-    echo "wall=$(( $(date +%s) - S )) cpus=$CPUS lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$OUT/B-$T.done"
-    echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$OUT/B-$T.done"))"
+    record_done "$OUT/B-$T.done" "$RC" "$S" "$CPUS"
+    [ -s "$OUT/B-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$OUT/B-$T.done"))"
   fi
 }
 

@@ -141,7 +141,13 @@ pipeline was broken when it was really one enormous dataset.
    ran, and the whole $0.02 went on model round-trips. The same budget bought 178 minutes on a task
    whose code ran. Both arms pay this identically so parity holds — but **"same budget" is not "same
    amount of work"**, and a methods note has to say so.
-8. **The metric is noisy on cheap tasks.** The same solver scored **1.0006** then **1.4468** on
+8. **Stopping a campaign used to mark live tasks complete.** `.done` was written unconditionally
+   after `timeout`, so killing a run recorded it as finished — measured 2026-08-20, one stop wrote
+   six markers over live tasks, one of them 230 minutes in, and a resume would have skipped all six
+   with no score. A marker is now written only for exit `0` (ended on its own) or `124` (the
+   wall-clock net fired — terminal, recorded so it is visible rather than retried forever). An
+   interrupted run leaves no marker and is still owed. The exit code rides in the marker.
+9. **The metric is noisy on cheap tasks.** The same solver scored **1.0006** then **1.4468** on
    consecutive runs. Read the aggregate over 20 tasks, not one row; `compare_arms.py` prints every
    per-task row so a wild value cannot hide in a mean.
 
