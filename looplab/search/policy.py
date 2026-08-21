@@ -697,6 +697,40 @@ _REGISTRY: dict[str, Callable[..., SearchPolicy]] = {
 }
 
 
+# WHICH POLICIES CANNOT KEEP A WIDE RUN BUSY, and it is a property of the SCHEDULE rather than of
+# any one board. An ASHA-family policy races arms in rungs: once the seed target is met it can only
+# PROMOTE, and a promotion needs the rung's survivors, so while a single rung-0 arm is unresolved it
+# can neither seed nor promote and answers nothing. A run with two eval slots therefore executes one
+# node at a time until that arm finishes.
+#
+# MEASURED, and the measurement is already in the tree — `search/card_selection.py::
+# _asha_mask_is_unsound` records 8.03 starved hours across five runs, 5.94 of them this shape, and
+# **0.00 in every GreedyTree and EvolutionaryPolicy run**. The lanes always answered there.
+#
+# THIS NAMES A COST, NEVER A REFUSAL. A racing schedule on a wide box can be exactly the right
+# choice — `runs/e5small-dr-unified-v4`'s Strategist picked it with the sound argument that
+# five-hour evaluations make a numeric sweep cheaper than many separate ones. What went unsaid is
+# that the same decision ALSO set `eval_parallel: 2`, and nothing anywhere connected the two fields.
+# The operator's own instruction after the fact: the engine may not silently half-use its box.
+SERIALISING_POLICIES: frozenset[str] = frozenset({"asha", "bohb"})
+
+
+def policy_fills_width(policy_name, width) -> bool:
+    """Can `policy_name` keep `width` evaluation slots busy in steady state? Pure; total.
+
+    False ONLY for a racing schedule asked to fill more than one slot. Unknown names answer True —
+    a policy this table has not heard of is not accused of starving anything, the same fail-quiet
+    rule `per_experiment_gpu_budget` follows for an unprobed pool.
+    """
+    try:
+        w = int(width)
+    except (TypeError, ValueError, OverflowError):
+        return True
+    if w <= 1:
+        return True
+    return str(policy_name or "").strip().lower() not in SERIALISING_POLICIES
+
+
 def available_policies() -> list[str]:
     return list(_REGISTRY)
 
