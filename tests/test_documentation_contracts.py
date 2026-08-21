@@ -73,7 +73,15 @@ def test_index_mentions_every_numbered_document():
     #   48 -> 49 (2026-08-21): the day report (doc 49). No collision — the number was claimed by
     #   checking the glob AND the index table together, and no sibling worktree held an unmerged
     #   `49-` at the time.
-    assert len(numbered) == 49, "the derived numbered-document inventory changed"
+    #   49 -> 52 (2026-08-21, REBASE onto master): the SIXTH collision, and the largest so far.
+    #   This branch held 47/48/49 (benchmark landscape, AlgoTune arm notes, the second box) while
+    #   master concurrently landed 47/48/49 of its own (a day report, early-stop blind classes, a
+    #   second day report). Both sides were right when they looked; nothing short of a lock prevents
+    #   it, which every earlier entry here has already weighed and rejected. Resolved the same way
+    #   as the fifth: the LATER-merged trio is renumbered, to 50/51/52, keeping master's three in
+    #   place because they are cross-referenced from `train_monitor.py` and from each other while
+    #   ours were referenced only from `benchmarks/algotune/` and from one another.
+    assert len(numbered) == 52, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index

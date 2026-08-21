@@ -100,7 +100,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   paragraph prescribes rather than by bumping the number: the catalogue was 183 keys and
   //   removing exactly `train_monitor_contract` gave back 182, so this is one real addition
   //   with nothing renamed away underneath it.
-  assert.equal(Object.keys(schema.fieldByKey).length, 183)
+  //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
+  //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
+  assert.equal(Object.keys(schema.fieldByKey).length, 186)
   assert.equal(schema.fieldByKey.gpu_footprint_cue.type, 'bool')
   assert.equal(schema.fieldByKey.gpu_footprint_cue.default, true)
   //   181 -> 183 (2026-08-19): `llm_budget_usd` (a HARD spend ceiling for a run's LLM calls, 0 =
@@ -111,7 +113,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   Verified as the paragraph prescribes rather than by bumping the number: the catalogue was
   //   183 keys and removing exactly those two gave back 181, so these are two real additions with
   //   nothing renamed away underneath them.
-  assert.equal(Object.keys(schema.fieldByKey).length, 183)
+  //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
+  //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
+  assert.equal(Object.keys(schema.fieldByKey).length, 186)
   assert.equal(schema.fieldByKey.llm_budget_usd.type, 'float')
   assert.equal(schema.fieldByKey.llm_budget_usd.default, 0)
   assert.equal(schema.fieldByKey.hide_empty_tools.type, 'bool')

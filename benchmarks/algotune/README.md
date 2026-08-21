@@ -12,7 +12,7 @@ single box, for four reasons:
    `eval_input`, `profile`, `profile_lines`, and the prompt *enumerates* the 27 packages it may use.
    So the benchmark measures algorithm work, not environment wrangling.
 3. **It is CPU-bound**, so GPU-generation issues (see the FML-bench notes in
-   [doc 47](../../docs/47-benchmark-landscape-and-local-plan-2026-08-19.md)) do not arise.
+   [doc 47](../../docs/50-benchmark-landscape-and-local-plan-2026-08-19.md)) do not arise.
 4. **It ships 17 models × 154 tasks = 2,595 reference solvers** under `results/`, which can be
    **re-timed on our machine** rather than compared against published numbers from someone else's.
 

@@ -81,7 +81,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               revocation costs nothing that was not already spent:
 #               `speculation_implementation_digest` hashes every shipped `.py` and this
 #               change moves it regardless.
-_EXPECTED_DIGEST = "sha256:7670c4d95046721af9764ce0b68c07886a317ef71f3ab5b8c23d58792b8d2e6f"
+_EXPECTED_DIGEST = "sha256:34934b72b333d6e6060eb91dd908db47a950ce1e130fe0bdf8b658abfd398e97"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -370,7 +370,15 @@ _EXPECTED_DIGEST = "sha256:7670c4d95046721af9764ce0b68c07886a317ef71f3ab5b8c23d5
 #               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated
 #               assignments against master reports exactly [train_monitor_contract] added
 #               and [] removed, so no +1/-1 pair is hiding behind the new integer.
-_EXPECTED_FIELD_COUNT = 213
+#   2026-08-21  REBASE onto master, and BOTH pins re-measured over the rebased tree rather than
+#               carried from either side. The branch adds three fields to master's set
+#               (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`) — 213 -> 216 —
+#               and the digest hashes every shipped `.py`, so 45 commits of master move it whatever
+#               the field set does. Old receipts SHOULD stop verifying: `developer_probe_confine`
+#               ships ON and FAILS CLOSED, so a replicate calibrated where the kernel offers
+#               Landlock and one calibrated where it does not can spend a different number of
+#               Developer turns on the same node.
+_EXPECTED_FIELD_COUNT = 216
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

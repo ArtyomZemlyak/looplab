@@ -100,7 +100,12 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 183
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 186
+    # 183 -> 186 on 2026-08-21, at the REBASE onto master: three rows this branch authored
+    # (`llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`) meeting master's own
+    # additions. The count moved by exactly the three, which is the check that the rebase carried
+    # the branch's catalogue rather than resolving them away — they WERE resolved away first, and
+    # were lifted back from the pre-rebase head rather than retyped.
     # 218 -> 219 Settings and 182 -> 183 catalogued rows on 2026-08-20:
     # `train_monitor_contract`, whether the live training-log watchdog is shown the stage's
     # own declared contract (`expect.assert` / `expect.files`) and the engine's reading of
@@ -159,7 +164,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # (there is no container filesystem to make read-only), so a form row would offer every operator
     # a knob that does nothing on their box, and the operators who DO run the container tiers set
     # them together in a config file.
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 216
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 219
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

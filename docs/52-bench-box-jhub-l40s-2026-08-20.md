@@ -1,7 +1,7 @@
 # 49. Standing the arena up on a second box: JupyterHub + L40S (2026-08-20)
 
-Companion to [doc 47](47-benchmark-landscape-and-local-plan-2026-08-19.md) (*why* AlgoTune, and the
-parity analysis) and [doc 48](48-algotune-arm-operational-notes-2026-08-20.md) (*what was touched*
+Companion to [doc 47](50-benchmark-landscape-and-local-plan-2026-08-19.md) (*why* AlgoTune, and the
+parity analysis) and [doc 48](51-algotune-arm-operational-notes-2026-08-20.md) (*what was touched*
 in the third-party checkout). This one is the **second machine** doc 48 §6 asks for: what a box that
 is not the original 8-core Windows/WSL laptop needs, what it measured differently, and what a number
 produced here may and may not be set beside.
