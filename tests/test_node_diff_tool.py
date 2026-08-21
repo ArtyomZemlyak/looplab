@@ -233,16 +233,31 @@ def test_the_files_shown_are_the_ones_the_node_LAST_ran(real_state):
     assert set(nd.node_record(real_state, 3)["files"]) == last_repair[3]
 
 
-def test_the_real_champion_pair_reports_a_gain_it_cannot_certify(real_state):
+def test_the_real_champion_pair_shows_what_ran_and_where_the_carriers_disagree(real_state):
     """v8 node 3 (0.762048) against node 0 (0.736689). Every part of the answer is a fact about the
-    record rather than about the tool: nine proposal coordinates move, nothing says what RAN, and
-    the two numbers are not known to be on one scale."""
+    record rather than about the tool.
+
+    THIS TEST CHANGED ITS ASSERTION ONCE, AND THAT WAS THE TOOL WORKING. It used to assert
+    `applied params: NOT RECOVERABLE`, which was true of the record as shipped: nothing said what
+    those nodes RAN. `backfill-applied-params --apply` then repaired that record, and this test went
+    red — a test built on the real record noticing the real record change is the behaviour, not the
+    fragility. What it asserts now is the repaired answer, including the half that matters most:
+    node 3's two carriers DISAGREE about `batch_size` (the config document says 8192, the training
+    script assigns 4096, because R-Drop's second forward pass will not fit at 8192 even on a 140 GB
+    H200), and the tool reports the disagreement with both readings instead of settling it."""
     t = NodeDiffTools()
     t.bind_state(real_state)
     out = t.execute("diff_nodes", {"left": 0, "right": 3, "section": "params"})
     assert "9 of 22 coordinates differ" in out
     assert "loss.rdrop_alpha" in out and "loss.dcl" in out
-    assert f"applied params: {NOT_RECOVERABLE}" in out
+    # What actually ran is now IN the record for both nodes, and node 3's carriers disagree.
+    assert "committed authority" in out
+    assert "train.training.batch_size" in out and "4096.0" in out and "8192.0" in out
+    assert "vectorsearch/train.py:31" in out and "config.yaml:281" in out, (
+        "a carrier conflict must name BOTH readings with file and line")
+    assert "carriers DISAGREE" in out and "does not settle this" in out
+    # …and the resolved view must not call an UNSETTLED coordinate absent.
+    assert "(its own carriers disagree — unsettled)" in out
 
     metric = t.execute("diff_nodes", {"left": 0, "right": 3, "section": "metric"})
     assert "0.736689" in metric and "0.762048" in metric and "+0.025359" in metric
