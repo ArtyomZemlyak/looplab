@@ -270,7 +270,13 @@ def main() -> int:
             if optimized_ms:
                 speedup = float(cached["baseline_time_ms"]) / float(optimized_ms)
         else:
-            out["baseline_source"] = "unavailable"
+            # NOT "the baseline is missing" -- the speedup above came through fine and is the
+            # harness's own. This branch means only that the RECORD carries no `baseline_time_ms`
+            # for this bridge to cache, which is the normal shape (see the note above the reads),
+            # so the aggregate cache never engages. The old label read as a failure and cost a real
+            # investigation on 2026-08-20: a node scoring 0.0 was diagnosed as "no baseline" when
+            # the actual cause was an empty working set, three layers away.
+            out["baseline_source"] = "in-harness (record exposes no baseline_time_ms to cache)"
 
     out["speedup"] = float(speedup) if speedup is not None else 0.0
     if baseline_ms is not None:

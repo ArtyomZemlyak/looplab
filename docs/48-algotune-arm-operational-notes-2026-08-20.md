@@ -271,3 +271,44 @@ whole hole for that phase.
 **Any number produced before this landed must be read with the question "could this node have read
 the checker?"** For the runs on this box the answer is: the two `discrete_log` controls, no
 (measured, zero harness reads); the `--role-split` run, yes — it is discarded.
+
+---
+
+## 9. The fork is the primary path (2026-08-21)
+
+`github.com/ArtyomZemlyak/AlgoTune`, branch `looplab-bench`, is upstream `dff9914` with every
+deviation in §1–2 applied **as a commit**. Use it:
+
+```bash
+git clone -b looplab-bench https://github.com/ArtyomZemlyak/AlgoTune.git /srv/AlgoTune
+```
+
+That retires the sharpest hazard in §1 — a number that could only be attributed to "a checkout
+somebody patched" can now name a commit, and `git status` on a prepared checkout is empty.
+
+**`setup_algotune.sh` no longer reproduces that branch, and the difference changes measurements.**
+The fork additionally carries `AlgoTuner/utils/evaluator/looplab_parallel.py` and its wiring in
+`evaluation_orchestrator.py` / `solver_executor.py`: instances are evaluated concurrently, one core
+per worker, out of the mask the process already holds (measured on the reference box: a scorer run
+132 s → 23 s; 100 instances of `discrete_log` 2.35 s against ~130 s serial). No patch script
+produces those, so a checkout prepared by the script evaluates **serially** and one prepared from
+the fork evaluates **in parallel**. Both are valid harnesses. Numbers from the two are not
+comparable, because the regime a solver is timed under differs — so the script now detects the fork
+and says which one you have rather than being quiet about it.
+
+### Verified here, end to end, on the fork
+
+A reference-equivalent solver (sympy's own `discrete_log`) scored **1.0048** in 195 s and, on a
+second run with the harness baseline cached, **1.0161** in 108 s. That is the first end-to-end proof
+of the whole bridge — dataset load, baseline pass, solver timing, ratio — and it also measures the
+**noise floor: ~1 % between identical runs**, which is the resolution any per-task claim has to
+clear.
+
+### `baseline_source` was lying, and it cost an investigation
+
+The bridge printed `baseline_source: "unavailable"` on every successful evaluation. It never meant
+the baseline was missing — the speedup is the harness's own and arrives fine. It meant only that the
+record exposes no `baseline_time_ms` for the bridge's *aggregate* cache to store, which is the normal
+shape and is noted in the code beside the read. On 2026-08-20 a node that scored 0.0 was first
+diagnosed from that label; the real cause was an empty working set, three layers away. The label now
+says what it means.

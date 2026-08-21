@@ -45,6 +45,34 @@ AT="${1:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 AT="$(cd "$AT" && pwd)"
 
+# ---------------------------------------------------------------- the FORK is the primary path
+#
+# `github.com/ArtyomZemlyak/AlgoTune`, branch `looplab-bench`, is upstream dff9914 with every
+# deviation below applied AS A COMMIT, so a published number can name a commit instead of "a
+# checkout somebody patched". Prefer it:
+#
+#     git clone -b looplab-bench https://github.com/ArtyomZemlyak/AlgoTune.git /srv/AlgoTune
+#
+# THIS SCRIPT NO LONGER REPRODUCES THAT BRANCH, and the difference is not cosmetic. The fork also
+# carries `AlgoTuner/utils/evaluator/looplab_parallel.py` plus its wiring in
+# `evaluation_orchestrator.py` and `solver_executor.py` -- instance evaluation runs concurrently,
+# one core per worker, measured 132 s -> 23 s for a scorer run on the reference box. There is no
+# patch script for those, so a checkout prepared HERE evaluates SERIALLY and a checkout prepared
+# from the fork evaluates in parallel. Both are valid harnesses; numbers from the two are not
+# comparable, because the timing regime a solver is measured under is different.
+#
+# So the script refuses to be silent about which one you ended up with.
+ON_FORK=0
+if git -C "$AT" rev-parse --verify --quiet looplab-bench >/dev/null 2>&1    && [ -f "$AT/AlgoTuner/utils/evaluator/looplab_parallel.py" ]; then
+    ON_FORK=1
+fi
+if [ "$ON_FORK" = "1" ]; then
+    echo "== this checkout already carries the fork branch (looplab_parallel.py present)."
+    echo "   The patches below are already committed there; re-applying them is a no-op, but the"
+    echo "   parallel evaluator is NOT reproducible from this script -- do not revert it."
+fi
+
+
 echo "== 1/7  sys.modules iteration bug"
 sed -i 's/for module_name, module in sys.modules.items():/for module_name, module in list(sys.modules.items()):/g' \
     "$AT/AlgoTuner/utils/isolated_benchmark.py"
