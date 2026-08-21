@@ -127,18 +127,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
       and arXiv literature (network-optional)."""
     providers = []
     if getattr(settings, "researcher_tools", True):
+        from looplab.tools.node_diff import NodeDiffTools   # what differs between two nodes
         from looplab.tools.run_tools import DataTools, RunTools
-        providers.append(RunTools())                        # own experiments + code + themes
-        providers.append(DataTools(task))                   # task schema / profile / data
-        # Beside RunTools and under the same flag, because it answers the question RunTools' own
-        # answer PROVOKES: `list_experiments` hands back a table of node -> metric, and an agent
-        # that reads a number without knowing what differs between the rows attributes it to
-        # whatever the record happens to say. The record says `Idea.params`, which is a PROPOSAL —
-        # under `params_style: "none"` the engine applies nothing and the Developer realises the
-        # idea by editing the repo. Measured over every run on disk: 41 of 457 comparisons (9.0%)
-        # diverge, 18 of them on nodes that produced a metric.
-        from looplab.tools.node_diff import NodeDiffTools
-        providers.append(NodeDiffTools())                   # what actually differs between two nodes
+        providers += [RunTools(), DataTools(task), NodeDiffTools()]   # experiments / data / diffs
     if run_dir is not None and getattr(settings, "cross_run_tools", True):
         from looplab.tools.run_tools import SiblingRunTools
         providers.append(SiblingRunTools(Path(run_dir).parent, Path(run_dir).name))   # other runs
