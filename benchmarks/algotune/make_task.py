@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 
 BRIDGE = Path(__file__).resolve().parent / "looplab_eval.py"
@@ -175,6 +176,42 @@ ONE_CARD = (
 )
 
 
+def rules_clause(root: Path) -> str:
+    """The arena's submission rules, in the goal, DERIVED from the validator that enforces them.
+
+    Not hand-written prose: a copied ban list goes stale in the direction that silently permits, and
+    the operator then reads a goal that promises a rule the arena no longer has (or, worse, does not
+    promise one it does). This reads `AlgoTuner.security.code_validator`'s own tables, so the
+    sentence and the check cannot disagree.
+
+    Why state them at all when AlgoTune does NOT — its two prompt files mention no ban anywhere, and
+    its agent learns the rule only by having an edit refused. Because the shapes differ: their agent
+    edits and is refused in the same turn, at no cost. Ours has a RESEARCHER that commits to an
+    algorithm before any code exists, and an idea resting on a forbidden primitive burns a whole node
+    before anyone finds out. The cheapest place to say it is therefore before the idea, not after the
+    edit.
+    """
+    try:
+        sys.path.insert(0, str(root))
+        from AlgoTuner.security.code_validator import TamperingDetector
+    except Exception:                           # noqa: BLE001 — no validator, no claim about rules
+        return ""
+    finally:
+        if sys.path and sys.path[0] == str(root):
+            sys.path.pop(0)
+    protected = sorted(getattr(TamperingDetector, "PROTECTED_MODULES", ()) or ())
+    if not protected:
+        return ""
+    return (" ARENA RULES FOR THE SUBMITTED SOLVER, enforced by this benchmark's own validator "
+            "before anything is scored — a solver that breaks one is not scored low, it is NOT "
+            "SCORED: no `import ctypes` (directly or through `__import__`), no reading or writing "
+            "`sys.modules`, no redefining `is_solution`, and no monkey-patching of the standard "
+            "modules the arena protects (" + ", ".join(protected[:8]) +
+            f", and {len(protected) - 8} more). Write ordinary algorithmic Python. If an idea only "
+            "works by reaching for one of these, it is not an idea this arena can accept — pick a "
+            "different one rather than a way around.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path)
@@ -184,6 +221,10 @@ def main() -> int:
                     help="Interpreter that has AlgoTune installed "
                          "(default: <algotune-root>/.venv/bin/python).")
     ap.add_argument("--timeout", type=int, default=7200, help="Eval timeout in seconds.")
+    ap.add_argument("--enforce-rules", action="store_true",
+                    help="Score through AlgoTune's OWN solver validator and state its rules in the "
+                         "goal. OFF by default: they are this ARENA's rules, and a LoopLab task "
+                         "that is not an AlgoTune arm must not inherit them.")
     ap.add_argument("--one-card", action="store_true",
                     help="Append the ONE HYPOTHESIS / THE ONLY TEST IS THE SUBMITTED CODE / THE "
                          "DEVELOPER IMPLEMENTS clause (see ONE_CARD). Composes with the others.")
@@ -222,7 +263,8 @@ def main() -> int:
         "goal": (GOAL.format(task=args.task)
                  + (ROLE_SPLIT if args.role_split else "")
                  + (DELIVER if args.deliver else "")
-                 + (ONE_CARD if args.one_card else "")),
+                 + (ONE_CARD if args.one_card else "")
+                 + (rules_clause(root) if args.enforce_rules else "")),
         "direction": "max",
         "editable_path": str(ws),
         "edit_surface": ["solver.py"],
@@ -258,7 +300,7 @@ def main() -> int:
                     # would let this arm optimise against the set it is graded on while the reference
                     # arm does not -- the champion is scored on test once, after the run.
                     "--subset", "train",
-                ],
+                ] + (["--enforce-rules"] if args.enforce_rules else []),
                 "timeout": args.timeout,
             }],
             "metric": {"kind": "stdout_json", "key": "speedup"},

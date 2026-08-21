@@ -140,6 +140,39 @@ def _walk_for_result(node, task: str) -> dict | None:
     return None
 
 
+def _rules_violation(root: Path, solver: Path) -> str:
+    """AlgoTune's own verdict on this candidate, or "" when it is clean.
+
+    Their validator, imported from their checkout — not a reimplementation and not a copied list.
+    The rule set is theirs to change; a second copy here would go stale in the direction that
+    silently permits, which is the direction that produces an incomparable number.
+
+    A validator that cannot be imported returns "" and says so on stderr: refusing to score every
+    node because their layout moved would turn an arena change into a campaign of zeros, and this
+    check is a fairness guarantee, not a safety boundary (the safety boundary is the probe's kernel
+    rung, which does not depend on it).
+    """
+    sys.path.insert(0, str(root))
+    try:
+        from AlgoTuner.security.code_validator import check_code_for_tampering
+    except Exception as exc:                    # noqa: BLE001 — see the docstring
+        print(f"looplab_eval: --enforce-rules asked for, but AlgoTune's validator did not import "
+              f"({exc!r}); scoring WITHOUT the rule check", file=sys.stderr)
+        return ""
+    finally:
+        if sys.path and sys.path[0] == str(root):
+            sys.path.pop(0)
+    try:
+        return str(check_code_for_tampering(solver.read_text(encoding="utf-8")) or "")
+    except SyntaxError as exc:
+        # Their validator re-raises a syntax error rather than reporting it, and a solver that does
+        # not parse is the EVALUATOR's failure to report, not a rules violation.
+        print(f"looplab_eval: solver does not parse ({exc}); leaving it to the evaluator",
+              file=sys.stderr)
+        return ""
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path,
@@ -162,6 +195,11 @@ def main() -> int:
                          "scoring every node on test would let this arm optimise against the graded "
                          "split while the other arm does not. Requires patch_eval_subset.py.")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
+    ap.add_argument("--enforce-rules", action="store_true",
+                    help="Run AlgoTune's OWN solver validator (AlgoTuner.security.code_validator) "
+                         "on the candidate before scoring, and refuse to score a violation. OFF by "
+                         "default: these are THIS arena's rules, not LoopLab's, and a LoopLab task "
+                         "that is not an AlgoTune arm must not inherit them.")
     args = ap.parse_args()
 
     root: Path = args.algotune_root.resolve()
@@ -174,6 +212,20 @@ def main() -> int:
     if not src.exists():
         print(json.dumps({"speedup": 0.0, "error": f"no solver at {src}"}))
         return 0
+
+    if args.enforce_rules:
+        violation = _rules_violation(root, src)
+        if violation:
+            # NOT a score of zero, and not a crash to repair: this candidate was never eligible.
+            # Arm A cannot produce such a solver at all — AlgoTune validates at EDIT time and simply
+            # refuses to write the file (`editor/editor_functions.py:1377`), so its agent learns the
+            # rule and loses nothing. Our Developer writes through LoopLab's own tools, which that
+            # validator never sees, so without this the two arms would be playing by different rules
+            # about what may be SUBMITTED — and a speedup obtained with a primitive the other arm was
+            # forbidden is not a comparable number.
+            print(json.dumps({"speedup": None, "rules_violation": violation,
+                              "error": f"rules_violation: {violation}"}))
+            return 2
 
     # A PER-INVOCATION model name, because LoopLab evaluates nodes CONCURRENTLY (`eval_parallel`).
     # With the fixed `--model LoopLab`, two nodes copied their solvers over one another in
