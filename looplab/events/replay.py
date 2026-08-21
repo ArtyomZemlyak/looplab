@@ -87,6 +87,7 @@ from looplab.events.types import (
     EV_NODE_CREATED, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
     EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
+    EV_APPLIED_PARAMS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
@@ -1264,6 +1265,53 @@ def _invalidate_completion_certificates(st: RunState, ctx: "_FoldCtx") -> None:
     st.confirmed_done = False
     ctx.best_confirmed = None
     _clear_approval(st)
+
+
+def _on_applied_params_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Apply a REPAIRED applied-params record to a node whose evaluation predates the live one.
+
+    THE RULE, and it is the whole safety of the mechanism: **a live record always wins.** This
+    handler writes only where `metric_provenance.applied_params` is absent or None. A backfill is a
+    reconstruction — it re-reads the workdir long after the eval, on a tree the eval may have
+    rewritten — and a reconstruction may never overwrite a measurement made while the run was
+    happening. That also makes re-running the backfill idempotent by CONSTRUCTION rather than by a
+    check that could drift: the second pass finds the record it wrote and declines.
+
+    A node with no `metric_provenance` at all gets none: this event repairs what a metric SAYS about
+    itself, and a node with no metric has nothing to say. `applied_params: null` with an
+    `unrecoverable` reason IS a real answer and is stored as one — "the workdir is gone, so what ran
+    cannot be recovered" must be legible, because the alternative is a reader falling back to the
+    proposal and calling it fact.
+
+    Every write carries `backfilled: true` and the reason it was possible. No surface may present a
+    reconstruction as a measurement, and the flag is how a surface tells them apart.
+    """
+    # `_coerce_node_id` takes the ROW, not the value — it is the fold's own guard against a forged
+    # `{"node_id": [999]}` (unhashable), a bool (`int(True) == 1` would match node 1) and a
+    # non-integral float, and passing it a bare value silently defeats all three.
+    node_id = _coerce_node_id(d)
+    node = st.nodes.get(node_id) if node_id is not None else None
+    if node is None or not isinstance(node.metric_provenance, dict):
+        return
+    if node.metric_provenance.get("applied_params") is not None:
+        return                      # a LIVE record. Never overwritten. This is the idempotence.
+    record = d.get("applied_params")
+    unrecoverable = str(d.get("unrecoverable") or "").strip()
+    if isinstance(record, dict) and record:
+        stamped = dict(record)
+        stamped["backfilled"] = True
+        stamped["backfilled_at"] = d.get("read_at")
+        stamped["backfilled_from"] = str(d.get("workdir_digest") or "")[:64]
+    elif unrecoverable:
+        # NOT an empty record. An empty one is a claim ("the configuration said nothing about
+        # anything you declared"); this is the absence of an answer, and the two are opposite facts.
+        stamped = {"backfilled": True, "backfilled_at": d.get("read_at"),
+                   "unrecoverable": unrecoverable[:200]}
+    else:
+        return
+    prov = dict(node.metric_provenance)
+    prov["applied_params"] = stamped
+    node.metric_provenance = prov
 
 
 def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3921,6 +3969,7 @@ _HANDLERS = {
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
+    EV_APPLIED_PARAMS_BACKFILLED: _on_applied_params_backfilled,
     EV_RESUME_REQUESTED: _on_resume_requested,
     EV_RESUME_SERVED: _on_resume_served,
     EV_RESTART: _on_restart,

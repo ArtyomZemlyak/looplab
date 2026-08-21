@@ -76,6 +76,26 @@ EV_NODE_REPAIRED = "node_repaired"
 # st.nodes, excluded from selection). Written offline by the machine-runs boss tool while the engine
 # is stopped (delete refuses on a live run); irreversible physical purge is a separate explicit
 # compaction, never an ordinary domain command.
+# THE RECORD REPAIRED IN PLACE, for nodes whose evaluation predates `metric_provenance.
+# applied_params` (merged 2026-08-20). Those rows keep the PROPOSAL — `Idea.params` — and every
+# reader downstream presents it as the parameters that ran. Under `params_style: "none"` the engine
+# applies nothing and the Developer realises the idea by EDITING THE REPO, so the two legitimately
+# differ: measured over every run on disk, 41 of 457 comparisons (9.0%), 18 of them on nodes that
+# produced a metric. The e5 champion at 0.793426 is recorded as batch 8192 / 15 epochs and ran
+# batch 512 / 3 epochs — and that record is what put 8192 into the v3 task goal, which then died
+# with three nodes and no metric.
+#
+# APPEND-ONLY, like `node_tombstoned` above and `concept_aliases.jsonl` beside it: nothing rewrites
+# a historical row. The fold applies this at READ time and ONLY where the node has no applied-params
+# record of its own — a live record always wins, so a backfill can never overwrite a measurement
+# the engine made while the eval was running. Re-running the backfill is therefore idempotent by
+# construction rather than by a check.
+#
+# Data: {"node_id", "generation", "applied_params" | null, "unrecoverable": str, "read_at": float,
+#        "workdir_digest": str}. `applied_params: null` WITH an `unrecoverable` reason is a real
+# answer and is folded as one — "the workdir is gone, so what ran cannot be recovered" is the honest
+# record, and it is exactly the row that must not be mistaken for "the proposal is what ran".
+EV_APPLIED_PARAMS_BACKFILLED = "applied_params_backfilled"
 EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"

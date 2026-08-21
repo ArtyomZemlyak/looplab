@@ -1085,5 +1085,3 @@ def claims_cmd(
     for c in claims[: max(0, top)]:
         typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_maturity_label(c)} "
                    f"[{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
-
-
