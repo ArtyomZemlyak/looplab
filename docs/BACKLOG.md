@@ -504,6 +504,19 @@ site that proves it is open.
     "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
     backend. `adapters/` holds classification / dataset / mlebench{,_real} / regression / repo /
     timeseries / toytask and nothing else.
+    **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds, the enumeration drifted.** No `autogluon`,
+    `darts` or `sktime` appears anywhere under `looplab/`, so the templated forecaster IS still the
+    forecaster; there is no tabular-AutoML adapter (only tabular PROFILING in
+    `adapters/dataset_task.py`) and no multimodal one. But "and nothing else" is now false —
+    `adapters/` also holds kaggle_dl, mlebench_grade, mlebench_prep, repo_developer,
+    repo_write_tools and tasks. Only the timeseries half gets a marker: the missing-adapter half has
+    no falsifier that isn't a filename guess, and a proof that names a FILE THAT MIGHT ARRIVE UNDER
+    ANOTHER NAME is the mechanism-not-property shape this file was corrected for nine times.
+    OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
+    forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
+    capability; retire this when a real backend is imported.
+    proof:`absent:import autogluon@looplab/adapters/timeseries.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands.]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
@@ -520,6 +533,18 @@ site that proves it is open.
     `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
     `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
     (Notebook export DID ship: `events/notebook.py::champion_notebook`, `export_cmds.py:108`.)
+    **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds; the entry's own grep claim is literally false,
+    and finding out why was the point.** `export_run` and `champion_notebook` are where the entry
+    says (the CLI line moved to `export_cmds.py:101`/`:114`), and there is no connector class:
+    `DataConnector` / `class *Connector` is 0 hits. But "grep for `autolog` across `looplab/` is
+    empty" is WRONG — there is exactly one hit, `core/config.py:218`, inside the word **tau·tolog·y**.
+    Nothing is broken by that; what would have been broken is the obvious falsifier. `absent:autolog`
+    reads FALSE as shipped, which the guard would have reported as an item already fixed — an
+    open item closed by an English word. The pin is bound to the CALL instead.
+    OPEN[mlflow-is-export-not-autolog] MLflow receives a run only when a human runs the export
+    command, so nothing is tracked while a run is in flight; retire this when autologging is wired.
+    proof:`absent:mlflow.autolog@looplab/events/mlflow_export.py`
+    *Mutated before it was written:* True as shipped, False the moment that call lands.]
 17. **The MCTS tree has no LLM value estimate and no reflection (P2, M).**
     `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
     the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
@@ -536,6 +561,19 @@ site that proves it is open.
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
     ship (`engine/widths.py::EVAL_WIDTH_MAX` enforced at `orchestrator.py:2966`;
     `engine/proposal_cues.py:425::per_experiment_gpu_budget`).
+    **[RE-DERIVED 2026-08-21 — HOLDS, and every line citation in it is now wrong.** `ray`, `celery`
+    and `dask` are 0 hits across `looplab/`, so eval parallelism is still one process's task group.
+    The corrections, since this entry is the reason the house style forbids `file.py:NNN`: the
+    limiter is `evaluate.py::LoopEvaluator._evaluate`, not `:1375`; the task groups are around
+    `orchestrator.py:4412`/`:4539`, not `:1503,2383`; `EVAL_WIDTH_MAX` is enforced at
+    `orchestrator.py:2885`, not `:2966`; and `per_experiment_gpu_budget` is DEFINED in
+    `engine/widths.py`, merely imported by `proposal_cues.py`. Four dead citations in one entry, the
+    exact rot `claimpin.LINE_CITATION` was written to refuse.
+    OPEN[eval-parallelism-is-in-process-only] evals are bounded by one box's task group, so the
+    second H200 is the ceiling and a queued node waits rather than dispatching; retire this when a
+    cross-machine dispatcher exists.
+    proof:`absent:import ray@looplab/engine/evaluate.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands.]
 19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
     **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
     The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
