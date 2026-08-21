@@ -264,6 +264,37 @@ site that proves it is open.
    `-v {root}:/work` with no `:ro`. Windows tree-kill is `taskkill /F /T` (`sandbox.py:1275`), not an
    atomic Job Object. Partially covered by newer, independent rungs — but `Settings.landlock` is OFF
    by default (`runtime/landlock.py`) and `runtime/read_fence.py` only sees `open` inside CPython.
+   **[RE-DERIVED 2026-08-21 — TWO OF THESE CLAIMS ARE NOW FALSE, and a third was DECIDED rather
+   than forgotten.**
+   *(a) `--read-only` + tmpfs SHIPPED.* Eight occurrences of `--read-only` and five of `tmpfs` in
+   `runtime/sandbox.py`, with `READONLY_SCRATCH_DIRS` enumerating the writable scratch in one place
+   and `Settings.sandbox_readonly_rootfs` gating it. "Appears nowhere in the tree" is no longer a
+   statement about this tree.
+   *(b) `-v {root}:/work` WITHOUT `:ro` IS A DECISION,* and the code answers this entry directly:
+   "`/work` IS the node's workdir on the host … a `:ro` here does not harden anything, it deletes the
+   tier's output channel. The per-source `edit:false` enforcement that DOES exist is
+   `make_docker_wrap(binds=…)`'s `--mount …,readonly`, one mount per declared data/reference source,
+   which is the right granularity." Asking for `:ro` on `/work` is asking to delete the metric file
+   the engine reads back.
+   *(c) WHAT IS STILL LIVE is the narrow half:* the host-side fence ships opt-in
+   (`core/config.py`'s `landlock` default) and `runtime/read_fence.py` still only sees `open` inside
+   CPython — the schema row's own help says why, and names the retirement condition ("nobody has run
+   a ruleset through a real GPU eval").
+   *AND IT CARRIES NO `OPEN[…]` MARKER ON PURPOSE, which is itself worth recording.* Every marker in
+   this tree is `absent:<symbol>` over an identifier that WOULD EXIST once the item ships — the
+   index tracks a MISSING CAPABILITY. This item is a different shape: the capability exists and the
+   DEFAULT is the finding. `proof:` accepts only `absent:`/`present:`/`missing:` with a
+   whitespace-free literal (`_PROOF` is `\S+`), so `landlock: str = "off"` cannot be expressed, and
+   the one whitespace-free spelling in the tree (`Settings.landlock="off"`) sits in a COMMENT, which
+   `satisfied_only_by_prose` is there to reject. Forcing a marker here would have shipped exactly
+   the vacuous guard this repo found nine times in one day — one that names a mechanism rather than
+   a property. **So the gap is in the index's grammar, not in this entry:** a "wrong default" item
+   has no expressible falsifier today. That is the thing to fix before the remaining ranked entries
+   can be brought under the guard.
+   **The re-derivation is the finding, not the fix.** Three ranked entries were checked against the
+   tree on 2026-08-21 and none described it — #19 fixed six days earlier by the very symbol it
+   names, #6 standing on a rate this box cannot reproduce, and this one with two claims false. See
+   the note above §0.1.]
 8. **Nothing tests the append lock across real OS processes (P1, S).** Both other C4 halves landed —
    `Event.v` is enforced (`events/eventstore.py:166-168`, `UnsupportedEventVersionError`) and the
    append lock fails loud (`_interprocess_lock`, `eventstore.py:254-321`, raising
