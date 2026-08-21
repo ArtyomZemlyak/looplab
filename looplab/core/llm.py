@@ -584,6 +584,36 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
                 body["reasoning_effort"] = "medium" if mode == "on" else mode
         # st == "none": shape nothing (rely solely on `extra`)
     if extra:
+        # A CONTRADICTION, not an override. `extra` is merged by KEY, and a provider's own spelling
+        # of the effort knob is a DIFFERENT key from ours -- OpenRouter takes `reasoning.effort`
+        # where OpenAI takes `reasoning_effort` -- so an operator who sets the one in `extra`
+        # meaning "use medium" does not replace `llm_reasoning`, they ship both and let the provider
+        # pick. Measured 2026-08-20 on an AlgoTune run configured exactly that way: the request
+        # carried `reasoning_effort: high` beside `reasoning: {effort: medium}`, and two `propose`
+        # calls burned the FULL 65,536-token completion cap without emitting a tool call -- 889 s
+        # and 593 s, $0.019, both ERROR ("no tool_calls in response"), both retried. The operator's
+        # `medium` had never taken effect on any call in that run.
+        #
+        # Refusing beats picking a winner: which of the two the provider honours is its business and
+        # it is not documented, so a silent precedence rule here would be a guess presented as a
+        # setting. `ConfigRefusal` names both spellings and says to keep one -- and the fix is one
+        # word either way (`llm_reasoning="medium"`, or drop the key from `llm_reasoning_extra`).
+        # The clash is BETWEEN SPELLINGS, so comparing like keys finds nothing -- that was this
+        # guard's first cut and it detected exactly zero of the case it was written for. What
+        # matters is that BOTH sides name the depth AT ALL, whatever key each one uses.
+        DEPTH_KEYS = ("reasoning", "reasoning_effort", "chat_template_kwargs", "thinking")
+        ours = [k for k in DEPTH_KEYS if k in body]
+        theirs = [k for k in DEPTH_KEYS if k in extra]
+        clash = sorted(set(ours) | set(theirs)) if (ours and theirs) else []
+        if clash and mode:
+            from looplab.core.errors import ConfigRefusal
+            raise ConfigRefusal(
+                f"llm_reasoning={mode!r} and llm_reasoning_extra both set the reasoning depth "
+                f"({' + '.join(clash)}). "
+                "They are DIFFERENT request keys, so the second does not override the first -- both "
+                "are sent and the provider chooses. Set the depth in ONE place: either "
+                "llm_reasoning, or the provider's own key in llm_reasoning_extra with "
+                "llm_reasoning=\"\".")
         body = {**body, **extra}
     return body
 

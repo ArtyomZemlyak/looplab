@@ -108,7 +108,17 @@ export LOOPLAB_LLM_TEMPERATURE='0.0'
 # closing `provider` and shipped malformed JSON). Measured 2026-08-20 -- arm B died at
 # `SettingsError: error parsing value for field "llm_reasoning_extra"`, which is the loud version;
 # the default's silent corruption is the half that would have travelled into a campaign.
-DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false},"reasoning":{"effort":"medium"}}'
+# The depth is NOT in here. It used to be, as `reasoning.effort` -- OpenRouter's spelling and a
+# DIFFERENT request key from the `reasoning_effort` that `Settings.llm_reasoning` emits, so both
+# were sent and the provider chose. The `medium` this campaign believed it ran at never took
+# effect on a single call. Measured 2026-08-20: two `propose` calls burned the FULL 65,536-token
+# completion cap without emitting a tool call -- 889 s and 593 s, $0.019, both ERROR ("no
+# tool_calls in response"), both retried. `core/llm.py::reasoning_body` now REFUSES that pair, so
+# the split below is enforced at the client rather than remembered here.
+export LOOPLAB_LLM_REASONING="${LOOPLAB_LLM_REASONING:-medium}"
+# EXTRA carries only what is NOT the depth: the provider pin. Unpinned, one slug reached two
+# different fp4 providers and returned 96/17/96 completion tokens for one prompt.
+DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false}}'
 export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-$DEFAULT_REASONING_EXTRA}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
 export PYTHONPATH="$REPO"
