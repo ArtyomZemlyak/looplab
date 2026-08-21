@@ -301,6 +301,7 @@ _LAYOUT = {
     "router_wiring": "serve",   # router mount order + the late-bound `srv.*_fn` registry (doc 25 XP-05)
     "run_deletion": "core",
     "run_reset": "core",
+    "node_diff": "tools",   # what actually differs between two nodes: code, params proposed vs applied
     "run_tools": "tools",
     "machine_runs_tools": "tools",
     "sandbox": "runtime",
