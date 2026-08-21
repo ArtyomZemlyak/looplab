@@ -269,6 +269,12 @@ def _missing_paths_feedback(missing: list[str]) -> str:
             "given. (If a path is produced by an EARLIER stage, reference it relatively.)")
 
 
+#: The pipeline DECLARATION `declare_stages` writes. It is not a candidate: it says how to
+#: evaluate one. Named once so the rule that a build must produce actual code
+#: (`repo_developer.py::empty_build_refusal`) cannot drift from the writer.
+STAGES_MANIFEST = "looplab_stages.json"
+
+
 class RepoWriteTools:
     """Write side of the in-house repo developer (the LLM authors/edits files via tools). Writes are
     COLLECTED into `self.files` (path -> content) rather than applied to disk — the orchestrator
@@ -468,7 +474,7 @@ class RepoWriteTools:
         collision = self.manifest_collision_refusal(clean)
         if collision is not None:
             return collision
-        self.files["looplab_stages.json"] = json.dumps({"stages": clean}, indent=1)
+        self.files[STAGES_MANIFEST] = json.dumps({"stages": clean}, indent=1)
         chain = " → ".join(s["name"] for s in clean) + " → score (operator cmd)"
         return f"declared {len(clean)} preceding stage(s): {chain}"
 

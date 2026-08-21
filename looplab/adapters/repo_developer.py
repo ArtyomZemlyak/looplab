@@ -397,10 +397,42 @@ def empty_build_refusal(*, error, base, base_deleted, files, deleted) -> str:
     here too would charge one event under two vocabularies that mean different things: "nothing was
     built" and "nothing was CHANGED".
     """
-    if error is None and base is None and base_deleted is None and not files and not deleted:
-        return (f"{DEVELOPER_ERROR_PREFIX} the implement session ended without writing or "
-                "deleting a single file, so there is no candidate to evaluate. The working set "
-                "is empty and the workdir would hold the untouched template.)")
+    if error is not None or base is not None or base_deleted is not None:
+        return ""
+    # The manifest is not a candidate. `declare_stages` writes `looplab_stages.json` -- the
+    # DECLARATION of how to evaluate an experiment -- through a different tool from the
+    # `write_file`/`edit_file` that produce the experiment itself, so a working set holding only it
+    # is a build that planned an evaluation and never wrote the thing to evaluate.
+    #
+    # This clause is the 2026-08-21 correction, and the run that forced it is the reason the rule
+    # cannot just be "did anything get written". A Gemini-3.7-flash run reached FIVE nodes -- the
+    # first arm-B run ever to evaluate anything -- and every one carried exactly one file, a
+    # 200-290 byte manifest declaring a single stage `python -c "print('Ready')"` with
+    # `expect.assert: "Check solver environment readiness"`. `solver.py` was the untouched
+    # `raise NotImplementedError` template in all five. Each evaluated honestly in 12-17 s and
+    # recorded 0.0, at $0.63 of a $1.00 budget.
+    #
+    # So the empty-set check passed a DECOY: a file that satisfies "something was written" while
+    # containing no implementation. A rule keyed on the count of files is one filename away from
+    # being satisfied by any placeholder, which is why this one is keyed on WHICH file and names
+    # the manifest from its own writer (`repo_write_tools.STAGES_MANIFEST`) rather than repeating
+    # the literal.
+    #
+    # RESIDUAL, stated rather than hidden: a fresh build whose genuine intent is "run the repo's
+    # existing code under a different pipeline" is refused here too. Nothing on this corpus does
+    # that -- a fresh build exists to produce a candidate, and re-declaring a pipeline over pristine
+    # code measures the baseline, not an experiment -- but it is the case that would need an
+    # exemption if one ever appears, and it should arrive as a declaration rather than as a
+    # loosening of this predicate.
+    from looplab.adapters.repo_write_tools import STAGES_MANIFEST
+    authored = [name for name in (files or {}) if name != STAGES_MANIFEST]
+    if not authored and not deleted:
+        only_manifest = bool(files)
+        return (f"{DEVELOPER_ERROR_PREFIX} the implement session ended having written "
+                + ("only the stage manifest" if only_manifest else "nothing at all")
+                + ", so there is no candidate to evaluate -- "
+                + ("declaring how to run an experiment is not writing one; " if only_manifest else "")
+                + "the workdir would hold the untouched template.)")
     return ""
 
 
