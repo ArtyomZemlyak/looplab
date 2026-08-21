@@ -331,17 +331,28 @@ site that proves it is open.
    (`core/config.py`'s `landlock` default) and `runtime/read_fence.py` still only sees `open` inside
    CPython — the schema row's own help says why, and names the retirement condition ("nobody has run
    a ruleset through a real GPU eval").
-   *AND IT CARRIES NO `OPEN[…]` MARKER ON PURPOSE, which is itself worth recording.* Every marker in
+   *IT NOW CARRIES A MARKER, and getting there was the actual work.* Every other marker in
    this tree is `absent:<symbol>` over an identifier that WOULD EXIST once the item ships — the
-   index tracks a MISSING CAPABILITY. This item is a different shape: the capability exists and the
-   DEFAULT is the finding. `proof:` accepts only `absent:`/`present:`/`missing:` with a
-   whitespace-free literal (`_PROOF` is `\S+`), so `landlock: str = "off"` cannot be expressed, and
-   the one whitespace-free spelling in the tree (`Settings.landlock="off"`) sits in a COMMENT, which
-   `satisfied_only_by_prose` is there to reject. Forcing a marker here would have shipped exactly
-   the vacuous guard this repo found nine times in one day — one that names a mechanism rather than
-   a property. **So the gap is in the index's grammar, not in this entry:** a "wrong default" item
-   has no expressible falsifier today. That is the thing to fix before the remaining ranked entries
-   can be brought under the guard.
+   index tracks a MISSING CAPABILITY, and this item is a wrong DEFAULT, where the capability
+   already exists. The first marker written for it was REJECTED by the guard as malformed:
+   `proof:` read only a whitespace-free literal, so `landlock: str = "off"` was inexpressible, and
+   the sole whitespace-free spelling in the tree sits in a COMMENT that `satisfied_only_by_prose`
+   rejects. Rather than force one — which would have shipped the vacuous guard this repo found nine
+   times in a day — the SCANNER was fixed: `looplab/core/claimpin.py::PROOF` is now the twin of
+   `DECIDED`, both indexes read one grammar, and `line:` plus the backtick-quoted form are
+   admissible.
+   *THE FIRST FALSIFIER WRITTEN WITH THAT NEW GRAMMAR WAS VACUOUS, and a mutation caught it.*
+   `line:landlock&&"off"@core/config.py` reads True even with the default flipped to `"on"`, because
+   `config.py:2201` carries `("landlock", ("off", "enforce"))` — the ALLOWED-VALUES tuple, which
+   names both literals on one line and never changes. That is the exact defect `line:` was invented
+   to fix ("this string occurs" vs "this string is SAID ABOUT that subject") recurring one level up:
+   binding two literals to one LINE does not help when a DIFFERENT line legitimately carries both.
+   The shipped falsifier is the whole assignment, which only the default line can satisfy — verified
+   by flipping the default and watching it go False.
+   OPEN[landlock-is-opt-in-by-default] an untrusted eval gets the host-side filesystem fence only
+   when an operator asks for it, so the container rungs above carry the default alone; retire this
+   when a ruleset has been through a real GPU eval and the default flips.
+   proof:`present:landlock: str = "off"@looplab/core/config.py`
    **The re-derivation is the finding, not the fix.** Three ranked entries were checked against the
    tree on 2026-08-21 and none described it — #19 fixed six days earlier by the very symbol it
    names, #6 standing on a rate this box cannot reproduce, and this one with two claims false. See

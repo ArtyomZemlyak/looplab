@@ -77,7 +77,13 @@ CLAIM_MARKER = re.compile(r"\bCLAIM\[([a-z0-9][a-z0-9-]{2,60})\]")
 # spaces in it — `mount: bool = True` is the line that decides whether repo data is copied or
 # symlinked, and a predicate grammar that cannot quote it forces the author to pick a weaker literal,
 # which is the satisfiable-by-anything pin this convention exists to refuse.
-_KINDS = "present:|absent:|missing:|line:"
+# The vocabulary, once, as BOTH a regex alternation and a tuple. `tests/test_claim_pins.py` and
+# `tests/test_open_item_index.py` each carried their own `startswith((...))` list of kinds beside
+# their own regex, so admitting `line:` to the scanners on 2026-08-21 left the open index READING a
+# predicate its own well-formedness check then rejected — the guard caught it, which is the system
+# working, but the second spelling is why there was anything to catch.
+KINDS: tuple[str, ...] = ("present:", "absent:", "missing:", "line:")
+_KINDS = "|".join(KINDS)
 DECIDED = re.compile(rf"decided:(?:`((?:{_KINDS})[^`]+)`|((?:{_KINDS})\S+))")
 # THE SAME GRAMMAR FOR THE OPEN-ITEM INDEX, and it lives here for the reason this module exists at
 # all: `predicate_holds` was moved out of the two guards because "two evaluators would eventually

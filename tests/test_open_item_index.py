@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 
 from looplab.core.claimpin import (
+    KINDS as _KNOWN_KINDS,
     PROOF as _PROOF_GRAMMAR,
     predicate_holds,
     proof_predicate,
@@ -125,8 +126,9 @@ def test_every_open_marker_is_well_formed():
                 bad.append(f"{rel}: OPEN[{slug}] carries no `proof:` clause within {_WINDOW} chars")
                 continue
             for pred in proof_predicate(proof).split("+"):
-                if not pred.startswith(("absent:", "present:", "missing:")):
-                    bad.append(f"{rel}: OPEN[{slug}] predicate {pred!r} is not absent:/present:/missing:")
+                if not pred.startswith(_KNOWN_KINDS):
+                    bad.append(f"{rel}: OPEN[{slug}] predicate {pred!r} is not one of "
+                               + "/".join(_KNOWN_KINDS))
         else:
             measured = _MEASURED.search(window)
             if not measured:
