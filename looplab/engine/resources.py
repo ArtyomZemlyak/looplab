@@ -781,6 +781,20 @@ class ResourceSchedulingMixin:
         if policy == "off" or not (spec or {}).get("editables"):
             self._read_fence_cache = None
             return None
+        # OPEN[read-fence-allow-lists-the-dir-holding-itself]
+        # proof:present:allow=[str(self.run_dir)]@looplab/engine/resources.py
+        # The fence is INSTALLED at
+        # `<run_dir>/.looplab-fence/sitecustomize.py` and the run dir is what this line allow-lists,
+        # so the fence's own source sits inside the region it exempts. The fence governs READS; an
+        # eval writes its outputs into the run dir by design, so a node process can open that file
+        # for writing and neutralise the fence for every process the run starts afterwards. Found
+        # 2026-08-21 by an agent researching probe confinement, driven end to end there:
+        # refuse -> `open(fence, "w")` -> the same read succeeds. It re-enables the incident the
+        # fence exists for (a node scoring a HUMAN's checkpoint, `rubertlite-dr-unified-v6` node 4)
+        # and it applies to EVERY run with `read_fence="deny"`, not only to a benchmark arm.
+        # The fix is not to drop the allow entry -- a run may legitimately live inside the repo it
+        # edits -- but to put the fence source where the allow entry does not reach, or to make the
+        # generated file unwritable to the process it fences (the kernel rung, not the hook).
         roots, allow, dropped, swallowed = read_fence.fence_inputs(
             spec, allow=[str(self.run_dir)])
         try:

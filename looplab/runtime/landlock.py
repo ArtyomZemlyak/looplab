@@ -513,6 +513,104 @@ def _looplab_no_mutation_ruleset():
 NO_MUTATION_FUNCTION = "_looplab_no_mutation_ruleset"
 
 
+# --------------------------------------------------------------------------- the READ half
+# The mirror image of the block above, and it exists for a threat the write rung does not touch:
+# a BENCHMARK CONTESTANT reading the grader. Measured 2026-08-21 on a live AlgoTune arm -- of 119
+# `run_probe` calls in one task, 116 reached outside the workdir by absolute path and read the
+# evaluation bridge, the scorer, the cached reference timings and the dataset directory. The read
+# FENCE could not have stopped it and was not failing: `read_fence` is a deny-prefix on the
+# operator's EDITABLE tree, and the grader is not under one. "May this node read the operator's
+# source" and "may this contestant read the answer key" are different questions, and only the second
+# one needs an allow-list.
+#
+# Why the kernel and not the audit hook: the hook covers `open` inside ONE interpreter. This covers
+# `ctypes` into libc, a native reader, a syscall CPython does not audit, and -- the one that decides
+# it -- a child across `execve`. Verified against all of those, including a freshly exec'd
+# `python -I -S -E` with every fence-delivery mechanism stripped.
+#
+# TWO THINGS IT DOES NOT DO, and both must be said wherever this is turned on:
+#   * ABI 2 has no metadata right, so `os.stat` still reports existence, size and mtime. BYTES are
+#     confined; NAMES are not. For benchmark integrity that is the right trade -- an answer key is
+#     bytes -- but it is not invisibility.
+#   * It cannot make a path unreachable that the allow-list contains. If the grader is installed
+#     INTO site-packages, granting site-packages grants the grader. Path confinement cannot separate
+#     two things at the same path; only not putting them there can (the operator's E.1).
+READ_CONFINE_HANDLED = FS_READ_FILE | FS_READ_DIR
+
+_READ_CONFINE_SOURCE = '''\
+def _looplab_read_confine(allow):
+    """Kernel rung: read only under `allow`, for this process and everything it starts.
+
+    `allow` is a tuple of paths. Returns `(reason_or_None, skipped)` where `skipped` is
+    `[(path, why)]` -- under an ALLOW-list a path that cannot be opened contributes no rule, which
+    means the kernel denies it. That list is never swallowed: measured upstream, 211 candidate rules
+    produced 55 accepted ones, i.e. 156 silent denials, and a silent denial here reads to the caller
+    as a broken interpreter rather than as a missing rule.
+    """
+    import ctypes
+    import os
+
+    class _Attr(ctypes.Structure):
+        _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+    class _Beneath(ctypes.Structure):
+        _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
+
+    try:
+        lib = ctypes.CDLL(None, use_errno=True)
+    except Exception as exc:                       # noqa: BLE001 — no libc reachable (rare, stated)
+        return ("libc unavailable: %%s" %% (exc,), [])
+    attr = _Attr(handled_access_fs=%(handled)d)
+    ctypes.set_errno(0)
+    fd = lib.syscall(ctypes.c_long(%(create)d), ctypes.byref(attr),
+                     ctypes.c_size_t(ctypes.sizeof(attr)), ctypes.c_uint32(0))
+    if fd < 0:
+        return (("landlock_create_ruleset failed: %%s (Landlock needs Linux 5.13+ with "
+                 "CONFIG_SECURITY_LANDLOCK=y)" %% os.strerror(ctypes.get_errno())), [])
+    skipped = []
+    try:
+        for _path in allow:
+            try:
+                pfd = os.open(str(_path), os.O_PATH | os.O_CLOEXEC)
+            except OSError as exc:
+                skipped.append((str(_path), exc.strerror or str(exc)))
+                continue
+            try:
+                rule = _Beneath(allowed_access=%(handled)d, parent_fd=pfd)
+                ctypes.set_errno(0)
+                if lib.syscall(ctypes.c_long(%(add)d), ctypes.c_int(fd), ctypes.c_uint32(1),
+                               ctypes.byref(rule), ctypes.c_uint32(0)) != 0:
+                    skipped.append((str(_path), os.strerror(ctypes.get_errno())))
+            finally:
+                os.close(pfd)
+        ctypes.set_errno(0)
+        if lib.prctl(ctypes.c_int(38), ctypes.c_ulong(1), ctypes.c_ulong(0),
+                     ctypes.c_ulong(0), ctypes.c_ulong(0)) != 0:   # PR_SET_NO_NEW_PRIVS
+            return ("prctl(PR_SET_NO_NEW_PRIVS) failed: %%s" %% os.strerror(ctypes.get_errno()),
+                    skipped)
+        ctypes.set_errno(0)
+        if lib.syscall(ctypes.c_long(%(restrict)d), ctypes.c_int(fd), ctypes.c_uint32(0)) != 0:
+            return ("landlock_restrict_self failed: %%s" %% os.strerror(ctypes.get_errno()), skipped)
+    finally:
+        os.close(fd)
+    return (None, skipped)
+'''
+
+READ_CONFINE_FUNCTION = "_looplab_read_confine"
+
+
+def read_confine_source() -> str:
+    """Source defining `READ_CONFINE_FUNCTION` — the read allow-list rung, self-contained.
+
+    Spliced rather than imported for `no_mutation_source`'s reason: the launcher runs in the probe's
+    own interpreter, which may not have this package importable, and a hand-copied constant does not
+    crash — it silently produces a different ruleset."""
+    return _READ_CONFINE_SOURCE % {"handled": READ_CONFINE_HANDLED,
+                                   "create": _SYS_LANDLOCK_CREATE_RULESET,
+                                   "add": _SYS_LANDLOCK_ADD_RULE,
+                                   "restrict": _SYS_LANDLOCK_RESTRICT_SELF}
+
+
 def no_mutation_source() -> str:
     """Source defining `NO_MUTATION_FUNCTION` — the deny-every-mutation kernel rung, self-contained.
 

@@ -384,7 +384,7 @@ if _LL_REASON:
         "LOOPLAB probe: the kernel no-write rung could not be applied (%%s). The audit hook and "
         "RLIMIT_FSIZE 0 still hold, so nothing can put BYTES in a file, but a native writer "
         "(pyarrow/h5py/ctypes) can still CREATE an empty one.\\n" %% (_LL_REASON,))
-# The probe's cwd is its disposable workspace replica, so a staged module must be importable by the
+%(read_rung)s# The probe's cwd is its disposable workspace replica, so a staged module must be importable by the
 # name the Developer knows it by. `python <launcher>` puts the LAUNCHER's directory on sys.path, not
 # the cwd, and without this `import train` fails for a file the model can see with os.listdir().
 sys.path.insert(0, os.getcwd())
@@ -427,7 +427,60 @@ except BaseException:
 '''
 
 
-def render_launcher(program_path: str) -> str:
+# The READ rung, spliced ONLY when a caller asks for confinement. Kept out of `_LAUNCHER`
+# rather than left inert inside it so that a probe nobody confined renders the byte-identical
+# launcher it always did -- the same rule `_system_body` follows for `developer_probe=False`.
+_READ_RUNG = '''\
+%(landlock_read)s
+# THE READ RUNG. Only when the caller asked for it (`confine_reads`), and then it FAILS CLOSED —
+# unlike the write rung above, which degrades with a stated limit. The asymmetry is the point: the
+# write rung is one of three, so losing it narrows a guarantee that still partly holds; this is the
+# ONLY thing standing between a benchmark contestant and the grader, and a probe that runs without
+# it produces a number nobody can defend. A caller that has not asked for confinement is unaffected.
+#
+# The allow-list is derived HERE, inside the probe's own interpreter, not templated from the parent:
+# the parent may be a different interpreter with a different prefix, and an allow-list computed for
+# the wrong python denies python itself. Measured while building this: allowing the PARENT's
+# `sys.prefix` left numpy/scipy/sklearn at PermissionError, with nothing to say why.
+_LL_READ_EXTRA = %(read_allow_extra)r
+if _LL_READ_EXTRA is not None:
+    import site as _ll_site
+    import sysconfig as _ll_sysconfig
+
+    # The interpreter, plus the system directories every CPython needs to start and to load a
+    # shared library. They are here rather than left to the caller because a forgotten path under an
+    # allow-list is a SILENT DENIAL that reads as a broken interpreter: measured while building this,
+    # omitting `/opt` made python itself unopenable, and omitting these made `import numpy` an
+    # ImportError with nothing to say why. None of them is a secret; the grader is not under them.
+    _ll_allow = {os.getcwd(), sys.prefix, sys.base_prefix, os.path.dirname(sys.executable),
+                 _ll_sysconfig.get_paths().get("stdlib") or "",
+                 _ll_sysconfig.get_paths().get("purelib") or "",
+                 "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt", "/dev", "/proc/self"}
+    for _fn in (_ll_site.getsitepackages, _ll_site.getusersitepackages):
+        try:
+            _got = _fn()
+        except Exception:                       # noqa: BLE001 — absent in some venvs; prefixes cover it
+            continue
+        _ll_allow.update([_got] if isinstance(_got, str) else _got)
+    _ll_allow.update(_LL_READ_EXTRA)
+    _ll_reason, _ll_skipped = %(landlock_read_fn)s(sorted(p for p in _ll_allow if p))
+    if _ll_reason:
+        sys.stderr.write(
+            "LOOPLAB probe: read confinement was REQUIRED and could not be applied (%%s). Refusing "
+            "to run: without it this surface can read the evaluation harness, and a result produced "
+            "beside a readable grader is not a result.\\n" %% (_ll_reason,))
+        sys.exit(3)
+    if _ll_skipped:
+        # A skip under an allow-list IS a denial. Naming it is the difference between "the
+        # interpreter is broken" and "add this path": upstream measured 211 candidates -> 55 rules,
+        # i.e. 156 silent denials, and that is what this line exists to make loud.
+        sys.stderr.write("LOOPLAB probe: read allow-list skipped %%d path(s), which the kernel now "
+                         "DENIES: %%s\\n" %% (len(_ll_skipped), _ll_skipped))
+
+'''
+
+
+def render_launcher(program_path: str, read_allow: Optional[tuple] = None) -> str:
     """The generated launcher source for one probe. Split out so the boundary can be read, diffed
     and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess.
 
@@ -442,7 +495,13 @@ def render_launcher(program_path: str) -> str:
                         # reorders a table is a diff nobody can read.
                         "mutations": tuple(sorted(read_fence.MUTATION_EVENTS)),
                         "landlock": landlock.no_mutation_source(),
-                        "landlock_fn": landlock.NO_MUTATION_FUNCTION}
+                        "landlock_fn": landlock.NO_MUTATION_FUNCTION,
+                        # Spliced only when confinement is asked for, so a launcher that was not
+                        # asked for it is byte-identical to what it has always been.
+                        "read_rung": ("" if read_allow is None else _READ_RUNG % {
+                            "landlock_read": landlock.read_confine_source(),
+                            "landlock_read_fn": landlock.READ_CONFINE_FUNCTION,
+                            "read_allow_extra": tuple(read_allow)})}
 
 
 class DevProbeTools:
