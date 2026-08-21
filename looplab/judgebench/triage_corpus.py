@@ -709,6 +709,14 @@ def extract_run(run_dir) -> list:
         data = event.get("data") or {}
         seq = event.get("seq")
         error = str(data.get("error_in") or data.get("error") or "")
+        # THE RECORD'S OWN WIDER WINDOW, when the row has one. `error_in` is the 500-character
+        # PROMPT tail and always has been; `error_evidence` is the column the engine started
+        # stamping beside it so the record would stop being thinner than what the classifier read.
+        # Absent on every row written before that, which is why it is read with `or ""` and kept in
+        # its own field rather than merged into `error`: a bench that silently substituted one for
+        # the other would report a window change as a rule change, which is the exact confusion the
+        # `frozen` / `frozen-widened` arms exist to prevent.
+        error_evidence = str(data.get("error_evidence") or "")
         span = triage.get((node, attempt))
         span_attrs = (span or {}).get("attributes") or {}
         recorded = data.get("reason")
@@ -791,6 +799,13 @@ def extract_run(run_dir) -> list:
                 "at_classification": {
                     "stderr_tail": at_classification,
                     "stderr_tail_chars": len(error),
+                    # The durable wide window, "" when the row predates it. Sits HERE and not in
+                    # `on_demand` because it costs no fetch — it is on the row — and the split this
+                    # file draws is "what could be read without looking further", not "how many
+                    # characters". A row that has it was genuinely better recorded, and that is a
+                    # different fact from a diagnostician having gone and looked.
+                    "stderr_evidence": _redact(error_evidence),
+                    "stderr_evidence_chars": len(error_evidence),
                     "exit_code": (stage_row or {}).get("exit_code"),
                     "failed_stage": stage,
                     "failed_stage_status": (stage_row or {}).get("status"),

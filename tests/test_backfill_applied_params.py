@@ -45,7 +45,7 @@ _V8 = _RUNS / "rubertlite-dr-unified-v8"
 
 
 def _state(run_dir: Path):
-    return fold(EventStore(str(run_dir / "events.jsonl")).read_all())
+    return fold(_as_shipped(EventStore(str(run_dir / "events.jsonl")).read_all()))
 
 
 # ---------------------------------------------------------------- the fold rule, driven directly
@@ -60,11 +60,36 @@ def _fold_with(base_rows, backfill_row):
     return fold(list(base_rows) + [_Ev(EV_APPLIED_PARAMS_BACKFILLED, backfill_row)])
 
 
+def _as_shipped(rows):
+    """The run's rows with every backfill event REMOVED — the record as the engine wrote it.
+
+    THESE TESTS USED TO READ THE LIVE RUN DIRECTORY AND BROKE THE DAY IT WAS REPAIRED, which is
+    exactly right of them and exactly wrong of me: `backfill-applied-params --apply` is a supported
+    operation, and a suite that goes red because a record was legitimately repaired is measuring the
+    directory rather than the code. Stripping the rows this module writes gives every test below a
+    stable "before" no matter how many times the repair has run, and keeps the fixtures real — these
+    are still v8's own bytes, not an invented shape.
+    """
+    return [e for e in rows if getattr(e, "type", None) != EV_APPLIED_PARAMS_BACKFILLED]
+
+
+def _unbackfilled_copy(src: Path, dest: Path) -> Path:
+    """A working COPY of a run with the backfill rows stripped, so a test may write to it."""
+    dest.mkdir(parents=True, exist_ok=True)
+    kept = [ln for ln in (src / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            if ln.strip() and json.loads(ln).get("type") != EV_APPLIED_PARAMS_BACKFILLED]
+    (dest / "events.jsonl").write_text("\n".join(kept) + "\n", encoding="utf-8")
+    nodes = src / "nodes"
+    if nodes.is_dir():
+        (dest / "nodes").symlink_to(nodes)     # read-only use; the backfill never writes a workdir
+    return dest
+
+
 @pytest.fixture(scope="module")
 def v8_rows():
     if not _V8.exists():
         pytest.skip("the v8 run is not on this machine")
-    return EventStore(str(_V8 / "events.jsonl")).read_all()
+    return _as_shipped(EventStore(str(_V8 / "events.jsonl")).read_all())
 
 
 def test_a_backfill_lands_on_a_node_that_has_no_record(v8_rows):
@@ -156,11 +181,11 @@ def test_a_row_for_a_node_that_has_no_metric_provenance_is_ignored(v8_rows):
 
 
 # ---------------------------------------------------------------- the reading, over the real runs
-def test_the_champion_that_put_8192_into_a_task_goal_is_recovered_as_512():
+def test_the_champion_that_put_8192_into_a_task_goal_is_recovered_as_512(tmp_path):
     """The measurement that started all of this, re-derived from the workdir rather than asserted."""
     if not (_V2 / "nodes" / "node_1").is_dir():
         pytest.skip("the v2 node-1 workdir is not on this machine")
-    rows = {r["node_id"]: r for r in bf.plan_run(_V2)}
+    rows = {r["node_id"]: r for r in bf.plan_run(_unbackfilled_copy(_V2, tmp_path / "v2"))}
     rec = rows[1]["applied_params"]
     diverged = {d["param"]: (d["declared"], d["applied"]) for d in rec["diverged"]}
     assert diverged["train.training.batch_size"] == (8192.0, 512.0)
@@ -168,7 +193,7 @@ def test_the_champion_that_put_8192_into_a_task_goal_is_recovered_as_512():
     assert diverged["train.training.n_epochs"] == (15.0, 3.0)
 
 
-def test_two_carriers_that_disagree_are_recorded_as_a_conflict_not_resolved():
+def test_two_carriers_that_disagree_are_recorded_as_a_conflict_not_resolved(tmp_path):
     """v8 node 3: the config document says 8192 while the training script assigns 4096, with the
     Developer's reasoning inline — R-Drop's second forward pass OOMs at 8192 even on a 140 GB H200,
     so it halves the batch and doubles accumulation and deliberately leaves the document alone to
@@ -176,7 +201,7 @@ def test_two_carriers_that_disagree_are_recorded_as_a_conflict_not_resolved():
     record owes the reader BOTH, with file and line."""
     if not (_V8 / "nodes" / "node_3").is_dir():
         pytest.skip("the v8 node-3 workdir is not on this machine")
-    rows = {r["node_id"]: r for r in bf.plan_run(_V8)}
+    rows = {r["node_id"]: r for r in bf.plan_run(_unbackfilled_copy(_V8, tmp_path / "v8"))}
     conflicts = {c["param"]: c for c in rows[3]["applied_params"]["conflicts"]}
     readings = {(r["file"], r["line"]): r["applied"]
                 for r in conflicts["train.training.batch_size"]["readings"]}

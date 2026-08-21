@@ -223,12 +223,37 @@ def diff_params(left: dict, right: dict) -> list[str]:
             continue
         checked, declared = rec.get("checked"), rec.get("declared")
         diverged = [d for d in (rec.get("diverged") or []) if isinstance(d, dict)]
+        conflicts = [c for c in (rec.get("conflicts") or []) if isinstance(c, dict)]
         out.append(f"applied params: node {side['node_id']} — {rec.get('authority', '?')} authority, "
                    f"{checked} of {declared} declared coordinates answered by the carrier, "
-                   f"{len(diverged)} diverge from the proposal")
+                   f"{len(diverged)} diverge from the proposal, "
+                   f"{len(conflicts)} that its own carriers disagree about"
+                   + (" (backfilled from the workdir after the fact, not measured at the eval)"
+                      if rec.get("backfilled") else ""))
         for d in diverged[:8]:
+            # WHERE the carrier says it, not just that it does. The record carries `file`/`line`
+            # and a `match` kind; naming the file is what lets a reader go and look, and "but exact
+            # APPLIED 512.0" — the earlier spelling, which printed the match KIND where the reader
+            # expects a place — reads as a typo rather than as evidence.
+            where = (f"{d.get('file')}:{d.get('line')}" if d.get("file")
+                     else str(d.get("match") or "the carrier"))
             out.append(f"    {d.get('param')}: DECLARED {d.get('declared')} but "
-                       f"{d.get('match') or d.get('line')} APPLIED {d.get('applied')}")
+                       f"{where} APPLIED {d.get('applied')}")
+        # CONFLICTS ARE NOT DIVERGENCES AND MUST NOT BE OMITTED. A conflict is a coordinate two of
+        # the node's OWN carriers give different numbers for, which the record deliberately refuses
+        # to settle — and it is a WORSE state than a divergence, not a cleaner one: the run cannot
+        # say what its number is filed under at all. `champion_caveats.applied_params_diverged`
+        # already counts them for exactly that reason. Rendering only `diverged` printed nothing at
+        # all for `rubertlite-dr-unified-v8` node 3 — the 0.762048 champion whose config document
+        # says 8192 while its training script assigns 4096 — i.e. the tool was silent about the
+        # single most consequential record on this box.
+        for c in [c for c in (rec.get("conflicts") or []) if isinstance(c, dict)][:8]:
+            readings = "; ".join(
+                f"{r.get('file')}:{r.get('line')}={r.get('applied')}"
+                for r in (c.get("readings") or [])[:4] if isinstance(r, dict))
+            out.append(f"    {c.get('param')}: DECLARED {c.get('declared')} and this node's own "
+                       f"carriers DISAGREE — {readings}. The record does not settle this; neither "
+                       "number is what the node 'used'.")
     if isinstance(la, dict) and isinstance(ra, dict):
         lv, rv = la.get("applied") or {}, ra.get("applied") or {}
         keys = sorted(set(lv) | set(rv))
@@ -243,9 +268,33 @@ def diff_params(left: dict, right: dict) -> list[str]:
         else:
             out.append(f"what actually ran: {len(moved)} of {len(keys)} resolved coordinates differ")
             for k in moved:
-                out.append(f"    {k}: node {left['node_id']}={lv.get(k, '(absent)')}  ->  "
-                           f"node {right['node_id']}={rv.get(k, '(absent)')}")
+                out.append(f"    {k}: node {left['node_id']}={_resolved_as(la, k)}  ->  "
+                           f"node {right['node_id']}={_resolved_as(ra, k)}")
     return out
+
+
+def _resolved_as(record, key: str) -> str:
+    """How one coordinate reads in an applied-params record: the number, or WHY there is no number.
+
+    `(absent)` is the wrong word for three different states and the record distinguishes all three.
+    A coordinate the node's own carriers DISAGREE about is not one the node failed to set — it is
+    one the record deliberately refuses to settle, and rendering that as `(absent)` is the same
+    absence-vs-emptiness confusion this whole module exists to end, one level down. On
+    `rubertlite-dr-unified-v8` node 3 that is `train.training.batch_size`, i.e. the single most
+    consequential coordinate on this box.
+    """
+    if not isinstance(record, dict):
+        return "(no applied-params record)"
+    applied = record.get("applied") or {}
+    if key in applied:
+        return str(applied[key])
+    for c in (record.get("conflicts") or []):
+        if isinstance(c, dict) and c.get("param") == key:
+            return "(its own carriers disagree — unsettled)"
+    unresolved = record.get("unresolved") or {}
+    if key in unresolved:
+        return f"(unresolved: {unresolved[key]})"
+    return "(not declared by this node)"
 
 
 def diff_metrics(left: dict, right: dict) -> list[str]:

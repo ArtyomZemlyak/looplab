@@ -131,6 +131,28 @@ _UNPARSEABLE_REPAIR_LIMIT = 3
 # because it binds solely on chains longer than any cap an operator would set.
 _JUDGE_HISTORY_ROWS = 12
 _JUDGE_ERROR_CHARS = 300
+# HOW MUCH OF THE FAILURE THE RECORD KEEPS, as opposed to how much the PROMPT carries.
+#
+# `_eval_failure_text` is 500 characters and is four things at once — the repair prompt, the judge's
+# history rows, the terminal's `error`, and `node_repaired.error_in`. Three of those are paid text
+# and must not grow. The fourth is the RECORD, and it has been the same 500 characters as the
+# prompt purely because one string served both.
+#
+# MEASURED (`judgebench/triage_corpus.py` states it in its own header): `res.stderr` was clamped at
+# 64,000 bytes per stream when the classifier read it, and 500 characters survived to disk. Not one
+# of the 122 stored tails in that corpus contains a torch-OOM marker — five are a launcher's opaque
+# "Root Cause … exitcode: 1" block and two are nothing but a progress bar — so the deleted marker
+# rule replayed over the durable record scores 0 of 23 OOMs, and 16 of 23 over a wider window. The
+# diagnostician goes 82.2% -> 86.4% on the same widening. The evidence was never missing; it was
+# thrown away between reading it and writing it down.
+#
+# WHY 16,000 AND NOT 64,000. The redactor is the only thing between this text and a durable log, and
+# its firing rate was priced on this corpus: 0 masks at 500 characters, 36 at 16 KB — including a
+# real `password` — and 384 at 64 KB. Every one of those is a secret that reached the redactor, so
+# the number is a statement about how much secret-bearing text the column carries, not just about
+# bytes. 16 KB is 32x the evidence at a masking load the redactor is measurably handling; 64 KB is
+# ten times that load for the last seven of twenty-three OOMs.
+_DURABLE_EVIDENCE_CHARS = 16_000
 
 # WHAT AN OPERATOR WITH `inline_repair_attempts: 0` GETS, stated plainly because it is the setting
 # most preserved runs actually carry (38 of 46 snapshots under `runs/`, INCLUDING `rubert-dr-0804` —
@@ -1171,6 +1193,27 @@ class EvaluateMixin:
                 cancel.set()
                 return
 
+    def _durable_failure_evidence(self, res) -> str:
+        """What the RECORD keeps about a failed eval — deliberately wider than what the prompt says.
+
+        THE SPLIT THIS EXISTS TO MAKE. `_eval_failure_text` below is one string doing four jobs, and
+        three of them are paid text that must not grow: the repair prompt, the judge's history rows,
+        and the terminal's `error` field. The fourth is `node_repaired.error_in`, the durable record,
+        and it has been clamped to the prompt's 500 characters only because one string served both.
+        This is the record's own window. NOTHING ON THE PROMPT PATH READS IT — that is the property
+        the guard test drives, because the moment something does, this becomes a silent 32x increase
+        in the cost of every repair.
+
+        Same redactor, same source bytes, different budget. Returns "" when there is nothing to keep,
+        so a row that would have carried no evidence carries no column either — an empty string here
+        is "the eval wrote nothing to stderr", and absence of the key is "this row predates the
+        column"; a reader must be able to tell those apart.
+        """
+        raw = getattr(res, "stderr", "") or ""
+        if not str(raw).strip():
+            return ""
+        return self._redact(str(raw)[-_DURABLE_EVIDENCE_CHARS:])
+
     def _eval_failure_text(self, res) -> str:
         """The ONE description of a failed eval — the repair prompt, `node_repaired.error_in`, the
         judge's history rows and the terminal's `error` field are all this string.
@@ -2155,6 +2198,10 @@ class EvaluateMixin:
                 # The node's whole account of what went wrong — see `_eval_failure_text`, which is
                 # where the no-metric hint and the blank-stderr fallback now live.
                 err = self._eval_failure_text(res)
+                # …and what the RECORD keeps, which is wider on purpose. Bound here, beside `err`,
+                # so the two windows onto the same bytes are visibly siblings rather than one being
+                # discovered later at a write site. See `_durable_failure_evidence`.
+                err_evidence = self._durable_failure_evidence(res)
                 if watchdog_reason:
                     # The diagnosis FIRST: it is the only part of this text that says what to
                     # change, and the killed process's own tail says only that it was killed.
@@ -2841,6 +2888,13 @@ class EvaluateMixin:
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
+                        # THE RECORD'S OWN WINDOW, beside the prompt's. Omitted when empty so a row
+                        # with no column ("this predates the widening") stays distinguishable from a
+                        # row with an empty one ("the eval wrote nothing to stderr") — the same
+                        # additive, absence-is-a-fact rule `evidence` and `engine_reason` follow two
+                        # lines below. Nothing on the prompt path reads it; `_durable_repair_ledger`
+                        # keeps building the judge's history from `error_in`, unchanged.
+                        **({"error_evidence": err_evidence} if err_evidence else {}),
                         # Same screen as `node_failed.triage_rationale` below, and for the same
                         # reason — this is the judge's own words about a crash, on a DURABLE row, and
                         # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
@@ -3352,6 +3406,14 @@ class EvaluateMixin:
                     data = {"node_id": node_id, "generation": generation,
                             "error": err, "reason": reason, "eval_seconds": total_eval,
                             "reason_source": _reason_source, "engine_reason": _engine_reason}
+                    # …and the record's wider window on the same bytes. The TERMINAL is the row a
+                    # whole run is audited from, and it is also the row for a node that never
+                    # reached a repair — a node abandoned on its first failure has no
+                    # `node_repaired` row at all, so without this its evidence would be the
+                    # 500-character prompt tail and nothing else. Same additive/omitted-when-empty
+                    # rule as on the repair row.
+                    if err_evidence:
+                        data["error_evidence"] = err_evidence
                     # The diagnostician's citation rides the TERMINAL too, on the same additive,
                     # omitted-when-absent rule as on `node_repaired` above: the terminal is the row a
                     # whole run is audited from, and "who said this and what did they read" is
