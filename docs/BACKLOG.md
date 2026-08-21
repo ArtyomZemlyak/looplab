@@ -3909,6 +3909,24 @@ Separate and not to be conflated: `_nonstream_bounded` bounds ONE attempt at
 = 9 times, so a genuinely wedged call can hold the loop ~62 minutes on its own. That is a worst case
 this run did not hit.
 
+**IT IS THE WHOLE CREATE HANDLER, not one phase — mapped 2026-08-21 after the stack was read.**
+`_handle_create_actions` spans orchestrator.py 2172–2523 and every producer call inside it is a
+plain `def`, none of them awaited: `_stage_card_creates` (2300, the one on the live stack),
+`_claim_existing_card_builds` (2366), `_consume_batch_proposal` (2403) and `_create_node` (2494 and
+2506). The last is the DEVELOPER — the phase that writes a node's code, and the longest of the lot.
+So the loop is held not only while a proposal is drafted but for the whole of node building, which
+is the same freeze arriving through four more doors. A fix is a five-point change, not a one-liner.
+
+**And the offload looks feasible on every axis checkable without running it** (recorded here because
+this entry previously said the opposite): `llm_broker`'s fairness is a plain `threading.Condition`,
+so it is thread-native and blocking it ON the loop is itself wrong; `card_reservation.py` and
+`search/foresight.py` contain ZERO `anyio.`/`asyncio.`/`await`/`async def`; the broker's lane
+contextvar survives `anyio.to_thread.run_sync` (driven — "build" set on the loop reads back "build"
+in the worker); `EventStore.append` already runs under a writer lock and tail CAS because the UI and
+the engine write the same file from different processes; and an AST pass finds ZERO RunState
+mutations in either file. What remains is empirical — no live test — and `_prepare_node_idea` lives
+in orchestrator.py, where that AST pass has not been run.
+
 **NO MARKER, on the rule that refused one for §0.1 item 9: an item without a re-derivable falsifier
 must not be tagged.** Every candidate here fails. A pin on the synchronous call site
 (`if self._stage_card_creates(lane, state):`) stays TRUE after an offload lands INSIDE
