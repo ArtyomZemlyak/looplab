@@ -692,6 +692,36 @@ class CrashRepairMixin:
                     "in float32 even under mixed precision, guard a masked softmax against an "
                     "all-masked row and a 0*log(0), and reduce or ramp the weight of any newly-added "
                     "auxiliary/regularisation term. Keep the idea; make its arithmetic survivable.")
+        if reason == "check_false_positive":
+            # The directive that must be said FIRST is, again, the negative one — and here the
+            # negative is the whole point. Every other kind in this ladder tells the Developer what
+            # to change about the EXPERIMENT. This one says the experiment may be fine and the thing
+            # that refused it may be wrong, because that is what the diagnostician just concluded
+            # after reading the same log the checker read.
+            #
+            # MEASURED, on `runs/rubertlite-dense-retrieval`: node 1's diagnosis reads "the run
+            # actually reached val recall@100=0.8114 (matching the known-good baseline 0.81), yet
+            # the verifier flagged" it; n9 and n16 refute the checker with validation recall from
+            # the SAME log. Without this branch those rows were handed the ordinary "here is your
+            # error, fix your code" context, which asks a Developer to rewrite a training run whose
+            # numbers it has just been told are correct — and the cheapest way to satisfy a wrong
+            # check is to break the thing it was checking.
+            return ("[failure kind: check_false_positive]\n" + error + "\n"
+                    "THE STAGE'S DECLARED CHECK REFUSED THIS RUN, AND THE FAILURE DIAGNOSTICIAN — "
+                    "reading the same log afterwards, with more of it — BELIEVES THE CHECK WAS "
+                    "WRONG. Read its rationale above before you touch anything.\n"
+                    "Do NOT start by rewriting the experiment to satisfy the check. If the run "
+                    "genuinely met its declared condition, changing the training code to please a "
+                    "faulty assertion damages a working experiment, and the cheapest way to satisfy "
+                    "a wrong check is to break the thing it was checking.\n"
+                    "Work in this order: (1) re-read the stage's `expect`/`assert` in "
+                    "`looplab_stages.json` and decide whether it actually describes success for THIS "
+                    "run — a threshold copied from a different backbone, a file path the run writes "
+                    "under a different name, an epoch count the config no longer uses; (2) if the "
+                    "check is wrong, FIX THE CHECK and say so plainly in your rationale, changing "
+                    "nothing about the experiment; (3) only if the check is right after all, fix "
+                    "the code it caught. Say which of the three you did — the record cannot tell "
+                    "them apart afterwards unless you do.")
         if reason == "stalled":
             # Same misclassification hazard as `diverged`, opposite fix: the process was ALIVE and
             # silent, so there is nothing to read in stderr and nothing memory-shaped to cut.

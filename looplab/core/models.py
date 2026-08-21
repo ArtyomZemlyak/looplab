@@ -825,10 +825,23 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # default `Settings.inline_repair_reasons`, because a node must not be thrown away over a flapping
 # provider; `tests/test_inline_repair_reason_coverage.py` derives the producer set from all THREE
 # producers rather than from the classifier alone.
+# `check_false_positive` (2026-08-21) is the FOURTEENTH, and the second member no classifier
+# produces: it is answer-only, like `oom` and `not_learning`, and only the failure DIAGNOSTICIAN can
+# ever emit it. It exists because `check_failed` names the stage that REFUSED and says nothing about
+# why, so "the stage really did fail, here is the cause" and "the stage did not fail, the check was
+# wrong" collapsed into one word. Measured on `bench-out/cand.durable.jsonl`: of 22 `check_failed`
+# rows, 14 become `not_learning` and FIVE are answered back as `check_failed` — and reading those
+# five's rationales, the diagnostician is refuting the checker with validation numbers from the same
+# log ("the run actually reached val recall@100=0.8114 … yet the verifier flagged"). It was right
+# and had nowhere to put it. Like `not_learning` and `unclassified` it is deliberately ABSENT from
+# `metric_salvage.NEVER_SALVAGED_REASONS`, so it can neither suppress a metric nor admit one — a
+# model saying "the check was wrong" must not thereby score the node (docs/36). What it buys is the
+# record and the DIRECTIVE: `crash_repair._repair_error_context` points the repair at the check
+# instead of asking a Developer to rewrite an experiment it has just been told is correct.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
-                                    "needs_failed", "not_learning")
+                                    "needs_failed", "not_learning", "check_false_positive")
 
 
 def is_developer_error(code) -> bool:

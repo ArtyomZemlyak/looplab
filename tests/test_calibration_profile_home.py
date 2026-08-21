@@ -81,7 +81,19 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               revocation costs nothing that was not already spent:
 #               `speculation_implementation_digest` hashes every shipped `.py` and this
 #               change moves it regardless.
-_EXPECTED_DIGEST = "sha256:7670c4d95046721af9764ce0b68c07886a317ef71f3ab5b8c23d58792b8d2e6f"
+#   2026-08-21  A DEFAULT MOVED, and the field set did NOT — so this is branch (2) of the
+#               assertion below, not a derivation change. `inline_repair_reasons` gained a
+#               fourteenth member, `check_false_positive`, because `check_failed` names the
+#               stage that REFUSED and says nothing about why: of 22 `check_failed` rows on
+#               the durable bench, five were the diagnostician refuting the checker with
+#               validation numbers out of the same log and having nowhere to put the finding.
+#               A replicate calibrated before it is GENUINELY different — the same failure now
+#               reaches a directive pointed at the check rather than at the experiment, so a
+#               repair chain can diverge from the first attempt onward. Old receipts should
+#               stop verifying. (This is the second time this same field has moved the digest;
+#               the first is in the list two paragraphs up, and both are the same kind of
+#               deliberate widening rather than a refactor.)
+_EXPECTED_DIGEST = "sha256:d5537f63994f3679217487b80a9538632e9fad54ea8c70fb7c9ccb2f1e337ada"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.

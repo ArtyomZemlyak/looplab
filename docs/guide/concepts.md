@@ -722,10 +722,10 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   out got a fresh Debug node to have another go at the same experiment, and that node is deleted —
   along with any `draft`/`improve` that would be one under another name (nothing may be created to
   retry an experiment that just failed). Since 2026-08-12
-  **any** of the thirteen `FAILURE_REASONS` is eligible for repair **in place** within the same eval
+  **any** of the fourteen `FAILURE_REASONS` is eligible for repair **in place** within the same eval
   (`inline_repair`): `crash`, `timeout`, `oom`, `setup`, `no_metric`, `drift`, `unclassified`,
-  `expect_failed`, `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning` — not only
-  the mechanical three.
+  `expect_failed`, `check_failed`, `diverged`, `stalled`, `needs_failed`, `not_learning`,
+  `check_false_positive` — not only the mechanical three.
 
   **WHO SAYS WHICH ONE IT WAS, since 2026-08-20** (`engine/failure_diagnosis.py`). The engine
   classifies only what it CAUSED, RAN or MEASURED and remembers doing — its own clock (`timeout`),
@@ -733,7 +733,11 @@ The win comes from rich operators, not exotic search. The Researcher/Developer a
   return code of the setup command it ran (`setup`), and its own `stat` of a stage's declared input
   and output (`needs_failed`/`expect_failed`). Everything else is diagnosed by an AGENT that can
   read the dead eval's stage logs AND the code that wrote them, and that must cite the file, line or
-  log record it stood on. The engine's own structural answer stays on the row beside it
+  log record it stood on. Two of its answers exist because no out-of-band channel can produce them:
+  `oom` (both text rules were deleted, and device-level free memory is sampled after the process is
+  gone) and `check_false_positive` — the stage check is ANOTHER MODEL's reading of stdout, so "that
+  reading was wrong" is a claim only a second reader can make. Neither admits a metric: both are
+  absent from `NEVER_SALVAGED_REASONS`, so they can neither suppress one nor grant one. The engine's own structural answer stays on the row beside it
   (`engine_reason`) and `reason_source` says who chose the word.
 
   The engine still HANDS OVER what it saw. `engine_observed_facts` states the exit status and

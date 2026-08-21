@@ -249,8 +249,13 @@ def test_the_engine_can_no_longer_say_oom_at_all():
     assert "oom" not in _classifier_vocabulary()
     assert "oom" not in DIAGNOSABLE_ENGINE_REASONS
     assert "oom" in DIAGNOSED_FAILURE_REASONS
+    # `check_false_positive` joined the answer-only set on 2026-08-21 for the same structural
+    # reason `oom` is in it: no out-of-band channel can produce it. The engine's stage check is
+    # ANOTHER MODEL's reading of stdout, so "that reading was wrong" is a claim only a second
+    # reader can make — there is nothing for the engine to have observed. Pinned here rather than
+    # left to a `>=` so a third member has to be argued into this list, not slipped into it.
     assert set(DIAGNOSED_ONLY_REASONS) == set(DIAGNOSED_FAILURE_REASONS) - set(
-        DIAGNOSABLE_ENGINE_REASONS) == {"oom", "not_learning"}
+        DIAGNOSABLE_ENGINE_REASONS) == {"oom", "not_learning", "check_false_positive"}
 
 
 def test_the_diagnosed_vocabulary_overlaps_engine_final_in_exactly_one_registered_place():
