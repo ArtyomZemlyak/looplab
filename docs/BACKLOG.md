@@ -412,7 +412,24 @@ site that proves it is open.
    **Still open, noticed here:** each planner call re-enters `_resolve_stages`, so a manifest that is
    over the operator's budget emits its `stage_timeout_over_budget` span 2–4 times per attempt
    instead of once. Diagnostic-only and unchanged by this fix, but it is the duplicate-consumer tax
-   the shared derivation makes visible.]
+   the shared derivation makes visible.
+   **[MEASURED 2026-08-21 — real in code, and it has never once fired.** The four call sites are
+   `evaluate.py` at the eval, the log plan, the repair and the salvage, each re-entering
+   `_resolve_stages`, whose `record_stages_over_time_budget(..., at="resolve")` has no dedupe — so
+   the shape is exactly as described. The cost is **zero**: across every `spans.jsonl` under `runs/`
+   — **44 files, 99,644 span rows — ZERO are named `stage_timeout_over_budget`**. (Two grep hits
+   exist and both are false: the string occurs inside a tool's OUTPUT and inside a generation's
+   INPUT, i.e. in source an agent happened to read. Counting by span NAME is the only honest count.)
+   *The denominator was wrong the first time and is corrected here.* The first pass globbed
+   `runs/*/events.jsonl` and `runs/*/spans.jsonl` — 8 files, 94,197 rows — while the corpus is every
+   `*.jsonl` under `runs/`: **131 files across 15 run directories**, seven of which keep no top-level
+   `events.jsonl` at all. The conclusion survived the correction; it was not entitled to.
+   **NO MARKER, deliberately, and the rule is the reason:** "an item without a re-derivable
+   falsifier must NOT be tagged". Every candidate here fails one way or the other — a pin on the
+   emitter's presence stays true after a dedupe lands INSIDE the emitter (a marker that can never
+   go green), and a pin on a dedupe symbol names a mechanism that may arrive under any other name,
+   which is the mechanism-not-property shape §0.8 found nine times. The index is not improved by a
+   tag that cannot be checked; the measurement is what makes this row honest.]
 10. **Cross-run aggregation is a list, not an overlay (P1, M).** `ui/src/panels.jsx:2319
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
