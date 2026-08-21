@@ -434,6 +434,43 @@ def test_malformed_complete_span_is_quarantined_without_hiding_following_rows(tm
     assert (idx.full_span("tail") or {}).get("span_id") == "tail"
 
 
+# OPEN[harness-failure-mimics-the-defect] this test proves the projection TERMINATES by running it
+# in a subprocess and reading the timeout exception as the answer — the SAME signal a slow or
+# starved box produces — so the guard cannot fail as ITSELF.
+# proof:absent:TimeoutExpired@tests/test_span_index.py
+#
+# POLARITY, stated because the easy reading is the other one: the falsifier is `absent:`, not
+# `present:timeout=10`, because a correct fix may well KEEP the ten-second budget and add
+# ATTRIBUTION around it — a `present:` proof would then stay true forever and leave the marker
+# stuck open, which is the noise that teaches readers to ignore the index. Any real fix has to
+# name the exception in order to tell the two causes apart, so `absent:` flips exactly when the
+# work is done.
+#
+# MEASURED (2026-08-20): the work itself costs 0.16 s against the 10 s budget below — a 60x
+# margin — and 30 forced runs under 12-way interpreter churn timed out ZERO times, max 0.64 s, so
+# CPU contention is excluded. It has failed inside a 130-file pytest chunk and is unreproducible
+# alone (2/2 green) and in the 70-file `test_s*` subset (16 alternating runs, 0 failures). What it
+# needs is accumulated session state, which is precisely what this shape hides.
+#
+# THE SECOND INSTANCE IS WORSE AND TAKES THE SAME FIX. `tests/test_setup_completion.py` builds
+# THREE `_git` helpers (lines 170, 206, 230); not one passes a timeout and not one asserts
+# `returncode` — the file contains zero occurrences of that word — so a git call that fails
+# returns an EMPTY RESULT which the test reads as product behaviour. A timeout at least announces
+# itself; an empty list does not. Both of that file's observed failures were exactly that shape,
+# on two different tests.
+#
+# THE FIX IS ALREADY WRITTEN ONE FILE OVER, so this is adoption and not invention:
+# `tests/test_merge_history_integrity.py::_git` passes an explicit `_GIT_TIMEOUT_S` (line 45) and
+# asserts `result.returncode == 0` with the stderr in the message (line 229). Take that shape in
+# both places, and make this subprocess announce its progress so a slow start is distinguishable
+# from a hang in `build_conversation`.
+#
+# ONE SLUG, TWO INSTANCES: the fix is the same rule applied twice — a guard must assert the
+# OUTCOME it is testing, never read the absence of a completion signal as the product's answer.
+# The predicate above pins the FIRST instance only, because no single literal spans two files; when
+# it flips red, re-read this body and delete the marker only once the `_git` half is done as well.
+# It is the THIRD instance of this family recorded today — a harness whose own failure mimics the
+# defect it guards — so recognise the family rather than re-deriving it.
 def test_conversation_parent_cycles_degrade_without_hanging():
     script = r'''
 import json

@@ -245,9 +245,11 @@ RATIONALE AT ALL.
 
 `verify_repair` asks *did the repair do what it SAID*. This asks *does the code the engine committed
 still agree with the parameters the record DECLARES* — and both inputs are things the engine holds:
-`Idea.params`, minted into `node_created` by the Researcher (never by a repair), and the `.py` bytes
-of `node_repaired.files`. So it sits in `REPAIR_INERT`'s trust tier, not `REPAIR_UNMET`'s: no wording
-evades it, none summons it, and a model that writes a more persuasive rationale changes nothing here.
+`Idea.params`, minted into `node_created` by the Researcher (never by a repair), and the committed
+bytes of `node_repaired.files`, read through whichever CARRIER decides the value (Python source or a
+structured configuration document — `_carrier_kind`). So it sits in `REPAIR_INERT`'s trust tier, not
+`REPAIR_UNMET`'s: no wording evades it, none summons it, and a model that writes a more persuasive
+rationale changes nothing here.
 
 **THE INCIDENT, on the live run's CHAMPION.** `rubertlite-dr-unified-v8` node 3 (R-Drop α=0.5 on
 node 1's DCL loss) became the run's best at **0.762048**, +0.0236 over the next node while the other
@@ -293,9 +295,12 @@ THE BOUNDS, each load-bearing:
   * The declared key must carry at least `PARAM_OVERRIDE_MIN_PARTS` dotted parts. A bare `lr` or `x`
     (the toy/benchmark spaces) would be met by any local of that name; a dotted `train.training.
     batch_size` is a path into a config object and English does not produce one by accident.
-  * The code target is parsed with `ast`, never a regex — the input IS Python by construction, and
-    the whole false-positive family here is comments and string literals, which `ast` does not have.
-    A file that does not parse is skipped (an agent may commit anything), never guessed at.
+  * The carrier is PARSED, never regex-matched — Python with `ast`, a document with its own parser
+    — because the whole false-positive family here is comments and string literals, which neither
+    parser has. A file that does not parse is skipped (an agent may commit anything), never guessed
+    at. Which files are carriers is `_carrier_kind`, and the rule is that the guard reads what
+    DECIDES the value: the `.py` test that stood here until 2026-08-20 was the EXTRACTOR's limit
+    mistaken for the rule, and on this box it made the rung a FALSE CLEAN rather than a partial one.
   * The declared parts must be a contiguous SUFFIX of the target's own parts, so
     `config.train.training.batch_size` and `cfg["train"]["training"]["batch_size"]` both match while
     the receiver's name is nobody's business.
@@ -310,6 +315,8 @@ import difflib
 import math
 import re
 from dataclasses import dataclass
+
+from looplab.core import param_carriers
 
 # --- The verdict vocabulary (a REGISTRY: CLAUDE.md) ---------------------------------------------
 # The single spelling of what a repair did to the tree. Duck-typed across three sites — the
@@ -708,140 +715,87 @@ class ParamOverride:
                 "file": self.path, "line": self.line}
 
 
-def _numeric_literal(node):
-    """The float value of a numeric literal AST node (`4096`, `-1`, `0.5`), else None.
+# The Python extractor MOVED to `core/param_carriers.py` on 2026-08-20 and is re-exported here.
+#
+# It moved because it stopped being this rung's private helper: `runtime/applied_params.py` binds the
+# APPLIED configuration at the metric read and must read a Python carrier for exactly the reason this
+# rung must — measured over `runs/`, 14 declared coordinates have a Python carrier and a document
+# carrier that STATE DIFFERENT NUMBERS, 9 of them on nodes that recorded a metric, including
+# `rubertlite-dr-unified-v8` node 3, the champion at 0.762048. A record built on one family alone
+# publishes the other family's number. `runtime` may not import `engine`, so the ONE extractor had to
+# go below both; the alternative was a second copy, which is this repo's most-measured defect.
+#
+# RE-EXPORTED, not re-implemented: the names below are the SAME objects, so every existing importer
+# and every monkeypatch through `repair_verify` still reaches the one body.
+_numeric_literal = param_carriers.numeric_literal
+_assignment_target_parts = param_carriers.assignment_target_parts
+_assigned_numeric_paths = param_carriers.python_numeric_paths
 
-    `ast.UnaryOp(USub)` is spelled out because a negative literal is not one node in Python's
-    grammar. Anything with a NAME or a CALL in it is not a literal and is not resolved — see the
-    docstring's fourth bound. Bools are excluded: `True` is `isinstance(int)` and comparing it to a
-    declared `1.0` would report agreement nobody wrote."""
-    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-        inner = _numeric_literal(node.operand)
-        return None if inner is None else -inner
-    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
-            and not isinstance(node.value, bool):
-        val = float(node.value)
-        # `1e400` parses to `inf` and a huge int overflows the conversion; either would ride onto a
-        # durable event as a bare `Infinity`, which is not JSON. Same rule as the declared side.
-        return val if math.isfinite(val) else None
+
+# --- WHICH FILES DECIDE A VALUE (the carrier rule) -----------------------------------------------
+# A CARRIER is a committed file that can be read, deterministically and without executing anything,
+# as `dotted path -> numeric literal`. The `.py` test this loop used to make was never the rule; it
+# was the only EXTRACTOR. `core/param_carriers.py` holds the second family and the whole argument —
+# and the cost of not having it is on the record: `e5small-dr-unified-v2`'s champion (RECALL@100
+# 0.793426) was handed five files INCLUDING its own `vectorsearch/configs/config.yaml`, which reads
+# `n_epochs: 3` / `batch_size: 512` / `gradient_accumulation_steps: 32` against a declaration of
+# 15 / 8192 / 2, and this function answered `()`.
+#
+# NOT "add YAML as a special case". The two kinds are matched by DIFFERENT rules and the difference
+# is a property of the format, not a preference:
+#   _CARRIER_PYTHON    — an incomplete tree. A target's path is rooted at whatever local the code
+#                        bound (`config`, `cfg`, `self.conf`), so the walk is TARGET-first and two
+#                        assignments matching one declared suffix are two assignments.
+#   _CARRIER_DOCUMENT  — a complete, rooted tree. Every leaf's full path is known, so the walk is
+#                        DECLARATION-first and "this declaration names two leaves" is decidable and
+#                        REFUSED. A bare `batch_size` resolves to three leaves of the config on this
+#                        box; guessing between them is the one thing this rung may not do.
+_CARRIER_PYTHON = "python"
+_CARRIER_DOCUMENT = "document"
+
+
+def _carrier_kind(path):
+    """`_CARRIER_PYTHON` / `_CARRIER_DOCUMENT` for a file this rung can read, else None.
+
+    `_WHOLE_FILE` is the synthetic name of the solution artifact, which is Python by construction.
+    """
+    name = str(path or "")
+    if name == _WHOLE_FILE or name.endswith(".py"):
+        return _CARRIER_PYTHON
+    if param_carriers.is_document_carrier(name):
+        return _CARRIER_DOCUMENT
     return None
 
 
-def _assignment_target_parts(node):
-    """The dotted path an assignment TARGET names, outermost-last, or None if it names no path.
-
-    `config.train.training.batch_size` -> `["config", "train", "training", "batch_size"]`, and
-    `cfg["train"]["training"]["batch_size"]` -> the same tail, because a config object reached by
-    attribute and one reached by key are the same declaration to the reader this serves. A subscript
-    whose index is not a plain string constant (`row[i]`) makes the whole target unreadable and
-    answers None — a partial path would silently match on its suffix, which is the one thing the
-    suffix rule below cannot survive."""
-    parts: list = []
-    cur = node
-    while True:
-        if isinstance(cur, ast.Attribute):
-            parts.append(cur.attr)
-            cur = cur.value
-        elif isinstance(cur, ast.Subscript):
-            key = cur.slice
-            if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
-                return None
-            parts.append(key.value)
-            cur = cur.value
-        elif isinstance(cur, ast.Name):
-            parts.append(cur.id)
-            break
-        else:
-            return None                       # a call, a literal, a tuple — names no stable path
-    parts.reverse()
-    return parts
+def _carrier_numeric_paths(path, text) -> dict:
+    """The `(dotted path) -> (value, line)` map for one carrier, dispatched on its kind."""
+    kind = _carrier_kind(path)
+    if kind == _CARRIER_PYTHON:
+        return _assigned_numeric_paths(text)
+    if kind == _CARRIER_DOCUMENT:
+        return param_carriers.document_numeric_paths(path, text)
+    return {}
 
 
-def _assigned_numeric_paths(source: str) -> dict:
-    """`(dotted path) -> (value, line)` for every numeric-literal assignment in one Python source.
-
-    LAST WRITE WINS on a repeated path, matching what the interpreter would do if both ran in order —
-    and if they are in exclusive branches the rung is over-reading either way, which is the residual
-    the docstring states rather than guesses at. Unparseable source answers `{}`: an agent may commit
-    anything, and a `SyntaxError` is not evidence about a parameter.
-
-    **SOURCE ORDER IS RESOLVED EXPLICITLY, and it is not a tidy-up.** `ast.walk` is BREADTH-FIRST, so
-    it yields every module-level statement before anything nested inside one, and "last write" under
-    it means DEEPEST-then-latest rather than last-in-the-file. That inverts the rule this docstring
-    states, in the direction the whole rung is not allowed to fail in: a node whose module-level
-    `cfg.train.training.batch_size = 8192` AGREES with its declaration is convicted anyway when a
-    helper `def` earlier in the file carries a different default, because the nested assignment is
-    visited last and overwrites the agreeing one. That row reaches `champion_caveats` as
-    `params_overridden` on the run's best number. It also hands an adversarial candidate both
-    directions for free — a one-line decoy `def _unused(): cfg.a.b = <the declared value>`, nested
-    ANYWHERE in the file, outranks a real module-level divergence and answers "agrees" — and it
-    breaks `declared_param_overrides`' baseline attribution, which acquits only on an EQUAL prior
-    value: a repair that merely DELETES a dead helper carrying `1024`, over a module body that said
-    `4096` before and after, was charged with introducing the 4096 (driven; `tests/
-    test_repair_verification.py` keeps all three). So the nodes are sorted by `(lineno, col_offset)`
-    before the dict is written, and the dict then means what it says. (Textual order still is not execution
-    order — a nested `def` may run after the module body — which is exactly why the module docstring
-    says this is a statement about two artifacts and never "this is what ran".)
-
-    Walks `Assign` and `AnnAssign` (`config.train.batch_size: int = 4096`) and deliberately NOT
-    `AugAssign`: `x += 1` carries no absolute value to compare a declaration against.
-    """
-    try:
-        tree = ast.parse(source or "")
-    except (SyntaxError, ValueError, RecursionError, MemoryError):  # noqa: BLE001 — not evidence
-        return {}
-    found: list = []
-    # SCOPE DEPTH per statement: 0 for the module body, +1 inside every `def`/`class`/`lambda`.
-    # Computed here rather than inferred from `col_offset`, which a continuation line or a
-    # module-level `if` would both get wrong.
-    depth_of: dict = {}
-
-    def _mark(node, depth: int) -> None:
-        for child in ast.iter_child_nodes(node):
-            deeper = depth + isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
-                                                ast.ClassDef, ast.Lambda))
-            depth_of[id(child)] = deeper
-            _mark(child, deeper)
-
-    depth_of[id(tree)] = 0
-    _mark(tree, 0)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        else:
-            continue
-        val = _numeric_literal(value)
-        if val is None:
-            continue
-        found.append((depth_of.get(id(node), 0), getattr(node, "lineno", 0),
-                      getattr(node, "col_offset", 0), targets, val))
-    out: dict = {}
-    # SHALLOWEST WINS, then latest. `out[key] = ...` is last-write-wins, so the sort runs DEEPEST
-    # first and the module body last: an assignment in the module body certainly executes, one
-    # inside a `def` only if something calls it, and letting the second outrank the first is what
-    # made a one-line `def _unused(): cfg.a.b = <declared value>` — placed ANYWHERE in the file —
-    # a free acquittal, and a nested default a free conviction of an agreeing module body. Within
-    # ONE depth the rule is unchanged and is textual: later overwrites earlier. (Textual order still
-    # is not execution order, which is exactly why the module docstring says this compares two
-    # artifacts and never claims "this is what ran".)
-    for _depth, lineno, _col, targets, val in sorted(
-            found, key=lambda f: (-f[0], f[1], f[2])):
-        for tgt in targets:
-            parts = _assignment_target_parts(tgt)
-            if parts:
-                out[tuple(parts)] = (val, lineno)
-    return out
+def _resolve_declaration(paths, parts):
+    """`core/param_carriers.resolve_declaration`, reached through the module so the ONE resolution
+    rule the applied-configuration record uses is the one this rung uses."""
+    return param_carriers.resolve_declaration(paths, parts)
 
 
 def declared_param_overrides(params, files, *, code: str = "", baseline_files=None,
                              baseline_code: str = ""):
-    """The declared `Idea.params` keys this working set's own `.py` code assigns a DIFFERENT number.
+    """The declared `Idea.params` keys this working set's own CARRIERS assign a DIFFERENT number.
 
     Pure, total and deterministic over two things the engine holds — the Researcher's declaration and
     the bytes the engine committed. It never reads a rationale, so no agent text can summon or evade
     a row; see the module docstring for the incident, the bounds and what the claim is NOT.
+
+    A CARRIER is a committed file that decides a value: Python source read with `ast`, or a
+    structured document (YAML/JSON) read as its own nesting (`core/param_carriers.py`, which holds
+    the rule and the measurement — the `.py`-only reading this used to do returned `()` about the
+    box's best number, whose own committed config contradicts three of its declared coordinates).
+    The two families are matched by DIFFERENT rules; `_carrier_kind`'s comment says why.
 
     `files` is a `{path: content}` map (`node.files` / `node_repaired.files`); `code` is the
     whole-file solution artifact when there is one, reported under the same `<whole-file solution>`
@@ -902,7 +856,7 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
     budget = _PARAM_SOURCE_CAP
     for path in sorted(files or {}):
         text = (files or {}).get(path)
-        if not isinstance(text, str) or not str(path).endswith(".py"):
+        if not isinstance(text, str) or not _carrier_kind(path):
             continue
         if not any(t in text for t in tails):
             continue
@@ -910,6 +864,8 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
             break
         budget -= len(text)
         sources.append((str(path), text))
+    # The whole-file solution artifact is Python by construction — it is `node.code`, the thing the
+    # sandbox executes — so it is admitted under that kind and never sniffed.
     if isinstance(code, str) and code.strip() and any(t in code for t in tails):
         sources.append((_WHOLE_FILE, code))
 
@@ -924,15 +880,33 @@ def declared_param_overrides(params, files, *, code: str = "", baseline_files=No
         for path in sorted(baseline_files or {}):
             text = (baseline_files or {}).get(path)
             if str(path) in _wanted and isinstance(text, str):
-                base_paths[str(path)] = _assigned_numeric_paths(text)
+                base_paths[str(path)] = _carrier_numeric_paths(str(path), text)
         # The whole-file artifact under the SAME synthetic name it is reported by, so the one source
         # that has no path is attributed by the same rule as the ones that do.
         if _WHOLE_FILE in _wanted and isinstance(baseline_code, str):
-            base_paths[_WHOLE_FILE] = _assigned_numeric_paths(baseline_code)
+            base_paths[_WHOLE_FILE] = _carrier_numeric_paths(_WHOLE_FILE, baseline_code)
 
     out: list = []
     for path, text in sources:
-        assigned = _assigned_numeric_paths(text)
+        assigned = _carrier_numeric_paths(path, text)
+        if _carrier_kind(path) == _CARRIER_DOCUMENT:
+            # DECLARATION-FIRST, because a document is a COMPLETE tree and the question "which leaf
+            # does this declaration name" therefore HAS an answer — one, none, or too many. Too many
+            # is a refusal (`param_carriers.resolve_declaration`), which the target-first walk below
+            # cannot express: it would emit a row per matching leaf and let a bare word convict two
+            # unrelated sections of one config at once.
+            for key, (parts, decl) in sorted(declared.items()):
+                val, line, how = _resolve_declaration(assigned, parts)
+                if val is None or val == decl:
+                    continue                  # silent, ambiguous, or AGREES — nothing to say
+                if attribute:
+                    prior_map = base_paths.get(path, {})
+                    prior, _pline, _phow = _resolve_declaration(prior_map, parts)
+                    if prior is not None and prior == val:
+                        continue              # already there before this repair — not its doing
+                out.append(ParamOverride(param=key, declared=decl, code=val,
+                                         path=path, line=int(line)))
+            continue
         for target, (val, line) in assigned.items():
             for key, (parts, decl) in declared.items():
                 # SUFFIX, not equality: the receiver (`config`, `cfg`, `self.conf`) is the caller's

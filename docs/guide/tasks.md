@@ -630,6 +630,127 @@ every other caveat it is derived from the declaration and the bytes the engine c
 model-authored text, and it moves no metric, champion, selection or violation
 (`engine/repair_verify.py::declared_param_overrides` owns the rule and its bounds).
 
+**That rung read only `.py` files until 2026-08-20, and on the task family this box actually runs
+that made it a FALSE CLEAN rather than a miss.** `params_style: "none"` means the engine applies
+nothing: the Researcher proposes coordinates, the Developer realises them by editing the repo, and
+on every repo run here the file that DECIDES a value is `vectorsearch/configs/config.yaml`. Run over
+every event log on disk, matching each declared key against that document on its exact dotted path
+or an UNAMBIGUOUS dotted suffix: **529 comparable declarations, 41 diverged (7.8 %), 5 refused as
+ambiguous, and 18 of the divergences sit on nodes that produced a metric.** The champion of
+`e5small-dr-unified-v2` — RECALL@100 **0.793426**, the best number on the box — is recorded at batch
+8192 / accumulation 2 / **15 epochs** and its own committed config says **512 / 32 / 3**. Handed that
+node's five committed files, `declared_param_overrides` returned `()`.
+
+The fix is **not** "read YAML too". The rule is that the guard reads **what decides the value**: a
+carrier is any committed file that can be read, deterministically and without executing anything, as
+`dotted path -> numeric literal`. Python source is one such format (`ast`), a structured document is
+another (`core/param_carriers.py`), and the `.py` test was never the rule — it was the only
+extractor. The two families keep DIFFERENT matching rules because the difference is a property of the
+format: a document is a complete rooted tree, so "this declaration names two leaves" is decidable and
+is **refused** (a bare `batch_size` resolves to three leaves of the real config); Python source is
+not, so two assignments matching one declared suffix are two assignments and both are reported.
+
+Two bounds are worth knowing. A PLAIN YAML scalar whose text `float()` accepts is a number even when
+PyYAML leaves it a string — PyYAML implements YAML **1.1**, whose float regex needs a `.` in the
+mantissa, so `5e-3` composes as `'5e-3'` while YAML 1.2, `float()` and every pydantic `float` field
+read 0.005; taking the resolver's word for it dropped two real divergences on
+`rubertlite-dr-unified-v8` node 12 (metric 0.761400), a ten-fold change in the loss temperature. A
+QUOTED scalar is never coerced, and JSON is never coerced at all.
+
+**The `.py` reading is not removed and it is not vestigial.** `rubertlite-dense-retrieval` is a
+different task shape whose node workspaces hold flat `dataset.py`/`loss.py`/`metrics.py` and no
+configuration document at all, and its Python carriers keep exactly the treatment they had. Two
+things about that run are worth recording rather than assuming: its folded nodes declare **zero**
+`Idea.params`, so this rung is silent there because the DECLARATION is empty and not because of a
+carrier; and across the whole corpus, of the 54 nodes that do carry a comparable declaration,
+**51 hold both a Python and a document carrier, 3 hold a document only, and none holds Python
+only or neither**. So no node on this box is answerable from Python alone — which is why the
+interesting case turned out to be the two families DISAGREEING, not one of them being absent.
+
+Corpus effect: **24 of the 58 folded nodes** now carry at least one row (12 of them metric-bearing),
+41 rows from the YAML carrier and the pre-existing 12 from `.py`, and **zero** from
+`looplab_stages.json` — the other committed document. Two champions are caveated where one was:
+`e5small-dr-unified-v2` node 1 joins `rubertlite-dr-unified-v8` node 3. `champion_metric_caveats`
+costs 26-35 ms per `/api/runs` poll on the two large repo runs, up from 15-17 ms.
+
+### What the number's coordinates ARE — `eval.metric.applied_config_glob`
+
+`declared_param_overrides` compares the declaration against **bytes the engine committed**, which is
+pure, replayable and total over every log ever written. It cannot see a value the eval process
+resolved for itself. `runtime/applied_params.py` binds that third side of the record — beside
+`metric_subject` (what the number is ABOUT) and `metric_inputs` (what it was measured AGAINST) — at
+the **metric read**, and folds it onto `node_evaluated.metric_provenance.applied_params`:
+
+```jsonc
+"metric": { "kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)",
+            "applied_config_glob": "vectorsearch/experiments/*/final/config.yaml" }
+```
+
+The carrier set is derived from the FORMAT of each file the engine committed, not from a task
+declaration and not from a path. That is deliberate: the carrier is chosen by the *Developer* at
+build time — v8 node 12 moved a parameter into `merge_nodes.py` — so an operator declaring a carrier
+list at submit time could not know where the value would end up. What a suffix registry costs when a
+third format arrives (TOML, `.ini`, an `.env`) is one extractor returning `{parts: (value, line)}`
+and one entry in `DOCUMENT_SUFFIXES`: no call-site change, no policy change, and
+`test_every_registered_document_suffix_actually_parses` already goes red if a suffix is registered
+without a working extractor. What no suffix registry can reach is a value **no file states** — one
+computed at runtime, read from the environment, or passed on the command line. That is not a gap a
+better file list closes; it is the reason the applied record below is bound at the metric read.
+
+Two authorities. `committed` reads the carriers the engine itself staged, re-read from the workdir at
+the metric read; it needs no declaration and fires on all 52 corpus nodes that have a config carrier,
+which is the whole reason it exists — a record that only fires once the operator has declared
+something is the literal-`subject` defect again. `resolved` reads the configuration **the eval
+process wrote**, elected only by the glob above, and is the stronger source because it is
+post-resolution: defaults filled in, environment and command line layered, types coerced (170 leaves
+against the input config's 149). It is written as **JSON inside a `.yaml` filename** — the file
+begins `{\n  "version": null,` — which a line-oriented reader would miss entirely and a parser reads
+without noticing, JSON being a YAML subset; that is one more reason the extractor is a parser and the
+format test is the suffix rather than the first byte. Coverage on this box is not the limiting
+factor: **28 of the 29 scored nodes** have at least one.
+
+Why both, in numbers. Over `runs/` the two agree on **341 of 345** declared keys where both answer.
+The four that differ are the argument: `rubertlite-dr-unified-v8` node 8 declares batch 8192 / 15
+epochs, its committed carrier **agrees with the declaration**, and the config the process resolved
+says **4096 / 8** — invisible to any reader of committed bytes. `e5small-dr-unified-v2` node 0
+declares 8192, its carrier says 512, and the process resolved **2048**: three different numbers for
+one parameter.
+
+**A single pattern, and it binds only on a unique match** — the same rule as `subject_glob`, for a
+measured reason rather than a symmetry. 28 of the 52 nodes hold more than one `**/final/config.yaml`,
+and on **8** of them the matches DISAGREE, on `train.training.batch_size` and
+`gradient_accumulation_steps` specifically, because the training stage and the scoring stage each
+resolved their own. Two matches is `ambiguous`, zero is `missing`, an older one is `stale`; each is a
+REFUSAL that falls back to `committed` and records *why* (`resolved_refused`). A list of patterns is
+refused at submit for the same reason: a number has one applied configuration, and choosing between
+two documents that disagree is exactly what this declaration exists to refuse.
+
+**Two carriers of one node may DISAGREE, and the record does not settle it.** `train.py` mutating the
+object the YAML just loaded is the ordinary case here, and static bytes cannot order the two.
+Measured over `runs/`: **14 declared coordinates have a Python carrier and a document carrier that
+state different numbers, 9 of them on nodes that recorded a metric**, including
+`rubertlite-dr-unified-v8` node 3 — that run's champion at 0.762048, whose config says
+`batch_size: 8192` while `vectorsearch/train.py:31` sets 4096. The naive reading ("the config file
+is the config") is measurably **wrong**: on the two conflicts the run's own resolved config settles
+uniquely, it is the **Python** carrier that ran (node 8: config 8192 / 15 epochs, `train.py` 4096 /
+8, the process resolved 4096 / 8). So a conflicted coordinate is left out of `applied`, rides in
+`conflicts` with *every* reading and the file and line each came from, and is named `conflict` in
+`unresolved`. It also raises the champion caveat: a run that cannot say what its number is filed
+under is not in a cleaner state than one that can.
+
+**And this is what the `resolved` tier is really for.** Declaring one `applied_config_glob` on the
+repo task takes the corpus from **7 conflicted records to 0** (39 of the 42 records bind at
+`resolved`; 2 refuse `ambiguous`, 1 `missing`, all three falling back to `committed` with the reason
+recorded). The defaults argument is secondary to that one.
+
+**It surfaces and never refuses.** A node that cut its epochs to fit a real time budget did the right
+thing — the champion's own config says so in a comment beside the line — and must still run, still
+record its metric and still be allowed to win. What must not survive is a record attributing that
+number to parameters the node never used. The record mints no violation, excludes nothing and cannot
+cost a node its terminal; it is `None` (never an empty record) when nothing was checked, and it always
+carries `checked` beside `diverged` so "everything agreed" and "nothing was looked at" can never read
+the same. Old logs carry no key at all and every reader defaults them to silence (invariant #5).
+
 **A repaired declaration whose contract then passes is not a salvage at all** (since 2026-08-13).
 When the failure was an artifact contract and the cause fix corrected the manifest, the engine
 re-asks the **artifact check** — never the stage, which is the whole economy of salvaging — against

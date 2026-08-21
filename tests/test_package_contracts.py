@@ -70,7 +70,16 @@ def test_runtime_holds_only_process_execution_modules():
                      # captures — the comparability KEY, its authorities, and which surfaces refuse
                      # a cross-key ranking — is `engine/comparability.py`, above this boundary,
                      # exactly as the `metric_subject` clause above describes for its own half.
-                     "metric_inputs"}, (
+                     "metric_inputs",
+                     # `applied_params` (2026-08-20) is `metric_subject`'s third face and
+                     # belongs here for the identical reason: it reads bytes standing in the
+                     # eval's own workdir at the instant the number was read, through the SAME
+                     # `bind_one` binder with the two policies inverted (no confinement rule of
+                     # its own, freshness on the RESOLVED tier only), and it imports nothing
+                     # above `core`. It records what the configuration that ran said and
+                     # decides nothing — the POLICY that reads it (`engine/champion_caveats.py`
+                     # `params_overridden`) lives above, exactly as the subject side's does.
+                     "applied_params"}, (
         "a module that is not process execution landed in runtime again")
 
 

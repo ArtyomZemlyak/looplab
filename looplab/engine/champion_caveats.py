@@ -238,9 +238,10 @@ def champion_metric_caveats(state) -> list[str]:
     # configuration", and a declaration the node's own code contradicts fails that question whoever
     # wrote the line. (`node_repaired.param_overrides` carries the attribution, for the reader who
     # is asking about the attempt rather than about the number.)
-    if declared_param_overrides(getattr(getattr(best, "idea", None), "params", None) or {},
-                                getattr(best, "files", None) or {},
-                                code=getattr(best, "code", "") or ""):
+    if (declared_param_overrides(getattr(getattr(best, "idea", None), "params", None) or {},
+                                 getattr(best, "files", None) or {},
+                                 code=getattr(best, "code", "") or "")
+            or applied_params_diverged(provenance)):
         out.append(CHAMPION_CAVEAT_PARAMS_OVERRIDDEN)
 
     # COMPARABILITY. Asked of the FOLD alone — every key rides on `node.metric_provenance`, which
@@ -253,3 +254,36 @@ def champion_metric_caveats(state) -> list[str]:
     if run_split_by_key(list(nodes.values()) if isinstance(nodes, dict) else (nodes or [])):
         out.append(CHAMPION_CAVEAT_MIXED_COMPARABILITY)
     return out
+
+
+def applied_params_diverged(provenance) -> bool:
+    """Whether the APPLIED-configuration record on this metric reports a divergence.
+
+    THE SECOND WITNESS TO ONE CAVEAT, deliberately not a second caveat. `declared_param_overrides`
+    reads the bytes the engine COMMITTED, which is pure, replayable and total over every log ever
+    written; this reads what `runtime/applied_params.py` bound AT THE METRIC READ, which is the only
+    thing that can see a configuration the eval process itself resolved. They answer the same
+    operator question — "may I reuse this configuration?" — and giving them two slugs would make a
+    reader who saw one believe the other had been asked.
+
+    It catches exactly the population the byte rung cannot. Measured over `runs/`,
+    `rubertlite-dr-unified-v8` node 8 declares batch 8192 / 15 epochs and its own committed carrier
+    AGREES with the declaration, while the config the process resolved says 4096 / 8.
+
+    A CONFLICT COUNTS, and that is the half worth stating. `conflicts` are coordinates two of the
+    node's OWN carriers give different numbers for — its config says 8192 and its `train.py` says
+    4096 — which the record deliberately refuses to settle. That is not a cleaner state than a
+    divergence, it is a worse one: the run cannot say what the number is filed under at all. Reading
+    only `diverged` would answer "no caveat" about exactly the champion this whole change is about
+    (`rubertlite-dr-unified-v8` node 3, 0.762048, whose two carriers disagree on `batch_size` and
+    `gradient_accumulation_steps`), which is the vacuous green one layer up.
+
+    READER-SIDE DEFAULTS, invariant #5: every metric recorded before 2026-08-20 carries no
+    `applied_params` key at all and answers False here, so no preserved run gains a caveat from this
+    branch and the byte rung decides them exactly as it did.
+    """
+    record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+    if not isinstance(record, dict):
+        return False
+    return any(isinstance(record.get(field), (list, tuple)) and len(record[field]) > 0
+               for field in ("diverged", "conflicts"))

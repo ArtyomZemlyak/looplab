@@ -505,6 +505,19 @@ class RunResult:
     # at one path is the routine case here, not the exotic one. None when the task declared no
     # inputs, which is every task shipped before 2026-08-20.
     eval_inputs: Optional[dict] = None
+    # APPLIED PARAMS (`runtime/applied_params.py`): what the CONFIGURATION that ran said the node's
+    # declared `Idea.params` coordinates were worth — `{authority, carriers:[…identity…], declared,
+    # checked, applied:{key: value}, diverged:[…], unresolved?, resolved_refused?}` — bound at the
+    # metric read.
+    #
+    # The THIRD side of the record, beside `metric_subject` (what the number is ABOUT). `Idea.params`
+    # is a PROPOSAL under `params_style: "none"`: the Developer realises it by editing the repo and
+    # legitimately deviates when it hits a real constraint, and nothing reconciled the two — so
+    # `e5small-dr-unified-v2`'s champion is recorded at batch 8192 / 15 epochs and its own committed
+    # config says 512 / 3, with the reason written in a comment beside each line. This field is what
+    # stops the record attributing a number to parameters the node never used. It gates nothing and
+    # cannot fail a node. None when the node declares no comparable coordinate or no carrier read.
+    applied_params: Optional[dict] = None
 
     # SETUP: True when the run's SETUP command — the one the engine itself ran, before the eval —
     # exited non-zero or timed out. The out-of-band twin of `timed_out`/`stalled`/`diverged`, and it
