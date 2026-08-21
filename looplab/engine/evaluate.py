@@ -2679,7 +2679,11 @@ class EvaluateMixin:
                     # exist establish the convention. A third call shape here would make this the one
                     # place in the loop where the lane's propagation has to be reasoned about.
                     _judged = repair_log[-_JUDGE_HISTORY_ROWS:]
-                    critic = self._repair_critic(state, node, _judged, attempt + 1)
+                    # The SAME verdicts the triage judge just read, from the same durable
+                    # rows — the critic decides whether this chain lives and must not be
+                    # reading a thinner record than the judge whose work it is grading.
+                    critic = self._repair_critic(state, node, _judged, attempt + 1,
+                                                monitor_verdicts=_monitor_verdicts)
                     # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
                     # critic left no trace of what it ANSWERED: its span carried
                     # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a

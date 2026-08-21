@@ -511,7 +511,8 @@ class CrashRepairMixin:
                     "missing_dependency": ""}
 
     @in_llm_lane("build")
-    def _repair_critic(self, state: RunState, node, repair_log, attempt: int) -> dict:
+    def _repair_critic(self, state: RunState, node, repair_log, attempt: int,
+                       monitor_verdicts=None) -> dict:
         """Is this node's repair chain still addressing different causes? `{"action", "rationale"}`
         with action ∈ `CRITIC_ACTIONS` — F8's second stop signal.
 
@@ -550,6 +551,32 @@ class CrashRepairMixin:
             return {"action": CRITIC_CONTINUE, "rationale": "no repair critic wired",
                     "source": CRITIC_SOURCE_UNWIRED}
         trajectory = format_repair_trajectory(repair_log)
+        # THE WATCHDOG'S VERDICTS REACH THE CRITIC TOO, and leaving them out was a scoping error
+        # measured within hours of shipping the repair half. This critic answers "are successive
+        # attempts addressing DIFFERENT causes, or circling one?" and returns continue-or-stop — it
+        # decides whether the chain lives. Its per-attempt CAUSE column is the ENGINE's: `crash`,
+        # `crash`, `oom`, `expect_failed`, `timeout`. None of those words can say that the objective
+        # has no floor.
+        #
+        # MEASURED on `runs/e5small-dr-unified-v4` node 3, attempt 6: while the repair — which now
+        # sees the verdicts — wrote "the watchdog's diagnosis is correct and I reproduced the
+        # mechanism in code" and changed `loss.py`, this critic wrote "a pure speed timeout with a
+        # healthy training run", which is verbatim the framing that cost ~17 GPU-hours the day
+        # before. It answered `continue` and the answer was right, but the justification was a
+        # training run that was not healthy.
+        #
+        # THE EXPENSIVE DIRECTION IS THE MIRROR ONE. A chain that repairs SPEED five times on a node
+        # whose loss is unbounded below looks like five DISTINCT causes to a reader of that column,
+        # because the engine wrote a different word each time — and "distinct causes" is exactly the
+        # evidence this critic continues on.
+        #
+        # Appended to `trajectory` rather than given a new keyword, for the same reason the repair
+        # half splices into `history`: `repair_critic` is a DUCK-TYPED seam and `_accepted_kwargs`
+        # would quietly drop an argument older implementations do not name, so a new keyword reaches
+        # one implementation and silently skips every other. Empty renders empty.
+        _verdicts_block = _format_monitor_verdicts(monitor_verdicts)
+        if trajectory and _verdicts_block:
+            trajectory = trajectory + "\n" + _verdicts_block
         if not trajectory:
             return {"action": CRITIC_CONTINUE, "rationale": "no repair trajectory to judge yet",
                     "source": CRITIC_SOURCE_NO_TRAJECTORY}
