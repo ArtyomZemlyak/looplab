@@ -38,7 +38,7 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
                      hypothesis_id,
-                     normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
+                     EXTRA_METRIC_DECLARED, normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
                      normalize_steering_context,
                      run_setup_key)
@@ -88,6 +88,7 @@ from looplab.events.types import (
     EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
     EV_APPLIED_PARAMS_BACKFILLED,
+    EV_SCORE_METRICS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_ATTEMPTED, EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
@@ -1274,6 +1275,44 @@ def _invalidate_completion_certificates(st: RunState, ctx: "_FoldCtx") -> None:
     st.confirmed_done = False
     ctx.best_confirmed = None
     _clear_approval(st)
+
+
+def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Apply objectives a score stage MEASURED and the record never kept.
+
+    THE SAME RULE AS ITS SIBLING, and the whole safety of the mechanism: **a live record always
+    wins.** This writes only where the node's `extra_metrics` is empty. A backfill re-reads a
+    `score.log` long after the eval, and a reconstruction may never overwrite a measurement made
+    while the run was happening — which is also what makes a second pass idempotent by CONSTRUCTION
+    rather than by a check that could drift.
+
+    NO DIRECTION IS EVER WRITTEN HERE, deliberately, and the omission is the point. Nobody declared
+    which way was better when these evals ran; orientation is a forward-looking declaration an
+    operator makes in `eval.metrics`, and asserting it retroactively would present a reconstruction
+    as a measurement. The consequence is intended: a ranking surface declines to order an axis it
+    cannot orient (`ui/src/panels.jsx::paretoFront`), so these values are readable everywhere and
+    decide nothing.
+
+    The CHANNEL is `declared`: an operator-owned reader spec is not what produced them, but neither
+    is the candidate's stdout scrape — they were printed by the operator's own scoring program and
+    recovered from the log the engine itself preserved. `EXTRA_METRIC_ENGINE` would claim the engine
+    wrote the print statement, which is false. `declared` is the honest one of the three, and the
+    `backfilled` marker beside it is what stops any surface calling this a live measurement.
+    """
+    node_id = _coerce_node_id(d)
+    node = st.nodes.get(node_id) if node_id is not None else None
+    if node is None or node.metric is None:
+        return
+    if node.extra_metrics:
+        return                      # a LIVE record. Never overwritten. This is the idempotence.
+    found = d.get("extra_metrics")
+    if not isinstance(found, dict) or not found:
+        return
+    node.extra_metrics = normalize_extra_metrics(found)
+    node.extra_metrics_provenance = normalize_extra_metric_channels(
+        {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
+    # ...and NOT `extra_metrics_direction`. See the docstring: the axis stays unorientable because
+    # nothing in this run ever said which way is better about it.
 
 
 def _on_applied_params_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -3981,6 +4020,7 @@ _HANDLERS = {
     EV_NODE_REPAIRED: _on_node_repaired,
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
     EV_APPLIED_PARAMS_BACKFILLED: _on_applied_params_backfilled,
+    EV_SCORE_METRICS_BACKFILLED: _on_score_metrics_backfilled,
     EV_RESUME_REQUESTED: _on_resume_requested,
     EV_RESUME_SERVED: _on_resume_served,
     EV_RESTART: _on_restart,

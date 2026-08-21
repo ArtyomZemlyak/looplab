@@ -96,6 +96,7 @@ EV_NODE_REPAIRED = "node_repaired"
 # answer and is folded as one — "the workdir is gone, so what ran cannot be recovered" is the honest
 # record, and it is exactly the row that must not be mistaken for "the proposal is what ran".
 EV_APPLIED_PARAMS_BACKFILLED = "applied_params_backfilled"
+EV_SCORE_METRICS_BACKFILLED = "score_metrics_backfilled"
 EV_NODE_TOMBSTONED = "node_tombstoned"
 EV_CONFIRM_EVAL = "confirm_eval"
 EV_NODE_CONFIRMED = "node_confirmed"
