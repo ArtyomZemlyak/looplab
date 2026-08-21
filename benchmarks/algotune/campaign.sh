@@ -121,6 +121,44 @@ export LOOPLAB_LLM_REASONING="${LOOPLAB_LLM_REASONING:-medium}"
 DEFAULT_REASONING_EXTRA='{"provider":{"order":["siliconflow/fp8"],"allow_fallbacks":false}}'
 export LOOPLAB_LLM_REASONING_EXTRA="${LOOPLAB_LLM_REASONING_EXTRA:-$DEFAULT_REASONING_EXTRA}"
 export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
+
+# ARM A'S BUDGET DOES NOT LIVE HERE, and pretending otherwise is how two arms end up on two
+# budgets under one banner. `BUDGET_USD` reaches `LOOPLAB_LLM_BUDGET_USD`, which is LoopLab's
+# ceiling and nothing else; AlgoTuner resolves its own as
+# `model_info.get("spend_limit", global_config.spend_limit)` out of `config.yaml`. Measured
+# 2026-08-21: the banner below printed one budget for both arms while arm A was still on the
+# shipped `spend_limit: 0.02` -- so a $1.00 arm-B run could sit beside a $0.02 arm-A run and the
+# log would say they matched.
+#
+# So arm A REFUSES rather than guesses. Rewriting somebody's config from a campaign driver is the
+# worse failure: it would make every run silently authoritative over a file the fork owns.
+# `patch_model_entry.py --spend-limit` is the one place that value is set.
+if [ "$ARM" = "A" ]; then
+  A_LIMIT="$(python3 - "$AT" "$ALGOTUNE_MODEL_KEY" <<'PYEOF'
+import sys, yaml
+cfg = yaml.safe_load(open(f"{sys.argv[1]}/AlgoTuner/config/config.yaml")) or {}
+entry = (cfg.get("models") or {}).get(sys.argv[2])
+if entry is None:
+    print("MISSING")
+else:
+    print(entry.get("spend_limit", (cfg.get("global") or {}).get("spend_limit", "")))
+PYEOF
+)"
+  if [ "$A_LIMIT" = "MISSING" ]; then
+    echo "arm A: no model entry '$ALGOTUNE_MODEL_KEY' in $AT/AlgoTuner/config/config.yaml." >&2
+    echo "  add one:  python3 $HERE/patch_model_entry.py --algotune-root $AT \\" >&2
+    echo "                --slug ${ALGOTUNE_MODEL_KEY#openrouter/} --spend-limit $BUDGET_USD" >&2
+    exit 2
+  fi
+  if [ "$(python3 -c "print(abs(float('$A_LIMIT')-float('$BUDGET_USD'))<1e-9)")" != "True" ]; then
+    echo "arm A budget MISMATCH: config.yaml says spend_limit=$A_LIMIT, BUDGET_USD=$BUDGET_USD." >&2
+    echo "  The two arms would not be measured on the same budget. Re-point one of them:" >&2
+    echo "  python3 $HERE/patch_model_entry.py --algotune-root $AT \\" >&2
+    echo "      --slug ${ALGOTUNE_MODEL_KEY#openrouter/} --spend-limit $BUDGET_USD" >&2
+    exit 2
+  fi
+  echo "arm A budget: spend_limit=$A_LIMIT (matches BUDGET_USD)"
+fi
 export PYTHONPATH="$REPO"
 mkdir -p "$OUT" "$WS"
 

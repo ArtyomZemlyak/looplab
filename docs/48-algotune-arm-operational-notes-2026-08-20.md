@@ -388,3 +388,34 @@ denotes the operator's own scoring step, and this is the operator's.
 **Read every arm-B number before this date with that in mind.** The Developer was being asked, on
 every node, to design a training pipeline for a task that has none — and the phase where it should
 have written the solver came after it.
+
+---
+
+## 12. The two arms did not share a budget, and the banner said they did (2026-08-21)
+
+`BUDGET_USD` reaches `LOOPLAB_LLM_BUDGET_USD` — **LoopLab's ceiling and nothing else**. AlgoTuner
+resolves its own as `model_info.get("spend_limit", global_config.spend_limit)` out of `config.yaml`,
+which the campaign never touched. So a `$1.00` arm-B run could sit beside a `$0.02` arm-A run while
+the driver's own banner printed one budget for both.
+
+Two changes, and the split between them is the point:
+
+- **`patch_model_entry.py`** adds an OpenRouter model entry *with* its `spend_limit`. A per-model
+  limit wins over the global one, so this is the only lever the campaign has over the reference
+  arm's budget. It is also what makes running both arms on a NEW model possible at all —
+  `ALGOTUNE_MODEL_KEY` can only pick an entry that exists.
+- **`campaign.sh` REFUSES rather than rewrites.** For `ARM=A` it reads the entry's limit and exits 2
+  if it is missing or disagrees with `BUDGET_USD`, naming the exact command that fixes it. Silently
+  rewriting `config.yaml` from a campaign driver would make every run authoritative over a file the
+  fork owns — the worse failure, and the one that would leave no trace.
+
+Driven in all three states before use: matching budget passes, a mismatch refuses, an unknown model
+refuses.
+
+### While this was found: the two arms were on different reasoning depths
+
+Arm A sets effort only through `extra_body.reasoning.effort` (OpenRouter's spelling) and AlgoTuner
+sends no `reasoning_effort` of its own — so it has never had the collision §…/`reasoning_body` now
+refuses, and it has been running at **medium** all along. Arm B was on **high** until 2026-08-20
+(see the two-spellings finding). Both are `medium` now. Every cross-arm comparison from before that
+date carries this difference on top of everything else.
