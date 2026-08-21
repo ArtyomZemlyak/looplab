@@ -175,7 +175,7 @@ def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
     """Walk every run under `root`. Returns the report."""
     out: list[str] = []
     totals = {"considered": 0, "recovered": 0, "unrecoverable": 0, "written": 0,
-              "diverged": 0, "conflicted": 0, "skipped_live": 0}
+              "diverged": 0, "conflicted": 0, "skipped_live": 0, "bounded": 0}
     for run_dir in run_dirs(root):
         if only and run_dir.name != only:
             continue
@@ -184,11 +184,30 @@ def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
                        "written to cannot be read as what ran.")
             totals["skipped_live"] += 1
             continue
+        # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
+        # backfilled produces NO rows and `continue`s below — so the one combination a reader most
+        # needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") printed nothing at
+        # all. Found by running it, not by reading it.
+        #
+        # WHAT THIS PASS COULD NOT SEE. `EventStore.read_all` serves the log's dense prefix and stops
+        # at the first logical-sequence gap — correct for a fold, invisible to a coverage claim. This
+        # command shipped without saying so, and on `rubertlite-dense-retrieval` the fence bites at
+        # event 20 of 1,624 lines, so a run with 81 `node_created` rows folded to two nodes and the
+        # report read as if that were the run. Named rather than fixed: repairing a gapped log is a
+        # different question from backfilling, and smuggling it in here would answer neither well.
+        served, lines = run_store(run_dir).readable_horizon()
+        if lines and served < lines:
+            out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
+                       "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
+                       "point were NOT considered, and any count below is the prefix's, not the "
+                       "run's. **")
+            totals["bounded"] += 1
         rows = plan_run(run_dir)
         if not rows:
             continue
         summary = summarize(rows)
         out.append(render(run_dir.name, rows, summary))
+
         totals["considered"] += summary["considered"]
         totals["recovered"] += summary["recovered"]
         totals["unrecoverable"] += summary["unrecoverable"]
@@ -201,10 +220,16 @@ def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
                f"{totals['unrecoverable']} unrecoverable, {totals['diverged']} with a coordinate "
                f"that diverged from the proposal, {totals['conflicted']} with carriers that "
                f"disagree with each other"
-               + (f", {totals['skipped_live']} run(s) skipped as live" if totals["skipped_live"] else ""))
+               + (f", {totals['skipped_live']} run(s) skipped as live" if totals["skipped_live"] else "")
+               + (f", {totals['bounded']} run(s) READ ONLY TO A SEQUENCE GAP" if totals["bounded"] else ""))
     out.append("DRY RUN — nothing was written." if dry_run
                else f"WROTE {totals['written']} backfill event(s).")
     return "\n".join(out)
+
+
+def run_store(run_dir: Path) -> EventStore:
+    """This run's store. One spelling, so the horizon and the plan cannot read different files."""
+    return EventStore(str(run_dir / "events.jsonl"))
 
 
 def _lock_is_live(run_dir: Path) -> bool:

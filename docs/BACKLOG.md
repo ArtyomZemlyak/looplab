@@ -3877,6 +3877,47 @@ which in a GPU-shaped run means deep research never fires at all. The fix is not
 other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
 under one claim rather than two reads. Do it when someone actually wants serial research.
 
+**THE WHOLE ENGINE STOPS FOR A PROPOSE PHASE — measured 2026-08-21 on a live run, and this is the
+mechanism the "free GPU sits idle" family has been circling.**
+
+`_handle_create_actions` is awaited on the main task, but everything under it is SYNCHRONOUS:
+`_stage_card_creates` → `_prepare_node_idea` → `foresight.propose` → `agent.run_phase` →
+`tool_loop.drive_tool_loop` → `llm.chat` → `_bounded_create` → `threading.join`. A py-spy dump of the
+live engine (pid 3423806, `runs/e5small-dr-unified-v4`, sampled twice 8 minutes apart) puts asyncio's
+own `_run_once` BELOW that join with **no coroutine frame in between** — so an entire propose phase,
+call/parse/call/parse with no `await` anywhere, executes as ONE event-loop callback.
+
+Two observations that looked contradictory are both explained by it: **243 provider calls COMPLETED**
+between 21:26 and 21:45 (nothing was wedged) while **node 4's terminal never landed** (nothing else
+ran). All 243 happened inside one callback; the loop had not turned since the phase began.
+
+The bill, on one evening: node 4's train stage OOM'd and its process EXITED at 21:03:40. Sixty-two
+minutes later the engine had emitted no `stage_finished`, no terminal and no repair for it — last
+node-4 event 21:01:03 — with `pgrep -P` showing no children and all three anyio worker threads idle
+on empty queues. Both H200s sat idle ~59 minutes. Propose phases in that run take a median 10.8 min
+(n=12, max 38.9), and node 5 ran SIX back to back, producing **10 cards added against 5 ever
+requested for build**: the board filled while the machine that consumes it never got a turn.
+
+`orchestrator.py:1902` already documents the neighbouring half — card production is reachable "only
+in the instants when NOTHING is running... Production was gated on occupancy ZERO, which is exactly
+backwards." That comment fixes WHEN creates become reachable. This entry is the other half: once
+reachable, a create holds the loop for as long as it takes, and eval finalisation, terminal writes
+and GPU dispatch all wait behind it.
+
+Separate and not to be conflated: `_nonstream_bounded` bounds ONE attempt at
+`llm_timeout + header_timeout + 10` (415 s on this run) and `_post` retries `range(max_retries + 1)`
+= 9 times, so a genuinely wedged call can hold the loop ~62 minutes on its own. That is a worst case
+this run did not hit.
+
+**NO MARKER, on the rule that refused one for §0.1 item 9: an item without a re-derivable falsifier
+must not be tagged.** Every candidate here fails. A pin on the synchronous call site
+(`if self._stage_card_creates(lane, state):`) stays TRUE after an offload lands INSIDE
+`_stage_card_creates` — a marker that can never go green. A pin on `to_thread`/`run_sync` names a
+mechanism the fix may not use. And the honest fix is not obvious: `llm_broker` fairness and
+`card_reservation` both sit in that chain, so whether the phase can move off the loop thread at all
+is unmeasured. What this row needed was a stack and a number, and it has both.
+*Evidence: `py-spy dump` captures, two samples plus a final one, in the session scratchpad.*
+
 **A clean trust scan commits to nothing — CLOSED 2026-08-19, see §0.18.** The `trust_scan` receipt
 is written for EVERY evaluated node, hit or no hit. One correction to the ledger row above that this
 entry owes: **"they run unconditionally per evaluated node" is FALSE** — `reward_hack_detect` and
