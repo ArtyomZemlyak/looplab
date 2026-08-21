@@ -76,7 +76,12 @@ GROUPS = {
     # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
     # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;
     # the group docstring states that in its first paragraph rather than below a "read-only" claim.
-    "maintenance_cmds": {"backfill-applied-params"},
+    # `backfill-score-metrics` is the same contract read the other way round: one run's account of
+    # itself again, this time a node whose record kept ONE number while its own preserved score.log
+    # holds the 36 the stage measured. Same append-only shape, same "a live record always wins"
+    # fold rule, same refusal to guess — so it belongs beside its sibling and not in a group of its
+    # own.
+    "maintenance_cmds": {"backfill-applied-params", "backfill-score-metrics"},
 }
 
 

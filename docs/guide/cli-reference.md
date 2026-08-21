@@ -40,6 +40,7 @@ looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
+looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -1052,6 +1053,59 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
+
+## `backfill-score-metrics`
+
+**Recovers the objectives the score stage MEASURED and the record threw away.**
+
+A vecsearch score stage computes a whole IR suite and **prints** it — Recall@k, nDCG@k, MAP@k,
+MRR@k and Precision@k at seven cutoffs, 36 numbers — and the run keeps **one**. Dry run over
+`runs/`: 28 of 29 scored nodes across five runs carry a recoverable block, **979 values** the
+record had already computed and discarded.
+
+Not a bug — an unused door. `auto` capture fires only when `metric.kind == "stdout_json"`, and
+these tasks read their metric by `stdout_regex`, so it is structurally off; the `declared` channel
+(`eval.metrics`) no task on disk has ever populated. Measured over every `*.jsonl` under `runs/`
+(131 files, 15 run directories), the 400 records that *do* carry `extra_metrics` hold 1,600 values
+across 4 keys — every one the engine's own CUDA-probe telemetry in the `specgate*` toys.
+
+**What it buys, already.** `e5small-dr-unified-v4` node 3 scored 0.790898 against node 1's
+0.764853, and nothing could say whether that was a recall@100 artifact. Its own `score.log`
+answers: MAP@100 0.34 vs 0.29, nDCG@100 0.46 vs 0.41, MRR@100 0.41 vs 0.35 — it leads every
+family, not one.
+
+```bash
+looplab backfill-score-metrics runs/                     # DRY RUN — prints every row it would write
+looplab backfill-score-metrics runs/ --only my-run       # one run
+looplab backfill-score-metrics runs/ --apply             # actually append
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `RUN_ROOT` | *(required)* | The run root; every run under it |
+| `--only NAME` | all | One run directory name |
+| `--apply` | off | Actually append. Without it this is a dry run and writes nothing |
+
+**What makes it safe to point at a real record**
+
+* **Append-only, and a live record always wins.** One `score_metrics_backfilled` event per node;
+  the fold applies it only where `extra_metrics` is empty, so a measurement taken while the run was
+  happening can never be overwritten by a log read afterwards. The fold declines on exactly the
+  condition the planner skips on, which makes a second pass idempotent **by construction**.
+* **It never orients an axis.** No `extra_metrics_direction` is written, deliberately: nobody
+  declared which way was better when those evals ran, orientation is a forward-looking declaration
+  in `eval.metrics`, and asserting it retroactively would present a reconstruction as a
+  measurement. The consequence is intended — the Pareto front declines to *rank* an axis it cannot
+  orient, so these values are audit: readable everywhere, deciding nothing.
+* **It reports precision per key.** These logs print the suite at 2 decimals and the primary at 6.
+  v4 nodes 0 and 1 differ by 0.006 on the primary and are *identical* on every recovered metric —
+  "equal on nDCG" and "the print statement cannot tell them apart" are different claims.
+* **It names its own horizon.** `EventStore.read_all` stops at the first logical-sequence gap. On
+  `rubertlite-dense-retrieval` that fence bites at event 20 of 1,624 lines, so a run with 81
+  `node_created` rows folds to two nodes. The report says so rather than quietly reporting "1
+  scored node".
+* **It refuses a live run**, by contending for `engine.lock`: a `score.log` still being written
+  describes nothing yet.
 
 ## `backfill-applied-params`
 

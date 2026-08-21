@@ -90,6 +90,10 @@ _REVIEW_NODE_KEYS = {
     # portfolio identity (`{name: "declared"|"auto"}` over this node's own keys), so it raises none
     # of the disclosure questions `origin` does.
     "extra_metrics_provenance",
+    # ...and WHICH WAY IS BETTER on each, for the same reason and by the same rule: a reviewer
+    # handed `nDCG_at_100: 0.44` beside `0.41` cannot say which node did better without it, and the
+    # answer is not derivable from the key's spelling.
+    "extra_metrics_direction",
     "violations", "feasible", "stages",
     # `repairs` rides with `stages` for the SAME reason `extra_metrics_provenance` rides with
     # `extra_metrics`, one paragraph up: each stage row carries the repair epoch it was recorded in,

@@ -929,6 +929,13 @@ class EvalSpec(BaseModel):
                     f"eval.metric.kind {k!r} is not a metric reader. Use one of {sorted(_KINDS)} (HOW to "
                     "read the printed metric, e.g. stdout_json). The max/min DIRECTION belongs in the "
                     "task's `direction`, not here.")
+        # THE ONE PLACE A `direction` KEY IS MEANINGFUL, stated here because this message is where a
+        # reader will be sent to ask. The warning above is about `eval.metric`, the PRIMARY, whose
+        # direction is the task's own and must not be restated per-reader. An `eval.metrics` entry —
+        # a SECONDARY objective — has no task-level direction to inherit, so `direction: "min"|"max"`
+        # on one of those is read by `runtime/command_eval.py` into `extra_metrics_direction` and is
+        # what lets a ranking surface order that axis at all (`core/models.py::
+        # normalize_extra_metric_directions`). Absent there, the axis is simply not ranked on.
         return v
 
     @field_validator("metric")

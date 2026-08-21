@@ -64,3 +64,42 @@ def backfill_applied_params(
     """
     from looplab.maintenance.backfill_applied_params import backfill
     typer.echo(backfill(Path(run_root), dry_run=not apply, only=only))
+
+
+@app.command(name="backfill-score-metrics")
+def backfill_score_metrics(
+    run_root: Path = typer.Argument(..., help="The run root (e.g. runs/) — every run under it."),
+    only: Optional[str] = typer.Option(None, "--only", help="One run directory name."),
+    apply: bool = typer.Option(False, "--apply",
+                               help="Actually append. Without it this is a DRY RUN."),
+):
+    """Recover the objectives the score stage MEASURED and the record threw away.
+
+    A vecsearch score stage computes a whole IR suite and prints it — Recall@k, nDCG@k, MAP@k,
+    MRR@k and Precision@k at seven cutoffs, 36 numbers — and the run keeps ONE. Measured over every
+    `*.jsonl` under `runs/` (131 files, 15 run directories): 400 records carry a non-empty
+    `extra_metrics`, all 1,600 values the engine's own CUDA-probe telemetry in the `specgate*` toys.
+    NO experiment node has ever recorded a second OBJECTIVE.
+
+    Not a bug — an unused door. `auto` capture fires only when `metric.kind == "stdout_json"` and
+    these tasks read by `stdout_regex`, so it is structurally off; the `declared` channel
+    (`eval.metrics`) no task on disk has ever populated. The numbers were computed, printed,
+    preserved in `score.log`, and never entered the record.
+
+    WHAT IT COSTS, CONCRETELY: v4 node 3 scored 0.790898 against node 1's 0.764853, and nothing
+    could say whether that was a recall@100 artifact. Its own score.log answers — MAP@100 0.34 vs
+    0.29, nDCG@100 0.46 vs 0.41, MRR@100 0.41 vs 0.35: it leads every family, not one.
+
+    APPEND-ONLY, and a live record always wins, so a second run is a no-op by construction. It
+    writes NO direction: nobody declared which way was better when those evals ran, orientation is a
+    forward-looking declaration in `eval.metrics`, and asserting it retroactively would present a
+    reconstruction as a measurement — so a ranking surface leaves these axes unranked and they are
+    audit. It reports PRECISION per key, because the suite prints 2 decimals while the primary is
+    read at 6 and "these two nodes are equal on nDCG" is a different claim from "the print statement
+    cannot tell them apart". And it names its own HORIZON: `EventStore.read_all` stops at the first
+    logical-sequence gap, which on `rubertlite-dense-retrieval` is event 20 of 1,624 lines, so that
+    run's 81 `node_created` rows fold to two nodes — a bounded pass that does not say what it
+    bounded reads as complete coverage.
+    """
+    from looplab.maintenance.backfill_score_metrics import backfill
+    typer.echo(backfill(run_root, dry_run=not apply, only=only))
