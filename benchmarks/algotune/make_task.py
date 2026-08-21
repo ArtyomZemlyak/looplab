@@ -125,6 +125,56 @@ DELIVER = (
 )
 
 
+# --one-card: the whole run is ONE hypothesis, implemented ONCE, and the ONLY way to test anything
+# is to submit code and read the evaluation.
+#
+# Measured on this box (2026-08-21, budget $0.15/task, `convex_hull` + `discrete_log`): the run never
+# reaches an evaluated node. Where the money goes, by phase: propose 44%, stages 28%, plan 21%,
+# card_build (the Developer's only turn) 1%. So 93% is spent BEFORE any code is written, and the
+# node that does get created is never evaluated.
+#
+# What propose spends it on, call by call: the workspace is THREE files totalling 20 KB, and the
+# Researcher made 30 tool calls in it. Seven of those pulled ONE 400-line file through a paginated
+# reader, out of order. Six went to stores the same turn had already told it were empty -- the
+# published inventory in its own user message reads `find_concept_slugs=0 data_schema=0
+# cross_run_prior_attempts=0`, and it called them anyway. Then the entire sequence replayed
+# byte-for-byte (served from the gateway's cache at 0.0 s per call, and charged in full: 13 of 63
+# calls, 22% of the task's budget).
+#
+# `--role-split` was written for the layer below this one -- the Developer choosing an algorithm by
+# probing -- and was measured on the same two tasks at the same budget: same outcome, node created,
+# never evaluated. So the constraint has to move UP, to how many things the run is allowed to be
+# about, and OUT, to what counts as a test.
+#
+# Three rules, and each names the behaviour it forbids rather than describing a virtue:
+#   1. ONE CARD. Think about as many directions as you like; commit to exactly one.
+#   2. TESTING IS THE EVALUATION. Not the probe, not a benchmark the agent writes for itself.
+#   3. THE DEVELOPER IMPLEMENTS, and that is all it does.
+ONE_CARD = (
+    " HOW THIS RUN IS ORGANISED, and it is not negotiable:\n"
+    "(1) ONE HYPOTHESIS. The Researcher may consider any number of directions in its own reasoning, "
+    "but it ends its turn having committed to EXACTLY ONE concrete idea, and the run works that one "
+    "idea. Not a menu, not \"A, and if that fails B\", not a decision tree with an unresolved branch "
+    "condition. If the idea rests on something nobody here knows yet, STATE THE ASSUMPTION inside the "
+    "idea and commit anyway -- an assumption that turns out wrong is a finished experiment with a "
+    "result, which is what this loop reads and builds on.\n"
+    "(2) THE ONLY TEST IS THE SUBMITTED CODE. Nothing is 'checked', 'verified', 'compared' or "
+    "'benchmarked' by any other means. There is no exploratory probing to find out which approach is "
+    "faster, no timing harness written on the side, no trying two variants to see which wins: you "
+    "write the solver, you submit it, and the evaluation tells you. That report is the evidence, and "
+    "it is the ONLY evidence. If you catch yourself measuring something in order to decide what to "
+    "write, stop -- write the committed idea instead and let the evaluation answer.\n"
+    "(3) THE DEVELOPER IMPLEMENTS THE IDEA IT WAS GIVEN. Mechanically, once, exactly as named. It "
+    "does not pick between algorithms, does not benchmark alternatives, does not redesign the "
+    "approach, and does not use any tool to decide WHAT to write -- only, at most, to make the named "
+    "thing actually RUN (does this import, what shape does this API return). If the Developer "
+    "believes the idea is wrong, it implements it anyway and says so in its rationale; a different "
+    "idea belongs to the NEXT experiment, not to this one.\n"
+    "Getting a submitted, evaluated solver -- even a mediocre one -- is worth more than any amount of "
+    "investigation that produces none."
+)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path)
@@ -134,6 +184,9 @@ def main() -> int:
                     help="Interpreter that has AlgoTune installed "
                          "(default: <algotune-root>/.venv/bin/python).")
     ap.add_argument("--timeout", type=int, default=7200, help="Eval timeout in seconds.")
+    ap.add_argument("--one-card", action="store_true",
+                    help="Append the ONE HYPOTHESIS / THE ONLY TEST IS THE SUBMITTED CODE / THE "
+                         "DEVELOPER IMPLEMENTS clause (see ONE_CARD). Composes with the others.")
     ap.add_argument("--deliver", action="store_true",
                     help="Append the YOU CANNOT MEASURE YOUR OWN SCORE clause (see DELIVER).")
     ap.add_argument("--role-split", action="store_true",
@@ -166,7 +219,10 @@ def main() -> int:
     spec = {
         "kind": "repo",
         "id": f"algotune_{args.task}",
-        "goal": GOAL.format(task=args.task) + (ROLE_SPLIT if args.role_split else "") + (DELIVER if args.deliver else ""),
+        "goal": (GOAL.format(task=args.task)
+                 + (ROLE_SPLIT if args.role_split else "")
+                 + (DELIVER if args.deliver else "")
+                 + (ONE_CARD if args.one_card else "")),
         "direction": "max",
         "editable_path": str(ws),
         "edit_surface": ["solver.py"],
