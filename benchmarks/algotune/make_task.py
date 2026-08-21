@@ -228,17 +228,39 @@ def main() -> int:
         "edit_surface": ["solver.py"],
         "protect": [ref_name, "description.txt"],
         "eval": {
-            "command": [
-                interpreter, str(BRIDGE),
-                "--algotune-root", str(root),
-                "--task", args.task,
-                "--model", "LoopLab",
-                "--solver", "solver.py",
-                # TRAIN, mirroring AlgoTuner's own agent. Scoring every node on the test split
-                # would let this arm optimise against the set it is graded on while the reference
-                # arm does not -- the champion is scored on test once, after the run.
-                "--subset", "train",
-            ],
+            # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not
+            # cosmetic. `repo_developer.py::_operator_stage_list` reads `eval.stages`; when it is
+            # present and valid the engine runs it verbatim, the Developer's own manifest is
+            # IGNORED, and its `stages` phase is SKIPPED entirely.
+            #
+            # With only a `command` that phase runs, and its prompt is written for ML pipelines:
+            # "declare the ordered stages that run BEFORE it ... GOOD PRACTICE: separate stages for
+            # data/feature PREPARATION, TRAINING (a fresh model every node) and TESTING; bake this
+            # node's hyperparameters into the `train` command". An AlgoTune task has none of those
+            # -- one file, run directly by the scorer -- so the honest answer is "no stages", which
+            # the prompt does not offer. Measured 2026-08-21 on a `google/gemini-3.7-flash` run: all
+            # FIVE nodes emitted a manifest whose entire content was one invented stage,
+            # `python -c "print('Ready')"` with `expect.assert: "Check solver environment
+            # readiness"`, and `solver.py` was never written. The `stages` phase had also been the
+            # single largest consumer of a DeepSeek run's wall clock (232 of its generations).
+            #
+            # `score` is the right name: it is RESERVED against a Developer manifest precisely
+            # because it denotes the operator's own scoring step, and this is the operator's.
+            "stages": [{
+                "name": "score",
+                "command": [
+                    interpreter, str(BRIDGE),
+                    "--algotune-root", str(root),
+                    "--task", args.task,
+                    "--model", "LoopLab",
+                    "--solver", "solver.py",
+                    # TRAIN, mirroring AlgoTuner's own agent. Scoring every node on the test split
+                    # would let this arm optimise against the set it is graded on while the reference
+                    # arm does not -- the champion is scored on test once, after the run.
+                    "--subset", "train",
+                ],
+                "timeout": args.timeout,
+            }],
             "metric": {"kind": "stdout_json", "key": "speedup"},
             # THE GRADER FENCE. AlgoTune is `uv pip install -e .` into the same venv the Developer
             # inspects, so without this `read_installed`/`grep_installed` reach the checker, the

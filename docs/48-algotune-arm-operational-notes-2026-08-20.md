@@ -351,3 +351,40 @@ does not set it, so every campaign so far is serial and unaffected. The prize fo
 — 107 s → 20 s per evaluation, and evaluation is ~98 % of a real arm's wall clock — but a 75 %
 inflation would have read as "LoopLab beats the reference by 1.7×" on a solver that is literally the
 reference.
+
+---
+
+## 11. The task must declare `eval.stages`, not `eval.command` (2026-08-21)
+
+A bare `eval.command` leaves the Developer's **stages phase** switched on, and that phase is written
+for ML pipelines. Its prompt says:
+
+> declare the ordered stages that run BEFORE it … GOOD PRACTICE: separate stages for data/feature
+> PREPARATION, TRAINING (a fresh model every node — the pipeline must not point at another
+> experiment's checkpoint), and TESTING; bake this node's hyperparameters into the `train` command
+
+An AlgoTune task has none of that. It is one file that the scorer runs directly, so the honest
+answer is *"no stages"* — which the prompt never offers. What the model does instead is invent one:
+
+```json
+{"name": "check", "command": ["python", "-c", "print('Ready')"],
+ "expect": {"assert": "Check solver environment readiness"}}
+```
+
+That is the entire output of all **five** nodes of the 2026-08-21 `google/gemini-3.7-flash` run —
+the first arm-B run that ever reached an evaluation. `solver.py` was the untouched template in every
+one, each evaluated honestly in 12–17 s, and each recorded 0.0. On the DeepSeek control the same
+phase was the single largest consumer of wall clock (232 generations).
+
+Declaring the scoring command as a **one-stage operator pipeline** instead removes the phase
+altogether: `repo_developer.py::_operator_stage_list` reads `eval.stages`, and when it is present and
+valid the engine runs it verbatim, the Developer's own manifest is ignored, and the phase is skipped.
+Verified on the generated task — `_operator_stage_list -> ['score']`, `has_cmd: True`, grader fence
+unchanged.
+
+`score` is the right stage name: it is reserved *against a Developer manifest* precisely because it
+denotes the operator's own scoring step, and this is the operator's.
+
+**Read every arm-B number before this date with that in mind.** The Developer was being asked, on
+every node, to design a training pipeline for a task that has none — and the phase where it should
+have written the solver came after it.
