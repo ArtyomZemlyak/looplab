@@ -1229,3 +1229,35 @@ class EventStore:
             # Return a snapshot copy so a caller iterating the result can't be perturbed by a
             # concurrent top-up (and so callers expecting a re-iterable list still work).
             return list(self._cache)
+
+    def readable_horizon(self) -> tuple[int, int]:
+        """`(events this store will SERVE, lines on disk)` — how far into this log a reader can see.
+
+        `read_all` returns the log's dense prefix and stops at the first logical-sequence GAP, which
+        is the right call for a state fold and is tested (`test_monotonic_logical_sequence_gap_
+        fails_closed`). What it cannot do is TELL anyone it stopped, and a bounded reader that does
+        not name its bound reads as complete coverage.
+
+        Measured 2026-08-21 on `runs/rubertlite-dense-retrieval`: seq jumps 19 -> 25 at file line 21,
+        so the store serves **20 events of 1,624 lines** and a run with 81 `node_created` and 71
+        `node_evaluated` rows on disk folds to TWO nodes. Anything built on the fold — both offline
+        backfills, any audit, any coverage claim — silently describes that prefix and calls it the
+        run. `backfill-applied-params` shipped exactly that way; its "23 events" is the prefix's
+        answer, not the corpus's.
+
+        Lives here, beside `read_all`, because it is a property of the STORE rather than of any
+        consumer: two copies of "how far can this be read" is the drift `tests/
+        test_shared_identity_rules.py` exists to refuse, and the second copy would be written by
+        whoever next needed the number.
+
+        Cheap and side-effect free: `read_all` is cache-served, and the line count is one buffered
+        pass. An unreadable path answers `(served, 0)` — 0 lines can never be less than `served`, so
+        a caller comparing them reports nothing rather than inventing a horizon from a failed stat.
+        """
+        served = len(self.read_all())
+        try:
+            with open(self.path, "rb") as fh:
+                lines = sum(1 for _ in fh)
+        except OSError:
+            lines = 0
+        return served, lines

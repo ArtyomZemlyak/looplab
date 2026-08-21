@@ -105,27 +105,13 @@ def _score_log(run_dir: Path, node_id: int) -> Optional[Path]:
 
 
 def readable_horizon(run_dir: Path) -> tuple[int, int]:
-    """`(events the store will serve, lines on disk)` — how far into this log a reader can see.
+    """This run's `(events served, lines on disk)`, from the STORE that owns the question.
 
-    THE SILENT TRUNCATION THIS EXISTS TO MAKE LOUD. `EventStore.read_all` returns the log's dense
-    prefix and stops at the first logical-sequence GAP, deliberately and with a test
-    (`test_monotonic_logical_sequence_gap_fails_closed`). On `runs/rubertlite-dense-retrieval` that
-    fence bites at seq 19 -> 25: the store serves **20 events of 1,624 lines**, so a run with 81
-    `node_created` and 71 `node_evaluated` rows on disk folds to TWO nodes.
-
-    Nothing here is broken — failing closed on a gap is the right call for a state fold. What is not
-    acceptable is a maintenance tool REPORTING "1 scored node" about that run, because a reader
-    cannot tell that from "this run has one scored node". A bounded pass that does not say what it
-    bounded reads as complete coverage, which is the shape `docs/BACKLOG.md` §0.8 keeps finding.
+    Thin on purpose. `EventStore.readable_horizon` is where the rule lives — `read_all` stops at the
+    first logical-sequence gap, and a bounded reader that does not name its bound reads as complete
+    coverage. Two copies of that number is the drift `tests/test_shared_identity_rules.py` refuses.
     """
-    served = len(EventStore(str(run_dir / "events.jsonl")).read_all())
-    path = run_dir / "events.jsonl"
-    try:
-        with open(path, "rb") as fh:
-            lines = sum(1 for _ in fh)
-    except OSError:
-        lines = 0
-    return served, lines
+    return EventStore(str(run_dir / "events.jsonl")).readable_horizon()
 
 
 def plan_run(run_dir: Path) -> list[dict]:
@@ -228,18 +214,23 @@ def backfill(root: Path, *, dry_run: bool = True, only: Optional[str] = None,
                        "being written describes nothing yet.")
             totals["skipped_live"] += 1
             continue
+        # NAMED BEFORE THE EARLY RETURN, not after it. A run whose rows are all already
+        # backfilled produces NO rows and would `continue` below — so the one combination a reader
+        # most needs ("nothing to do here" AND "only 20 of 1,624 lines are readable") was exactly
+        # the one that printed nothing at all. Found by running it, not by reading it.
+        served, lines = readable_horizon(run_dir)
+        bounded = bool(lines and served < lines)
+        if bounded:
+            out.append(f"{run_dir.name}: ** BOUNDED — the event store serves {served} of {lines} "
+                       "lines; it stops at the first logical-sequence gap. Nodes recorded past that "
+                       "point were NOT considered, and any count below is the prefix's, not the "
+                       "run's. **")
+            totals["bounded"] += 1
         rows = plan_run(run_dir)
         if not rows:
             continue
         summary = summarize(rows)
         out.append(render(run_dir.name, rows, summary))
-        served, lines = readable_horizon(run_dir)
-        if lines and served < lines:
-            out.append(f"    ** BOUNDED: the event store serves {served} of {lines} lines — it "
-                       "stops at the first logical-sequence gap. Nodes recorded past that point "
-                       "were NOT considered, and this run's node count above is the prefix's, "
-                       "not the run's. **")
-            totals["bounded"] += 1
         for k in ("considered", "recovered", "values"):
             totals[k] += summary[k]
         if not dry_run:

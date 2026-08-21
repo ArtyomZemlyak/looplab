@@ -118,6 +118,43 @@ def test_a_node_with_no_score_log_gets_a_row_that_says_so(tmp_path):
     assert plan_run(d)[0]["unrecoverable"] == NO_SCORE_LOG
 
 
+def test_the_horizon_is_named_even_when_there_is_NOTHING_to_do(tmp_path):
+    """The combination that printed nothing at all until it was RUN.
+
+    A run with NO scored node yields no rows, and the report's early `continue` used to skip the
+    horizon line with them — so "nothing to do here" and "only 20 of 1,624 lines are readable" was
+    exactly the pair a reader could not tell apart. That is the shape the whole horizon exists to
+    refuse, arriving through the back door.
+
+    THE FIXTURE HAD TO BE REBUILT TO MEAN ANYTHING. The first version backfilled an already-scored
+    run and asserted the same thing; it passed with the fix REMOVED, because `plan_run` still
+    returns a row (`ALREADY_RECORDED`) for a scored node, so the early return never fired. Only a
+    run whose nodes never scored reaches it.
+    """
+    from looplab.maintenance.backfill_score_metrics import backfill, plan_run
+    d = tmp_path / "r"
+    (d / "nodes" / "node_0").mkdir(parents=True)
+    store = EventStore(str(d / "events.jsonl"))
+    store.append("run_started", {"run_id": "r", "goal": "g", "direction": "max"})
+    store.append("node_created", {"node_id": 0, "operator": "seed",
+                                  "idea": {"name": "n", "rationale": "r", "params": {},
+                                           "operator": "seed"}})
+    store.append("node_created", {"node_id": 1, "operator": "seed",
+                                  "idea": {"name": "n", "rationale": "r", "params": {},
+                                           "operator": "seed"}})
+    with open(d / "events.jsonl", "r+", encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+        rows[-1]["seq"] = rows[-1]["seq"] + 5       # punch a gap
+        fh.seek(0), fh.truncate()
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    assert plan_run(d) == [], "no node scored, so there is genuinely nothing to write"
+    report = backfill(d.parent, dry_run=True)
+    assert "BOUNDED" in report, (
+        "a bounded pass that reports nothing reads as complete coverage — the whole defect")
+    assert "READ ONLY TO A SEQUENCE GAP" in report
+
+
 def test_the_readable_horizon_is_named_rather_than_silently_applied(tmp_path):
     """`EventStore.read_all` stops at the first logical-sequence GAP, deliberately. On
     `runs/rubertlite-dense-retrieval` that fence bites at event 20 of 1,624 lines, so a run with 81
