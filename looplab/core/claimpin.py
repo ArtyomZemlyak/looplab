@@ -79,6 +79,31 @@ CLAIM_MARKER = re.compile(r"\bCLAIM\[([a-z0-9][a-z0-9-]{2,60})\]")
 # which is the satisfiable-by-anything pin this convention exists to refuse.
 _KINDS = "present:|absent:|missing:|line:"
 DECIDED = re.compile(rf"decided:(?:`((?:{_KINDS})[^`]+)`|((?:{_KINDS})\S+))")
+# THE SAME GRAMMAR FOR THE OPEN-ITEM INDEX, and it lives here for the reason this module exists at
+# all: `predicate_holds` was moved out of the two guards because "two evaluators would eventually
+# disagree about what `present:` means". The SCANNERS were left behind, and by 2026-08-21 they had
+# already drifted — `tests/test_claim_pins.py` accepted `line:` and the backtick-quoted form,
+# `tests/test_open_item_index.py` accepted neither, so the two indexes disagreed about which
+# predicates EXIST while sharing the one that evaluates them.
+#
+# WHAT THE DRIFT COST, measured the day it was found: an item of the shape "the DEFAULT is wrong"
+# had no expressible falsifier. `docs/BACKLOG.md` §0.1 #7's live half is `Settings.landlock`
+# shipping `"off"`; the only predicate that discriminates it is
+# `line:landlock&&"off"@looplab/core/config.py` — True today, False the moment the default flips —
+# and `line:` was exactly what the open-item scanner did not admit. The one whitespace-free spelling
+# in the tree sits in a COMMENT, which `satisfied_only_by_prose` is there to reject. So the entry
+# stayed OUTSIDE the guard, which is how nine other ranked entries got there: three were checked
+# against the tree that day and none of the three still described it.
+#
+# `absent:`/`present:`/`missing:` keep meaning exactly what they meant; this only widens what the
+# OPEN scanner will READ, and every predicate is still evaluated by the one function below.
+PROOF = re.compile(rf"proof:(?:`((?:{_KINDS})[^`]+)`|((?:{_KINDS})\S+))")
+
+
+def proof_predicate(match: "re.Match") -> str:
+    """The predicate text of a `proof:` match, quoted or bare — the sibling of
+    `decided_predicates`, and deliberately its twin rather than a second spelling."""
+    return match.group(1) or match.group(2) or ""
 
 # The window a pin's own `decided:` clause must live in — a docstring paragraph, a comment block or
 # a markdown row all fit, and it is short enough that a clause cannot describe the NEXT claim.
