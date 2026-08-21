@@ -568,12 +568,46 @@ def _looplab_read_confine(allow):
         return (("landlock_create_ruleset failed: %%s (Landlock needs Linux 5.13+ with "
                  "CONFIG_SECURITY_LANDLOCK=y)" %% os.strerror(ctypes.get_errno())), [])
     skipped = []
+    # Normalise before adding rules: resolve symlinks, drop duplicates, and drop any path already
+    # contained in another. On a usrmerge box `/bin` is a symlink to `/usr/bin`, so the raw list
+    # asks the kernel for a rule it already has and -- worse -- asks the HOOK half to open a path it
+    # refuses, producing a "skipped" line on every probe. A skip must mean "this path is now denied
+    # and you may not have meant that", so it cannot also mean "this was a symlink to something you
+    # already granted".
+    _pairs = []
+    for _p in allow:
+        try:
+            _r = os.path.realpath(str(_p))
+        except Exception:                       # noqa: BLE001 — an unresolvable path is just a skip
+            _r = str(_p)
+        _pairs.append((_r, str(_p)))
+    _uniq, _keys = [], []
+    for _r, _orig in sorted(set(_pairs), key=lambda kv: len(kv[0])):
+        if not any(_r == _k or _r.startswith(_k.rstrip("/") + "/") for _k in _keys):
+            _keys.append(_r)
+            # The ORIGINAL spelling is what gets opened, not the resolved one: the hook half of this
+            # rule matches its allow-list by prefix STRING, and a fence entry written
+            # `/mnt/data/` does not match a realpath'd `/mnt/data`. Resolving is for deciding what is
+            # a duplicate; opening is for the kernel, which resolves anyway.
+            _uniq.append(_orig)
+    allow = _uniq
     try:
         for _path in allow:
             try:
                 pfd = os.open(str(_path), os.O_PATH | os.O_CLOEXEC)
-            except OSError as exc:
-                skipped.append((str(_path), exc.strerror or str(exc)))
+            except FileNotFoundError:
+                # Not reported: there is nothing at this path to deny, so the "you may not have
+                # meant that" reading does not apply. `/lib32` on a box that has no 32-bit tree is
+                # the every-probe case; reporting it trains the reader to ignore the line that
+                # matters.
+                continue
+            except BaseException as exc:
+                # Not `except OSError`: the HOOK half of the same rule is already live in this
+                # interpreter and refuses with a deliberately non-OSError type, so a hook refusal
+                # here crashed the launcher instead of skipping one rule. Measured 2026-08-21 on
+                # `/bin`, which this box symlinks into `/usr` -- already granted, so the skip costs
+                # nothing and the crash cost everything.
+                skipped.append((str(_path), getattr(exc, "strerror", None) or str(exc)))
                 continue
             try:
                 rule = _Beneath(allowed_access=%(handled)d, parent_fd=pfd)

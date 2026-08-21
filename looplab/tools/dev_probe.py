@@ -186,7 +186,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime import landlock, read_fence
+from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.tools._base import (RESULT_CAP, CancelSignal, ToolCapability, ToolResult,
                                  clip, fn_spec, stream_tails)
 
@@ -480,6 +480,20 @@ if _LL_READ_EXTRA is not None:
 '''
 
 
+def _under_tempdir(path: str) -> bool:
+    """Is `path` one of the machine's shared temp roots (or inside one)?
+
+    A separate predicate rather than a literal comparison because `tempfile.gettempdir()` is what
+    the rest of the runtime honours (`TMPDIR` moves it), and a hard-coded `/tmp` would silently stop
+    matching on a box that sets it.
+    """
+    import tempfile
+
+    roots = {"/tmp", "/var/tmp", os.path.realpath(tempfile.gettempdir())}
+    real = os.path.realpath(path)
+    return any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
+
+
 def render_launcher(program_path: str, read_allow: Optional[tuple] = None) -> str:
     """The generated launcher source for one probe. Split out so the boundary can be read, diffed
     and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess.
@@ -514,10 +528,21 @@ class DevProbeTools:
     `RepoWriteTools` whose `files` dict is replicated, read-only, into the probe's cwd."""
 
     def __init__(self, repo_spec: Optional[dict] = None, *, timeout_s: float = _DEFAULT_TIMEOUT,
-                 staged=None):
+                 staged=None, confine_reads: bool = True):
         self.repo_spec = repo_spec or {}
         self.timeout_s = max(1.0, min(float(timeout_s or _DEFAULT_TIMEOUT), _MAX_TIMEOUT))
         self.staged = staged
+        # RULE 1, KERNEL HALF. The audit-hook fence covers `open` in ONE interpreter; this covers
+        # `ctypes` into libc, a native reader, an unaudited syscall and a child across `execve`.
+        # ON by default, and the default is the whole point: the two tests that demand it
+        # (`test_a_probe_cannot_read_outside_its_own_workdir`,
+        # `test_a_probe_cannot_read_the_operators_editable_source_tree`) build this provider
+        # DIRECTLY, so a default of False would leave them red while `make_roles` looked fixed --
+        # exactly the split that let a probe ship unfenced for two days. It FAILS CLOSED: on a
+        # kernel without Landlock the probe refuses rather than running with a boundary it does not
+        # have, and the refusal names `developer_probe_confine`, which is how an operator who wants
+        # the old trade takes it.
+        self.confine_reads = bool(confine_reads)
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -611,7 +636,9 @@ class DevProbeTools:
             program = root / "probe.py"
             program.write_text(code, encoding="utf-8")
             launcher = root / "probe_launcher.py"
-            launcher.write_text(render_launcher(str(program)), encoding="utf-8")
+            launcher.write_text(
+                render_launcher(str(program), read_allow=self._read_allow(work)),
+                encoding="utf-8")
             from looplab.runtime.sandbox import run_argv
             env = {
                 # Belt to the launcher's braces: no bytecode written anywhere, so an import of a
@@ -681,12 +708,48 @@ class DevProbeTools:
         # start and import -- nothing else, by construction rather than by enumeration of what to
         # refuse. Cross-run and cross-node knowledge is unaffected: it never travels through the
         # probe's filesystem, it arrives through the run-reading tools, which are unchanged.
-        allow = tuple(allow) + self._interpreter_allow(fence_dir.parent)
+        # The same list the kernel rung is given (`_confined_allow`), not a second
+        # derivation: see that method for why they cannot be allowed to differ.
+        allow = self._confined_allow(fence_dir.parent / "work")
         (fence_dir / "sitecustomize.py").write_text(
+            # `confine` only when the KERNEL rung is NOT the read boundary. With both on, the hook
+            # -- already live when the launcher runs -- refuses the rung's own `O_PATH` opens and the
+            # probe dies while ADDING a rule. One boundary per mechanism: the kernel owns reads when
+            # it is available (it also covers ctypes, native readers and a child across execve, which
+            # the hook cannot), and the hook keeps its original deny-prefix job over the editable
+            # tree plus every write refusal, where its non-OSError message is what makes the failure
+            # actionable.
             read_fence.render(roots, allow, policy="deny", log="", run="developer-probe",
-                              confine=True),
+                              confine=not self.confine_reads),
             encoding="utf-8")
         return True
+
+    def _confined_allow(self, work_root) -> tuple:
+        """The ONE allow-list both halves of rule 1 use: the hook and the kernel rung.
+
+        Computed once and handed to both because they are two enforcement points for a single rule,
+        and the day their lists differ the weaker one is the boundary. It is not a theoretical
+        worry: while building the kernel rung, the hook — already live in the launcher's
+        interpreter — refused the rung's own `O_PATH` opens for paths it had not been given, and the
+        probe died on a rule it was trying to ADD.
+
+        The machine temp tiers are DROPPED here, and that line decides whether the rung works at
+        all. `read_allowlist._DEFAULT_TIERS` grants `/tmp` and `/var/tmp` whole, because an eval
+        legitimately writes scratch there. Measured 2026-08-21: with them granted, a confined probe
+        still read everything under `/var/tmp/looplab-bench` — this box's AlgoTune checkout, the
+        evaluation bridge and the cached reference timings. The allow-list would have granted
+        exactly what the rung exists to refuse. Nothing is lost: rule 2 means the probe cannot write,
+        so it has no scratch to read back, its own replica is granted below by absolute path, and a
+        task that genuinely needs a temp path DECLARES it as a mount, which arrives in `allow`.
+        """
+        _roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        tiers = tuple(path for path, _mode in read_allowlist.machine_read_tiers()
+                      if not _under_tempdir(path))
+        return tuple(allow) + tiers + (str(work_root), str(Path(work_root).parent))
+
+    def _read_allow(self, work) -> Optional[tuple]:
+        """What the KERNEL rung grants, or None when confinement is off."""
+        return self._confined_allow(work) if self.confine_reads else None
 
     @staticmethod
     def _interpreter_allow(work_root) -> tuple:

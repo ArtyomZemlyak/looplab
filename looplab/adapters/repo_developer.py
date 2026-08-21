@@ -461,7 +461,8 @@ class LLMRepoDeveloper:
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
                  prompts=None, cross_run_read_tools: bool = False, memory_dir=None,
-                 probe: bool = False, probe_timeout_s: float = 60.0, command_runtime=None):
+                 probe: bool = False, probe_timeout_s: float = 60.0,
+                 probe_confine: bool = True, command_runtime=None):
         self.client = client
         self.task = task
         self.parser = parser
@@ -487,6 +488,7 @@ class LLMRepoDeveloper:
         # every one of them.
         self._probe = bool(probe)
         self._probe_timeout_s = float(probe_timeout_s)
+        self._probe_confine = bool(probe_confine)
         self.brief = task.agent_brief()
         rs = task.repo_spec()
         self._surface = rs["edit_surface"]
@@ -894,6 +896,7 @@ class LLMRepoDeveloper:
             # the probe cannot write, so nothing it does can flow back into the build.
             extra.append(DevProbeTools(getattr(self, "_probe_repo_spec", None),
                                        timeout_s=getattr(self, "_probe_timeout_s", 60.0),
+                                       confine_reads=getattr(self, "_probe_confine", True),
                                        staged=write))
         # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.

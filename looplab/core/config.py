@@ -1941,6 +1941,15 @@ class Settings(BaseSettings):
     # wall-clock ceiling (`developer_session_time_budget_s`), which a probe spends like any other
     # turn, and a second fixed counter is the shape doc 36 names as the category error.
     developer_probe_timeout_s: float = 60.0
+    # The probe's read boundary, KERNEL half (`tools/dev_probe.py` rule 1). ON: the probe may read
+    # its own replica, the interpreter and the task's declared mounts, and nothing else -- enforced
+    # by Landlock, so it holds for `ctypes`, a native reader and a child across `execve`, none of
+    # which the audit hook reaches. Measured 2026-08-21 on a live benchmark arm with it OFF: 116 of
+    # 119 probe calls read outside the workdir, including the evaluation harness that grades the
+    # run. It FAILS CLOSED -- on a kernel without Landlock the probe refuses rather than running
+    # with a boundary it does not have -- so this is the switch to flip if that trade is wrong for
+    # a given box, and the refusal names it.
+    developer_probe_confine: bool = True
     # Phase-handoff summaries. Each LLM phase in a node build (Researcher·propose → Developer·stages →
     # plan → implement) ends with ONE extra LLM call that distills its transcript — the repo structure
     # it mapped, files/data confirmed, decisions made — into a brief injected into the NEXT phase (even
