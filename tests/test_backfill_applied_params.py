@@ -169,7 +169,7 @@ def test_the_champion_that_put_8192_into_a_task_goal_is_recovered_as_512():
 
 
 def test_two_carriers_that_disagree_are_recorded_as_a_conflict_not_resolved():
-    """v8 node 3: `config.yaml:281` says 8192 and `vectorsearch/train.py:31` assigns 4096, with the
+    """v8 node 3: the config document says 8192 while the training script assigns 4096, with the
     Developer's reasoning inline — R-Drop's second forward pass OOMs at 8192 even on a 140 GB H200,
     so it halves the batch and doubles accumulation and deliberately leaves the document alone to
     keep the completed `mine` stage reusable. Picking either number would be an invention; the

@@ -20,7 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from looplab.cli import concept_cmds, governance_cmds, inspect_cmds, memory_cmds
+from looplab.cli import (concept_cmds, governance_cmds, inspect_cmds, maintenance_cmds,
+                         memory_cmds)
 
 _CLI = Path(__file__).resolve().parents[1] / "looplab" / "cli"
 
@@ -71,6 +72,11 @@ GROUPS = {
     # is the one governance does not have: every command there RECORDS a decision and adds, this one
     # REMOVES rows whose writing run is gone and decides nothing about their content.
     "memory_cmds": {"memory-orphans"},
+    # OFFLINE RECORD REPAIRS. Its own group rather than `governance_cmds` because the subject is a
+    # SINGLE run's account of itself — a node whose durable record kept the proposal and lost what
+    # actually ran — not the cross-run store. It appends events, so it is not `inspect_cmds` either;
+    # the group docstring states that in its first paragraph rather than below a "read-only" claim.
+    "maintenance_cmds": {"backfill-applied-params"},
 }
 
 

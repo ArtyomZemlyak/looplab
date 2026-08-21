@@ -12,7 +12,7 @@ Measured over every run on disk: **457 comparisons, 41 diverged (9.0%), 18 of th
 produced a metric.** The e5 champion at 0.793426 is recorded as batch 8192 / accum 2 / 15 epochs and
 ran batch 512 / accum 32 / 3 epochs. That record is what put 8192 into the v3 task goal, and v3 died
 with three nodes and no metric. On `rubertlite-dr-unified-v8`'s champion the carrier is not even the
-document everyone assumed: `config.yaml` says 8192 and `vectorsearch/train.py:31` assigns 4096, with
+document everyone assumed: `config.yaml` says 8192 while the assignment in `vectorsearch/train.py` says 4096, with
 the Developer's reasoning inline — R-Drop's second forward pass makes 8192 OOM even on a 140 GB
 H200, so it halves the batch and doubles accumulation, deliberately leaving the document untouched
 so the completed `mine` stage stays reusable.
@@ -31,9 +31,9 @@ WHAT IT WILL AND WILL NOT DO
   is the point: "the workdir is gone" and "the proposal is what ran" are opposite statements, and
   the second is the one every reader currently makes by default.
 * NEVER GUESSES. `bind_applied_params` reports a coordinate two carriers disagree about as a
-  CONFLICT rather than picking one — on the v8 champion that is exactly `train.training.batch_size`
-  (config.yaml:281 says 8192, train.py:31 says 4096) — and this module passes that through
-  untouched.
+  CONFLICT rather than picking one — on the v8 champion that is exactly `train.training.batch_size`,
+  where the config document says 8192 and the training script's own assignment says 4096 — and this
+  module passes that through untouched, each reading with the file and line it was read at.
 * REFUSES A LIVE RUN. The workdir of a node that is training right now is being written to, and a
   reading taken mid-write describes nothing.
 """

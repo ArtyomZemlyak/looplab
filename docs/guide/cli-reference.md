@@ -39,6 +39,7 @@ looplab claims          Lean statement/reference claim projection (PART IV cross
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
+looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -1051,6 +1052,55 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
+
+## `backfill-applied-params`
+
+**Repairs the historical record: what a node PROPOSED is not what it RAN.**
+
+`Idea.params` is a PROPOSAL. Under `params_style: "none"` the engine applies nothing — the Developer
+realises the idea by **editing the repo** — so a deviation is legitimate and expected. What is not
+legitimate is that the durable record keeps only the proposal, and every reader downstream (the
+distilled lessons, the context handed to the next proposer, the run report, the champion card, the
+UI) presents it as the parameters that produced the metric.
+
+Measured over every run on disk: **457 comparisons, 41 diverged (9.0%), 18 of them on nodes that
+produced a metric.** The e5 champion at 0.793426 is recorded as batch 8192 / accum 2 / 15 epochs and
+ran **512 / 32 / 3** — and that record is what put 8192 into a later task goal, which then died with
+three nodes and no metric.
+
+`metric_provenance.applied_params` records this for every eval going forward. Nodes evaluated before
+it have none, and the engine cannot retro-fit its own past. This command reads the workdirs that
+survive and appends what it finds.
+
+```bash
+looplab backfill-applied-params runs/                     # DRY RUN — prints every row it would write
+looplab backfill-applied-params runs/ --only my-run       # one run
+looplab backfill-applied-params runs/ --apply             # actually append
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `RUN_ROOT` | *(required)* | The run root; every run under it |
+| `--only NAME` | all | One run directory name |
+| `--apply` | off | Actually append. Without it this is a dry run and writes nothing |
+
+**What makes it safe to point at a real record**
+
+* **Append-only.** One `applied_params_backfilled` event per node; nothing is rewritten. The fold
+  applies it at read time.
+* **A live record always wins.** It writes only where the node has no applied-params record of its
+  own. A backfill is a *reconstruction* — it re-reads a workdir long after the eval — and may never
+  overwrite a measurement made while the run was happening. That is also the whole of the
+  idempotence: a second pass finds what the first wrote and declines. Every write carries
+  `backfilled: true`, so no surface can present a reconstruction as a measurement.
+* **Absence is recorded as absence.** A node whose workdir is gone gets a row that *says so*. An
+  empty record is a claim ("the configuration said nothing about anything you declared"); this is
+  the absence of an answer, and the two are opposite facts.
+* **It never guesses.** Two carriers that disagree are recorded as a CONFLICT carrying both readings
+  with their file and line — on one champion the config document says 8192 while the training
+  script's own assignment says 4096, and picking either would be an invention.
+* **It refuses a live run**, asked by contending for `engine.lock` (the file is empty and holds an
+  flock, not a pid).
 
 ## `concept-merge`
 
