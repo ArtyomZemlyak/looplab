@@ -84,6 +84,33 @@ site that proves it is open.
 
 ### §0.1 Ranked
 
+> **THIS LIST IS NOT GUARDED, AND ON 2026-08-21 THAT WAS MEASURED RATHER THAN SUSPECTED.**
+>
+> `grep -rn 'OPEN\['` IS this repo's backlog: every marker carries a falsifier, closing one is a
+> DELETION, and `tests/test_open_item_index.py` fails when a tracked item stops being open, when a
+> slug is declared twice, or when a decline carries no `measured:` clause. It caught three separate
+> drifts of mine in one day.
+>
+> **Nine of the nineteen entries below are self-marked closed. Of the ten that are not, ZERO carry
+> an `OPEN[…]` marker** — except §0.1 #5, whose marker text records its own falsifier firing falsely
+> within an hour and being tightened. Everything else here is prose that nothing re-derives.
+>
+> Two were checked on 2026-08-21 and neither was what it said:
+> * **#19** was FIXED on 2026-08-15 by exactly the symbol the entry names as its own remedy
+>   (`unreliable_metric_ids`), and sat open for six days. Verifying it cost one `grep`.
+> * **#6** was P0 on the strength of "this box serves local models", which it does not — and the
+>   local instrument the repo built for that question reports 33 asks, 0 repaired, 0 failed.
+>
+> So the failure rate of a spot-check here is 2 of 2. A ranked list that asks for work on the
+> strength of a number that stopped being true is the same defect as a record that reports
+> parameters a run did not use — the carrier lies about FUTURE work instead of past work, and the
+> cost is the next reader's attention rather than GPU-hours.
+>
+> **What would fix it:** give every still-open entry an `OPEN[<slug>]` with a falsifier the guard can
+> re-derive, and let closing be a deletion, as it is everywhere else in this tree. Until then, verify
+> an entry against the code before acting on it — start with the symbols the entry itself names.
+
+
 1. ✅ **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
    `serve/launch.py:422-426` did `Path(os.path.expandvars(os.path.expanduser(v))).resolve()` and
    loaded it — the only guard an 8 MiB size cap. The other half of the old C3 row shipped as an
@@ -429,19 +456,26 @@ site that proves it is open.
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
     ship (`engine/widths.py::EVAL_WIDTH_MAX` enforced at `orchestrator.py:2966`;
     `engine/proposal_cues.py:425::per_experiment_gpu_budget`).
-19. **[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**
-    `trust/memo_verify.py:209::finalize_verified_evidence` re-checks a cited node's LIFECYCLE only
-    (exists, not tombstoned, not aborted, terminal status, stable attempt) — grep for
-    `feasible|metric_salvaged|flagged` across `memo_verify.py` returns nothing — so a D8 research
-    claim can ratify `supported` on a salvaged or reward-hacked node's number into the cross-run
-    `research_claims.jsonl` (`engine/claims.py`), where a later run retrieves it as evidence.
-    CLAUDE.md's engine map records this as "STILL OPEN". **Cost:** the same leak
-    `engine/memory.py::unreliable_metric_ids` closed for lessons/skills on 2026-08-13, one store
-    over. **Fix:** reuse that exact join — `engine/metric_salvage.py::metric_unmeasured` ∪
-    `events/replay.py::flagged_node_ids` — and refuse/downgrade a `supported` verdict whose cited
-    node is in the set, stating the withheld reason in the claim row. Ranked here (not top-5) only
-    because D8 claims are advisory retrieval input, not selection machinery.
-
+19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
+    **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
+    The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
+    metric_unmeasured` ∪ `events/replay.py::flagged_node_ids` — and refuse/downgrade a `supported`
+    verdict whose cited node is in the set". `trust/memo_verify.py::finalize_verified_evidence` now
+    imports and calls `engine/memory.py::unreliable_metric_ids` (the function that IS that join) and
+    refuses on it, with a docstring that states the leak in the entry's own terms: "none asked
+    whether this run trusts its number".
+    It also fails closed in the direction the entry did not ask for and should have: an unreadable
+    state answers "verification could not establish whether this run trusts the cited node(s)"
+    rather than ratifying — the OPPOSITE containment from the predicate's own, whose bare `except`
+    would return the empty set and thereby answer "everything is reliable".
+    Driven by `tests/test_memo_verify_evidence_trust.py`, `tests/test_research_claim_finalize.py`
+    and `tests/test_champion_metric_caveats.py`.
+    **WHY IT SAT HERE FOR SIX DAYS, which is the more useful finding.** This entry carried no
+    `OPEN[…]` marker, so the open-item guard — the mechanism that DOES notice when a tracked item
+    stops being open, and that caught three of my own drifts on 2026-08-21 alone — could not see it.
+    Ten of the nineteen ranked entries are in that state. Verifying one took a single `grep` for the
+    symbol the entry itself names; nothing was doing that grep. See the note under §0.1 for what
+    that costs and what it would take to fix.]
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
 - **[FIXED 2026-08-15] `declared_param_overrides` read a file in BREADTH-FIRST order, so a helper
