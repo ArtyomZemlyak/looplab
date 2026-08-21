@@ -38,7 +38,7 @@ from looplab.core.models import (CARD_STATEMENT_MAX_UTF8_BYTES as _CARD_REPLAY_S
                      Event, Idea, Node, NodeStatus, RunState, Trial,
                      coerce_node_id as _coerce_node_id,
                      hypothesis_id,
-                     normalize_extra_metric_channels, normalize_extra_metrics,
+                     normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_researcher_footprint,
                      normalize_steering_context,
                      run_setup_key)
@@ -953,6 +953,13 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             # that is provably false about it.
             n.extra_metrics_provenance = normalize_extra_metric_channels(
                 d.get("extra_metrics_provenance"))
+            # ...and WHICH WAY IS BETTER on each, folded the same way and defaulting the same way:
+            # absent -> `{}` -> every key answers `EXTRA_METRIC_DIRECTION_UNKNOWN`. Not defaulting
+            # to a direction is the same discipline as not defaulting to `declared` one line up —
+            # every extra metric preserved in `runs/` was recorded with no direction at all, and
+            # picking one for them would state a fact nobody measured.
+            n.extra_metrics_direction = normalize_extra_metric_directions(
+                d.get("extra_metrics_direction"))
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
             # Additive with a reader-side default: an old log has no such key and folds to None,
@@ -1166,6 +1173,8 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.extra_metrics = {}
         # ...and so did the CHANNEL map describing where those extras came from.
         n.extra_metrics_provenance = {}
+        # ...and so did the DIRECTION map saying which way was better on them.
+        n.extra_metrics_direction = {}
         n.violations = []
         n.feasible = True
         # WHERE THE OLD METRIC CAME FROM described the old metric, which this epoch just cleared.
@@ -1412,6 +1421,8 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.extra_metrics = {}
         # ...and so did the CHANNEL map describing where those extras came from.
         n.extra_metrics_provenance = {}
+        # ...and so did the DIRECTION map saying which way was better on them.
+        n.extra_metrics_direction = {}
         n.violations = []
         n.feasible = True
         # See the same line in `_requeue_partition_bound_results`: the provenance describes the metric this

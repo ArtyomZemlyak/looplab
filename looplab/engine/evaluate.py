@@ -44,6 +44,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  developer_artifact_footprint, developer_stuck_reason,
                                  is_developer_error, is_developer_stuck,
                                  EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
+                                 normalize_extra_metric_directions,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
 from looplab.core.node_evidence import begin_metrics_attempt
 from looplab.engine.asha_monitor import extract_resource_curve
@@ -3189,9 +3190,16 @@ class EvaluateMixin:
                     # `search/speculation_quality.py` compares for equality.
                     _extras = normalize_extra_metrics(res.extra_metrics)
                     _extra_channels = normalize_extra_metric_channels(res.extra_metrics_provenance)
+                    _extra_dirs = normalize_extra_metric_directions(res.extra_metrics_direction)
                     if not bool(getattr(self, "auto_extra_metrics", True)):
                         _extras, _extra_channels = authenticated_extra_metrics_only(
                             _extras, _extra_channels)
+                    # The direction map may only describe values that SURVIVED the gate above. A
+                    # direction for a dropped key is an orphan: it says which way is better about a
+                    # number this record does not carry, and the next reader to join the two would
+                    # be reading a fact about nothing. Restricted rather than gated a second time,
+                    # so it cannot drift from whichever rule dropped the values.
+                    _extra_dirs = {k: v for k, v in _extra_dirs.items() if k in _extras}
                     _eval_payload = {
                         "node_id": node_id, "generation": generation,
                         "metric": res.metric,
@@ -3210,6 +3218,13 @@ class EvaluateMixin:
                     # information at all. Absent == "this node reported no extra metrics".
                     if _extra_channels:
                         _eval_payload["extra_metrics_provenance"] = _extra_channels
+                    # Same "only when there is something to say" rule, and for the same reason: an
+                    # unconditional key would rewrite the `node_evaluated` bytes of every node in
+                    # every run — the calibration nodes included — to say `{}`. Absent == nobody
+                    # declared which way is better about anything here, which is the honest reading
+                    # of every log written before this shipped.
+                    if _extra_dirs:
+                        _eval_payload["extra_metrics_direction"] = _extra_dirs
                     if _curve:                     # computed above, outside the write-lock (see the #7 note)
                         _eval_payload["resource_curve"] = _curve
                     if salvaged is not None:

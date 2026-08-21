@@ -135,6 +135,58 @@ test('a caveated point dominates measured nodes OFF the front', async () => {
 })
 
 // ---------------------------------------------------------------------------------------------
+// AN AXIS NOBODY CAN ORIENT IS NOT AN AXIS.
+//
+// `paretoFront` treated every extra_metrics key as cost-like, which was harmless only because no
+// run has ever recorded a real second objective: measured over every `*.jsonl` under `runs/` (131
+// files, 15 run directories) the sole extras are the engine's four CUDA-probe CONSTANTS in the
+// specgate toys, and a constant dimension can neither create nor break a domination.
+//
+// The objectives queued to be recorded are QUALITY metrics — one vecsearch score stage already
+// prints nDCG@k, MAP@k, MRR@k, Precision@k and Recall@k at seven cutoffs, ~35 higher-is-better
+// numbers, of which the record keeps one. Under the old rule the BETTER nDCG loses on its own axis
+// and nothing on screen looks wrong: every number real, the ordering backwards.
+// ---------------------------------------------------------------------------------------------
+
+const withNdcg = (id, metric, ndcg, direction) => measured(id, metric, {
+  extra_metrics: { 'nDCG_at_100': ndcg },
+  ...(direction ? { extra_metrics_direction: { 'nDCG_at_100': direction } } : {}),
+})
+
+test('a higher-is-better axis is ranked the right way up once the record declares it', async () => {
+  const { paretoFront } = await panels()
+  // #5 wins the primary, #6 wins nDCG. Correctly oriented, NEITHER dominates: both are on the front.
+  const oriented = [withNdcg(5, 0.79, 0.41, 'max'), withNdcg(6, 0.76, 0.44, 'max')]
+  assert.deepEqual(paretoFront(oriented, 'max').front.map(n => n.id).sort(), [5, 6],
+    'each node is strictly better on one objective, so the front is both of them')
+  assert.deepEqual(paretoFront(oriented, 'max').keys, ['nDCG_at_100'],
+    'and the declared axis really is one of the ranked dimensions')
+})
+
+test('an UNDECLARED axis is dropped from the ordering rather than assumed to be a cost', async () => {
+  const { paretoFront } = await panels()
+  // The same two nodes with no direction recorded — every log written before this shipped. The old
+  // rule read nDCG as cost-like and let #5 (worse nDCG, better metric) dominate #6 off the table.
+  const unoriented = [withNdcg(5, 0.79, 0.41), withNdcg(6, 0.76, 0.44)]
+  assert.deepEqual(paretoFront(unoriented, 'max').keys, [],
+    'an axis the record cannot orient is not ranked on at all')
+  // And the CONSEQUENCE, stated rather than wished for: with no orientable second axis there is
+  // one objective, so the better primary wins outright and #6 leaves the front. That is the honest
+  // answer — a single-objective ranking the operator can read as one — and it is not the same as
+  // the old behaviour, which reached the identical front by ranking nDCG upside down and would
+  // have kept doing so as the numbers moved. The falsifier is `keys`, not the front's membership.
+  assert.deepEqual(paretoFront(unoriented, 'max').front.map(n => n.id), [5],
+    'the front is the primary metric alone')
+})
+
+test('two nodes disagreeing about a direction leaves the axis unorientable', async () => {
+  const { paretoFront } = await panels()
+  const split = [withNdcg(5, 0.79, 0.41, 'max'), withNdcg(6, 0.76, 0.44, 'min')]
+  assert.deepEqual(paretoFront(split, 'max').keys, [],
+    'a contradiction is not a direction — the record does not say which way is better')
+})
+
+// ---------------------------------------------------------------------------------------------
 // THE RENDER. Nothing else in the suite MOUNTS a panel, which is why this survived.
 // ---------------------------------------------------------------------------------------------
 

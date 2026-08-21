@@ -723,10 +723,36 @@ const paretoMetric = node => node.confirmed_mean ?? node.metric
 
 // Exported for the same reason `Inspector.jsx::Metrics` is: nothing in the suite MOUNTS a panel, and
 // which nodes reach the front is a claim about a RECORD that has to be driven, not read off source.
+// AN AXIS NOBODY CAN ORIENT IS NOT AN AXIS, and until 2026-08-21 this function assumed one.
+// Every extra_metrics key entered the domination test as cost-like — the comment above says so —
+// and that was harmless for exactly one reason: measured over every `*.jsonl` under `runs/` (131
+// files, 15 run directories), the only extras any run has ever recorded are the engine's four
+// CUDA-probe CONSTANTS in the specgate toys, and a constant dimension can neither create nor break
+// a domination. All 8 evaluated nodes of the two real task families record `extra_metrics: {}`.
+//
+// It stops being harmless the moment a run records a real second objective, and the ones queued to
+// be recorded are QUALITY metrics: one vecsearch score stage already prints nDCG@k, MAP@k, MRR@k,
+// Precision@k and Recall@k at seven cutoffs — ~35 numbers, every one higher-is-better — of which
+// the record keeps one. Under the old rule a node with nDCG 0.44 was DOMINATED by one at 0.41 on
+// that axis. Nothing on screen would look wrong: every number real, the ordering backwards.
+//
+// So a key is ranked only where the RECORD says which way is better (`node.extra_metrics_direction`,
+// filled from the operator's own `eval.metrics` spec — see `core/models.py::
+// normalize_extra_metric_directions` for why a name rule like "nDCG means max" is refused). An
+// unoriented key stays visible everywhere it was visible before; it is dropped from the ORDERING
+// only. That is a different exclusion from the one this panel refuses two paragraphs down: dropping
+// a POINT publishes a front the record does not support, because membership is a relation over a
+// SET, while dropping an AXIS publishes a smaller front that it does support.
+const extraDirection = (nodes, key) => {
+  const seen = new Set(nodes.map(n => n.extra_metrics_direction?.[key]).filter(d => d === 'min' || d === 'max'))
+  return seen.size === 1 ? [...seen][0] : null   // undeclared, or two nodes disagree -> unorientable
+}
 export function paretoFront(nodes, direction) {
   const keys = [...new Set(nodes.flatMap(n => Object.keys(n.extra_metrics || {})))]
+    .filter(k => extraDirection(nodes, k) != null)
   const vec = (n) => [direction === 'min' ? paretoMetric(n) : -paretoMetric(n),
-    ...keys.map(k => { const v = n.extra_metrics?.[k]; return v == null ? Infinity : v })]
+    ...keys.map(k => { const v = n.extra_metrics?.[k]; if (v == null) return Infinity
+      return extraDirection(nodes, k) === 'min' ? v : -v })]
   const dominates = (a, b) => { let strict = false; for (let i = 0; i < a.length; i++) { if (a[i] > b[i]) return false; if (a[i] < b[i]) strict = true } return strict }
   const pts = nodes.map(n => ({ n, v: vec(n) }))
   return { keys, front: pts.filter(p => !pts.some(q => q !== p && dominates(q.v, p.v))).map(p => p.n) }
