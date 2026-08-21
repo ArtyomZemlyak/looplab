@@ -113,7 +113,8 @@ class TrainingVerdict(BaseModel):
     evidence_locator: str = Field(
         default="",
         description="WHERE EXACTLY, as `path:line` or `path:start-end` relative to the workdir — "
-                    "for example `vectorsearch/training/loss.py:486`. THIS IS RE-READ BY THE ENGINE: "
+                    "for example training/loss.py followed by a colon and the line number. "
+                    "THIS IS RE-READ BY THE ENGINE: "
                     "a locator pointing at a file that is not there does not make your verdict "
                     "wrong, but it does mean nobody can re-derive it, so cite something you "
                     "actually opened. Leave empty when evidence_source is 'none'.")
@@ -181,8 +182,8 @@ _MONITOR_LOOK_TURNS = 9
 # THE CHECKLIST, and it is the difference between an invitation and an obligation. `_LOOK_INVITATION`
 # above has told this judge to read the source since 2026-08-18, and it DOES: five of node 3's
 # sixteen `broken` verdicts on `e5small-dr-unified-v4` cite a file in their prose, including
-# `loss.py:486` — the line that declares the -1e9 sentinel that made that run's objective unbounded
-# below. The judge found the mechanism by reading the code.
+# the line of the candidate's own loss module that declares the -1e9 masked-logit sentinel which
+# made that run's objective unbounded below. The judge found the mechanism by reading the code.
 #
 # What it could not do was make that finding COUNT. The citation lived in `reason`, which is prose,
 # so nothing re-resolved it, and the engine could not tell a verdict that had opened the file from
@@ -195,8 +196,9 @@ _MONITOR_LOOK_TURNS = 9
 # wrong citation is still a wrong verdict. It asks for a claim somebody else can re-derive.
 _CITE_INVITATION = (
     "IF YOU CALL THIS BROKEN AND BLAME THE IMPLEMENTATION, CITE THE LINE. Fill `evidence_source` "
-    "and `evidence_locator` with the file and line you actually opened — "
-    "`vectorsearch/training/loss.py:486`, not a description of it. THE ENGINE RE-READS WHAT YOU "
+    "and `evidence_locator` with the file and line you actually opened, written as the path "
+    "inside this run's workdir followed by a colon and the line number — not a description of it. "
+    "THE ENGINE RE-READS WHAT YOU "
     "CITE. A verdict that names the mechanism in a file the engine can open carries weight prose "
     "cannot, because a later reader can go and check it; a verdict that cites nothing is read as a "
     "reading of the tail, which is what it is.\n"
@@ -1225,7 +1227,8 @@ def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool
     # `trajectory_vetoes_kill` refuses to end a descending, non-anomalous curve. For a loss bounded
     # below that is right and it is why the veto exists. It is WRONG for an objective that is
     # unbounded below, where descent is the symptom: measured on `e5small-dr-unified-v4` node 3,
-    # whose DCL mask sentinel is a finite -1e9 that reaches the batch mean, the loss ran 40.07 ->
+    # whose DCL mask sentinel — a finite -1e9 in the candidate's own loss module, not this repo's
+    # code — reaches the batch mean, the loss ran 40.07 ->
     # -2.4e7 and the veto blocked every one of five `broken` verdicts at or above the bar, one of
     # them at confidence 0.90 with the streak already satisfied. Zero of twenty-four alerts stopped
     # anything.
@@ -1256,7 +1259,8 @@ def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool
 def _confirmation_would_act(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float,
                             log_role: str = LOG_ROLE_UNKNOWN,
                             trajectory: Optional["LossTrajectory"] = None,
-                            confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS) -> bool:
+                            confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS,
+                            citation_resolved: Optional[bool] = None) -> bool:
     """Whether REPEATING this verdict would reach an intervention. Pure/deterministic.
 
     The arming question, and it is deliberately the same COUNTERFACTUAL shape as the `role_withheld`
@@ -1273,9 +1277,21 @@ def _confirmation_would_act(verdict: Optional["TrainingVerdict"], *, enabled: bo
         should_monitor_kill(verdict, enabled=enabled, threshold=threshold, log_role=log_role,
                             broken_streak=confirm_ticks, confirm_ticks=confirm_ticks,
                             trajectory=trajectory)
+        # …AND WITH THE CITATION, for the same reason the streak is passed already satisfied: this
+        # is the counterfactual "would a REPEAT of this verdict act", and every input the real gate
+        # reads has to be the one it will read. Omitting it re-introduced exactly the drift this
+        # function's docstring exists to prevent: a first `broken` tick carrying a RESOLVED
+        # citation would act on its repeat, but the counterfactual — computing the veto without the
+        # citation — said it would not, so the monitor did not arm and the second look waited a
+        # full cadence (up to thirty minutes) instead of `_MONITOR_CONFIRM_DELAY_S`. On a node
+        # burning ~4 GPU-hours per attempt that is the whole point of arming, lost silently.
+        #
+        # `should_monitor_kill` above is deliberately NOT given it and cannot be: it takes no such
+        # parameter. The counterfactual therefore inherits the same asymmetry as the real gates,
+        # which is what "cannot drift from them" has to mean.
         or should_monitor_repair(verdict, enabled=enabled, threshold=threshold, log_role=log_role,
                                  broken_streak=confirm_ticks, confirm_ticks=confirm_ticks,
-                                 trajectory=trajectory))
+                                 trajectory=trajectory, citation_resolved=citation_resolved))
 
 
 def claim_watchdog_kill(kill_signal: dict, cancel, *, reason: str, terminal_reason: str,
@@ -2761,7 +2777,8 @@ class TrainingMonitorMixin:
                               and kill_signal is not None
                               and _confirmation_would_act(
                                   verdict, enabled=getattr(self, "_train_monitor_kill", False),
-                                  threshold=threshold, log_role=log_role, trajectory=trajectory)):
+                                  threshold=threshold, log_role=log_role, trajectory=trajectory,
+                                  citation_resolved=_citation_resolved)):
                             # ARMED, not acting: re-look promptly instead of after another full cadence
                             # (up to 30 min on a long budget), so confirmation costs seconds of a
                             # multi-hour budget rather than a meaningful slice of it. `armed_at` starts

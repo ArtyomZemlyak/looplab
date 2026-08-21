@@ -180,7 +180,14 @@ def test_the_checklist_asks_for_what_the_engine_can_actually_check():
     It asks for a path and a line, which is exactly the shape `evidence_citation_resolves` parses."""
     text = tm._CITE_INVITATION
     assert "evidence_locator" in text and "evidence_source" in text
-    assert "RE-READS" in text and "loss.py:486" in text
+    assert "RE-READS" in text
+    # It asks for the SHAPE `evidence_citation_resolves` parses — a workdir-relative path, a colon,
+    # a line number — and asks for it in words rather than by pasting a specimen path. A specimen
+    # would read to `tests/test_claim_pins.py` as a citation INTO THIS REPO of a file that lives in
+    # the candidate's tree, and that guard is right: a path this repo cannot resolve is a dead
+    # citation regardless of who it was written for.
+    assert "path inside this run's workdir" in text
+    assert "colon and the line number" in text
 
 
 # ------------------------------------------------------------------ the re-read itself
@@ -216,3 +223,34 @@ def test_the_engine_re_reads_rather_than_trusting_the_verdict(tmp_path):
                  resolved=evidence_citation_resolves(cite, tmp_path)) is True
     assert _gate(v, trajectory=_descending(),
                  resolved=evidence_citation_resolves(cite, empty)) is False
+
+# ------------------------------------------------------------------ the arming counterfactual
+def test_a_citation_bearing_verdict_arms_the_prompt_re_look():
+    """`_confirmation_would_act` asks "would a REPEAT of this verdict act", and every input the real
+    gate reads has to be the one it will read — its own docstring's phrase is "cannot drift from
+    them". Adding `citation_resolved` to the gate and not to the counterfactual re-introduced
+    exactly that drift: a first `broken` tick carrying a RESOLVED citation would act on its repeat,
+    the counterfactual said it would not, so the monitor did not arm and the second look waited a
+    full cadence — up to THIRTY MINUTES — instead of `_MONITOR_CONFIRM_DELAY_S`. On a node burning
+    ~4 GPU-hours per attempt that is the entire value of arming, lost silently."""
+    traj = _descending()
+    armed = tm._confirmation_would_act(
+        _verdict(), enabled=True, threshold=0.8, log_role=tm.LOG_ROLE_TRAINING,
+        trajectory=traj, confirm_ticks=2, citation_resolved=True)
+    assert armed is True
+    # …and without the re-read it still does not arm, because the repeat still would not act.
+    assert tm._confirmation_would_act(
+        _verdict(), enabled=True, threshold=0.8, log_role=tm.LOG_ROLE_TRAINING,
+        trajectory=traj, confirm_ticks=2, citation_resolved=None) is False
+
+
+def test_the_counterfactual_inherits_the_asymmetry_rather_than_restating_it():
+    """It hands the citation to the REPAIR predicate and cannot hand it to the KILL one, because
+    that function takes no such parameter. The asymmetry is inherited from the gates instead of
+    being re-listed at the arming site, which is the whole reason this function exists."""
+    import inspect
+
+    src = inspect.getsource(tm._confirmation_would_act)
+    assert "citation_resolved=citation_resolved" in src
+    kill_call = src[src.index("should_monitor_kill("):src.index("or should_monitor_repair")]
+    assert "citation_resolved" not in kill_call
