@@ -1611,6 +1611,29 @@ class OpenAICompatibleClient:
                                 for c in msg["tool_calls"]])
             return msg
 
+    @staticmethod
+    def _stamp_unusable_generation(gen, msg: dict, usage, reason: str) -> None:
+        """Record WHAT the model said on a generation that produced no usable tool call.
+
+        The error branches used to stamp `usage`, `cost` and `error` and drop `output`/`thinking` on
+        the floor -- so the trace said a call cost 65,536 completion tokens and could not say what a
+        single one of them was. That is exactly backwards: a generation that returned the answer is
+        the one you never need to read, and one that burned the whole completion cap without
+        emitting the forced call is the only evidence of WHY.
+
+        Measured 2026-08-20 on an AlgoTune `propose` phase: two calls, 889 s and 593 s, $0.019, both
+        `no tool_calls in response`, both at exactly the 65,536-token cap -- 25 minutes of a run
+        whose wall clock is 68-94 % LLM calls, and nothing recorded but the number. Comparing an OK
+        span's attributes with an ERROR span's across three runs, the ERROR span is missing
+        `output`, `thinking` and `tool_calls` every time (and in one run `cost`/`usage` as well, so
+        those three calls are opaque even as to their size).
+
+        The content is already in hand here -- `msg` is the parsed message -- so this costs one
+        stamp, bounded by `tracing._TRACE_TEXT_CAP` (64,000 chars) like every other traced text.
+        """
+        thinking, answer = _clean_thinking(msg.get("content") or "", _reasoning_of(msg))
+        gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking)            .usage(usage).cost(_usage_cost(usage)).error(reason)
+
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:
         tool = {"type": "function",
                 "function": {"name": "emit", "description": "Emit the structured result.",
@@ -1639,8 +1662,8 @@ class OpenAICompatibleClient:
                     msg["content"] = _clean
             calls = msg.get("tool_calls")
             if not calls:  # endpoint ignored tool_choice -> let parse.py fall back to text
-                usage = body.get("usage")
-                gen.usage(usage).cost(_usage_cost(usage)).error("no tool_calls in response")
+                self._stamp_unusable_generation(gen, msg, body.get("usage"),
+                                                "no tool_calls in response")
                 raise KeyError("no tool_calls in response")
             # This endpoint FORCES `tool_choice: emit`, so the result must actually be that call.
             # Taking `calls[0]` blindly let a backend that ignores tool_choice have some OTHER tool's
@@ -1651,8 +1674,8 @@ class OpenAICompatibleClient:
             # back to the text path, which is the honest reading of an endpoint that ignored the force.
             emit = next((c for c in calls if (c.get("function") or {}).get("name") == "emit"), None)
             if emit is None:
-                usage = body.get("usage")
-                gen.usage(usage).cost(_usage_cost(usage)).error("forced emit not honored")
+                self._stamp_unusable_generation(gen, msg, body.get("usage"),
+                                                "forced emit not honored")
                 raise KeyError("no tool_calls in response")
             args = emit["function"]["arguments"]
             # Reasoning models emit their chain-of-thought (a `reasoning` field, or inline <think> in
