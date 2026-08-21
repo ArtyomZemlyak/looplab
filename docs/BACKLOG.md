@@ -470,6 +470,17 @@ site that proves it is open.
     `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
     every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`
     returns **nothing**. It never reaches champion selection.
+   **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds, one detail drifted.** `pareto` now appears twice
+   in `engine/holdout.py`, but both are COMMENTS ("feeds the node's Pareto objectives", "Pareto
+   objective") — no algorithm, no selection. `ui/src/panels.jsx` still carries the real
+   `paretoFront`. So the entry's claim is right and its "returns nothing" is now literally false;
+   the fix is what a marker is for.
+   OPEN[pareto-never-reaches-champion-selection] the non-dominated front is computed in the BROWSER
+   and nothing in the search or the engine consumes it, so a run still elects one champion on one
+   scalar; retire this when a front is computed where selection can read it.
+   proof:absent:pareto_front@looplab/search/policy.py
+   *Mutated before it was written:* True as shipped, False the moment a `pareto_front` lands in the
+   policy.]
 13. **The feature-engineering CV gate is a sentence, not an enforcement (P1, M).**
     `engine/proposal_cues.py:231::_cue_feature_engineering` appends prose telling the model
     *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
@@ -498,6 +509,13 @@ site that proves it is open.
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
     `drift` hit in `looplab/` is code/schema-drift prose or confirm-phase seed variance
     (`engine/confirm_phase.py:273`), never a distribution-shift detector.
+   **[RE-DERIVED 2026-08-21 — HOLDS.** No population-stability index, no KS test, no
+   `distribution_shift`/`drift_detect` symbol anywhere under `looplab/`.
+   OPEN[no-distribution-shift-detector] nothing compares the deployment distribution against the
+   training one, so a run cannot tell a shifted input from a worse model; retire this when a
+   detector exists.
+   proof:missing:looplab/trust/drift.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists.]
 16. **MLflow is manual export, not autolog; there are no data connectors (P2, S–M).**
     `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
     `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
@@ -506,6 +524,13 @@ site that proves it is open.
     `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
     the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
     `search/graded_novelty.py` / `novelty_recall.py` / `taxonomy_dedup.py`, which exist independently.
+   **[RE-DERIVED 2026-08-21 — HOLDS.** `MCTSPolicy` is still the one class, `search/policy.py`
+   imports no `graded_novelty`, and there is still no `lats.py`.
+   OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
+   branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
+   estimate exists.
+   proof:missing:looplab/search/lats.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
