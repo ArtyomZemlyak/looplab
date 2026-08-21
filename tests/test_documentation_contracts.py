@@ -70,7 +70,10 @@ def test_index_mentions_every_numbered_document():
     #   together while a sibling worktree held an unmerged `46-`. Renumbered to 47 —
     #   glob, index row, index first column, mkdocs nav and the two in-tree citations
     #   (`CLAUDE.md`, the DECLINED marker in `engine/train_monitor.py`) together.
-    assert len(numbered) == 48, "the derived numbered-document inventory changed"
+    #   48 -> 49 (2026-08-21): the day report (doc 49). No collision — the number was claimed by
+    #   checking the glob AND the index table together, and no sibling worktree held an unmerged
+    #   `49-` at the time.
+    assert len(numbered) == 49, "the derived numbered-document inventory changed"
     missing = [path.name for path in numbered if path.name not in index]
     assert not missing, f"numbered document(s) missing from docs/00-INDEX.md: {missing}"
     assert "| 09 |" in index and "No document was allocated" in index
