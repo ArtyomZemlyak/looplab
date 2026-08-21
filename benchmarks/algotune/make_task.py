@@ -87,6 +87,44 @@ ROLE_SPLIT = (
 )
 
 
+# --deliver: the DEVELOPER half. `--role-split` moved the algorithm CHOICE back to the Researcher
+# and its Researcher half worked -- the hypotheses it produced are committed experiments ("run a
+# baby-step giant-step baseline as the first committed experiment") instead of the decision tree the
+# control produced ("use BSGS OR Pollard's rho, choose based on ..."). Its Developer half did not:
+# that run still committed a node with `files: {}`, exactly like the control.
+#
+# The clause was aimed wrong and this is the correction. It restricted WHY the Developer may probe
+# ("the probe is for making the named algorithm actually RUN") and never told it to WRITE -- and
+# "make it run" is an unlimited licence, which is what 24 probes and 216 package reads were spent
+# under. Measured on the control: 19 implement generations, `write_file`/`edit_file` called ZERO
+# times.
+#
+# What it says instead is a FACT about this task rather than a rule to obey, because a rule invites
+# a workaround and a fact does not. Note the fact has to be stated PRECISELY or the model is right
+# to disregard it: the Developer CAN check correctness locally (generate instances, verify
+# `pow(g,x,p) == h`). What it cannot do is measure the SCORE -- the graded instances are not on the
+# machine and it has no way to produce them -- and the transcripts show the search was about
+# exactly that: instance sizes and timings.
+DELIVER = (
+    " YOU CANNOT MEASURE YOUR OWN SCORE, AND YOU ARE NOT MEANT TO. The instances you are graded on "
+    "are not on this machine and you cannot generate them; the speedup comes from the evaluator, "
+    "which runs after you finish. So timing your own guesses against invented inputs measures "
+    "something else -- your guess about the input -- and no amount of it brings the real number "
+    "closer. (Correctness is different and you CAN check it: build a few instances yourself and "
+    "verify the contract holds. Do that briefly, then stop.) "
+    "YOUR OUTPUT IS THE FILE. A session that ends without writing solver.py has produced NOTHING -- "
+    "not a partial result, not a finding, nothing the loop can use -- and it is thrown away. Write "
+    "a correct implementation EARLY, while you still have room, and improve it after; a working "
+    "solver that is only a little faster beats a perfect plan that was never written down. "
+    "Probes are for questions with a yes/no answer about this environment -- does this import, what "
+    "does this call return. If you have run more than a handful, you have stopped answering "
+    "questions and started doing the evaluator's job for it. Where something depends on the "
+    "instance sizes, PICK A REASONABLE ASSUMPTION, write it into the code as a threshold or a "
+    "fallback, say so in your summary, and let the evaluation tell you whether it was right. That "
+    "answer is worth more than any estimate you can make here, and it costs one experiment."
+)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--algotune-root", required=True, type=Path)
@@ -96,6 +134,8 @@ def main() -> int:
                     help="Interpreter that has AlgoTune installed "
                          "(default: <algotune-root>/.venv/bin/python).")
     ap.add_argument("--timeout", type=int, default=7200, help="Eval timeout in seconds.")
+    ap.add_argument("--deliver", action="store_true",
+                    help="Append the YOU CANNOT MEASURE YOUR OWN SCORE clause (see DELIVER).")
     ap.add_argument("--role-split", action="store_true",
                     help="Append the ONE EXPERIMENT = ONE ALGORITHM clause (see ROLE_SPLIT).")
     args = ap.parse_args()
@@ -126,7 +166,7 @@ def main() -> int:
     spec = {
         "kind": "repo",
         "id": f"algotune_{args.task}",
-        "goal": GOAL.format(task=args.task) + (ROLE_SPLIT if args.role_split else ""),
+        "goal": GOAL.format(task=args.task) + (ROLE_SPLIT if args.role_split else "") + (DELIVER if args.deliver else ""),
         "direction": "max",
         "editable_path": str(ws),
         "edit_surface": ["solver.py"],
