@@ -86,7 +86,7 @@ case "${1:-status}" in
     ;;
   once)   check_once ;;
   stop)
-    # By PID, never `pkill -f`: that pattern matches this script's own command line (docs/48 trap 6).
+    # By PID, never `pkill -f`: that pattern matches this script's own command line (docs/51 trap 6).
     [ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null && rm -f "$PIDFILE" && echo stopped
     ;;
   status)

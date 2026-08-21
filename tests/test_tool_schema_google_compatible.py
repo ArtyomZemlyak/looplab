@@ -39,12 +39,13 @@ def _array_dicts_without_items(tree: ast.AST):
 def test_no_declared_array_omits_items():
     """AST over the real source (CLAUDE.md tier 3): a schema in a comment cannot satisfy or break
     this, and a substring scan for '"type": "array"' could not tell whether `items` was present."""
+    # `_source_scan`'s walk, not a private `rglob` (doc 25 XP-10): the copies of that walk had
+    # already diverged on DECODING, and a hard-coded `encoding="utf-8"` here would turn this guard
+    # into a `UnicodeDecodeError` at collection the moment one source arrived BOM'd.
+    from _source_scan import iter_trees
+
     offenders = []
-    for path in sorted((ROOT / "looplab").rglob("*.py")):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:                      # not ours to police here
-            continue
+    for path, tree in iter_trees():
         for lineno in _array_dicts_without_items(tree):
             offenders.append(f"{path.relative_to(ROOT)}:{lineno}")
     assert offenders == [], (

@@ -113,13 +113,14 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   Verified as the paragraph prescribes rather than by bumping the number: the catalogue was
   //   183 keys and removing exactly those two gave back 181, so these are two real additions with
   //   nothing renamed away underneath them.
-  //   183 -> 186 (2026-08-21, REBASE): this branch's three rows meeting master's additions —
-  //   `llm_budget_usd`, `hide_empty_tools`, `developer_probe_confine`.
-  assert.equal(Object.keys(schema.fieldByKey).length, 186)
+  //   183 -> 186 (2026-08-21, REBASE): the three rows above meeting master's additions. The total
+  //   is pinned ONCE, in the test above; this body checks the ROWS, not the count.
   assert.equal(schema.fieldByKey.llm_budget_usd.type, 'float')
   assert.equal(schema.fieldByKey.llm_budget_usd.default, 0)
   assert.equal(schema.fieldByKey.hide_empty_tools.type, 'bool')
   assert.equal(schema.fieldByKey.hide_empty_tools.default, false)
+  assert.equal(schema.fieldByKey.developer_probe_confine.type, 'bool')
+  assert.equal(schema.fieldByKey.developer_probe_confine.default, true)
   assert.equal(schema.fieldByKey.cadence_while_evaluating.type, 'bool')
   assert.equal(schema.fieldByKey.cadence_while_evaluating.default, true)
   assert.equal(schema.fieldByKey.speculation_depth.type, 'int')

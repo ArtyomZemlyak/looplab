@@ -18,7 +18,7 @@ both sides.
 Idempotent: re-running with the same values is a no-op, and re-running with different ones rewrites
 just that entry. Every other key in the file is preserved byte-for-byte -- the file is edited as
 TEXT rather than round-tripped through a YAML dumper, which would reflow the comments that carry
-this campaign's own deviations (§2 of docs/48).
+this campaign's own deviations (§2 of docs/51).
 """
 from __future__ import annotations
 

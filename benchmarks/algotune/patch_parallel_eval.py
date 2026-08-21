@@ -17,7 +17,7 @@ Two consequences worth stating plainly:
 
   * With a prefetch, the consecutive-failure abort no longer SAVES work; it still produces the same
     truncated result, but every instance has already been evaluated. On this box that trade is
-    strongly positive: the pathological case docs/48 records -- one timing-out candidate costing
+    strongly positive: the pathological case docs/51 records -- one timing-out candidate costing
     100 x `baseline_timeout` -- is precisely the case that parallelises best.
   * `ALGOTUNE_EVAL_WORKERS` unset or 1 leaves upstream behaviour bit-for-bit. The patch is inert
     until a campaign asks for it, and it applies to BOTH arms, since both evaluate through this

@@ -5,7 +5,7 @@
 #   source benchmarks/box-jhub-l40s.sh && benchmarks/meter/start_meter.sh [--restart]
 #
 # Killing it by pattern is deliberately NOT done with a bare `pkill -f proxy.py`: that pattern
-# matches the launching shell's own command line too (docs/48 trap 6 -- it killed the campaign
+# matches the launching shell's own command line too (docs/51 trap 6 -- it killed the campaign
 # launcher twice). The PIDs are read and killed one by one instead.
 set -u
 

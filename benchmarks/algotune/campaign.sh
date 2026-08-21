@@ -188,7 +188,7 @@ record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpu
   #              recorded as "interrupted, still owed" -- i.e. a FINISHED task queued for a retry
   #              that could never do anything different.
   #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
-  #              rather than retried forever, but it produces no number (see docs/48)
+  #              rather than retried forever, but it produces no number (see docs/51)
   #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
   case "$RC" in
     0|2|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;

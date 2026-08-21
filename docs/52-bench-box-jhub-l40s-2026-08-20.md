@@ -1,13 +1,13 @@
-# 49. Standing the arena up on a second box: JupyterHub + L40S (2026-08-20)
+# 52. Standing the arena up on a second box: JupyterHub + L40S (2026-08-20)
 
-Companion to [doc 47](50-benchmark-landscape-and-local-plan-2026-08-19.md) (*why* AlgoTune, and the
-parity analysis) and [doc 48](51-algotune-arm-operational-notes-2026-08-20.md) (*what was touched*
-in the third-party checkout). This one is the **second machine** doc 48 §6 asks for: what a box that
+Companion to [doc 50](50-benchmark-landscape-and-local-plan-2026-08-19.md) (*why* AlgoTune, and the
+parity analysis) and [doc 51](51-algotune-arm-operational-notes-2026-08-20.md) (*what was touched*
+in the third-party checkout). This one is the **second machine** doc 51 §6 asks for: what a box that
 is not the original 8-core Windows/WSL laptop needs, what it measured differently, and what a number
 produced here may and may not be set beside.
 
 **Nothing here changes the protocol.** The arms, the task set, the patches, the run counts and the
-$0.02-per-task-arm budget are doc 48's. What changes is the environment underneath, and one thing
+$0.02-per-task-arm budget are doc 51's. What changes is the environment underneath, and one thing
 that had to be *built* because the environment took a mechanism away: the budget.
 
 ---
@@ -18,17 +18,17 @@ that had to be *built* because the environment took a mechanism away: the budget
 |---|---|---|
 | CPU | `nproc` 96, **cgroup quota `cpu.max = 9000000 100000` = 90 CPUs** | 20 lanes x 2 cores = 40 — inside the quota, so lane pinning means what it says. An arm is **one round**, not seven. |
 | RAM | 755 GB (`memory.max` 773 GB) | Never the constraint here. |
-| GPU | 1x L40S, 46 GB, idle | **Unused by this arena.** AlgoTune is CPU-bound in substance (doc 47 §5d), which is why the sm_120 problem that blocks FML-bench does not arise. |
+| GPU | 1x L40S, 46 GB, idle | **Unused by this arena.** AlgoTune is CPU-bound in substance (doc 50 §5d), which is why the sm_120 problem that blocks FML-bench does not arise. |
 | Disk (runtime) | overlay/xfs on `/`, ~110 GB free | Where everything runs. |
 | Disk (home) | `/home/jovyan/data`, **geesefs — an S3-backed FUSE mount**, 1 PB | Where nothing runs. See below. |
-| Python | 3.12 system, **3.11.13 via `uv` for the AlgoTune venv** | Same version as doc 48. |
+| Python | 3.12 system, **3.11.13 via `uv` for the AlgoTune venv** | Same version as doc 51. |
 | Network | HTTPS through a local `http_proxy` on 127.0.0.1:18080 | github/pypi/HuggingFace/openrouter all reachable; the corporate LLM gateway is reached DIRECTLY, not through it. |
 
 ### The home filesystem cannot host the benchmark
 
 `/home/jovyan/data` is geesefs. `uv venv` fails on it outright — `error: Operation not supported
 (os error 95)`, i.e. no `flock` — so the environment cannot even be *built* there. That is the loud
-failure; the quiet one matters more. This benchmark's cost is **process spawn and imports** (doc 48
+failure; the quiet one matters more. This benchmark's cost is **process spawn and imports** (doc 51
 trap 2: one fork per timed run, spawning is ~98 % of per-instance cost), which is precisely what a
 network filesystem is worst at, and a timing taken over S3 is not a timing of the solver.
 
@@ -42,7 +42,7 @@ So the layout splits by what each filesystem is for:
 
 The local side is **ephemeral** — a container restart takes it. That is acceptable only because
 every part of it is scripted (`setup_algotune.sh`, `setup_gateway_arm.py`, `box-jhub-l40s.sh`) and
-the repository side is pushed. It is the same argument doc 48 makes for arm B running from a pinned
+the repository side is pushed. It is the same argument doc 51 makes for arm B running from a pinned
 clone: the environment is a thing you rebuild from a record, not a thing you preserve.
 
 ---
@@ -54,11 +54,11 @@ OpenRouter. Measured 2026-08-20:
 
 | What | Measured | Why it matters |
 |---|---|---|
-| `usage.cost` | **absent.** Its own `x-litellm-response-cost-original` is `0.0` (`x-litellm-model-name: openai/default`, i.e. unpriced there too) | **Both arms budget by reading `usage.cost`** — AlgoTuner at `models/lite_llm_model.py::_extract_cost_from_response`, LoopLab at `core/llm.py::_usage_cost`. Unpriced ⇒ `spend_limit: 0.02` and `LOOPLAB_LLM_BUDGET_USD` never bind, and the SPEND budget doc 47 §5f settles on becomes no budget at all. |
+| `usage.cost` | **absent.** Its own `x-litellm-response-cost-original` is `0.0` (`x-litellm-model-name: openai/default`, i.e. unpriced there too) | **Both arms budget by reading `usage.cost`** — AlgoTuner at `models/lite_llm_model.py::_extract_cost_from_response`, LoopLab at `core/llm.py::_usage_cost`. Unpriced ⇒ `spend_limit: 0.02` and `LOOPLAB_LLM_BUDGET_USD` never bind, and the SPEND budget doc 50 §5f settles on becomes no budget at all. |
 | Rate limit | `x-litellm-key-rpm-limit: 50` (team 150), **enforced**: a 20-way burst returned **9 x HTTP 429**, and sequential calls kept 429-ing until the window rolled | A 20-lane campaign trips it constantly. |
 | Caching | The identical prompt at `temperature 0` returned in **0.0 s with 400 completion tokens** (28,886 tok/s) — a cache hit, not a generation | A probe without a nonce measures the cache and reports an endpoint that does not exist. **The first speed numbers taken here were exactly that mistake.** |
-| Real throughput | **~96 tok/s** median, 400-token completions (`deepseek-v4-flash`); `qwen3.6-35b` ~160–320 tok/s | The campaign model is the slower of the two, and is chosen anyway: it is the model doc 47/48 sized the campaign around. |
-| Reasoning channel | **none** — no `reasoning_content`, and the OpenRouter `provider` / `reasoning` blocks are accepted and ignored (HTTP 200) | doc 48's `reasoning: {effort: medium}` pin and the `siliconflow/fp8` provider pin control nothing here. They are set EMPTY rather than left in: a dead parameter in the record reads like a live control. |
+| Real throughput | **~96 tok/s** median, 400-token completions (`deepseek-v4-flash`); `qwen3.6-35b` ~160–320 tok/s | The campaign model is the slower of the two, and is chosen anyway: it is the model doc 50/51 sized the campaign around. |
+| Reasoning channel | **none** — no `reasoning_content`, and the OpenRouter `provider` / `reasoning` blocks are accepted and ignored (HTTP 200) | doc 51's `reasoning: {effort: medium}` pin and the `siliconflow/fp8` provider pin control nothing here. They are set EMPTY rather than left in: a dead parameter in the record reads like a live control. |
 
 ### The fix is one meter in front of both arms, not an edit to either
 
@@ -81,7 +81,7 @@ proxy:
 
 **The price is imputed, and the doc says so.** The constants are the published OpenRouter list price
 of `deepseek/deepseek-v4-flash-0731` — $0.140 in / $0.280 out per 1M, the same `siliconflow/fp8` row
-doc 47 §5a chose — fetched 2026-08-20T10:16:47Z and **pinned in the file**, because a benchmark
+doc 50 §5a chose — fetched 2026-08-20T10:16:47Z and **pinned in the file**, because a benchmark
 number must not move when a vendor re-prices a model between two arms. Every response carries
 `usage.cost_basis: "imputed"` and `usage.cost_source: <that timestamp>`, and an upstream that ever
 starts reporting its own cost outranks the table (`cost_basis: "upstream"`).
@@ -92,9 +92,9 @@ column here cannot be compared to a dollar column from an OpenRouter run.
 
 ---
 
-## 3. Deviations beyond doc 48's list
+## 3. Deviations beyond doc 51's list
 
-doc 48 §1 enumerates what is patched in the third-party checkout; all of it applies unchanged and is
+doc 51 §1 enumerates what is patched in the third-party checkout; all of it applies unchanged and is
 applied by the same `setup_algotune.sh`. This box adds three, in descending order of how much they
 could touch a number:
 
@@ -102,7 +102,7 @@ could touch a number:
 |---|---|---|
 | 1 | **The metering proxy** (above) | It is the reason a budget exists at all here. It adds a loopback hop to every call — measured overhead is below the endpoint's own jitter — and it queues calls when the arms exceed 45 rpm, which shows up as wall-clock, identically for both arms, and is recorded per call as `queued_s`. |
 | 2 | **A second model entry** in AlgoTune's `config.yaml`, `gateway/deepseek-v4-flash` → `openai/deepseek-v4-flash` (`benchmarks/meter/setup_gateway_arm.py`, idempotent, keeps a `.orig`) | None on scoring. The OpenRouter entry is left exactly as `setup_algotune.sh` wrote it; a box picks one with `ALGOTUNE_MODEL_KEY`. |
-| 3 | **`typer>=0.12` installed into the AlgoTune venv** | None on scoring — it is LoopLab's CLI argument parser. Worth recording because doc 48 §3 states that *nothing* was added to that venv for LoopLab's sake; on this box exactly one thing was, and arm B still inherits AlgoTune's numerical stack (`torch 2.13.0`, `numpy 1.26.4`, `scipy 1.17.1`), not ours. |
+| 3 | **`typer>=0.12` installed into the AlgoTune venv** | None on scoring — it is LoopLab's CLI argument parser. Worth recording because doc 51 §3 states that *nothing* was added to that venv for LoopLab's sake; on this box exactly one thing was, and arm B still inherits AlgoTune's numerical stack (`torch 2.13.0`, `numpy 1.26.4`, `scipy 1.17.1`), not ours. |
 
 `campaign.sh` gained three env knobs whose defaults reproduce the previous behaviour exactly:
 `ALGOTUNE_MODEL_KEY`, `METER_BASE`, and `LOOPLAB_LLM_REASONING_EXTRA` becoming overridable rather
@@ -115,10 +115,10 @@ script, so the campaign script stays the same file on every machine.
 
 | Check | Result |
 |---|---|
-| AlgoTune install (`uv venv --python 3.11` + `uv pip install -e .`) | 158 packages in **2 m 07 s**. Same headline versions as doc 48: `torch 2.13.0`, `jax 0.7.1`, `scipy 1.17.1`, `numpy 1.26.4`, `ortools 9.11.4210`. `litellm` is 1.97.0 here vs 1.83.0 there. |
-| The 27 packages the agent's prompt promises | **27/27 importable**, matching doc 47 §5d's audit on the other box. |
+| AlgoTune install (`uv venv --python 3.11` + `uv pip install -e .`) | 158 packages in **2 m 07 s**. Same headline versions as doc 51: `torch 2.13.0`, `jax 0.7.1`, `scipy 1.17.1`, `numpy 1.26.4`, `ortools 9.11.4210`. `litellm` is 1.97.0 here vs 1.83.0 there. |
+| The 27 packages the agent's prompt promises | **27/27 importable**, matching doc 50 §5d's audit on the other box. |
 | All seven `setup_algotune.sh` steps | Applied: 2 `sys.modules` sites, the site-packages narrowing, `runs/dev_runs/eval_runs: 3`, `baseline_timeout: 10000`, `disable_rlimit_as: true`, both on-disk patches. |
-| **The evaluator, end to end, with no LLM in the loop** | Re-timed a SHIPPED reference solver: `GPT-5.4` on `discrete_log` → **0.9967x**, ~9 minutes cold on 2 pinned cores including the HuggingFace dataset fetch. This is doc 47 §5e's re-timing plan working on this box. |
+| **The evaluator, end to end, with no LLM in the loop** | Re-timed a SHIPPED reference solver: `GPT-5.4` on `discrete_log` → **0.9967x**, ~9 minutes cold on 2 pinned cores including the HuggingFace dataset fetch. This is doc 50 §5e's re-timing plan working on this box. |
 | `pick_tasks.py` | Reproduces campaign.sh's 20-task list exactly (cheapest 20 by `reports/generation.json` median eval pass; worst case `pde_heat1d` 60.5 s on the authors' machine). |
 | Cost reaching **arm A** | `litellm` yields `_hidden_params.response_cost = None` (it does not know this model), falls through to method 2, and `_extract_cost_from_response` returns the injected figure. Verified against a live call. |
 | Cost reaching **arm B** | LoopLab records `calls 1 priced 1 spent 1.764e-05` for 16 in / 55 out — exactly the pinned rate. `priced_calls` equalling `calls` is the property that makes `spent` an invoice rather than a floor. |
@@ -132,13 +132,13 @@ script, so the campaign script stays the same file on every machine.
 - **Against another arm run HERE — yes.** That is the whole design: same machine, same clock, same
   meter, same task set, one model. Arm A vs arm B is valid, and so is re-timing the 17 shipped
   reference solvers on these cores.
-- **Against doc 47/48's numbers from the 5090 box — no.** Different CPU count, different model
+- **Against doc 50/51's numbers from the 5090 box — no.** Different CPU count, different model
   deployment, unknown quantization on the gateway, and an imputed price. Ratios are
   hardware-self-normalising *within* a task-run (`speedup = baseline_ms / optimized_ms`, both timed
   here), so the SPEEDUP column travels better than the cost and wall-clock columns do — but the arms
   were budgeted in dollars that mean different things, so treat a cross-box comparison as
   qualitative.
-- **Against AlgoTune's published table — no**, for the reason doc 47 §5e already gives: the 17
+- **Against AlgoTune's published table — no**, for the reason doc 50 §5e already gives: the 17
   shipped arms are artifacts of AlgoTuner's own loop driving other models, and re-timing them here
   makes them context, not controls.
 
@@ -163,7 +163,7 @@ python3 benchmarks/meter/probe_endpoint.py --models deepseek-v4-flash --sequenti
 ARM=A benchmarks/algotune/campaign.sh
 ```
 
-**Probe the endpoint before every campaign, with a nonce.** doc 47 §5a's rule — the catalogue is not
+**Probe the endpoint before every campaign, with a nonce.** doc 50 §5a's rule — the catalogue is not
 evidence — has a second edge here: on a caching gateway, the *probe itself* is not evidence unless
 each call is unique.
 
@@ -171,7 +171,7 @@ each call is unique.
 
 ## 7. Timing a task's instances AT ONCE — what 90 cores actually buy
 
-The original box had 8 cores and doc 47 called that its handicap. This one has the opposite problem:
+The original box had 8 cores and doc 50 called that its handicap. This one has the opposite problem:
 the arena spends ~97 % of its wall clock in the per-instance timing pass (an arm-A run made **5 LLM
 calls in 40 minutes**), and that pass walked instances one at a time. Not a decision anybody made —
 the harness's own pool class, `BenchmarkPool`, is defined and instantiated **nowhere**.
@@ -221,9 +221,9 @@ Measured effect: the instance pass on `discrete_log` goes **~130 s → 2.35 s**,
 An earlier draft of this section said the metric is regime-sensitive, on the strength of the same
 shipped solver scoring 1.09× / 1.43× / 1.78× under different pairings of contended halves. **That
 does not follow.** The same box then produced **1.0007 and 1.6318 in the SAME regime** on the same
-task — which is the spread doc 47 §5f already recorded for `discrete_log` (1.0006 then 1.4468 on
+task — which is the spread doc 50 §5f already recorded for `discrete_log` (1.0006 then 1.4468 on
 consecutive runs). One task at n=1 cannot separate a regime effect from that noise; the honest
-reading is the one doc 47 already prescribes — **read the aggregate over 20 tasks, never a row.**
+reading is the one doc 50 already prescribes — **read the aggregate over 20 tasks, never a row.**
 
 The wall-clock win is not affected by any of this: it was measured directly, inside the pool, by the
 breadcrumb.
@@ -251,7 +251,7 @@ limit**, where 20 lanes of arm B would have sat at ~41. Measured per-lane demand
 runs: arm A 0.12 rpm (peak 3/min), arm B 2.05 rpm (peak 9/min).
 
 Arm B runs from `/var/tmp/looplab-bench/looplab-armb`, detached at a commit rebased onto master, per
-doc 48 §7. The rebase cost two conflicts, and the second is worth recording: `settings_ui_schema.json`
+doc 51 §7. The rebase cost two conflicts, and the second is worth recording: `settings_ui_schema.json`
 is a 150 KB single line, merged programmatically by inserting this branch's two fields into master's
 document; and `test_calibration_profile_home.py` arrived with **two adjacent `_EXPECTED_FIELD_COUNT`
 statements** (212 from master, 213 from the branch) of which Python silently uses the last — the

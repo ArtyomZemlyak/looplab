@@ -6,7 +6,7 @@
     "So the proxy prices every response from these constants and stamps the result into usage.cost.",
     "",
     "The constants are the PUBLISHED OpenRouter list price of the dated slug the campaign was",
-    "designed around (docs/47 5a: siliconflow/fp8 at $0.140 in / $0.280 out per 1M). Fetched from",
+    "designed around (docs/50 5a: siliconflow/fp8 at $0.140 in / $0.280 out per 1M). Fetched from",
     "https://openrouter.ai/api/v1/models at the timestamp below and PINNED here: a benchmark number",
     "must not move because a vendor re-priced a model between two arms.",
     "",

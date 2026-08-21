@@ -3,7 +3,7 @@
 #
 #   source benchmarks/box-jhub-l40s.sh && benchmarks/snapshot.sh [dest]
 #
-# The runtime lives on the container's local disk (see docs/49) because the home mount is geesefs
+# The runtime lives on the container's local disk (see docs/52) because the home mount is geesefs
 # and cannot host a venv or an honest timing. Local disk does not survive a container restart, so
 # the split is: anything scripted is rebuilt, anything MEASURED is copied here.
 #

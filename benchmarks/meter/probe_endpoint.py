@@ -2,7 +2,7 @@
 """Measure an OpenAI-compatible endpoint the way a campaign will actually use it.
 
 Two questions decide whether an endpoint can carry a benchmark, and neither is answered by a
-vendor's catalogue (docs/47 5a: published `uptime_last_30m` did not predict availability -- a
+vendor's catalogue (docs/50 5a: published `uptime_last_30m` did not predict availability -- a
 provider at 99.0 % returned 502 and one at 99.5 % hung for 300 s):
 
   1. **Speed**, as tokens per second on a prompt of realistic shape -- not on "say hi".

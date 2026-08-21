@@ -331,9 +331,16 @@ def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     # `serve/routers/genesis.py` are operator surfaces, `engine/genesis.py` runs before a run
     # exists, `engine/train_monitor.py` composes a watchdog's read-only log tools, `cli/__init__.py`
     # is a one-shot command, and `tools/run_tools.py` builds a delegate for a foreign run.
+    #
+    # `engine/failure_diagnosis.py` arrived on master after this guard was written and is the same
+    # shape as `train_monitor.py`: it composes the dead eval's log-and-source readers for the
+    # DIAGNOSTICIAN, and it is reached from `triage_crash` with no `Settings` anywhere on the call
+    # path — the engine holds a run, not a settings object — so routing it through `compose_tools`
+    # would mean inventing a settings argument for four frames, not adding a keyword. Listed, not
+    # silently tolerated.  proof:absent:settings@looplab/engine/failure_diagnosis.py::_diag_tools
     declared = {
         "repo_developer.py", "__init__.py", "genesis.py", "train_monitor.py",
-        "assistant.py", "boss.py", "run_tools.py",
+        "assistant.py", "boss.py", "run_tools.py", "failure_diagnosis.py",
     }
     found = {name.split(":")[0] for name in offenders}
     assert found <= declared, (

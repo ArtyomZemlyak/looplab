@@ -15,7 +15,7 @@
 #
 # CPU.  `nproc` is 96 but the cgroup quota is `cpu.max = 9000000 100000`, i.e. 90 CPUs of
 # throughput. 20 lanes x 2 cores = 40, comfortably inside it, so lane pinning means what it says.
-# (docs/47 called 8 cores the handicap of the original box; this one has the opposite problem --
+# (docs/50 called 8 cores the handicap of the original box; this one has the opposite problem --
 # enough cores that the campaign is one round instead of seven.)
 #
 # LLM.  A corporate LiteLLM gateway, not OpenRouter. Three measured consequences, all handled by

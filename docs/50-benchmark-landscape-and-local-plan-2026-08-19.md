@@ -1,4 +1,4 @@
-# 47. LoopLab — Benchmark Landscape + a Local Test Plan (2026-08-19)
+# 50. LoopLab — Benchmark Landscape + a Local Test Plan (2026-08-19)
 
 > **Status: analysis + measurement.** Point-in-time external sweep in the
 > [doc 13](13-external-works-analysis-2026-07.md) / [doc 41](41-external-works-synergy-2026-08-14.md)
@@ -906,7 +906,7 @@ which alone would have produced a campaign of zeros indistinguishable from a bad
 2. **The summary reader was keyed on fields nothing writes.** The file is
    `{"discrete_log": {"BV4": {"final_speedup": "0.9963"}}}` — no `task_name`, no `speedup`, value a
    string — and `looplab_eval.py` searched for `task_name`/`speedup`. It reported `speedup: 0.0` on
-   a summary that had just been written successfully. This is the same defect class doc 47's own
+   a summary that had just been written successfully. This is the same defect class doc 50's own
    subject matter keeps producing: *a reader keyed on a field nothing writes is a silent empty
    answer, not a red test.*
 

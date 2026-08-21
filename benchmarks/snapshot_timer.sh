@@ -57,7 +57,7 @@ case "${1:-status}" in
 
   stop)
     # Killed by PID, never by `pkill -f <pattern>`: that pattern matches this script's own command
-    # line too, which is how a launcher gets killed by its own stop command (docs/48 trap 6).
+    # line too, which is how a launcher gets killed by its own stop command (docs/51 trap 6).
     if [ -f "$PIDFILE" ]; then
       kill "$(cat "$PIDFILE")" 2>/dev/null && echo "stopped $(cat "$PIDFILE")"
       rm -f "$PIDFILE"

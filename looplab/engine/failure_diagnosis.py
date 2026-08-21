@@ -193,6 +193,11 @@ from looplab.core.models import FAILURE_REASONS  # noqa: F401
 # What the engine CAUSED, RAN or MEASURED and remembers doing. Never asked; never overridable.
 ENGINE_FINAL_REASONS: tuple[str, ...] = (
     "timeout", "diverged", "stalled", "not_learning", "drift", "setup",
+    # STATED by the operator-pinned eval, not inferred: the arena's own submission validator refused
+    # this candidate before scoring. It is final for the same reason the rest of this tuple is —
+    # nothing a diagnostician could add changes what happened — and it is the one member the engine
+    # did not itself measure but was TOLD by the command it launched (`triage.DECLARABLE_REASONS`).
+    "rules_violation",
     "needs_failed", "expect_failed")
 
 # The deterministic answers `_failure_reason` still PRODUCES that are handed to the diagnostician as

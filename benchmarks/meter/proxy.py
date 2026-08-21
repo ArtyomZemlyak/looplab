@@ -13,13 +13,13 @@ Both arms enforce their per-task budget by reading a cost the PROVIDER reports:
 The corporate gateway (`llm-core-olap.samokat.ru/v1`, SGLang behind it) returns
 `usage {prompt_tokens, completion_tokens, total_tokens}` and NO cost. Measured 2026-08-20.
 So on that endpoint `spend_limit: 0.02` (arm A) and `LOOPLAB_LLM_BUDGET_USD` (arm B) never bind,
-and the budget parity docs/47 5f settles on -- equal SPEND, not equal wall-clock -- silently
+and the budget parity docs/50 5f settles on -- equal SPEND, not equal wall-clock -- silently
 becomes no budget at all on either side.
 
 This proxy prices each response from a pinned table (`pricing.json`) and stamps the result into
 `usage.cost`, where both arms already look. Neither framework is modified.
 
-It is also the single meter docs/47 5a asks for: one call log, one token count, one dollar figure,
+It is also the single meter docs/50 5a asks for: one call log, one token count, one dollar figure,
 identical for both arms -- which is what makes the reported cost columns comparable.
 
 WHAT IT DOES AND DOES NOT TOUCH

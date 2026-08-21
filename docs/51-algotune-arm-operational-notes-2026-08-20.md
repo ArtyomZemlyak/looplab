@@ -1,8 +1,8 @@
-# 48. Running the AlgoTune arm: every deviation, dependency and trap (2026-08-20)
+# 51. Running the AlgoTune arm: every deviation, dependency and trap (2026-08-20)
 
 What a second machine, or a later reader, needs in order to reproduce these numbers and to know
 what was changed outside this repository to get them. Companion to
-[doc 47](50-benchmark-landscape-and-local-plan-2026-08-19.md), which covers *why* AlgoTune and what
+[doc 50](50-benchmark-landscape-and-local-plan-2026-08-19.md), which covers *why* AlgoTune and what
 was measured; this one covers *what was touched*.
 
 Everything below is applied by `benchmarks/algotune/setup_algotune.sh`. It exists so that none of it
