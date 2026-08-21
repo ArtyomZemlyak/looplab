@@ -640,6 +640,43 @@ def _fmt_coverage(cov: dict) -> str:
             f"top_themes={cov.get('top_themes', [])}")
 
 
+def _policy_width_note(ctx) -> str:
+    """One line naming the policies that cannot fill THIS run's eval width, or "".
+
+    THE PAIR THIS AGENT SETS IN ONE BREATH. A strategy answer carries `policy` and `eval_parallel`
+    together, and nothing had ever told this agent that some schedules cannot spend the width they
+    are asking for. `runs/e5small-dr-unified-v4` chose `policy: "bohb"` and `eval_parallel: 2` in the
+    SAME decision — with a sound argument for the racing schedule, five-hour evaluations making a
+    numeric sweep cheaper than many separate ones — and then ran one node at a time with a device
+    idle and no card created for 19.5 hours while hypotheses kept arriving.
+
+    A racing schedule (`asha`/`bohb`) fills one slot once its seed target is met: a promotion needs
+    the rung's survivors, so an unresolved arm blocks both seeding and promotion.
+    `search/card_selection.py::_asha_mask_is_unsound` measured the consequence across the corpus —
+    8.03 starved hours in five runs, 5.94 of them this shape, and 0.00 in every GreedyTree and
+    EvolutionaryPolicy run.
+
+    IT NAMES A COST AND FORBIDS NOTHING. The racing schedule may still be the right answer; what it
+    must not be is an unwitting one. Empty at width 1 and empty when nothing in the menu serialises,
+    so the ordinary brief is unchanged byte for byte.
+    """
+    from looplab.search.policy import policy_fills_width
+
+    width = getattr(ctx, "eval_parallel", None)
+    menu = list(getattr(ctx, "available_policies", None) or [])
+    starving = [name for name in menu if not policy_fills_width(name, width)]
+    if not starving:
+        return ""
+    return (f"CONCURRENCY COST OF THE POLICY CHOICE: at eval_parallel={width}, "
+            f"{', '.join(starving)} cannot keep the slots busy — a racing schedule fills ONE slot "
+            "once its seeds are met, because a promotion needs the rung's survivors and an "
+            "unresolved arm supplies none, so the remaining slots idle until it resolves. Measured "
+            "across this box's runs: 8.03 starved hours, 5.94 of them this shape, 0.00 under greedy "
+            "or evolutionary. Choose it if the search argument is worth that; if you do, consider "
+            "setting eval_parallel to 1 in the same answer so the record says the run is serial on "
+            "purpose rather than by accident.\n")
+
+
 def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
     """The compact decision brief shared by the structured-output and tool-using Strategists."""
     brief = (
@@ -647,7 +684,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"improves_since_best={ctx.improves_since_best} numeric_space={ctx.is_numeric_space} "
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
-        f"current runtime concurrency: eval_parallel={ctx.eval_parallel}; "
+        + _policy_width_note(ctx)
+        + f"current runtime concurrency: eval_parallel={ctx.eval_parallel}; "
         f"LLM broker total={ctx.llm_total if ctx.llm_total is not None else 'unbounded'} "
         f"(the value to change with canonical llm_parallel); "
         f"current build fan-out={ctx.llm_parallel}; LLM lanes={ctx.llm_lane_limits}\n"

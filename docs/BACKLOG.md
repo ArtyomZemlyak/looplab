@@ -285,6 +285,30 @@ site that proves it is open.
    already failed. **Cost:** this box serves local models, which is exactly where native FC collapses
    (~20 % vs ~92–94 %). The original note called it the cheapest whole-system lift and that still
    holds — it is now a one-line default change plus its blast-radius test.
+   **[MEASURED 2026-08-21 AND THE PREMISE DOES NOT HOLD — DO NOT SHIP THE DEFAULT CHANGE ON IT.**
+   The code half of the entry is still exactly true: `Settings.llm_parser` is `"tool_call"` and
+   `_ORDER["tool_call"]` is `["tool_call", "baml"]`, so the SAP runs only after native FC fails.
+   What is false is the *cost* clause it rests on.
+   *(a) THIS BOX DOES NOT SERVE LOCAL MODELS.* `config.snapshot.json` on every current run reads
+   `llm_base_url = https://llm-core-olap.samokat.ru/v1`, `llm_model = deepseek-v4-flash` — a remote
+   endpoint whose function calling works. The `~20 % vs ~92–94 %` figure describes a configuration
+   this box has not been in.
+   *(b) THE LOCAL MEASUREMENT SAYS THE OPPOSITE, and the repo already built the instrument for it.*
+   `looplab parser-stats` over every run that carries the observation:
+   `e5small-dr-unified-v3` — concept_coverage 5, hypothesis_merge 1, propose 9; `e5small-dr-unified-v4`
+   — concept_coverage 5, deep_research 1, hypothesis_merge 3, propose 9. **33 asks, first-try 100.0 %
+   in every phase, 0 repaired, 0 failed, `won: tool_call` on all of them.** Native FC is not
+   collapsing here; it is answering everything on the first try.
+   *(c) THE EVIDENCE IS THIN AND SAYS SO.* 33 asks is a small sample, and only two of eight runs
+   contribute — but that is NOT an instrumentation defect, which was checked rather than assumed:
+   `grep -c structured_parse` returns 0 rows for `rubertlite-dr-unified-v8`, `e5small-dr-unified-v2`
+   and `rubertlite-dense-retrieval` (they predate the observation) and 18 for `e5small-dr-unified-v4`,
+   which is exactly the 5+1+3+9 the tool reported. The tool sees everything that exists.
+   So: the change is a one-line default flip whose entire justification is a rate this box cannot
+   currently reproduce. **Re-priced from P0 to P3, open only as a question**: flip it if and when a
+   run's own `parser-stats` shows `repaired` or `failed` above zero, which is the number the flip
+   was always supposed to be answering. Leaving it at P0 would spend the next reader's attention on
+   a lift that has no measured lift behind it.]
 7. **Untrusted code still gets a writable container filesystem (P1, M).** `runtime/sandbox.py:230-238`
    has `--pids-limit 1024`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`,
    `--cpus`; `--read-only` + tmpfs appears **nowhere** in the tree, and `sandbox.py:241` mounts

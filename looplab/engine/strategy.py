@@ -454,6 +454,28 @@ class StrategyCadenceMixin:
         }
         if developer_application is not None:
             payload["developer_application"] = developer_application
+        # THE PAIR THIS DECISION SETS IN ONE BREATH, and until now nothing looked at both. A
+        # strategy payload carries `policy` AND `eval_parallel`; a racing schedule (`asha`/`bohb`)
+        # cannot fill more than one slot once its seed target is met, because a promotion needs the
+        # rung's survivors and an unresolved arm supplies none. `runs/e5small-dr-unified-v4` set
+        # `policy: "bohb"` and `eval_parallel: 2` in the SAME event, with a sound argument for the
+        # racing schedule and no mention of the width — and then ran one node at a time with a
+        # device idle, no card added for 19.5 hours while hypotheses kept arriving.
+        #
+        # A RECEIPT, NOT A REFUSAL, and deliberately so: the choice can be right, and the engine has
+        # no standing to overrule a Strategist on a search-design question it argued for. What it
+        # has standing to do is refuse to let the consequence go unrecorded. Additive and
+        # fold-ignored; ABSENT when the pair is fine, so every decision that does fill its width
+        # writes exactly the payload it always did.
+        from looplab.search.policy import policy_fills_width
+        _width = strat.get("eval_parallel")
+        if not policy_fills_width(strat.get("policy"), _width):
+            payload["width_unfilled"] = {
+                "policy": str(strat.get("policy") or ""), "eval_parallel": _width,
+                "note": ("a racing schedule fills one slot once its seeds are met — a promotion "
+                         "needs the rung's survivors, so an unresolved arm blocks both seeding and "
+                         "promotion and the remaining slots stay idle until it resolves"),
+            }
         self.store.append(EV_STRATEGY_DECISION, payload)
         # The expensive/fallible factory work happened before the append. From here a prepared
         # transition must either install or stop this owner; continuing after the durable event with
