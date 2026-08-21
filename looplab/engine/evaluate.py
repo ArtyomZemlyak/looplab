@@ -358,6 +358,52 @@ def _durable_repair_seconds(events, node_id: int, generation: int) -> float:
     return spent
 
 
+def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
+    """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
+
+    WHY THE REPAIR NEEDS THEM, measured in production on 2026-08-20/21. `runs/e5small-dr-unified-v4`
+    node 3 drew ELEVEN `train_monitor_alert` rows over ten hours, converging on a mechanism the
+    watchdog named precisely — the DCL mask sentinel is a FINITE `-1e9`, so a row whose mask removes
+    every negative drags the batch mean by ~`-1e9/batch` and the objective is unbounded below. The
+    stage then timed out, and the repair that followed opened: "Healthy training run ... a pure speed
+    failure, not a correctness one." It cut `n_epochs` 15 -> 3, left `dcl_threshold` and the sentinel
+    untouched, and the next attempt re-ran the same degenerate objective. ~17 GPU-hours, on one node,
+    because the agent that ACTS could not see what the agent that WATCHES had said eleven times.
+
+    Nothing here is new evidence — the rows were already durable, already keyed to this node, and
+    already paid for. This is a READ.
+
+    KEYED BY `_durable_row_belongs`, the same call the three repair ledgers make, so a resumed node
+    reads its own verdicts and not a sibling generation's.
+    """
+    out: list[dict] = []
+    for e in events or []:
+        if e.type != EV_TRAIN_MONITOR_ALERT:
+            continue
+        d = e.data or {}
+        if not _durable_row_belongs(d, node_id, generation):
+            continue
+        # Carried verbatim rather than reduced. WHICH FIELDS AND WHY: `status` and `confidence`
+        # because the series WOBBLED on the motivating node (broken 0.75, 0.70, 0.75, watch 0.55,
+        # healthy 0.85, broken 0.85, healthy 0.85, broken 0.60, broken 0.80, healthy 0.85) and a
+        # collapsed summary would hide that the judge contradicted itself twice; `fault` because it
+        # is what `should_monitor_repair` gates on and a reader comparing the two needs it; `reason`
+        # because it carries the diagnosis, which is the whole point. `log_role` and `stage` locate
+        # the claim. Nothing is dropped for being inconvenient — a reduction here is an opinion, and
+        # the opinions in this record belong to the watchdog, not to the reader assembling them.
+        # …and `trajectory`, the one field on this row that is NOT the judge's opinion:
+        # `train_monitor.trajectory_row` builds it from the loss series and says so itself —
+        # "deliberately the MEASUREMENT and not a judgement". On the motivating node the verdicts
+        # contradicted each other five times and the trajectories never did (40.07 -> -2.4e7,
+        # direction `descending`, every window). Carrying only the prose would have handed the
+        # repair the ARGUMENT and withheld the EVIDENCE.
+        out.append({"status": d.get("status"), "confidence": d.get("confidence"),
+                    "fault": d.get("fault"), "reason": d.get("reason"),
+                    "log_role": d.get("log_role"), "stage": d.get("stage"),
+                    "trajectory": d.get("trajectory")})
+    return out
+
+
 def _durable_repair_ledger(events, node_id: int, generation: int) -> tuple[int, list[dict], int]:
     """This node's repair ledger as the EVENT LOG records it: (attempts, judge rows, unparseables).
 
@@ -497,6 +543,7 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_IN
                                   EV_NODE_EVAL_STARTED,
                                   EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
                                   EV_NODE_RESET, EV_PAUSE, EV_PROXY_SCORED,
+                                  EV_TRAIN_MONITOR_ALERT,
                                   EV_REPAIR_CRITIC_VERDICT,
                                   EV_REWARD_HACK_SUSPECTED, EV_TRUST_SCAN,
                                   EV_SPEC_DRIFT, EV_STAGE_FINISHED, EV_STAGE_ROLLBACK)
@@ -2361,12 +2408,19 @@ class EvaluateMixin:
                 _repair_tools = await anyio.to_thread.run_sync(
                     diagnosis_tools, self, workdir, _log_plan, _log_snapshot,
                     abandon_on_cancel=True)
+                # READ FRESH, NOT FROM `events_at_start`. Every alert this reads was appended
+                # DURING the attempt that just died — a snapshot taken before the node started
+                # contains, by construction, none of them. This is the one place in the node loop
+                # where that distinction is the whole point of the read.
+                _monitor_verdicts = _durable_monitor_verdicts(self.store.read_all(), node_id,
+                                                              generation)
                 triage = self._triage_crash(state, node, err, attempt + 1, reason=reason,
                                             repair_log=repair_log[-_JUDGE_HISTORY_ROWS:],
                                             depth=_depth,
                                             attempts_left=_repair_attempts_left(attempt, _repair_cap),
                                             log_tools=_repair_tools,
-                                            engine_facts=engine_observed_facts(res))
+                                            engine_facts=engine_observed_facts(res),
+                                            monitor_verdicts=_monitor_verdicts)
                 action = triage.get("action", DEFAULT_TRIAGE_ACTION)
                 # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
                 # verdict this attempt already paid for, and before every branch below that

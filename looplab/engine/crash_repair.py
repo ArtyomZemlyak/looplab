@@ -63,6 +63,81 @@ def _accepted_kwargs(fn, candidates: dict) -> dict:
     return {k: v for k, v in candidates.items() if k in params}
 
 
+# How many watchdog verdicts reach the prompt, and how much of each `reason` survives. The prompt
+# already carries the repair history, the stderr tail and the code tail; node 3 drew TWENTY-ONE
+# alerts for one lifecycle, so "all of them" is not a free choice. The window takes the LAST rows
+# because they are the ones formed with the most of the log in view — on that node the early alerts
+# carried the symptom and the later ones the mechanism — and the count of what was dropped is
+# printed, so a bounded view never reads as the whole record.
+#
+# The char cap is a SECOND belt, not the operative one: `_monitor_training` already caps `reason` at
+# 300 characters before it appends the row (train_monitor.py, next to its `_redact` call), so on
+# rows this engine wrote it never fires. It is here for rows it did not write — an older run's log,
+# a replayed corpus — because this renderer's input is untrusted append-only data like every other
+# durable read on the repair path.
+_MONITOR_VERDICT_ROWS = 6
+_MONITOR_REASON_CHARS = 400
+
+
+def _format_monitor_verdicts(verdicts) -> str:
+    """Render the training watchdog's OPINIONS about this node for the repair to read.
+
+    THE VOICE IS THE WATCHDOG'S, NOT THE ENGINE'S, and that is the whole design. Everything else in
+    this prompt that the engine says, it says because it OBSERVED it — the change-set comparison, the
+    stage statuses, the attempt count. These are a MODEL'S READING of a log, and this repo has twice
+    measured what happens when a reading is handed on as a fact: the diagnostician promotes the stage
+    checker's prose to a cause and loses 8 of 10 rows on `rubertlite-dense-retrieval` doing it. So the
+    heading says whose opinion it is, every row carries its own CONFIDENCE, and the series is NOT
+    collapsed into one verdict — on `e5small-dr-unified-v4` node 3 it ran broken 0.75, 0.70, 0.75,
+    watch 0.55, healthy 0.85, broken 0.85, healthy 0.85, broken 0.60, broken 0.80, healthy 0.85, and
+    that it contradicted itself twice is information the Developer should have rather than something
+    an averaging step hides.
+
+    WHY IT IS WORTH THE TOKENS. Node 3's watchdog named its defect eleven times over ten hours; the
+    repair that followed wrote "Healthy training run ... a pure speed failure, not a correctness one",
+    cut the epochs and left the cause untouched. ~17 GPU-hours.
+
+    Empty renders EMPTY, so a node with no alerts produces a byte-identical prompt to the one this
+    function did not exist for. Prompt text is a contract (CLAUDE.md): a new fact earns a new
+    sentence, it does not reword the existing ones."""
+    rows = [v for v in (verdicts or []) if isinstance(v, dict) and v.get("status")]
+    if not rows:
+        return ""
+    shown = rows[-_MONITOR_VERDICT_ROWS:]
+    dropped = len(rows) - len(shown)
+    head = ("--- WHAT THE TRAINING WATCHDOG SAID ABOUT THIS NODE (a JUDGE'S READING of the "
+            "training log, not an engine observation — it may be wrong, and on this node it has "
+            "disagreed with itself)")
+    if dropped:
+        head += f"; showing the {len(shown)} most recent of {len(rows)}"
+    out = [head + " ---"]
+    for v in shown:
+        conf = v.get("confidence")
+        conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "unstated"
+        bits = [f"verdict={v.get('status')}", f"confidence={conf_s}"]
+        if v.get("fault"):
+            bits.append(f"blames={v.get('fault')}")
+        if v.get("stage"):
+            bits.append(f"stage={v.get('stage')}")
+        out.append("  " + " ".join(bits))
+        traj = v.get("trajectory")
+        if isinstance(traj, dict) and traj:
+            # Rendered on its OWN line and in the ENGINE's flat vocabulary, because unlike the
+            # sentence below it this is measured. `first`/`last`/`minimum` are the numbers that
+            # settle "did the loss actually do something impossible" without trusting either side.
+            keys = [k for k in ("direction", "first", "last", "minimum", "net", "windows",
+                                "points", "progress", "anomaly") if traj.get(k) is not None]
+            if keys:
+                out.append("    measured: " + " ".join(f"{k}={traj[k]}" for k in keys))
+        reason = str(v.get("reason") or "").strip()
+        if reason:
+            clipped = reason[:_MONITOR_REASON_CHARS]
+            if len(reason) > _MONITOR_REASON_CHARS:
+                clipped += "…"
+            out.append("    " + clipped)
+    return "\n".join(out) + "\n"
+
+
 def _format_repair_log(repair_log) -> str:
     """Render this node's in-node repair history for the stop judge: one line per attempt, oldest
     first, newest last. Pure text assembly — the engine decides WHAT the judge sees, the agent
@@ -169,7 +244,7 @@ class CrashRepairMixin:
     def _triage_crash(self, state: RunState, node, error: str, attempt: int,
                       reason: str = "crash", *, repair_log=None,
                       depth: Optional[int] = None, attempts_left: Optional[int] = None,
-                      log_tools=None, engine_facts: str = "") -> dict:
+                      log_tools=None, engine_facts: str = "", monitor_verdicts=None) -> dict:
         """Decide what to do with a just-failed node BEFORE spending another eval:
         {"action": "repair"|"abandon"|"reject_idea"|"unanswerable"|"unreadable", "rationale": str,
         "failure_kind": str}.
@@ -254,7 +329,7 @@ class CrashRepairMixin:
             for _round in range(1 + _TRIAGE_REASK_LIMIT):
                 verdict = self._ask_triage(fn, state, node, tagged, attempt, reason,
                                            repair_log, depth, attempts_left, log_tools,
-                                           engine_facts)
+                                           engine_facts, monitor_verdicts)
                 if verdict["action"] in AGENT_TRIAGE_ACTIONS:
                     return verdict
             return verdict
@@ -273,7 +348,8 @@ class CrashRepairMixin:
                             _effective_repair_cap(self._inline_repair_attempts))
 
     def _ask_triage(self, fn, state: RunState, node, tagged: str, attempt: int, reason: str,
-                    repair_log, depth, attempts_left, log_tools=None, engine_facts: str = "") -> dict:
+                    repair_log, depth, attempts_left, log_tools=None, engine_facts: str = "",
+                    monitor_verdicts=None) -> dict:
         """ONE ask of the wired judge, normalized to a `TRIAGE_ACTIONS` verdict.
 
         Split out of `_triage_crash` so the re-ask above is a loop over a single, total function
@@ -324,7 +400,22 @@ class CrashRepairMixin:
             # TypeError, which the fail-closed handler below reads as a dead provider — a stopped
             # node PLUS a RUN-level pause. `_accepted_kwargs` is the safety; listing it here
             # unconditionally like the rest is what keeps one rule for the whole bag.
-            extra = {"history": _format_repair_log(repair_log),
+            # SPLICED INTO `history`, NOT given a new keyword. `history` is documented as "already
+            # rendered by the engine", so every duck-typed `triage_crash` — including every test
+            # double and the older signatures `_accepted_kwargs` exists to tolerate — sees the
+            # watchdog's verdicts the moment they exist, with no coordinated change. A new keyword
+            # would have reached exactly one implementation and silently skipped the rest.
+            #
+            # JOINED EXPLICITLY, not with a `+` and a leading newline inside one of the halves.
+            # Either half can be empty — most nodes have no repair history on attempt 1 and most
+            # have no watchdog verdicts at all — and a separator baked into one of them puts a
+            # blank line at the top of the prompt in exactly those cases. `off == today` has to
+            # hold in BOTH directions or it is not a byte-identical fallback.
+            _log_block = _format_repair_log(repair_log)
+            _mon_block = _format_monitor_verdicts(monitor_verdicts)
+            _history = ("\n".join(b for b in (_log_block, _mon_block) if b)
+                        if (_log_block and _mon_block) else (_log_block or _mon_block))
+            extra = {"history": _history,
                      "stages_passed": depth, "attempts_left": attempts_left,
                      "tools": log_tools, "engine_facts": engine_facts}
             with self.tracer.span("triage", attempt=attempt, reason=reason):

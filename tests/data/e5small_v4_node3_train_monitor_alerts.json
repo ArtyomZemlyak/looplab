@@ -1,0 +1,380 @@
+[
+ {
+  "status": "broken",
+  "confidence": 0.75,
+  "fault": "implementation",
+  "reason": "Loss diverges catastrophically from 40.07 to -1.57e6 in 50 steps (with the newly-enabled dcl_threshold=0.05/rdrop_alpha=0.5), driven by the DCL hard-negative mask: rows with no surviving negatives fall back to the -1e9 sentinel in log_denom, dominating the batch mean with a degenerate huge-negative ",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "unknown",
+   "windows": 1,
+   "points": 5,
+   "first": 40.0686,
+   "last": -1574676.9,
+   "minimum": -1574676.9,
+   "noise": 207521.72415,
+   "progress": "52/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.7,
+  "fault": "implementation",
+  "reason": "Loss collapses unboundedly from 40.07 to -2.09e6 in just 62/10545 steps (still descending), a clear divergence — the DCL empty-denominator sentinel (-1e9) dominates when no negatives survive the threshold, so the objective is degenerate, not learning.",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 2,
+   "points": 11,
+   "first": 40.0686,
+   "last": -2087373.0,
+   "minimum": -2087373.0,
+   "noise": 268557.686225,
+   "net": 579835.075,
+   "progress": "62/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.75,
+  "fault": "implementation",
+  "reason": "Loss diverges monotonically to -2.5M (40→-330k→-1.5M→-2.5M in ~110 steps); with L2-normalized embeddings and temp 0.05 the loss is bounded unless log_denom hits -1e9, i.e. the DCL denominator (positive removed, loss.py:507) empties and the objective collapses to -inf — unlike the champion's original",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 3,
+   "points": 20,
+   "first": 40.0686,
+   "last": -2526827.8,
+   "minimum": -2526827.8,
+   "noise": 207521.72415,
+   "net": 1757816.05,
+   "progress": "118/10545"
+  }
+ },
+ {
+  "status": "watch",
+  "confidence": 0.55,
+  "reason": "Loss descends steadily (40 -> -3.5e6, no errors, on cuda:0) but the magnitude is degenerate: the DCL path masks negatives to a finite -1e9 constant (loss.py:505-507, 511), and rows whose denominators fully collapse contribute ~-1e9 each, so the loss value and its descent are dominated by that maskin",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 4,
+   "points": 29,
+   "first": 40.0686,
+   "last": -3161594.4,
+   "minimum": -3576632.8,
+   "noise": 149537.212075,
+   "net": 2624517.25,
+   "progress": "178/10545"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.85,
+  "reason": "Loss descends monotonically across the whole run (40 → −6.5M over 1:36h, every bucket lower), grad_norm 1–4, no errors; the ported code does accept dcl_threshold/rdrop_alpha so the champion loss+params are actually running.",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 5,
+   "points": 37,
+   "first": 40.0686,
+   "last": -5908179.2,
+   "minimum": -6396460.4,
+   "noise": 207521.72415,
+   "net": 5688484.65,
+   "progress": "494/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.85,
+  "fault": "implementation",
+  "reason": "Loss diverged monotonically from 40.07 to -10.7M (still falling at step 820/10545) — an impossible value for a contrastive NLL (uniformity disabled), caused by the -1e9 masked-logit constant dominating the denominator when masking removes all negatives.",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 6,
+   "points": 46,
+   "first": 40.0686,
+   "last": -11071755.2,
+   "minimum": -11071755.2,
+   "noise": 253297.262075,
+   "net": 9643564.65,
+   "progress": "809/10545"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.85,
+  "reason": "Loss descending steadily (40.07 → -1.09e7, still dropping across all hourly buckets), grad_norm healthy (~1.2-1.8), LR in warmup, no errors or stalls in the tail. Code check confirms NLLCosLoss and prepare_loss DO implement dcl_threshold and rdrop_alpha (loss.py:397/565, config.py:482/490-491), so t",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 7,
+   "points": 54,
+   "first": 40.0686,
+   "last": -10888648.8,
+   "minimum": -11816384.0,
+   "noise": 299072.8,
+   "net": 10491953.45,
+   "progress": "872/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.6,
+  "fault": "implementation",
+  "reason": "Contrastive NLL loss diverged to -1.9e7 and keeps descending (hourly medians -3.2e6→-1.82e7); a loss bounded near O(1) reaching -1e7 means rows with fully-masked denominators (thr=0.1 + dcl_threshold=0.05) contribute the -1e9 sentinel, making the objective unbounded below — the model is rewarded for",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 10,
+   "points": 79,
+   "first": 40.0686,
+   "last": -19580056.0,
+   "minimum": -19750953.6,
+   "noise": 347902.22415,
+   "net": 18334970.25,
+   "progress": "1805/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.8,
+  "fault": "implementation",
+  "reason": "Loss diverges unbounded below to -1.98e7 (contrastive loss minimum is 0): with DCL enabled the positive is removed from the denominator and masked negatives are set to -1e9 (loss.py:511-517), so an all-masked row yields log_denom=-1e9 and a ~-1e9 loss term; config.yaml enables dcl_threshold=0.05/rdr",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 11,
+   "points": 87,
+   "first": 40.0686,
+   "last": -19079563.2,
+   "minimum": -19836401.6,
+   "noise": 366210.8,
+   "net": 19000252.65,
+   "progress": "1868/10545"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.85,
+  "reason": "Loss descends steadily from 40.07 to ~-1.9e7 (min -2.08e7) across the whole run with no errors, NaNs, or stalls; grad_norm healthy (~0.8-0.98), LR following the cosine warmup schedule, and the ported NLLCosLoss code (loss.py) does contain and apply dcl_threshold=0.05 and rdrop_alpha=0.5 as configure",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 12,
+   "points": 95,
+   "first": 40.0686,
+   "last": -18981908.8,
+   "minimum": -20776347.2,
+   "noise": 384521.4,
+   "net": 18933113.45,
+   "progress": "1926/10545"
+  }
+ },
+ {
+  "status": "watch",
+  "confidence": 0.6,
+  "reason": "Loss descends smoothly (40 -> -2.19e7) with grad_norm ~1 and no errors, but the -2e7 magnitude is far beyond a sane contrastive loss and indicates the -1e9 masking sentinel is dominating log_denom for many fully-masked rows, so the reported loss scale is not trustworthy even though training is progr",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 13,
+   "points": 104,
+   "first": 40.0686,
+   "last": -21899390.4,
+   "minimum": -22717262.4,
+   "noise": 402832.0,
+   "net": 21569833.45,
+   "progress": "2204/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.85,
+  "fault": "implementation",
+  "reason": "Loss diverges unboundedly to -2.42e7 (from 40.07, still descending): the ported NLLCosLoss removes the positive logit from the denominator and uses -1e9 as the masked constant, so rows where the DCL threshold masks out all negatives contribute ~-1e9 each, driving the mean to an absurd negative scale",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 14,
+   "points": 113,
+   "first": 40.0686,
+   "last": -23461891.2,
+   "minimum": -24157694.4,
+   "noise": 445556.0,
+   "net": 22814950.25,
+   "progress": "2516/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.7,
+  "fault": "implementation",
+  "reason": "Loss diverges monotonically to -2.4e7 (from +40) with no floor; the DCL branch (loss.py:504-507) masks negatives below pos-dcl_threshold to -1e9 and removes the positive from the denominator, making the objective unbounded below so the optimizer drives it to ~-1e9 — a degenerate, unrecoverable run.",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 15,
+   "points": 122,
+   "first": 40.0686,
+   "last": -22070288.0,
+   "minimum": -24157694.4,
+   "noise": 488280.0,
+   "net": 21875011.05,
+   "progress": "2576/10545"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.85,
+  "reason": "Loss descends steadily across all hourly buckets (40 -> -2.4e7, min -2.42e7) with no errors, tracebacks or stalls; the premise that dcl_threshold/rdrop_alpha are absent is contradicted by the code (loss.py:418-419, 504-507, 563-576, 635-636) and config (dcl_threshold:0.05, rdrop_alpha:0.5), so the r",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 16,
+   "points": 133,
+   "first": 40.0686,
+   "last": -19274881.6,
+   "minimum": -24157694.4,
+   "noise": 598146.4,
+   "net": 21740731.05,
+   "progress": "2635/10545"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.6,
+  "fault": "implementation",
+  "reason": "The contrastive loss is diverging to absurd negative values (-2.5e7 and still descending toward -1e9), not converging: with DCL active (dcl_threshold=0.05, positive removed from denominator) and the code's -1e9 masked-logit constant, once the hard-negative selection masks all negatives in a row logs",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 17,
+   "points": 142,
+   "first": 40.0686,
+   "last": -25634747.2,
+   "minimum": -25634747.2,
+   "noise": 708012.8,
+   "net": 23596198.25,
+   "progress": "2943/10545"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.6,
+  "reason": "Run just started training cleanly (0/2109 it/s, loss type nll_cos created, index/data prepared with no errors); no loss values emitted yet, no traceback or divergence.",
+  "stage": "train",
+  "log_role": "training"
+ },
+ {
+  "status": "broken",
+  "confidence": 0.85,
+  "fault": "implementation",
+  "reason": "Loss collapses monotonically 38.57 → -842k → -1.66M → -2.03M → -2.27M over the first 50 steps (~6h40m projected remaining): the NLLCos denominator uses a finite -1e9 sentinel for masked negatives (loss.py:486), so rows whose negatives are all masked by thr=0.1+dcl_threshold=0.05 contribute -1e9 to l",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "unknown",
+   "windows": 1,
+   "points": 5,
+   "first": 38.5723,
+   "last": -2270479.4,
+   "minimum": -2270479.4,
+   "noise": 592042.7,
+   "progress": "51/2109"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.65,
+  "fault": "implementation",
+  "reason": "Loss explodes monotonically from 38.57 to -2.53M within 60 steps (still descending, heading toward the -1e9 masked-logit floor), a catastrophic divergence far outside any sane contrastive-loss range — the DCL path (dcl_threshold=0.05, rdrop_alpha=0.5, temperature=0.05 active per config) is collapsin",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "flat",
+   "windows": 2,
+   "points": 11,
+   "first": 38.5723,
+   "last": -2526827.6,
+   "minimum": -2526827.6,
+   "noise": 479127.75,
+   "net": 183106.4,
+   "progress": "62/2109"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.9,
+  "fault": "implementation",
+  "reason": "Loss diverges monotonically from 38.57 (step 10) to -3.80M (step 120), accelerating toward the -1e9 sentinel: with DCL the positive is removed from the denominator and rows with no surviving negatives collapse to log_denom≈-1e9 (loss.py neg_inf), so the objective as written cannot produce sane value",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 3,
+   "points": 19,
+   "first": 38.5723,
+   "last": -3796361.2,
+   "minimum": -3796361.2,
+   "noise": 366212.8,
+   "net": 1257327.9,
+   "progress": "121/2109"
+  }
+ },
+ {
+  "status": "broken",
+  "confidence": 0.75,
+  "fault": "implementation",
+  "reason": "Loss diverges to -4.96e6 (and still descending ~1e6/5min at step 181/2109) — a contrastive NLL loss should be O(1)-O(10); the DCL path uses neg_inf=-1e9 as the masked-logit constant and removes the positive from the denominator, so any row whose negatives are all masked contributes ~-1e9 to the mean",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 4,
+   "points": 27,
+   "first": 38.5723,
+   "last": -4956029.2,
+   "minimum": -4956029.2,
+   "noise": 366211.8,
+   "net": 2166752.4,
+   "progress": "181/2109"
+  }
+ },
+ {
+  "status": "healthy",
+  "confidence": 0.85,
+  "reason": "Loss descending steadily (38.57 -> -6.04M over 240 steps, 11% of run) with no errors, no stall, no NaN; NLLCos is a legitimately negative contrastive loss, and loss.py:397/prepare_loss DO wire dcl_threshold=0.05 and rdrop_alpha=0.5 (config.yaml:249-250), so the run is executing the intended objectiv",
+  "stage": "train",
+  "log_role": "training",
+  "trajectory": {
+   "direction": "descending",
+   "windows": 5,
+   "points": 35,
+   "first": 38.5723,
+   "last": -5676245.2,
+   "minimum": -5761693.2,
+   "noise": 366210.8,
+   "net": 3417974.2,
+   "progress": "239/2109"
+  }
+ }
+]
