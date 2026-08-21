@@ -312,3 +312,42 @@ record exposes no `baseline_time_ms` for the bridge's *aggregate* cache to store
 shape and is noted in the code beside the read. On 2026-08-20 a node that scored 0.0 was first
 diagnosed from that label; the real cause was an empty working set, three layers away. The label now
 says what it means.
+
+---
+
+## 10. `ALGOTUNE_EVAL_WORKERS` inflates the metric ~75 %. Keep it at 1 until that is explained.
+
+The fork's parallel evaluator is real and fast — but on this box it also **changes the number**, and
+that disqualifies it for measurement until the mechanism is understood.
+
+Reproduction, same solver every time (sympy's own `discrete_log` wrapped as `Solver.solve`, i.e.
+reference-equivalent, whose honest score is ~1.00), same four pinned cores, `discrete_log`, train:
+
+| `ALGOTUNE_EVAL_WORKERS` | speedup | eval wall |
+|---|---|---|
+| 1 | **1.0011** | 107 s |
+| 2 | **1.7795** | 113 s |
+| 4 | **1.7156** | 20 s |
+| 1 (repeats) | 1.0048 / 1.0074 / 1.0161 | 195 / 108 / 109 s |
+
+Three things this rules out:
+
+- **Not noise.** Serial repeats span 1.0011–1.0161 (~1 %, the measured noise floor); every
+  parallel run lands at 1.72–1.78. The gap is ~75×  the noise.
+- **Not contention scaling.** The jump appears the moment workers goes 1 → 2 and does **not** grow
+  from 2 → 4. At `workers=2` the run was *slower* in wall time (113 s vs 107 s) while reporting
+  1.78×, so whatever moved is not "more cores made it faster".
+- **Not the regime-keyed baseline cache.** That mechanism exists in `baseline_manager.py`, and its
+  comment records the authors measuring this same family of swing (1.46× → 1.04×) and fixing it that
+  way. Here the cache directory does not exist at all, so every run re-measures its own baseline in
+  its own regime — and the discontinuity survives anyway.
+
+What is left is a structural difference between the serial timing path and the pooled one: once the
+pool is used at all, the solver's measured time and the reference's stop being taken the same way.
+A ratio only cancels overhead when both halves carry it.
+
+**Operational rule until this is explained: leave `ALGOTUNE_EVAL_WORKERS` unset.** `campaign.sh`
+does not set it, so every campaign so far is serial and unaffected. The prize for fixing it is large
+— 107 s → 20 s per evaluation, and evaluation is ~98 % of a real arm's wall clock — but a 75 %
+inflation would have read as "LoopLab beats the reference by 1.7×" on a solver that is literally the
+reference.
