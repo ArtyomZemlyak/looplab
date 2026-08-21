@@ -103,6 +103,20 @@ class TrainingVerdict(BaseModel):
                     "hypothesis records a verdict about an idea that was never actually tested.")
     reason: str = Field(description="One short sentence naming the SPECIFIC log evidence for the status.")
     confidence: float = Field(default=0.5, description="Confidence in the status, 0.0 to 1.0.")
+    evidence_source: Literal["code", "log", "none"] = Field(
+        default="none",
+        description="WHERE the thing you are pointing at lives, so the engine can go and look at it "
+                    "itself. 'code' = a file in this run's workdir that you READ with your tools. "
+                    "'log' = a place in a stage log you read. 'none' = you are reasoning from the "
+                    "tail you were handed and cited nothing checkable — which is an honest answer "
+                    "and the right one when it is true.")
+    evidence_locator: str = Field(
+        default="",
+        description="WHERE EXACTLY, as `path:line` or `path:start-end` relative to the workdir — "
+                    "for example `vectorsearch/training/loss.py:486`. THIS IS RE-READ BY THE ENGINE: "
+                    "a locator pointing at a file that is not there does not make your verdict "
+                    "wrong, but it does mean nobody can re-derive it, so cite something you "
+                    "actually opened. Leave empty when evidence_source is 'none'.")
     recheck_after_s: Optional[float] = Field(
         default=None,
         description="Optional: how many seconds until you want to look again. Use a LARGER value when the "
@@ -162,6 +176,41 @@ _LOOK_INVITATION = (
 # attribution exists to replace. Still far below `trust.judge.JUDGE_MAX_TURNS` (15) and still
 # multiplied by ~200 ticks per node, which is why it moved by three and not by ten.
 _MONITOR_LOOK_TURNS = 9
+
+
+# THE CHECKLIST, and it is the difference between an invitation and an obligation. `_LOOK_INVITATION`
+# above has told this judge to read the source since 2026-08-18, and it DOES: five of node 3's
+# sixteen `broken` verdicts on `e5small-dr-unified-v4` cite a file in their prose, including
+# `loss.py:486` — the line that declares the -1e9 sentinel that made that run's objective unbounded
+# below. The judge found the mechanism by reading the code.
+#
+# What it could not do was make that finding COUNT. The citation lived in `reason`, which is prose,
+# so nothing re-resolved it, and the engine could not tell a verdict that had opened the file from
+# one that had invented the line number. A deterministic rung that can observe only "the number is
+# going down" then overruled it thirteen times.
+#
+# So the citation is a FIELD now, and this says what earns it. It asks for the three things
+# `failure_diagnosis.evidence_citation_resolves` can actually check and refuses to ask for more:
+# WHICH file, WHICH line, and that the judge opened it. It does not ask for more confidence — a
+# wrong citation is still a wrong verdict. It asks for a claim somebody else can re-derive.
+_CITE_INVITATION = (
+    "IF YOU CALL THIS BROKEN AND BLAME THE IMPLEMENTATION, CITE THE LINE. Fill `evidence_source` "
+    "and `evidence_locator` with the file and line you actually opened — "
+    "`vectorsearch/training/loss.py:486`, not a description of it. THE ENGINE RE-READS WHAT YOU "
+    "CITE. A verdict that names the mechanism in a file the engine can open carries weight prose "
+    "cannot, because a later reader can go and check it; a verdict that cites nothing is read as a "
+    "reading of the tail, which is what it is.\n"
+    "WORK THROUGH THIS BEFORE YOU CONCLUDE:\n"
+    "  1. `metric_series` over the WHOLE run — what the loss has actually done, not what the last "
+    "minute of it looks like.\n"
+    "  2. If the numbers are impossible FOR THIS OBJECTIVE — a contrastive loss below zero, a loss "
+    "in the millions, a cross-entropy above ln(vocab) — `grep` for the loss class and `read_file` "
+    "it. The arithmetic either can or cannot produce what you are seeing, and only the source says "
+    "which. A sentinel constant reaching the reduction is the usual answer.\n"
+    "  3. `grep` for the parameters the log echoed, in the config AND in the training script. They "
+    "disagree more often than anyone expects, and the script is what ran.\n"
+    "  4. Only then decide, and say in `reason` what you found and where.\n"
+    "Take the turns. The run costs hours; this costs seconds.")
 
 
 def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000) -> str:
@@ -1111,10 +1160,37 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
 MONITOR_REPAIR_REASON = "not_learning"
 
 
+def citation_authenticates(verdict, *, resolved: Optional[bool]) -> bool:
+    """Did this verdict point at a place in the node's own workdir that the ENGINE could re-open?
+
+    THE OUT-OF-BAND CHANNEL, and it is the repo's own rule applied where it had not been: text may
+    NOMINATE, it may never DECIDE. A `broken` verdict is a model reading a log, and on its own it may
+    not end a stage. A `broken` verdict whose `evidence_locator` the engine RE-READ and found is a
+    claim somebody else can go and check — and the re-read is a filesystem fact the model does not
+    author. `failure_diagnosis.evidence_citation_resolves` performs it, confined to the workdir and
+    refusing `..`, an absolute path and a symlink out.
+
+    IT DOES NOT CHECK THAT THE VERDICT IS RIGHT, and nothing here pretends otherwise — the same
+    honest limit `evidence_citation_resolves` states for the diagnostician. A wrong citation to a
+    real file still authenticates. What it buys is that the finding is RE-DERIVABLE, which is
+    exactly the property a deterministic measurement has and unsupported prose does not.
+
+    `fault == "implementation"` rides along because that is the only attribution a citation can
+    substantiate: "the code is wrong, here is the line". A `hypothesis` verdict is a claim about an
+    IDEA and no file can carry it — those are recorded, never repaired.
+    """
+    if verdict is None or getattr(verdict, "status", "") != "broken":
+        return False
+    if getattr(verdict, "fault", "unknown") != "implementation":
+        return False
+    return resolved is True
+
+
 def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float,
                           log_role: str = LOG_ROLE_UNKNOWN, broken_streak: int = 0,
                           confirm_ticks: int = _MONITOR_KILL_CONFIRM_TICKS,
-                          trajectory: Optional["LossTrajectory"] = None) -> bool:
+                          trajectory: Optional["LossTrajectory"] = None,
+                          citation_resolved: Optional[bool] = None) -> bool:
     """Whether a verdict warrants stopping this stage FOR REPAIR. Pure/deterministic.
 
     The sibling of `should_monitor_kill`, and the reason the role gate can finally open. Every
@@ -1144,7 +1220,28 @@ def should_monitor_repair(verdict: Optional["TrainingVerdict"], *, enabled: bool
         return False
     if log_role in _NON_TRAINING_ROLES:
         return False
-    if trajectory_vetoes_kill(trajectory):
+    # THE VETO YIELDS TO A RESOLVED CITATION, AND ONLY HERE — never in `should_monitor_kill`.
+    #
+    # `trajectory_vetoes_kill` refuses to end a descending, non-anomalous curve. For a loss bounded
+    # below that is right and it is why the veto exists. It is WRONG for an objective that is
+    # unbounded below, where descent is the symptom: measured on `e5small-dr-unified-v4` node 3,
+    # whose DCL mask sentinel is a finite -1e9 that reaches the batch mean, the loss ran 40.07 ->
+    # -2.4e7 and the veto blocked every one of five `broken` verdicts at or above the bar, one of
+    # them at confidence 0.90 with the streak already satisfied. Zero of twenty-four alerts stopped
+    # anything.
+    #
+    # The rung refused permanently in this file (see the DECLINED marker below) is a THRESHOLD on
+    # the trajectory, and it is refused for a measured reason: no bar separates the broken n74 (peak
+    # 2.54e+08) from champion n48 (2.53e+08). This is not a threshold. It is the engine re-reading a
+    # file the judge says it opened — and n48's run contains ZERO `train_monitor_alert` rows, so it
+    # cannot enter this path at all, in either direction.
+    #
+    # AND ONLY THE REPAIR PATH, because the costs are not symmetric and this file says so above: a
+    # kill discards a multi-hour training with no repair, no retry and no refunded slot, while a
+    # repair-stop costs ONE restart of a run the judge has just said is wasted, with the diagnosis
+    # attached. Being wrong here is recoverable in the way being wrong there is not.
+    if trajectory_vetoes_kill(trajectory) and not citation_authenticates(
+            verdict, resolved=citation_resolved):
         return False
     try:
         needed = int(confirm_ticks)
@@ -2264,6 +2361,11 @@ class TrainingMonitorMixin:
              + ((contract_text + "\n\n") if contract_text else "")
              + ((trajectory_text + "\n\n") if trajectory_text else "")
              + ((_LOOK_INVITATION + "\n\n") if tools is not None else "")
+             # Spliced at the SAME position pattern and under the SAME condition as the invitation
+             # above: both are about what the judge may go and DO, and neither can be honoured
+             # without tools. `train_monitor_tools=false` therefore still reproduces the historical
+             # message byte for byte, which is what makes the whole tool rung shippable.
+             + ((_CITE_INVITATION + "\n\n") if tools is not None else "")
              + "LIVE TRAINING LOG (recent tail):\n" + digest
              + "\n\nClassify this run's health from the log evidence above."},
         ]
@@ -2586,10 +2688,25 @@ class TrainingMonitorMixin:
                         # back to its Developer, and only an implementation the judge will NOT
                         # blame reaches the gun. See `should_monitor_repair` for why the role gate
                         # that guards the kill does not guard this.
+                        # THE ENGINE GOES AND LOOKS. `evidence_citation_resolves` re-opens the
+                        # place the verdict says it read, confined to this node's workdir and
+                        # refusing `..`, an absolute path and a symlink out. Three answers, and the
+                        # third one matters: None = it cited nothing checkable, False = it cited
+                        # something that is not there, True = the engine found it. Only True
+                        # authenticates. Computed once per tick, here rather than inside the gate,
+                        # because it is a FILESYSTEM read and the gates are pure/deterministic —
+                        # `tests/test_train_monitor.py` drives them with no disk at all.
+                        from looplab.engine.failure_diagnosis import evidence_citation_resolves
+                        try:
+                            _citation_resolved = evidence_citation_resolves(
+                                {"source": getattr(verdict, "evidence_source", "none"),
+                                 "locator": getattr(verdict, "evidence_locator", "")}, workdir)
+                        except Exception:  # noqa: BLE001 — a probe must never end the watcher
+                            _citation_resolved = None
                         repair_decided = kill_signal is not None and should_monitor_repair(
                             verdict, enabled=getattr(self, "_train_monitor_kill", False),
                             threshold=threshold, log_role=log_role, broken_streak=broken_streak,
-                            trajectory=trajectory)
+                            trajectory=trajectory, citation_resolved=_citation_resolved)
                         stop_decided = (not repair_decided) and kill_signal is not None \
                             and should_monitor_kill(
                                 verdict, enabled=getattr(self, "_train_monitor_kill", False),
@@ -2719,6 +2836,23 @@ class TrainingMonitorMixin:
                                 # a run that recorded only the second learned the wrong lesson from
                                 # every bug. Additive and fold-ignored; absent reads as "unknown".
                                 alert["fault"] = str(getattr(verdict, "fault", "unknown"))[:16]
+                                # WHAT IT CITED AND WHETHER THE ENGINE FOUND IT, on the durable row
+                                # whether or not it led anywhere. This is the audit half of the
+                                # authentication: a later reader asking "was that stop justified?"
+                                # or "why did the veto hold?" needs the citation AND the engine's
+                                # own answer about it, and re-deriving either from a workdir that
+                                # has since been reaped is impossible. Additive and fold-ignored;
+                                # `citation_resolved` is deliberately omitted rather than written
+                                # `false` when nothing was cited, because "cited nothing" and
+                                # "cited something absent" are different facts about this judge.
+                                _loc = str(getattr(verdict, "evidence_locator", "") or "").strip()
+                                if _loc:
+                                    alert["evidence_source"] = str(
+                                        getattr(verdict, "evidence_source", "none"))[:16]
+                                    alert["evidence_locator"] = (
+                                        _redact(_loc) if callable(_redact) else _loc)[:300]
+                                if _citation_resolved is not None:
+                                    alert["citation_resolved"] = bool(_citation_resolved)
                             if repair_decided:
                                 alert["repair_decided"] = True
                             if stop_decided or repair_decided:
