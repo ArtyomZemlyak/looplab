@@ -475,6 +475,19 @@ site that proves it is open.
     *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
     False`. There is no FE operator in `search/operators.py` and no `caafe` symbol anywhere. The row
     called the CV gate **mandatory**; an instruction to a model is not a gate.
+   **[RE-DERIVED 2026-08-21 — ALL FOUR CLAIMS HOLD, the first ranked entry checked that day that
+   still described the tree.** `_cue_feature_engineering` returns a STRING and nothing else — the
+   "gate" is the sentence "KEEP a feature only if it improves CV" inside it; `feature_engineering`
+   still defaults to `False`; `search/operators.py` still has no FE operator; and the only `caafe`
+   in the tree is the words "(CAAFE-style)" in a `core/config.py` COMMENT, which is prose and not a
+   symbol, so that claim stands too.
+   OPEN[fe-cv-gate-is-prose-not-enforcement] the eval never drops an engineered feature that fails
+   CV — the only thing that says so is a sentence in the proposer's prompt, and there is no
+   feature-engineering operator to enforce it; retire this when one exists.
+   proof:absent:feature_engineering@looplab/search/operators.py
+   *The falsifier was mutated before it was written:* True as shipped, and False the moment a
+   `feature_engineering` operator lands in that file — checked, because the previous marker written
+   that day was vacuous and only a mutation found it.]
 14. **The time-series adapter is a synthetic toy; tabular-AutoML and multimodal do not exist (P1, M
     each).** `adapters/timeseries.py`'s own docstring (line 9) says a real AutoGluon-TS/Darts backend
     "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
