@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from looplab.core.claimpin import (
+    KINDS,
     CLAIM_MARKER,
     DECIDED,
     decided_predicates,
@@ -79,7 +80,7 @@ def test_every_claim_pin_is_well_formed():
                 bad.append(f"{rel}: CLAIM[{slug}] carries no `decided:` clause")
                 continue
             for pred in decided_predicates(decided).split("+"):
-                if not pred.startswith(("absent:", "present:", "missing:", "line:")):
+                if not pred.startswith(KINDS):
                     bad.append(f"{rel}: CLAIM[{slug}] predicate {pred!r} is not a known kind")
     assert not bad, "malformed claim pins:\n  " + "\n  ".join(bad)
 
