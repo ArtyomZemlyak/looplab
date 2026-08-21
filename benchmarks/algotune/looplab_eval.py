@@ -223,7 +223,14 @@ def main() -> int:
             # validator never sees, so without this the two arms would be playing by different rules
             # about what may be SUBMITTED — and a speedup obtained with a primitive the other arm was
             # forbidden is not a comparable number.
+            # `looplab_failure_reason` is the DECLARED-reason channel
+            # (`runtime/command_eval.py::declared_failure_reason` ->
+            # `engine/triage.py::DECLARABLE_REASONS`): the engine ends the node with this reason and
+            # does NOT spend a repair on it, because there is nothing here a repair could fix that
+            # would not be a way around the arena's rule. The full text rides along so the next
+            # proposer reads WHAT was refused, not just that something was.
             print(json.dumps({"speedup": None, "rules_violation": violation,
+                              "looplab_failure_reason": "rules_violation",
                               "error": f"rules_violation: {violation}"}))
             return 2
 

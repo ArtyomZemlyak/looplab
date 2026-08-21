@@ -33,7 +33,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import Optional, TYPE_CHECKING
 
-from looplab.core.models import FAILURE_REASONS
+from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
 
 if TYPE_CHECKING:  # layering: engine may import core, but avoid the import cost at runtime
     from looplab.core.config import Settings
@@ -231,7 +231,7 @@ class EngineOptions:
     # ALL of `core/models.py::FAILURE_REASONS` since 2026-08-12 — see the field comment in
     # `core/config.py` for the run this default cost. Bound to the registry, not respelled:
     # this is the copy that would silently disagree with Settings.
-    inline_repair_reasons: tuple = FAILURE_REASONS  # reasons eligible for inline repair
+    inline_repair_reasons: tuple = REPAIRABLE_REASONS  # reasons eligible for inline repair
     metric_salvage: str = "audit"        # off | audit | select — see core/config.py
     metric_salvage_repair: bool = True   # fix the DECLARATION too; never re-evaluates
     inline_repair_retrain_cap: int = 2   # max FULL pipeline re-runs (re-trains) before abandoning

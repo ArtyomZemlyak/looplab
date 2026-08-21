@@ -281,7 +281,13 @@ def test_every_failure_reason_surface_names_all_of_them():
     """
     from looplab.core.models import FAILURE_REASONS
 
-    reasons = list(FAILURE_REASONS)
+    # The two doc surfaces describe REPAIR eligibility, so they are checked against the repairable
+    # subset — the registry gained its first non-repairable member on 2026-08-21
+    # (`rules_violation`), and a guard that kept demanding the whole registry would have forced the
+    # guide to claim a repair that does not happen.
+    from looplab.core.models import NON_REPAIRABLE_REASONS, REPAIRABLE_REASONS
+
+    reasons = list(REPAIRABLE_REASONS)
     word = _COUNT_WORDS.get(len(reasons))
     assert word, f"FAILURE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
     problems = []
@@ -305,12 +311,17 @@ def test_every_failure_reason_surface_names_all_of_them():
     # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
     # opposite of what it is for — the rule is about which reasons are named, never about where the
     # line ends.
-    bullet = re.search(r"\*\*any\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)mechanical\s+three",
-                       concepts, re.S)
+    bullet = re.search(r"\*\*any but one\*\* of the \w+ `FAILURE_REASONS`(.{0,600}?)"
+                       r"mechanical\s+three", concepts, re.S)
     assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
-    if bullet.group(1) != word:
-        problems.append(f"docs/guide/concepts.md says '{bullet.group(1)}' FAILURE_REASONS, not '{word}'")
-    missing = [r for r in reasons if f"`{r}`" not in bullet.group(2)]
+    missing = [r for r in reasons if f"`{r}`" not in bullet.group(1)]
+    # ...and the exception has to be NAMED, right after the list it is an exception to. A bullet
+    # that says "any but one" without saying which one is worse than the miscounts this guard was
+    # written for: the reader now knows there is a rule they have not been told.
+    for excluded in NON_REPAIRABLE_REASONS:
+        if f"`{excluded}`" not in concepts[concepts.index("mechanical"):][:800]:
+            problems.append(f"docs/guide/concepts.md excludes {excluded} from repair without "
+                            f"naming it beside the list")
     if missing:
         problems.append(f"docs/guide/concepts.md's inline-repair list omits {missing}")
 

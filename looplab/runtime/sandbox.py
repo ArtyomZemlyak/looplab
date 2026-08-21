@@ -467,6 +467,11 @@ class RunResult:
     # had already printed its metric keeps `metric` set — the orchestrator SALVAGES it (a completed
     # train+eval that only hung on teardown still counts) instead of wasting the whole run.
     stalled: bool = False
+    # What the OPERATOR-PINNED eval command stated about its own outcome, when it stated one:
+    # a fact the eval knows and this process cannot infer from symptoms. Read by
+    # `engine/triage.py::_failure_reason`, which accepts only the closed `DECLARABLE_REASONS` set —
+    # everything else here is inferred, and the difference is the point.
+    declared_reason: Optional[str] = None
     # DIVERGE watchdog: True when the stage was tree-killed because its live log reported non-finite
     # loss/grad_norm repeatedly. It is the AUTHENTICATED verdict (`run_argv`'s out-of-band `signals`),
     # not the stderr sentinel — the marker is mixed into the candidate's own stderr and is therefore

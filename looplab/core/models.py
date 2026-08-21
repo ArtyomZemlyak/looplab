@@ -828,7 +828,18 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
-                                    "needs_failed", "not_learning")
+                                    "needs_failed", "not_learning", "rules_violation")
+
+# The ONE reason that is not eligible for inline repair, and the criterion is
+# `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair
+# attempted only when it is evidence the HYPOTHESIS is wrong. Every other member describes a run
+# that could have worked -- a crash, a missing dependency, a metric printed one directory over.
+# `rules_violation` describes a candidate the ARENA WILL NOT ACCEPT AT ALL (its own submission
+# validator refused it before scoring), so there is nothing for a repair to fix that would not be a
+# way AROUND the rule. It ends the node and the reason travels to whoever proposes the next idea.
+NON_REPAIRABLE_REASONS: tuple[str, ...] = ("rules_violation",)
+REPAIRABLE_REASONS: tuple[str, ...] = tuple(r for r in FAILURE_REASONS
+                                            if r not in NON_REPAIRABLE_REASONS)
 
 
 def is_developer_error(code) -> bool:

@@ -19,7 +19,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single sources shared with the LLM resolver — see core/llm.py.
 from looplab.core.llm import AGENT_STAGE_KEYS, DEFAULT_HEADER_TIMEOUT_S
-from looplab.core.models import FAILURE_REASONS
+from looplab.core.models import FAILURE_REASONS, REPAIRABLE_REASONS
 
 _LOG = logging.getLogger(__name__)
 
@@ -874,7 +874,7 @@ class Settings(BaseSettings):
     # the per-attempt triage judge can answer `abandon` at any point. A coarse filter on top of three
     # calibrated ones was not protection — it was a way for a whole class of failure to be dropped
     # without anyone deciding to drop it. Env override expects a JSON array.
-    inline_repair_reasons: tuple[str, ...] = FAILURE_REASONS
+    inline_repair_reasons: tuple[str, ...] = REPAIRABLE_REASONS
     # METRIC SALVAGE (`engine/metric_salvage.py`): what happens when a node fails for something other
     # than "the metric is absent" and the operator's OWN declared reader can still find the metric
     # that eval already produced. The case it exists for: v5 node 0 trained 76 minutes, printed

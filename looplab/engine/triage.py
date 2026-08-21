@@ -155,6 +155,13 @@ def _shallow_fingerprint(path) -> str:
 # there, text NOMINATES and `is_present` DECIDES, which is the discipline this change generalizes.
 
 
+# The reasons an operator-pinned EVAL may state about its own outcome, rather than have inferred
+# from symptoms. Deliberately a closed set and deliberately tiny: every member has to be a fact the
+# eval knows and the engine cannot see, and has to be one whose only use by a candidate would be to
+# harm itself (see the trust note in `_failure_reason`).
+DECLARABLE_REASONS: frozenset = frozenset({"rules_violation"})
+
+
 def _failure_reason(res) -> str:
     """Classify why an eval produced no usable metric — STRUCTURALLY, from what the ENGINE itself
     recorded, and never from the failure's own text. Ordered most-specific first.
@@ -178,6 +185,31 @@ def _failure_reason(res) -> str:
     debug-anchor map, `events/card_ledger.py::_card_debuggable_leaf_candidate_ids`.
     `unclassified` is not produced here either: it is minted by `_evaluate` when a WIRED
     diagnostician could not answer, which is a fact about the diagnostician and not about the eval.)"""
+    # THE OPERATOR-PINNED EVAL'S OWN VERDICT, and it goes first because it is the one branch here
+    # that does not read a symptom. Everything below infers WHY a run produced no metric from what
+    # the run did; this reads what the EVAL COMMAND stated. The command is the operator's
+    # (`task.eval`), not the candidate's, so the fact is authenticated in the sense docs/44 means:
+    # it comes from the channel that DECIDED the outcome, not from prose about it.
+    #
+    # It exists for one shape the rest of this function cannot express — a candidate that was never
+    # ELIGIBLE. `benchmarks/algotune/looplab_eval.py --enforce-rules` runs the arena's own submission
+    # validator and refuses to score a solver that breaks its rules; that is not a crash, not a
+    # timeout and not a zero, and repairing it is the wrong move: the coverage guard's own criterion
+    # is that no reason should end a node unrepaired unless it is evidence the HYPOTHESIS is wrong,
+    # and "this arena will not accept a solver built this way" is exactly that evidence.
+    #
+    # Trust: the candidate's own code runs inside the evaluator and could in principle print this
+    # key too. The only thing it buys is ENDING ITS OWN NODE with no repair — there is no version of
+    # that which advantages a candidate, which is why this is safe to read at all while
+    # `usage.cost`-shaped self-reports are not.
+    # The literal is spelled out, like every other return here, so the registry cross-check in
+    # `tests/test_inline_repair_reason_coverage.py` can keep deriving this function's vocabulary
+    # from its own source. A second declarable reason therefore needs its own branch — and if one
+    # is added to the registry without it, that same test goes red with "registry names X, which no
+    # producer ever emits", which is the failure this shape exists to guarantee.
+    _declared = getattr(res, "declared_reason", None) or ""
+    if _declared == "rules_violation" and _declared in DECLARABLE_REASONS:
+        return "rules_violation"
     if getattr(res, "drift", None) is not None:
         return "drift"
     if res.timed_out:

@@ -433,6 +433,29 @@ def _confined(workdir, rel) -> Optional[Path]:
         return None
 
 
+
+def declared_failure_reason(stdout: str) -> Optional[str]:
+    """A reason the operator-pinned eval STATED about its own outcome, or None.
+
+    Read from the same last-JSON-line channel the metric uses, under the key
+    `looplab_failure_reason`, and validated against `engine/triage.py::DECLARABLE_REASONS` THERE
+    rather than here — this function reports what was said; that set decides what may be said. An
+    unparseable or absent value is None, never an exception: an eval that says nothing is the
+    ordinary case, and a malformed line must not change how the node is classified.
+    """
+    for line in reversed(str(stdout or "").splitlines()[-200:]):
+        line = line.strip()
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(row, dict) and isinstance(row.get("looplab_failure_reason"), str):
+            return row["looplab_failure_reason"][:64]
+    return None
+
+
 def _read_stdout_json(stdout, workdir, spec, wrap, since) -> Optional[float]:
     return json_line_metric(stdout, spec.get("key", "metric"))
 
@@ -2921,7 +2944,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      extra_metrics=extra, extra_metrics_provenance=extra_channels,
                      violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
-                     diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject)
+                     diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject,
+                     declared_reason=declared_failure_reason(out))
 
 
 # PUBLIC ALIASES for the three helpers `engine/metric_salvage.py` needs. They were reached as
