@@ -677,7 +677,16 @@ class UnifiedAgent(WrapsDeveloper):
                                  "description": "What this failure really was. The tagged kind is "
                                                 "what the engine saw from outside the process; "
                                                 "repeat it when it is right and correct it when "
-                                                "the log or the code says otherwise."},
+                                                "the log or the code says otherwise. "
+                                                "`check_false_positive` is for the case where the "
+                                                "stage's declared check refused a run that actually "
+                                                "MET its condition — the numbers are in the log and "
+                                                "the assertion is what is wrong. Use it instead of "
+                                                "repeating `check_failed`, which names the stage "
+                                                "that refused and says nothing about why; if you "
+                                                "believe the check was a false positive, that IS "
+                                                "the diagnosis and the repair is pointed at the "
+                                                "check rather than at the experiment."},
                 # WHERE THE DIAGNOSIS STANDS, in three fields rather than folded into `rationale`.
                 # Separate because the ENGINE re-resolves the locator against the workdir and
                 # records whether it resolved (`failure_diagnosis.evidence_citation_resolves`),
