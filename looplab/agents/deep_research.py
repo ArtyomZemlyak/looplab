@@ -547,7 +547,16 @@ def make_deep_researcher(settings, *, client=None, task=None, run_dir=None) -> O
     # knowledge gets the configured embedder/Memora/case layer, and memory/skills/literature follow
     # the same gates.  Deep Research still owns only its WebTools addition below.
     from looplab.agents.factory import _shared_providers
+    from looplab.agents.repo_reader import repo_reader_provider
     providers = _shared_providers(task, settings, run_dir, role="researcher")
+    # …and the editable-repo READER the Researcher has always had, which this site never appended.
+    # `_shared_providers` covers the run/knowledge/memory stores; on a cold start EVERY one of them
+    # is empty by construction, so without this the stage that mints the run's first hypotheses is
+    # handed a surface whose every row reads zero and cannot open the one thing on disk that answers
+    # the task. It said so itself in 70% of the memos it wrote. See `repo_reader_provider`.
+    _repo_reader = repo_reader_provider(task)
+    if _repo_reader is not None:
+        providers.append(_repo_reader)
     if getattr(settings, "web_search", False):
         from looplab.tools.web import WebTools
         providers.append(WebTools(enabled=True))

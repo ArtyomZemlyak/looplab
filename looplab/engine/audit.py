@@ -269,9 +269,11 @@ class AuditMixin:
     def _redact(self, text: str) -> str:
         """B3/C2: mask secrets in an output tail before it is persisted.
 
-        The ONE funnel for all six persisted tails (`evaluate.py`'s `stdout_tail` and stderr,
-        `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its RuntimeError message,
-        `train_monitor`/`asha_monitor`'s reason), so the split lands once.
+        The ONE funnel for all seven persisted tails (`evaluate.py`'s `stdout_tail`, its stderr
+        (three windows on one stream: `_eval_failure_text`, `_durable_failure_evidence`'s wider
+        `error_evidence`, and the SCORED terminal's `stderr_tail` — see
+        `_scored_output_evidence`), `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its
+        RuntimeError message, `train_monitor`/`asha_monitor`'s reason), so the split lands once.
 
         **`self._redact_output` no longer gates the whole pass** — see `core/redact.py`'s docstring.
         It defaults to False, so gating everything on it meant the DEFAULT path persisted a

@@ -50,6 +50,23 @@ def _probe_triage_rationale():
     return _node_line(n), "the approach cannot converge"
 
 
+def _probe_scored_eval_stderr():
+    """A node that SCORED, not one that failed — the whole point of the route. Driven through the
+    REAL tool surface (specs() registration + execute() dispatch), like the research-memo probe, so
+    unregistering `read_logs` leaves the signal undeliverable with a red probe."""
+    from looplab.tools.run_tools import RunTools
+    st = RunState(direction="max", goal="g")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                       metric=0.0, status=NodeStatus.evaluated,
+                       stdout_tail='{"speedup": 0.0}',
+                       stderr_tail="95 of 100 instances valid; 5 invalid")
+    rt = RunTools()
+    rt.bind_state(st)
+    assert any(s["function"]["name"] == "read_logs" for s in rt.specs()), \
+        "read_logs not registered in RunTools.specs()"
+    return rt.execute("read_logs", {"node_id": 0}), "95 of 100 instances valid"
+
+
 def _probe_foresight_calibration():
     from looplab.search.foresight import foresight_scoreboard
     st = RunState(direction="min", goal="g")
@@ -97,6 +114,7 @@ _PROBES = {
     "trust_flags": _probe_trust_flags,
     "watchdog_signals": _probe_watchdog_signals,
     "triage_rationale": _probe_triage_rationale,
+    "scored_eval_stderr": _probe_scored_eval_stderr,
     "foresight_calibration": _probe_foresight_calibration,
     "deep_research_memo": _probe_deep_research_memo,
     "operator_yields": _probe_operator_yields,

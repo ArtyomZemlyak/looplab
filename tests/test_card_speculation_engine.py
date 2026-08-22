@@ -987,7 +987,6 @@ def test_raw_producer_exception_becomes_consumable_failure_result(tmp_path, monk
                 events,
                 state,
                 0,
-                engine._proposal_cue_fence(state),
                 (engine.researcher, producer),
                 send,
             )
@@ -1382,73 +1381,160 @@ def test_rejected_raw_proposal_runs_once_then_returns_after_held_eval_boundary(
     assert engine._spec_raw_stage_result is None
 
 
-def test_raw_stage_authority_allows_llm_telemetry_but_rejects_other_tail_churn(tmp_path):
+def _seed_evaluated_node_zero(engine) -> None:
+    """One built-but-unscored node, so a terminal can move `best` WITHOUT moving the id ceiling."""
+    engine.store.append(EV_NODE_BUILDING, {
+        "node_id": 0, "operator": "draft", "parent_ids": []})
+    engine.store.append(EV_NODE_CREATED, {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "hypothesis": "an experiment already on the board"},
+        "code": "pass", "files": {}})
+
+
+def _raw_stage_result(engine, events, state, audit_type, idea):
+    ceiling = engine._node_id_ceiling(events, state)
+    return speculation_module.SpecRawStageResult(
+        generation=state.search_epoch,
+        action={"kind": "draft"},
+        proposal_state=state,
+        proposal_node_ceiling=ceiling,
+        at_node=ceiling,
+        source="researcher",
+        success=True,
+        idea=idea,
+        audit_events=((audit_type, {"source": "raw-test"}, None, None),),
+    )
+
+
+def test_a_paid_raw_proposal_survives_every_row_a_concurrent_task_may_append(tmp_path):
+    """The rows that are CERTAIN to land in a multi-minute proposal window must not void it.
+
+    MEASURED, `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): the isolated raw
+    lane made 56 paid proposals and staged 0 Cards, $3.89. `research_attempted` was inside 100 % of
+    the 56 windows, `node_evaluated` + `stage_finished` inside 52, `hint`/`research_completed`
+    inside 42 — i.e. the concurrent research task and the evaluation children, both of which run on
+    a TIMER precisely so they overlap the wait this lane exists to hide.
+
+    The BACKGROUND_APPENDABLE half is driven from the registry, not from a copied list: that set is
+    the enforced answer to "what may a concurrent task append", every member is already PROVEN
+    selection-neutral by `tests/test_background_appendable.py`, and a member added later must
+    inherit this property without anyone remembering to come back here. The payload map is asserted
+    exhaustive against it for the same reason.
+
+    `node_evaluated` is the load-bearing NON-registry row. It is not selection-neutral — it moves
+    `best`, and the old fence killed 39 of the 56 windows on exactly that — but it cannot falsify
+    anything this Card's own receipt asserts, so it must not void a proposal either. It is appended
+    against a node that already existed when the snapshot was taken, which is what the campaign logs
+    show: the ceiling moved in 0 of the 56.
+    """
+    from looplab.events.types import BACKGROUND_APPENDABLE
+
     engine, _producer = _engine(tmp_path / "raw-authority-tail", depth=1)
     _start(engine)
     engine._ensure_speculation_state()
-    idea = Idea(
-        operator="draft",
-        params={"x": 0.4, "y": -1.0},
-        rationale="stage only against the exact raw proposal prefix",
-        hypothesis="tail churn invalidates isolated proposal authority",
-    )
-
-    def _result(events, state, audit_type, prepared_idea=idea):
-        ceiling = engine._node_id_ceiling(events, state)
-        return speculation_module.SpecRawStageResult(
-            generation=state.search_epoch,
-            action={"kind": "draft"},
-            proposal_state=state,
-            proposal_authority_seq=engine._proposal_authority_seq(events),
-            proposal_node_ceiling=ceiling,
-            at_node=ceiling,
-            source="researcher",
-            cue_fence=engine._proposal_cue_fence(state),
-            success=True,
-            idea=prepared_idea,
-            audit_events=((audit_type, {"source": "raw-test"}, None, None),),
-        )
+    _seed_evaluated_node_zero(engine)
 
     proposal_events = engine.store.read_all()
     proposal_state = fold(proposal_events)
-    telemetry_result = _result(
-        proposal_events,
-        proposal_state,
-        "raw_committed_audit_test",
-    )
-    # The raw worker's own accounting may land while its paid proposal is running. It advances the
-    # physical tail but is deliberately excluded from selection authority.
-    engine.store.append(EV_LLM_USAGE, {"usage_id": "raw-usage", "calls": 1})
+    assert proposal_state.best_node_id is None
+    result = _raw_stage_result(
+        engine, proposal_events, proposal_state, "raw_committed_audit_test",
+        Idea(operator="draft", params={"x": 0.4, "y": -1.0},
+             rationale="stage a proposal the run has already paid for",
+             hypothesis="concurrent research and a node terminal do not invalidate it"))
+
+    background_payloads = {
+        "research_attempted": {"reason": "cadence", "ok": True},
+        "research_completed": {"summary": "a memo the proposal never read"},
+        "hint": {"text": "steer toward sparser solvers"},
+        "hypothesis_added": {"text": "a board entry", "id": "h-1"},
+        "llm_usage": {"usage_id": "raw-usage", "calls": 1},
+    }
+    assert set(background_payloads) == set(BACKGROUND_APPENDABLE), (
+        "a background-appendable type gained/lost a member; decide whether it can falsify a staged "
+        "Card's receipt before changing this map")
+    for event_type, payload in background_payloads.items():
+        engine.store.append(event_type, payload)
     engine.store.append(EV_LLM_COST, {"cost": 0.01})
-    engine._spec_raw_stage_result = telemetry_result
-
-    assert engine._serve_raw_card_stage() == (True, True)
-    committed_types = [event.type for event in engine.store.read_all()]
-    assert committed_types.index("card_added") < committed_types.index(
-        "raw_committed_audit_test"
-    )
-
-    stale_events = engine.store.read_all()
-    stale_state = fold(stale_events)
-    stale_idea = idea.model_copy(update={"params": {"x": 0.6, "y": -1.0}})
-    stale_result = _result(
-        stale_events,
-        stale_state,
-        "raw_stale_audit_test",
-        stale_idea,
-    )
-    # This policy record deliberately changes none of the lifecycle/parent/cue fields. Unlike LLM
-    # telemetry, it is authority-bearing and must invalidate the isolated RAW result all by itself.
+    # Not background-appendable and deliberately included: the node terminal that moved `best` in 39
+    # of the 56 discarded windows, and the diagnostic pair that fires from the same eval.
+    engine.store.append(EV_NODE_EVALUATED, {
+        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0})
+    engine.store.append("stage_finished", {"node_id": 0, "stage": "train", "status": "ok"})
     engine.store.append(EV_POLICY_DECISION, {
-        "scores": {},
-        "chosen": None,
-        "reason": "benign tail churn after raw launch",
-    })
-    engine._spec_raw_stage_result = stale_result
+        "scores": {}, "chosen": None, "reason": "the policy recorded a choice mid-proposal"})
 
-    assert engine._serve_raw_card_stage() == (True, False)
-    stale_types = [event.type for event in engine.store.read_all()]
-    assert stale_types.count("card_added") == 1
+    committed = fold(engine.store.read_all())
+    assert committed.best_node_id == 0, "the fixture did not actually move `best`"
+    assert committed.pending_hints and committed.research, "the fixture did not move the old cues"
+
+    engine._spec_raw_stage_result = result
+    assert engine._serve_raw_card_stage() == (True, True), (
+        "a proposal the run already paid for was discarded because the world it did not read "
+        "moved on")
+    committed_types = [event.type for event in engine.store.read_all()]
+    assert committed_types.count("card_added") == 1
+    assert committed_types.index("card_added") < committed_types.index(
+        "raw_committed_audit_test")
+
+
+@pytest.mark.parametrize("door", ["epoch", "ceiling", "lifecycle", "parent"])
+def test_a_stale_world_still_voids_a_paid_raw_proposal(tmp_path, door):
+    """The other half: the fence NARROWED, it did not go away.
+
+    One case per door — `_proposal_receipt_fence`'s two values plus the two absolutes beside it —
+    because a single combined case passes on any ONE of them still working.
+
+    Every case runs TWICE over two fresh run dirs, once with the stale append and once without, and
+    asserts the control staged the Card. That is what keeps it non-vacuous: an `improve` whose
+    parent is refused for some unrelated reason, or a fixture that never reaches the commit, would
+    otherwise show up as a green "correctly refused". The observation point is `_serve_raw_card_stage`
+    rather than the fence itself, so this survives a refactor of how the fence is spelled — and the
+    audit prefix is checked with it, because a stale proposal is abandoned and re-made, so its
+    receipts describe nothing that happened.
+    """
+    action = {"kind": "improve", "parent_id": 0} if door == "parent" else {"kind": "draft"}
+
+    def _served(run_dir, *, stale: bool):
+        engine, _producer = _engine(run_dir, depth=1)
+        _start(engine)
+        engine._ensure_speculation_state()
+        _seed_evaluated_node_zero(engine)
+        proposal_events = engine.store.read_all()
+        proposal_state = fold(proposal_events)
+        result = dataclasses.replace(
+            _raw_stage_result(
+                engine, proposal_events, proposal_state, "raw_stale_audit_test",
+                Idea(operator="draft", params={"x": 0.6, "y": -1.0},
+                     rationale="a proposal authored against a world that then moved",
+                     hypothesis="a stale proposal is never relabelled as current work")),
+            action=action)
+        if stale:
+            if door == "epoch":
+                engine.store.append(EV_RUN_FINISHED, {"reason": "done"})
+                engine.store.append(EV_RUN_REOPENED, {"reason": "one more epoch"})
+            elif door == "ceiling":
+                engine.store.append(EV_NODE_BUILDING, {
+                    "node_id": 1, "operator": "draft", "parent_ids": []})
+            elif door == "lifecycle":
+                engine.store.append(EV_PAUSE, {"reason": "the operator stopped the run"})
+            elif door == "parent":
+                # An `improve` receipt names its parent's exact generation, so a re-attempt of that
+                # parent is the one change that makes THIS receipt false rather than merely stale.
+                engine.store.append("node_reset", {
+                    "node_id": 0, "generation": 0, "from_stage": "eval",
+                    "reason": "the parent this proposal names was re-attempted"})
+        engine._spec_raw_stage_result = result
+        outcome = engine._serve_raw_card_stage()
+        return outcome, [event.type for event in engine.store.read_all()]
+
+    control, control_types = _served(tmp_path / f"raw-live-{door}", stale=False)
+    assert control == (True, True) and control_types.count("card_added") == 1, (
+        f"the {door} control never staged, so its stale case proves nothing")
+
+    stale, stale_types = _served(tmp_path / f"raw-stale-{door}", stale=True)
+    assert stale == (True, False)
+    assert "card_added" not in stale_types
     assert "raw_stale_audit_test" not in stale_types
 
 
@@ -1474,11 +1560,9 @@ def test_a_stopping_session_commits_its_paid_raw_stage_and_buys_no_new_producer(
             generation=state.search_epoch,
             action={"kind": "draft"},
             proposal_state=state,
-            proposal_authority_seq=engine._proposal_authority_seq(events),
             proposal_node_ceiling=ceiling,
             at_node=ceiling,
             source="researcher",
-            cue_fence=engine._proposal_cue_fence(state),
             success=True,
             idea=Idea(operator="draft", params={"x": 0.4, "y": -1.0},
                       rationale="a proposal this run has already paid for",
@@ -3037,14 +3121,19 @@ def test_a_ratcheted_run_resumes_through_the_real_pin_check(tmp_path, monkeypatc
     assert resumed._speculation_enabled() is False
 
 
-def test_a_diagnostic_row_cannot_discard_a_paid_proposal():
-    """The proposal fence must ignore EVERY diagnostic event, not just the two LLM accounting rows.
+def test_a_diagnostic_row_cannot_lose_a_reservation_cas():
+    """The reservation fence must ignore EVERY diagnostic event, not just the two LLM accounting rows.
 
-    `_proposal_authority_seq` is captured BEFORE the slow paid `_prepare_node_idea` and compared for
-    EQUALITY at commit, so any row appended in that window discards a proposal the run has already
-    paid a Developer call for — and reports it as "a control/research/lifecycle event won the CAS",
-    which is the one thing it was not. `train_monitor_alert` and the two ASHA rows are ON by default
-    and fire on a TIMER from concurrent evals, so they land in that window as a matter of course.
+    `_proposal_authority_seq` is captured on `_reserve_node_build`'s first plan and compared for
+    EQUALITY across its CAS retries, and a row appended in that window abandons the reservation and
+    reports it as "a control/research/lifecycle event won the CAS", which is the one thing it was
+    not. `train_monitor_alert` and the two ASHA rows are ON by default and fire on a TIMER from
+    concurrent evals, so they land in that window as a matter of course.
+
+    IT NO LONGER SPANS A PAID PROPOSAL. Until 2026-08-20 `_stage_prepared_card` compared the same
+    number across the whole slow `_prepare_node_idea` call, which is the defect
+    `card_reservation.py::_proposal_receipt_fence` records and replaced; this test keeps its subject
+    because the retry window still has the property, one tier down in what it costs.
 
     This also pins the retraction of a claim that was written into `types.py` and CLAUDE.md: a
     fold-ignored event is NOT splice-neutral "by construction", because the fold is not the only

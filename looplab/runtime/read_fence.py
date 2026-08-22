@@ -363,6 +363,131 @@ def fence_inputs(repo_spec: Optional[dict], *, allow: Iterable = ()) -> tuple:
     return roots, allowed, dropped, swallowed
 
 
+# The ceiling on what one swallowing grant may be expanded into (see `confine_grants`). A tier with
+# more entries than this is refused rather than turned into a thousand-rule ruleset: Landlock adds
+# one `open(O_PATH)` + one syscall per rule, the hook compares a `startswith` tuple per read, and a
+# grant list nobody can read is a boundary nobody can check. It is a bound on the EXPANSION, not on
+# the caller's own list. Sized against what a punch really has to enumerate, measured on this box:
+# a machine tier is tens of entries (`/opt` 5, `/usr` 10), a venv is 5, a stdlib 206, and the widest
+# thing a root can plausibly sit inside is a fat `site-packages` at 540. It is deliberately several
+# times that rather than snug — an expansion is a REFUSAL when it is exceeded, so a bound set at the
+# largest observed case turns a new dependency into a probe that will not run. What it catches is a
+# tier that is not a tier.
+_MAX_GRANT_EXPANSION = 4096
+
+
+def _grant_expansion(tier: str, roots, budget: int):
+    """Every subtree of `tier` that does NOT contain a fenced root, or None if it cannot be built.
+
+    The hole punch. `tier` is a normalized prefix (trailing separator) that CONTAINS one or more
+    `roots`; the caller may not grant it, and a kernel allow-list has no way to subtract. So the
+    tier is replaced by its children, minus the branch each root sits on, descending only along
+    those branches — `/opt` with the root `/opt/myrepo` becomes every other entry of `/opt`, and
+    `/opt/conda` (this box's interpreter) survives, which is the case that makes dropping the tier
+    outright unusable.
+
+    A child that RESOLVES into a fenced root is skipped, symlink included: the expansion stands in
+    for the tier and must not grant more than the tier's own subtree would have. Anything genuinely
+    needed from inside a root arrives as its own candidate (a venv in the repo is `sys.prefix`), and
+    a candidate under a root is a carve-out the caller states, never one this walk invents.
+
+    STATED RESIDUAL: a punched tier loses the loose FILES sitting directly in it — only directories
+    become grants, because a grant is a PREFIX on both sides of this rule (the hook compares
+    `startswith` against a trailing-separator string, which no file path can match) and one rule per
+    file in a real system tier is the thousand-rule ruleset the budget exists to refuse. It bites
+    only where the editable tree is INSIDE such a tier, which is the case this function exists for:
+    a repo at `/etc/myrepo` costs the process `/etc/nsswitch.conf`. The failure is a named
+    PermissionError on a path, not a quiet widening, and the fix is the one every refusal here
+    names — declare it as a mount."""
+    out: list[str] = []
+    stack = [tier]
+    while stack:
+        base = stack.pop()
+        try:
+            names = sorted(os.listdir(base))
+        except OSError:
+            return None
+        for name in names:
+            child = _norm_root(os.path.join(base, name))
+            if child is None or not os.path.isdir(child):
+                # A FILE under the tier is not grantable as a prefix and needs no rule of its own:
+                # the kernel grants directories, and the hook's compare is a directory prefix too.
+                continue
+            if not child.startswith(tier) or any(child.startswith(r) for r in roots):
+                continue                      # the root itself, inside one, or a symlink out of here
+            if any(r.startswith(child) for r in roots):
+                stack.append(child)           # still contains a root: punch one level deeper
+                continue
+            out.append(child)
+            if len(out) > budget:
+                return None
+    return out
+
+
+def confine_grants(candidates: Iterable, roots: Iterable) -> tuple:
+    """`(grants, refused)` — what a CONFINED process may read, given the roots it may not.
+
+    The companion of `fence_inputs` for the other shape of the same policy. `fence_inputs` answers
+    "what is forbidden, and which carve-outs survive"; this answers "what may be granted", which is
+    what a Landlock allow-list and `render(confine=True)` both need — and a grant list is where the
+    two guarantees `fence_inputs` provides for the deny side have to be provided again:
+
+      * every entry goes through `_norm_root` (realpath + trailing separator), so a grant of `/opt`
+        cannot also admit `/optfoo`;
+      * an entry that CONTAINS a root is never kept. On the deny side that is a disabled fence
+        (`_fenced` consults the allow tuple after the root tuple); on the grant side it is a kernel
+        grant of read over the very tree the confinement exists to hide. Neither is survivable, and
+        neither may be answered by dropping the entry outright: the interpreter's own tiers must be
+        granted or python does not start, which is the failure `_too_broad` exists to prevent one
+        layer down. So a swallowing entry is REPLACED by `_grant_expansion` — the same subtree minus
+        the roots inside it.
+
+    What cannot be replaced is REFUSED and returned in `refused` as `[(path, reason)]`, never
+    silently dropped and never silently kept: a candidate that IS a root (the repo is the venv), a
+    tier that cannot be listed, an expansion past `_MAX_GRANT_EXPANSION`. The caller's only correct
+    response is to say so and not run — a confined process missing a grant fails loudly at its first
+    import, but a confined process holding a swallowing grant is silently unconfined.
+
+    A candidate UNDER a root is kept, deliberately: that is the sanctioned carve-out (a declared
+    mount inside the source tree, a venv inside the repo), the same entries `fence_inputs` keeps."""
+    rootv = tuple(r for r in (_norm_root(x) for x in roots) if r)
+    grants: list[str] = []
+    refused: list[tuple] = []
+    for raw in candidates:
+        c = _norm_root(raw)
+        if c is None or c in grants:
+            continue
+        if not any(r.startswith(c) for r in rootv):
+            grants.append(c)
+            continue
+        if c in rootv:
+            refused.append((c, "it IS the fenced source root, so there is nothing left to grant"))
+            continue
+        if not os.path.isdir(c):
+            # A MACHINE tier that is not on this box grants nothing, so it can swallow nothing —
+            # dropped at derivation exactly as `read_allowlist._add` drops it, and for its reason.
+            continue
+        expanded = _grant_expansion(c, rootv, _MAX_GRANT_EXPANSION)
+        if expanded is None:
+            refused.append((c, "it contains the fenced source root and could not be expanded into "
+                               "the subtrees that do not"))
+            continue
+        for e in expanded:
+            if e not in grants:
+                grants.append(e)
+    # Absorb a grant already covered by another one — `sys.prefix`, `sys.base_prefix` and the
+    # interpreter's `bin/` are three spellings of one subtree on most boxes. Only after the punch,
+    # and it can never resurrect a swallower: nothing in `grants` contains a root by construction.
+    # Lexicographic order does the work in one pass: every entry carries the trailing separator, so
+    # an ancestor sorts immediately before the block it contains and nothing else can sort between
+    # them (`/a/` < `/a/b/` < `/a0`, because `/` sorts below every name character).
+    kept: list[str] = []
+    for g in sorted(grants):
+        if not (kept and g.startswith(kept[-1])):
+            kept.append(g)
+    return tuple(kept), tuple(refused)
+
+
 # The generated fence. Kept as ONE template rather than a shipped file plus a config sidecar so the
 # PYTHONPATH entry contains exactly one importable name (`sitecustomize`) — every additional module
 # in that directory would shadow a real one for every process in the run.

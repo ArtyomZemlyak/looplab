@@ -937,8 +937,14 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
+            # WHY this node scored what it scored, in the eval's own words — see
+            # `engine/evaluate.py::_scored_output_evidence`. Reader-defaulted to "" so every log
+            # written before the column existed folds byte-identically; `str()` because assignment
+            # validation is off and a corrupt/hand-edited row must not land a non-string here where
+            # `run_tools._logs` will `.rstrip()` it.
+            n.stderr_tail = str(d.get("stderr_tail", "") or "")
             # ASHA past-experiment curve (#7): a bounded [[resource, metric], ...] the ASHA watchdog
-            # reads to find same-resource peers for an EARLY live sample (the 500-char stdout_tail keeps
+            # reads to find same-resource peers for an EARLY live sample (the 4,000-char stdout_tail keeps
             # only the final epochs). Reader-defaulted to None so pre-#7 logs fold byte-identically.
             # NORMALIZED (#7 review): assignment validation is off, so an untrusted/corrupt event could
             # otherwise land a scalar or huge nested value here despite the 32-point bound; coerce it.
@@ -1159,6 +1165,10 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.error_reason = ""
         n.triage_rationale = ""
         n.stdout_tail = ""
+        # ...and the eval's own account of the number that attempt produced. Reset with its
+        # sibling above: a re-evaluated node that keeps the PREVIOUS attempt's stderr shows the
+        # loop a reason for a metric that no longer exists.
+        n.stderr_tail = ""
         n.resource_curve = None            # #7: the prior attempt's curve no longer describes this node
         n.eval_seconds = None
         n.never_evaluated = False          # the discard receipt described the prior attempt
@@ -1408,6 +1418,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         n.never_evaluated = False   # the discard receipt described the NOW-abandoned lifecycle
         n.eval_started = False      # ...and so did the eval-start boundary
         n.stdout_tail = ""
+        # ...and the eval's own account of the number that attempt produced. Reset with its
+        # sibling above: a re-evaluated node that keeps the PREVIOUS attempt's stderr shows the
+        # loop a reason for a metric that no longer exists.
+        n.stderr_tail = ""
         n.resource_curve = None            # #7: the abandoned attempt's curve no longer describes this node
         n.extra_metrics = {}
         # ...and so did the CHANNEL map describing where those extras came from.

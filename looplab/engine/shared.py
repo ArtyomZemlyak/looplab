@@ -203,6 +203,37 @@ class SharedEngineMixin:
         finally:
             _emit("finished", {**learned, "seconds": round(time.time() - t0, 3), "ok": ok})
 
+    @contextlib.contextmanager
+    def _paid_progress(self, stage: str, phase: str, **detail):
+        """`_progress` for a phase that SPENDS: the operator's beacon AND a real tracing span.
+
+        WHY THE PAIR IS ONE HELPER. `_progress` appends an event and opens no span, and
+        `core/tracing.py::generation` yields a NULL handle whenever `_current_tracer` is unset —
+        which `Tracer.span` is the only binder of. So every provider call a `_progress`-only phase
+        makes is written to `events.jsonl` with `trace_id=null, span_id=null` and appears in no span
+        at all: real money, attributable to nothing, and invisible to `looplab timings`, the trace
+        view and every per-phase cost question anyone will ever ask of the run.
+
+        MEASURED, `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): 1,579 of the
+        campaign's 6,002 paid calls (26 %) carried a null trace, and the novelty gate — a
+        `_progress`-only phase running a twelve-turn agentic loop plus, on a rejection, a whole
+        second Researcher proposal — was $1.77 of it, 11 % of the $15.73 budget and 6.6 of the 60.8
+        run-hours. Nothing in the run said where any of it went. An invisible fifth of a budget is
+        its own defect: the next person to measure this is misled exactly as we were.
+
+        The span NESTS (never `new_trace`): this phase's cost belongs to the operation that caused
+        it. It is `kind="operation"`, so `_phase_ctx` stamps `phase=<name>` onto every generation
+        underneath it and the cost becomes attributable by the SAME key the beacon uses. Degrades to
+        the beacon alone when no tracer is wired — tests build `Engine` via `__new__` — exactly as
+        `_op_span` does, and for the same reason: observability may never decide whether work runs.
+        """
+
+        tracer = getattr(self, "tracer", None)
+        span = (tracer.span(phase, **detail) if tracer is not None
+                else contextlib.nullcontext())
+        with span, self._progress(stage, phase, **detail) as learned:
+            yield learned
+
     # The shared since-last node-count gate (report/distill/refresh/strategist/coverage cadences).
     # `engine/cadence.py` states why since-last and not `n % every == 0`; the NAME lives here because
     # several mixins call it as `self._cadence_due`.

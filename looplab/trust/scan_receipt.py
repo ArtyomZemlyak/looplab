@@ -37,8 +37,10 @@ six preserved runs are in.
 
 The event is in `DIAGNOSTIC_EVENTS`: the fold never reads it, so no selection moves, and — the
 load-bearing half, per invariant #1 — `engine/speculation.py::_proposal_authority_seq` excludes
-`DIAGNOSTIC_EVENTS` wholesale, so a receipt landing inside a paid proposal's CAS window cannot
-discard the proposal the run already bought.
+`DIAGNOSTIC_EVENTS` wholesale, so a receipt landing inside a reservation's CAS window cannot lose it.
+Since 2026-08-20 that fence no longer spans a paid proposal at all
+(`engine/card_reservation.py::_proposal_receipt_fence`), so the exclusion buys a retry rather than a
+Developer call — measured, `trust_scan` was inside 52 of the 56 windows the old fence discarded.
 """
 from __future__ import annotations
 

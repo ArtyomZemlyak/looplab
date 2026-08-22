@@ -946,11 +946,19 @@ class Node(BaseModel):
     # digest can feed it to the NEXT proposal instead of dropping it (signal-delivery, §1).
     triage_rationale: str = ""
     stdout_tail: str = ""
+    # The eval command's OWN diagnostic channel on a node that SCORED — `res.stderr`, bounded and
+    # redacted by `engine/evaluate.py::_scored_output_evidence` (`_SCORED_EVIDENCE_CHARS`). It is the
+    # sibling of `error` on the failure terminal: a node that exited 0 and scored badly used to keep
+    # nothing but its metric and a 500-char stdout tail, so the loop could see WHAT a node scored and
+    # never WHY. Delivered by the `read_logs` pull tool (signal-delivery, §1).
+    # Additive/reader-defaulted: absent on every log written before 2026-08-22 -> "" -> unchanged
+    # fold. A RECORD only — no selection, feasibility, salvage or repair path reads it.
+    stderr_tail: str = ""
     # ASHA past-experiment curve (#7): a bounded per-RUNG `[[rung, metric], ...]` (canonical geometric
     # rungs — powers of two — via asha_monitor._resource_rung) mined from the eval's CAPTURED stdout (the
-    # ~64 KB run tail — far larger than the 500-char `stdout_tail`, though for a very verbose or
+    # ~64 KB run tail — far larger than the 4,000-char `stdout_tail`, though for a very verbose or
     # multi-stage job not the literal full stream) at node_evaluated, set only when the task declares a
-    # stdout_json `resource_key`. The 500-char `stdout_tail` retains only the FINAL epochs, so a live node
+    # stdout_json `resource_key`. The 4,000-char `stdout_tail` retains only the FINAL epochs, so a live node
     # stopped earlier finds no comparable peers there; this durable curve lets the ASHA watchdog compare a
     # fresh sample against past experiments at the SAME rung across the WHOLE run (the shared rung
     # schedule is what makes a mid-run comparison land). Additive/reader-defaulted (None on old logs).

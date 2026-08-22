@@ -183,7 +183,7 @@ includes redacted source evidence, and creates a link. The link is a one-run bea
   allow-list, so a future Node field is not disclosed by default;
 - minted review context is capability-scoped: summary permits summary-safe tabs/panels, evidence may
   add Code and Compare, and both remove historical `seq` plus raw Timeline `q`/`kinds`;
-- raw logs and captured process output including `stdout_tail`, prompts, traces, live sidecars,
+- raw logs and captured process output including `stdout_tail`/`stderr_tail`, prompts, traces, live sidecars,
   artifacts, Assistant, owner settings, and every mutation remain unavailable;
 - expiry, revocation, and generation binding are checked on every request. Reset, replacement,
   deletion, or a legacy/malformed missing generation ends the old link with `410 Gone` and **Review

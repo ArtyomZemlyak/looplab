@@ -180,7 +180,10 @@ EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
 # and how many findings came back. Never what they read: the flagged row already carries the detail,
 # and a receipt quoting candidate text would be a second copy of the artifact inside the audit trail.
 # DIAGNOSTIC on purpose — the fold ignores it, so no selection can move, and `_proposal_authority_seq`
-# excludes DIAGNOSTIC_EVENTS wholesale so a per-node receipt cannot discard a paid proposal.
+# excludes DIAGNOSTIC_EVENTS wholesale so a per-node receipt cannot lose a reservation's CAS.
+# (That fence stopped spanning a paid proposal on 2026-08-20 — see
+# `engine/card_reservation.py::_proposal_receipt_fence` — so what the exclusion buys here is a
+# retry, not a Developer call. `trust_scan` was inside 52 of the 56 windows the old one discarded.)
 # The reader-side default lives in `trust/scan_receipt.py` and is the load-bearing half: a node with
 # no receipt reads `unknown`, NEVER `clean` — which is the inversion this event exists to prevent.
 EV_TRUST_SCAN = "trust_scan"
@@ -389,8 +392,10 @@ EV_SETUP_STEP = "setup_step"
 # it says nothing about selection, and a resume must reconstruct the same RunState from a log that has
 # these rows and from one that does not. It is safe to append from a concurrent producer for the
 # reason invariant #1 states for diagnostics — `speculation.py::_proposal_authority_seq` excludes
-# DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside the paid-proposal CAS window cannot discard
-# the proposal. That exclusion is the load-bearing property, NOT "the fold ignores it".
+# DIAGNOSTIC_EVENTS wholesale, so a beacon landing inside a reservation's CAS window cannot lose it.
+# That exclusion is the load-bearing property, NOT "the fold ignores it". The beacon has a second
+# obligation since 2026-08-20 and it is the opposite kind: a phase that SPENDS must ALSO open a span
+# (`engine/shared.py::_paid_progress`), because a beacon alone leaves its money untraceable.
 EV_PHASE_PROGRESS = "phase_progress"
 # WHICH long operation is reporting. Closed so that a stage name can be rendered as a label without
 # every reader re-deriving the vocabulary.

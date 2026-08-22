@@ -984,10 +984,31 @@ class Settings(BaseSettings):
     #   "algo" — the deterministic gate: numeric param-distance (`novelty_epsilon`) + optional embedding
     #            similarity (`novelty_semantic`). Cheap, no LLM call, but can't explain itself.
     #   "llm"  — an LLM adjudicates (reads the real experiments via tools) whether the idea is a
-    #            near-duplicate and, if so, asks the Researcher once more for something different. One
-    #            extra LLM call per proposal — highest quality, follows the "let the LLM decide" line.
+    #            near-duplicate and, if so, asks the Researcher once more for something different.
+    #            NOT "one extra LLM call per proposal", which this line claimed until 2026-08-20:
+    #            `novelty.py::_llm_novelty_gate` runs `agentic_struct(..., max_turns=12)` and a
+    #            rejection then runs a WHOLE SECOND Researcher proposal. MEASURED over
+    #            `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs): 99 invocations, 823 paid
+    #            calls, **$1.77 of a $15.73 campaign and 6.6 of its 60.8 run-hours**, for 10
+    #            rejections. An admitted proposal costs a median of 4 calls / 10.6 s; a REJECTED one
+    #            costs 37 calls / 21.6 MINUTES, against a median card build of $0.077 and a median
+    #            evaluation of 34 s. Whether that is worth paying is a property of the TASK — a
+    #            duplicate GPU experiment costs far more than a duplicate 34-second one — so this
+    #            default is deliberately UNCHANGED on one task family's evidence. On AlgoTune the
+    #            gate is net-NEGATIVE ($1.77 and 6.6 h spent to avoid at most 10 duplicates worth
+    #            $0.77 and 5.7 min of evaluation); on a family whose evaluation is a GPU training
+    #            run the same fixed price buys a far larger saving, and no such run exists on this
+    #            box to measure. Flipping a product default on one family's numbers would be the
+    #            same error as fencing a proposal on the log's LENGTH. The lever an operator has
+    #            today is `novelty_mode=off`, which since 2026-08-20 is a real no-op, and the phase
+    #            is now TRACED (`engine/shared.py::_paid_progress`) so its price is visible in
+    #            `looplab timings` and the trace view instead of being 11 % of an invisible budget.
+    # THIS is the off switch ("off"), and `novelty_gate` below is NOT: it defaults False and only
+    # means "do not force the algo path". `engine/novelty.py::_apply_novelty_gate` documents the
+    # false claim that cost the campaign $1.77.
     novelty_mode: str = "llm"
-    # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo"):
+    # Legacy sub-toggles, honored by the "algo" mode (and back-compat: novelty_gate=True forces "algo").
+    # novelty_gate=FALSE forces nothing — it is not the off switch, `novelty_mode="off"` is:
     novelty_gate: bool = False
     novelty_epsilon: float = 0.05
     # T5 semantic novelty (active whenever the deterministic gate runs — novelty_mode=algo,
@@ -1288,9 +1309,15 @@ class Settings(BaseSettings):
     # wrongly-abandoned FAILED direction" proposal is ALLOWED through unchanged — the flat LLM/semantic
     # dedup gate can't tell "this DCL tweak" from "the whole DCL branch" and would wrongly reject a
     # legitimate variant or never re-open a sound-but-killed direction (the node_63 archetype). Levels
-    # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Deterministic
-    # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. ON by default in the product
+    # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Audit event
+    # `novelty_graded`, replay-safe. ON by default in the product
     # Settings (ce4a379), EngineOptions off; no-ops for a task with no skeleton. See search/graded_novelty.py.
+    # NOT "deterministic, no LLM", which this line claimed until 2026-08-20: the AGENTIC path
+    # (§21.4 F2, a classifier `node_concepts` cache present) calls `graded_novelty.tag_idea_llm` once
+    # per proposal. The no-LLM claim is true only of the curated-skeleton fallback. Since 2026-08-20
+    # the precheck is not reached at all when `novelty_mode` is off and the stance is not "explore",
+    # because a pre-gate whose only power is to bypass a gate that is not running cannot change the
+    # answer (`engine/novelty.py::_apply_novelty_gate`).
     graded_novelty: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5

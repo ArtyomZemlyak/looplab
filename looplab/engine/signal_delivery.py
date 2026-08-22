@@ -84,6 +84,21 @@ SIGNALS: tuple[SignalRoute, ...] = (
         call_sites=(("looplab/events/replay.py", "n.triage_rationale ="),
                     ("looplab/events/digest.py", "triage_rationale"))),
     SignalRoute(
+        name="scored_eval_stderr",
+        produced_by="engine/evaluate.py _scored_output_evidence (the eval command's own stderr, "
+                    "bounded + redacted, on the node_evaluated terminal)",
+        folded_into="Node.stderr_tail",
+        # PULL and deliberately not `context`: the route above is the same §1 shape for a node that
+        # FAILED, and it rides the always-on digest because a 100-char triage verdict fits there.
+        # This one is up to 4,000 characters of the eval's own text on EVERY scored node, so putting
+        # it on the digest would spend the working-set budget that lists the search itself. The
+        # defect being closed is that the signal did not EXIST, not that it was not pushed.
+        channel="pull",
+        inject="looplab.tools.run_tools:RunTools._logs",
+        consumer="Researcher / Developer (read_logs)",
+        call_sites=(("looplab/events/replay.py", "n.stderr_tail ="),
+                    ("looplab/tools/run_tools.py", "n.stderr_tail"))),
+    SignalRoute(
         name="foresight_calibration",
         produced_by="foresight_selected events + node outcomes",
         folded_into="RunState.foresight_selected",

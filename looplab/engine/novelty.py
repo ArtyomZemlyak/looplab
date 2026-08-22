@@ -1225,10 +1225,31 @@ class NoveltyGateMixin:
         (2) NUMERIC (E1 legacy): params within `novelty_epsilon` (normalized L2) of an existing
             node are deterministically nudged off the duplicate.
         Loop-safe (always returns a usable idea) and replay-safe (the final idea lands in
-        node_created; the gate is not re-run on replay). Runs when `novelty_gate` is on OR the
-        Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
-        one informed re-propose even when the static gate is off, so novelty pressure follows the
-        meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
+        node_created; the gate is not re-run on replay).
+
+        THE OFF SWITCH IS `novelty_mode`, and until 2026-08-20 the sentence here named `novelty_gate`
+        and claimed that switching it off left this a no-op. That was FALSE in the shipped default:
+        `novelty_gate` defaults False, `novelty_mode` defaults "llm", and `novelty_gate=False` only
+        means "do not force the algo path" (`orchestrator.py::Engine.__init__`). So a run whose
+        config snapshot read `novelty_gate = false` — which every run of the 2026-08-20 AlgoTune
+        campaign did — paid for a twelve-turn LLM adjudication on every proposal.
+
+        `mode == "off"` with a non-explore stance is now a REAL no-op: it returns above the graded
+        pre-gate as well as above the flat one. That ordering is the fix, not a shortcut. The graded
+        pre-gate's ONLY power is to SHORT-CIRCUIT the flat gate (see `_graded_novelty_precheck`: it
+        returns non-None exclusively for levels 4/5, and only to admit an idea the flat gate would
+        have wrongly rejected). With no flat gate to bypass it cannot change what this function
+        returns — so running it was pure cost, and it can spend: its agentic path calls
+        `tag_idea_llm` once per proposal whenever a classifier `node_concepts` cache exists. What
+        that ordering gives up with the gate off is the `novelty_graded` / `cross_run_prior`
+        observational receipts, which are receipts ABOUT an admission decision nobody is making."""
+        mode = getattr(self, "_novelty_mode", "llm")
+        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty
+        # stance is "explore" (the stance can engage a cheap soft dedup + one informed re-propose
+        # even when the mode is otherwise off), and "llm" runs the adjudicator. Anything else is a
+        # no-op, and a no-op must not reach a paid pre-gate.
+        if not (mode in {"algo", "llm"} or self._novelty_stance == "explore"):
+            return idea
         # PART IV D3 (Phase 2b): the concept-graph pre-gate runs FIRST. When it recognizes a legitimate
         # same-direction-new-implementation (level 4), or RATIFIES a re-open of a wrongly-abandoned failed
         # direction (level 5) with grounded repeated evidence, it SHORT-CIRCUITS. Every other grade (and the
@@ -1244,17 +1265,14 @@ class NoveltyGateMixin:
             # guard scanning ALL prior nodes (B1 fix), so a punctuation-only paraphrase can't reach here —
             # it falls through to the stronger `_llm_novelty_gate` below like every other grade.
             return graded
-        mode = getattr(self, "_novelty_mode", "llm")
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
         # distance heuristic), then re-proposes if it's a dup.
         if mode == "llm":
             return self._llm_novelty_gate(
                 state, idea, repropose, researcher=researcher,
                 prospective_node_id=prospective_node_id)
-        # The deterministic "algo" gate below runs when mode is "algo" OR the Strategist's novelty stance
-        # is "explore" (the stance can engage a cheap soft dedup + one informed re-propose even when the
-        # mode is otherwise off). "off" without explore leaves this a no-op — the Researcher's own
-        # read-the-history judgment stands.
+        # "off" reaches here only under an "explore" stance (the guard at the top of this function),
+        # which is exactly when the stance means to engage the cheap deterministic dedup.
         if not (mode == "algo" or self._novelty_stance == "explore"):
             return idea
         import random as _random

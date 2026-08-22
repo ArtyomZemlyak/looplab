@@ -58,15 +58,17 @@ def test_the_stage_phase_pair_is_closed_and_refuses_a_typo():
         assert_progress_phase(PROGRESS_STAGE_BUILD, "implement", "begun")
 
 
-def test_the_diagnostic_fence_covers_it_so_a_beacon_cannot_discard_a_paid_proposal():
+def test_the_diagnostic_fence_covers_it_so_a_beacon_cannot_lose_a_reservation():
     """Invariant #1's real rule: not "does the fold read it?" but "does any reader key on position?".
 
-    `_proposal_authority_seq` fences a paid proposal by comparing a max-seq for EQUALITY across the
-    window in which `_prepare_node_idea` makes its call — and beacons are appended INSIDE that very
-    window, by construction, since that call is what they bracket. The fence excludes
-    DIAGNOSTIC_EVENTS wholesale, which is what makes their position immaterial. That is a property of
-    the READER; if the exclusion were ever narrowed back to a named list, every build would discard
-    the proposal it just paid for.
+    `_proposal_authority_seq` compares a max-seq for EQUALITY across `_reserve_node_build`'s CAS
+    retries — and beacons are appended inside build windows by construction, since build phases are
+    what they bracket. The fence excludes DIAGNOSTIC_EVENTS wholesale, which is what makes their
+    position immaterial. That is a property of the READER; if the exclusion were ever narrowed back
+    to a named list, every reservation would abandon itself over its own beacon.
+
+    Until 2026-08-20 the same number ALSO fenced the paid `_stage_prepared_card` commit, which is the
+    defect `card_reservation.py::_proposal_receipt_fence` records and replaced.
     """
     from looplab.engine.speculation import SpeculationMixin
 
@@ -314,3 +316,125 @@ def test_a_body_that_reports_a_fact_named_ok_does_not_destroy_the_failure_it_was
     assert isinstance(finished[0]["seconds"], float)
     assert finished[0]["files"] == 3
     assert finished[0]["stage"] == PROGRESS_STAGE_BUILD and finished[0]["phase"] == "implement"
+
+
+# ------------------------------------------------- a phase that SPENDS must be attributable
+
+
+def _spans(run_dir):
+    path = run_dir / "spans.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def test_a_beacon_alone_leaves_a_phases_money_attributable_to_nothing(tmp_path):
+    """The counterfactual that makes the next test non-vacuous, and the defect it records.
+
+    `_progress` appends an event and opens NO span. `core/tracing.py::generation` yields a null
+    handle whenever `_current_tracer` is unset — `Tracer.span` is its only binder — and
+    `EventStore.append` stamps whatever `current_ids()` returns, which is `(None, None)` outside a
+    span. So every provider call a `_progress`-only phase makes is written with a null trace and
+    lands in no span: real money, attributable to nothing.
+
+    MEASURED, `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): 1,579 of 6,002 paid
+    calls (26 %) carried a null trace, and the `_progress`-only novelty phase was 823 of them —
+    $1.77 of a $15.73 campaign, invisible to `looplab timings`, to the trace view and to every
+    per-phase cost question anyone would ever ask of the run.
+    """
+    from looplab.events.types import EV_LLM_USAGE
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "beacon-only")
+    with engine._progress(PROGRESS_STAGE_BUILD, "novelty", node_id=0, prospective=True):
+        engine.store.append(EV_LLM_USAGE, {"usage_id": "u0", "calls": 1, "cost": 0.5})
+
+    rows, beacons = _beacons(engine.run_dir)
+    usage = next(r for r in rows if r["type"] == EV_LLM_USAGE)
+    assert usage["trace_id"] is None and usage["span_id"] is None
+    assert [b["status"] for b in beacons] == ["started", "finished"]
+
+
+def test_a_paid_phase_opens_a_real_span_so_its_cost_lands_on_the_phase(tmp_path):
+    """`_paid_progress` is the beacon AND the span, and the span is what makes the money findable.
+
+    Driven, not pinned: the row is appended by the body exactly as the cost accountant's sink
+    appends it (`engine/costs.py::_commit_usage_delta` -> `store.append`, which reads the live span
+    context), then read back off disk with the exported span beside it.
+    """
+    from looplab.events.types import EV_LLM_USAGE
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "paid-phase")
+    with engine._paid_progress(PROGRESS_STAGE_BUILD, "novelty", node_id=7, prospective=True):
+        engine.store.append(EV_LLM_USAGE, {"usage_id": "u1", "calls": 1, "cost": 0.5})
+    assert engine.tracer.exporter.force_flush(timeout_millis=5_000) is True
+
+    rows, beacons = _beacons(engine.run_dir)
+    usage = next(r for r in rows if r["type"] == EV_LLM_USAGE)
+    assert usage["trace_id"] and usage["span_id"], (
+        "a paid phase still writes its provider call with a null trace")
+
+    novelty = [s for s in _spans(engine.run_dir) if s["name"] == "novelty"]
+    assert len(novelty) == 1, "the phase opened no span of its own"
+    assert novelty[0]["span_id"] == usage["span_id"]
+    assert novelty[0]["kind"] == "operation", (
+        "an `operation` span is what stamps `phase` onto the generations underneath it")
+    assert novelty[0]["attributes"]["node_id"] == 7
+    # …and it is still the beacon it replaced, so the operator's screen is unchanged.
+    assert [b["status"] for b in beacons] == ["started", "finished"]
+    assert beacons[0]["phase"] == "novelty" and beacons[0]["node_id"] == 7
+
+
+def test_a_paid_phase_degrades_to_the_beacon_when_no_tracer_is_wired(tmp_path):
+    """Observability may never decide whether the work runs — the `_op_span` rule, one helper over.
+
+    Tests build `Engine` via `__new__` (~170 direct constructions carry no tracer), and an
+    AttributeError here would surface deep inside a build rather than at construction.
+    """
+    from looplab.engine.shared import SharedEngineMixin
+    from looplab.events.eventstore import EventStore
+
+    class _E(SharedEngineMixin):
+        pass
+
+    engine = _E()
+    engine.store = EventStore(tmp_path / "events.jsonl")
+    with engine._paid_progress(PROGRESS_STAGE_BUILD, "novelty", node_id=1) as learned:
+        learned["ran"] = True
+
+    _rows, beacons = _beacons(tmp_path)
+    assert [b["status"] for b in beacons] == ["started", "finished"]
+    assert beacons[1]["ran"] is True
+
+
+def test_the_novelty_phase_reaches_the_log_through_that_span(tmp_path, monkeypatch):
+    """The binding half: the gate that spends is the one wrapped, on the path a default run takes.
+
+    `_prepare_node_idea`'s draft lane is driven for real; only the gate BODY is replaced, by one that
+    appends a usage row the way the accountant does. What is asserted is that the row lands under a
+    span named for the phase — so this survives any rewrite of how the wrapping is spelled, and goes
+    red the moment the novelty gate is moved back outside a span.
+    """
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_LLM_USAGE
+    from tests.factories import make_engine
+
+    engine = make_engine(tmp_path / "novelty-traced")
+    engine.store.append("run_started", {
+        "run_id": engine.run_dir.name, "task_id": "toy", "goal": "g", "direction": "min"})
+
+    def _paying_gate(state, idea, **_kwargs):
+        engine.store.append(EV_LLM_USAGE, {"usage_id": "u2", "calls": 1, "cost": 0.25})
+        return idea
+
+    monkeypatch.setattr(engine, "_apply_novelty_gate", _paying_gate)
+    events = engine.store.read_all()
+    assert engine._prepare_node_idea(
+        {"kind": "draft"}, fold(events), researcher=engine.researcher,
+        prospective_node_id=0, source="researcher", proposal_events=events) is not None
+    assert engine.tracer.exporter.force_flush(timeout_millis=5_000) is True
+
+    rows, _beacons_unused = _beacons(engine.run_dir)
+    usage = next(r for r in rows if r["type"] == EV_LLM_USAGE)
+    assert usage["span_id"], "the novelty gate's spend is still untraced"
+    span = next(s for s in _spans(engine.run_dir) if s["span_id"] == usage["span_id"])
+    assert span["name"] == "novelty"

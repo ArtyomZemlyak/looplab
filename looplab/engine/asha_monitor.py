@@ -318,8 +318,10 @@ def latest_intermediate_sample(log_tail: str, workdir, metric_spec: dict) -> Opt
 def extract_resource_curve(stdout: str, metric_spec, *, max_points: int = 32) -> Optional[list]:
     """A bounded per-RUNG curve ``[[rung, metric], ...]`` mined from the eval's CAPTURED stdout at
     node_evaluated time (#7). That capture is run_argv's bounded ~64 KB tail (and, for a staged eval, the
-    final stage's output) — 128× the 500-char ``stdout_tail``, which retains only the FINAL epochs so a
-    live node stopped earlier never found same-resource peers. Persisting this durable curve lets
+    final stage's output) — 16× the 4,000-char ``stdout_tail`` (`evaluate._SCORED_EVIDENCE_CHARS`,
+    widened from 500 on 2026-08-22), which still retains only the FINAL epochs (a tqdm bar line is
+    ~330 characters, so the whole window is ~12 of them) so a live node stopped earlier never found
+    same-resource peers. Persisting this durable curve lets
     ``sibling_metrics_at_resource`` compare a fresh live sample against PAST EXPERIMENTS at the same rung.
     Reuses the eval's own metric contract (the operator/Developer-declared ``resource_key`` + metric key);
     returns None when the task declares no ``resource_key`` or the kind isn't ``stdout_json``.
@@ -411,10 +413,10 @@ def sibling_metrics_at_resource(state, node_id: int, metric_spec: dict,
         # node_evaluated (extract_resource_curve). Both sides snap to a shared geometric rung schedule
         # (`_resource_rung`), so a live node anywhere in the run — not only at an exact early coordinate —
         # finds a sibling checkpoint at its rung. A sibling contributes ONLY via its persisted curve (the
-        # START-of-band checkpoint): its 500-char stdout_tail retains only the FINAL epochs, so any in-band
-        # value there is an END-of-band (~2× more-trained) point — substituting it would false-flag a live
-        # node just into the band and mix start/end-of-band values in one population (peer review). A
-        # sibling whose curve lacks this rung (a pre-#7 log, or a #7 curve whose early rung scrolled past
+        # START-of-band checkpoint): its 4,000-char stdout_tail (~12 tqdm bar lines) retains only the
+        # FINAL epochs, so any in-band value there is an END-of-band (~2× more-trained) point —
+        # substituting it would false-flag a live node just into the band and mix start/end-of-band
+        # values in one population (peer review). A sibling whose curve lacks this rung (a pre-#7 log, or a #7 curve whose early rung scrolled past
         # the ~64 KB extract window) is simply EXCLUDED, never substituted from the tail — exactly the
         # docstring's contract. The min_siblings floor then degrades to no-kill on thin same-rung evidence.
         value = _curve_metric_at(getattr(node, "resource_curve", None), sample.resource)

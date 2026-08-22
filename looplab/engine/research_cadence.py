@@ -849,9 +849,12 @@ class ResearchCadenceMixin:
             row decides whether the operator's drop lands on the alias or on the surviving canonical
             card. `tests/test_hypothesis_merge.py` drives exactly that splice.
           * `speculation._proposal_authority_seq` does. It excludes `DIAGNOSTIC_EVENTS` wholesale and
-            the two LLM-accounting rows; `hypothesis_merged` is FOLDED, so it is none of those. A
-            background merge landing in the window where `_prepare_node_idea` makes the Developer call
-            moves the fence and discards a proposal the run has already paid for.
+            the two LLM-accounting rows; `hypothesis_merged` is FOLDED, so it is none of those. That
+            fence no longer spans a paid proposal (2026-08-20 — see
+            `card_reservation.py::_proposal_receipt_fence`), so what a background merge costs there is
+            one `_reserve_node_build` CAS retry rather than a Developer call. It is still a reader
+            keyed on position, and the merge is still a Card LIFECYCLE input, which is why it stays
+            out of `BACKGROUND_APPENDABLE`.
 
         So the answer to a board that fills faster than it drains is NOT to let this run in the
         background. It is to stop the background writer overfilling it: `_admissible_beliefs` bounds

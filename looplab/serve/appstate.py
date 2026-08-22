@@ -86,7 +86,7 @@ _DELETE_SERVICE_PREFIXES = (
 # wherever it is nested (not only under nodes — inject_requests also carries full code/file maps).
 _PUBLIC_STATE_RAW_KEYS = {
     "abs_path", "annotations", "code", "comments", "deleted", "files", "preview", "raw",
-    "stderr", "stdout", "stdout_tail", "triage_rationale",
+    "stderr", "stdout", "stdout_tail", "stderr_tail", "triage_rationale",
 }
 
 
@@ -407,6 +407,10 @@ class AppState:
             # in the stdout tail. Drop stdout_tail entirely (the full tail is behind the token-gated
             # node-detail endpoint) and redact the short error message the node table still shows.
             n.pop("stdout_tail", None)
+            # …and the SCORED node's own stderr tail beside it, for the identical reason: it is
+            # captured program output on the same untoken-gated projection, and a node that
+            # scored is exactly as able to have printed a secret as one that crashed.
+            n.pop("stderr_tail", None)
             # Redact BEFORE truncating: a secret straddling byte 160 would otherwise lose its tail,
             # leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
             n["error"] = redact_secrets(n.get("error") or "")[:160]

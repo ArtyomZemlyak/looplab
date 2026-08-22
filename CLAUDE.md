@@ -74,12 +74,11 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    sites; `tests/test_background_appendable.py` proves splice-position neutrality). A concurrent task
    MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored — the fold never reads them). **That is
    NOT the same as splice-neutral, and this invariant claimed it was until 2026-08-06.** The fold is
-   not the only reader of the log: `engine/speculation.py::_proposal_authority_seq` fences a paid
-   proposal by comparing a max-seq for EQUALITY across the window in which `_prepare_node_idea` makes
-   the Developer call, and it excluded only the two LLM-accounting rows. So a `train_monitor_alert`
-   or `asha_rank` — both ON by default, both fired from concurrent evals on a TIMER, i.e. landing in
-   that window as a matter of course — moved the fence and discarded a proposal the run had already
-   paid for, reported as "a control/research/lifecycle event won the CAS". The fence now excludes
+   not the only reader of the log: `engine/speculation.py::_proposal_authority_seq` compares a
+   max-seq for EQUALITY across a reservation's CAS window, and it excluded only the two
+   LLM-accounting rows. So a `train_monitor_alert` or `asha_rank` — both ON by default, both fired
+   from concurrent evals on a TIMER, i.e. landing in that window as a matter of course — moved the
+   fence, reported as "a control/research/lifecycle event won the CAS". The fence now excludes
    `DIAGNOSTIC_EVENTS` wholesale and `tests/test_card_speculation_engine.py` drives it from the
    registry, so a diagnostic type added later inherits the property. It excludes exactly ONE FOLDED
    pair, `SETUP_THREAD_APPENDABLE`, and only on evidence: those two rows are written from an eval
@@ -88,7 +87,26 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    concurrent writer is an anyio task on the loop that reservation is blocking — and they are the
    only folded pair whose splice-position neutrality this repo has PROVEN. That is not a precedent
    for `node_evaluated`: a node terminal moves `best`, the parent snapshot and every Card score, and
-   it stays in the fence. When you add a non-folded
+   it stays in the fence.
+   **THAT FENCE NO LONGER SPANS A PAID PROPOSAL (2026-08-20), and the exclusion list was never the
+   defect.** `card_reservation.py::_stage_prepared_card` used to compare the same number across the
+   whole slow `_prepare_node_idea` call, so a proposal the run had already bought was discarded by
+   any row at all; twice the answer was to widen the list, and the third measurement says the
+   COMPARISON was wrong. Over `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs) the isolated raw
+   proposal lane made **56 paid proposals and staged 0 Cards, $3.89** — `research_attempted` inside
+   100 % of the 56 windows, `node_evaluated`+`stage_finished` inside 52 — because the concurrent
+   research task and the evaluation children run on a timer precisely so they overlap that wait.
+   "Nothing at all happened" is a strict superset of "nothing this proposal's receipt asserts
+   moved", and the set difference IS the concurrent writers. The commit now compares
+   `card_reservation.py::_proposal_receipt_fence` — the search epoch and the exact parent
+   generations, i.e. only what `card_added` goes on to assert — beside the two absolutes (a
+   lifecycle stop, a moved node-slot ceiling). Dropped with the seq fence: `_proposal_cue_fence`
+   (hints/research/strategy are prompt INPUTS that no receipt field records, and a hint landing
+   mid-proposal is still pending for the next one) and `best_node_id` equality (the receipt names
+   `scored_against`, whose identity `_plan_native_card` re-derives from the COMMIT fold and refuses
+   when unscorable). Re-derived over the same 20 logs, the four surviving doors moved in 0 of the
+   56. **The rule to carry forward is that a fence over the log's LENGTH is not a fence over what a
+   decision READ.** When you add a non-folded
    event, the question to ask is not "does the fold read it?" but **"does any reader key on its
    position?"**: the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
    `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site.
@@ -185,6 +203,19 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
   asymmetry is what keeps the cycle open — five search modules import `agents` at module scope, so a
   module-level `looplab.search` import in `agents/` closes the loop into an ImportError at startup.
   Guarded by `tests/test_agents_search_direction.py`.
+- **A phase that SPENDS must open a SPAN, not just a `phase_progress` beacon.** `_progress`
+  (`engine/shared.py`) appends an event and opens nothing; `core/tracing.py::generation` yields a
+  NULL handle whenever `_current_tracer` is unset, and `Tracer.span` is its only binder. So every
+  provider call a beacon-only phase makes is written with `trace_id=null, span_id=null` and lands in
+  no span — real money attributable to nothing, invisible to `looplab timings`, to the trace view and
+  to every per-phase cost question. Measured over `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune
+  runs, 2026-08-20): **1,579 of 6,002 paid calls (26 %) carried a null trace**, and the beacon-only
+  novelty gate was 823 of them — $1.77 of $15.73 and 6.6 of 60.8 run-hours, with nothing in the run
+  saying where any of it went. `SharedEngineMixin::_paid_progress` is the beacon AND the span; use it
+  wherever the bracketed body can reach a role or a client. Still open at that measurement and NOT
+  fixed here: the isolated raw speculation lane's own propose calls, 628 calls / $1.21, untraced for a
+  second reason (its `tracer.span("propose")` exists in `spans.jsonl` for 52 of its 53 windows, yet
+  every usage row inside them is null) — the serial lane's identical propose calls are all traced.
 - **Comments are load-bearing.** The codebase documents *why* (ADR references, review provenance,
   replay-safety notes) inline. Preserve comments verbatim when moving code; write the same style.
 - **Prompt strings are contracts.** Changes to prompt text alter agent behavior — never "clean up"

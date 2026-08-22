@@ -443,6 +443,7 @@ _READ_RUNG = '''\
 # the wrong python denies python itself. Measured while building this: allowing the PARENT's
 # `sys.prefix` left numpy/scipy/sklearn at PermissionError, with nothing to say why.
 _LL_READ_EXTRA = %(read_allow_extra)r
+_LL_READ_DENY = %(read_deny)r
 if _LL_READ_EXTRA is not None:
     import site as _ll_site
     import sysconfig as _ll_sysconfig
@@ -463,6 +464,30 @@ if _LL_READ_EXTRA is not None:
             continue
         _ll_allow.update([_got] if isinstance(_got, str) else _got)
     _ll_allow.update(_LL_READ_EXTRA)
+    # THE CONTAINMENT RULE, applied where the grant is made. A grant that CONTAINS the operator's
+    # source root is not a wide grant, it is the fence removed: Landlock grants a whole subtree and
+    # has no way to subtract, so `/opt` granted with an editable tree at `/opt/myrepo` hands the
+    # probe the very thing rule 1 exists to hide. The parent already refuses those and sends the
+    # subtrees that do not swallow (`read_fence.confine_grants`, in `_LL_READ_EXTRA`); this half of
+    # the rule is here because the paths above are derived IN THIS INTERPRETER, where the parent
+    # cannot see them, and a `sys.prefix` with the repo inside it is the ordinary shape of that.
+    # Loud, not silent: a dropped grant is a denial, and the reader must be able to tell it from a
+    # broken interpreter.
+    _ll_refused = []
+    if _LL_READ_DENY:
+        _ll_kept = set()
+        for _p in _ll_allow:
+            _rp = os.path.realpath(_p)
+            _rp = _rp if _rp.endswith(os.sep) else _rp + os.sep
+            if any(_r.startswith(_rp) for _r in _LL_READ_DENY):
+                _ll_refused.append(_p)
+            else:
+                _ll_kept.add(_p)
+        _ll_allow = _ll_kept
+    if _ll_refused:
+        sys.stderr.write("LOOPLAB probe: %%d read grant(s) contain the operator's source tree and "
+                         "are REFUSED (the fence wins over the grant): %%s\\n"
+                         %% (len(_ll_refused), sorted(_ll_refused)))
     _ll_reason, _ll_skipped = %(landlock_read_fn)s(sorted(p for p in _ll_allow if p))
     if _ll_reason:
         sys.stderr.write(
@@ -480,21 +505,34 @@ if _LL_READ_EXTRA is not None:
 '''
 
 
-def _under_tempdir(path: str) -> bool:
-    """Is `path` one of the machine's shared temp roots (or inside one)?
+def _shared_temp_root(path: str) -> bool:
+    """Is `path` one of the machine's shared temp roots ITSELF?
 
     A separate predicate rather than a literal comparison because `tempfile.gettempdir()` is what
     the rest of the runtime honours (`TMPDIR` moves it), and a hard-coded `/tmp` would silently stop
     matching on a box that sets it.
+
+    THE TEST IS EQUALITY, AND IT USED TO BE CONTAINMENT — that was the 2026-08-22 defect. What was
+    measured is a statement about granting the temp roots WHOLE: `read_allowlist._DEFAULT_TIERS`
+    grants `/tmp` and `/var/tmp` entire, and with them granted a confined probe read everything
+    under `/var/tmp/looplab-bench` — this box's AlgoTune checkout, the evaluation bridge and the
+    cached reference timings, i.e. exactly what the rung exists to refuse. Dropping every candidate
+    that merely LIVES under one is a different and much wider rule, and it takes the interpreter
+    with it: on a box whose venv is `/var/tmp/<checkout>/.venv` (this one, under `uv`), `sys.prefix`
+    and its `site-packages` were dropped, so a confined probe could not `import numpy` — it died on
+    a `ModuleNotFoundError` naming a package that is installed, which is `_too_broad`'s failure
+    arriving through the grant list. A candidate under a temp root is granted on its own merits: it
+    is the interpreter, a declared mount or the probe's own replica, and granting `<checkout>/.venv`
+    grants no part of `<checkout>` that is not the venv.
     """
     import tempfile
 
     roots = {"/tmp", "/var/tmp", os.path.realpath(tempfile.gettempdir())}
-    real = os.path.realpath(path)
-    return any(real == r or real.startswith(r.rstrip("/") + "/") for r in roots)
+    return os.path.realpath(path) in roots
 
 
-def render_launcher(program_path: str, read_allow: Optional[tuple] = None) -> str:
+def render_launcher(program_path: str, read_allow: Optional[tuple] = None,
+                    read_deny: tuple = ()) -> str:
     """The generated launcher source for one probe. Split out so the boundary can be read, diffed
     and driven directly by `tests/test_dev_probe.py` rather than only through a subprocess.
 
@@ -515,7 +553,9 @@ def render_launcher(program_path: str, read_allow: Optional[tuple] = None) -> st
                         "read_rung": ("" if read_allow is None else _READ_RUNG % {
                             "landlock_read": landlock.read_confine_source(),
                             "landlock_read_fn": landlock.READ_CONFINE_FUNCTION,
-                            "read_allow_extra": tuple(read_allow)})}
+                            "read_allow_extra": tuple(read_allow),
+                            # The roots the child may not grant itself. See `_read_deny`.
+                            "read_deny": tuple(read_deny)})}
 
 
 class DevProbeTools:
@@ -637,7 +677,8 @@ class DevProbeTools:
             program.write_text(code, encoding="utf-8")
             launcher = root / "probe_launcher.py"
             launcher.write_text(
-                render_launcher(str(program), read_allow=self._read_allow(work)),
+                render_launcher(str(program), read_allow=self._read_allow(work),
+                                read_deny=self._read_deny()),
                 encoding="utf-8")
             from looplab.runtime.sandbox import run_argv
             env = {
@@ -685,15 +726,32 @@ class DevProbeTools:
         sites, not two policies. The site differs because the lifetime does: the engine's fence lives
         beside the run and is shared by every eval, and the probe's directory exists for one call.
 
-        `allow` is only what `fence_inputs` derives from the spec (the `data:`/`references:` mount
-        sources). The engine additionally allow-lists its run directory, because a run may be
-        `--out`-ed INSIDE the repo it edits; a probe has no run directory to protect, so passing one
-        would widen this fence for nothing.
-
         Policy is always `deny` and deliberately NOT `Settings.read_fence` — see rule 1 in the module
-        docstring. Returns whether a fence was written: `False` means the task declares no editable
-        source tree at all, i.e. there is nothing a probe could read that the node does not own."""
-        roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        docstring. Returns whether a fence was written: `False` means the rendered fence would be
+        INERT, i.e. the task declares no editable source tree AND the kernel rung (not the hook) is
+        the confinement, so there is nothing for the hook to refuse. That guard is not tidiness. The
+        fence directory goes first on the child's PYTHONPATH, so installing an inert one puts a
+        `sitecustomize` of ours ahead of any real one on the box for every probe — `read_fence`'s
+        own `_chain()` hands off to it, but the env a non-repo task's probe runs under is then no
+        longer the one it would have had, which is exactly what this returns False to keep true.
+
+        WHAT EACH HALF GETS. The grants are computed ONCE (`_confined_allow`) and both halves are
+        projections of that one list, because the day they differ the weaker one is the boundary:
+
+          * the KERNEL rung is an allow-list and gets the grants verbatim (`_read_allow`);
+          * the HOOK, when the kernel rung is on, runs as the historical DENYLIST over the editable
+            roots, and there `fence_inputs` is the projection — it drops every grant that is not
+            under a root (a denylist never needed them; `/usr` as an allow prefix only widens the
+            hot path) and KEEPS the ones that are, which is the half that matters: those are the
+            paths the kernel rung itself `open(O_PATH)`s, and a hook that refused one of them killed
+            the probe while it was ADDING the rule. Measured while building the kernel rung;
+          * the HOOK when it IS the confinement (`confine_reads=False`) gets the grants verbatim,
+            because then its `_ALLOW` is the whole boundary.
+
+        `swallowed` must be empty and is checked rather than assumed: `_confined_allow` refuses a
+        grant that contains a root, so a non-empty list here means the two derivations have come
+        apart, and the only safe answer is to refuse to run. A probe may fail loudly; it may never
+        run silently unfenced."""
         # CONFINE, not the engine's denylist. The old shape fenced only the editable source tree and
         # returned False when a task declared none -- installing NO fence at all, on the reasoning
         # that "there is nothing a probe could read that the node does not own". That reasoning holds
@@ -710,7 +768,20 @@ class DevProbeTools:
         # probe's filesystem, it arrives through the run-reading tools, which are unchanged.
         # The same list the kernel rung is given (`_confined_allow`), not a second
         # derivation: see that method for why they cannot be allowed to differ.
-        allow = self._confined_allow(fence_dir.parent / "work")
+        grants = self._confined_allow(fence_dir.parent / "work")
+        confine = not self.confine_reads
+        roots, hook_allow, _dropped, swallowed = read_fence.fence_inputs(
+            self.repo_spec, allow=grants)
+        if swallowed:
+            raise ProbeRefusal(
+                "refused to run: a read grant contains the operator's source root "
+                f"({', '.join(sorted(swallowed))}), which would disable the fence it is inside. "
+                "This is a defect in the probe's own derivation, not in the task.")
+        if not confine and not roots:
+            # Nothing to refuse: a denylist with no roots is an inert `sitecustomize` that would
+            # only shadow the box's own. The probe is still confined -- by the kernel rung, which
+            # is what `confine_reads` turned on.
+            return False
         (fence_dir / "sitecustomize.py").write_text(
             # `confine` only when the KERNEL rung is NOT the read boundary. With both on, the hook
             # -- already live when the launcher runs -- refuses the rung's own `O_PATH` opens and the
@@ -719,49 +790,74 @@ class DevProbeTools:
             # the hook cannot), and the hook keeps its original deny-prefix job over the editable
             # tree plus every write refusal, where its non-OSError message is what makes the failure
             # actionable.
-            read_fence.render(roots, allow, policy="deny", log="", run="developer-probe",
-                              confine=not self.confine_reads),
+            read_fence.render(roots, grants if confine else hook_allow, policy="deny", log="",
+                              run="developer-probe", confine=confine),
             encoding="utf-8")
         return True
 
     def _confined_allow(self, work_root) -> tuple:
-        """The ONE allow-list both halves of rule 1 use: the hook and the kernel rung.
+        """The ONE grant list both halves of rule 1 are projected from: the hook and the kernel rung.
 
-        Computed once and handed to both because they are two enforcement points for a single rule,
-        and the day their lists differ the weaker one is the boundary. It is not a theoretical
-        worry: while building the kernel rung, the hook — already live in the launcher's
-        interpreter — refused the rung's own `O_PATH` opens for paths it had not been given, and the
-        probe died on a rule it was trying to ADD.
+        Computed once because they are two enforcement points for a single rule, and the day their
+        lists differ the weaker one is the boundary. It is not a theoretical worry: while building
+        the kernel rung, the hook — already live in the launcher's interpreter — refused the rung's
+        own `O_PATH` opens for paths it had not been given, and the probe died on a rule it was
+        trying to ADD.
 
-        The machine temp tiers are DROPPED here, and that line decides whether the rung works at
-        all. `read_allowlist._DEFAULT_TIERS` grants `/tmp` and `/var/tmp` whole, because an eval
-        legitimately writes scratch there. Measured 2026-08-21: with them granted, a confined probe
-        still read everything under `/var/tmp/looplab-bench` — this box's AlgoTune checkout, the
-        evaluation bridge and the cached reference timings. The allow-list would have granted
+        Every entry is derived and then PROJECTED through `read_fence.confine_grants`, which is what
+        makes this a fence and not a list. Appending the machine tiers after `fence_inputs` returned
+        was the 2026-08-21 defect: the tiers skipped `_norm_root` (so `/opt` also admitted
+        `/optfoo`) and skipped the swallowing refusal (so `/opt` granted, with an editable tree at
+        `/opt/myrepo`, made `_fenced` return None for every path under it — an unfenced probe, in
+        BOTH halves, for any run whose repo sits under `/opt`, `/usr`, `/etc`, a conda prefix or
+        `~/.cache`). `confine_grants` refuses a swallowing tier and grants the subtrees of it that
+        do not swallow, so this box's `/opt/conda` interpreter survives a root at `/opt/myrepo`.
+        A grant it cannot make safe is a REFUSAL to run, raised here — never a quiet widening.
+
+        The machine temp tiers THEMSELVES are dropped here, and that line decides whether the rung
+        works at all. `read_allowlist._DEFAULT_TIERS` grants `/tmp` and `/var/tmp` whole, because an
+        eval legitimately writes scratch there. Measured 2026-08-21: with them granted, a confined
+        probe still read everything under `/var/tmp/looplab-bench` — this box's AlgoTune checkout,
+        the evaluation bridge and the cached reference timings. The allow-list would have granted
         exactly what the rung exists to refuse. Nothing is lost: rule 2 means the probe cannot write,
         so it has no scratch to read back, its own replica is granted below by absolute path, and a
         task that genuinely needs a temp path DECLARES it as a mount, which arrives in `allow`.
-        """
-        _roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
-        tiers = tuple(path for path, _mode in read_allowlist.machine_read_tiers()
-                      if not _under_tempdir(path))
-        return tuple(allow) + tiers + (str(work_root), str(Path(work_root).parent))
 
-    def _read_allow(self, work) -> Optional[tuple]:
-        """What the KERNEL rung grants, or None when confinement is off."""
-        return self._confined_allow(work) if self.confine_reads else None
+        The tier and a path INSIDE it are not the same statement, and conflating them cost the
+        interpreter — see `_shared_temp_root`. A venv under `/var/tmp` is granted; the `/var/tmp`
+        that contains it is not.
+        """
+        roots, allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        tiers = tuple(path for path in self._interpreter_allow() if not _shared_temp_root(path))
+        # The probe's own disposable replica, added AFTER the temp filter and never through it: it
+        # lives under `mkdtemp`, i.e. under exactly the tier that filter exists to drop.
+        grants, refused = read_fence.confine_grants(
+            tuple(allow) + tiers + (str(work_root), str(Path(work_root).parent)), roots)
+        if refused:
+            raise ProbeRefusal(
+                "refused to run: read confinement cannot be built for this task — "
+                + "; ".join(f"{p} ({why})" for p, why in refused)
+                + ". Move the editable tree out from under that path, or declare it as a mount. "
+                "Running without the fence is not the alternative: a probe that can read the "
+                "operator's tree is the incident this surface exists to prevent.")
+        return grants
 
     @staticmethod
-    def _interpreter_allow(work_root) -> tuple:
-        """The paths a confined probe must still reach: its own tree, and the interpreter.
+    def _interpreter_allow() -> tuple:
+        """The paths a confined probe must still reach: the interpreter, and the machine tiers.
 
         Denying the interpreter does not fence a probe, it stops python from starting -- which is the
         failure `read_fence._too_broad` exists to prevent one layer down. Everything here is derived
         from the running interpreter rather than listed, so a venv, a conda env and a system python
-        all work without a per-machine path table."""
+        all work without a per-machine path table.
+
+        It is `_confined_allow`'s only derivation of the machine's own paths — it was written to be
+        that, went unwired when the kernel rung landed, and the version that replaced it inline is
+        the one that skipped the normalization below. `read_allowlist.machine_read_tiers`'s docstring
+        names this function as the probe-side derivation, and it is true again."""
         import site
         import sysconfig
-        paths = {str(Path(work_root).resolve()), sys.prefix, sys.base_prefix,
+        paths = {sys.prefix, sys.base_prefix,
                  sysconfig.get_paths().get("stdlib") or "", sysconfig.get_paths().get("purelib") or ""}
         try:
             paths.update(site.getsitepackages())
@@ -778,16 +874,15 @@ class DevProbeTools:
         # non-OSError that library `except OSError` fallbacks cannot catch -- i.e. the probe is
         # broken for the most ordinary thing a Developer would check.
         try:
-            from looplab.runtime import read_allowlist
             paths.update(path for path, _mode in read_allowlist.machine_read_tiers())
         except Exception:  # noqa: BLE001 - the interpreter tiers above still let python start
             pass
-        # NORMALIZED through the fence's own rule. These entries are appended AFTER `fence_inputs`
-        # has run, so they skip the `_norm_root` every other root and allow entry goes through --
-        # and under `_CONFINE` the hot path is a bare `p.startswith(_ALLOW)`. Without the trailing
-        # separator an allow entry `/opt/venv` also admits `/opt/venv-secrets`, which is exactly the
-        # `/srcfoo` vs `/src` bug `_norm_root`'s docstring says it exists to prevent; without the
-        # realpath a symlinked venv fails its own compare and the probe is refused its stdlib.
+        # NORMALIZED through the fence's own rule. Without the trailing separator an allow entry
+        # `/opt/venv` also admits `/opt/venv-secrets`, which is exactly the `/srcfoo` vs `/src` bug
+        # `_norm_root`'s docstring says it exists to prevent; without the realpath a symlinked venv
+        # fails its own compare and the probe is refused its stdlib. `confine_grants` normalizes
+        # again on the way through — this stays because the temp filter and the dedupe above read
+        # these paths first, and a set of two spellings of one directory is not a set.
         normalized = []
         for raw in paths:
             if not raw:
@@ -796,6 +891,20 @@ class DevProbeTools:
             if norm:
                 normalized.append(norm)
         return tuple(sorted(set(normalized)))
+
+    def _read_allow(self, work) -> Optional[tuple]:
+        """What the KERNEL rung grants, or None when confinement is off."""
+        return self._confined_allow(work) if self.confine_reads else None
+
+    def _read_deny(self) -> tuple:
+        """The roots the kernel rung may not grant, whatever it derives in the child.
+
+        The grants are computed here and the child derives some of its own (`sys.prefix` and the
+        system tiers, in the probe's real interpreter — see `_READ_RUNG`). A derivation the parent
+        cannot see is a derivation the parent cannot fence, so the roots travel with the grants and
+        the containment rule is applied again where the grant is actually made."""
+        roots, _allow, _dropped, _swallowed = read_fence.fence_inputs(self.repo_spec, allow=())
+        return tuple(roots)
 
     def _replicate(self, work: Path) -> str:
         """Materialize the node's staged files into the probe's cwd, bounded.

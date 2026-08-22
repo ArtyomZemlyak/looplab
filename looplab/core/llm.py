@@ -558,6 +558,54 @@ def _stream_usage(value) -> dict:
     return dumped if isinstance(dumped, dict) else {}
 
 
+# Which request fields set the reasoning DEPTH, and — where a field carries more than the depth —
+# WHICH of its members do. `None` means the whole key is a depth knob; a tuple names the depth
+# members and says nothing about the rest of that key.
+#
+# The distinction is the point. This table's first cut was the flat key set
+# `("reasoning", "reasoning_effort", "chat_template_kwargs", "thinking")`, which conflates "sets the
+# depth" with "uses that key for anything" — and both of those keys have documented NON-depth
+# members that `llm_reasoning_extra` is the escape hatch FOR:
+#   * OpenRouter `reasoning.exclude` hides the reasoning tokens from the RESPONSE. It changes what
+#     comes back, not how hard the model thinks, and `{"reasoning": {"exclude": true}}` beside
+#     `llm_reasoning="high"` is a complete, coherent configuration that the flat set refused.
+#   * A Qwen chat template takes arbitrary `chat_template_kwargs`; `enable_thinking` is the one that
+#     is ours. Refusing every other member made the template unreachable on a qwen model.
+# A key whose value is not a mapping cannot be inspected, so it counts as the whole knob — fail
+# closed, since an operator writing `reasoning: "high"` means the depth.
+REASONING_DEPTH_KNOBS: dict = {
+    "reasoning_effort": None,                                   # OpenAI / Ollama-v1 / DeepSeek
+    "thinking": None,                                           # Anthropic: type + budget_tokens
+    "reasoning": ("effort", "enabled", "max_tokens"),           # OpenRouter (`exclude` is not depth)
+    "chat_template_kwargs": ("enable_thinking", "thinking_budget"),   # Qwen3 on vLLM/SGLang
+}
+
+
+def reasoning_depth_keys(fields: Optional[dict]) -> list[str]:
+    """The reasoning-DEPTH knobs `fields` actually sets, named the way an operator can act on.
+
+    Hoisted out of `reasoning_body` because the clash rule below is a rule nobody could state: it
+    lived inside a `raise` reachable only by building a client, so "is `reasoning.exclude` a depth
+    setting?" had no answer anywhere a reader or a test could ask it. Same treatment, same reason,
+    as `_stream_envelope_is_billable`.
+
+    Returns `"<key>"` for a whole-key knob and `"<key>.<member>[+<member>]"` for a scoped one, so
+    the refusal message names the field the operator has to edit rather than just its container.
+    """
+    named: list[str] = []
+    for key, members in REASONING_DEPTH_KNOBS.items():
+        if not fields or key not in fields:
+            continue
+        value = fields[key]
+        if members is None or not isinstance(value, dict):
+            named.append(key)
+        else:
+            hits = [member for member in members if member in value]
+            if hits:
+                named.append(f"{key}.{'+'.join(hits)}")
+    return named
+
+
 def reasoning_body(model: str, mode: str = "", style: str = "auto",
                    extra: Optional[dict] = None) -> dict:
     """The provider-specific request fields that TOGGLE a reasoning/thinking model — providers differ:
@@ -566,7 +614,19 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
     `mode`: "" = inject nothing (use the server default — unchanged behavior); off|none = disable;
     on = enable at default depth; low|medium|high = enable at that effort. `style`: auto picks `qwen`
     for qwen* models else `effort`. `extra` is merged last (escape hatch, e.g. Anthropic
-    `{"thinking": {"type": "enabled", "budget_tokens": N}}`)."""
+    `{"thinking": {"type": "enabled", "budget_tokens": N}}`).
+
+    WHERE THE DEPTH REFUSAL FIRES, and why it stays here rather than moving to `Settings`. It is not
+    a per-REQUEST check and never was: `make_llm_client` is this function's only production caller,
+    so it runs once per client, at construction, and `self.reasoning` is the frozen dict every later
+    request merges. Moving it up to `Settings._check_enum_fields` would look earlier and be WRONG,
+    because the predicate is a function of the MODEL: `style="auto"` shapes `chat_template_kwargs`
+    for a qwen target and `reasoning_effort` for every other one, and one `Settings` resolves many
+    targets (`llm_model`, the per-role models, `agent_stage_models`, every `llm_profiles` entry). A
+    qwen researcher beside a non-qwen developer genuinely clashes on one and not the other, and a
+    model-blind check would have to over-refuse to stay sound. The endpoint preflight cannot cover
+    it either — `agents/preflight.py::_probe_factory` passes `disable_reasoning=True`, so the probe
+    never calls this function. Client construction is the earliest site that knows enough."""
     mode = (mode or "").strip().lower()
     body: dict = {}
     if mode:
@@ -600,21 +660,36 @@ def reasoning_body(model: str, mode: str = "", style: str = "auto",
         # word either way (`llm_reasoning="medium"`, or drop the key from `llm_reasoning_extra`).
         # The clash is BETWEEN SPELLINGS, so comparing like keys finds nothing -- that was this
         # guard's first cut and it detected exactly zero of the case it was written for. What
-        # matters is that BOTH sides name the depth AT ALL, whatever key each one uses.
-        DEPTH_KEYS = ("reasoning", "reasoning_effort", "chat_template_kwargs", "thinking")
-        ours = [k for k in DEPTH_KEYS if k in body]
-        theirs = [k for k in DEPTH_KEYS if k in extra]
-        clash = sorted(set(ours) | set(theirs)) if (ours and theirs) else []
-        if clash and mode:
+        # matters is that BOTH sides name the DEPTH, whatever key each one uses.
+        #
+        # "Names the depth", not "names the key": the second cut was the flat key set and it refused
+        # `llm_reasoning="high"` beside OpenRouter's `{"reasoning": {"exclude": true}}` -- the
+        # hide-the-reasoning-tokens option, which sets no depth at all -- and every non-thinking
+        # `chat_template_kwargs` on a qwen model. Both are exactly what the `extra` in this
+        # function's own docstring is FOR. `REASONING_DEPTH_KNOBS` is where that distinction lives.
+        ours = reasoning_depth_keys(body)
+        theirs = reasoning_depth_keys(extra)
+        if ours and theirs:
             from looplab.core.errors import ConfigRefusal
             raise ConfigRefusal(
                 f"llm_reasoning={mode!r} and llm_reasoning_extra both set the reasoning depth "
-                f"({' + '.join(clash)}). "
+                f"({' + '.join(sorted(set(ours) | set(theirs)))}). "
                 "They are DIFFERENT request keys, so the second does not override the first -- both "
                 "are sent and the provider chooses. Set the depth in ONE place: either "
                 "llm_reasoning, or the provider's own key in llm_reasoning_extra with "
                 "llm_reasoning=\"\".")
-        body = {**body, **extra}
+        # MEMBER-wise for a key both sides shape, not a whole-key overwrite. `chat_template_kwargs`
+        # is that key today: on a qwen model we put `enable_thinking` in it, so a flat
+        # `{**body, **extra}` dropped it the moment an operator added any OTHER template kwarg --
+        # turning the loud refusal above into a silent loss of the depth setting, which is the
+        # failure this whole guard exists to stop. Permitting the non-depth use REQUIRES this merge.
+        # Anything `extra` names that is also ours wins per MEMBER, so the escape hatch still works.
+        merged = dict(body)
+        for key, value in extra.items():
+            mine = merged.get(key)
+            merged[key] = ({**mine, **value} if isinstance(mine, dict) and isinstance(value, dict)
+                           else value)
+        body = merged
     return body
 
 

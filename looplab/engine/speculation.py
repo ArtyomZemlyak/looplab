@@ -127,11 +127,9 @@ class SpecRawStageResult:
     generation: int
     action: dict[str, Any]
     proposal_state: RunState = field(compare=False, repr=False)
-    proposal_authority_seq: int
     proposal_node_ceiling: int
     at_node: int
     source: str
-    cue_fence: bytes
     success: bool
     idea: Optional[Idea] = None
     steering_context: tuple[Any, ...] = ()
@@ -431,11 +429,20 @@ class SpeculationMixin:
     def _proposal_authority_seq(events: list) -> int:
         """Latest selection-authority seq, ignoring everything that carries no selection authority.
 
-        EVERY DIAGNOSTIC EVENT, not just the two LLM accounting rows this used to name. The fence is
-        captured before the slow paid `_prepare_node_idea` and compared for EQUALITY at commit
-        (`card_reservation.py`), so any row appended in that window discards a proposal the run has
-        already paid a Developer call for — reported as "a control/research/lifecycle event won the
-        CAS", which is exactly what it was not.
+        ONE CALLER SINCE 2026-08-20, and the scope matters: `card_reservation.py::_reserve_node_build`
+        compares this for EQUALITY across the CAS RETRIES of one reservation, inside `_id_lock`. That
+        window is microseconds long and nothing paid is at risk in it — a retry just re-plans.
+
+        IT NO LONGER FENCES A PAID PROPOSAL. `_stage_prepared_card` used to take it and compare it
+        across the whole slow `_prepare_node_idea` call, and that was the wrong comparison rather
+        than the wrong exclusion list: "nothing at all happened" is a strict superset of "nothing
+        this proposal's receipt asserts moved", and the difference is exactly the concurrent research
+        task and the node terminals — the rows a multi-minute window is CERTAIN to contain. Measured
+        over `/var/tmp/looplab-bench/runs-armb` (20 runs, 2026-08-20): 56 isolated raw proposals, 56
+        discards, 0 Cards, $3.89, with `research_attempted` inside 100 % of the windows. Twice before
+        this the answer was to widen the list below (the two LLM rows -> `DIAGNOSTIC_EVENTS` ->
+        `SETUP_THREAD_APPENDABLE`); the list was never the defect. See
+        `card_reservation.py::_proposal_receipt_fence` for what replaced it and what still refuses.
         `train_monitor_alert` and the two ASHA rows are ON by default and fire on a TIMER from
         concurrent evals, so they land in that window as a matter of course; measured, each moves the
         fence 1 -> 2. `deps_installed` and `full_retrain_charged` do the same from the attempt loop.
@@ -1770,14 +1777,12 @@ class SpeculationMixin:
         proposal_events: list,
         proposal_state: RunState,
         proposal_node_ceiling: int,
-        cue_fence: bytes,
         roles: tuple[Any, Any],
     ) -> SpecRawStageResult:
         """Worker-only proposal half: no selection-affecting event may escape this call."""
 
         raw_action = dict(action)
         generation = proposal_state.search_epoch
-        proposal_authority_seq = self._proposal_authority_seq(proposal_events)
         researcher, developer = roles
         source = "engine" if raw_action.get("kind") == "merge" else "researcher"
         self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -1809,11 +1814,9 @@ class SpeculationMixin:
                 generation=generation,
                 action=raw_action,
                 proposal_state=proposal_state,
-                proposal_authority_seq=proposal_authority_seq,
                 proposal_node_ceiling=proposal_node_ceiling,
                 at_node=proposal_node_ceiling,
                 source=source,
-                cue_fence=cue_fence,
                 success=idea is not None,
                 idea=idea,
                 steering_context=steering,
@@ -1826,11 +1829,9 @@ class SpeculationMixin:
                 generation=generation,
                 action=raw_action,
                 proposal_state=proposal_state,
-                proposal_authority_seq=proposal_authority_seq,
                 proposal_node_ceiling=proposal_node_ceiling,
                 at_node=proposal_node_ceiling,
                 source=source,
-                cue_fence=cue_fence,
                 success=False,
                 audit_events=tuple(audit_events),
                 error=producer_error_text(exc),
@@ -1844,7 +1845,6 @@ class SpeculationMixin:
         proposal_events: list,
         proposal_state: RunState,
         proposal_node_ceiling: int,
-        cue_fence: bytes,
         roles: tuple[Any, Any],
         notify,
     ) -> None:
@@ -1857,7 +1857,6 @@ class SpeculationMixin:
                         proposal_events,
                         proposal_state,
                         proposal_node_ceiling,
-                        cue_fence,
                         roles,
                     ),
                     abandon_on_cancel=False,
@@ -1875,11 +1874,9 @@ class SpeculationMixin:
                     generation=proposal_state.search_epoch,
                     action=dict(action),
                     proposal_state=proposal_state,
-                    proposal_authority_seq=self._proposal_authority_seq(proposal_events),
                     proposal_node_ceiling=proposal_node_ceiling,
                     at_node=proposal_node_ceiling,
                     source="engine" if action.get("kind") == "merge" else "researcher",
-                    cue_fence=cue_fence,
                     success=False,
                     error=producer_error_text(exc),
                 )
@@ -1901,13 +1898,11 @@ class SpeculationMixin:
             result.action,
             result.idea,
             proposal_state=result.proposal_state,
-            proposal_authority_seq=result.proposal_authority_seq,
             proposal_node_ceiling=result.proposal_node_ceiling,
             at_node=result.at_node,
             source=result.source,
             steering_context=result.steering_context,
             cross_run_receipt=result.cross_run_receipt,
-            proposal_cue_fence=result.cue_fence,
         )
         if card_id is None:
             if getattr(self, "_card_stage_attached_to", None) is not None:
@@ -2517,8 +2512,8 @@ class SpeculationMixin:
             # owns its own tail/generation/parent CAS and may safely decline a stale
             # proposal if an eval changes the search state during the paid call.
             # Selection and proposal share one immutable log snapshot.  A second
-            # read here would let an old raw action inherit a newer best/parent/cue
-            # fence and make the main-task commit validate the wrong authority.
+            # read here would let an old raw action inherit a newer epoch/parent
+            # receipt fence and make the main-task commit validate the wrong authority.
             # Deliberately NOT `_fold_current`: this pair is the proposal's OWN authority snapshot,
             # handed whole to a worker that outlives the turn, and its explicit read/fold pairing is
             # what `test_raw_action_selection_and_worker_share_one_proposal_snapshot` reads.
@@ -2569,7 +2564,6 @@ class SpeculationMixin:
                             proposal_events,
                             proposal_state,
                             proposal_node_ceiling,
-                            self._proposal_cue_fence(proposal_state),
                             roles,
                             session.notify,
                         )

@@ -210,6 +210,58 @@ def test_novelty_gate_engages_under_explore_even_with_gate_off(tmp_path):
     assert nudged.params != {"x": 1.0}          # engaged -> nudged off the near-duplicate
 
 
+def test_the_off_switch_buys_no_paid_stage_at_all(tmp_path, monkeypatch):
+    """`novelty_mode="off"` must cost NOTHING — including the graded pre-gate above the flat one.
+
+    THE DEFECT THIS RECORDS. `_apply_novelty_gate`'s docstring claimed until 2026-08-20 that
+    "gate off" left it a no-op, naming `novelty_gate`. That field defaults False and only means "do
+    not force the algo path"; `novelty_mode` defaults `"llm"` and was dispatched BEFORE the no-op
+    check. So every run of the 2026-08-20 AlgoTune campaign — `novelty_gate = false` in all 20
+    config snapshots — paid a twelve-turn agentic adjudication per proposal, plus a whole second
+    Researcher proposal on each of the 10 rejections: $1.77 of a $15.73 budget and 6.6 of 60.8
+    run-hours.
+
+    Both paid stages are asserted, and the pre-gate is the half that is easy to miss: it ran ABOVE
+    the mode check, and its agentic path calls `graded_novelty.tag_idea_llm` once per proposal. Its
+    only power is to short-circuit the flat gate (levels 4/5 only), so with no flat gate running it
+    could not change the answer — it was pure cost. Every assertion has its `mode="llm"` control
+    beside it, so a fixture that never reached the dispatcher would fail rather than read green.
+    """
+    state = _one_node_state(tmp_path / "off-switch")
+    idea = Idea(operator="improve", params={"x": 1.0}, rationale="a duplicate of node 0",
+                hypothesis="the gate would have plenty to say about this")
+    entered: list[str] = []
+
+    def _engine_with_spies(run_dir, mode):
+        eng = _engine(run_dir)
+        eng._novelty_mode = mode
+        eng._novelty_stance = "balanced"
+        eng._graded_novelty = True
+        monkeypatch.setattr(eng, "_graded_novelty_precheck",
+                            lambda *_a, **_k: entered.append("pre_gate"))
+        monkeypatch.setattr(eng, "_llm_novelty_gate",
+                            lambda _state, _idea, *_a, **_k: entered.append("llm_gate") or _idea)
+        return eng
+
+    off = _engine_with_spies(tmp_path / "gate-off", "off")
+    assert off._apply_novelty_gate(state, idea) is idea, "the off gate rewrote the proposal"
+    assert entered == [], f"a disabled novelty gate still entered {entered}"
+
+    entered.clear()
+    on = _engine_with_spies(tmp_path / "gate-llm", "llm")
+    assert on._apply_novelty_gate(state, idea) is idea
+    assert entered == ["pre_gate", "llm_gate"], (
+        "the control never reached the paid stages, so the case above proves nothing")
+
+    # …and the STANCE still overrides the mode, which is the one door "off" deliberately leaves open.
+    entered.clear()
+    explore = _engine_with_spies(tmp_path / "gate-off-explore", "off")
+    explore._novelty_stance = "explore"
+    explore._apply_novelty_gate(state, idea)
+    assert entered == ["pre_gate"], (
+        "an explore stance must still engage the deterministic gate below the pre-check")
+
+
 def test_idea_embedding_cache_is_keyed_by_content_and_stays_bounded():
     """`_idea_vec` memoizes the embedding of an idea's text. Keyed on `hash(text)`, two distinct
     ideas that collide would silently share one vector — no error, just a wrong nearest-node score

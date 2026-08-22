@@ -34,6 +34,74 @@ restoration, not a protocol deviation — but it is a deviation from a naive rea
 of the harness, so it must appear in any methods note that accompanies published
 numbers. Pass ``--no-cache`` to force a full re-measurement.
 
+WHY BESIDE THE NUMBER — the ``no_speedup`` block
+------------------------------------------------
+A zero here is not one fact, it is at least six, and until 2026-08-22 they all printed the same
+line. Measured on the arm-B run ``runs-armb/spectral_clustering`` (node_2's own ``score.log``)::
+
+    {"speedup": 0.0, "eval_seconds": 110.5, "subset": "train",
+     "baseline_source": "in-harness (record exposes no baseline_time_ms to cache)"}
+
+while the evaluator's stderr — captured, then DISCARDED by this file — said::
+
+    WARNING - Failed evaluations: 1
+    WARNING -   spectral_clustering/diag2: Speedup N/A due to invalid results: 95/100 valid (95.0%)
+
+The agent saw the bare ``0.0`` three times, concluded "replicating the reference is ANSWERED and
+FAILED", threw the approach away and spent the rest of a $1.00 budget on that lesson. It was five
+edge cases from a working solver, and the harness had said so.
+
+So every line this bridge prints whose ``speedup`` is not a positive number now carries a
+``no_speedup`` object -- enforced at the one exit, ``_emit``, not at each branch. The single
+exception is the ``--enforce-rules`` refusal, which was already a complete explanation in its own
+channel (``rules_violation`` + ``looplab_failure_reason``) and which this change leaves untouched.
+The ``no_speedup`` keys are STABLE; add to them, do not rename them:
+
+``reason``          one of ``NO_SPEEDUP_REASONS`` below — the machine-readable class.
+``evaluator_verdict`` AlgoTune's own ``EvaluationResult.error_message``, verbatim, lifted off the
+                    "Failed evaluations" block on its stderr. Absent when it printed none.
+``speedup_reported`` the RAW value in ``evaluate_summary.json`` (a STRING: ``"N/A"``, ``"0.0000"``).
+                    This is what separates "the harness refused to score" from "it scored zero".
+``instances_total`` / ``instances_valid`` / ``instances_invalid`` / ``validity_pct``
+                    parsed from the verdict. 94/100 and 0/100 are different experiments.
+``is_solution_errors`` up to 3 ``{"message", "count"}`` rows: the DISTINCT ``ERROR:`` log lines the
+                    evaluator's worker processes emitted, most frequent first. On a task whose
+                    ``is_solution`` logs its rejections (139 of AlgoTune's 155 task modules call
+                    ``logging.error``) these ARE the rejection reasons, verbatim.
+``is_solution_error_lines`` / ``is_solution_errors_distinct``
+                    how many such lines there were in total, so "3 shown" is never mistaken for
+                    "3 happened".
+``stderr_tail``     stays at the TOP level, unchanged, as on the other failure paths.
+
+It is one NESTED object and not a set of top-level keys, which is a deliberate choice about a
+different subsystem: `runtime/sandbox.py::json_line_extras` sweeps every other NUMERIC key on this
+line into the node's `extra_metrics` with no declaration, so a top-level `instances_valid` would
+enter the operator's metrics table, the Pareto front, the MLflow export and the reviewer projection
+as an `auto`-channel measurement — which is exactly the population CLAUDE.md's `extra_metrics` rule
+was written about. A dict is not a number, so nesting keeps the diagnosis in the TEXT the agent
+reads and out of the metric plumbing. Verified 2026-08-22: on the line below, `json_line_metric`
+still returns the speedup and `json_line_extras` returns `{"eval_seconds": ...}` and nothing else —
+i.e. exactly what it returned before this change.
+
+WHAT IS NOT REACHABLE, established rather than assumed. AlgoTune builds a richer
+``invalid_solution_analysis`` — a per-instance code-context of the ``is_solution`` line that
+rejected the solution, which arm A's own agent is shown up to three of
+(``AlgoTuner/utils/message_writer.py:726-750``). It cannot get here:
+``AlgoTuner/utils/evaluator/main.py:1160`` attaches it to the returned list ONLY when a
+``baseline_manager`` was passed, and ``scripts/evaluate_results.py`` does not pass one; that script
+then reads only aggregate fields off the per-instance dicts and writes a summary whose entire
+payload is ``{"final_speedup": "<str>"}`` (``update_single_result``, line 852). Nothing under
+``results/<model>/<task>/`` is written by the evaluator at all — that directory is our INPUT. The
+``ERROR:`` lines above are the residual that IS reachable, and they are reachable for an accidental
+reason worth writing down: the ``ProcessPoolExecutor`` children are started with ``forkserver``, so
+they never run ``setup_logging`` and their root logger falls through to ``logging.lastResort``,
+which prints ``levelname:name:message`` to the inherited stderr at WARNING and above. INFO from a
+child is therefore lost (that is why "Validation stats: 94/100" never appears) and ERROR is not.
+
+Two things those lines are NOT, and the keys are named so as not to claim otherwise: they are not
+attributed to an instance, and they do not COUNT instances. The recorded run below is 6 invalid
+instances against 17 ``ERROR:`` lines, because one rejection can log several checks.
+
 Usage
 -----
     python looplab_eval.py --algotune-root /path/to/AlgoTune \\
@@ -47,6 +115,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -140,6 +209,249 @@ def _walk_for_result(node, task: str) -> dict | None:
     return None
 
 
+# ------------------------------------------------------------------------------------------------
+# The WHY beside the number. See the module docstring for the emitted key contract.
+# ------------------------------------------------------------------------------------------------
+
+# THE VOCABULARY. Every `no_speedup.reason` this file can print, and nothing else may be printed:
+# `_emit` refuses an unregistered one down to `unknown` rather than shipping a word no reader knows.
+# A bare string in a JSON line is exactly the duck-typed seam CLAUDE.md's registry rule is about — a
+# typo'd literal here does not fail, it silently teaches the next proposer a class that does not
+# exist. `tests/test_algotune_bridge_says_why.py` derives the emitted set from this module's own AST
+# and asserts both directions, so a reason added at a call site and forgotten here goes red.
+NO_SPEEDUP_REASONS = (
+    "invalid_results",     # some instances failed `is_solution`; AlgoTune refuses a partial speedup
+    "critical_error",      # solver_exception / import_error / memory_error — stopped mid-dataset
+    "no_valid_speedups",   # nothing was timed at all
+    "solver_unloadable",   # their import of our solver.py failed
+    "compilation_failed",  # a Cython/pythran/DaCe build step failed
+    "no_problems",         # the requested dataset half was empty
+    "evaluator_error",     # the evaluator itself raised, or produced a shape it did not expect
+    "evaluator_timeout",   # OUR --timeout fired; the evaluator never finished
+    "no_summary",          # the evaluator exited without writing evaluate_summary.json
+    "no_record",           # it wrote one, and this (task, model) is not in it
+    "unreadable_summary",  # it wrote one and we could not parse it
+    "reported_zero",       # the harness scored this solver and the number really is 0
+    "no_solver",           # nothing to score: --solver names no file
+    "no_evaluator",        # nothing to score with: no scripts/evaluate_results.py under the root
+    "unknown",             # a shape we do not recognise. The stderr tail is the evidence; say so.
+)
+# NOT a member: `rules_violation`. That path never prints a zero — it prints `"speedup": null` with
+# `rules_violation` and `looplab_failure_reason` already on the line, which is a COMPLETE
+# explanation in its own channel, and it is a path this change was asked to leave alone.
+
+# Their nine `result.error_message = ...` sites in `scripts/evaluate_results.py` (read 2026-08-22,
+# lines 409/415/430/460/546/607/624/626/636), each mapped to one of ours. Longest-first is not
+# required — no prefix here is a prefix of another — but FIRST MATCH WINS, so keep them disjoint.
+# A verdict matching none of these is `unknown` and travels verbatim in `evaluator_verdict`: this
+# table decides the CLASS, it never decides what the operator gets to read.
+_VERDICT_REASONS = (
+    ("Speedup N/A due to invalid results:", "invalid_results"),
+    ("Critical error:",                     "critical_error"),
+    ("No valid speedup calculations",       "no_valid_speedups"),
+    ("Compilation failed:",                 "compilation_failed"),
+    ("No test problems found",              "no_problems"),
+    ("Failed to import optimized solver:",  "solver_unloadable"),
+    ("Could not load optimized solver",     "solver_unloadable"),
+    ("Unexpected results format",           "evaluator_error"),
+    ("Agent-compatible evaluation error:",  "evaluator_error"),
+)
+
+# `logging.warning(f"  {result.task_name}/{result.display_model_name}: {result.error_message}")`,
+# under the `Failed evaluations:` header (`evaluate_results.py:1170-1173`). Matched WITHOUT the
+# `%(asctime)s - %(levelname)s - ` prefix `setup_logging` puts in front of it, because that format
+# is theirs to change and the pair we need is the one after it. The model is matched loosely (`\S+`)
+# rather than against our own `model_dir`: `normalize_model_name` may rewrite it, and a verdict for
+# the one task we asked for is ours by construction — this process runs exactly one (task, model).
+_VERDICT_RE = re.compile(r"(?:^|\s)(?P<task>[A-Za-z0-9_.+-]+)/(?P<model>\S+?): (?P<msg>\S.*)$")
+
+# The header the verdict lines hang under, and their count — `for result in failed[:5]`. The scan is
+# CONFINED to that block AND takes the FIRST match in it, and it needs both: `<task>/<model>: <text>`
+# is not a rare shape on this stream. TWO lines below the verdict the evaluator logs
+# `Updated summary for spectral_clustering/REC-90409: N/A`, which matches the same regex on the same
+# task, inside the same five-line window. Measured against the recorded fixture while writing this
+# (2026-08-22): a "last match wins" scan reported `evaluator_verdict: "N/A"` and `reason: unknown`
+# for the exact run this whole change was built from — the defect it fixes, one layer in.
+_FAILED_HEADER = "Failed evaluations:"
+_MAX_VERDICT_LINES = 5
+
+# The counts inside the verdict AlgoTune builds at `evaluate_results.py:607`.
+_COUNTS_RE = re.compile(r"(?P<valid>\d+)/(?P<total>\d+) valid \((?P<pct>[\d.]+)%\)")
+
+# `logging.lastResort`'s format — `%(levelname)s:%(name)s:%(message)s` — which is what an
+# unconfigured root logger in a forkserver child prints. WARNING is deliberately excluded: the one
+# WARNING every run of every task emits is `CODE_DIR not set when initializing DaCe`, i.e. pure
+# noise, while ERROR/CRITICAL is where a task's `is_solution` states its rejection.
+_WORKER_ERROR_RE = re.compile(r"^(?:ERROR|CRITICAL):(?P<logger>[\w.]*):(?P<msg>\S.*)$")
+
+_MAX_IS_SOLUTION_EXAMPLES = 3      # what arm A's own agent is shown (message_writer.py:744)
+_MAX_IS_SOLUTION_CHARS = 400       # one rejection line, not a pasted traceback
+# THE COST OF RANKING BY FREQUENCY, measured on the real verification run (2026-08-22, node_2 of
+# `runs-armb/spectral_clustering`): a HARNESS-internal error can outnumber every task rejection and
+# take the top slot. That run logged
+# `get_fresh_solve_callable_with_module_reload: Class 'Solver' not found in solver module` exactly
+# 100 times — once per instance, out of `isolated_benchmark.py`'s daemonic in-process fallback while
+# the REFERENCE was being timed — against 8 + 5 + 4 for the three real `is_solution` rejections, so
+# 4 distinct kinds went into 3 slots and one real rejection was dropped.
+#
+# The cap is still 3, deliberately. That line is NOT noise in general: on a candidate that really
+# ships no `Solver` class it is THE diagnosis, and no rule this side of the boundary can tell "the
+# harness could not load a class" from "the task rejected the answer" — both arrive as one
+# `logging.error` string through the same accidental channel. `is_solution_errors_distinct` is what
+# keeps the omission visible (4 shown as 3), and raising the cap is a one-constant change the
+# operator can make on evidence rather than a guess made here.
+
+
+def _verdict_from_stderr(stderr: str, task: str) -> str:
+    """AlgoTune's own `error_message` for THIS task, off its stderr, or "".
+
+    The evaluator never puts this in the summary file — `update_single_result` writes
+    `{"final_speedup": "N/A"}` and drops everything that explains it (see the module docstring) — so
+    stderr is the only channel it survives on, and this bridge captured it and threw it away.
+
+    Within one block the FIRST match for our task wins (see `_FAILED_HEADER`); across blocks the
+    LAST block wins, since a second one could only come from a later evaluator run on this stream
+    and the newest verdict is the one about the solver we just copied in.
+    """
+    found = ""
+    remaining = 0
+    for line in (stderr or "").splitlines():
+        line = line.rstrip()
+        if _FAILED_HEADER in line:
+            remaining = _MAX_VERDICT_LINES
+            continue
+        if remaining <= 0:
+            continue
+        match = _VERDICT_RE.search(line)
+        if match is None:
+            remaining = 0          # the block ended; anything after it is other logging
+            continue
+        remaining -= 1
+        if match.group("task") == task:
+            found = match.group("msg").strip()
+            remaining = 0
+    return found
+
+
+def _is_solution_errors(stderr: str) -> tuple[list[dict], int, int]:
+    """The distinct `ERROR:` lines the evaluator's workers logged, most frequent first.
+
+    Returns `(top rows, total lines, distinct count)`. Deduplicated by message and COUNTED, because
+    the same rejection fires on many instances and three copies of one string is not three findings.
+    Frequency order, ties broken by first appearance, so the answer is deterministic for a fixture.
+
+    These are NOT per-instance and they are NOT a count of invalid instances — the recorded run has
+    6 invalid instances and 17 of these lines. `instances_invalid` is the count; this is the reason.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    for line in (stderr or "").splitlines():
+        match = _WORKER_ERROR_RE.match(line.rstrip())
+        if match is None:
+            continue
+        total += 1
+        message = match.group("msg").strip()[:_MAX_IS_SOLUTION_CHARS]
+        counts[message] = counts.get(message, 0) + 1
+    order = list(counts)
+    top = sorted(order, key=lambda m: (-counts[m], order.index(m)))[:_MAX_IS_SOLUTION_EXAMPLES]
+    return [{"message": m, "count": counts[m]} for m in top], total, len(counts)
+
+
+def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
+                reported: Any = None) -> dict[str, Any]:
+    """Build the `no_speedup` block: the class, the harness's own words, and the counts.
+
+    `reason` is what the CALL SITE knows (it timed out; there was no summary). A verdict recovered
+    from stderr OVERRIDES it, and that is the point rather than a fallback: the call site knows only
+    that the number is missing, while the verdict is the evaluator saying which of the ways it
+    is missing. The one exception is `evaluator_timeout` — there the call site's fact is the newer
+    one, since any verdict on that stderr is about an earlier, completed phase.
+    """
+    verdict = _verdict_from_stderr(stderr, task) if task else ""
+    out: dict[str, Any] = {"reason": reason}
+    if verdict:
+        out["evaluator_verdict"] = verdict
+        if reason != "evaluator_timeout":
+            out["reason"] = next((r for prefix, r in _VERDICT_REASONS
+                                  if verdict.startswith(prefix)), "unknown")
+        counts = _COUNTS_RE.search(verdict)
+        if counts:
+            valid, total = int(counts.group("valid")), int(counts.group("total"))
+            out["instances_total"] = total
+            out["instances_valid"] = valid
+            out["instances_invalid"] = total - valid
+            out["validity_pct"] = float(counts.group("pct"))
+    if reported is not None:
+        # The RAW summary value, as a string, deliberately unparsed: "N/A" is the harness refusing
+        # to score and "0.0000" is the harness scoring a zero, and `float()` maps both to the same
+        # 0.0 that started this.
+        out["speedup_reported"] = str(reported)
+    rows, lines, distinct = _is_solution_errors(stderr)
+    if rows:
+        out["is_solution_errors"] = rows
+        out["is_solution_error_lines"] = lines
+        out["is_solution_errors_distinct"] = distinct
+    return out
+
+
+# The per-invocation artefacts this bridge creates in the THIRD-PARTY checkout, removed on the way
+# out. They exist because LoopLab evaluates nodes concurrently and a fixed `--model LoopLab` made
+# two nodes overwrite each other's solver and summary (see `main`), but nothing ever removed them:
+# measured 2026-08-22, ONE campaign left 77 `results/LoopLab-<pid>/` directories and 79
+# `reports/evaluate_summary.<pid>.json` files, and `benchmarks/snapshot.sh` copies `reports/` into
+# every snapshot. A directory named after a dead process is also indistinguishable from a live
+# one for anybody reading that tree later.
+#
+# Set `ALGOTUNE_KEEP_EVAL_ARTEFACTS=1` to keep them: when a score is disputed, the copied solver
+# and the raw summary are the evidence, and deleting evidence by default in a DEBUGGING session is
+# worse than the clutter this removes.
+_ARTEFACTS: list = []
+
+
+def _sweep_artefacts() -> None:
+    """Best-effort. A cleanup failure must never change the line this bridge prints."""
+    if os.environ.get("ALGOTUNE_KEEP_EVAL_ARTEFACTS") == "1":
+        return
+    for path in _ARTEFACTS:
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink()
+        except Exception:                       # noqa: BLE001 - see the docstring
+            pass
+    _ARTEFACTS.clear()
+
+
+def _emit(out: dict[str, Any]) -> None:
+    """Print the ONE JSON line LoopLab reads — the single exit through which every path leaves.
+
+    It exists to hold one invariant that a scattered `print(json.dumps(...))` could not: **a
+    non-positive speedup never ships without a `no_speedup.reason`.** That is the whole defect —
+    four different outcomes ("wrong on every instance", "wrong on 5 of 100", "crashed", "timed out")
+    printed one indistinguishable `0.0` — so it is enforced HERE, at the boundary, rather than
+    trusted to every branch above.
+
+    A reason outside `NO_SPEEDUP_REASONS` is downgraded to `unknown` and the original is preserved
+    under `reason_unregistered`. Refusing to print at all would turn a vocabulary slip into a node
+    with no metric, which `metric_salvage` DISCARDS — strictly worse than a scored zero with a
+    slightly wrong label, and the failure mode the timeout branch below was already fixed for once.
+    """
+    speedup = out.get("speedup")
+    if not isinstance(speedup, (int, float)) or speedup <= 0:
+        block = out.get("no_speedup")
+        if not isinstance(block, dict):
+            block = out["no_speedup"] = {"reason": "unknown"}
+        reason = block.get("reason")
+        if reason not in NO_SPEEDUP_REASONS:
+            block["reason_unregistered"] = str(reason)
+            block["reason"] = "unknown"
+    print(json.dumps(out))
+    # After the print, never before: the line LoopLab reads is the product, and a sweep that
+    # raised before it would turn clutter into a node with no metric.
+    _sweep_artefacts()
+
+
 def _rules_violation(root: Path, solver: Path) -> str:
     """AlgoTune's own verdict on this candidate, or "" when it is clean.
 
@@ -205,12 +517,14 @@ def main() -> int:
     root: Path = args.algotune_root.resolve()
     evaluator = root / "scripts" / "evaluate_results.py"
     if not evaluator.exists():
-        print(json.dumps({"speedup": 0.0, "error": f"no evaluate_results.py under {root}"}))
+        _emit({"speedup": 0.0, "error": f"no evaluate_results.py under {root}",
+               "no_speedup": _no_speedup("no_evaluator")})
         return 0
 
     src = Path(args.solver).resolve()
     if not src.exists():
-        print(json.dumps({"speedup": 0.0, "error": f"no solver at {src}"}))
+        _emit({"speedup": 0.0, "error": f"no solver at {src}",
+               "no_speedup": _no_speedup("no_solver")})
         return 0
 
     if args.enforce_rules:
@@ -242,11 +556,13 @@ def main() -> int:
     model_dir = f"{args.model}-{os.getpid()}"
     dest_dir = root / "results" / model_dir / args.task
     dest_dir.mkdir(parents=True, exist_ok=True)
+    _ARTEFACTS.append(root / "results" / model_dir)
     shutil.copy2(src, dest_dir / "solver.py")
 
     # The summary path is per-invocation for the same reason: `evaluate_results.py` writes one
     # shared `reports/evaluate_summary.json`, so concurrent bridges would read each other's.
     summary = root / "reports" / f"evaluate_summary.{os.getpid()}.json"
+    _ARTEFACTS.append(summary)
     if summary.exists():
         summary.unlink()
 
@@ -274,11 +590,18 @@ def main() -> int:
         # then recorded "no metric" rather than a scored-zero, which `metric_salvage` DISCARDS
         # instead of counting as a failed solver. A timed-out solver is a wrong solver, not a
         # missing measurement.
-        print(json.dumps({"speedup": 0.0, "eval_seconds": round(time.time() - started, 1),
-                          "subset": args.subset,
-                          "error": f"evaluator exceeded --timeout {args.timeout}s",
-                          "stderr_tail": (exc.stderr or b"")[-1000:].decode("utf-8", "replace")
-                          if isinstance(exc.stderr, bytes) else (exc.stderr or "")[-1000:]}))
+        # `TimeoutExpired.stderr` is bytes under `text=False` and str under `text=True`; the
+        # decode below is what the tail already did, hoisted so the explanation can read the SAME
+        # bytes. A partial stderr is still worth mining: the ERROR lines a task's `is_solution`
+        # logged before the wall clock ran out say what it was rejecting while it hung.
+        partial = exc.stderr or ("" if isinstance(exc.stderr, str) else b"")
+        if isinstance(partial, bytes):
+            partial = partial.decode("utf-8", "replace")
+        _emit({"speedup": 0.0, "eval_seconds": round(time.time() - started, 1),
+               "subset": args.subset,
+               "error": f"evaluator exceeded --timeout {args.timeout}s",
+               "stderr_tail": partial[-1000:],
+               "no_speedup": _no_speedup("evaluator_timeout", stderr=partial, task=args.task)})
         return 0
     elapsed = round(time.time() - started, 1)
 
@@ -287,7 +610,8 @@ def main() -> int:
     if not summary.exists():
         out["error"] = "evaluate_summary.json not produced"
         out["stderr_tail"] = proc.stderr[-1000:]
-        print(json.dumps(out))
+        out["no_speedup"] = _no_speedup("no_summary", stderr=proc.stderr, task=args.task)
+        _emit(out)
         return 0
 
     try:
@@ -295,13 +619,15 @@ def main() -> int:
                               args.task, model_dir)
     except Exception as exc:  # noqa: BLE001
         out["error"] = f"unreadable summary: {type(exc).__name__}: {exc}"
-        print(json.dumps(out))
+        out["no_speedup"] = _no_speedup("unreadable_summary", stderr=proc.stderr, task=args.task)
+        _emit(out)
         return 0
 
     if record is None:
         out["error"] = f"no record for task {args.task!r} in evaluate_summary.json"
         out["stderr_tail"] = proc.stderr[-1000:]
-        print(json.dumps(out))
+        out["no_speedup"] = _no_speedup("no_record", stderr=proc.stderr, task=args.task)
+        _emit(out)
         return 0
 
     speedup = next((_coerce_speedup(record[k]) for k in _SPEEDUP_KEYS if k in record), None)
@@ -346,7 +672,19 @@ def main() -> int:
         if record.get(key) is not None:
             out[key] = record[key]
 
-    print(json.dumps(out))
+    # THE PATH THIS CHANGE IS ABOUT. A record was found, and until 2026-08-22 that was treated as
+    # success even when the record said `"final_speedup": "N/A"` -- `_coerce_speedup` returned None,
+    # the line above printed 0.0, and `proc.stderr`, which held the evaluator's own sentence about
+    # WHY, was dropped on the floor. The reason starts as `reported_zero` (what THIS side knows: a
+    # record exists and it did not yield a positive number) and `_no_speedup` upgrades it to the
+    # evaluator's own class when its verdict is on the stderr we just captured.
+    if out["speedup"] <= 0:
+        reported = next((record[k] for k in _SPEEDUP_KEYS if k in record), None)
+        out["stderr_tail"] = proc.stderr[-1000:]
+        out["no_speedup"] = _no_speedup("reported_zero", stderr=proc.stderr, task=args.task,
+                                        reported=reported)
+
+    _emit(out)
     return 0
 
 

@@ -185,8 +185,9 @@ class RunTools:
                 "Read one experiment's EXECUTION LOGS — the captured stdout/stderr TAILS as recorded "
                 "in the event log (bounded, not the raw full stream; the END — where a traceback's "
                 "error and the final metric line live — is preserved). Far more than the 300-char "
-                "failure summary read_experiment shows. Use to see why a node failed, or what it "
-                "printed while training.",
+                "failure summary read_experiment shows. Use to see why a node failed, why a node "
+                "SCORED WHAT IT SCORED (a bad metric's reason is in the eval's stderr, not in the "
+                "number), or what it printed while training.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("find_analogous",
                 "Find experiments most similar to a given one (or to a set of params) by parameter "
@@ -442,7 +443,9 @@ class RunTools:
 
     def _logs(self, st: RunState, nid: int) -> str:
         """The node's execution logs: the captured stdout tail (what it printed while training/eval)
-        and the stderr/error tail — bounded (a chain of tails: 64KB capture → event tail → this clip),
+        and the stderr/error tail — for a FAILED node the engine's failure text, for a SCORED one the
+        eval command's own stderr (`Node.stderr_tail`), which is the only place a bad metric's REASON
+        survives — bounded (a chain of tails: 64KB capture → event tail → this clip),
         NOT the raw full stream, but far more than the 300-char failure summary `read_experiment`
         shows. Logs are the whole point of this tool, so they get a larger budget (`_LOG_CHARS`) than
         a normal read."""
@@ -456,7 +459,16 @@ class RunTools:
             head += f" · eval={digest.fmt_num(n.eval_seconds)}s"
         out = [head]
         stdout = (n.stdout_tail or "").rstrip()
-        error = (n.error or "").rstrip()
+        # BOTH TERMINALS' stderr, through one section. `n.error` is what a node that FAILED wrote;
+        # `n.stderr_tail` is what a node that SCORED wrote (see `engine/evaluate.py::
+        # _scored_output_evidence`) — before it existed, a node with a bad metric rendered here as a
+        # stdout tail and nothing else, which is how "the metric is 0.0" reached the next proposal
+        # with no account of WHY. The fold writes at most one of them per attempt (a `node_reset`
+        # clears both), so the join is a fail-safe against a corrupt log rather than a normal shape:
+        # ordered failure-text LAST because `_clip` keeps the TAIL and the failure text is the one a
+        # reader must not lose.
+        error = "\n".join(part for part in ((n.stderr_tail or "").rstrip(),
+                                            (n.error or "").rstrip()) if part)
         budget = max(self.max_chars, self._LOG_CHARS)
         # Split the budget so a huge stdout can't crowd out the error (and vice-versa): give each the
         # larger half only when the other is short, so a lone log still gets the whole budget.
@@ -1469,8 +1481,6 @@ class DataTools:
         # adapter error pinned `read_asset=UNKNOWN(...)` for the provider's whole life, and a first
         # call before the mounts landed pinned `read_asset=0` -- which under `hide_empty_tools`
         # withheld all three data tools for the rest of the run.
-        if state is not self.state:
-            self._inventory_cache = None
         if state is not self.state:
             self._inventory_cache = None
         self.state = state

@@ -431,14 +431,14 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     # Cross-run introspection: read-only access to SIBLING runs of the same task so the Researcher can
     # build on a neighbouring run's experiments. Needs the run's own dir; off without it (parity).
     providers = _shared_providers(task, settings, run_dir)
-    # RepoTask code-edit mode (item #3): give the Researcher read-only grep/list/read over the
-    # editable repo(s) so it proposes changes from the actual code, not blind. Skipped for the
-    # cli_overrides param-search mode (no code to read) and non-repo tasks.
-    rs_fn = getattr(task, "repo_spec", None)
-    rs = rs_fn() if callable(rs_fn) else None
-    if rs and rs.get("editables") and not _param_search:
-        from looplab.tools.knowledge_tools import RepoTools
-        providers.append(RepoTools(rs["editables"]))
+    # RepoTask code-edit mode (item #3): read-only grep/list/read over the editable repo(s) so the
+    # Researcher proposes from the actual code, not blind. The rule moved to `agents/repo_reader.py`
+    # — deep research builds from this same list and never grew a copy; see there for what it cost.
+    from looplab.agents.repo_reader import repo_reader_provider
+    rs_fn = getattr(task, "repo_spec", None)      # still read below for the sweep offer
+    _reader = repo_reader_provider(task)
+    if _reader is not None:
+        providers.append(_reader)
     # P6/P21 (docs/PROMPT_REVIEW.md): offer the intra-node sweep ONLY when the active Developer
     # actually implements `idea.space` — the in-house LLMDeveloper on script-solution (non-repo)
     # tasks. CliAgentDeveloper (external CLI presets) and LLMRepoDeveloper never read `idea.space`:

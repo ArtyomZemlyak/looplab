@@ -646,11 +646,9 @@ def test_the_raw_speculative_lane_keeps_the_receipts_of_the_proposal_it_could_no
         generation=state.search_epoch,
         action={"kind": "debug", "parent_id": 0},
         proposal_state=state,
-        proposal_authority_seq=engine._proposal_authority_seq(engine.store.read_all()),
         proposal_node_ceiling=1,
         at_node=1,
         source="researcher",
-        cue_fence=engine._proposal_cue_fence(state),
         success=True,
         idea=retry,
         audit_events=(("novelty_rejected", {
@@ -667,15 +665,21 @@ def test_the_raw_speculative_lane_keeps_the_receipts_of_the_proposal_it_could_no
 
 def test_a_staging_refusal_that_is_merely_stale_names_no_card(tmp_path):
     """The counterfactual: an ordinary moved-fence refusal is transient and must NOT be reported as
-    a permanent one, or the raw speculative lane would stop prefetching every time a tail moved."""
+    a permanent one, or the raw speculative lane would stop prefetching every time a tail moved.
+
+    The stale condition driven here is the node-slot ceiling: `_stage_prepared_card` is handed a
+    ceiling of 1 while the log's real one has moved on, which is the same shape of refusal a
+    concurrent reservation produces. It used to be spelled `proposal_authority_seq=0` — a fence that
+    no longer exists, and whose removal is the point of `_proposal_receipt_fence`.
+    """
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
     idea = Idea(operator="draft", params={"x": 5.0, "y": 6.0}, rationale="r",
                 hypothesis="An unrelated new question.")
+    engine.store.append(EV_NODE_BUILDING, {"node_id": 1, "operator": "draft", "parent_ids": []})
     assert engine._stage_prepared_card(
         {"kind": "draft", "parent_ids": []}, idea, proposal_state=state,
-        proposal_node_ceiling=1, at_node=1, source="researcher",
-        proposal_authority_seq=0) is None
+        proposal_node_ceiling=1, at_node=1, source="researcher") is None
     assert engine._card_stage_attached_to is None
 
 

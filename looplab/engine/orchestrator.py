@@ -2133,8 +2133,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         the board has nothing selectable" is already derivable — the live half from
         `Engine._eval_inflight`, the durable half from the folded board — and a row saying so would
         be a new writer for a fact nobody has to be told. A FOLDED row would move
-        `_proposal_authority_seq` and discard paid proposals; a DIAGNOSTIC row is excluded from that
-        fence today, but it would still be an append per poll turn for the whole of a multi-hour
+        `_proposal_authority_seq` (which since 2026-08-20 costs a `_reserve_node_build` CAS retry, no
+        longer a paid proposal) and the node-slot ceiling nothing; a DIAGNOSTIC row is excluded from
+        that fence today, but it would still be an append per poll turn for the whole of a multi-hour
         evaluation, i.e. an unbounded log written to record that nothing happened. The condition is
         also its own idempotence (see `occupancy_due`), so there is nothing for a receipt to fence.
         """
@@ -5304,8 +5305,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # final writer-owned Card id first, then run the same proposal-bound novelty sidecar as the
             # ordinary draft/improve path. Reserved parallel batches bypass this helper entirely: their
             # shared proposal pass has already applied the gate.
-            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                                node_id=prospective_node_id, prospective=True, operator=kind):
+            with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                     node_id=prospective_node_id, prospective=True, operator=kind):
                 final = self._apply_novelty_gate(
                     state, linked, researcher=researcher,
                     prospective_node_id=prospective_node_id,
@@ -5319,8 +5320,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 stamp_proposal_span(_span, idea, node_id=prospective_node_id)
             if idea is None:
                 return None
-            with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                                node_id=prospective_node_id, prospective=True, operator=kind):
+            with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                     node_id=prospective_node_id, prospective=True, operator=kind):
                 final = self._apply_novelty_gate(
                     state, idea,
                     repropose=lambda: _link(self._canonicalize_draft_idea(
@@ -5359,8 +5360,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             stamp_proposal_span(_span, idea, node_id=prospective_node_id)
         if idea is None:
             return None
-        with self._progress(PROGRESS_STAGE_BUILD, "novelty",
-                            node_id=prospective_node_id, prospective=True, operator=kind):
+        with self._paid_progress(PROGRESS_STAGE_BUILD, "novelty",
+                                 node_id=prospective_node_id, prospective=True, operator=kind):
             final = self._apply_novelty_gate(
                 state, idea,
                 repropose=lambda p=parent: _link(self._canonicalize_idea_operator(

@@ -34,7 +34,9 @@ the ONE channel that skipped the screen the rest of the codebase applies. It no 
   `setdefault` row could never fire.
 
 `redact_output_tail` is the ONE spelling of that split; `engine/audit.py::Engine._redact` is its
-only production caller and funnels all six persisted output tails through it.
+only production caller and funnels all seven persisted output tails through it (the seventh is
+`node_evaluated.stderr_tail`, the eval's own account of a metric on the terminal that SCORED —
+`engine/evaluate.py::_scored_output_evidence`).
 
 **THREE PATTERNS ANSWER THREE DIFFERENT QUESTIONS, and none of them is a copy of another.**
 `envsafe.SECRET_ENV` ("may a child process SEE this variable?") over-matches on purpose — a bare

@@ -260,6 +260,7 @@ _LAYOUT = {
     # the package-layout audit and also breaks the supported ``looplab.public_cards`` legacy alias.
     "public_cards": "serve",
     "reachability": "agents",  # task-aware inventory of reachable LLM consumers at run start
+    "repo_reader": "agents",   # the ONE rule for "may this read-only role open the task's source?"
     "read_fence": "runtime",   # the source-tree read fence: the generated per-run sitecustomize
     "metric_subject": "runtime",   # what a recorded metric is a claim ABOUT: the subject
     #                              binding the eval captures at the score stage's start

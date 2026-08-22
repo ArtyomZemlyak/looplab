@@ -4,6 +4,11 @@
 #   ARM=A ./campaign.sh          # the reference loop (AlgoTuner), depends on no LoopLab code
 #   ARM=B ./campaign.sh          # LoopLab, AFTER a rebase onto master (see below)
 #
+# EXIT CODES. 0 = every task-arm reached a terminal state. 2 = this driver refused before running
+# anything (bad ARM, no AlgoTune checkout, an arm-A budget that does not match). 3 = the arm ran but
+# one or more task-arms REFUSED TO START and were therefore not measured -- see `record_done` and
+# `final_banner`, and do not summarise an arm that exits 3.
+#
 # Run `setup_algotune.sh /path/to/AlgoTune` first, on every machine, or the numbers are not the
 # numbers this arm measures.
 #
@@ -114,7 +119,10 @@ export LOOPLAB_LLM_TEMPERATURE='0.0'
 # effect on a single call. Measured 2026-08-20: two `propose` calls burned the FULL 65,536-token
 # completion cap without emitting a tool call -- 889 s and 593 s, $0.019, both ERROR ("no
 # tool_calls in response"), both retried. `core/llm.py::reasoning_body` now REFUSES that pair, so
-# the split below is enforced at the client rather than remembered here.
+# the split below is enforced at the client rather than remembered here. What it refuses is a second
+# DEPTH setting, member by member (`core/llm.py::REASONING_DEPTH_KNOBS`) -- not the mere use of a
+# key: OpenRouter's `reasoning.exclude` and any non-thinking `chat_template_kwargs` belong in EXTRA
+# and are accepted beside `LOOPLAB_LLM_REASONING`.
 export LOOPLAB_LLM_REASONING="${LOOPLAB_LLM_REASONING:-medium}"
 # EXTRA carries only what is NOT the depth: the provider pin. Unpinned, one slug reached two
 # different fp4 providers and returned 96/17/96 completion tokens for one prompt.
@@ -133,6 +141,29 @@ export LOOPLAB_LLM_BUDGET_USD="$BUDGET_USD"
 # So arm A REFUSES rather than guesses. Rewriting somebody's config from a campaign driver is the
 # worse failure: it would make every run silently authoritative over a file the fork owns.
 # `patch_model_entry.py --spend-limit` is the one place that value is set.
+# The hint an operator is about to FOLLOW, so it must be right for the key actually in play.
+#
+# `patch_model_entry.py --slug X` writes the key `openrouter/X`. That is correct only while the
+# campaign runs on an OpenRouter key. `box-jhub-l40s.sh` sets `ALGOTUNE_MODEL_KEY=gateway/...`
+# (the corporate gateway), where `${KEY#openrouter/}` strips nothing, so the printed command wrote
+# `openrouter/gateway/...` -- a key the check does not look up, leaving the operator to fail the
+# same check again having done exactly what it said. Measured 2026-08-22.
+budget_hint() {
+  case "$ALGOTUNE_MODEL_KEY" in
+    openrouter/*)
+      echo "  python3 $HERE/patch_model_entry.py --algotune-root $AT \\" >&2
+      echo "      --slug ${ALGOTUNE_MODEL_KEY#openrouter/} --spend-limit $BUDGET_USD" >&2 ;;
+    *)
+      echo "  '$ALGOTUNE_MODEL_KEY' is not an OpenRouter key, so patch_model_entry.py does not" >&2
+      echo "  own it. Set the ceiling ON THAT ENTRY in $AT/AlgoTuner/config/config.yaml:" >&2
+      echo "      $ALGOTUNE_MODEL_KEY:" >&2
+      echo "        spend_limit: $BUDGET_USD" >&2
+      echo "  PER-MODEL, not the global: AlgoTuner resolves" >&2
+      echo "  model_info.get('spend_limit', global_config.spend_limit), so an entry without one" >&2
+      echo "  silently inherits the global (measured: 0.02 under a banner that said 1.00)." >&2 ;;
+  esac
+}
+
 if [ "$ARM" = "A" ]; then
   A_LIMIT="$(python3 - "$AT" "$ALGOTUNE_MODEL_KEY" <<'PYEOF'
 import sys, yaml
@@ -146,21 +177,24 @@ PYEOF
 )"
   if [ "$A_LIMIT" = "MISSING" ]; then
     echo "arm A: no model entry '$ALGOTUNE_MODEL_KEY' in $AT/AlgoTuner/config/config.yaml." >&2
-    echo "  add one:  python3 $HERE/patch_model_entry.py --algotune-root $AT \\" >&2
-    echo "                --slug ${ALGOTUNE_MODEL_KEY#openrouter/} --spend-limit $BUDGET_USD" >&2
+    echo "  add one:" >&2
+    budget_hint
     exit 2
   fi
   if [ "$(python3 -c "print(abs(float('$A_LIMIT')-float('$BUDGET_USD'))<1e-9)")" != "True" ]; then
     echo "arm A budget MISMATCH: config.yaml says spend_limit=$A_LIMIT, BUDGET_USD=$BUDGET_USD." >&2
     echo "  The two arms would not be measured on the same budget. Re-point one of them:" >&2
-    echo "  python3 $HERE/patch_model_entry.py --algotune-root $AT \\" >&2
-    echo "      --slug ${ALGOTUNE_MODEL_KEY#openrouter/} --spend-limit $BUDGET_USD" >&2
+    budget_hint
     exit 2
   fi
   echo "arm A budget: spend_limit=$A_LIMIT (matches BUDGET_USD)"
 fi
 export PYTHONPATH="$REPO"
 mkdir -p "$OUT" "$WS"
+# `.refused` is THIS invocation's tally of task-arms that never started, so a fixed-and-re-run
+# arm must not inherit the last one's. Only the tally is cleared -- never a `.done` marker, which
+# is the durable record of a task-arm that has already been measured.
+rm -f "$OUT/$ARM"-*.refused
 
 reap_orphan_workers() {
   # `pkill -f <name>` does not reach a multiprocessing forkserver: its command line carries neither
@@ -172,28 +206,119 @@ reap_orphan_workers() {
   done
 }
 
-record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus
+# THE EVIDENCE THAT A TASK-ARM ACTUALLY STARTED, which is the one thing exit 2 cannot tell you.
+#
+# `rc=2` is `cli/__init__.py::REFUSAL_EXIT_CODE` and it is worn by EVERY `OperatorRefusal`, not by
+# the spend ceiling this branch was written for. That family only grows: `BudgetExceeded` joined it
+# on 2026-08-20, every new `ConfigRefusal` raise site joins it, and it already contains `LLMError`,
+# whose ~35 raise sites cover an unreachable base URL, a half-set credential pair and a throttled
+# key. None of those is a verdict about a task -- they are the run declining to begin, and they all
+# arrive in about a second.
+#
+# So the whole arm can fail in one shape: every task exits 2 within seconds, 20 `.done` markers are
+# written, this driver prints COMPLETE, the results table is all nulls, and a resume SKIPS all 20
+# because the markers exist. A full-looking table of nothing is the worst output a benchmark harness
+# has, and it needs one bad environment variable.
+#
+# The two states ARE distinguishable, from the run's own artifacts rather than from its exit code.
+# Measured on this box 2026-08-22 and against the preserved arm-B corpus under camp-runs/:
+#   refused to start - the run dir holds `engine.lock`, zero bytes, and NOTHING else; there is no
+#                      `events.jsonl` at all, because the refusal happens before the engine opens
+#                      one. Reproduced identically for three separate exit-2 refusals (a half-set
+#                      credential pair, an unreachable endpoint, the reasoning-depth clash), each
+#                      1-2 s of wall.
+#   ran and stopped  - `events.jsonl` exists and carries `run_started` plus the `llm_usage` rows the
+#                      cost accountant wrote. camp-runs/convex_hull: 24 kB, 17 `llm_usage` rows,
+#                      marker `wall=136 rc=2`. All 20 preserved arm-B markers are rc=2 and every one
+#                      of them has such a log.
+# The event log is the discriminator, NOT the wall clock (a threshold between 2 s and 136 s is a
+# guess that a slow endpoint invalidates) and NOT the exit code (which cannot separate them, by
+# construction -- that is the defect).
+run_started_evidence() {   # $1 = run dir ("" = no LoopLab run dir, i.e. arm A). echoes metered calls
+  [ -n "${1:-}" ] && [ -s "$1/events.jsonl" ] || return 1
+  N="$(grep -c '"type":"llm_usage"' "$1/events.jsonl" 2>/dev/null)"
+  echo "${N:-0}"
+}
+
+record_done() {   # $1 = marker path, $2 = exit code, $3 = start epoch, $4 = cpus, $5 = run dir
   RC=$2
+  WALL=$(( $(date +%s) - $3 ))
+  REGIME="cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE"
   # A `.done` marker means "this task-arm reached a TERMINAL state and must not be re-run". It must
   # NOT be written for a run that was interrupted: an interrupted task has no verdict, and a marker
   # makes a later resume SKIP it silently. Measured 2026-08-20: stopping a campaign wrote six
   # markers over live runs -- one of them 230 minutes in -- and the resume would have treated all
   # six as complete with no score.
   #   0        - the run ended on its own (a score, or the harness's own N/A)
-  #   2        - a TYPED OPERATOR REFUSAL (`cli/__init__.py::REFUSAL_EXIT_CODE`), which for this
-  #              campaign is almost always the LLM spend ceiling. Terminal, and this is the whole
-  #              point of the exit code: a refusal is a property of the INPUT, so the next attempt
-  #              spends the same allowance, or reads the same bad task file, and stops at the same
-  #              wall. Before `BudgetExceeded` wore the marker it exited 1 with a traceback and was
-  #              recorded as "interrupted, still owed" -- i.e. a FINISHED task queued for a retry
-  #              that could never do anything different.
+  #   2        - a TYPED OPERATOR REFUSAL (`cli/__init__.py::REFUSAL_EXIT_CODE`). Terminal ONLY with
+  #              the evidence above that the run STARTED: "this task-arm finished, having spent its
+  #              budget" and "this task-arm refused to start" are the same exit code and opposite
+  #              facts. With the evidence the old reasoning holds and the marker is right -- a
+  #              refusal is a property of the INPUT, so the next attempt spends the same allowance
+  #              and stops at the same wall (before `BudgetExceeded` wore the marker it exited 1 with
+  #              a traceback and was recorded as "interrupted, still owed", i.e. a FINISHED task
+  #              queued for a retry that could never do anything different). WITHOUT it there is no
+  #              measurement to preserve and no allowance that was spent, so no marker is written.
   #   124      - the wall-clock net fired; terminal, and deliberately recorded so it is visible
   #              rather than retried forever, but it produces no number (see docs/51)
   #   130/137/143 and anything else - interrupted. NO marker; the task is still owed.
   case "$RC" in
-    0|2|124) echo "wall=$(( $(date +%s) - $3 )) rc=$RC cpus=$4 lanes=$LANE_COUNT cores_per_lane=$CORES_PER_LANE" > "$1" ;;
-    *)     echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed" ;;
+    0|124)
+      echo "wall=$WALL rc=$RC $REGIME" > "$1" ;;
+    2)
+      if METERED="$(run_started_evidence "${5:-}")"; then
+        # `metered` is recorded because a started run that paid for nothing is still worth seeing in
+        # the marker; it is not what decides the marker.
+        echo "wall=$WALL rc=$RC $REGIME metered=$METERED" > "$1"
+      else
+        refuse_to_start "$1" "$WALL" "$4" "${5:-}"
+      fi ;;
+    *)
+      echo "  [$(date +%H:%M:%S)][$4] interrupted (rc=$RC) -- no marker written, task still owed" ;;
   esac
+}
+
+refuse_to_start() {   # $1 = marker path (NOT written), $2 = wall, $3 = cpus, $4 = run dir
+  # A `.refused` file rather than a variable: every task runs in a backgrounded subshell, so a
+  # counter would be incremented in a child and lost. This is the tally `final_banner` reads, and it
+  # is deliberately NOT a `.done` -- the resume check keys on `.done`, and this task is still owed.
+  echo "wall=$2 rc=2 cpus=$3 evidence=none" > "${1%.done}.refused"
+  if [ -n "$4" ]; then
+    WHERE="no event log at $4/events.jsonl -- the run refused before the engine opened one"
+  else
+    # Arm A never runs LoopLab, so it has no event log to check AND no claim on exit 2: the branch
+    # above is justified entirely by `cli/__init__.py::REFUSAL_EXIT_CODE`, which AlgoTuner does not
+    # implement. Its exit 2 means whatever AlgoTuner means by it, which is not "this task is done".
+    # All 20 preserved arm-A markers are rc=0, so this has never fired on a real arm A.
+    WHERE="arm A runs no LoopLab engine, so exit 2 carries none of this campaign's meaning"
+  fi
+  echo "  [$(date +%H:%M:%S)][$3] REFUSED TO START after ${2}s: $WHERE." >&2
+  echo "      NO .done marker written. This task-arm measured NOTHING and is still owed;" >&2
+  echo "      the cause is in the last lines of ${1%.done}.log." >&2
+}
+
+final_banner() {   # $1 = out dir, $2 = arm, $3 = task count. Returns 3 if anything refused to start.
+  # The banner is a FUNCTION so it can be driven by tests/test_campaign_marker_evidence.py: the
+  # property that matters is "the driver does not say COMPLETE over an arm that never ran", and the
+  # only honest way to check that is to run it over a directory that holds a refusal.
+  REFUSED_N="$(ls "$1/$2"-*.refused 2>/dev/null | wc -l)"
+  DONE_N="$(ls "$1/$2"-*.done 2>/dev/null | wc -l)"
+  if [ "$REFUSED_N" -gt 0 ]; then
+    # "NOT MEASURED", not "INCOMPLETE": a watcher greps this log for `arm $ARM COMPLETE`, and
+    # "INCOMPLETE" CONTAINS that string -- the failure banner would have matched the success one.
+    echo "[$(date +%H:%M:%S)] ===== arm $2 NOT MEASURED: $REFUSED_N of $3 task-arms REFUSED TO START ====="
+    for R in "$1/$2"-*.refused; do
+      echo "    $(basename "${R%.refused}"): $(cat "$R")"
+    done
+    echo "  These exited 2 without starting a run. Exit 2 is REFUSAL_EXIT_CODE, worn by every"
+    echo "  OperatorRefusal -- an unreachable endpoint, a bad credential pair or a refused setting"
+    echo "  all land here, and none of them is a measurement. $DONE_N of $3 task-arms have a marker."
+    echo "  Fix the cause and re-run this arm: no marker was written, so exactly these are retried."
+    echo "  Do NOT summarise this arm -- the numbers below it would be a table of nothing."
+    return 3
+  fi
+  echo "[$(date +%H:%M:%S)] ===== arm $2 COMPLETE ($DONE_N/$3 markers) ====="
+  return 0
 }
 
 run_one() {                       # $1 = task, $2 = cpu list
@@ -212,7 +337,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
-    record_done "$OUT/A-$T.done" "$RC" "$S" "$CPUS"
+    record_done "$OUT/A-$T.done" "$RC" "$S" "$CPUS" ""
     [ -s "$OUT/A-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm A done ($(cat "$OUT/A-$T.done"))"
   else
     if [ -s "$OUT/B-$T.done" ]; then echo "[$CPUS] $T arm B already done"; return; fi
@@ -235,7 +360,14 @@ run_one() {                       # $1 = task, $2 = cpu list
     RC=$?   # captured HERE: the champion extraction and the test scoring below both clobber $?
     # Champion from the FOLD, then ONE scoring pass on TEST: every node above ran on TRAIN, which
     # is what AlgoTuner's own agent does. Without this the arm optimises against its graded split.
-    if python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
+    if [ "$RC" = 2 ] && ! run_started_evidence "$TASK_ROOT/run" >/dev/null; then
+      # The SAME predicate `record_done` uses four lines down, applied to the results row. A run that
+      # refused to start has no fold, so there is no champion to extract -- and the usual
+      # null-speedup row would enter compare_arms' table looking exactly like a task that ran hard
+      # and found nothing. `compare_arms.py` reads only `speedup`, so the sentence is for the human.
+      echo '{"speedup": null, "error": "the LoopLab run refused to start (exit 2, no event log) -- not a measurement"}' \
+        > "$OUT/B-$T.final.json"
+    elif python "$REPO/benchmarks/algotune/extract_champion.py" --run-dir "$TASK_ROOT/run" \
            --out "$TASK_ROOT/champion_solver.py" >> "$OUT/B-$T.log" 2>&1; then
       (cd "$TASK_ROOT" && timeout "$HARD_TIMEOUT" taskset -c "$CPUS" \
           python "$REPO/benchmarks/algotune/looplab_eval.py" --algotune-root "$AT" --task "$T" \
@@ -244,7 +376,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     else
       echo '{"speedup": null, "error": "no champion to score"}' > "$OUT/B-$T.final.json"
     fi
-    record_done "$OUT/B-$T.done" "$RC" "$S" "$CPUS"
+    record_done "$OUT/B-$T.done" "$RC" "$S" "$CPUS" "$TASK_ROOT/run"
     [ -s "$OUT/B-$T.done" ] && echo "[$(date +%H:%M:%S)][$CPUS] $T arm B done ($(cat "$OUT/B-$T.done"))"
   fi
 }
@@ -273,7 +405,8 @@ for T in $TASKS; do
 done
 wait
 reap_orphan_workers
-echo "[$(date +%H:%M:%S)] ===== arm $ARM COMPLETE ====="
+final_banner "$OUT" "$ARM" "$NTASKS"
+CAMPAIGN_RC=$?
 
 # The runtime disk does not survive a container restart and an arm is hours of measurement that
 # cannot be recomputed. Snapshot at the one moment we know the data just changed. SNAPSHOT=0 skips.
@@ -282,3 +415,8 @@ if [ "${SNAPSHOT:-1}" = "1" ] && [ -x "$REPO/benchmarks/snapshot.sh" ]; then
 fi
 echo "summarise with:  python $REPO/benchmarks/algotune/compare_arms.py \\"
 echo "    --algotune-root $AT --runs-root $RUNS_ROOT --final-dir $OUT --reference"
+
+# Exit 3 = the arm did not measure everything it was asked to (see `final_banner`). It is a
+# distinct code on purpose: 0 would let a wrapper summarise a table of nothing, and the 2 this
+# script already uses is its own pre-flight refusal, raised before a single task ran.
+exit "$CAMPAIGN_RC"

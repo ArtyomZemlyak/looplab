@@ -487,6 +487,17 @@ one real run turned an out-of-credits `402` into **2345 `node_repaired` events o
 wall-clock actually went (LLM vs eval vs repair vs tools, per node **and** run-level, reconciled
 against the run's real duration with the untraced remainder named).
 
+**A phase that spends must open a span, or `timings` cannot see it.** A `phase_progress` beacon
+alone appends an event and opens nothing, and an LLM call made outside every span is written to
+`events.jsonl` with `trace_id: null` and lands in no span at all. Measured over a 20-run AlgoTune
+campaign on 2026-08-20, **1,579 of 6,002 paid calls (26 %) were untraced**, $1.77 of them the
+novelty gate — a beacon-only phase running a 12-turn agentic loop plus a whole second Researcher
+proposal on each rejection, 11 % of the budget and 6.6 of 60.8 run-hours with nothing saying so.
+`SharedEngineMixin._paid_progress` is the beacon and the span together; the novelty phase uses it
+since 2026-08-20, so its cost now appears under `phase=novelty` like every other phase. Turn the
+gate off with `novelty_mode=off` (**not** `novelty_gate=false`, which is a legacy alias that forces
+nothing) — see [configuration](configuration.md).
+
 ### What the triage judge is allowed to look at
 
 Until 2026-08-15 the answer was: `res.stderr[-500:]`. Five hundred characters — the tail of one
@@ -664,9 +675,15 @@ text is what docs/36 forbids.
 resolves *and* that a synthetic input's content actually reaches the rendered output. A signal added
 to the registry without a delivery probe fails the suite — so *"the signal silently stopped being
 delivered"* is a red test, not the next review's finding. Three of the routes (trust flags, watchdog
-signals, operator directives) are **push** (the engine injects them), one (deep-research memo) is
-**pull** (a tool the
-agent may call for depth), and the rest ride the always-on folded-state briefs. The full rationale is
+signals, operator directives) are **push** (the engine injects them), two (deep-research memo,
+and the scored eval's own stderr via `read_logs`) are **pull** (a tool the
+agent may call for depth), and the rest ride the always-on folded-state briefs.
+The scored-eval route (`Node.stderr_tail`, written by `engine/evaluate.py::_scored_output_evidence`)
+is deliberately pull rather than context: the `triage_rationale` route carries a ~100-char verdict
+about a node that FAILED on the always-on digest, while this one is up to 4,000 characters of the
+eval's own text on EVERY scored node, and the always-on working set is under a hard char cap. Before
+it existed a node that exited 0 and scored badly kept nothing but its metric and a 500-char stdout
+tail — so the loop could see *what* a node scored and never *why*. The full rationale is
 in `docs/14-agent-framework-mega-review-2026-07-10.md` §1.
 
 Deep Research uses the shared `agent_self_plan` setting. With the shipped default enabled, the

@@ -65,7 +65,16 @@ def _arm_a(summary_path: Path, model_fragment: str) -> dict[str, float | None]:
             # "N/A" and "Error" are the harness's own words for "no number", and they are not zero.
             # `finite=True` additionally rejects NaN/inf, which would otherwise print as a speedup
             # and poison the mean.
-            out[task] = _to_float(raw)
+            value = _to_float(raw)
+            # LAST WRITER DOES NOT WIN. The fragment matches by SUBSTRING, and this file routinely
+            # holds several names for one model -- `deepseek-v4-flash` and
+            # `deepseek-v4-flash-0731` both match the default fragment. Assigning unconditionally
+            # let a trailing "N/A"/"Error" row overwrite an earlier real number, so the task
+            # printed `--`, counted as "missing an arm" and dropped out of the means: the silent
+            # exclusion this module's docstring promises not to do, arriving through the door it
+            # was watching. A number, once found for a task, is never replaced by a non-number.
+            if value is not None or task not in out:
+                out[task] = value
     return out
 
 

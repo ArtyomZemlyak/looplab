@@ -1087,3 +1087,117 @@ def test_this_module_owns_the_only_refusal_sentence_the_boundary_can_deliver():
     assert not [name for name in vars(read_allowlist)
                 if "refus" in name.lower() or "message" in name.lower()], (
         "a refusal sentence in the GRANT module is a sentence no refusal can carry")
+
+
+# ------------------------------------------------- the GRANT side of the same policy (`confine_grants`)
+#
+# `fence_inputs` answers "what is forbidden"; `confine_grants` answers "what may be granted", which
+# is the shape a Landlock allow-list and `render(confine=True)` need. The tests below exist because
+# the grant side had to be given the two guarantees the deny side already had — the `_norm_root`
+# normalization and the refusal of a prefix that CONTAINS a root — and a version shipped without
+# them: `tools/dev_probe.py` appended the machine tiers AFTER `fence_inputs` returned, so a repo at
+# `/opt/myrepo` under the granted `/opt` was unfenced in both halves of its rule 1.
+
+def _tier_with_a_root_inside(tmp_path):
+    """A machine-tier-shaped directory holding the fenced repo, the interpreter and a bystander."""
+    tier = tmp_path / "tier"
+    (tier / "repo" / "experiments").mkdir(parents=True)
+    (tier / "repo" / "experiments" / "final.txt").write_text(CHECKPOINT)
+    (tier / "venv" / "lib").mkdir(parents=True)
+    (tier / "other").mkdir()
+    (tmp_path / "tierfoo").mkdir()          # the sibling a bare prefix compare would swallow
+    return tier, tier / "repo"
+
+
+def test_a_grant_that_contains_a_root_is_replaced_by_the_subtrees_that_do_not(tmp_path):
+    """Neither answer the deny side has is available here. KEEPING it is a kernel grant of read over
+    the tree the confinement exists to hide; DROPPING it is what `_too_broad` exists to prevent one
+    layer down — the tier that swallows the repo is usually the interpreter's own prefix, and a
+    confined process without it does not start. So the tier is punched: everything under it except
+    the branch the root sits on."""
+    tier, root = _tier_with_a_root_inside(tmp_path)
+    grants, refused = read_fence.confine_grants([str(tier)], [str(root)])
+    assert not refused
+    assert str(tier) + os.sep not in grants, "the swallowing tier was granted whole"
+    covered = lambda p: any((p + os.sep).startswith(g) for g in grants)      # noqa: E731
+    assert not covered(str(root)) and not covered(str(root / "experiments" / "final.txt"))
+    assert covered(str(tier / "venv" / "lib")) and covered(str(tier / "other"))
+
+
+def test_a_punched_tier_is_punched_all_the_way_down_to_the_root(tmp_path):
+    """The root is rarely a direct child of the tier (`/opt/conda/src/repo` under `/opt`). Grant the
+    siblings at every level and descend only along the branch that still contains the root."""
+    deep = tmp_path / "tier" / "a" / "b" / "repo"
+    deep.mkdir(parents=True)
+    (tmp_path / "tier" / "a" / "sibling").mkdir()
+    (tmp_path / "tier" / "a" / "b" / "cousin").mkdir()
+    grants, refused = read_fence.confine_grants([str(tmp_path / "tier")], [str(deep)])
+    assert not refused
+    covered = lambda p: any((p + os.sep).startswith(g) for g in grants)      # noqa: E731
+    assert covered(str(tmp_path / "tier" / "a" / "sibling"))
+    assert covered(str(tmp_path / "tier" / "a" / "b" / "cousin"))
+    assert not covered(str(deep / "x")), "the root survived the descent"
+
+
+def test_every_grant_carries_the_trailing_separator_a_root_does(tmp_path):
+    """The `/src` vs `/srcfoo` bug, on the grant side. Under `_CONFINE` the hot path is a bare
+    `p.startswith(_ALLOW)`, so a grant spelled without the separator admits its sibling — and the
+    kernel half is handed the same tuple."""
+    tier, root = _tier_with_a_root_inside(tmp_path)
+    grants, _refused = read_fence.confine_grants([str(tier / "other")], [str(root)])
+    assert all(g.endswith(os.sep) for g in grants)
+    src = read_fence.render((), grants, policy="deny", confine=True)
+    ns = {"__name__": read_fence._PROBE_NAME}
+    exec(compile(src, "<fence>", "exec"), ns)
+    assert ns["_fenced"](str(tier / "other" / "x")) is None
+    assert ns["_fenced"](str(tier / "otherfoo" / "x")) is not None
+
+
+def test_a_grant_that_is_the_root_itself_is_refused_rather_than_dropped_or_kept(tmp_path):
+    """The one case the punch cannot answer (the repo IS the venv). Both silent outcomes are wrong —
+    kept is an unfenced process, dropped is a process that dies at its first import with nothing to
+    say why — so it is returned as a refusal for the caller to be loud about."""
+    _tier, root = _tier_with_a_root_inside(tmp_path)
+    grants, refused = read_fence.confine_grants([str(root)], [str(root)])
+    assert grants == () and [p for p, _why in refused] == [str(root) + os.sep]
+
+
+def test_an_expansion_too_big_to_read_is_a_refusal_and_not_a_thousand_rules(tmp_path, monkeypatch):
+    """A bound on the EXPANSION, not on the caller's list: every grant costs the kernel an
+    `open(O_PATH)` plus a syscall and the hook a `startswith`, and a grant list nobody can read is a
+    boundary nobody can check. Over the bound it refuses — the same answer as any other grant it
+    cannot make safe, never a quiet widening."""
+    tier, root = _tier_with_a_root_inside(tmp_path)
+    monkeypatch.setattr(read_fence, "_MAX_GRANT_EXPANSION", 1)
+    grants, refused = read_fence.confine_grants([str(tier)], [str(root)])
+    assert grants == () and len(refused) == 1 and "expanded" in refused[0][1]
+
+
+def test_the_expansion_does_not_grant_a_symlink_that_leads_back_into_the_root(tmp_path):
+    """The punch stands IN for the tier and must not grant more than the tier's own subtree would
+    have. A child that resolves into the fenced tree is exactly the shape that would hand the whole
+    root back through the replacement — and a symlink is how a source tree usually appears twice."""
+    tier, root = _tier_with_a_root_inside(tmp_path)
+    (tier / "shortcut").symlink_to(root)
+    grants, _refused = read_fence.confine_grants([str(tier)], [str(root)])
+    assert not any((str(root) + os.sep).startswith(g) for g in grants)
+    assert not any(g.startswith(str(root) + os.sep) for g in grants)
+
+
+def test_a_machine_tier_that_is_not_on_this_box_swallows_nothing(tmp_path):
+    """An absent tier grants nothing, so it cannot disable anything — dropped at derivation exactly
+    as `read_allowlist._add` drops it, and for the same reason: `/opt` missing on a slim image is a
+    fact about the image, not a disagreement with the operator. Refusing here would make an absent
+    directory able to stop a probe."""
+    grants, refused = read_fence.confine_grants(
+        [str(tmp_path / "absent")], [str(tmp_path / "absent" / "repo")])
+    assert grants == () and refused == ()
+
+
+def test_a_grant_under_a_root_is_kept_because_that_is_the_sanctioned_carve_out(tmp_path):
+    """The mirror of the refusal above, and the reason it cannot simply be "no grant may touch a
+    root": a declared mount lives inside the editable tree by design, and a venv inside the repo is
+    how the interpreter gets there. Under, not over — the direction is the whole rule."""
+    _tier, root = _tier_with_a_root_inside(tmp_path)
+    grants, refused = read_fence.confine_grants([str(root / "corpus")], [str(root)])
+    assert refused == () and grants == (str(root / "corpus") + os.sep,)

@@ -140,7 +140,7 @@ def test_the_engine_still_owns_every_moved_member():
                  "_prepare_existing_card_claim", "_claim_existing_card_builds",
                  "_claim_existing_card_build", "_note_card_claim_refusal", "_refuse_card_claim",
                  "_create_stall_diagnosis", "_drop_card_once", "_record_node_less_card",
-                 "_mirror_hypothesis_card_merges", "_build_parent_snapshot", "_proposal_cue_fence",
+                 "_mirror_hypothesis_card_merges", "_build_parent_snapshot", "_proposal_receipt_fence",
                  "_implementation_ref", "_card_statement", "_card_action", "_card_added_payload",
                  "_card_event_matches", "_card_score_snapshot", "_card_claim_receipt_action",
                  "_fixed_point_idea", "_rebuilt_claim_idea", "_engine_card_number",

@@ -23,6 +23,7 @@ Writes ``<out-dir>/<task>/`` (the workspace) and ``<out-dir>/algotune_<task>.jso
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import shutil
 import sys
@@ -147,12 +148,51 @@ DELIVER = (
 # never evaluated. So the constraint has to move UP, to how many things the run is allowed to be
 # about, and OUT, to what counts as a test.
 #
-# Three rules, and each names the behaviour it forbids rather than describing a virtue:
+# Three rules, and each names the behaviour it forbids rather than describing a virtue (a fourth,
+# numbered 0 because it happens before them, was added later -- see the note below it):
 #   1. ONE CARD. Think about as many directions as you like; commit to exactly one.
 #   2. TESTING IS THE EVALUATION. Not the probe, not a benchmark the agent writes for itself.
 #   3. THE DEVELOPER IMPLEMENTS, and that is all it does.
+# The (0) clause was added after the arm above ran, and it is a different KIND of rule from (1)-(3):
+# those name a behaviour to stop, this one corrects a misreading of (1) itself -- "commit to exactly
+# one idea" turned reading the file into one of the things you could commit to. Under `--one-card`
+# a card is the scarcest thing in the run -- a $1.00 task produces three or four -- and the
+# Researcher spent the first one describing how it intended to start.
+# Measured 2026-08-21 (`/var/tmp/looplab-bench/runs-armb`, the `--deliver --one-card
+# --enforce-rules` arm): the first hypothesis of `max_independent_set_cpsat` was "PREREQUISITE
+# (must happen before any experiment): read reference_max_independent_set_cpsat.py to extract the
+# exact contract"; of `queens_with_obstacles`, "FIRST ACTION (blocking): Have the Developer read
+# reference_queens_with_obstacles.py and record the exact contract ... This is the single
+# highest-value step and cannot be done with the available tools." On `convex_hull`, `kcenters` and
+# `pagerank` the same shape reached card-0 itself. Across the 20-task run, 22 of 129 hypotheses and
+# 3 of 58 cards were procedure rather than experiment.
+#
+# The cause is visible in the phase spans and it is not laziness: in `deep_research` -- the phase
+# that mints those first hypotheses -- the Researcher made 17 (MIS) and 14 (queens) tool calls and
+# NOT ONE of them opened `reference_*.py` or `description.txt`; every call went to the memory and
+# concept stores. It then proposed, correctly, that somebody should read the file. The reading did
+# happen later (18 `repo_read`s of the reference in `propose`, 6 more in `plan`), so the file was
+# always reachable -- it was simply never treated as something you do BEFORE having an idea.
+#
+# So the clause states a fact about cost ("it costs no card") and then names the four spellings of
+# the non-experiment, because the shape recurs under new names. It deliberately does NOT say "read
+# widely" or "investigate the environment": the read fence and the grader fence exist because an
+# earlier run made 119 probe calls, 116 of them reading the grader. The last sentence closes that
+# door in the same breath as opening this one -- two files, and the harness is not one of them.
 ONE_CARD = (
     " HOW THIS RUN IS ORGANISED, and it is not negotiable:\n"
+    "(0) READING THE TWO FILES YOU WERE GIVEN IS A PRECONDITION, NOT AN EXPERIMENT, AND IT COSTS "
+    "NO CARD. `description.txt` and `reference_{task}.py` are already in this workspace. The "
+    "contract they state -- what `problem` holds, what `solve()` must return, what `is_solution()` "
+    "actually checks and what it does NOT check -- is the only thing in this run that is KNOWN "
+    "rather than guessed, so read them once, end to end, BEFORE you commit an idea, and carry what "
+    "you learned INTO the idea as a stated fact. What does not count as a hypothesis, in any "
+    "wording: \"first read the reference\", \"extract the exact contract\", \"establish a "
+    "correctness baseline harness\", \"land a faithful port so the contract becomes readable\". "
+    "None of those names a change to solver.py, and this run gets three or four experiments in "
+    "total. Those two files are also the WHOLE of the reading: the evaluator, the timer and the "
+    "instance generator are fenced and are not yours to look at, and a solver written from them "
+    "would not be a result.\n"
     "(1) ONE HYPOTHESIS. The Researcher may consider any number of directions in its own reasoning, "
     "but it ends its turn having committed to EXACTLY ONE concrete idea, and the run works that one "
     "idea. Not a menu, not \"A, and if that fails B\", not a decision tree with an unresolved branch "
@@ -206,10 +246,96 @@ def rules_clause(root: Path) -> str:
             "before anything is scored — a solver that breaks one is not scored low, it is NOT "
             "SCORED: no `import ctypes` (directly or through `__import__`), no reading or writing "
             "`sys.modules`, no redefining `is_solution`, and no monkey-patching of the standard "
+            # The tail is CONDITIONAL: `PROTECTED_MODULES` is a third-party list and a shorter one
+            # made the goal every turn is built from say "and 0 more" -- or, at five entries,
+            # "and -3 more". A goal card that visibly cannot count is not one a model should be
+            # asked to take literally.
             "modules the arena protects (" + ", ".join(protected[:8]) +
-            f", and {len(protected) - 8} more). Write ordinary algorithmic Python. If an idea only "
-            "works by reaching for one of these, it is not an idea this arena can accept — pick a "
-            "different one rather than a way around.")
+            (f", and {len(protected) - 8} more" if len(protected) > 8 else "") +
+            "). Note what that last one is and is not: the "
+            "validator's rule is that you may not REASSIGN those modules' attributes, and most of "
+            "the list is the scientific stack itself, so importing them and calling them normally "
+            "is not merely allowed, it is the expected way to write this file. If an idea only "
+            "works by reaching under the runtime for one of these, it is not an idea this arena "
+            "can accept — pick a different one rather than a way around.")
+
+
+# --enforce-rules, second half: WHAT IS PERMITTED. `rules_clause` states only prohibitions, and a
+# prohibition list read on its own reads narrower than the rule is -- the sentence this clause pair
+# replaced told the solver to write plain algorithmic Python and nothing else, which on a task whose
+# reference IS a solver-library call is an instruction to leave that library alone. (The retired
+# sentence is quoted in `tests/test_algotune_goal_clauses.py`'s docstring and nowhere in this file:
+# it is a negative pin, and a commented-out copy would satisfy the substring it forbids.)
+#
+# Measured 2026-08-21 across `/var/tmp/looplab-bench/runs-armb` (20 tasks, `--deliver --one-card
+# --enforce-rules`): on the four tasks whose reference is CP-SAT and nothing else --
+# `max_independent_set_cpsat`, `queens_with_obstacles`, `min_dominating_set`, `max_common_subgraph`
+# -- EVERY hypothesis and EVERY card was a hand-written exact combinatorial search in pure Python
+# (bitset branch-and-bound, greedy-colouring bounds, McSplit, Levi association graphs). Not one
+# proposed calling `ortools` itself with a different model, different parameters or a warm start.
+# Best scores: 0.2933, 0.3101, 0.3592, 0.3470 — and on `max_independent_set_cpsat` all three cards
+# landed inside 0.2824-0.2933, three attempts at one family.
+#
+# It is not that the family loses. On the two tasks where somebody DID think of it,
+# `multi_dim_knapsack` ("Seeding CP-SAT with a greedy warm-start hint", "num_search_workers=8 on a
+# minimal model identical to the reference") and `rectanglepacking` ("keep the exact CP-SAT model
+# but cut the time limit ... CP-SAT spends the remaining time proving optimality, which
+# is_solution() does not require"), the cards were built, ran and scored 0.4950 and 0.3740 — the
+# top of that whole cluster. The family was excluded by the goal's wording, not by the arena.
+#
+# DERIVED from the reference's own import statements, for the same reason `rules_clause` is derived
+# from the validator's own tables: a hand-written "you may use OR-Tools" would be a per-task claim
+# maintained by hand, would be wrong on the 16 tasks that use scipy/cvxpy/networkx instead, and
+# would go stale silently. The reference imports it, the evaluator runs the reference, therefore
+# the import resolves in the interpreter that will run solver.py — that is a fact, not advice.
+#
+# What it deliberately does NOT do is choose. It names the family and the generic levers (model,
+# parameters, bound, warm start, stopping rule) and stops there; which lever, and whether to use
+# the library at all, stays the Researcher's committed guess, because the point is to stop
+# EXCLUDING a family, not to hand over an answer the evaluation is supposed to give.
+def reference_libraries(ref: Path) -> list[str]:
+    """Third-party top-level modules `ref` imports — stdlib and the harness's own packages removed.
+
+    `AlgoTune*` is dropped because `from AlgoTuneTasks.base import Task` is the registration
+    boilerplate every reference carries and is exactly what the candidate may NOT import; naming it
+    here as an available library would contradict the fence two clauses up.
+    """
+    try:
+        tree = ast.parse(ref.read_text(encoding="utf-8"))
+    except Exception:                        # noqa: BLE001 — unparseable reference, no claim
+        return []
+    roots: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            roots.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            roots.add(node.module.split(".", 1)[0])
+    return sorted(r for r in roots
+                  if r and r != "__future__" and not r.startswith("AlgoTune")
+                  and r not in sys.stdlib_module_names)
+
+
+def solution_space_clause(ref: Path, task: str) -> str:
+    """What the arena PERMITS, derived from the reference's imports (see the note above)."""
+    libs = reference_libraries(ref)
+    if not libs:                             # a pure-stdlib reference borrows nothing to name
+        return ""
+    named = ", ".join(f"`{lib}`" for lib in libs)
+    return (" WHAT THE SOLUTION SPACE INCLUDES — said explicitly because the paragraph above lists "
+            f"only prohibitions and is read as narrower than it is. `reference_{task}.py` imports "
+            f"{named}, the evaluator runs that reference on this machine, so those same imports "
+            "resolve in the interpreter that will run your solver.py. Reaching for the SAME "
+            "library the reference reaches for is not a loophole, not cheating and not a "
+            "degenerate answer — it is the same starting line. The reference is a straightforward "
+            "use of it, so re-modelling the problem for that library, changing how it is "
+            "configured, giving it a bound or a warm start it does not currently get, or stopping "
+            "it at the point `is_solution()` would already accept the answer (READ what it checks "
+            "before assuming that point exists), are all legitimate hypotheses — exactly as "
+            "legitimate as replacing the library with code you write yourself, and neither side is "
+            "the default. Nobody here can measure which "
+            "wins; commit to the one you actually believe and let the evaluation say. (The single "
+            f"import that stays forbidden is `reference_{task}.py` itself — the library, never the "
+            "reference.)")
 
 
 def main() -> int:
@@ -223,11 +349,14 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=7200, help="Eval timeout in seconds.")
     ap.add_argument("--enforce-rules", action="store_true",
                     help="Score through AlgoTune's OWN solver validator and state its rules in the "
-                         "goal. OFF by default: they are this ARENA's rules, and a LoopLab task "
-                         "that is not an AlgoTune arm must not inherit them.")
+                         "goal — BOTH halves: what it forbids (see rules_clause) and what it "
+                         "therefore permits, including the reference's own libraries (see "
+                         "solution_space_clause). OFF by default: they are this ARENA's rules, and "
+                         "a LoopLab task that is not an AlgoTune arm must not inherit them.")
     ap.add_argument("--one-card", action="store_true",
-                    help="Append the ONE HYPOTHESIS / THE ONLY TEST IS THE SUBMITTED CODE / THE "
-                         "DEVELOPER IMPLEMENTS clause (see ONE_CARD). Composes with the others.")
+                    help="Append the READING IS A PRECONDITION / ONE HYPOTHESIS / THE ONLY TEST "
+                         "IS THE SUBMITTED CODE / THE DEVELOPER IMPLEMENTS clause (see ONE_CARD). "
+                         "Composes with the others.")
     ap.add_argument("--deliver", action="store_true",
                     help="Append the YOU CANNOT MEASURE YOUR OWN SCORE clause (see DELIVER).")
     ap.add_argument("--role-split", action="store_true",
@@ -263,8 +392,12 @@ def main() -> int:
         "goal": (GOAL.format(task=args.task)
                  + (ROLE_SPLIT if args.role_split else "")
                  + (DELIVER if args.deliver else "")
-                 + (ONE_CARD if args.one_card else "")
-                 + (rules_clause(root) if args.enforce_rules else "")),
+                 + (ONE_CARD.format(task=args.task) if args.one_card else "")
+                 # BANS then PERMISSIONS, in that order and both under the same flag: they are one
+                 # statement of what this arena allows, and the half that was missing is the half
+                 # that costs score. See `solution_space_clause`.
+                 + (rules_clause(root) if args.enforce_rules else "")
+                 + (solution_space_clause(ref, args.task) if args.enforce_rules else "")),
         "direction": "max",
         "editable_path": str(ws),
         "edit_surface": ["solver.py"],

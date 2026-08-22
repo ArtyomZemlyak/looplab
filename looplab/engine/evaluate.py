@@ -154,6 +154,40 @@ _JUDGE_ERROR_CHARS = 300
 # ten times that load for the last seven of twenty-three OOMs.
 _DURABLE_EVIDENCE_CHARS = 16_000
 
+# WHAT THE RECORD KEEPS ABOUT A NODE THAT SCORED, as opposed to one that failed — the ONE window
+# onto the eval's own output on that terminal, applied to BOTH streams.
+#
+# The block above is about a FAILURE. The same defect one terminal over was worse: `node_evaluated`
+# carried `res.stdout[-500:]` and never read `res.stderr` at all, so a node that exited 0 and scored
+# badly kept LESS of its own account than one that crashed. Measured on `runs-armb/spectral_clustering`
+# node 0 — 55 `node_evaluated` rows across that corpus, every one of them a metric plus a
+# ~140-character stdout line and no stderr channel to land in. The next `hint` read that scalar and
+# concluded the HYPOTHESIS was answered and failed; the cause was 95 of 100 instances valid.
+#
+# BOTH STREAMS, because the eval chooses which one it says it on and the record may not care.
+# `benchmarks/algotune/looplab_eval.py` says it on STDOUT, inside the same JSON line the metric
+# reader parses: measured 2026-08-22 over `tests/fixtures/algotune_eval_invalid_results_stderr.txt`,
+# that line is **745 characters**, and `res.stdout[-500:]` keeps the last 500 of it — dropping the
+# `{"speedup": 0.0` the number lives in AND the `no_speedup.reason` class, and starting the record
+# mid-string at `0 valid (94.0%)`. A tail is the right shape (an eval prints its summary last) and
+# 500 was simply too short for a line that now says something. Widening it here rather than adding a
+# second column is what this file's own rule prescribes: `error_evidence` is a SECOND column only
+# because `error_in` is also the repair PROMPT, and `stdout_tail` is on no prompt path at all —
+# `tools/run_tools.py::_logs` (a pull tool) and the token-gated UI detail are its only readers.
+#
+# 4,000 is bounded from four sides and is the only number under all of them: the arm-A diagnostic it
+# has to be able to carry is 2,581-2,878 characters over the five blocks preserved here; the bridge's
+# own metric line is 745; the redactor carries 0 masks at 500 and its first measured mask at 8 KB;
+# and `RunTools._LOG_CHARS` (`RESULT_CAP - 400` = 3,600) is the most any consumer can be shown.
+# It is 4,000 where the failure path's is 16,000 because this row is written once per SCORED node
+# and not once per failure — see `_scored_output_evidence`.
+#
+# COST, since the corpus is what refused a 64 KB stderr: on the 55-row arm-B corpus the growth is
+# ZERO (every stdout there is ~140 characters and no eval wrote to stderr), and the worst case is
+# ~7 KB per scored node against a 32.7 MB event log, i.e. well under a percent for the tens of
+# scored nodes a GPU run produces — against the +8.8 MB / +27 % that was measured and refused.
+_SCORED_EVIDENCE_CHARS = 4_000
+
 # WHAT AN OPERATOR WITH `inline_repair_attempts: 0` GETS, stated plainly because it is the setting
 # most preserved runs actually carry (38 of 46 snapshots under `runs/`, INCLUDING `rubert-dr-0804` —
 # the 2345-repair incident this whole redesign was built for).
@@ -1214,6 +1248,61 @@ class EvaluateMixin:
             return ""
         return self._redact(str(raw)[-_DURABLE_EVIDENCE_CHARS:])
 
+    def _scored_output_evidence(self, res) -> str:
+        """The SAME question on the terminal that says the node WORKED: what did the eval say about
+        the number it just produced?
+
+        `_durable_failure_evidence` above closed this hole for a node that FAILED. A node that
+        SCORES kept less than one that crashes: the `node_evaluated` payload took
+        `res.stdout[-500:]` and never read `res.stderr` at all, so 100 % of the eval command's own
+        diagnostic channel was dropped between `run_command_eval` returning it and the row being
+        written — and the 500 characters it DID keep were too few for a metric line that says why
+        (measured: 745). This method is the stderr half; the stdout half is the same
+        `_SCORED_EVIDENCE_CHARS` window applied in place at the write site, because `stdout_tail`
+        already exists and is on no prompt path.
+
+        Measured on `runs-armb/spectral_clustering` node 0 — metric 0.0, exit 0, and the whole
+        durable account of it is `{"speedup": 0.0, ...}`, one scalar. The loop then reasoned
+        correctly from the only thing it was given and concluded the HYPOTHESIS was answered and
+        failed, when what the eval knew (and did not get to say) was that 95 of 100 instances were
+        valid — an implementation fact, not a verdict on the idea.
+
+        IT IS A RECORD AND NOT A VERDICT (invariant: text may nominate, never decide). The metric
+        stays `res.metric`, read by the operator's own reader; `ok`, `feasible`, `violations` and
+        every selection path are byte-identical whatever this string contains. Nothing branches on
+        it. It is delivered by the `read_logs` PULL tool (`engine/signal_delivery.py`), so it costs
+        nothing on the always-on prompt and cannot silently grow one.
+
+        WHY 4,000 AND NOT `_DURABLE_EVIDENCE_CHARS`. Four bounds, all measured, and 4,000 is the
+        only number under all four:
+          * the payload it has to carry. Arm A hands its agent the validity summary plus up to three
+            `is_solution` examples (`AlgoTune/AlgoTuner/utils/message_writer.py:726-750`); the five
+            such blocks preserved on this box are 2,581-2,878 characters, so 0 of 5 fit a 2,000-char
+            window and 5 of 5 fit 4,000.
+          * the redactor's firing rate, which is the only thing between candidate bytes and a
+            durable log. Priced over the 257 preserved stage/console logs: 0 masks at 500
+            characters, 3 at 8 KB, 36 at 16 KB (a real `password`), 384 at 64 KB. 4,000 sits below
+            the first window that carried ANY mask.
+          * the eval's own metric line, when THAT is where it says why:
+            `benchmarks/algotune/looplab_eval.py`'s `no_speedup` line measures 745 characters, of
+            which the old 500-character window kept the wrong end.
+          * what a reader can actually be shown. `tools/run_tools.py::RunTools._LOG_CHARS` is
+            `RESULT_CAP - 400` = 3,600, so a wider record would be text no consumer of this signal
+            could ever render.
+        This row is written once per SCORED node rather than once per failure, which is why it is
+        4,000 and not the failure path's 16,000: stderr is also where a tqdm bar lives, and the cost
+        of the wide window is paid on every successful node instead of on the 138 failure-bearing
+        rows the 16 KB column was priced against.
+
+        Same rule as its sibling on absence: "" when there is nothing to keep, so the caller omits
+        the key. `{"stderr_tail": ""}` means "the eval wrote nothing to stderr"; no key at all means
+        "this row predates the column", and a reader must be able to tell those apart.
+        """
+        raw = getattr(res, "stderr", "") or ""
+        if not str(raw).strip():
+            return ""
+        return self._redact(str(raw)[-_SCORED_EVIDENCE_CHARS:])
+
     def _eval_failure_text(self, res) -> str:
         """The ONE description of a failed eval — the repair prompt, `node_repaired.error_in`, the
         judge's history rows and the terminal's `error` field are all this string.
@@ -2165,11 +2254,14 @@ class EvaluateMixin:
                 # marker in either arrival order) rather than being re-derived here — a second,
                 # hand-synced copy of that rule in the writer is how the two would drift apart again.
                 # COST, stated because it is a real one: `stage_finished` is FOLDED, so under
-                # `eval_parallel > 1` these rows can move `speculation.py::_proposal_authority_seq` and
-                # discard a concurrently-prepared paid proposal (invariant 1). They could already do
-                # that — the terminal block appended the same rows from the same concurrent evals —
-                # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
-                # instead is not available: the fold reads them.
+                # `eval_parallel > 1` these rows move `speculation.py::_proposal_authority_seq`
+                # (invariant 1). They could already do that — the terminal block appended the same
+                # rows from the same concurrent evals — what changes is the RATE, bounded by
+                # attempts x stages. Making them diagnostic instead is not available: the fold reads
+                # them. What that costs is now a `_reserve_node_build` CAS retry and not a paid
+                # proposal: `stage_finished` was inside 52 of the 56 windows that fence discarded
+                # across the 2026-08-20 campaign, which is why it no longer spans one
+                # (`card_reservation.py::_proposal_receipt_fence`).
                 async with self._write_lock:
                     for _st in (res.stages or []):
                         self.store.append(EV_STAGE_FINISHED,
@@ -3191,7 +3283,12 @@ class EvaluateMixin:
                     _eval_payload = {
                         "node_id": node_id, "generation": generation,
                         "metric": res.metric,
-                        "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
+                        # `_SCORED_EVIDENCE_CHARS`, not 500: the eval's metric line is where an eval
+                        # that says WHY says it, and 500 cut a measured 745-character one off at the
+                        # front — see the constant for the measurement and for why this widens in
+                        # place instead of growing a second column.
+                        "stdout_tail": self._redact(res.stdout[-_SCORED_EVIDENCE_CHARS:]),
+                        "eval_seconds": total_eval,
                         "extra_metrics": _extras,   # #5 multi-objective
                         "violations": res.violations or [],
                         # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
@@ -3206,6 +3303,16 @@ class EvaluateMixin:
                     # information at all. Absent == "this node reported no extra metrics".
                     if _extra_channels:
                         _eval_payload["extra_metrics_provenance"] = _extra_channels
+                    # WHAT THE EVAL SAID ABOUT THE NUMBER IT JUST PRODUCED. Same additive,
+                    # omitted-when-empty rule as the key above and as `error_evidence` on the two
+                    # failure rows: a scored node whose eval wrote nothing to stderr is byte-identical
+                    # to what it was before this column existed, and an absent key stays readable as
+                    # "this row predates the column" rather than "the eval was silent".
+                    # See `_scored_output_evidence` — it is a RECORD, nothing here or downstream
+                    # branches on it, and `res.metric` above is still the only thing that decides.
+                    _scored_evidence = self._scored_output_evidence(res)
+                    if _scored_evidence:
+                        _eval_payload["stderr_tail"] = _scored_evidence
                     if _curve:                     # computed above, outside the write-lock (see the #7 note)
                         _eval_payload["resource_curve"] = _curve
                     if salvaged is not None:
