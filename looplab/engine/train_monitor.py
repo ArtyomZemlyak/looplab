@@ -398,6 +398,24 @@ class LossTrajectory:
     progress_done: Optional[int] = None
     progress_total: Optional[int] = None
     span_s: Optional[float] = None
+    # HOW LONG THIS STAGE STILL HAS, in seconds — the run's own step rate extrapolated to its own
+    # declared total. `None` whenever the log has not said enough to answer (see `_eta_of`).
+    #
+    # WHY IT IS WORTH RECORDING AT ALL. Nothing in this engine knew how long anything would take:
+    # `_resource_envelope` carries a GPU count and memory and no time at all, and a search for
+    # `eta` / `predicted_duration` / `estimated_seconds` across `engine/` and `search/` finds
+    # nothing. Every scheduling question an operator asks — "can a second experiment fit beside this
+    # one?" — needs this number and could not be asked.
+    #
+    # MEASURED on the two e5 nodes that finished under this monitor: the step-rate figure settles
+    # almost immediately (node 3 predicted 6.90 h at step 20 and 6.94 h at step 936; node 4 gave
+    # 8.74 h and 8.76 h at the same points) and UNDER-states the truth by 4-5 % (actuals 7.28 h and
+    # 9.13 h), because it counts training steps and not the tail — the in-process test, the
+    # checkpoint write, the score stage. That bias is one-directional and therefore correctable, but
+    # NOT from two samples: this field records the RAW extrapolation, `node_evaluated.eval_seconds`
+    # already records the truth, and the pair accumulates until the correction can be measured
+    # instead of guessed.
+    eta_s: Optional[float] = None
 
     @property
     def anomalous(self) -> bool:
@@ -488,6 +506,42 @@ def _anomaly_of(rows, numeric) -> str:
     return ""
 
 
+def _eta_of(rows) -> Optional[float]:
+    """Seconds of stage remaining, from the run's OWN observed step rate. `None` when unanswerable.
+
+    Derived from the two windows the tracker already keeps rather than from a new parse:
+    `progress_done` / `progress_total` / `at` are collected on every tick for the progress line, so
+    this costs nothing and cannot drift from what the trajectory reports.
+
+    Refuses rather than guesses, in FOUR ways, because a wrong ETA is worse than none for anything
+    that would schedule on it: a missing progress pair, a non-positive total, no forward motion
+    between the ends (a stalled or restarted counter), or a non-positive span. `done >= total`
+    answers 0.0 rather than a negative — a bar at or past its own total is finishing, not overdue.
+
+    THERE IS NO SEPARATE "FEWER THAN TWO WINDOWS" CHECK, and its absence is deliberate. One was
+    written here first, to mirror the rule `summarize_trajectory` applies to `direction`. Mutation
+    testing showed it could not fail: with a single window `first` and `last` are the same object,
+    so `advanced == 0` and the forward-motion guard below already answers None. A guard that cannot
+    fail is the vacuous shape this repo keeps finding, so it is gone rather than propped up by a
+    test that could not discriminate it either.
+    """
+    if not rows:
+        return None
+    first, last = rows[0], rows[-1]
+    done_a, done_b, total = first.progress_done, last.progress_done, last.progress_total
+    if not (type(done_a) is int and type(done_b) is int and type(total) is int and total > 0):
+        return None
+    if first.at is None or last.at is None:
+        return None
+    span, advanced = last.at - first.at, done_b - done_a
+    if span <= 0 or advanced <= 0:
+        return None
+    remaining = total - done_b
+    if remaining <= 0:
+        return 0.0
+    return remaining * (span / advanced)
+
+
 def summarize_trajectory(windows) -> LossTrajectory:
     """Reduce the observed windows to the run-scale trajectory. Pure/deterministic — the whole
     "is it still descending" decision is this one function plus `_anomaly_of`, so it has a truth
@@ -507,6 +561,7 @@ def summarize_trajectory(windows) -> LossTrajectory:
         progress_done=last_seen.progress_done, progress_total=last_seen.progress_total,
         span_s=((last_seen.at - rows[0].at)
                 if last_seen.at is not None and rows[0].at is not None else None),
+        eta_s=_eta_of(rows),
     )
     if not numeric:
         return LossTrajectory(direction="unknown", **common)
@@ -982,6 +1037,11 @@ def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
         return None
     row = {"direction": trajectory.direction, "windows": trajectory.windows,
            "points": trajectory.points}
+    # The ETA rides the row the trajectory already stamps, so it reaches the durable log, the judge's
+    # context and the UI through ONE seam instead of three. Absent when unanswerable — a reader must
+    # treat a missing `eta_s` as "the engine cannot say", never as "soon".
+    if isinstance(trajectory.eta_s, float) and math.isfinite(trajectory.eta_s):
+        row["eta_s"] = round(trajectory.eta_s, 1)
     for key in ("first", "last", "minimum", "noise", "net"):
         value = getattr(trajectory, key)
         if isinstance(value, float) and math.isfinite(value):
