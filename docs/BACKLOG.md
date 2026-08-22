@@ -3885,6 +3885,41 @@ which in a GPU-shaped run means deep research never fires at all. The fix is not
 other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
 under one claim rather than two reads. Do it when someone actually wants serial research.
 
+**THIRTY DUPLICATE CARDS OF ONE IDEA HALVED A TWO-GPU BOX — measured live 2026-08-22.**
+
+37 cards on `e5small-dr-unified-v4`'s board cluster, at 85% statement similarity, into TEN distinct
+ideas — and three of the clusters (20 + 6 + 4 = **30 cards**) are the same one restated: *"extend
+n_epochs 15→30 (and 50) on node #3's exact ported-loss recipe"*. 31 of the 37 declare a 2-GPU
+footprint against 6 that declare 1.
+
+**The declaration contradicts the idea it carries.** Node 3 — the node those 30 cards propose to
+extend — was created with `footprint: {"gpus": 1}` and ran on one card. So the number that halves
+the box is not merely expensive; it asks for twice the hardware the experiment it copies used.
+
+The bill is arithmetic. `run_width_settled` takes the WIDEST declared footprint across OPEN
+proposals — evidence `{gpu_pool: 2, open_proposals: 21, widest_declared_gpus: 2}` → `eval_parallel`
+2 → 1. The node that then ran, node 4, declares `{"gpus": 1}` and uses one card, so GPU 1 has been
+idle since 02:06 for the whole of a ~9-hour training, held there by proposals nobody is building.
+
+**AND THE NOVELTY GATE IS NOT ABSENT — IT IS ONE STAGE TOO LATE.** This was first written up as "card
+minting has no novelty gate", which is wrong and worth correcting in place: the gate is configured
+and ON for this run (`novelty_mode: "llm"`, an LLM adjudicates), and it demonstrably fires — the
+durable record holds exactly two `novelty_rejected` rows, node 3 ("Identical claim") and node 4
+("Same card as #2"). Both are keyed to a `node_id`. Not one card was ever adjudicated, so 30
+restatements reached the board while the machinery that would have caught them sat downstream of
+where they were made.
+
+OPEN[novelty-gate-runs-after-the-card-is-minted] the card mint path never applies the novelty gate
+the node path applies, so one idea can occupy the board N times and its widest declared footprint
+sets the run's width; retire this when the mint consults the gate.
+proof:absent:_apply_novelty_gate@looplab/engine/card_reservation.py+absent:_llm_novelty_gate@looplab/engine/card_reservation.py
+*Mutated before it was written:* True as shipped; injecting EITHER call into the mint module turns
+it False, so a fix through either entry point retires the marker.
+
+Related and separate, filed above: the create handler holds the loop, which is WHY the mint fired
+30 times — an unfinalised eval reads as "running", and `_occupancy_paced_creates` produces supply
+behind a node that had already died.
+
 **A REPAIR'S RATIONALE IS NOT DERIVED FROM ITS OWN DIFF — 2 of 2 observed 2026-08-22.**
 
 Both repairs the engine performed on `e5small-dr-unified-v4` node 4 that night WORK, and both
