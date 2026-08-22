@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Collection, Any, Literal
 
 from looplab.core.models import (
     CARD_FRESHNESS_SUPERSEDED_ERROR,
@@ -424,6 +424,51 @@ def card_action(card: Card) -> Action | None:
     if card.operator == "merge" and len(parents) == 2:
         return {"kind": "merge", "parent_ids": list(parents), META_CARD_ID: card.id}
     return None
+
+
+def unconsumed_card_inventory(state: RunState, *, exclude: "Collection[str]" = ()) -> int:
+    """How many Cards the board is HOLDING and nothing has consumed — prefetch inventory, counted.
+
+    THE OMISSION THIS CLOSES. `engine/speculation.py::_speculation_depth_used` is the ceiling on how
+    much unconsumed prefetch a run may hold, and its own contract says it "counts outstanding
+    requests plus committed/unevaluated speculative NODES". But the lane it gates
+    (`speculative_raw_actions` -> `_stage_prepared_card`) deliberately produces a CARD and no Node —
+    its call site says so: "Author their concrete Ideas and durable Cards now, but deliberately
+    leave every Node slot unowned". A Card is not a pending Node until something builds it, so the
+    thing the gate buys was invisible to the number that limits the buying.
+
+    Measured live on `runs/e5small-dr-unified-v4`: `_speculation_depth_used()` returned **1** against
+    a pinned ceiling of 2 while **88** cards sat unbuilt — `1 < 2` every turn, forever. Nothing could
+    consume them either: while any node is pending, `card_next_actions` returns `forced_card_actions`
+    (an `evaluate` for the running node) and never reaches card SELECTION, which the engine documents
+    at `_occupancy_paced_creates`.
+
+    `exclude` is what the caller has already counted — outstanding requests and the cards owned by
+    pending Nodes — so the two halves of the ceiling cannot double-count the same work.
+
+    DELIBERATELY COARSER THAN `_strictly_selection_ready`, and the direction is the argument. That
+    predicate answers "may this Card be CLAIMED right now" and re-checks receipt identity, action
+    provenance and generation freshness — the right bar for a claim, the wrong one for a COUNT: a
+    Card failing a freshness fence this turn is still inventory the board holds. Over-counting only
+    makes the run prefetch LESS, which is the safe direction; under-counting is the bug being fixed.
+    The four fields read here are the board's own terminal vocabulary, the same ones
+    `open_research_cards` keys on.
+    """
+    skip = set(exclude or ())
+    total = 0
+    for card in state.cards.values():
+        if card.id in skip:
+            continue                       # already counted by the caller's other half
+        if getattr(card, "status", None) != "proposed":
+            continue                       # built, running, dropped: no longer waiting
+        if getattr(card, "verdict", None) != "open":
+            continue
+        if getattr(card, "dropped_reason", None) is not None:
+            continue
+        if getattr(card, "merged_into", None) is not None:
+            continue
+        total += 1
+    return total
 
 
 def _strictly_selection_ready(card: Card) -> bool:

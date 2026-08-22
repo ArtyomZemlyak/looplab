@@ -27,6 +27,7 @@ from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.replay import fold
 from looplab.engine.node_build import developer_crash_records
+from looplab.search.card_selection import unconsumed_card_inventory
 from looplab.events.types import (
     DIAGNOSTIC_EVENTS,
     EV_CARD_ADDED,
@@ -775,6 +776,37 @@ class SpeculationMixin:
             if (node.id, node.attempt) not in consumed
         )
         return len(cls._outstanding_requests(state)) + pending
+
+    @classmethod
+    def _prefetch_supply_used(
+        cls,
+        state: RunState,
+        *,
+        consumed_inflight: set[tuple[int, int]] | frozenset[tuple[int, int]] = frozenset(),
+    ) -> int:
+        """What the PRODUCING gates must weigh: outstanding work plus the inventory already staged.
+
+        Separate from `_speculation_depth_used` because the ceiling answers two different questions
+        and only one of them may count the board. The consuming gate (`_request_card_build`) asks
+        "may I turn an existing Card into a build?" — charging it for the very Card it is about to
+        consume makes consumption impossible, which a first version of this fix did: six tests in
+        `test_card_speculation_engine.py` went red on `_request_card_build() is False`, and they were
+        right. The producing gates ask "may I buy MORE?", and there the board is exactly the thing
+        that should stop them.
+
+        THE BUG THIS CLOSES. The raw lane stages a CARD and deliberately owns no Node slot ("Author
+        their concrete Ideas and durable Cards now, but deliberately leave every Node slot unowned"),
+        while `_speculation_depth_used` counts outstanding requests plus speculative NODES. The thing
+        the gate bought was invisible to the number that limits the buying. Measured live on
+        `runs/e5small-dr-unified-v4`: it returned 1 against a pinned ceiling of 2 while 88 cards sat
+        unbuilt — `1 < 2` on every turn, without end. Nothing drained them either: while any node is
+        pending, `card_next_actions` returns `forced_card_actions` (an `evaluate` naming the running
+        node) and never reaches card SELECTION, so a staged card could not become the Node the
+        counter was waiting for. Minting stayed legal precisely because consuming was impossible.
+        """
+        return cls._speculation_depth_used(
+            state, consumed_inflight=consumed_inflight,
+        ) + unconsumed_card_inventory(state, exclude=cls._speculative_card_ids(state))
 
     def _speculative_prefetch_ceiling(self) -> int:
         """How many unconsumed prefetches this run may HOLD — the depth, narrowed by the lane width.
@@ -2530,7 +2562,7 @@ class SpeculationMixin:
                 # refusal there falls through to here, so leaving the raw lane on the bare depth
                 # would turn "do not buy a prefetch the gate must discard" into "buy a Researcher
                 # proposal and a staged Card instead" — the identical spend one lane over.
-                and self._speculation_depth_used(
+                and self._prefetch_supply_used(
                     proposal_state,
                     consumed_inflight=session.eval_inflight,
                 ) < self._speculative_prefetch_ceiling()
