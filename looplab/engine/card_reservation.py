@@ -38,6 +38,10 @@ is what makes that falsifiable, and it is driven (a real run, watched intercepti
 """
 from __future__ import annotations
 
+import functools
+
+import anyio
+
 import hashlib
 from collections.abc import Collection
 from typing import NamedTuple, Optional
@@ -1325,7 +1329,7 @@ class CardReservationMixin:
         return bool(getattr(self, "card_driven_selection", False))
 
     @in_llm_lane("build")
-    def _stage_card_creates(self, actions: list[dict], state: RunState) -> list[str]:
+    async def _stage_card_creates(self, actions: list[dict], state: RunState) -> list[str]:
         """Turn raw policy creates into durable, selection-ready Card receipts only.
 
         No ``node_building`` is written here.  A later fresh fold must select the Card, after which the
@@ -1367,13 +1371,32 @@ class CardReservationMixin:
                     with self._progress(PROGRESS_STAGE_BUILD, "propose",
                                         node_id=proposal_node_ceiling + offset, prospective=True,
                                         operator=action.get("kind")):
-                        idea = self._prepare_node_idea(
-                            action,
-                            proposal_state,
-                            researcher=self.researcher,
-                            prospective_node_id=proposal_node_ceiling + offset,
-                            source=source,
-                            proposal_events=proposal_events,
+                        # OFF THE EVENT-LOOP THREAD, and only this half. `_prepare_node_idea` is a
+                        # paid Researcher call — minutes of provider latency with no `await` in it —
+                        # and it ran as ONE event-loop callback, so nothing else on the loop could
+                        # progress for its whole duration. Measured on the live engine with py-spy:
+                        # asyncio's own `_run_once` sat BELOW a `threading.join` with no coroutine
+                        # frame between, and a node whose training had already died waited 62 minutes
+                        # for its terminal while both H200s idled.
+                        #
+                        # THE STAGING HALF DELIBERATELY STAYS HERE. The module's own contract is that
+                        # "every selection-affecting event ... is written by the main engine task",
+                        # and the loop below says why in its own words ("MAIN TASK: both callers of
+                        # `_stage_card_creates` ... run there, so the pause is appended immediately").
+                        # `_prepare_node_idea` is the right thing to move precisely because it writes
+                        # NOTHING: an AST pass over it finds zero `store.append` calls, and its audit
+                        # rows go through `_append_proposal_event`, whose `_PROPOSAL_EVENT_SINK`
+                        # contextvar survives `to_thread.run_sync` (driven, not assumed).
+                        idea = await anyio.to_thread.run_sync(
+                            functools.partial(
+                                self._prepare_node_idea,
+                                action,
+                                proposal_state,
+                                researcher=self.researcher,
+                                prospective_node_id=proposal_node_ceiling + offset,
+                                source=source,
+                                proposal_events=proposal_events,
+                            )
                         )
                     if idea is None:
                         continue
