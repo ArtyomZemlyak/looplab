@@ -506,10 +506,41 @@ class ProposalCuesMixin:
                 "would otherwise run at the same time, so the run serialises at the same per-experiment "
                 f"cost. Declaring `gpus: {budget}` is the ordinary case, not an escalation. Whatever you "
                 "declare, the training/eval command must target that SAME count.")
+        # WHAT A SMALLER DECLARATION DOES NOT BUY, said out loud, because the omission was
+        # measurably expensive. `budget` already states the ordinary count; nothing stated what
+        # happens BELOW it, and a reader supplies the obvious inference — "fewer devices for me
+        # means more experiments at once" — which is true only when the run's WIDTH can spend them.
+        #
+        # MEASURED on `runs/e5small-dr-unified-v4`: pool 2, width 1, so this paragraph said
+        # `footprint.gpus = 2`. Hand-written goal prose in the same message said "declare
+        # {"gpus": 1} and two experiments run concurrently". Four nodes in a row declared 1, the
+        # second card sat idle for the whole run, and no surface anywhere said the second half of
+        # that sentence could not happen at this width. ~15 GPU-hours. The same invariant broke
+        # MIRRORED one run earlier — see `engine/widths.py::per_experiment_gpu_budget`, where a
+        # goal saying "two GPUs are available" met `eval_parallel: 2` and went serial at double the
+        # per-node cost.
+        #
+        # It is one sentence and only when there is something to warn about (`budget > 1`), so a
+        # single-device box and a fully-spent width read exactly as they did before.
+        idle_warning = ""
+        if budget > 1:
+            idle_warning = (
+                f" DECLARING FEWER THAN {budget} DOES NOT BUY CONCURRENCY HERE: this run's width "
+                f"is fixed at {self._eval_parallel} experiment(s) at a time, so a "
+                f"`footprint.gpus = 1` declaration runs ONE experiment on ONE device and leaves the "
+                f"other {pool - 1} idle for its whole duration. Fewer devices per experiment only "
+                "buys more experiments at once on a run whose width can spend them, and this one's "
+                "cannot. The operator's task statement still WINS on the count it names — see the "
+                "last line of this paragraph — but a claim about what that count BUYS IN "
+                "CONCURRENCY is arithmetic over the width this run launched with, not a preference, "
+                "and this paragraph is where that arithmetic is done. If the task statement says a "
+                "smaller footprint runs more experiments at once, take the count and not the reason."
+            )
         return (
             head + self._gpu_memory_clause()
             + f", so `footprint.gpus = {budget}` is the ORDINARY declaration and leaves every "
-            "sibling experiment a device. It is a DEFAULT, not a wall: a LARGER count is HONOURED — "
+            "sibling experiment a device." + idle_warning
+            + " It is a DEFAULT, not a wall: a LARGER count is HONOURED — "
             "the scheduler reserves that many devices for this one experiment and re-pins the run to "
             "`pool // gpus` concurrent experiments (never above the width this run launched with) "
             "for as long as such a card is open. So it is a real choice and it is YOURS to make, on "

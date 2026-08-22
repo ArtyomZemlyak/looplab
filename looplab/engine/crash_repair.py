@@ -511,7 +511,8 @@ class CrashRepairMixin:
                     "missing_dependency": ""}
 
     @in_llm_lane("build")
-    def _repair_critic(self, state: RunState, node, repair_log, attempt: int) -> dict:
+    def _repair_critic(self, state: RunState, node, repair_log, attempt: int,
+                       monitor_verdicts=None) -> dict:
         """Is this node's repair chain still addressing different causes? `{"action", "rationale"}`
         with action ∈ `CRITIC_ACTIONS` — F8's second stop signal.
 
@@ -550,6 +551,32 @@ class CrashRepairMixin:
             return {"action": CRITIC_CONTINUE, "rationale": "no repair critic wired",
                     "source": CRITIC_SOURCE_UNWIRED}
         trajectory = format_repair_trajectory(repair_log)
+        # THE WATCHDOG'S VERDICTS REACH THE CRITIC TOO, and leaving them out was a scoping error
+        # measured within hours of shipping the repair half. This critic answers "are successive
+        # attempts addressing DIFFERENT causes, or circling one?" and returns continue-or-stop — it
+        # decides whether the chain lives. Its per-attempt CAUSE column is the ENGINE's: `crash`,
+        # `crash`, `oom`, `expect_failed`, `timeout`. None of those words can say that the objective
+        # has no floor.
+        #
+        # MEASURED on `runs/e5small-dr-unified-v4` node 3, attempt 6: while the repair — which now
+        # sees the verdicts — wrote "the watchdog's diagnosis is correct and I reproduced the
+        # mechanism in code" and changed `loss.py`, this critic wrote "a pure speed timeout with a
+        # healthy training run", which is verbatim the framing that cost ~17 GPU-hours the day
+        # before. It answered `continue` and the answer was right, but the justification was a
+        # training run that was not healthy.
+        #
+        # THE EXPENSIVE DIRECTION IS THE MIRROR ONE. A chain that repairs SPEED five times on a node
+        # whose loss is unbounded below looks like five DISTINCT causes to a reader of that column,
+        # because the engine wrote a different word each time — and "distinct causes" is exactly the
+        # evidence this critic continues on.
+        #
+        # Appended to `trajectory` rather than given a new keyword, for the same reason the repair
+        # half splices into `history`: `repair_critic` is a DUCK-TYPED seam and `_accepted_kwargs`
+        # would quietly drop an argument older implementations do not name, so a new keyword reaches
+        # one implementation and silently skips every other. Empty renders empty.
+        _verdicts_block = _format_monitor_verdicts(monitor_verdicts)
+        if trajectory and _verdicts_block:
+            trajectory = trajectory + "\n" + _verdicts_block
         if not trajectory:
             return {"action": CRITIC_CONTINUE, "rationale": "no repair trajectory to judge yet",
                     "source": CRITIC_SOURCE_NO_TRAJECTORY}
@@ -692,6 +719,36 @@ class CrashRepairMixin:
                     "in float32 even under mixed precision, guard a masked softmax against an "
                     "all-masked row and a 0*log(0), and reduce or ramp the weight of any newly-added "
                     "auxiliary/regularisation term. Keep the idea; make its arithmetic survivable.")
+        if reason == "check_false_positive":
+            # The directive that must be said FIRST is, again, the negative one — and here the
+            # negative is the whole point. Every other kind in this ladder tells the Developer what
+            # to change about the EXPERIMENT. This one says the experiment may be fine and the thing
+            # that refused it may be wrong, because that is what the diagnostician just concluded
+            # after reading the same log the checker read.
+            #
+            # MEASURED, on `runs/rubertlite-dense-retrieval`: node 1's diagnosis reads "the run
+            # actually reached val recall@100=0.8114 (matching the known-good baseline 0.81), yet
+            # the verifier flagged" it; n9 and n16 refute the checker with validation recall from
+            # the SAME log. Without this branch those rows were handed the ordinary "here is your
+            # error, fix your code" context, which asks a Developer to rewrite a training run whose
+            # numbers it has just been told are correct — and the cheapest way to satisfy a wrong
+            # check is to break the thing it was checking.
+            return ("[failure kind: check_false_positive]\n" + error + "\n"
+                    "THE STAGE'S DECLARED CHECK REFUSED THIS RUN, AND THE FAILURE DIAGNOSTICIAN — "
+                    "reading the same log afterwards, with more of it — BELIEVES THE CHECK WAS "
+                    "WRONG. Read its rationale above before you touch anything.\n"
+                    "Do NOT start by rewriting the experiment to satisfy the check. If the run "
+                    "genuinely met its declared condition, changing the training code to please a "
+                    "faulty assertion damages a working experiment, and the cheapest way to satisfy "
+                    "a wrong check is to break the thing it was checking.\n"
+                    "Work in this order: (1) re-read the stage's `expect`/`assert` in "
+                    "`looplab_stages.json` and decide whether it actually describes success for THIS "
+                    "run — a threshold copied from a different backbone, a file path the run writes "
+                    "under a different name, an epoch count the config no longer uses; (2) if the "
+                    "check is wrong, FIX THE CHECK and say so plainly in your rationale, changing "
+                    "nothing about the experiment; (3) only if the check is right after all, fix "
+                    "the code it caught. Say which of the three you did — the record cannot tell "
+                    "them apart afterwards unless you do.")
         if reason == "stalled":
             # Same misclassification hazard as `diverged`, opposite fix: the process was ALIVE and
             # silent, so there is nothing to read in stderr and nothing memory-shaped to cut.

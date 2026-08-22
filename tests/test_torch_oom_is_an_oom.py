@@ -67,8 +67,29 @@ now go and get them — `read_log` over the whole stage log plus `RepoScoutTools
 workdir — so the numbers are REACHABLE where before they were not present anywhere in the loop. The
 splice itself is unchanged, so the item stays open and its proof still holds; what moved is that a
 remedy now exists for a judge that chooses to spend a turn on it.
+MEASURED ON A LIVE OOM, 2026-08-22 (`runs/e5small-dr-unified-v4` node 4, train stage). The window
+is not merely too small — it lands in PADDING, and the filler is not the DDP wrapper this item was
+written about:
+
+    torch.OutOfMemoryError          952 chars from EOF
+    "Tried to allocate 2.25 GiB"    908 chars from EOF
+    "total capacity of 139.80 GiB"  868 chars from EOF
+    trailing whitespace run         329 chars   <- a tqdm bar's final render
+
+Every one of those facts is present in the 24,680-byte stage log and NONE of them is inside the last
+500 characters. 329 of that window is literal whitespace, so its effective reach is ~171 characters
+of real text against evidence that begins at 952 — off by a factor of two even before the padding is
+counted. A progress bar is NOT a new class of filler and is not the commoner one — the block above already
+counted the triage corpus: of 122 stored tails, five are a launcher's opaque "Root Cause … exitcode:
+1" and TWO are nothing but a progress bar. (I wrote "the likelier one" here first, inferring a
+comparative frequency from a single instance while the corpus that refutes it sat forty lines up.)
+What tonight's node adds is the DISTANCE, which no corpus header states: the marker is not merely
+absent from the tail, it begins 952 characters from EOF against a 500-character window whose last
+329 are padding. A fix needs a number to clear, and this is it.
+
     OPEN[oom-evidence-not-in-repair-text] a torch OOM's allocation numbers are still not PUSHED to
-    the Developer: the repair text is a 500-char stderr tail that a DDP wrapper fills entirely.
+    the Developer: the repair text is a 500-char stderr tail that a DDP wrapper — or, measured
+    above, a tqdm bar's 329-char pad — fills entirely, while the numbers sit 908+ chars from EOF.
     The diagnostician can now PULL them (`repair_log_tools`), which is a remedy and not a fix.
     proof:present:res.stderr[-500:]@looplab/engine/evaluate.py
 """

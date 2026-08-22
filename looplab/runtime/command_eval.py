@@ -37,7 +37,7 @@ from looplab.core.envsafe import (ENGINE_OWNED_ENV, MAX_ENV_VALUE_CHARS,  # noqa
 # `normalize_extra_metrics` because the fold, the UI projections and this writer must all spell the
 # two channels the same way — `runtime` may import `core`, and this is the site that KNOWS which
 # door each value came through.
-from looplab.core.models import EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED
+from looplab.core.models import DIRECTIONS, EXTRA_METRIC_AUTO, EXTRA_METRIC_DECLARED
 # The two stage-row identity slots and the derivation behind them. A LEAF under this module — it
 # reaches back for `_confined`/`normalize_declared_path` through deferred, function-local imports
 # only (`metric_subject`'s precedent), so this module-level import closes no cycle.
@@ -2935,6 +2935,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     # Same precedence as the values (`declared` wins a name collision), for the same reason.
     extra_channels = ({**{k: EXTRA_METRIC_AUTO for k in auto},
                        **{k: EXTRA_METRIC_DECLARED for k in declared}} or None)
+    # WHICH WAY IS BETTER, from the DECLARING spec and nowhere else. Only names that actually
+    # produced a value are oriented, so a spec whose reader missed contributes no orphan direction
+    # for a key the record does not carry — the same rule the `declared` dict one line up follows.
+    # `auto` keys are deliberately absent: nothing declared them, so nothing said which way is
+    # better, and inventing an answer here is exactly the silent inversion this map exists to stop.
+    extra_directions = ({name: d for name in declared
+                         if (d := (metrics.get(name) or {}).get("direction")) in DIRECTIONS}
+                        or None)
     viol = (_violations(out, str(wd), constraints, wrap, since=_reader_since)
             if (constraints and not to and m is not None) else None)
     # Intra-node sweep: a RepoTask command may emit the same `{"trials": [...]}` stdout line; carry
@@ -2942,6 +2950,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, extra_metrics_provenance=extra_channels,
+                     extra_metrics_direction=extra_directions,
                      violations=(viol or None), trials=trials,
                      stages=stage_results, stalled=_salvageable_stall(_sig),
                      diverged=bool(_sig.get("diverged")), metric_subject=_run.metric_subject,

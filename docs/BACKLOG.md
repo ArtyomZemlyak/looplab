@@ -84,6 +84,33 @@ site that proves it is open.
 
 ### §0.1 Ranked
 
+> **THIS LIST IS NOT GUARDED, AND ON 2026-08-21 THAT WAS MEASURED RATHER THAN SUSPECTED.**
+>
+> `grep -rn 'OPEN\['` IS this repo's backlog: every marker carries a falsifier, closing one is a
+> DELETION, and `tests/test_open_item_index.py` fails when a tracked item stops being open, when a
+> slug is declared twice, or when a decline carries no `measured:` clause. It caught three separate
+> drifts of mine in one day.
+>
+> **Nine of the nineteen entries below are self-marked closed. Of the ten that are not, ZERO carry
+> an `OPEN[…]` marker** — except §0.1 #5, whose marker text records its own falsifier firing falsely
+> within an hour and being tightened. Everything else here is prose that nothing re-derives.
+>
+> Two were checked on 2026-08-21 and neither was what it said:
+> * **#19** was FIXED on 2026-08-15 by exactly the symbol the entry names as its own remedy
+>   (`unreliable_metric_ids`), and sat open for six days. Verifying it cost one `grep`.
+> * **#6** was P0 on the strength of "this box serves local models", which it does not — and the
+>   local instrument the repo built for that question reports 33 asks, 0 repaired, 0 failed.
+>
+> So the failure rate of a spot-check here is 2 of 2. A ranked list that asks for work on the
+> strength of a number that stopped being true is the same defect as a record that reports
+> parameters a run did not use — the carrier lies about FUTURE work instead of past work, and the
+> cost is the next reader's attention rather than GPU-hours.
+>
+> **What would fix it:** give every still-open entry an `OPEN[<slug>]` with a falsifier the guard can
+> re-derive, and let closing be a deletion, as it is everywhere else in this tree. Until then, verify
+> an entry against the code before acting on it — start with the symbols the entry itself names.
+
+
 1. ✅ **`task_file` is executed from any path on the box, and the API token is opt-in (P0, S).**
    `serve/launch.py:422-426` did `Path(os.path.expandvars(os.path.expanduser(v))).resolve()` and
    loaded it — the only guard an 8 MiB size cap. The other half of the old C3 row shipped as an
@@ -258,12 +285,78 @@ site that proves it is open.
    already failed. **Cost:** this box serves local models, which is exactly where native FC collapses
    (~20 % vs ~92–94 %). The original note called it the cheapest whole-system lift and that still
    holds — it is now a one-line default change plus its blast-radius test.
+   **[MEASURED 2026-08-21 AND THE PREMISE DOES NOT HOLD — DO NOT SHIP THE DEFAULT CHANGE ON IT.**
+   The code half of the entry is still exactly true: `Settings.llm_parser` is `"tool_call"` and
+   `_ORDER["tool_call"]` is `["tool_call", "baml"]`, so the SAP runs only after native FC fails.
+   What is false is the *cost* clause it rests on.
+   *(a) THIS BOX DOES NOT SERVE LOCAL MODELS.* `config.snapshot.json` on every current run reads
+   `llm_base_url = https://llm-core-olap.samokat.ru/v1`, `llm_model = deepseek-v4-flash` — a remote
+   endpoint whose function calling works. The `~20 % vs ~92–94 %` figure describes a configuration
+   this box has not been in.
+   *(b) THE LOCAL MEASUREMENT SAYS THE OPPOSITE, and the repo already built the instrument for it.*
+   `looplab parser-stats` over every run that carries the observation:
+   `e5small-dr-unified-v3` — concept_coverage 5, hypothesis_merge 1, propose 9; `e5small-dr-unified-v4`
+   — concept_coverage 5, deep_research 1, hypothesis_merge 3, propose 9. **33 asks, first-try 100.0 %
+   in every phase, 0 repaired, 0 failed, `won: tool_call` on all of them.** Native FC is not
+   collapsing here; it is answering everything on the first try.
+   *(c) THE EVIDENCE IS THIN AND SAYS SO.* 33 asks is a small sample, and only two of eight runs
+   contribute — but that is NOT an instrumentation defect, which was checked rather than assumed:
+   `grep -c structured_parse` returns 0 rows for `rubertlite-dr-unified-v8`, `e5small-dr-unified-v2`
+   and `rubertlite-dense-retrieval` (they predate the observation) and 18 for `e5small-dr-unified-v4`,
+   which is exactly the 5+1+3+9 the tool reported. The tool sees everything that exists.
+   So: the change is a one-line default flip whose entire justification is a rate this box cannot
+   currently reproduce. **Re-priced from P0 to P3, open only as a question**: flip it if and when a
+   run's own `parser-stats` shows `repaired` or `failed` above zero, which is the number the flip
+   was always supposed to be answering. Leaving it at P0 would spend the next reader's attention on
+   a lift that has no measured lift behind it.]
 7. **Untrusted code still gets a writable container filesystem (P1, M).** `runtime/sandbox.py:230-238`
    has `--pids-limit 1024`, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--memory`,
    `--cpus`; `--read-only` + tmpfs appears **nowhere** in the tree, and `sandbox.py:241` mounts
    `-v {root}:/work` with no `:ro`. Windows tree-kill is `taskkill /F /T` (`sandbox.py:1275`), not an
    atomic Job Object. Partially covered by newer, independent rungs — but `Settings.landlock` is OFF
    by default (`runtime/landlock.py`) and `runtime/read_fence.py` only sees `open` inside CPython.
+   **[RE-DERIVED 2026-08-21 — TWO OF THESE CLAIMS ARE NOW FALSE, and a third was DECIDED rather
+   than forgotten.**
+   *(a) `--read-only` + tmpfs SHIPPED.* Eight occurrences of `--read-only` and five of `tmpfs` in
+   `runtime/sandbox.py`, with `READONLY_SCRATCH_DIRS` enumerating the writable scratch in one place
+   and `Settings.sandbox_readonly_rootfs` gating it. "Appears nowhere in the tree" is no longer a
+   statement about this tree.
+   *(b) `-v {root}:/work` WITHOUT `:ro` IS A DECISION,* and the code answers this entry directly:
+   "`/work` IS the node's workdir on the host … a `:ro` here does not harden anything, it deletes the
+   tier's output channel. The per-source `edit:false` enforcement that DOES exist is
+   `make_docker_wrap(binds=…)`'s `--mount …,readonly`, one mount per declared data/reference source,
+   which is the right granularity." Asking for `:ro` on `/work` is asking to delete the metric file
+   the engine reads back.
+   *(c) WHAT IS STILL LIVE is the narrow half:* the host-side fence ships opt-in
+   (`core/config.py`'s `landlock` default) and `runtime/read_fence.py` still only sees `open` inside
+   CPython — the schema row's own help says why, and names the retirement condition ("nobody has run
+   a ruleset through a real GPU eval").
+   *IT NOW CARRIES A MARKER, and getting there was the actual work.* Every other marker in
+   this tree is `absent:<symbol>` over an identifier that WOULD EXIST once the item ships — the
+   index tracks a MISSING CAPABILITY, and this item is a wrong DEFAULT, where the capability
+   already exists. The first marker written for it was REJECTED by the guard as malformed:
+   `proof:` read only a whitespace-free literal, so `landlock: str = "off"` was inexpressible, and
+   the sole whitespace-free spelling in the tree sits in a COMMENT that `satisfied_only_by_prose`
+   rejects. Rather than force one — which would have shipped the vacuous guard this repo found nine
+   times in a day — the SCANNER was fixed: `looplab/core/claimpin.py::PROOF` is now the twin of
+   `DECIDED`, both indexes read one grammar, and `line:` plus the backtick-quoted form are
+   admissible.
+   *THE FIRST FALSIFIER WRITTEN WITH THAT NEW GRAMMAR WAS VACUOUS, and a mutation caught it.*
+   `line:landlock&&"off"@core/config.py` reads True even with the default flipped to `"on"`, because
+   `config.py:2201` carries `("landlock", ("off", "enforce"))` — the ALLOWED-VALUES tuple, which
+   names both literals on one line and never changes. That is the exact defect `line:` was invented
+   to fix ("this string occurs" vs "this string is SAID ABOUT that subject") recurring one level up:
+   binding two literals to one LINE does not help when a DIFFERENT line legitimately carries both.
+   The shipped falsifier is the whole assignment, which only the default line can satisfy — verified
+   by flipping the default and watching it go False.
+   OPEN[landlock-is-opt-in-by-default] an untrusted eval gets the host-side filesystem fence only
+   when an operator asks for it, so the container rungs above carry the default alone; retire this
+   when a ruleset has been through a real GPU eval and the default flips.
+   proof:`present:landlock: str = "off"@looplab/core/config.py`
+   **The re-derivation is the finding, not the fix.** Three ranked entries were checked against the
+   tree on 2026-08-21 and none described it — #19 fixed six days earlier by the very symbol it
+   names, #6 standing on a rate this box cannot reproduce, and this one with two claims false. See
+   the note above §0.1.]
 8. **Nothing tests the append lock across real OS processes (P1, S).** Both other C4 halves landed —
    `Event.v` is enforced (`events/eventstore.py:166-168`, `UnsupportedEventVersionError`) and the
    append lock fails loud (`_interprocess_lock`, `eventstore.py:254-321`, raising
@@ -319,7 +412,32 @@ site that proves it is open.
    **Still open, noticed here:** each planner call re-enters `_resolve_stages`, so a manifest that is
    over the operator's budget emits its `stage_timeout_over_budget` span 2–4 times per attempt
    instead of once. Diagnostic-only and unchanged by this fix, but it is the duplicate-consumer tax
-   the shared derivation makes visible.]
+   the shared derivation makes visible.
+   **[MEASURED 2026-08-21 — real in code, and it has never once fired.** The four call sites are
+   `evaluate.py` at the eval, the log plan, the repair and the salvage, each re-entering
+   `_resolve_stages`, whose `record_stages_over_time_budget(..., at="resolve")` has no dedupe — so
+   the shape is exactly as described. The cost is **zero**: across every `spans.jsonl` under `runs/`
+   — **44 files, 99,644 span rows — ZERO are named `stage_timeout_over_budget`**. (Two grep hits
+   exist and both are false: the string occurs inside a tool's OUTPUT and inside a generation's
+   INPUT, i.e. in source an agent happened to read. Counting by span NAME is the only honest count.)
+   **AND THE FENCE IS NOT ONLY A READING BOUND — driven 2026-08-22.** Pointing
+   `backfill-score-metrics --apply` at the corpus made the store REFUSE the append on that run:
+   `EventLogCorruptionError … 1603 later record(s) are DROPPED on replay. Refusing to append.` The
+   pass stopped there and the three runs after it alphabetically were never processed until they
+   were re-run with `--only`. So a gapped run is INERT, not merely truncated to a prefix — and the
+   remedy the store names, `looplab repair-log`, truncates 1,603 records, which makes it an
+   operator's decision and not a maintenance step. Every earlier sentence here that says the store
+   "serves 20 of 1,624 lines" is true and understates it.
+   *The denominator was wrong the first time and is corrected here.* The first pass globbed
+   `runs/*/events.jsonl` and `runs/*/spans.jsonl` — 8 files, 94,197 rows — while the corpus is every
+   `*.jsonl` under `runs/`: **131 files across 15 run directories**, seven of which keep no top-level
+   `events.jsonl` at all. The conclusion survived the correction; it was not entitled to.
+   **NO MARKER, deliberately, and the rule is the reason:** "an item without a re-derivable
+   falsifier must NOT be tagged". Every candidate here fails one way or the other — a pin on the
+   emitter's presence stays true after a dedupe lands INSIDE the emitter (a marker that can never
+   go green), and a pin on a dedupe symbol names a mechanism that may arrive under any other name,
+   which is the mechanism-not-property shape §0.8 found nine times. The index is not improved by a
+   tag that cannot be checked; the measurement is what makes this row honest.]
 10. **Cross-run aggregation is a list, not an overlay (P1, M).** `ui/src/panels.jsx:2319
     ::CrossRunPanel` renders per-run metric observations and explicitly disclaims the thing the row
     asked for: *"Cross-run ranking unavailable… Values below remain per-run observations"*
@@ -377,47 +495,130 @@ site that proves it is open.
     `ui/src/panels.jsx:721::paretoFront` with `dominates()` at `:725`, over the primary metric plus
     every `extra_metric` — but grep for `pareto` across `looplab/search/` and `looplab/engine/`
     returns **nothing**. It never reaches champion selection.
+   **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds, one detail drifted.** `pareto` now appears twice
+   in `engine/holdout.py`, but both are COMMENTS ("feeds the node's Pareto objectives", "Pareto
+   objective") — no algorithm, no selection. `ui/src/panels.jsx` still carries the real
+   `paretoFront`. So the entry's claim is right and its "returns nothing" is now literally false;
+   the fix is what a marker is for.
+   OPEN[pareto-never-reaches-champion-selection] the non-dominated front is computed in the BROWSER
+   and nothing in the search or the engine consumes it, so a run still elects one champion on one
+   scalar; retire this when a front is computed where selection can read it.
+   proof:absent:pareto_front@looplab/search/policy.py
+   *Mutated before it was written:* True as shipped, False the moment a `pareto_front` lands in the
+   policy.]
 13. **The feature-engineering CV gate is a sentence, not an enforcement (P1, M).**
     `engine/proposal_cues.py:231::_cue_feature_engineering` appends prose telling the model
     *"KEEP a feature only if it improves CV"*, gated by `core/config.py:643::feature_engineering =
     False`. There is no FE operator in `search/operators.py` and no `caafe` symbol anywhere. The row
     called the CV gate **mandatory**; an instruction to a model is not a gate.
+   **[RE-DERIVED 2026-08-21 — ALL FOUR CLAIMS HOLD, the first ranked entry checked that day that
+   still described the tree.** `_cue_feature_engineering` returns a STRING and nothing else — the
+   "gate" is the sentence "KEEP a feature only if it improves CV" inside it; `feature_engineering`
+   still defaults to `False`; `search/operators.py` still has no FE operator; and the only `caafe`
+   in the tree is the words "(CAAFE-style)" in a `core/config.py` COMMENT, which is prose and not a
+   symbol, so that claim stands too.
+   OPEN[fe-cv-gate-is-prose-not-enforcement] the eval never drops an engineered feature that fails
+   CV — the only thing that says so is a sentence in the proposer's prompt, and there is no
+   feature-engineering operator to enforce it; retire this when one exists.
+   proof:absent:feature_engineering@looplab/search/operators.py
+   *The falsifier was mutated before it was written:* True as shipped, and False the moment a
+   `feature_engineering` operator lands in that file — checked, because the previous marker written
+   that day was vacuous and only a mutation found it.]
 14. **The time-series adapter is a synthetic toy; tabular-AutoML and multimodal do not exist (P1, M
     each).** `adapters/timeseries.py`'s own docstring (line 9) says a real AutoGluon-TS/Darts backend
     "is a drop-in replacement for the templated forecaster" — i.e. it is the template, not the
     backend. `adapters/` holds classification / dataset / mlebench{,_real} / regression / repo /
     timeseries / toytask and nothing else.
+    **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds, the enumeration drifted.** No `autogluon`,
+    `darts` or `sktime` appears anywhere under `looplab/`, so the templated forecaster IS still the
+    forecaster; there is no tabular-AutoML adapter (only tabular PROFILING in
+    `adapters/dataset_task.py`) and no multimodal one. But "and nothing else" is now false —
+    `adapters/` also holds kaggle_dl, mlebench_grade, mlebench_prep, repo_developer,
+    repo_write_tools and tasks. Only the timeseries half gets a marker: the missing-adapter half has
+    no falsifier that isn't a filename guess, and a proof that names a FILE THAT MIGHT ARRIVE UNDER
+    ANOTHER NAME is the mechanism-not-property shape this file was corrected for nine times.
+    OPEN[timeseries-adapter-embeds-its-own-forecaster] the adapter generates its own exponential
+    forecaster inline, so the task validates LoopLab's plumbing rather than any forecasting
+    capability; retire this when a real backend is imported.
+    proof:`absent:import autogluon@looplab/adapters/timeseries.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands.]
 15. **Drift detection is absent (P2, M).** `trust/leakage.py` DID go past exact-match —
     `code_leakage_scan` (`:147`, self-described "static-dataflow-lite": preprocessor fit on full data
     before the split, `.fit()` on test data), plus `target_leakage` and `temporal_leakage`. But every
     `drift` hit in `looplab/` is code/schema-drift prose or confirm-phase seed variance
     (`engine/confirm_phase.py:273`), never a distribution-shift detector.
+   **[RE-DERIVED 2026-08-21 — HOLDS.** No population-stability index, no KS test, no
+   `distribution_shift`/`drift_detect` symbol anywhere under `looplab/`.
+   OPEN[no-distribution-shift-detector] nothing compares the deployment distribution against the
+   training one, so a run cannot tell a shifted input from a worse model; retire this when a
+   detector exists.
+   proof:missing:looplab/trust/drift.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists.]
 16. **MLflow is manual export, not autolog; there are no data connectors (P2, S–M).**
     `events/mlflow_export.py::export_run` + `cli/export_cmds.py:93` ship a per-run push; grep for
     `autolog` across `looplab/` is **empty**, and there is no `DataConnector`/`connector` symbol.
     (Notebook export DID ship: `events/notebook.py::champion_notebook`, `export_cmds.py:108`.)
+    **[RE-DERIVED 2026-08-21 — the SUBSTANCE holds; the entry's own grep claim is literally false,
+    and finding out why was the point.** `export_run` and `champion_notebook` are where the entry
+    says (the CLI line moved to `export_cmds.py:101`/`:114`), and there is no connector class:
+    `DataConnector` / `class *Connector` is 0 hits. But "grep for `autolog` across `looplab/` is
+    empty" is WRONG — there is exactly one hit, `core/config.py:218`, inside the word **tau·tolog·y**.
+    Nothing is broken by that; what would have been broken is the obvious falsifier. `absent:autolog`
+    reads FALSE as shipped, which the guard would have reported as an item already fixed — an
+    open item closed by an English word. The pin is bound to the CALL instead.
+    OPEN[mlflow-is-export-not-autolog] MLflow receives a run only when a human runs the export
+    command, so nothing is tracked while a run is in flight; retire this when autologging is wired.
+    proof:`absent:mlflow.autolog@looplab/events/mlflow_export.py`
+    *Mutated before it was written:* True as shipped, False the moment that call lands.]
 17. **The MCTS tree has no LLM value estimate and no reflection (P2, M).**
     `search/policy.py:393::MCTSPolicy` is classic UCB1 (`:475-478`) with reward folded straight from
     the metric (`_mcts_reward`, `:374`). No `lats.py`, no LLM valuation, and it is not wired to
     `search/graded_novelty.py` / `novelty_recall.py` / `taxonomy_dedup.py`, which exist independently.
+   **[RE-DERIVED 2026-08-21 — HOLDS.** `MCTSPolicy` is still the one class, `search/policy.py`
+   imports no `graded_novelty`, and there is still no `lats.py`.
+   OPEN[mcts-has-no-llm-value-estimate] the tree values a node by its metric alone, so an unexplored
+   branch nobody has evaluated is indistinguishable from a bad one; retire this when a value
+   estimate exists.
+   proof:missing:looplab/search/lats.py
+   *Mutated before it was written:* True as shipped, False the moment that module exists.]
 18. **Parallel eval is in-process only (P2, L).** `engine/evaluate.py:1375` takes an
     `anyio.CapacityLimiter` and `orchestrator.py:1503,2383` open task groups; there is no `ray`,
     `celery` or `dask` anywhere and no cross-machine dispatch. The budget-guard half of the row DID
     ship (`engine/widths.py::EVAL_WIDTH_MAX` enforced at `orchestrator.py:2966`;
     `engine/proposal_cues.py:425::per_experiment_gpu_budget`).
-19. **[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**
-    `trust/memo_verify.py:209::finalize_verified_evidence` re-checks a cited node's LIFECYCLE only
-    (exists, not tombstoned, not aborted, terminal status, stable attempt) — grep for
-    `feasible|metric_salvaged|flagged` across `memo_verify.py` returns nothing — so a D8 research
-    claim can ratify `supported` on a salvaged or reward-hacked node's number into the cross-run
-    `research_claims.jsonl` (`engine/claims.py`), where a later run retrieves it as evidence.
-    CLAUDE.md's engine map records this as "STILL OPEN". **Cost:** the same leak
-    `engine/memory.py::unreliable_metric_ids` closed for lessons/skills on 2026-08-13, one store
-    over. **Fix:** reuse that exact join — `engine/metric_salvage.py::metric_unmeasured` ∪
-    `events/replay.py::flagged_node_ids` — and refuse/downgrade a `supported` verdict whose cited
-    node is in the set, stating the withheld reason in the claim row. Ranked here (not top-5) only
-    because D8 claims are advisory retrieval input, not selection machinery.
-
+    **[RE-DERIVED 2026-08-21 — HOLDS, and every line citation in it is now wrong.** `ray`, `celery`
+    and `dask` are 0 hits across `looplab/`, so eval parallelism is still one process's task group.
+    The corrections, since this entry is the reason the house style forbids `file.py:NNN`: the
+    limiter is `evaluate.py::LoopEvaluator._evaluate`, not `:1375`; the task groups are around
+    `orchestrator.py:4412`/`:4539`, not `:1503,2383`; `EVAL_WIDTH_MAX` is enforced at
+    `orchestrator.py:2885`, not `:2966`; and `per_experiment_gpu_budget` is DEFINED in
+    `engine/widths.py`, merely imported by `proposal_cues.py`. Four dead citations in one entry, the
+    exact rot `claimpin.LINE_CITATION` was written to refuse.
+    OPEN[eval-parallelism-is-in-process-only] evals are bounded by one box's task group, so the
+    second H200 is the ceiling and a queued node waits rather than dispatching; retire this when a
+    cross-machine dispatcher exists.
+    proof:`absent:import ray@looplab/engine/evaluate.py`
+    *Mutated before it was written:* True as shipped, False the moment that import lands.]
+19. ~~**[added 2026-08-14] Claim ratification ignores node feasibility and trust flags (P1, S).**~~
+    **[FIXED 2026-08-15, VERIFIED 2026-08-21 — this entry outlived its defect by six days.**
+    The entry prescribed the fix by name: "reuse that exact join — `engine/metric_salvage.py::
+    metric_unmeasured` ∪ `events/replay.py::flagged_node_ids` — and refuse/downgrade a `supported`
+    verdict whose cited node is in the set". `trust/memo_verify.py::finalize_verified_evidence` now
+    imports and calls `engine/memory.py::unreliable_metric_ids` (the function that IS that join) and
+    refuses on it, with a docstring that states the leak in the entry's own terms: "none asked
+    whether this run trusts its number".
+    It also fails closed in the direction the entry did not ask for and should have: an unreadable
+    state answers "verification could not establish whether this run trusts the cited node(s)"
+    rather than ratifying — the OPPOSITE containment from the predicate's own, whose bare `except`
+    would return the empty set and thereby answer "everything is reliable".
+    Driven by `tests/test_memo_verify_evidence_trust.py`, `tests/test_research_claim_finalize.py`
+    and `tests/test_champion_metric_caveats.py`.
+    **WHY IT SAT HERE FOR SIX DAYS, which is the more useful finding.** This entry carried no
+    `OPEN[…]` marker, so the open-item guard — the mechanism that DOES notice when a tracked item
+    stops being open, and that caught three of my own drifts on 2026-08-21 alone — could not see it.
+    Ten of the nineteen ranked entries are in that state. Verifying one took a single `grep` for the
+    symbol the entry itself names; nothing was doing that grep. See the note under §0.1 for what
+    that costs and what it would take to fix.]
 ### §0.2 Low-cost residue (open, but cheap to keep open)
 
 - **[FIXED 2026-08-15] `declared_param_overrides` read a file in BREADTH-FIRST order, so a helper
@@ -3683,6 +3884,150 @@ carries `true`. Under `false` the concurrent half does not exist and the serial 
 which in a GPU-shaped run means deep research never fires at all. The fix is not the one-liner the
 other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
 under one claim rather than two reads. Do it when someone actually wants serial research.
+
+**THIRTY DUPLICATE CARDS OF ONE IDEA HALVED A TWO-GPU BOX — measured live 2026-08-22.**
+
+37 cards on `e5small-dr-unified-v4`'s board cluster, at 85% statement similarity, into TEN distinct
+ideas — and three of the clusters (20 + 6 + 4 = **30 cards**) are the same one restated: *"extend
+n_epochs 15→30 (and 50) on node #3's exact ported-loss recipe"*. 31 of the 37 declare a 2-GPU
+footprint against 6 that declare 1.
+
+**The declaration contradicts the idea it carries.** Node 3 — the node those 30 cards propose to
+extend — was created with `footprint: {"gpus": 1}` and ran on one card. So the number that halves
+the box is not merely expensive; it asks for twice the hardware the experiment it copies used.
+
+The bill is arithmetic. `run_width_settled` takes the WIDEST declared footprint across OPEN
+proposals — evidence `{gpu_pool: 2, open_proposals: 21, widest_declared_gpus: 2}` → `eval_parallel`
+2 → 1. The node that then ran, node 4, declares `{"gpus": 1}` and uses one card, so GPU 1 has been
+idle since 02:06 for the whole of a ~9-hour training, held there by proposals nobody is building.
+
+**AND THE NOVELTY GATE IS NEITHER ABSENT NOR LATE — IT RAN, AND IT PASSED THEM. Third correction
+of this paragraph, and the last one is the measurement.**
+
+Two earlier versions of this entry were wrong and are replaced rather than footnoted. The first said
+"card minting has no novelty gate"; the second said the gate "is one stage too late — it fires on
+the NODE path only". Both were inferred from the two `novelty_rejected` rows being keyed to a
+`node_id`. Neither survived a direct check:
+
+* the gate is CONFIGURED and on — `novelty_mode: "llm"`, an LLM adjudicates;
+* both mint lanes call `_prepare_node_idea` (`card_reservation.py`:1370 and `speculation.py`:1795),
+  and that helper is where `_apply_novelty_gate` runs — neither call passes `already_gated`;
+* and it RAN. The durable record holds **190 `phase_progress` rows with `phase: "novelty"` against
+  192 with `phase: "propose"`** — essentially one novelty pass per mint.
+
+It rejected **four**. Meanwhile the board reached 88 cards holding TEN distinct ideas at 85%
+statement similarity, three of whose clusters (20 + 6 + 4 = 30 cards) restate one sentence: *"extend
+n_epochs 15→30 (and 50) on node #3's exact ported-loss recipe"*.
+
+So this is not a wiring defect and there is nothing here to rewire. It is a JUDGE-QUALITY finding:
+an adjudicator that saw 190 proposals and let ~30 restatements of one idea through. That is the
+`judgebench` family's subject — a replay over the recorded proposals scoring the gate's verdicts
+against the clusters — and NOT a prompt to edit on a hunch. The marker that stood here — slug
+`novelty-gate-runs-after-the-card-is-minted`, named without its keyword so this retraction cannot
+itself be read as an open item — is DELETED with this correction. Its falsifier read TRUE for the
+wrong reason: `card_reservation.py` reaches the gate through `_prepare_node_idea` rather than by
+naming `_apply_novelty_gate`, so a pin on the absence of that symbol was satisfied by an indirection
+and not by the property. A falsifier that passes because of a call graph rather than because of a
+behaviour is exactly the shape this index exists to refuse, and this one was mine.
+
+WHAT DID CAP THE SPREE is a different bug entirely, fixed separately: the prefetch ceiling counted
+speculative NODES while the lane it gates stages CARDS, so `_speculation_depth_used` answered 1
+against a pinned ceiling of 2 while 88 cards sat unbuilt. With that closed, a long evaluation mints
+2 and stops — which bounds the duplicates without touching the judge.
+
+Related and separate, filed above: the create handler holds the loop, which is WHY the mint fired
+30 times — an unfinalised eval reads as "running", and `_occupancy_paced_creates` produces supply
+behind a node that had already died.
+
+**A REPAIR'S RATIONALE IS NOT DERIVED FROM ITS OWN DIFF — 2 of 2 observed 2026-08-22.**
+
+Both repairs the engine performed on `e5small-dr-unified-v4` node 4 that night WORK, and both
+describe a change they did not make:
+
+* the module-path repair's rationale says *"Moving it into vectorsearch/ fixes the import"*; its
+  `changed` list is `['looplab_stages.json']` and `run_mine.py` is still at the workdir root. What it
+  actually did was rewrite the stage command from `python -m vectorsearch.run_mine` to
+  `python run_mine.py` — a different, equally valid fix.
+* the OOM repair's rationale says *"revert batch/grad_accum/epochs to node #3's real applied values
+  (4096/4/3)"*, and its summary adds *"This restores the true one-knob LR experiment"*. The config it
+  wrote is `batch_size: 512 / gradient_accumulation_steps: 32` — the applied params of the **v2**
+  champion, a different node in a different run. Effective batch matches node 3 (16384) and the step
+  count is identical (2109), so nothing fails; what changed unannounced is the PER-DEVICE batch, and
+  node 3's own config says why that number was chosen: *"kept large to preserve the in-batch negative
+  pool"*. With `cross_batch_negatives: true` an 8x smaller pool is a second knob on an experiment
+  declared to have one.
+
+Note what this is NOT: the diagnosis was excellent both times. The OOM triage pulled the allocator's
+own numbers out of the stage log (2.25 GiB requested against 126.73 GiB allocated of 139.80 GiB),
+rejected the tempting wrong cause ("Root cause is NOT the LR"), named the mechanism (R-Drop runs the
+model twice per step), used `diff_nodes` to separate declared from applied, and was classified
+`reason: oom` against the engine's own `crash`. The defect is downstream of the reasoning: the prose
+handed to the record describes an intention, and the diff is what happened, and nobody joins them.
+
+**NO MARKER, and for a different reason than usual:** this is a property of the RECORD, not of the
+tree, so the open-item index cannot re-derive it — its falsifiers read source. The right instrument
+is a bench in the `judgebench` family: replay every `node_repaired` in `runs/` and score whether the
+files and numerals named in `rationale`/`reason_summary` intersect `changed` and the diff. 2 of 2 is
+a striking rate and a sample of two; the bench is what would turn it into one.
+
+**THE WHOLE ENGINE STOPS FOR A PROPOSE PHASE — measured 2026-08-21 on a live run, and this is the
+mechanism the "free GPU sits idle" family has been circling.**
+
+`_handle_create_actions` is awaited on the main task, but everything under it is SYNCHRONOUS:
+`_stage_card_creates` → `_prepare_node_idea` → `foresight.propose` → `agent.run_phase` →
+`tool_loop.drive_tool_loop` → `llm.chat` → `_bounded_create` → `threading.join`. A py-spy dump of the
+live engine (pid 3423806, `runs/e5small-dr-unified-v4`, sampled twice 8 minutes apart) puts asyncio's
+own `_run_once` BELOW that join with **no coroutine frame in between** — so an entire propose phase,
+call/parse/call/parse with no `await` anywhere, executes as ONE event-loop callback.
+
+Two observations that looked contradictory are both explained by it: **243 provider calls COMPLETED**
+between 21:26 and 21:45 (nothing was wedged) while **node 4's terminal never landed** (nothing else
+ran). All 243 happened inside one callback; the loop had not turned since the phase began.
+
+The bill, on one evening: node 4's train stage OOM'd and its process EXITED at 21:03:40. Sixty-two
+minutes later the engine had emitted no `stage_finished`, no terminal and no repair for it — last
+node-4 event 21:01:03 — with `pgrep -P` showing no children and all three anyio worker threads idle
+on empty queues. Both H200s sat idle ~59 minutes. Propose phases in that run take a median 10.8 min
+(n=12, max 38.9), and node 5 ran SIX back to back, producing **10 cards added against 5 ever
+requested for build**: the board filled while the machine that consumes it never got a turn.
+
+`orchestrator.py:1902` already documents the neighbouring half — card production is reachable "only
+in the instants when NOTHING is running... Production was gated on occupancy ZERO, which is exactly
+backwards." That comment fixes WHEN creates become reachable. This entry is the other half: once
+reachable, a create holds the loop for as long as it takes, and eval finalisation, terminal writes
+and GPU dispatch all wait behind it.
+
+Separate and not to be conflated: `_nonstream_bounded` bounds ONE attempt at
+`llm_timeout + header_timeout + 10` (415 s on this run) and `_post` retries `range(max_retries + 1)`
+= 9 times, so a genuinely wedged call can hold the loop ~62 minutes on its own. That is a worst case
+this run did not hit.
+
+**IT IS THE WHOLE CREATE HANDLER, not one phase — mapped 2026-08-21 after the stack was read.**
+`_handle_create_actions` spans orchestrator.py 2172–2523 and every producer call inside it is a
+plain `def`, none of them awaited: `_stage_card_creates` (2300, the one on the live stack),
+`_claim_existing_card_builds` (2366), `_consume_batch_proposal` (2403) and `_create_node` (2494 and
+2506). The last is the DEVELOPER — the phase that writes a node's code, and the longest of the lot.
+So the loop is held not only while a proposal is drafted but for the whole of node building, which
+is the same freeze arriving through four more doors. A fix is a five-point change, not a one-liner.
+
+**And the offload looks feasible on every axis checkable without running it** (recorded here because
+this entry previously said the opposite): `llm_broker`'s fairness is a plain `threading.Condition`,
+so it is thread-native and blocking it ON the loop is itself wrong; `card_reservation.py` and
+`search/foresight.py` contain ZERO `anyio.`/`asyncio.`/`await`/`async def`; the broker's lane
+contextvar survives `anyio.to_thread.run_sync` (driven — "build" set on the loop reads back "build"
+in the worker); `EventStore.append` already runs under a writer lock and tail CAS because the UI and
+the engine write the same file from different processes; and an AST pass finds ZERO RunState
+mutations in either file. What remains is empirical — no live test — and `_prepare_node_idea` lives
+in orchestrator.py, where that AST pass has not been run.
+
+**NO MARKER, on the rule that refused one for §0.1 item 9: an item without a re-derivable falsifier
+must not be tagged.** Every candidate here fails. A pin on the synchronous call site
+(`if self._stage_card_creates(lane, state):`) stays TRUE after an offload lands INSIDE
+`_stage_card_creates` — a marker that can never go green. A pin on `to_thread`/`run_sync` names a
+mechanism the fix may not use. And the honest fix is not obvious: `llm_broker` fairness and
+`card_reservation` both sit in that chain, so whether the phase can move off the loop thread at all
+is unmeasured. What this row needed was a stack and a number, and it has both.
+*Evidence: `py-spy dump` captures, two samples plus a final one, in the session scratchpad.*
 
 **A clean trust scan commits to nothing — CLOSED 2026-08-19, see §0.18.** The `trust_scan` receipt
 is written for EVERY evaluated node, hit or no hit. One correction to the ledger row above that this

@@ -27,7 +27,10 @@ from pathlib import Path
 import re
 
 from looplab.core.claimpin import (
+    KINDS as _KNOWN_KINDS,
+    PROOF as _PROOF_GRAMMAR,
     predicate_holds,
+    proof_predicate,
     read_text as _read,
     satisfied_only_by_prose,
     text_without_markers as _text_without_markers,
@@ -52,7 +55,20 @@ _MARKER = re.compile(r"\b(OPEN|DECLINED)\[([a-z0-9][a-z0-9-]{2,60})\]")
 # The kind is part of the key on purpose: `proof:` alone occurs in ordinary prose
 # ("the correlation proof: …"), and an index whose scanner matches prose is the
 # `still open` collision this convention was chosen to avoid.
-_PROOF = re.compile(r"proof:((?:absent:|present:|missing:)\S+)")
+# THE GRAMMAR IS THE SIBLING'S, IMPORTED RATHER THAN RE-SPELLED (2026-08-21). This was a local
+# regex accepting `absent:`/`present:`/`missing:` and a whitespace-free literal, while
+# `tests/test_claim_pins.py` accepted `line:` and a backtick-quoted literal too — so the two indexes
+# disagreed about which predicates EXIST while sharing the one function that evaluates them, which
+# is precisely the split `looplab/core/claimpin.py` was created to end.
+#
+# WHAT THE DRIFT COST: an item of the shape "the DEFAULT is wrong" had no expressible falsifier at
+# all. §0.1 #7's live half is `Settings.landlock` shipping `"off"`, and the only predicate that
+# discriminates it is `line:landlock&&"off"@looplab/core/config.py` — True today, False the moment
+# the default flips. `line:` was exactly what this scanner did not admit, and the one whitespace-free
+# spelling in the tree sits in a COMMENT, which `satisfied_only_by_prose` exists to reject. So that
+# entry stayed outside the guard — as nine other ranked entries are, three of which were checked
+# against the tree that day and none of which still described it.
+_PROOF = _PROOF_GRAMMAR
 _MEASURED = re.compile(r"measured:(.{0,400})", re.S)
 
 # The window a marker's own clause must live in. A docstring paragraph and a markdown row both fit.
@@ -109,9 +125,10 @@ def test_every_open_marker_is_well_formed():
             if not proof:
                 bad.append(f"{rel}: OPEN[{slug}] carries no `proof:` clause within {_WINDOW} chars")
                 continue
-            for pred in proof.group(1).split("+"):
-                if not pred.startswith(("absent:", "present:", "missing:")):
-                    bad.append(f"{rel}: OPEN[{slug}] predicate {pred!r} is not absent:/present:/missing:")
+            for pred in proof_predicate(proof).split("+"):
+                if not pred.startswith(_KNOWN_KINDS):
+                    bad.append(f"{rel}: OPEN[{slug}] predicate {pred!r} is not one of "
+                               + "/".join(_KNOWN_KINDS))
         else:
             measured = _MEASURED.search(window)
             if not measured:
@@ -178,7 +195,7 @@ def test_no_open_marker_has_silently_shipped():
         proof = _PROOF.search(window)
         if not proof:
             continue  # reported by the well-formedness test
-        for pred in proof.group(1).split("+"):
+        for pred in proof_predicate(proof).split("+"):
             holds, why = _predicate_holds(pred)
             if not holds:
                 stale.append(f"OPEN[{slug}] at {path.relative_to(ROOT)}: {why}")
@@ -232,7 +249,7 @@ def test_no_proof_is_satisfiable_only_by_prose():
         proof = _PROOF.search(window)
         if not proof:
             continue
-        for pred in proof.group(1).split("+"):
+        for pred in proof_predicate(proof).split("+"):
             for form in ("absent:", "present:"):
                 if not pred.startswith(form):
                     continue
@@ -274,3 +291,39 @@ def test_the_prose_check_can_actually_fail():
     assert not satisfied_only_by_prose(triage, _text_without_markers(triage), "no-such-text-anywhere"), (
         "a literal that does not occur at all is a DEAD citation, reported by the proof check — "
         "this one must not also claim it is prose")
+
+
+def test_the_two_indexes_agree_on_which_predicates_EXIST():
+    """One grammar, two indexes — asserted over the compiled objects, not over two spellings.
+
+    `looplab/core/claimpin.py` was created because "two evaluators would eventually disagree about
+    what `present:` means". The SCANNERS were left behind and had drifted by 2026-08-21: this file's
+    local regex accepted `absent:`/`present:`/`missing:` with a whitespace-free literal, while
+    `tests/test_claim_pins.py` also accepted `line:` and a backtick-quoted literal. Two indexes
+    disagreeing about which predicates exist, over one shared evaluator.
+
+    THE COST WAS A WHOLE SHAPE OF ITEM. "The DEFAULT is wrong" has no whitespace-free falsifier —
+    §0.1 #7's live half is `Settings.landlock` shipping `"off"`, discriminated only by
+    `line:landlock&&"off"@…`, and the sole whitespace-free spelling in the tree sits in a COMMENT
+    that `satisfied_only_by_prose` rejects. So that entry could not come under the guard at all.
+    """
+    from looplab.core import claimpin
+
+    assert _PROOF is claimpin.PROOF
+    for kind in ("absent:", "present:", "missing:", "line:"):
+        bare = _PROOF.search(f"proof:{kind}Symbol@a.py")
+        assert bare, f"the open-item scanner must admit {kind!r}"
+        assert proof_predicate(bare).startswith(kind)
+    # …and the quoted form, which is the only way a literal may carry a space.
+    quoted = _PROOF.search('proof:`line:landlock&&"off"@looplab/core/config.py`')
+    assert quoted and proof_predicate(quoted) == 'line:landlock&&"off"@looplab/core/config.py'
+
+
+def test_a_wrong_default_is_now_expressible_and_discriminating():
+    """The predicate the grammar gap made impossible, driven against the real tree: TRUE while the
+    default is what the item says it is, FALSE the moment it flips. A falsifier that cannot go
+    false is the vacuous guard this repo found nine times in one day."""
+    open_now, _ = predicate_holds('line:landlock&&"off"@looplab/core/config.py', root=ROOT)
+    closed_then, why = predicate_holds('line:landlock&&"on"@looplab/core/config.py', root=ROOT)
+    assert open_now is True, "the item this proves is open must actually be open"
+    assert closed_then is False and "belong together" in why

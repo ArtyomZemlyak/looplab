@@ -31,6 +31,8 @@ those tests fails on the tree that shipped the attach. They are grouped by what 
 """
 from __future__ import annotations
 
+import functools
+import anyio
 import pytest
 
 from looplab.adapters.toytask import ToyObjectiveDeveloper
@@ -153,7 +155,7 @@ def test_the_inventory_staging_lane_writes_no_twin(tmp_path):
     engine = _engine(tmp_path)
     state = _seed_failed_card(engine)
 
-    assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == []
+    assert anyio.run(functools.partial(engine._stage_card_creates, [{"kind": "debug", "parent_id": 0}], state)) == []
     assert _card_added_ids(engine) == ["card-0"]
     assert list(fold(engine.store.read_all()).cards) == ["card-0"]
 
@@ -200,7 +202,7 @@ def test_the_engine_funnel_refuses_every_debug_entry_point(tmp_path):
     assert engine._prepare_node_idea({"kind": "debug", "parent_id": 0}, state,
                                      researcher=engine.researcher, prospective_node_id=1,
                                      source="researcher") is None
-    assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == []
+    assert anyio.run(functools.partial(engine._stage_card_creates, [{"kind": "debug", "parent_id": 0}], state)) == []
     with pytest.raises(ValueError, match="debug nodes were removed"):
         engine._create_injected_node({"idea": {"operator": "debug", "params": {}},
                                       "parent_id": 0, "code": "print(1)"})
@@ -624,7 +626,7 @@ def test_the_staging_lane_names_the_card_it_refused_to_duplicate(tmp_path):
     # refuses SILENTLY-BUT-OBSERVABLY: it stages nothing, mints nothing, and a stall here is still
     # diagnosable rather than reported as "N action(s) planned … without creating a node" with no
     # cause. The attach-naming branch is exercised through the planner in the AUTHORITY block above.
-    assert engine._stage_card_creates([{"kind": "debug", "parent_id": 0}], state) == []
+    assert anyio.run(functools.partial(engine._stage_card_creates, [{"kind": "debug", "parent_id": 0}], state)) == []
     assert getattr(engine, "_card_stage_attached_to", None) is None
     assert _card_added_ids(engine) == ["card-0"]
     assert engine._create_stall_diagnosis([{"kind": "debug", "parent_id": 0}], state)

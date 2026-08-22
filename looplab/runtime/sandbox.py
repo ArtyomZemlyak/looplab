@@ -451,6 +451,13 @@ class RunResult:
     # no declaration and no gate. Every producer of `extra_metrics` MUST set this beside it —
     # an untagged key reads back `unknown` at every consumer, which is deliberately not `declared`.
     extra_metrics_provenance: Optional[dict] = None
+    # WHICH WAY IS BETTER on each `extra_metrics` key: `{name: "min"|"max"}`
+    # (`core/models.py::normalize_extra_metric_directions`). Only the DECLARED channel can fill it,
+    # because only an operator's own reader spec says which way it meant — an `auto`-scraped key has
+    # no declaration to read a direction out of, and the engine's probe constants are not objectives
+    # at all. An unoriented key reads back `unknown` at every consumer, and a consumer that ranks
+    # must DROP such a dimension rather than assume one; see `oriented_extra_metrics_only`.
+    extra_metrics_direction: Optional[dict] = None
     violations: Optional[list] = None
     # Intra-node sweep: when the solution ran a grid of configs in one process, it emits a final
     # `{"trials": [...]}` line; this carries that raw list of trial dicts. The orchestrator picks

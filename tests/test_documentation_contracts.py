@@ -260,7 +260,8 @@ def test_the_package_map_names_each_package_exactly_once():
 
 # The number-words the three surfaces below spell out. Short on purpose: a registry that outgrew
 # this map would be a registry whose enumerations should stop being written by hand at all.
-_COUNT_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen"}
+_COUNT_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
+                14: "fourteen"}
 
 
 def test_every_failure_reason_surface_names_all_of_them():

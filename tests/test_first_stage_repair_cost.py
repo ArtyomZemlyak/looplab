@@ -216,8 +216,13 @@ def test_the_critic_is_absent_from_exactly_the_configuration_the_rule_path_serve
     consulted: list = []
     original = CrashRepairMixin._repair_critic
 
-    def _record(self, state, node, repair_log, attempt):
-        out = original(self, state, node, repair_log, attempt)
+    # `**kw` rather than the four positionals this used to name: `_repair_critic` gained
+    # `monitor_verdicts` when the watchdog's verdicts were routed to the critic as well as to the
+    # judge, and a spy that pins an EXACT signature turns any growth of the seam it observes into a
+    # TypeError in a test about something else entirely. What this test is about is WHETHER the
+    # critic is consulted, not how many arguments it takes — so it forwards whatever it is given.
+    def _record(self, state, node, repair_log, attempt, **kw):
+        out = original(self, state, node, repair_log, attempt, **kw)
         consulted.append(out)
         return out
 

@@ -2298,7 +2298,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # the complete lane in one tail-CAS group — so the batch shape survives the queue
                     # rather than being flattened by it.
                     lane = stageable if not self._speculation_enabled() else stageable[:1]
-                    if self._stage_card_creates(lane, state):
+                    if await self._stage_card_creates(lane, state):
                         return "continue", state, _no_mint_turns
                     if self._create_paused:
                         # …but a staging attempt that GATED the run is not a "rejected" one. The

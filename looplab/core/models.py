@@ -250,6 +250,85 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
     return out
 
 
+# WHICH WAY IS BETTER on an extra metric — the second SUBJECT question about a value, beside the
+# channel question one block up, and recorded the same way for the same reason.
+#
+# THE OMISSION THIS CLOSES, and it is a live hazard rather than a tidiness point.
+# `ui/src/panels.jsx::paretoFront` builds the non-dominated set over the primary metric (which IS
+# direction-aware, from `state.direction`) plus EVERY key of `extra_metrics`, each treated as
+# cost-like — lower is better. That assumption is documented in the panel and has been harmless for
+# exactly one reason: measured 2026-08-21 over every `*.jsonl` under `runs/` (131 files, 15 run
+# directories), the only extra metrics any run has ever recorded are the engine's four CUDA-probe
+# constants in the `specgate*` toys, and a CONSTANT dimension can neither create nor break a
+# domination. Every one of the 8 evaluated nodes across the two real task families records
+# `extra_metrics == {}`.
+#
+# So the panel is correct today and becomes wrong the moment a run records a real second objective —
+# and the objectives waiting to be recorded are quality metrics. One vecsearch score stage already
+# PRINTS nDCG@k, MAP@k, MRR@k, Precision@k and Recall@k at seven cutoffs, ~35 numbers, of which the
+# record keeps one; every one of them is higher-is-better. Declaring them without this map would
+# invert them on the single surface that ranks nodes, and the failure is silent: every number on
+# screen is real and the ordering is backwards.
+#
+# WHY A MAP AND NOT A NAME RULE. "nDCG means max" is a heuristic over spellings, which is the
+# mechanism-not-property shape (`docs/BACKLOG.md` §0.8 found it nine times in one day) — it answers
+# for the keys someone thought of and silently mis-answers for `loss_at_100` or a domain metric
+# nobody anticipated. The operator's own reader spec is where the answer belongs, because the
+# operator is the party that knows.
+#
+# WHY "UNKNOWN" MUST NOT DEFAULT TO A DIRECTION. Same discipline as `EXTRA_METRIC_UNKNOWN`: every
+# value already on disk was recorded without one, and picking either direction for those states
+# something that was never measured. A consumer that cannot orient a dimension must DROP it from
+# the ordering rather than guess — which is what keeps this change behaviour-preserving on the
+# corpus as it stands.
+EXTRA_METRIC_DIRECTION_UNKNOWN = "unknown"
+
+
+def normalize_extra_metric_directions(value, *, max_items: int = 256) -> dict[str, str]:
+    """Normalize the `extra_metrics` direction map to `{name: "min"|"max"}`.
+
+    Same untrusted-input discipline as `normalize_extra_metric_channels`, and the same reason: this
+    arrives from an old or hand-edited event log with assignment validation off. A non-dict, a
+    non-string key, or a value outside `DIRECTIONS` is DROPPED rather than coerced, and a dropped
+    entry reads back as `EXTRA_METRIC_DIRECTION_UNKNOWN` through `extra_metric_direction` — an
+    unorientable dimension, which every consumer must decline to rank on."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, raw in value.items():
+        if len(out) >= max_items or not isinstance(key, str) or raw not in DIRECTIONS:
+            continue
+        out[key[:200]] = str(raw)
+    return out
+
+
+def extra_metric_direction(directions, key) -> str:
+    """Which way is better on a single extra metric, for any reader.
+
+    `EXTRA_METRIC_DIRECTION_UNKNOWN` when the map is absent (every log written before this shipped)
+    AND when it is present but says nothing about this key. Both are the same fact — nobody recorded
+    which way is better — and neither may be reported as a direction."""
+    if isinstance(directions, dict):
+        found = directions.get(key)
+        if found in DIRECTIONS:
+            return str(found)
+    return EXTRA_METRIC_DIRECTION_UNKNOWN
+
+
+def oriented_extra_metrics_only(extras, directions) -> tuple[dict, dict]:
+    """The `(extras, directions)` pair keeping ONLY the values a reader can ORDER.
+
+    The sibling of `authenticated_extra_metrics_only`, expressed over the recorded tag for the same
+    reason: a ranking surface must not re-derive "which way is better" a second time and drift from
+    the label. Everything else stays readable — this drops a dimension from an ORDERING, never a
+    node from a record, and the two are not the same exclusion (`ui/src/panels.jsx` argues at length
+    why dropping a POINT from a Pareto test publishes a front the record does not support; dropping
+    an axis nobody can orient publishes a smaller front that it does)."""
+    kept = {k: v for k, v in (extras or {}).items()
+            if extra_metric_direction(directions, k) in DIRECTIONS}
+    return kept, {k: extra_metric_direction(directions, k) for k in kept}
+
+
 def extra_metric_channel(channels, key) -> str:
     """Which channel a single extra metric came through, for any reader.
 
@@ -825,10 +904,24 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # default `Settings.inline_repair_reasons`, because a node must not be thrown away over a flapping
 # provider; `tests/test_inline_repair_reason_coverage.py` derives the producer set from all THREE
 # producers rather than from the classifier alone.
+# `check_false_positive` (2026-08-21) is the FOURTEENTH, and the second member no classifier
+# produces: it is answer-only, like `oom` and `not_learning`, and only the failure DIAGNOSTICIAN can
+# ever emit it. It exists because `check_failed` names the stage that REFUSED and says nothing about
+# why, so "the stage really did fail, here is the cause" and "the stage did not fail, the check was
+# wrong" collapsed into one word. Measured on `bench-out/cand.durable.jsonl`: of 22 `check_failed`
+# rows, 14 become `not_learning` and FIVE are answered back as `check_failed` — and reading those
+# five's rationales, the diagnostician is refuting the checker with validation numbers from the same
+# log ("the run actually reached val recall@100=0.8114 … yet the verifier flagged"). It was right
+# and had nowhere to put it. Like `not_learning` and `unclassified` it is deliberately ABSENT from
+# `metric_salvage.NEVER_SALVAGED_REASONS`, so it can neither suppress a metric nor admit one — a
+# model saying "the check was wrong" must not thereby score the node (docs/36). What it buys is the
+# record and the DIRECTIVE: `crash_repair._repair_error_context` points the repair at the check
+# instead of asking a Developer to rewrite an experiment it has just been told is correct.
 FAILURE_REASONS: tuple[str, ...] = ("crash", "timeout", "oom", "setup", "no_metric", "drift",
                                     "unclassified",
                                     "expect_failed", "check_failed", "diverged", "stalled",
-                                    "needs_failed", "not_learning", "rules_violation")
+                                    "needs_failed", "not_learning", "check_false_positive",
+                                    "rules_violation")
 
 # The ONE reason that is not eligible for inline repair, and the criterion is
 # `tests/test_inline_repair_reason_coverage.py`'s own: a reason should end a node with no repair
@@ -1000,6 +1093,14 @@ class Node(BaseModel):
     # A key missing from a PRESENT map reads `unknown` for the same reason — a later merge (trial
     # collapse, salvage gates) that forgot to tag must not inherit its neighbours' authority.
     extra_metrics_provenance: dict[str, str] = Field(default_factory=dict)
+    # WHICH WAY IS BETTER on each extra metric: `{name: "min"|"max"}` (see
+    # `normalize_extra_metric_directions`). Rides beside the values for the same reason the channel
+    # map does — a ranking surface that re-derives it from the key's SPELLING answers for the names
+    # someone thought of and silently mis-answers the rest. Additive with a reader-side default: `{}`
+    # on every log written before this shipped, so every key reads `EXTRA_METRIC_DIRECTION_UNKNOWN`
+    # and no consumer may order on it. A key missing from a PRESENT map reads `unknown` for the same
+    # reason its channel does.
+    extra_metrics_direction: dict[str, str] = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
     # WHERE THIS NODE'S METRIC CAME FROM, when it was not simply measured. `None` for every ordinary
@@ -1021,6 +1122,11 @@ class Node(BaseModel):
     @classmethod
     def _normalize_extra_metrics_provenance(cls, value):
         return normalize_extra_metric_channels(value)
+
+    @field_validator("extra_metrics_direction", mode="before")
+    @classmethod
+    def _normalize_extra_metrics_direction(cls, value):
+        return normalize_extra_metric_directions(value)
     # Transient re-run marker (node_reset): "propose" | "implement" set it so the engine RE-RUNS this
     # existing node in place from that stage; cleared once the re-run's node_created lands. ("eval" resets
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,

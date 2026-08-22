@@ -251,15 +251,35 @@ DIAGNOSABLE_ENGINE_REASONS: tuple[str, ...] = ("crash", "no_metric", "check_fail
 # `check_failed` or `crash` and puts "ran out of budget" in its EVIDENCE, where a reader can weigh
 # it. `timeout` is also in `NEVER_SALVAGED_REASONS`, so admitting it here would hand a model the
 # power to suppress a metric — the direction `docs/36` refuses outright.
+#
+# `check_false_positive` IS THE ONE THIS VOCABULARY WAS MISSING, and the corpus says so. Of the 22
+# `check_failed` rows in `bench-out/cand.durable.jsonl`, 14 become `not_learning` — the win this
+# split was built for — and FIVE are answered back as `check_failed`, which reads as the
+# diagnostician restating the status it was handed. Reading those five's rationales says otherwise:
+# `rubertlite-dense-retrieval` n1 wrote *"The check_failed verdict is a false positive: the run
+# actually reached val recall@100=0.8114 … yet the verifier flagged"*, and n9 and n16 refute the
+# checker with validation recall taken from the SAME log it read. The diagnostician was right and
+# had nowhere to put it: `check_failed` names the stage that REFUSED, never the failure behind it,
+# so "the stage really did fail and here is why" and "the stage did not fail, the check was wrong"
+# collapse into one word.
+#
+# IT ADMITS NO METRIC, and that is what keeps it on the right side of docs/36. It is deliberately
+# ABSENT from `metric_salvage.NEVER_SALVAGED_REASONS` — the same position `not_learning` holds — so
+# it can neither suppress a metric nor admit one, and a model saying "the check was wrong" does not
+# thereby score the node. What it changes is the RECORD (which stops naming a stage where a cause
+# belongs) and the DIRECTIVE (`crash_repair._repair_error_context`), which stops telling a Developer
+# to rewrite an experiment that may have nothing wrong with it. A wrong `check_false_positive`
+# therefore costs exactly one repair round pointed at the check instead of at the code — the same
+# thing every other wrong kind costs.
 DIAGNOSED_FAILURE_REASONS: tuple[str, ...] = (
-    "crash", "oom", "no_metric", "check_failed", "not_learning")
+    "crash", "oom", "no_metric", "check_failed", "not_learning", "check_false_positive")
 
 # The two ANSWER-ONLY kinds, i.e. the members no classifier produces. `oom` because both of its
 # producers were the deleted text rules (see `DIAGNOSABLE_ENGINE_REASONS`), `not_learning` because
 # its only engine producer is a watchdog KILL and the diagnostician's answer is about a run nothing
 # killed. Spelled so the guard test can assert the two vocabularies' relationship exactly instead of
 # asserting "they overlap somehow".
-DIAGNOSED_ONLY_REASONS: tuple[str, ...] = ("oom", "not_learning")
+DIAGNOSED_ONLY_REASONS: tuple[str, ...] = ("oom", "not_learning", "check_false_positive")
 
 # The registered overlap with ENGINE-FINAL, spelled once so the guard test can assert it EXACTLY
 # rather than assert "some overlap is allowed". Adding a member here means arguing the three bullets
