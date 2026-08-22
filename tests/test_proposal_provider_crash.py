@@ -18,6 +18,7 @@ or a node, the run freezes with a reason naming the provider, and a resume conti
 """
 from __future__ import annotations
 
+import functools
 import anyio
 import pytest
 
@@ -157,7 +158,7 @@ def test_the_card_staging_lane_refuses_it_too(tmp_path):
     engine.store.append("run_started", {"run_id": "r", "task_id": "toy", "goal": "g",
                                         "direction": "min", "card_driven_selection": True})
     state = fold(engine.store.read_all())
-    assert engine._stage_card_creates([{"kind": "draft"}], state) == []
+    assert anyio.run(functools.partial(engine._stage_card_creates, [{"kind": "draft"}], state)) == []
     events = engine.store.read_all()
     assert not [event for event in events if event.type == EV_CARD_ADDED], (
         "the transport error reached the durable Card board as a hypothesis STATEMENT")
@@ -183,7 +184,7 @@ def test_the_batch_staging_lane_refuses_it_too_including_its_audit_rows(tmp_path
                                         "direction": "min", "card_driven_selection": True})
     state = fold(engine.store.read_all())
 
-    assert engine._stage_card_creates([{"kind": "draft"}, {"kind": "draft"}], state) == []
+    assert anyio.run(functools.partial(engine._stage_card_creates, [{"kind": "draft"}, {"kind": "draft"}], state)) == []
     events = engine.store.read_all()
     assert not [event for event in events if event.type == EV_CARD_ADDED], (
         "the batch lane's dropped-proposal audit put the transport error on the Card board")
