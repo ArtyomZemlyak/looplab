@@ -3901,20 +3901,39 @@ proposals — evidence `{gpu_pool: 2, open_proposals: 21, widest_declared_gpus: 
 2 → 1. The node that then ran, node 4, declares `{"gpus": 1}` and uses one card, so GPU 1 has been
 idle since 02:06 for the whole of a ~9-hour training, held there by proposals nobody is building.
 
-**AND THE NOVELTY GATE IS NOT ABSENT — IT IS ONE STAGE TOO LATE.** This was first written up as "card
-minting has no novelty gate", which is wrong and worth correcting in place: the gate is configured
-and ON for this run (`novelty_mode: "llm"`, an LLM adjudicates), and it demonstrably fires — the
-durable record holds exactly two `novelty_rejected` rows, node 3 ("Identical claim") and node 4
-("Same card as #2"). Both are keyed to a `node_id`. Not one card was ever adjudicated, so 30
-restatements reached the board while the machinery that would have caught them sat downstream of
-where they were made.
+**AND THE NOVELTY GATE IS NEITHER ABSENT NOR LATE — IT RAN, AND IT PASSED THEM. Third correction
+of this paragraph, and the last one is the measurement.**
 
-OPEN[novelty-gate-runs-after-the-card-is-minted] the card mint path never applies the novelty gate
-the node path applies, so one idea can occupy the board N times and its widest declared footprint
-sets the run's width; retire this when the mint consults the gate.
-proof:absent:_apply_novelty_gate@looplab/engine/card_reservation.py+absent:_llm_novelty_gate@looplab/engine/card_reservation.py
-*Mutated before it was written:* True as shipped; injecting EITHER call into the mint module turns
-it False, so a fix through either entry point retires the marker.
+Two earlier versions of this entry were wrong and are replaced rather than footnoted. The first said
+"card minting has no novelty gate"; the second said the gate "is one stage too late — it fires on
+the NODE path only". Both were inferred from the two `novelty_rejected` rows being keyed to a
+`node_id`. Neither survived a direct check:
+
+* the gate is CONFIGURED and on — `novelty_mode: "llm"`, an LLM adjudicates;
+* both mint lanes call `_prepare_node_idea` (`card_reservation.py`:1370 and `speculation.py`:1795),
+  and that helper is where `_apply_novelty_gate` runs — neither call passes `already_gated`;
+* and it RAN. The durable record holds **190 `phase_progress` rows with `phase: "novelty"` against
+  192 with `phase: "propose"`** — essentially one novelty pass per mint.
+
+It rejected **four**. Meanwhile the board reached 88 cards holding TEN distinct ideas at 85%
+statement similarity, three of whose clusters (20 + 6 + 4 = 30 cards) restate one sentence: *"extend
+n_epochs 15→30 (and 50) on node #3's exact ported-loss recipe"*.
+
+So this is not a wiring defect and there is nothing here to rewire. It is a JUDGE-QUALITY finding:
+an adjudicator that saw 190 proposals and let ~30 restatements of one idea through. That is the
+`judgebench` family's subject — a replay over the recorded proposals scoring the gate's verdicts
+against the clusters — and NOT a prompt to edit on a hunch. The marker that stood here — slug
+`novelty-gate-runs-after-the-card-is-minted`, named without its keyword so this retraction cannot
+itself be read as an open item — is DELETED with this correction. Its falsifier read TRUE for the
+wrong reason: `card_reservation.py` reaches the gate through `_prepare_node_idea` rather than by
+naming `_apply_novelty_gate`, so a pin on the absence of that symbol was satisfied by an indirection
+and not by the property. A falsifier that passes because of a call graph rather than because of a
+behaviour is exactly the shape this index exists to refuse, and this one was mine.
+
+WHAT DID CAP THE SPREE is a different bug entirely, fixed separately: the prefetch ceiling counted
+speculative NODES while the lane it gates stages CARDS, so `_speculation_depth_used` answered 1
+against a pinned ceiling of 2 while 88 cards sat unbuilt. With that closed, a long evaluation mints
+2 and stops — which bounds the duplicates without touching the judge.
 
 Related and separate, filed above: the create handler holds the loop, which is WHY the mint fired
 30 times — an unfinalised eval reads as "running", and `_occupancy_paced_creates` produces supply
