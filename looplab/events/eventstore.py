@@ -1250,6 +1250,16 @@ class EventStore:
         test_shared_identity_rules.py` exists to refuse, and the second copy would be written by
         whoever next needed the number.
 
+        AND THE GAP IS NOT ONLY A READING BOUND — IT CLOSES THE LOG TO WRITES. Driven 2026-08-22 by
+        pointing `backfill-score-metrics --apply` at the corpus: on that run the append raised
+        `EventLogCorruptionError` ("the newline-terminated record is invalid and 1603 later
+        record(s) are DROPPED on replay. Refusing to append."), so the pass stopped there and the
+        three runs after it alphabetically were never processed. A caller that treats this as a
+        read-side caveat will size its batch wrong: the honest reading is that a gapped run is
+        INERT — unreadable past the fence and unwritable at all — until someone runs
+        `looplab repair-log`, which truncates to the last valid boundary and is therefore an
+        operator's decision rather than a maintenance step.
+
         Cheap and side-effect free: `read_all` is cache-served, and the line count is one buffered
         pass. An unreadable path answers `(served, 0)` — 0 lines can never be less than `served`, so
         a caller comparing them reports nothing rather than inventing a horizon from a failed stat.

@@ -420,6 +420,14 @@ site that proves it is open.
    — **44 files, 99,644 span rows — ZERO are named `stage_timeout_over_budget`**. (Two grep hits
    exist and both are false: the string occurs inside a tool's OUTPUT and inside a generation's
    INPUT, i.e. in source an agent happened to read. Counting by span NAME is the only honest count.)
+   **AND THE FENCE IS NOT ONLY A READING BOUND — driven 2026-08-22.** Pointing
+   `backfill-score-metrics --apply` at the corpus made the store REFUSE the append on that run:
+   `EventLogCorruptionError … 1603 later record(s) are DROPPED on replay. Refusing to append.` The
+   pass stopped there and the three runs after it alphabetically were never processed until they
+   were re-run with `--only`. So a gapped run is INERT, not merely truncated to a prefix — and the
+   remedy the store names, `looplab repair-log`, truncates 1,603 records, which makes it an
+   operator's decision and not a maintenance step. Every earlier sentence here that says the store
+   "serves 20 of 1,624 lines" is true and understates it.
    *The denominator was wrong the first time and is corrected here.* The first pass globbed
    `runs/*/events.jsonl` and `runs/*/spans.jsonl` — 8 files, 94,197 rows — while the corpus is every
    `*.jsonl` under `runs/`: **131 files across 15 run directories**, seven of which keep no top-level
