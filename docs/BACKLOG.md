@@ -3885,6 +3885,37 @@ which in a GPU-shaped run means deep research never fires at all. The fix is not
 other four got: it needs the two paths to agree on a single spend, i.e. the mark check and the receipt
 under one claim rather than two reads. Do it when someone actually wants serial research.
 
+**A REPAIR'S RATIONALE IS NOT DERIVED FROM ITS OWN DIFF — 2 of 2 observed 2026-08-22.**
+
+Both repairs the engine performed on `e5small-dr-unified-v4` node 4 that night WORK, and both
+describe a change they did not make:
+
+* the module-path repair's rationale says *"Moving it into vectorsearch/ fixes the import"*; its
+  `changed` list is `['looplab_stages.json']` and `run_mine.py` is still at the workdir root. What it
+  actually did was rewrite the stage command from `python -m vectorsearch.run_mine` to
+  `python run_mine.py` — a different, equally valid fix.
+* the OOM repair's rationale says *"revert batch/grad_accum/epochs to node #3's real applied values
+  (4096/4/3)"*, and its summary adds *"This restores the true one-knob LR experiment"*. The config it
+  wrote is `batch_size: 512 / gradient_accumulation_steps: 32` — the applied params of the **v2**
+  champion, a different node in a different run. Effective batch matches node 3 (16384) and the step
+  count is identical (2109), so nothing fails; what changed unannounced is the PER-DEVICE batch, and
+  node 3's own config says why that number was chosen: *"kept large to preserve the in-batch negative
+  pool"*. With `cross_batch_negatives: true` an 8x smaller pool is a second knob on an experiment
+  declared to have one.
+
+Note what this is NOT: the diagnosis was excellent both times. The OOM triage pulled the allocator's
+own numbers out of the stage log (2.25 GiB requested against 126.73 GiB allocated of 139.80 GiB),
+rejected the tempting wrong cause ("Root cause is NOT the LR"), named the mechanism (R-Drop runs the
+model twice per step), used `diff_nodes` to separate declared from applied, and was classified
+`reason: oom` against the engine's own `crash`. The defect is downstream of the reasoning: the prose
+handed to the record describes an intention, and the diff is what happened, and nobody joins them.
+
+**NO MARKER, and for a different reason than usual:** this is a property of the RECORD, not of the
+tree, so the open-item index cannot re-derive it — its falsifiers read source. The right instrument
+is a bench in the `judgebench` family: replay every `node_repaired` in `runs/` and score whether the
+files and numerals named in `rationale`/`reason_summary` intersect `changed` and the diff. 2 of 2 is
+a striking rate and a sample of two; the bench is what would turn it into one.
+
 **THE WHOLE ENGINE STOPS FOR A PROPOSE PHASE — measured 2026-08-21 on a live run, and this is the
 mechanism the "free GPU sits idle" family has been circling.**
 
