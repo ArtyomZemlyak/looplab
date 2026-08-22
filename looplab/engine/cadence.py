@@ -285,3 +285,121 @@ def seed_boundary_due(n: int, last: int, n_seeds: int) -> bool:
     knob.
     """
     return n > 0 and last <= 0 and n >= max(1, int(n_seeds or 0))
+
+
+# ---------------------------------------------------------------------------------- backfill (F1h)
+#
+# WHOSE PROBLEM THIS IS. `proposal_derived_width` settles the run's evaluation width from the WIDEST
+# footprint any open proposal declares, so one card asking for two GPUs on a two-GPU box settles the
+# width to 1 — correctly, because when that experiment runs it will need both devices. What it does
+# NOT do is fill the gap in the meantime: measured on `runs/e5small-dr-unified-v4`, a node declaring
+# `{"gpus": 1}` held one card for a nine-hour evaluation while the other idled the whole time,
+# reserved for a two-GPU proposal nobody had started.
+#
+# THE LITERATURE'S ANSWER IS BACKFILLING, and the variant that fits here is the SLACK-BASED one:
+# a waiting job may start on the free devices even if it delays the reservation, provided the delay
+# stays inside a bound. Strict EASY backfilling — "may start only if it provably finishes before the
+# reservation" — is the wrong bound for this workload and the arithmetic says why. With seven hours
+# left on the running node and a nine-hour candidate, EASY refuses and spends SEVEN device-hours of
+# idleness to avoid TWO hours of delay. The trade is 3.5:1 against it.
+#
+# So the rule below weighs the two directly rather than testing a deadline:
+#
+#     benefit = min(candidate, remaining)      device-hours the free device stops wasting
+#     cost    = max(0, candidate - remaining)  hours the reservation is pushed back
+#     admit   ⟺  benefit > lam * cost
+#
+# `lam` is the one knob and it is a PRICE, not a threshold: how many device-hours of idleness the
+# operator will pay to avoid one hour of delay to reserved work. At 1.0 an hour of delay and a
+# device-hour are worth the same, which admits the 7-vs-9 case (7 > 2) and refuses the hopeless one
+# (one hour left, nine-hour candidate: 1 > 8 is false). Above 1.0 the reservation is protected more;
+# below it, utilisation wins.
+#
+# WHY A PRICE AND NOT THE USUAL SLACK FACTOR. Slack-based backfilling normally caps the delay at a
+# fraction of the reserved job's runtime, which is a bound on the WORST case and says nothing about
+# what the delay buys. Here both sides are measurable in the same unit, so the comparison can be
+# exact instead of conservative. That is only possible because the ETA is good: `LossTrajectory.
+# eta_s` landed within 0.3 % at the halfway mark of a real 9.13-hour node, where the HPC literature
+# is built around user estimates that overshoot by 2-3x (Tsafrir/Etsion/Feitelson, TPDS 2007). A
+# rule this sharp would be reckless on those inputs and is merely honest on these.
+
+
+def _backfill_terms(candidate_s, remaining_s):
+    """`(benefit, cost)` in seconds, or None when the inputs cannot support a decision.
+
+    ONE definition for both the predicate and the receipt. They were written as two copies first,
+    and mutation caught what that costs: flipping `max(0.0, ...)` in the predicate turned NO test
+    red, because the receipt kept its own correct copy and the predicate's answer happens not to
+    change when `cost` goes negative. A term that only one of two spellings uses cannot be tested
+    through the other, and two spellings of one rule is the drift this module keeps refusing.
+
+    Refuses on any unknown or impossible input — a missing or non-finite ETA, a non-positive
+    duration, a non-positive gap. `remaining_s <= 0` is a refusal and not a computation: the
+    reservation can start NOW, so there is no gap to fill, and saying `unknown` is honest where
+    "the delay exceeds the gain" would be a verdict about a trade that does not exist.
+    """
+    try:
+        cand = float(candidate_s)
+        rem = float(remaining_s)
+    except (TypeError, ValueError):
+        return None
+    if cand != cand or rem != rem:                       # NaN
+        return None
+    if cand in (float("inf"), float("-inf")) or rem in (float("inf"), float("-inf")):
+        return None
+    if cand <= 0 or rem <= 0:
+        return None
+    return min(cand, rem), max(0.0, cand - rem)
+
+
+def backfill_admits(candidate_s, remaining_s, *, lam: float = 1.0) -> bool:
+    """Whether a candidate may take a free device that is reserved for wider work.
+
+    `candidate_s` — how long the candidate will hold the device. `remaining_s` — how long until the
+    reservation could have started anyway, i.e. the running work's own remaining time. Both in
+    seconds; `lam` prices an hour of delay against a device-hour reclaimed.
+
+    REFUSES ON ANY UNKNOWN, and that is the load-bearing half. A missing or non-finite ETA means the
+    engine cannot say how long something will take, and admitting on a guess is how a scheduler
+    turns one idle device into two late experiments. `remaining_s` of zero admits nothing either:
+    the reservation can start NOW, so there is no gap to fill and no idleness to reclaim.
+
+    A candidate that fits entirely inside the gap costs nothing and is always admitted — that is the
+    EASY case, and it falls out of the arithmetic rather than being special-cased (`cost == 0`, and
+    any positive benefit beats `lam * 0`).
+    """
+    try:
+        price = float(lam)
+    except (TypeError, ValueError):
+        return False
+    if price != price or price < 0:                      # NaN or a negative price
+        return False
+    terms = _backfill_terms(candidate_s, remaining_s)
+    if terms is None:
+        return False
+    benefit, cost = terms
+    return benefit > price * cost
+
+
+def backfill_receipt(candidate_s, remaining_s, *, lam: float = 1.0) -> dict:
+    """The decision plus the arithmetic that produced it, for the durable log.
+
+    Recorded rather than acted on while the rule is being observed: the engine can write what it
+    WOULD have admitted and let a real corpus accumulate before any admission changes. That is the
+    same "measure first" shape `docs/BACKLOG.md` records for the deterministic stop gate, and it
+    matters more here because the cost of a wrong admission is a real training run delayed.
+    """
+    admits = backfill_admits(candidate_s, remaining_s, lam=lam)
+    row = {"admits": admits, "lam": round(float(lam), 4) if isinstance(lam, (int, float)) else None}
+    terms = _backfill_terms(candidate_s, remaining_s)
+    if terms is None:
+        row["why"] = "unknown_duration"
+        return row
+    benefit, cost = terms
+    row["candidate_s"] = round(float(candidate_s), 1)
+    row["remaining_s"] = round(float(remaining_s), 1)
+    row["benefit_s"] = round(benefit, 1)
+    row["cost_s"] = round(cost, 1)
+    row["why"] = ("fits_inside_the_gap" if cost == 0
+                  else ("worth_the_delay" if admits else "delay_exceeds_the_gain"))
+    return row
