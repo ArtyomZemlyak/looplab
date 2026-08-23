@@ -657,7 +657,16 @@ class Settings(BaseSettings):
     # operator's reader over the protected `score` stage is untouched) and it cannot buy a second
     # grace. Still, it is money, so the operator opts in rather than discovering it on a bill.
     # `runtime/sandbox.py::_granted_grace` is where the clamp is enforced.
-    eval_deadline_grace_s: float = Field(default=0.0, ge=0)
+    # ON BY DEFAULT SINCE 2026-08-23, as AUTO (`-1`), on the operator's decision. It shipped opt-in
+    # on the argument one line up — it is money — and a year of the corpus answered that argument:
+    # NINE `stage_finished.status == "timeout"` rows across `runs/` discarded 57.6 GPU-hours, every
+    # one of them landing within seconds of its own declared wall. Opt-in put the whole of that loss
+    # behind a switch nobody had turned, which is the wrong default for a bounded, one-shot,
+    # fail-closed rescue. `-1` rather than a number because the right ceiling is a FRACTION of the
+    # stage being rescued, not a constant — see `resolve_deadline_grace` for why 1800 means three
+    # different things on this repo's own stages. A resumed pre-2026-08-23 run keeps `0.0` through
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`; the ge bound admits the sentinel and nothing below it.
+    eval_deadline_grace_s: float = Field(default=-1.0, ge=-1)
     # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — the per-node
     # `setup`, the single `command`, and every stage on BOTH sandbox tiers, and the solution.py
     # sandbox path for a non-repo task (the composition sits above that branch, not inside it). The run-wide half of the
@@ -2474,6 +2483,15 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # terminal, `require` remains reachable on a resume, and re-pinning a LEGACY default would change
     # how an already-recorded run replays, which is the one thing this table exists to prevent.
     "metric_subject": "off",
+    # THE DEADLINE GRACE, whose DEFAULT changed (0.0 -> -1 AUTO) on 2026-08-23. Like
+    # `inline_repair_attempts` and `repair_reasons` this is a pre-existing field, so (a) cannot
+    # apply and (b)+(c) carry it. (b) is paid work in both currencies at once: a resumed run would
+    # start making a judge call at EVERY stage deadline the original made none at, and would hand
+    # out up to 10% more wall clock per stage — on a nine-hour training, GPU-hours nobody chose,
+    # in the same event log whose first half killed on the wall. (c) is `0.0`, pointable at every
+    # commit between the field landing (2026-08-13) and this one, and it is exactly what that
+    # field's own comment still means by "the unconditional tree-kill, byte for byte".
+    "eval_deadline_grace_s": 0.0,
     # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
     # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the
     # run, so a resumed pre-versioning snapshot stops itself after three failed nodes under a policy

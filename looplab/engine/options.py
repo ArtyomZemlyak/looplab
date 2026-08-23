@@ -104,7 +104,9 @@ class EngineOptions:
     max_eval_timeout: float = 3600.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     eval_stall_timeout_s: float = 1800.0  # #6: silence-before-kill CAP for an eval stage; 0 disables
-    eval_deadline_grace_s: float = 0.0   # one-shot judge-granted extension at the deadline; 0 = off
+    # -1 = AUTO (min(10% of the stage's own wall, 1800s)); 0 = off; >0 = the operator's absolute
+    # ceiling. Resolved per stage in `runtime/sandbox.py::resolve_deadline_grace`.
+    eval_deadline_grace_s: float = -1.0   # one-shot judge-granted extension at the deadline
     # F1d RUN-LEVEL DECLARED ENVIRONMENT: {NAME: value} set for every eval of every node (setup, the
     # single command, and every stage), under the task's `cmd.env` and a stage's own `env`. A
     # `default_factory` rather than a bare `{}` because this dataclass is frozen but its FIELD

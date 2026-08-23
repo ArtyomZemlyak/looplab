@@ -774,6 +774,9 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # Bound the deadline at the universal choke point: a NaN/inf/negative timeout from ANY caller
     # would otherwise disable the wall-clock kill (a NaN deadline is never reached). See finite_timeout.
     timeout = finite_timeout(timeout)
+    # AFTER `finite_timeout`, so AUTO is a fraction of the wall this stage will ACTUALLY be
+    # held to rather than of an unbounded number a caller passed in.
+    deadline_grace_max_s = resolve_deadline_grace(deadline_grace_max_s, timeout)
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
     argv = list(argv)
@@ -1085,6 +1088,53 @@ class _StageHealthPair:
                 for item in self.monitors.values():
                     item.hits = 0
             return sum(item.hits for item in self.monitors.values()) >= self.threshold
+
+
+# `deadline_grace_max_s = -1` is AUTO — the default since 2026-08-23. The operator asked for the
+# feature to be ON without having to name a number, and a NUMBER is the wrong thing to name once:
+# 1800 s is 50% of a 3600 s score stage, 30x a 60 s smoke stage, and 6% of the 28000 s train wall
+# that `runs/e5small-dr-unified-v4` node 6 died on. A FRACTION of the stage's own wall is the only
+# quantity that means the same thing at every scale, so AUTO is `min(10% of this stage's timeout,
+# 30 minutes)`. The ceiling is what stops the fraction from turning a 24-hour stage into a
+# 2.4-hour rescue.
+#
+# RESOLVED HERE AND NOWHERE ELSE, because here is the only place the STAGE'S OWN timeout is in
+# scope: `deadline_grace_max_s` is threaded from the engine once per `command_eval` for the whole
+# pipeline, while `run_argv` is entered once per stage with that stage's wall. Resolving upstream
+# would hand every stage the same absolute number and lose the proportionality that is the point.
+AUTO_DEADLINE_GRACE_S = -1.0
+_AUTO_GRACE_FRACTION = 0.10
+_AUTO_GRACE_CEILING_S = 1800.0
+
+
+def resolve_deadline_grace(cap, timeout) -> float:
+    """The absolute grace ceiling for ONE stage, resolved from the operator's setting and that
+    stage's own wall. Pure and TOTAL — every unusable input resolves to 0.0, the historical kill.
+
+    `None`/`0` => OFF (byte-for-byte the unconditional tree-kill). A POSITIVE number is the
+    operator's own absolute ceiling and is returned unchanged, exactly as before this existed. A
+    NEGATIVE number is the AUTO sentinel and resolves against `timeout`.
+
+    Non-finite is 0.0 in BOTH directions on purpose: a NaN cap cannot be compared into a bound, and
+    `-inf` is not an intentional request for AUTO — it is a broken caller, and the cheap answer to a
+    broken caller here is the kill that always happened. Same for a non-positive `timeout`: a stage
+    with no meaningful wall has no meaningful fraction of one."""
+    import math
+    try:
+        cap = float(cap if cap is not None else 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(cap):
+        return 0.0
+    if cap >= 0:
+        return cap
+    try:
+        wall = float(timeout)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(wall) or wall <= 0:
+        return 0.0
+    return min(_AUTO_GRACE_FRACTION * wall, _AUTO_GRACE_CEILING_S)
 
 
 def _granted_grace(on_deadline, tail: str, cap) -> float:

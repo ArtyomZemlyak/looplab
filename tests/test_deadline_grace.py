@@ -6,7 +6,10 @@ What is being held, in both directions:
     is still captured;
   * nothing a judge (or the candidate's log it reads) can say buys more than the OPERATOR'S cap, a
     second grace, or a reprieve from an operator cancel;
-  * with the feature off — the default — the behaviour is the historical unconditional tree-kill.
+  * with the feature off — an EXPLICIT `0`, which stopped being the default on 2026-08-23 — the
+    behaviour is the historical unconditional tree-kill;
+  * and AUTO (`-1`, the default since that date) is resolved against the STAGE'S OWN wall, so the
+    same setting means 6 s on a one-minute stage and 30 minutes on a nine-hour one.
 
 Why it exists: all four `stage_finished.status == "timeout"` rows in `runs/` land exactly on their
 4 h / 6 h / 8 h wall and discarded 22.0 GPU-hours between them. The entire captured record of
@@ -267,3 +270,86 @@ def test_a_stage_that_goes_quiet_NEAR_its_wall_is_judged_and_keeps_the_whole_gra
     assert sig["deadline_grace_s"] == 2.0
     assert elapsed >= 2.6, (
         f"the grace was served for {elapsed - 1.2:.2f}s of its 2.0s (stall window 0.9s): {elapsed:.2f}s")
+
+
+# --------------------------------------------------------------------------------------------
+# AUTO (`-1`), the default since 2026-08-23. The operator's decision was "on by default"; the
+# design decision was that the ceiling is a FRACTION of the stage being rescued, because 1800 s is
+# 50% of a 3600 s score stage, 30x a 60 s smoke stage and 6% of the 28000 s train wall
+# `runs/e5small-dr-unified-v4` node 6 died on.
+# --------------------------------------------------------------------------------------------
+
+def test_auto_resolves_against_the_stages_own_wall():
+    """The truth table for the sentinel. Fraction below the ceiling, ceiling above it, and every
+    unusable input resolving to the historical kill in BOTH directions."""
+    from looplab.runtime.sandbox import resolve_deadline_grace as R
+    assert R(-1.0, 3600.0) == pytest.approx(360.0), "10% of the wall while under the ceiling"
+    assert R(-1.0, 60.0) == pytest.approx(6.0), "a small stage gets a small rescue, not 30 minutes"
+    assert R(-1.0, 28000.0) == pytest.approx(1800.0), "the 30-minute ceiling binds on a long wall"
+    assert R(-1.0, 18000.0) == pytest.approx(1800.0), "exactly at the crossover"
+    # OFF and EXPLICIT are untouched by the sentinel's arrival.
+    assert R(0.0, 3600.0) == 0.0 and R(None, 3600.0) == 0.0, "explicit off stays off"
+    assert R(900.0, 3600.0) == 900.0, "the operator's own number is returned unchanged"
+    assert R(900.0, 10.0) == 900.0, "an EXPLICIT cap is NOT proportional — only AUTO is"
+    # Unusable input is the historical kill, never an unbounded rescue.
+    assert R(float("nan"), 3600.0) == 0.0
+    assert R(float("-inf"), 3600.0) == 0.0, "-inf is a broken caller, not a request for AUTO"
+    assert R(float("inf"), 3600.0) == 0.0
+    assert R("auto", 3600.0) == 0.0
+    assert R(-1.0, 0.0) == 0.0 and R(-1.0, -5.0) == 0.0, "no wall means no fraction of one"
+    assert R(-1.0, float("nan")) == 0.0 and R(-1.0, "soon") == 0.0
+
+
+def test_auto_is_resolved_in_the_runtime_and_the_row_says_the_resolved_number(tmp_path):
+    """THE PROPERTY, end to end: the engine threads ONE cap for the whole pipeline, so a stage's own
+    wall can only be seen in the runtime — and the durable row must report the number that was
+    actually in force, not the sentinel. A judge asking for thirty seconds against a 2 s wall gets
+    0.2 s, and the row says 0.2."""
+    from looplab.runtime.command_eval import run_command_eval
+    (tmp_path / "slow.py").write_text(
+        "import time\n"
+        "for i in range(400):\n"
+        "    print(i, flush=True); time.sleep(0.05)\n", encoding="utf-8")
+    stages = [{"name": "train", "command": [sys.executable, "slow.py"], "timeout": 2.0}]
+    res = run_command_eval([sys.executable, "slow.py"], str(tmp_path), 2.0,
+                           {"kind": "stdout_json", "key": "metric"}, stages=stages,
+                           on_deadline=lambda tail: 30.0, deadline_grace_max_s=-1.0)
+    row = res.stages[0]
+    assert row["status"] == "timeout", "the child never finishes; AUTO is a rescue, not a reprieve"
+    assert row["deadline_grace_s"] == pytest.approx(0.2, abs=0.01), (
+        "10% of the STAGE's 2 s wall — not the sentinel, and not the pipeline's number")
+
+
+def test_the_engine_builds_a_judge_under_AUTO_and_asks_for_everything_allowed():
+    """The two ways the new default could ship as no change at all, both of which it did at first.
+
+    (1) `_deadline_grace_fn` gated on `cap <= 0`, which reads the AUTO sentinel as OFF and returns
+    no judge — feature on, judge never asked. (2) the judge returned `cap`, i.e. `-1`, which
+    `_granted_grace` rejects as a non-answer — feature on, judge asked, judge agrees, nothing
+    granted. Both are invisible to every test that only checks the setting's value."""
+    from looplab.engine.eval_stages import EvalStagesMixin
+    from looplab.runtime.sandbox import _granted_grace
+
+    class _Client:
+        def __init__(self, word): self.word = word
+        def complete_text(self, msgs): return self.word
+
+    class _Stub(EvalStagesMixin):
+        def __init__(self, cap, word):
+            self.eval_deadline_grace_s = cap
+            self._client = _Client(word)
+        def _reflect_client(self): return self._client
+        def _idea_text(self, idea): return "toy"
+
+    judge = _Stub(-1.0, "FINISHING")._deadline_grace_fn(None)
+    assert judge is not None, "AUTO is ON: a judge must be built"
+    asked = judge("100%|##########| 664/664")
+    assert asked == float("inf"), "the judge asks for everything allowed; the runtime decides how much"
+    # …and that is what makes AUTO actually pay out, once the runtime has resolved a real cap.
+    assert _granted_grace(lambda t: asked, "", 360.0) == 360.0
+
+    assert _Stub(-1.0, "NOT_FINISHING")._deadline_grace_fn(None)("...") == 0.0
+    assert _Stub(-1.0, "probably about to finish")._deadline_grace_fn(None)("...") == 0.0, (
+        "still fail-closed: prose is not FINISHING")
+    assert _Stub(0.0, "FINISHING")._deadline_grace_fn(None) is None, "explicit 0 is the off switch"
+    assert _Stub(float("nan"), "FINISHING")._deadline_grace_fn(None) is None

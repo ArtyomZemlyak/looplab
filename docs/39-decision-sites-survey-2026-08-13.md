@@ -156,10 +156,13 @@ input that must not be trusted with anything expensive:
 | clamped again inside the runtime (inf → cap; NaN, negatives, strings, a raising judge → 0) | `sandbox.py::_granted_grace` |
 | asked AT MOST ONCE per command | `_tee_drain`'s `graced` latch |
 | an operator `cancel` is NEVER graced | `_tee_drain`'s split branch |
-| OFF by default | `eval_deadline_grace_s = 0.0` |
+| ~~OFF by default~~ **ON by default since 2026-08-23**, as AUTO | `eval_deadline_grace_s = -1` → `sandbox.py::resolve_deadline_grace` = `min(10% of the stage's own wall, 1800s)` |
 
-So a solution that prints a convincing progress bar buys `eval_deadline_grace_s` seconds, once, and no
-other thing. **This widens the action space, not the trusted set** (doc 36 corollary 2).
+So a solution that prints a convincing progress bar buys at most 10% of its own stage's wall (never
+more than 30 minutes), once, and no other thing. The 2026-08-23 default flip changed WHO PAYS, not
+what the judge can do: every row above still holds, and the operator's `0` still buys the
+byte-for-byte historical kill. What moved was the argument — opt-in put NINE timed-out stages and
+57.6 discarded GPU-hours behind a switch nobody had turned. **This widens the action space, not the trusted set** (doc 36 corollary 2).
 
 Note the fail direction is the **opposite** of §2.1's, deliberately: there an unreadable answer *saves*
 a node, here it would *spend*. "Unreadable" must resolve to whichever answer is cheap, and that is not

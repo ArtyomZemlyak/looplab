@@ -581,8 +581,8 @@
      "key": "eval_deadline_grace_s",
      "label": "Deadline grace (s)",
      "type": "float",
-     "default": 0.0,
-     "help": "At the wall-clock deadline, ask a live-log judge ONE word (FINISHING / NOT_FINISHING) instead of killing unconditionally, and give the stage at most this many extra seconds — once per command, never on an operator cancel, clamped inside the runtime. 0 (default) = the unconditional kill. A deadline cannot see a progress bar: all four timed-out stages in the shipped corpus sat exactly on their 4h/6h/8h wall and lost 22.0 GPU-hours between them, and one of them was at 664/664. OPT-IN because the judge reads the candidate's OWN log, so a solution that prints a convincing progress bar buys exactly this many seconds — and nothing else: the metric still comes from your reader over the protected score stage."
+     "default": -1.0,
+     "help": "At the wall-clock deadline, ask a live-log judge ONE word (FINISHING / NOT_FINISHING) instead of killing unconditionally, and give the stage a bounded amount of extra time — once per command, never on an operator cancel, clamped inside the runtime. -1 (the default since 2026-08-23) = AUTO: at most 10% of that stage's own time limit, and never more than 30 minutes. 0 = the unconditional kill. A positive number is your own absolute ceiling in seconds. A deadline is a number that cannot see a progress bar: all nine timed-out stages in the shipped corpus sat within seconds of their own declared wall and lost 57.6 GPU-hours between them, and one of them was at 664/664. It is ON by default because that loss sat behind a switch nobody had turned; it stays BOUNDED because the judge reads the candidate's OWN log, so a solution that prints a convincing progress bar buys exactly those seconds and nothing else — the metric still comes from your reader over the protected score stage."
     },
     {
      "key": "sweep_timeout_mult",

@@ -808,8 +808,8 @@ or *"an `eval_timeout` you set is NOT honoured here"* when ungranted). **The Dev
 "generous timeout" ask (prompt strings are contracts) and into the implement/repair message, which is
 the only one a repair session reaches.
 
-**`eval_deadline_grace_s` (shipped 2026-08-13, default `0.0`).** Named only when it is ON, and named as
-a RESCUE: *"a judge may grant a stage that is demonstrably about to finish up to Ns more. That is a
+**`eval_deadline_grace_s` (shipped 2026-08-13 at `0.0`; ON by default as AUTO `-1` since
+2026-08-23).** Named whenever it is ON — which is now by default — and named as a RESCUE: *"a judge may grant a stage that is demonstrably about to finish up to Ns more. That is a
 rescue, not budget — plan as if it does not exist."* The announced ceiling is unchanged by it. A
 ceiling that reads as "you have more than this" would re-open the defect from the other side.
 

@@ -697,7 +697,7 @@ class ProposalCuesMixin:
           longer one that reports nothing, and that is not licence to propose something too small to
           answer the question.
 
-        `eval_deadline_grace_s` is named only when it is ON (default `0.0` says nothing), and named as a
+        `eval_deadline_grace_s` is named whenever it is ON — which since 2026-08-23 is by default — and as a
         RESCUE rather than as budget: a judge-granted extension does not change the number to plan
         against, and a ceiling that reads as "you have more than this" would re-open the defect from the
         other side.
@@ -769,18 +769,25 @@ class ProposalCuesMixin:
                 "that buys nothing.")
 
     def _deadline_grace_text(self) -> str:
-        """The `eval_deadline_grace_s` clause — present only when the operator turned it on.
+        """The `eval_deadline_grace_s` clause — present whenever the feature is ON (AUTO included).
 
         A judge-granted extension is a RESCUE for a stage that is demonstrably about to finish, clamped
         to the operator's own number in the runtime (`sandbox._granted_grace`). It does not change the
         number to plan against, and announcing it as though it did would hand back exactly the margin
-        this hint exists to state. Silent at the `0.0` default so the shipped prompt gains nothing."""
+        this hint exists to state. Silent only at an explicit `0.0`, which is now the OFF switch rather than the default."""
         try:
             grace = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
         except (TypeError, ValueError, OverflowError):
             return ""
-        if not math.isfinite(grace) or grace <= 0:
+        if not math.isfinite(grace) or grace == 0:
             return ""
+        if grace < 0:
+            # AUTO. The cue CANNOT name seconds: the ceiling is a fraction of whichever stage reaches
+            # its wall, and this hint is written once per proposal, before any stage exists. Naming
+            # the RULE keeps the clause honest; naming a number here would invent one.
+            return (" (At the deadline a judge may grant a stage that is demonstrably about to finish "
+                    "up to 10% of that stage's own time limit, at most 30 minutes. That is a rescue, "
+                    "not budget — plan as if it does not exist.)")
         return (f" (At the deadline a judge may grant a stage that is demonstrably about to finish up to "
                 f"{grace:.0f}s more. That is a rescue, not budget — plan as if it does not exist.)")
 
