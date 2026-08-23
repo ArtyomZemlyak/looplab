@@ -1931,6 +1931,25 @@ class RunState(BaseModel):
     # `lessons_refreshed` records each mid-run re-read of the shared cross-run store (cadence gate).
     lessons_distilled: list[dict] = Field(default_factory=list)
     lessons_refreshed: list[dict] = Field(default_factory=list)
+    # THE CROSS-NODE REPAIR LEDGER — what OTHER nodes had to fix, and why.
+    #
+    # Lineage carries FILES from parent to child, and it carries them correctly (see
+    # `repo_developer.implement_from`). What it cannot carry is a fix discovered by a SIBLING,
+    # because a node only becomes a parent by WINNING ON METRIC. Measured on
+    # `runs/e5small-dr-unified-v4`: nodes 4,5,6,8,9 all improve from node 3 — a star, not a chain.
+    # Node 6 hit `stage 'mine' exited 0 without producing its artifact`, its repair wrote a `prep.py`
+    # that fixes it, and node 6 scored 0.781781 against node 3's 0.790898. So node 6 will never be a
+    # parent, its `prep.py` is unreachable, and node 8 inherited node 3's six files verbatim and hit
+    # the identical failure. Three nodes paid for the same discovery.
+    #
+    # The mechanism is right and is NOT changed: a mechanical fix and a scientific result are being
+    # selected by the SAME criterion, and only one of them should be. So this is a second channel
+    # carrying INFORMATION, never files — a later Developer is told what was repaired and why, and
+    # decides for itself. It cannot corrupt a lineage because nothing is inherited through it.
+    #
+    # Bounded on purpose (`_REPAIR_LEDGER_MAX`): a long run repairs many times, and a ledger that
+    # grows without limit becomes a prompt that crowds out the code it is meant to annotate.
+    repair_ledger: list[dict] = Field(default_factory=list)
 
     @field_serializer("run_setup_done")
     def _ser_run_setup_done(self, v: set) -> list:
@@ -1997,6 +2016,42 @@ class RunState(BaseModel):
                 continue
             seen.add(key)
             out.append(c)
+        return out
+
+    def repair_candidates(self) -> list[dict]:
+        """The repair ledger grouped by FILE PATH, most-repeated first — the operator's list of
+        changes that belong in the source repo rather than in one node.
+
+        A node inherits its parent's files, and correctly; what it cannot inherit is a fix a SIBLING
+        found, because a node becomes a parent only by winning on metric. Measured on
+        `runs/e5small-dr-unified-v4`: nodes 4, 5, 6, 8 and 9 all improve from node 3, so node 6's
+        repaired `prep.py` — which diagnosed the mine-stage artifact contract correctly — was
+        unreachable to node 8, and node 8 hit the same failure with node 3's six files verbatim.
+
+        Grouped by path and counted by DISTINCT NODES on purpose: one node repairing the same file
+        four times is one discovery, and four nodes repairing it once each is a property of the
+        repo. The second is what deserves a commit; the first is a node having a bad day.
+
+        This RANKS, it decides nothing. Promoting a fix into the source repo moves the substrate
+        every later node is measured on — that is an operator's call, and it has to be recorded as
+        an event or the comparability key cannot tell nodes on either side of it apart."""
+        by_path: dict[str, dict] = {}
+        for row in self.repair_ledger:
+            node_id = row.get("node_id")
+            for path in (row.get("paths") or []):
+                if not isinstance(path, str):
+                    continue
+                entry = by_path.setdefault(path, {"path": path, "nodes": set(), "reasons": {}})
+                entry["nodes"].add(node_id)
+                reason = row.get("reason")
+                if isinstance(reason, str):
+                    entry["reasons"][reason] = entry["reasons"].get(reason, 0) + 1
+        out = [{"path": e["path"],
+                "nodes": sorted(n for n in e["nodes"] if n is not None),
+                "node_count": len(e["nodes"]),
+                "reasons": dict(sorted(e["reasons"].items(), key=lambda kv: (-kv[1], kv[0])))}
+               for e in by_path.values()]
+        out.sort(key=lambda e: (-e["node_count"], e["path"]))
         return out
 
     def evaluated_nodes(self) -> list[Node]:
