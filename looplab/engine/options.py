@@ -180,10 +180,10 @@ class EngineOptions:
     feature_engineering: bool = False    # I1: CV-gated feature-engineering directive
     ablate_code_blocks: bool = False     # A0a: ablate pipeline code blocks, not just params
     proxy_kill_fraction: float = 0.0
-    reward_hack_detect: bool = False     # B5: flag suspicious wins
+    reward_hack_detect: bool = True      # B5: flag suspicious wins
     trust_gate: str = "audit"            # T2: audit|gate|block — what a hack/leak flag does to selection
-    code_leakage_detect: bool = False    # I3: static code-leakage scan per node
-    critic_check: bool = False           # C4: execution-free critic per node
+    code_leakage_detect: bool = True     # I3: static code-leakage scan per node
+    critic_check: bool = True            # C4: execution-free critic per node
     # B3: the ENTROPY half of the persisted-tail redactor (shapes + this operator's env values are
     # masked at every tail regardless, since 2026-08-14). Flipped to True on 2026-08-15 WITH the
     # `Settings` default, deliberately NOT recorded as a divergence in

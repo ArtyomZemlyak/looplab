@@ -1208,21 +1208,21 @@
      "key": "reward_hack_detect",
      "label": "Reward-hack detector",
      "type": "bool",
-     "default": false,
+     "default": true,
      "help": "B5: audit suspicious wins such as grader/answer-key access, frozen-file writes and perfect-score heuristics. Findings are advisory under trust_gate=audit; high-precision reward-hack/leakage signals can gate or block under the configured trust gate."
     },
     {
      "key": "code_leakage_detect",
      "label": "Code-leakage scan",
      "type": "bool",
-     "default": false,
+     "default": true,
      "help": "I3: static scan of each solution for train→test leakage (fit-before-split, fit-on-test); surfaced in the Trust panel."
     },
     {
      "key": "critic_check",
      "label": "Independent critic",
      "type": "bool",
-     "default": false,
+     "default": true,
      "help": "C4: execution-free critic of each solution (stub / hardcoded-metric / params-ignored); surfaced in the Trust panel."
     },
     {
@@ -1284,14 +1284,14 @@
      "key": "literature_search",
      "label": "Literature grounding",
      "type": "bool",
-     "default": false,
+     "default": true,
      "help": "E3: give the agentic Researcher an arXiv search tool (network-optional; fails gracefully if blocked)."
     },
     {
      "key": "web_search",
      "label": "Web search (deep research)",
      "type": "bool",
-     "default": false,
+     "default": true,
      "help": "P2: give the Deep-Research stage a general web search/fetch tool on top of arXiv (network-optional)."
     },
     {
