@@ -809,6 +809,20 @@ class LLMRepoDeveloper:
             from looplab.tools.cross_run_tools import CrossRunTools
             tool = CrossRunTools(self._cross_run_memory_dir, role="developer", audience="run")
             state = getattr(self, "_memory_state", None)
+            # …AND the lessons ledger itself, role-scoped. Until 2026-08-23 the Developer could read
+            # what the prior renderer PUSHED at it and nothing more: `search_lessons` lives in
+            # `MemoryTools`, `MemoryTools` is composed in `agents/factory._shared_providers`, and the
+            # Developer assembles its own toolset here. Measured on `runs/e5small-dr-unified-v4`:
+            # across 10,455 tool calls `search_lessons` fired 10 times — 9 in `propose`, 1 in
+            # `deep_research`, ZERO in `card_build`/`plan`/`stages`/`inline_repair`. So the role that
+            # writes the code could not look up the lesson its current failure matches, and node 8
+            # repeated the stage failure node 6 had already diagnosed and fixed.
+            # `role="developer"` keeps meta-notes out — the same line the prior renderer draws.
+            from looplab.tools.memory_tools import MemoryTools
+            lessons_tool = MemoryTools(self._cross_run_memory_dir, role="developer")
+            if state is not None:
+                lessons_tool.bind_state(state)
+            extra.append(lessons_tool)
             if state is not None:
                 # Agent-facing providers are task-bound before use. Unbound reads remain an explicit
                 # human/CLI portfolio capability, never an accidental agent default — `audience="run"`
