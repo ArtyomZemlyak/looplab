@@ -24,6 +24,7 @@ Everything here is offline: fake clients, the toy task, no provider.
 """
 from __future__ import annotations
 
+import re
 import pytest
 
 import looplab.engine.orchestrator as _orch
@@ -162,7 +163,13 @@ def test_an_ungranted_researcher_is_told_the_field_is_dead(tmp_path):
     engine = _engine(tmp_path / "locked", agent_control={"timeout": []})
     assert engine._agent_may("researcher", "timeout") is False
     hint = _stamp(engine, LLMResearcher(_ToolEmitClient()))
-    assert "is NOT honoured here" in hint and "up to" not in hint
+    # The property is "no eval_timeout HEADROOM is quoted", and the headroom has a shape:
+    # `up to <N>s` plus the clamp sentence (see the granted case above). A bare `up to` is the
+    # MECHANISM, not the property, and it stopped separating the two on 2026-08-23 when the
+    # deadline-grace clause — which quotes a RULE, not a number, and says to plan as if it does not
+    # exist — became part of the default prompt.
+    assert "is NOT honoured here" in hint
+    assert re.search(r"up to \d+s", hint) is None and "clamped to that ceiling" not in hint
 
 
 def test_a_repo_task_is_told_nothing_about_eval_timeout_at_all(tmp_path):
@@ -176,10 +183,26 @@ def test_a_repo_task_is_told_nothing_about_eval_timeout_at_all(tmp_path):
 
 
 # --------------------------------------------------------------------------- the grace interaction
-def test_the_deadline_grace_is_silent_by_default(tmp_path):
-    """`eval_deadline_grace_s` ships at 0.0 — the unconditional tree-kill, byte for byte — so the
-    shipped prompt must gain nothing from this clause."""
-    engine = _engine(tmp_path / "no-grace")
+def test_the_default_grace_is_auto_and_names_the_rule_not_a_number(tmp_path):
+    """Since 2026-08-23 the feature ships ON as AUTO (`-1`), so the shipped prompt DOES carry the
+    clause — and it must quote the RULE, because there is no number to quote. The ceiling is a
+    fraction of whichever stage reaches its wall, and this hint is written once per proposal, before
+    any stage exists. A seconds figure here would be invented."""
+    engine = _engine(tmp_path / "auto-grace")
+    assert engine.eval_deadline_grace_s == -1.0
+    hint = _stamp(engine, LLMResearcher(_ToolEmitClient()))
+    assert "judge" in hint
+    assert "10% of that stage's own time limit" in hint and "at most 30 minutes" in hint
+    assert "a rescue, not budget" in hint and "plan as if it does not exist" in hint
+    # AUTO must never be spelled as seconds, and least of all as its own sentinel.
+    assert re.search(r"up to -?\d+s more", hint) is None
+
+
+def test_an_explicit_zero_is_still_silent(tmp_path):
+    """`0.0` stopped being the default and became the OFF switch. It must keep meaning exactly what
+    it always did — the unconditional tree-kill, byte for byte — so a prompt on a run that turned the
+    feature off gains nothing from this clause."""
+    engine = _engine(tmp_path / "no-grace", eval_deadline_grace_s=0.0)
     assert engine.eval_deadline_grace_s == 0.0
     assert "judge" not in _stamp(engine, LLMResearcher(_ToolEmitClient()))
 

@@ -93,7 +93,7 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               stop verifying. (This is the second time this same field has moved the digest;
 #               the first is in the list two paragraphs up, and both are the same kind of
 #               deliberate widening rather than a refactor.)
-_EXPECTED_DIGEST = "sha256:d5537f63994f3679217487b80a9538632e9fad54ea8c70fb7c9ccb2f1e337ada"
+_EXPECTED_DIGEST = "sha256:8b43ea226cbe85ef9608d801d6942adbb4972fc8a83d4157c4fe34c777820212"
 # The field set the digest above was measured over. Pinning it as a literal COUNT + a sorted digest
 # of the names is what lets the assertion below name the CAUSE of a shift instead of just reporting
 # one. Re-pin both, together, when Settings legitimately gains or loses a knob.
@@ -382,6 +382,17 @@ _EXPECTED_DIGEST = "sha256:d5537f63994f3679217487b80a9538632e9fad54ea8c70fb7c9cc
 #               2026-08-14 entries prescribe: an AST scan of `Settings`' annotated
 #               assignments against master reports exactly [train_monitor_contract] added
 #               and [] removed, so no +1/-1 pair is hiding behind the new integer.
+#   2026-08-23  CHANGED DEFAULT: eval_deadline_grace_s 0.0 -> -1 (AUTO). The 'field set is
+#               UNCHANGED / a default moved on purpose' branch — 213 fields before and after, so
+#               this is case (2) and old receipts SHOULD stop verifying. It is the SAME field the
+#               2026-08-13 entry above admitted while calling it "INERT AT ITS DEFAULT", and that
+#               sentence is what expires here: the default is no longer the historical kill, so a
+#               replicate that reaches its wall now gets a judge call and, if that judge says
+#               FINISHING, up to 10% more wall clock (30 min ceiling). A receipt issued before this
+#               was measured on replicates that could not be rescued, which is precisely a
+#               different envelope. The knob that "does not get to be invisible just because its
+#               default is off" is now not off. Digest re-pinned; field count unchanged at 213,
+#               which is itself the evidence that no field was added or removed alongside it.
 _EXPECTED_FIELD_COUNT = 213
 
 

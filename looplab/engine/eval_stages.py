@@ -1088,10 +1088,22 @@ class EvalStagesMixin:
         (`parse_deadline_reply` — fail-closed, so an unreadable reply kills as before); the seconds
         come from the OPERATOR'S `eval_deadline_grace_s`; `sandbox._granted_grace` clamps them again
         in the runtime; the judge is asked AT MOST ONCE per command; an operator `cancel` is never
-        graced; and the whole thing is OFF by default. So a solution that prints a convincing
-        progress bar buys `eval_deadline_grace_s` seconds, once, and no other thing."""
-        cap = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
-        if cap <= 0:
+        graced; and — until 2026-08-23 — the whole thing was OFF by default. It is now ON as
+        AUTO, which changes WHO pays and not WHAT the judge can do: the seconds are still the
+        operator's, still clamped in the runtime, still one-shot, still fail-closed. So a solution
+        that prints a convincing progress bar buys at most 10% of its own stage's wall (never more
+        than 30 minutes), once, and no other thing."""
+        # `cap == 0` is the ONLY off switch. A NEGATIVE cap is the AUTO sentinel and must build the
+        # judge: the seconds it may buy are resolved per stage in the runtime, against that stage's
+        # own wall, and are not knowable here — the engine threads ONE cap for the whole pipeline.
+        # Testing `cap <= 0` (what this said while the feature was opt-in) would read AUTO as OFF
+        # and silently ship the new default as no change at all.
+        import math
+        try:
+            cap = float(getattr(self, "eval_deadline_grace_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(cap) or cap == 0:
             return None
         try:
             client = self._reflect_client()
@@ -1122,7 +1134,12 @@ class EvalStagesMixin:
                 out = (client.complete_text(msgs) or "").strip()
             except Exception:  # noqa: BLE001 — a judge failure must never turn a timeout into a crash
                 return 0.0
-            return cap if parse_deadline_reply(out) else 0.0
+            # ASK FOR EVERYTHING ALLOWED, never for a number. `_granted_grace` clamps to the cap the
+            # RUNTIME resolved, and under AUTO that cap is not knowable here — `cap` is the sentinel
+            # `-1`, which `_granted_grace` reads as "no" (`not (asked > 0)`) and which would have
+            # shipped the new default as a feature that is on, is asked, agrees, and grants nothing.
+            # `inf` is identical to the old behaviour under an explicit cap: min(inf, cap) == cap.
+            return float("inf") if parse_deadline_reply(out) else 0.0
 
         return _judge
 

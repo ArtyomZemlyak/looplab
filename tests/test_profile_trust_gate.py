@@ -33,12 +33,22 @@ TASK = ROOT / "examples" / "toy_task.json"
 
 # ---------- T1: profile preset (config-first) ----------
 
-def test_default_profile_leaves_machinery_off():
+def test_the_default_profile_LOOKS_and_still_never_ACTS():
+    """Since 2026-08-23 the default no longer leaves the trust machinery off — it leaves it
+    ADVISORY, which is a different claim and the one that matters.
+
+    Two separate decisions live here and the old assertion conflated them: the three detector flags
+    decide whether the run LOOKS, and `trust_gate` decides whether what it sees may change selection.
+    Turning the scans on costs one execution-free pass per node and buys visibility; turning the gate
+    on is what can fail a node. The default now does the first and still refuses the second, so
+    `thorough` remains a genuinely different profile — by its GATE, not by its blindness."""
     s = Settings()
     assert s.profile == "default"
     assert s.confirm_top_k == 0 and s.confirm_seeds == 0
-    assert s.novelty_gate is False and s.reward_hack_detect is False
-    assert s.trust_gate == "audit"
+    assert s.novelty_gate is False
+    assert s.reward_hack_detect and s.code_leakage_detect and s.critic_check, "the default LOOKS"
+    assert s.trust_gate == "audit", "and looking still changes nothing about selection"
+    assert Settings(profile="thorough").trust_gate == "gate", "which is what thorough adds"
 
 
 def test_thorough_profile_turns_machinery_on():

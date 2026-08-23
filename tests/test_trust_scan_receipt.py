@@ -239,8 +239,12 @@ def test_the_detector_list_is_the_scan_s_own_decision_not_a_second_copy(tmp_path
                           TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC}
     assert list(names) == [name for name in TRUST_DETECTORS if name in set(names)], "order is the contract"
 
+    # Every OTHER detector must be named OFF explicitly: since 2026-08-23 `reward_hack_detect`
+    # defaults ON (and `workdir_audit` always did), so a test that names only the one it wants would
+    # be asserting the DEFAULTS rather than the composition rule it is about.
     leakage_only = make_engine(tmp_path / "leak", n_seeds=1, max_nodes=1,
-                               code_leakage_detect=True, critic_check=False)
+                               code_leakage_detect=True, critic_check=False,
+                               reward_hack_detect=False, workdir_audit=False)
     assert set(leakage_only._trust_scan_detectors(_LEAKY_SOLUTION)) == {TRUST_DETECTOR_CODE_LEAKAGE}
     assert {row["signal"].split(":")[0]
             for row in leakage_only._trust_gate_signals(

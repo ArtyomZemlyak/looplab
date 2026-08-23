@@ -657,7 +657,16 @@ class Settings(BaseSettings):
     # operator's reader over the protected `score` stage is untouched) and it cannot buy a second
     # grace. Still, it is money, so the operator opts in rather than discovering it on a bill.
     # `runtime/sandbox.py::_granted_grace` is where the clamp is enforced.
-    eval_deadline_grace_s: float = Field(default=0.0, ge=0)
+    # ON BY DEFAULT SINCE 2026-08-23, as AUTO (`-1`), on the operator's decision. It shipped opt-in
+    # on the argument one line up — it is money — and a year of the corpus answered that argument:
+    # NINE `stage_finished.status == "timeout"` rows across `runs/` discarded 57.6 GPU-hours, every
+    # one of them landing within seconds of its own declared wall. Opt-in put the whole of that loss
+    # behind a switch nobody had turned, which is the wrong default for a bounded, one-shot,
+    # fail-closed rescue. `-1` rather than a number because the right ceiling is a FRACTION of the
+    # stage being rescued, not a constant — see `resolve_deadline_grace` for why 1800 means three
+    # different things on this repo's own stages. A resumed pre-2026-08-23 run keeps `0.0` through
+    # `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`; the ge bound admits the sentinel and nothing below it.
+    eval_deadline_grace_s: float = Field(default=-1.0, ge=-1)
     # RUN-LEVEL DECLARED ENVIRONMENT: variables set for every eval of every node — the per-node
     # `setup`, the single `command`, and every stage on BOTH sandbox tiers, and the solution.py
     # sandbox path for a non-repo task (the composition sits above that branch, not inside it). The run-wide half of the
@@ -1091,7 +1100,11 @@ class Settings(BaseSettings):
     # access, runtime writes to frozen files, suspiciously-perfect metrics) as a `reward_hack_suspected`
     # audit event in the Trust panel. Off by default. Whether a flag CHANGES selection is governed by
     # `trust_gate` below (default: audit-only, never changes selection).
-    reward_hack_detect: bool = False
+    # ON by default since 2026-08-23 (operator). Audit-only by construction: whether a flag changes
+    # selection is `trust_gate`'s decision, and that still defaults to audit, so this buys VISIBILITY
+    # and nothing else. A suspiciously-perfect metric on a run whose whole purpose is to maximise one
+    # number is precisely the failure an autonomous engine cannot notice about itself.
+    reward_hack_detect: bool = True
     # Trust enforcement (T2): what a reward-hack / data-leakage flag actually DOES to selection.
     #   "audit" (default) = surface it in the Trust panel, never change selection (today's behavior);
     #   "gate"  = a flagged node can no longer be selected as BEST **and isn't bred/confirmed from**
@@ -1105,7 +1118,10 @@ class Settings(BaseSettings):
     trust_gate: str = "audit"
     # I3 data-centric: static code-leakage scan of each evaluated solution (fit-before-split,
     # fit-on-test) surfaced into the Trust panel alongside reward-hack flags. Off by default.
-    code_leakage_detect: bool = False
+    # ON by default since 2026-08-23 (operator). Static, execution-free, audit-only under the default
+    # `trust_gate` — the same argument as the two flags above. fit-before-split and fit-on-test are
+    # silent wins: they raise the metric and leave the log looking healthy.
+    code_leakage_detect: bool = True
     # 4.4 sandbox instrumentation (needs reward_hack_detect): after each eval, flag a RUNTIME write
     # to a protected/frozen file (an answer key or grader tampered mid-run) — behavioral evidence a
     # static code scan misses. ON by default; only fires when the reward-hack detector is on.
@@ -1145,7 +1161,13 @@ class Settings(BaseSettings):
     # params-ignored; on host-graded tasks the metric checks become a submission-output check)
     # surfaced in the Trust panel. Broad findings are advisory; `critic:hardcoded_metric` can gate under
     # trust_gate=gate/block. Off by default.
-    critic_check: bool = False
+    # ON by default since 2026-08-23 (operator). It is EXECUTION-FREE and, under the default
+    # `trust_gate=audit`, changes no selection — it only makes the finding visible. The reason it
+    # stops being opt-in is `params-ignored`, which is not hypothetical here: `params_style: none`
+    # means the Developer realises a proposal by editing the repo, 41 of 457 corpus comparisons
+    # diverged, and the e5 champion is RECORDED as batch 8192/accum 2/15 epochs while it RAN
+    # 512/32/3 — the exact class of fact this critic exists to surface and nobody had turned on.
+    critic_check: bool = True
     # A7 Strategist (NEW, user-requested): optional LLM/rule meta-controller that picks the search
     # policy/allocator + operator mix + fidelity (+ Developer backend) per situation. Config-first:
     # every choice the Strategist makes is also a direct knob. Defaults to "agent" so the agent adapts
@@ -1970,11 +1992,20 @@ class Settings(BaseSettings):
     # E3 literature-grounded ideation (network-OPTIONAL): give the agentic Researcher an arXiv search
     # tool to ground ideas in real techniques. Off by default (egress is unreliable on some boxes);
     # fails gracefully if the network is blocked.
-    literature_search: bool = False
+    # ON by default since 2026-08-23 (operator), and the old reason for keeping it off — 'egress is
+    # unreliable on some boxes' — was MEASURED on this one and is false here: `export.arxiv.org`
+    # answers 200 in ~0.8 s through the ambient proxy, and `LiteratureTools.execute('arxiv_search')`
+    # returns real hits. It still fails gracefully where the network is blocked, which is what makes
+    # ON the right default rather than a per-box question.
+    literature_search: bool = True
     # Deep-Research stage (network-OPTIONAL): give the DeepResearcher a general web search/fetch
     # tool (DuckDuckGo) on top of arXiv to read across results + the web before steering the next
     # batch. Off by default (egress is unreliable on some boxes); fails gracefully when blocked.
-    web_search: bool = False
+    # ON by default since 2026-08-23 (operator). Same measurement, same graceful failure: DuckDuckGo
+    # answers through the proxy and `WebTools.execute('web_search')` returns real results here. The
+    # SSRF guard, the download bound and the redirect handler are unchanged — this flips WHETHER the
+    # DeepResearcher may look, not what it is allowed to reach.
+    web_search: bool = True
     # Cadence for the Deep-Research stage: run it automatically every N created nodes.
     # **`0` MEANS START IMMEDIATELY, NOT "off"** — this is the one interval knob in `Settings` whose
     # zero is not the off switch, and the rule is stated once in `engine/cadence.py`
@@ -2474,6 +2505,28 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # terminal, `require` remains reachable on a resume, and re-pinning a LEGACY default would change
     # how an already-recorded run replays, which is the one thing this table exists to prevent.
     "metric_subject": "off",
+    # THE DEADLINE GRACE, whose DEFAULT changed (0.0 -> -1 AUTO) on 2026-08-23. Like
+    # `inline_repair_attempts` and `repair_reasons` this is a pre-existing field, so (a) cannot
+    # apply and (b)+(c) carry it. (b) is paid work in both currencies at once: a resumed run would
+    # start making a judge call at EVERY stage deadline the original made none at, and would hand
+    # out up to 10% more wall clock per stage — on a nine-hour training, GPU-hours nobody chose,
+    # in the same event log whose first half killed on the wall. (c) is `0.0`, pointable at every
+    # commit between the field landing (2026-08-13) and this one, and it is exactly what that
+    # field's own comment still means by "the unconditional tree-kill, byte for byte".
+    "eval_deadline_grace_s": 0.0,
+    # THE FIVE DEFAULTS FLIPPED ON 2026-08-23 with `eval_deadline_grace_s`. All five are CHANGED
+    # defaults on pre-existing fields, so (a) cannot apply and (b)+(c) carry them, and (b) is paid
+    # work in every case: the three trust scans add a per-node pass (two of them a MODEL call) that
+    # the resumed run's first half never made, and the two search tools add network round trips and
+    # extra agentic turns to ideation. (c) is False for all five, pointable at every commit before
+    # this one. Note the trust three are audit-only under the default `trust_gate` — that makes them
+    # cheap to turn ON for a NEW run and does NOT make them free for an OLD one, which is the whole
+    # distinction this table draws.
+    "critic_check": False,
+    "reward_hack_detect": False,
+    "code_leakage_detect": False,
+    "literature_search": False,
+    "web_search": False,
     # THE RUN-LEVEL "nothing has ever worked" STOP, added 2026-08-11 defaulting to 3. It satisfies
     # (a)+(b)+(c): (b) is the strongest form on this table — it does not add work, it TERMINATES the
     # run, so a resumed pre-versioning snapshot stops itself after three failed nodes under a policy
