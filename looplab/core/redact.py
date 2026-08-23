@@ -354,11 +354,33 @@ def _bounded_redacted_text(text: str, max_chars: int) -> tuple[str, bool]:
     cap = max(0, int(max_chars))
     if len(text) <= cap:
         return text[:cap], False
-    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
-    marker = f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
+    marker = _truncation_marker(text)
     if len(marker) >= cap:
         return (marker[-cap:] if cap else ""), True
     return text[:cap - len(marker)] + marker, True
+
+
+def _truncation_marker(text: str) -> str:
+    """The receipt appended when a cap drops characters. ONE definition, because its LENGTH is a
+    number callers have to budget for and a second copy of this f-string is how the two drift."""
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    return f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
+
+
+def truncation_receipt_chars(text) -> int:
+    """How much of a `max_chars` budget the truncation receipt would consume for `text`.
+
+    Exists because a cap is a budget for TWO things — the visible characters and the receipt — and
+    a caller that wants N visible characters must ask for N + this. Measured 2026-08-23 on the live
+    cross-run lesson render: `max_chars=200` against a 111-char receipt left 89 visible characters,
+    so 19 of the 33 statements in the shared lesson store (58%) reached BOTH roles cut mid-sentence —
+    including the one that would have stopped `runs/e5small-dr-unified-v4` nodes 6, 8
+    and 9 repeating each other's stage failure. The lesson survived role scoping, task scoping and
+    top-5 ranking, and was destroyed in the last inch by a budget spent on a hash.
+
+    Derived, never hard-coded: the receipt's length depends on the digit count of `original_chars`,
+    so a caller guessing "about 111" is right until a statement crosses a power of ten."""
+    return len(_truncation_marker(_persisted_input(text)))
 
 
 def _redact_persisted(value, *, max_chars: int, entropy: bool = True,
