@@ -1081,6 +1081,46 @@ def _on_node_eval_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 _SALVAGE_CAUSE_TRIAGE_ACTION = "salvage_cause_fix"
 
 
+_REPAIR_LEDGER_MAX = 200
+_REPAIR_LEDGER_RATIONALE_CAP = 400
+
+
+def _record_repair_ledger(st: RunState, d: dict) -> None:
+    """Append one row to the cross-node repair ledger — see `RunState.repair_ledger` for why it
+    exists and what it deliberately does NOT do.
+
+    Recorded OUTSIDE the pending/generation guard below on purpose: that guard protects the node's
+    own CODE from a duplicate or post-terminal row, and this records a fact about the run rather
+    than mutating a node. Idempotence is provided instead by the (node, attempt, generation) key, so
+    a double-fold collapses to the same single row and replay stays a pure function of the log."""
+    node_id = d.get("node_id")
+    attempt = d.get("attempt")
+    generation = d.get("generation")
+    if type(node_id) is not int:
+        return
+    key = (node_id, attempt, generation)
+    for row in st.repair_ledger:
+        if (row.get("node_id"), row.get("attempt"), row.get("generation")) == key:
+            return
+    if len(st.repair_ledger) >= _REPAIR_LEDGER_MAX:
+        return
+    # `changed` is the path list the repair itself declared; fall back to the keys of `files` so a
+    # row written before that column existed still names what it touched.
+    paths = d.get("changed")
+    if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+        paths = sorted((d.get("files") or {}).keys()) if isinstance(d.get("files"), dict) else []
+    rationale = d.get("rationale")
+    st.repair_ledger.append({
+        "node_id": node_id,
+        "attempt": attempt,
+        "generation": generation,
+        "reason": d.get("reason") if isinstance(d.get("reason"), str) else None,
+        "paths": [p for p in paths][:40],
+        "rationale": (rationale[:_REPAIR_LEDGER_RATIONALE_CAP]
+                      if isinstance(rationale, str) else None),
+    })
+
+
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
     # node's code with the LLM-repaired version BEFORE the eval that follows it. Idempotent
@@ -1089,6 +1129,7 @@ def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # or post-terminal node_repaired (corrupt/double-fold) is a no-op — mirrors the
     # `first_terminal` guard above. The LLM/subprocess are never re-invoked; the final code
     # and metric/status are reconstructed purely from this event + the terminal event.
+    _record_repair_ledger(st, d)
     n = _node_for_event(st, d)
     if (n is not None and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d)

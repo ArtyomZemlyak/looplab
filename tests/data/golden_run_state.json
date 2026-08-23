@@ -793,6 +793,7 @@
   "proposed_spec": null,
   "proxy_scores": {},
   "proxy_skipped": [],
+  "repair_ledger": [],
   "report": null,
   "research": [
     {
