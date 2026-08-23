@@ -167,7 +167,19 @@ def test_the_watchdogs_log_plan_cannot_move_with_the_profile(tmp_path):
     engine, wd, node = _engine(tmp_path), _workdir(tmp_path), _node()
     smoke, full = engine._resolved_stages(node, str(wd)), engine._resolved_stages(node, str(wd), "full")
     assert smoke != full
-    assert eval_log_plan(smoke) == eval_log_plan(full)
+    a, b = eval_log_plan(smoke), eval_log_plan(full)
+    # ATTRIBUTION AND AUTHORITY are what may not move, and they are named one by one rather than
+    # compared as whole objects: `EvalLogPlan` gained a `timeouts` map on 2026-08-23, and a plain
+    # `a == b` would have read that addition as this guard's own defect.
+    assert (a.roles, a.stage_names, a.training_artifacts, a.declarations) == (
+        b.roles, b.stage_names, b.training_artifacts, b.declarations)
+    # …and the WALL is profile-dependent ON PURPOSE, pinned here so the exemption above is a stated
+    # fact and not a hole. A profile changes the appended `score` stage's timeout, so the number a
+    # projection must be compared against changes with it; comparing an 11 s smoke stage to a 33 s
+    # full wall is exactly the mistake `projected_overrun_s` exists to avoid. This carries no kill
+    # authority: nothing in `should_monitor_kill` reads it.
+    assert a.timeouts != b.timeouts
+    assert a.timeouts["score"] == 11.0 and b.timeouts["score"] == 33.0
 
 
 def test_the_planner_stays_total_when_the_derivation_raises(tmp_path):
