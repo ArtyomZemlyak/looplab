@@ -64,11 +64,37 @@ def _bounded_result(header: list[str], lines: list[str]) -> str:
     return result if len(result) <= RESULT_CAP else result[:RESULT_CAP - 21] + "\n[RESULT_TRUNCATED]"
 
 
+# The role names, spelled here rather than imported: `looplab.engine.lessons_priors` owns them, and
+# `tools` importing `engine` at module scope is the layering this package avoids (its siblings do it
+# lazily, inside methods). A guard test asserts the two spellings stay equal, so the duplication is
+# checked rather than trusted.
+_ROLE_DEVELOPER = "developer"
+_ROLE_RESEARCHER = "researcher"
+
+
 class MemoryTools:
     """``search_lessons`` and ``recall_notes`` over one cross-run memory directory."""
 
-    def __init__(self, memory_dir: str | None):
+    def __init__(self, memory_dir: str | None, *, role: str = "researcher"):
         self.dir = Path(memory_dir) if memory_dir else None
+        # ROLE-SCOPED since 2026-08-23, mirroring `lessons_priors._render_role_prior` exactly, and
+        # for the same two reasons it gives.
+        #
+        # (1) META-NOTES ARE RESEARCH-FLAVOURED and that renderer withholds them from the Developer
+        #     ("the Developer never sees them"). This provider handed the same rows to whoever held
+        #     it, so composing it for the Developer without a role would have contradicted a
+        #     deliberate decision one module over instead of extending it.
+        # (2) A lesson EXPLICITLY for the other role stays out; UNTAGGED is shared. Same predicate,
+        #     same wording, so the pull and the push cannot disagree about what a role may know.
+        #
+        # Why the Developer needs this at all, measured on `runs/e5small-dr-unified-v4`: across
+        # 10,455 tool calls `search_lessons` was called TEN times — 9 in `propose`, 1 in
+        # `deep_research`, ZERO in any code-writing phase. Not because the Developer declined it:
+        # the tool was not in its toolset. `_shared_providers` composes MemoryTools for the
+        # Researcher/Strategist, and `repo_developer` assembles its own set. So the role that WRITES
+        # THE CODE could read the priors it was pushed and nothing else — it could not look up the
+        # lesson its current failure matches.
+        self.role = str(role or "researcher")
         # Unbound until a run binds us: a CLI/human audit reading the ledger directly stays
         # portfolio-wide, exactly as `CrossRunTools` does (doc 25 TO-07).
         self._scope = LessonScope()
@@ -87,7 +113,7 @@ class MemoryTools:
     def specs(self) -> list[dict]:
         if not self.dir:
             return []
-        return [
+        specs = [
             fn_spec("search_lessons",
                 "Search a bounded recent window of the cross-run LESSONS ledger: generalizable "
                 "observations (what worked and what did not), their verdict, and how many recorded "
@@ -110,6 +136,13 @@ class MemoryTools:
                                           f"hard maximum {_MAX_LIMIT})."}},
                 []),
         ]
+        if self.role == _ROLE_DEVELOPER:
+            # Only the lessons ledger. `recall_notes` is the meta-note stream the prior
+            # renderer already refuses this role; offering it here would reopen that
+            # decision through a tool instead of overturning it deliberately.
+            specs = [sp for sp in specs
+                     if (sp.get("function") or sp).get("name") == "search_lessons"]
+        return specs
 
     def _load(self, fname: str) -> tuple[list[dict], dict]:
         """Read only a bounded, newline-aligned recent snapshot of a mutable JSONL file.
@@ -174,6 +207,11 @@ class MemoryTools:
             return "(no cross-run memory configured)"
         if not isinstance(name, str) or name not in _TOOL_NAMES:
             return "(unknown memory tool)"
+        if name == "recall_notes" and self.role == _ROLE_DEVELOPER:
+            # Refused in `execute`, not only hidden from `specs`: a name that never appeared in this
+            # role's spec list can still arrive from a replayed transcript or a wrapper that merged
+            # toolsets, and "not offered" is not the same guarantee as "not answered".
+            return "(meta-notes are not available to this role)"
         parsed = self._arguments(args)
         if isinstance(parsed, str):
             return parsed
@@ -189,6 +227,9 @@ class MemoryTools:
                     continue
                 if not self._scope.allows(row):        # doc 25 TO-07 — the sibling's own predicate
                     continue
+                lrole = row.get("role")
+                if lrole is not None and lrole != self.role:
+                    continue                           # §role-split: untagged is shared, tagged is not
                 overlap = len(query_tokens & _toks(statement))
                 if query_tokens and not overlap:
                     continue

@@ -35,6 +35,27 @@ LESSON_ROLE_DEVELOPER = "developer"
 #: the params render is 490 chars over 15 keys.
 CASE_PARAMS_CHARS = 1_200
 
+#: VISIBLE characters one lesson statement may occupy in a role prior. Sized from the shared store
+#: rather than chosen: statements run 66..382 chars, median 211, so 400 lets every one of them
+#: arrive WHOLE and anything longer still truncates honestly with its receipt.
+#:
+#: THE BUG THIS NUMBER REPLACES, measured 2026-08-23. The render asked for `max_chars=200` — but a
+#: cap is a budget for the visible text AND for the truncation receipt, and that receipt is 111
+#: characters of sha256. Eighty-nine characters survived. Measured THROUGH THE REAL RENDER against
+#: the live store: 19 of 33 statements (58%) reached BOTH roles cut mid-sentence, and 0 do after
+#: this change. (A first estimate said 27/82% by comparing RAW statement lengths to the visible
+#: budget; that over-counts, because `single_line=True` collapses whitespace before the cap and
+#: several statements fit once collapsed. The number that counts is the one the renderer produces.)
+#: The one that would have stopped `runs/e5small-dr-unified-v4` nodes 6, 8 and 9 from repeating the
+#: same stage failure arrived as "A pipeline stage that short-circuits and skips (re)writing its
+#: declared artifact when the [redacted preview: ...]" — the sentence stops exactly before "so every
+#: stage must write its declared artifact unconditionally on each run".
+#:
+#: The whole delivery chain was already correct: role scoping (untagged = shared), task scoping
+#: (exact match), the priors block reaching `card_build`/`plan`/`stages`/`inline_repair`, and top-5
+#: ranking, which that lesson WON. It was destroyed in the last inch.
+LESSON_STATEMENT_CHARS = 400
+
 
 def _memoized_embed(embed):
     """Wrap an embedder in a per-build content memo. The two role priors (built together at run start
@@ -362,8 +383,16 @@ class LessonPriorsMixin:
             seen.add(key)
             d = o.get("delta")
             dtxt = f" Δ{d:+.3g}" if isinstance(d, (int, float)) else ""
+            # Ask for the visible budget PLUS what the receipt costs, derived from the text rather
+            # than guessed — the receipt's length tracks the digit count of `original_chars`, so a
+            # literal "+111" is correct only until a statement crosses a power of ten. Redaction is
+            # untouched: `entropy=True` here and the block-level pass at the end of this method are
+            # defence in depth, and a bare high-entropy token is masked by EITHER of them.
+            from looplab.core.redact import truncation_receipt_chars
             stmt = cross_run_text(
-                o["statement"], max_chars=200, single_line=True, entropy=True).strip()
+                o["statement"],
+                max_chars=LESSON_STATEMENT_CHARS + truncation_receipt_chars(o["statement"]),
+                single_line=True, entropy=True).strip()
             outcome = cross_run_text(
                 o.get("outcome", "?"), max_chars=40, single_line=True, entropy=True).strip()
             picked.append(f"{stmt} [{outcome}{dtxt}]")   # store is shared/free-text

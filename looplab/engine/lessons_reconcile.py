@@ -69,6 +69,12 @@ class LessonReconcileMixin:
                 a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
                 if pr["kind"] == "debug":
                     why = " ".join((a.idea.rationale or "").split())[:90]
+                    if a.id == b.id:      # IN-NODE repair: the same node before and after its fix
+                        what = getattr(a, "failed_stage", None) or (a.error_reason or "a failure")
+                        out.append(_lesson(
+                            pr, f"a node whose '{what}' stage failed was repaired in place and then "
+                                f"scored" + (f": {why}" if why else ""), "supported", 0.5))
+                        continue
                     out.append(_lesson(pr, f"a node failing with '{b.error_reason or 'error'}' "
                                            f"was fixed" + (f": {why}" if why else ""),
                                        "supported", 0.5))
@@ -85,7 +91,16 @@ class LessonReconcileMixin:
         blocks = []
         for i, pr in enumerate(pairs, 1):
             a, b = state.nodes[pr["a"]], state.nodes[pr["b"]]
-            if pr["kind"] == "debug":
+            if pr["kind"] == "debug" and a.id == b.id:
+                # IN-NODE repair. There is no cross-node diff to show — both sides ARE this node —
+                # so name the stage that failed and how many attempts it took, and say plainly that
+                # the interesting difference is the repair, not a rival experiment.
+                head = (f"P{i} (in-node repair): #{a.id} failed its "
+                        f"'{getattr(a, 'failed_stage', None) or a.error_reason or 'eval'}' stage, was "
+                        f"repaired {int(getattr(a, 'repairs', 0) or 0)} time(s) in place, and then "
+                        f"reached metric={a.metric:.4g}. The lesson is what the REPAIR had to change, "
+                        f"not which experiment won.")
+            elif pr["kind"] == "debug":
                 head = (f"P{i} (debug): #{b.id} FAILED with '{b.error_reason or 'error'}'; its "
                         f"repair #{a.id} reached metric={a.metric:.4g}.")
             else:

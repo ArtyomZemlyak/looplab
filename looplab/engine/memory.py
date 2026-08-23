@@ -282,6 +282,21 @@ def select_comparison_pairs(state, k: int = 3, exclude=None) -> list[dict]:
                     pairs.append({"kind": "solution", "a": n.id, "b": pid, "delta": delta})
             elif p.status is NodeStatus.failed:
                 pairs.append({"kind": "debug", "a": n.id, "b": pid, "delta": None})
+        # THE IN-NODE REPAIR, and it is why the developer half of the lesson store was empty from
+        # the day it shipped. A `debug` pair above needs a FAILED PARENT and a succeeding child —
+        # a lineage shape a star of improvements hanging off a WINNING champion can never produce.
+        # Measured on the shared store 2026-08-23: 23 lessons tagged `researcher`, 10 untagged,
+        # ZERO tagged `developer`, because `pr["kind"] == "debug"` is the only thing
+        # `lessons_reconcile` maps to that role and it had never once fired.
+        #
+        # But "what code change fixed a crash" — the developer lesson's own definition — mostly
+        # happens INSIDE one node: a stage fails, the repair rewrites code, the same node then
+        # scores. `runs/e5small-dr-unified-v4` nodes 3, 6, 8 and 9 each did exactly that with the
+        # mine stage, and each rediscovered the same fix because none of it became a lesson.
+        # Self-paired on purpose: the two sides of this comparison are the SAME node before and
+        # after its repair, which is what the reconciler's `a.id == b.id` branch words.
+        if int(getattr(n, "repairs", 0) or 0) > 0:
+            pairs.append({"kind": "debug", "a": n.id, "b": n.id, "delta": None})
     pairs.sort(key=lambda pr: (0 if pr["kind"] == "debug" else 1,
                                -abs(pr["delta"] or 0.0), pr["a"], pr["b"]))
     return pairs[:max(0, k)]
