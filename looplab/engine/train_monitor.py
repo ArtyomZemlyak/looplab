@@ -1026,6 +1026,55 @@ def trajectory_vetoes_kill(trajectory: Optional[LossTrajectory]) -> bool:
             and not trajectory.anomalous)
 
 
+def projected_overrun_s(span_s, eta_s, wall_s) -> Optional[float]:
+    """Seconds by which a stage is projected to MISS its own wall, or None when unanswerable.
+
+    `span_s + eta_s` is where this stage is heading; `wall_s` is where it will be killed. The whole
+    point is WHEN the comparison can be made: at the wall, `eval_deadline_grace_s` asks a judge for
+    a one-shot rescue and that judge is right to refuse a run two hours short — 30 minutes cannot
+    close a 2.2-hour gap, which is exactly what it correctly refused for node 6. Seven hours EARLIER
+    the same overrun was already computable, while it was still cheap to act on.
+
+    Total and fail-CLOSED: any missing, non-finite or non-positive input answers None, and a stage
+    that fits answers None as well — the row exists only when there is something to say.
+
+    NOTE THE BIAS, and note its direction. `LossTrajectory.eta_s` counts training steps and not the
+    tail (the in-process test, the checkpoint write), so on the two e5 nodes measured it UNDER-stated
+    the truth by 4-5%. That makes this figure CONSERVATIVE: it will under-report an overrun and never
+    invent one. A caller may treat a positive answer as real; it may not treat None as "fits"."""
+    try:
+        span, eta, wall = float(span_s), float(eta_s), float(wall_s)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (span, eta, wall)):
+        return None
+    if span < 0 or eta < 0 or wall <= 0:
+        return None
+    overrun = (span + eta) - wall
+    return overrun if overrun > 0 else None
+
+
+def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan) -> None:
+    """Put the projection beside the verdict on the durable alert row, when there is one to put.
+
+    A separate function for the same reason `trajectory_row` is one: the alert is assembled inside a
+    long async loop, and a fact that can only be tested by driving that loop is a fact nobody tests.
+    Mutates `alert` in place and returns nothing — it is a stamp, not a decision.
+
+    Silent unless ALL of it is knowable: a measured span, an answerable ETA, a resolved stage, and a
+    wall that stage's own manifest declared. Every one of those absences means "the engine cannot
+    say", and none of them means "it fits"."""
+    wall = None
+    if resolved is not None and getattr(resolved, "stage", None) and log_plan is not None:
+        wall = (getattr(log_plan, "timeouts", None) or {}).get(str(resolved.stage))
+    over = projected_overrun_s(getattr(trajectory, "span_s", None),
+                               getattr(trajectory, "eta_s", None), wall)
+    if over is None:
+        return
+    alert["projected_overrun_s"] = round(over, 1)
+    alert["stage_wall_s"] = round(float(wall), 1)
+
+
 def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
     """The compact, JSON-safe form stamped on `EV_TRAIN_MONITOR_ALERT`, or None.
 
@@ -1490,6 +1539,12 @@ class EvalLogPlan:
     # because every existing construction is keyword-only and it must stay that way for a
     # positional one too.
     declarations: dict = field(default_factory=dict)
+    # stage name -> the WALL that stage was declared with. Carried so a watchdog can compare its own
+    # projection against the deadline the stage will actually be held to. Without it the engine can
+    # measure that a run needs ten hours and be unable to notice that it has seven — which is what
+    # happened: `runs/e5small-dr-unified-v4` node 6 was recorded at 15:45 as "6% of a ~10h run"
+    # against a 28000 s wall, and was killed on that wall 7 hours later having burned 7.78 GPU-hours.
+    timeouts: dict = field(default_factory=dict)
 
 
 def eval_log_plan(stages) -> EvalLogPlan:
@@ -1586,9 +1641,13 @@ def eval_log_plan(stages) -> EvalLogPlan:
     # are already going to hold that stage to, and withholding it from a stage that promised
     # something would hide a check the engine is certainly going to run.
     declarations: dict = {}
+    timeouts: dict = {}
     for stage in raw:
         if not isinstance(stage, dict) or stage.get("name") is None:
             continue
+        _wall = stage.get("timeout")
+        if type(_wall) in (int, float) and math.isfinite(float(_wall)) and float(_wall) > 0:
+            timeouts[str(stage.get("name"))] = float(_wall)
         expect = stage.get("expect") or {}
         files = expect.get("files") if isinstance(expect, dict) else None
         promised = tuple(str(f) for f in (files or []) if isinstance(f, str))
@@ -1641,7 +1700,7 @@ def eval_log_plan(stages) -> EvalLogPlan:
         if roles.get(_log_name_key(f"{name}.log"), (None, None))[1] == LOG_ROLE_TRAINING:
             artifacts = promised
     return EvalLogPlan(roles=roles, stage_names=names, training_artifacts=artifacts,
-                       declarations=declarations)
+                       declarations=declarations, timeouts=timeouts)
 
 
 def training_authority_spent(workdir, plan: Optional[EvalLogPlan]) -> bool:
@@ -2896,6 +2955,15 @@ class TrainingMonitorMixin:
                             measured = trajectory_row(trajectory)
                             if measured is not None:
                                 alert["trajectory"] = measured
+                                # THE PROJECTION AGAINST THE WALL, while it is still cheap to act
+                                # on. The engine has measured a stage's remaining time since the ETA
+                                # shipped and compared it against nothing: node 6 was recorded at
+                                # "6% of a ~10h run" seven hours before a 28000 s wall killed it and
+                                # discarded 7.78 GPU-hours. The deadline judge is the LAST line and
+                                # is right to refuse a run two hours short; this is the first one.
+                                # Additive and fold-ignored — it records that the engine knew.
+                                stamp_projected_overrun(
+                                    alert, trajectory, resolved, log_plan)
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
                             if role_withheld:
