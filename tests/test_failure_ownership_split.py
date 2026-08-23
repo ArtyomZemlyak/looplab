@@ -70,7 +70,7 @@ from looplab.engine.failure_diagnosis import (DIAGNOSABLE_ENGINE_REASONS,
                                               REASON_SOURCES, UNCLASSIFIED_REASON, coerce_evidence,
                                               coerce_failure_kind, diagnosed_failure_reason,
                                               evidence_citation_resolves)
-from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS
+from looplab.engine.metric_salvage import NEVER_SALVAGED_REASONS, salvage_condition
 from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
                                    _failure_reason, _rule_triage)
 from looplab.engine.train_monitor import MONITOR_REPAIR_REASON
@@ -554,6 +554,78 @@ def test_setup_is_engine_final_through_a_flag_and_not_through_a_prefix():
         "the candidate's own stderr must not be able to claim the engine's setup step failed")
 
     assert "setup" in ENGINE_FINAL_REASONS and "setup" in NEVER_SALVAGED_REASONS
+
+
+@pytest.mark.parametrize("engine_fact,expected", [
+    ({"drift": {"declared": 1.0, "cross": 0.2, "reason": "the two readers disagreed"}}, "drift"),
+    ({"timed_out": True}, "timeout"),
+    ({"setup_failed": True}, "setup"),
+    ({"diverged": True}, "diverged"),
+    ({"stalled": True, "exit_code": 137}, "stalled"),
+])
+def test_an_eval_declared_reason_never_outranks_a_fact_the_engine_measured(engine_fact, expected):
+    """THE SAME ANTI-PATTERN AS `setup`, one producer newer — and the SAME containment.
+
+    `rules_violation` is a reason the operator-pinned eval STATES about its own outcome, and the
+    channel it states it on is `runtime/command_eval.py::declared_failure_reason`: the last JSON
+    line of the eval's STDOUT. That is the channel the metric reader parses, and it is shared with
+    the candidate, because the arena imports and runs `solver.py` inside the evaluator process. So a
+    declaration is exactly as forgeable as the `"setup failed:"` prefix the test above deleted, and
+    it must never be able to rename a fact the engine itself measured.
+
+    ORDER IS THE CONTAINMENT, which is why this is parametrized over every authenticated flag rather
+    than asserted once: the branch sits below all of them and above the residuals, so a candidate
+    can only rename `crash`/`no_metric`/a stage-contract status — and that buys it nothing but the
+    end of its own node. Written the other way round (the branch FIRST, as it was on 2026-08-22) the
+    cost is concrete and is driven below: `drift` and `setup` are both in `NEVER_SALVAGED_REASONS`
+    and neither has a flag `salvage_condition` read directly, so ONE printed line turned that gate
+    from refusing to `eval_failed` — a metric the drift cross-reader had just discarded, back in
+    play for the champion under `metric_salvage="select"`.
+
+    The control arm is the same `RunResult` WITHOUT the engine's fact: it must still classify
+    `rules_violation`, or this test would pass just as well against a branch that had been deleted.
+    """
+    base = dict(exit_code=0, stdout="", stderr="", metric=None, timed_out=False,
+                stages=[{"name": "score", "status": "ok"}],
+                declared_reason="rules_violation")
+
+    control = RunResult(**base)
+    assert _failure_reason(control) == "rules_violation", (
+        "the eval's own verdict about a residual is the whole point of the branch")
+
+    contested = RunResult(**{**base, **engine_fact})
+    assert _failure_reason(contested) == expected, (
+        f"a line on the candidate's own stdout renamed the engine's {expected!r}")
+
+
+@pytest.mark.parametrize("engine_fact", [
+    {"drift": {"declared": 1.0, "cross": 0.2, "reason": "the two readers disagreed"}},
+    {"setup_failed": True},
+])
+def test_a_declared_reason_cannot_re_open_the_salvage_gate(engine_fact):
+    """The half that COSTS something, driven end to end through the two pure rules.
+
+    `test_a_diagnosed_reason_can_never_move_a_metric` states this for the DIAGNOSTICIAN, whose
+    vocabulary is disjoint from `NEVER_SALVAGED_REASONS` and which is asked below the salvage
+    branch. `rules_violation` is neither: it is produced by the deterministic classifier itself, so
+    it reaches `salvage_condition` as the reason, and it is not in that refusal set. Two independent
+    things therefore have to hold, and both are asserted here because either alone is one refactor
+    from silent:
+
+      * the LABEL is right — `_failure_reason` still says `drift`/`setup` (the ordering above);
+      * and the GATE does not depend on the label being right — `salvage_condition` reads
+        `res.drift` / `res.setup_failed` directly, exactly as it already reads `diverged` and
+        `timed_out`, so the refusal is a property of the RESULT.
+    """
+    base = dict(exit_code=0, stdout="", stderr="", metric=None, timed_out=False,
+                stages=[{"name": "score", "status": "ok"}],
+                declared_reason="rules_violation")
+    res = RunResult(**{**base, **engine_fact})
+    assert salvage_condition(res, _failure_reason(res)) is None
+    # …and the same result under the label a mis-ordered classifier would hand it. This is the
+    # assertion that survives the ordering being moved back.
+    assert salvage_condition(res, "rules_violation") is None, (
+        "the salvage gate must refuse on the engine's own flag, not on whichever label reached it")
 
 
 def test_an_allocator_that_raises_is_now_a_question_and_not_an_answer():

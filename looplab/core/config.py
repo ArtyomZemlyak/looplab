@@ -2616,6 +2616,16 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # already states that `developer_probe=false` restores the old prompt BYTE FOR BYTE — which is
     # what makes this row a restoration rather than a guess.
     "developer_probe": False,
+    # THE PROBE'S KERNEL READ CONFINEMENT, added 2026-08-21 defaulting to True. (a) holds — a
+    # pre-2026-08-21 snapshot names no such field. (b) is not paid work, but it is the strongest
+    # column there is on a RESUME: the rung fails CLOSED. On a box whose kernel offers no Landlock,
+    # or whose layout puts a machine tier around the editable tree in a way that cannot be punched,
+    # a confined probe REFUSES TO RUN. So a run whose first half made probes on a Landlock host and
+    # is resumed onto one without it would start refusing the same calls it had been answering —
+    # the mirror of `inline_repair_attempts: 0` above, and the reason that row exists.
+    # (c) is `False`: before this field the probe carried the write ruleset and the deny-prefix hook
+    # and nothing else, which is exactly what `developer_probe_confine=false` restores.
+    "developer_probe_confine": False,
     # THE REPAIR CRITIC'S CADENCE, added 2026-08-13 defaulting to 3 (F8). (a) holds. (b) is paid
     # work AND an intervention, the two strongest columns at once: from the 4th durable repair on a
     # node, `agents/unified_agent.py::repair_critic` is a SECOND model asked whether the chain is

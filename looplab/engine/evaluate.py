@@ -155,6 +155,37 @@ _JUDGE_ERROR_CHARS = 300
 # ten times that load for the last seven of twenty-three OOMs.
 _DURABLE_EVIDENCE_CHARS = 16_000
 
+def _redacted_tail(redact, raw, chars: int) -> str:
+    """The ONE order for a durable output tail: REDACT THE WHOLE STREAM, THEN CAP IT.
+
+    Hoisted rather than spelled at each site because the order is a SECURITY property and the two
+    spellings are one character apart. `redact(text[-chars:])` shows the redactor a stream whose
+    front has already been cut, so a secret STRADDLING the cut arrives with its shape gone and the
+    remainder lands verbatim on a durable row. Driven, not argued
+    (`tests/test_scored_output_evidence.py::test_a_secret_straddling_the_cut_is_not_left_as_a_fragment`):
+    `export TOKEN=sk-live-A9fQ2xLm7ZpR4tVw8YbN1cJdKe` cut eleven characters into the token leaves
+    `Q2xLm7ZpR4tVw8YbN1cJdKe` — the `sk-` rule no longer matches it and the 23-character remainder
+    is below what the entropy rule fires on, so `redact` returns it UNCHANGED, while redacting first
+    masks the whole token. `core/redact.py`'s own docstring names this channel (an eval that prints
+    `os.environ`) as the reason the redactor exists, and `serve/appstate.py` states the same rule for
+    its PREFIX cut ("Redact BEFORE truncating"); this is the same rule for a SUFFIX cut, where the
+    fragment that survives is the secret's TAIL rather than its head.
+
+    Cost is a regex pass over the eval's bounded ~64 KB capture instead of over the window, once per
+    node terminal. `""` for nothing-to-keep, so a caller can tell "the stream was empty" from "this
+    row predates the column"; whitespace-only counts as nothing.
+
+    DELIBERATELY NOT APPLIED TO `_eval_failure_text`, which caps the same stream at 500: that string
+    IS the repair prompt and `tests/test_diagnosis_record.py` pins its bytes as an EQUALITY. Its
+    window is the narrow one where the corpus measured ZERO masks, so the fragment shape has no
+    instance there; moving it is a prompt-contract change and belongs with that contract.
+    """
+    text = "" if raw is None else str(raw)
+    if not text.strip():
+        return ""
+    return redact(text)[-chars:]
+
+
 # WHAT THE RECORD KEEPS ABOUT A NODE THAT SCORED, as opposed to one that failed — the ONE window
 # onto the eval's own output on that terminal, applied to BOTH streams.
 #
@@ -1244,10 +1275,8 @@ class EvaluateMixin:
         is "the eval wrote nothing to stderr", and absence of the key is "this row predates the
         column"; a reader must be able to tell those apart.
         """
-        raw = getattr(res, "stderr", "") or ""
-        if not str(raw).strip():
-            return ""
-        return self._redact(str(raw)[-_DURABLE_EVIDENCE_CHARS:])
+        return _redacted_tail(self._redact, getattr(res, "stderr", ""),
+                              _DURABLE_EVIDENCE_CHARS)
 
     def _scored_output_evidence(self, res) -> str:
         """The SAME question on the terminal that says the node WORKED: what did the eval say about
@@ -1299,10 +1328,8 @@ class EvaluateMixin:
         the key. `{"stderr_tail": ""}` means "the eval wrote nothing to stderr"; no key at all means
         "this row predates the column", and a reader must be able to tell those apart.
         """
-        raw = getattr(res, "stderr", "") or ""
-        if not str(raw).strip():
-            return ""
-        return self._redact(str(raw)[-_SCORED_EVIDENCE_CHARS:])
+        return _redacted_tail(self._redact, getattr(res, "stderr", ""),
+                              _SCORED_EVIDENCE_CHARS)
 
     def _eval_failure_text(self, res) -> str:
         """The ONE description of a failed eval — the repair prompt, `node_repaired.error_in`, the
@@ -3298,8 +3325,12 @@ class EvaluateMixin:
                         # `_SCORED_EVIDENCE_CHARS`, not 500: the eval's metric line is where an eval
                         # that says WHY says it, and 500 cut a measured 745-character one off at the
                         # front — see the constant for the measurement and for why this widens in
-                        # place instead of growing a second column.
-                        "stdout_tail": self._redact(res.stdout[-_SCORED_EVIDENCE_CHARS:]),
+                        # place instead of growing a second column. Through `_redacted_tail` with
+                        # its sibling below, because widening a TAIL cut moves where a straddling
+                        # secret is severed — and stdout is the channel `core/redact.py` was written
+                        # for (an eval that prints `os.environ`).
+                        "stdout_tail": _redacted_tail(self._redact, res.stdout,
+                                                      _SCORED_EVIDENCE_CHARS),
                         "eval_seconds": total_eval,
                         "extra_metrics": _extras,   # #5 multi-objective
                         "violations": res.violations or [],

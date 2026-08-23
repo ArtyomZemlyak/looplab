@@ -68,8 +68,18 @@ DATASET_PATCH = """                _ll_train_iter, _ll_test_iter = task_instance
                 _ll_subset = _looplab_eval_subset()
                 test_iter = _ll_train_iter if _ll_subset == "train" else _ll_test_iter
                 test_problems = list(test_iter)
-                logging.info(f"LOOPLAB scoring on the {_ll_subset!r} split "
-                             f"({len(test_problems)} problems)")"""
+                # WARNING and not INFO, and that is the whole point of the line. This function runs
+                # in a `ProcessPoolExecutor` child started under `forkserver`; `setup_logging` never
+                # runs there, so its root logger falls through to `logging.lastResort`, which prints
+                # WARNING and above to the inherited stderr and DROPS INFO. Measured on a real 458 s
+                # evaluator run (`tests/fixtures/algotune_eval_invalid_results_stderr.txt`, 104 KB):
+                # zero occurrences of this line at INFO, and zero of the `test problems for` INFO
+                # four lines below it, while the PARENT's INFO lines are all present.
+                # It is the only channel on which the thing that ACTUALLY chose the split can say
+                # which one it chose -- `looplab_eval.py::subset_actually_scored` reads it, and
+                # without it the bridge can only infer the split from this marker being in the file.
+                logging.warning(f"LOOPLAB scoring on the {_ll_subset!r} split "
+                                f"({len(test_problems)} problems)")"""
 
 
 def main() -> int:

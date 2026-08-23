@@ -224,6 +224,26 @@ def rules_clause(root: Path) -> str:
     promise one it does). This reads `AlgoTuner.security.code_validator`'s own tables, so the
     sentence and the check cannot disagree.
 
+    IT HAD ALREADY GONE STALE IN EXACTLY THAT DIRECTION, and the sentence above was the reason
+    nobody looked. Only ONE of the validator's tables was read (`PROTECTED_MODULES`); the other
+    prohibitions were typed out, and `DISALLOWED_CALLS` -- `exec`, `eval`, `compile`,
+    `gc.get_objects` -- was not stated in any wording at all. Verified 2026-08-23 by running the
+    real `check_code_for_tampering` on a four-line solver that compiles a specialised expression:
+    `Error: Code contains security violations ... Calling compile is not allowed in solver code`.
+    A run under `--enforce-rules` turns that into `looplab_failure_reason: rules_violation`, which
+    the engine ends the node on and spends NO repair on -- so runtime code generation, a real
+    optimisation family for a task that is scored on speed, costs one of the three or four
+    experiments a $1.00 run gets, having been promised a complete rule list. Checked against the
+    goal actually shipped to the live campaign (`ws-B/algotune_spectral_clustering.json`): the
+    words exec/eval/compile appear in it ten times and every one of them is "evaluator".
+
+    So `DISALLOWED_CALLS` is derived too. What CANNOT be derived is the rest: the ctypes import, the
+    `sys.modules` access and the `is_solution` override are AST rules with no table behind them, so
+    they stay prose -- and `tests/test_algotune_goal_clauses.py` pins each stated prohibition by
+    RUNNING the real validator on a snippet that breaks it, which is the only check that cannot
+    drift. Adding to this clause CHANGES THE GOAL CARD, i.e. changes the measurement: adopt it
+    between arms, never inside one.
+
     Why state them at all when AlgoTune does NOT — its two prompt files mention no ban anywhere, and
     its agent learns the rule only by having an edit refused. Because the shapes differ: their agent
     edits and is refused in the same turn, at no cost. Ours has a RESEARCHER that commits to an
@@ -242,6 +262,14 @@ def rules_clause(root: Path) -> str:
     protected = sorted(getattr(TamperingDetector, "PROTECTED_MODULES", ()) or ())
     if not protected:
         return ""
+    # The second table, and the one the goal used to be silent about. Sorted so the sentence is
+    # stable across runs; `gc.get_objects` sits in here beside the three builtins because the
+    # validator matches it by the same dotted-name rule.
+    disallowed = sorted(getattr(TamperingDetector, "DISALLOWED_CALLS", ()) or ())
+    calls = (" No call to " + ", ".join(f"`{c}`" for c in disallowed) +
+             " — the arena refuses runtime code generation and harness introspection outright, so "
+             "an idea that turns on generating and compiling specialised code is not one it can "
+             "accept, however fast the result would be." if disallowed else "")
     return (" ARENA RULES FOR THE SUBMITTED SOLVER, enforced by this benchmark's own validator "
             "before anything is scored — a solver that breaks one is not scored low, it is NOT "
             "SCORED: no `import ctypes` (directly or through `__import__`), no reading or writing "
@@ -257,7 +285,7 @@ def rules_clause(root: Path) -> str:
             "the list is the scientific stack itself, so importing them and calling them normally "
             "is not merely allowed, it is the expected way to write this file. If an idea only "
             "works by reaching under the runtime for one of these, it is not an idea this arena "
-            "can accept — pick a different one rather than a way around.")
+            "can accept — pick a different one rather than a way around." + calls)
 
 
 # --enforce-rules, second half: WHAT IS PERMITTED. `rules_clause` states only prohibitions, and a

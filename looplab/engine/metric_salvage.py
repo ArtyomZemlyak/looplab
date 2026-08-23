@@ -368,6 +368,17 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     # than of whichever label the classifier happened to reach for.
     if getattr(res, "diverged", False):
         return None
+    # THE OTHER TWO MEMBERS OF `NEVER_SALVAGED_REASONS` THAT ARE FLAGS, read the same way and added
+    # for the same reason once `_failure_reason` gained a branch whose input is not a flag at all.
+    # `declared_reason` comes off the eval's stdout, which the candidate co-writes, so the LABEL is
+    # no longer a pure function of the engine's own observations even though it is ordered below
+    # them today: a candidate that prints one line can only rename a residual now, and if that
+    # ordering is ever disturbed these two lines are what still refuse. Provably a no-op against the
+    # current classifier — `reason == "drift"` iff `res.drift is not None`, and `setup` iff
+    # `setup_failed` with no drift/timeout above it — which is exactly the property that makes a
+    # defence-in-depth check safe to add.
+    if getattr(res, "drift", None) is not None or getattr(res, "setup_failed", False):
+        return None
     if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False):
         return None
     stages = [s for s in (getattr(res, "stages", None) or []) if isinstance(s, dict)]

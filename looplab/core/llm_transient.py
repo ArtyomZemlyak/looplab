@@ -111,6 +111,38 @@ def _sdk_transient(exc: Exception) -> bool:
     return True                                   # reset / EOF / protocol error mid-read → transient
 
 
+def _inband_stream_error(exc: BaseException) -> bool:
+    """Did the endpoint report a failure INSIDE an HTTP-200 response body it was already streaming?
+
+    The third shape a provider call can fail in, and the one this module had no name for. It is not
+    `_sdk_transient`'s question — that one is only ever asked about an `APIConnectionError`, i.e.
+    about reaching the endpoint at all, so widening IT would have been a no-op for this family.
+    Here the endpoint was reached, accepted the request, answered HTTP 200 and streamed for minutes;
+    then its own upstream died and it said so on the wire, as a `data: {"error": …}` frame. A
+    litellm gateway does this verbatim: `litellm.APIConnectionError: … Response payload is not
+    completed: <TransferEncodingError …>`, forwarded to us in band.
+
+    Identified by CLASS, not by message text, for the same reason `classify_llm_failure` is: the
+    openai SDK builds a BARE `APIError` at exactly four sites and all four are `_streaming.py`'s
+    error-frame branches, so "an `APIError` carrying no HTTP status that is not an
+    `APIConnectionError`" is a precise reading of "the stream carried an error frame" rather than a
+    heuristic over wording. The only other member of that status-less family,
+    `APIResponseValidationError`, is a response-SHAPE defect and is excluded by name.
+
+    `core/llm.py` reads this in two places that must not drift: `_accumulate_stream` salvages such a
+    stream when it had already produced an answer, and `_RETRY_POLICY`'s `_policy_stream_interrupted`
+    row retries it when it had not. Deliberately NOT applied to a mid-body reset or an idle-guard
+    kill, which are also mid-stream but are `_policy_connection`'s, with their own measured
+    provenance (a proxied endpoint that wedges on SSE and answers the same request in 2 s without
+    it) — this repo has no measurement saying that judgement is wrong, and a fix should not reach
+    past its evidence.
+    """
+    if openai is None or not isinstance(exc, openai.APIError):
+        return False
+    return not isinstance(exc, (openai.APIStatusError, openai.APIConnectionError,
+                                openai.APIResponseValidationError))
+
+
 # The closed vocabulary of REASONS a provider call can have failed for good, once the client has
 # spent every retry it was given. It exists because the two ends of this list demand OPPOSITE
 # actions from the operator and used to be reported with one sentence: a run refused for

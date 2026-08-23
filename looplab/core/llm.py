@@ -63,8 +63,8 @@ from looplab.core.parse import split_think  # noqa: F401  (also a re-export)
 # affected and fails if a new one appears without this note being true of it.
 from looplab.core.llm_transient import (  # noqa: F401
     BACKOFF_CAP_S, LLM_FAILURE_CAUSES, RETRY_AFTER_CAP_S, _REASONING_REJECT_KEYS, _backoff,
-    _err_body, _is_reasoning_reject, _is_stream_options_reject, _is_throttle_403,
-    _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
+    _err_body, _inband_stream_error, _is_reasoning_reject, _is_stream_options_reject,
+    _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
 from looplab.core.llm_streaming import (  # noqa: F401
     _chunk_has_content, _shutdown_pool_sockets, _stream_raw_socket, _stream_with_idle_guard)
 from looplab.core.llm_toolcall import (  # noqa: F401
@@ -545,6 +545,65 @@ def _stream_envelope_is_billable(*, usage_observed: bool, delegated_to_fallback:
     if delegated_to_fallback:
         return False
     return stream_completed or produced_content
+
+
+# The `finish_reason` a SALVAGED envelope carries — the one durable mark saying this answer is the
+# part of a stream that arrived before the transport cut it. Deliberately NOT OpenAI's `"length"`:
+# that names a TOKEN LIMIT the model ran into, a fact about the generation, and this cut is the
+# gateway's. Nothing in `looplab/` reads a finish_reason VALUE (`_keepalive_stall` reads only its
+# presence), so the honest word costs nothing here while the borrowed one would have asserted
+# something false about the model on every truncated call.
+STREAM_TRUNCATED_FINISH_REASON = "truncated"
+
+
+def _interrupted_stream_is_salvageable(*, produced_content: bool, produced_tool_calls: bool,
+                                       produced_reasoning: bool) -> bool:
+    """An HTTP-200 stream broke mid-body. KEEP what it produced, or discard it and re-ask?
+
+    Hoisted for the same reason as `_stream_envelope_is_billable`: it lives inside
+    `_accumulate_stream`'s `except`, where no caller can reach it, and it decides the branch with
+    the most expensive failure mode in this client. Stated here so the trade-off can be READ.
+
+    The rule: an interrupted stream that yielded ANY of content / tool_calls / reasoning is a
+    TRUNCATED ANSWER and is returned; one that yielded nothing is a failed attempt and is re-raised
+    for `_RETRY_POLICY` to retry. That is the same judgement `_keepalive_stall` already makes about
+    a stream that ended CLEANLY with nothing usable, and the same one `complete_text_stream`'s
+    `except openai.APIError:` has always made (`if not pieces:` delegate, else `break` and keep what
+    arrived) — this path was the one place the client disagreed with itself.
+
+    WHY NOT SIMPLY RETRY. Measured over one 20-run AlgoTune campaign (`/var/tmp/looplab-bench/runs-B`
+    against `meter/meter.jsonl`, 2026-08-22/23) through a gateway that cuts any generation at
+    ~1800 s: 26 cut streams across 10 of the 20 tasks, each carrying 196,286-238,423 forwarded
+    content deltas at 1815-1830 s and costing $0.055-$0.067. The scarce resource is WALL CLOCK, not
+    just money — those 26 streams burned 13.15 hours, 18.7-94.6 % of each affected run's entire
+    lifetime, and produced nothing. `count_riemann_zeta_zeros` spent 94.6 % of a 3.21-hour run
+    inside six of them and reached ZERO nodes; `pde_heat1d` and `sparse_eigenvectors_complex` were
+    pushed into the harness's own 4-hour kill (3.99 h and 3.98 h wall) with no terminal event at
+    all. Re-asking under `max_retries=8` multiplies that by up to eight — ~4 hours and ~$0.52 on
+    ONE call against a $1.00 run ceiling — and the cut RECURS, so the retries would be spent rather
+    than saved. `_keepalive_stall` already warns that retrying a truncated-but-usable response "5x
+    regenerates minutes of reasoning tokens"; here it is thirty minutes, eight times over.
+
+    WHY THE BARREN CASE STILL RETRIES, and why this needs no retry cap of its own: the cost of a
+    retry is exactly what the aborted attempt generated. This rule sends the productive streams
+    (expensive to repeat, and already answered) down the salvage path and the barren ones (nothing
+    generated, so nothing to repeat) down the retry path, and neither branch is the costly one. On
+    the corpus above the split is 26 salvaged / 0 retried, which is why a retry CAP of its own would
+    be a knob defending against a case this rule already removes.
+    """
+    return produced_content or produced_tool_calls or produced_reasoning
+
+
+def _envelope_is_truncated(body: Optional[dict]) -> bool:
+    """Did this chat body come out of `_accumulate_stream`'s salvage rather than a whole stream?
+
+    A named predicate rather than an inline comparison because two unrelated decisions read it —
+    the T7 cache must never store a truncated answer under a deterministic request's key, and the
+    operator notice must fire exactly once per salvaged call — and a second spelling of "is this
+    the truncated shape?" is how one of them starts answering a slightly different question.
+    """
+    choices = (body or {}).get("choices") or []
+    return bool(choices) and (choices[0] or {}).get("finish_reason") == STREAM_TRUNCATED_FINISH_REASON
 
 
 def _stream_usage(value) -> dict:
@@ -1125,41 +1184,70 @@ class OpenAICompatibleClient:
         """Reassemble an SDK streaming response into the non-streaming body shape. Merges tool_call
         deltas by index (partial name/arguments concatenated), captures reasoning deltas, and keeps
         the final include_usage chunk. httpx's read timeout bounds each iteration — a stall surfaces
-        as openai.APITimeoutError out of this loop, caught by `_post`."""
+        as openai.APITimeoutError out of this loop, caught by `_post`.
+
+        A stream the endpoint ENDS in band is not a failed attempt. The SDK raises an
+        `openai.APIError` out of this loop when a `data: {"error": …}` frame arrives inside an
+        HTTP-200 body (`llm_transient.py::_inband_stream_error` is that family, and says why the
+        class is a precise reading of it). Whatever already arrived is a real, truncated answer, and
+        it used to be thrown away with the exception: 200,438 forwarded deltas and thirty minutes of
+        generation, discarded, unbilled, re-asked. `_interrupted_stream_is_salvageable` decides; a
+        stream with nothing to salvage re-raises unchanged, so `_policy_stream_interrupted` still
+        owns that case. Every OTHER mid-stream failure — an idle-guard kill, a reset, an EOF —
+        re-raises here untouched and keeps `_policy_connection`'s existing degrade-and-retry.
+        """
         content: list[str] = []
         reasoning: list[str] = []
         tcs: dict[int, dict] = {}
         finish = None
         usage: dict = {}
-        for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
-            if getattr(ev, "usage", None):
-                # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
-                # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
-                # AttributeError aborted the entire call over optional telemetry.
-                usage = _stream_usage(ev.usage)
-            if not ev.choices:
-                continue
-            ch = ev.choices[0]
-            d = ch.delta
-            if getattr(d, "content", None):
-                content.append(d.content)
-            r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
-            if r:
-                reasoning.append(r)
-            for tc in (getattr(d, "tool_calls", None) or []):
-                tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
-                idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
-                slot = tcs.setdefault(idx, {"id": None, "type": "function",
-                                            "function": {"name": "", "arguments": []}})
-                if tcd.get("id"):
-                    slot["id"] = tcd["id"]
-                fn = tcd.get("function") or {}
-                if fn.get("name"):
-                    slot["function"]["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["function"]["arguments"].append(fn["arguments"])
-            if ch.finish_reason:
-                finish = ch.finish_reason
+        truncated = False
+        try:
+            for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
+                if getattr(ev, "usage", None):
+                    # Same tolerant extractor `complete_text_stream` uses: a provider (or a test mock)
+                    # whose final chunk carries `usage` as a PLAIN DICT has no `.model_dump()`, and the
+                    # AttributeError aborted the entire call over optional telemetry.
+                    usage = _stream_usage(ev.usage)
+                if not ev.choices:
+                    continue
+                ch = ev.choices[0]
+                d = ch.delta
+                if getattr(d, "content", None):
+                    content.append(d.content)
+                r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
+                if r:
+                    reasoning.append(r)
+                for tc in (getattr(d, "tool_calls", None) or []):
+                    tcd = tc.model_dump()               # reuse the tested index-merge logic (_tool_call_slot)
+                    idx = _tool_call_slot(tcs, tcd)     # provider-omitted `index` must not collapse calls
+                    slot = tcs.setdefault(idx, {"id": None, "type": "function",
+                                                "function": {"name": "", "arguments": []}})
+                    if tcd.get("id"):
+                        slot["id"] = tcd["id"]
+                    fn = tcd.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"].append(fn["arguments"])
+                if ch.finish_reason:
+                    finish = ch.finish_reason
+        except openai.APIError as exc:
+            # NARROW twice over. `openai.APIError` (not `Exception`) for the reason
+            # `_policy_unparseable` states: a ValueError/AttributeError out of the merge code above
+            # is OUR bug and must propagate loudly rather than be laundered into a plausible-looking
+            # partial answer. Then `_inband_stream_error` again, so a stall or a reset keeps
+            # `_policy_connection`'s answer and only the family this fix has evidence about changes.
+            if not (_inband_stream_error(exc) and _interrupted_stream_is_salvageable(
+                    produced_content=bool(content), produced_tool_calls=bool(tcs),
+                    produced_reasoning=bool(reasoning))):
+                raise
+            truncated = True
+        if truncated:
+            # Overwrite any finish_reason the stream had already delivered: the mark is what stops
+            # `_post` caching this body, and a stream that broke after its finish_reason still lost
+            # whatever came next (the usage frame most of all). Over-marking only costs a cache miss.
+            finish = STREAM_TRUNCATED_FINISH_REASON
         msg: dict = {"role": "assistant", "content": "".join(content)}
         if reasoning:
             msg["reasoning"] = "".join(reasoning)
@@ -1237,6 +1325,18 @@ class OpenAICompatibleClient:
         ((openai.RateLimitError, openai.InternalServerError), "_policy_throttled"),
         (openai.APIConnectionError, "_policy_connection"),
         (openai.PermissionDeniedError, "_policy_forbidden"),
+        # The last three rows are ONE decision read in order, and the first two exist only to hold
+        # the tail still while the third widens. An `openai.APIError` row on its own would also
+        # claim every STATUS-bearing error no row above named — 404 (wrong model), 409, 422 — and
+        # retry a permanent request defect eight times with backoff. So: anything carrying an HTTP
+        # status keeps the fail-fast answer it has always had, `APIResponseValidationError` (the
+        # only OTHER member of the status-less family) keeps it too, and what reaches
+        # `_policy_stream_interrupted` is exactly the bare `APIError` the SDK builds for an in-band
+        # error frame on a 200 stream. Expressed in the table's own vocabulary rather than as a
+        # predicate inside a handler, because ORDER is what this table is for.
+        (openai.APIStatusError, "_policy_unclassified"),
+        (openai.APIResponseValidationError, "_policy_unclassified"),
+        (openai.APIError, "_policy_stream_interrupted"),
     ) if openai is not None else ()) + (
         (json.JSONDecodeError, "_policy_unparseable"),
         (None, "_policy_unclassified"),
@@ -1367,6 +1467,36 @@ class OpenAICompatibleClient:
             return False
         raise LLMError(f"LLM request to {self.base_url} returned an unparseable body") from exc
 
+    def _policy_stream_interrupted(self, exc, attempt: int, use_stream: bool) -> bool:
+        # A bare `openai.APIError` — the SDK builds one at exactly four sites, all in
+        # `_streaming.py`, all for an in-band `data: {"error": …}` frame inside an HTTP-200 SSE
+        # body. The endpoint accepted the request and started answering, then its own upstream
+        # broke and it told us so on the wire. That is a TRANSPORT failure, the family
+        # `_sdk_transient`'s docstring already calls "a transient hiccup on a busy gateway ->
+        # retry" — but classification never reached it, because a bare APIError is not an
+        # APIConnectionError, so it fell to the unclassified tail and raised on the FIRST attempt
+        # with `max_retries=8` untouched. Measured on 20 AlgoTune runs (2026-08-22/23): the run's
+        # own span shows ONE 1818 s attempt and no second one.
+        #
+        # Only a STREAM can produce this error, so a non-stream attempt keeps the fail-fast answer
+        # (see `_policy_unclassified`) rather than retrying an error it could not have caused.
+        # `use_stream` is also the returned flag: the next attempt drops SSE, which is the whole
+        # point — `_nonstream_bounded` reads the body under one wall-clock guard, so the in-band
+        # frame that cut this attempt cannot cut that one the same way. Ratcheting `_stream_stalls`
+        # alongside it is the same judgement `_policy_connection` makes about a stalled stream: an
+        # endpoint whose SSE keeps breaking mid-body should stop being asked for SSE.
+        #
+        # This branch only ever sees a stream that produced NOTHING — `_accumulate_stream` already
+        # returned any interrupted stream that produced content, tool_calls or reasoning as a
+        # truncated answer (see `_interrupted_stream_is_salvageable`, which is where the argument
+        # for not re-generating 200k tokens lives). So the retry it asks for is a retry of a
+        # generation that generated nothing, and costs a backoff.
+        if use_stream and attempt < self._max_retries:
+            self._stream_stalls += 1
+            time.sleep(_backoff(attempt))
+            return True
+        raise LLMError(f"LLM request to {self.base_url} failed: {exc}") from exc
+
     def _policy_unclassified(self, exc, attempt: int, use_stream: bool) -> bool:
         # The ladder's final `except openai.APIError`: any other SDK-level protocol error -> clean
         # LLMError. `_post` catches only APIError|JSONDecodeError, so nothing else reaches here.
@@ -1487,8 +1617,39 @@ class OpenAICompatibleClient:
         if "choices" not in body or not body["choices"]:
             # Ollama/vLLM emit {"error": ...} envelopes on a bad request — don't index [0] blind.
             raise LLMError(f"LLM response had no choices: {str(body)[:200]}")
+        if _envelope_is_truncated(body):
+            self._note_truncated_stream(body, usage)
+            return body                          # NEVER cached — see `_note_truncated_stream`
         self._cache_put(ck, body)                # T7
         return body
+
+    def _note_truncated_stream(self, body: dict, usage: dict) -> None:
+        """Say out loud that a salvaged answer is partial, and why its price may be missing.
+
+        Two things happen to a truncated envelope that the caller cannot see and must not have to
+        infer. It is NOT cached: a truncated answer stored under a deterministic (temperature 0)
+        request's key would be served to every later identical ask for the rest of the process, so
+        one cut stream becomes a permanently amputated answer — the T7 cache's own reason for
+        existing (a retry, a panel re-ask, a verify pass) is exactly the traffic that would hit it.
+        And it usually arrives UNPRICED: the provider's usage frame is the LAST thing on the wire,
+        so a stream cut before it carries no token counts at all. `CostAccountant.add` has already
+        run, which is the fix that matters — the call now counts (`calls` +1) and counts as
+        unpriced (`priced_calls` +0) instead of never reaching the ledger at all. What it cannot do
+        is state an amount, and `cost_is_reported`'s rule is that UNPRICED IS NOT FREE.
+
+        WARNING, at the level and for the reason `_policy_throttled`'s backoff notice uses: it is
+        what logging's `lastResort` handler puts on stderr in a CLI run that configured no logging,
+        and a silent under-count is what let five arms of one 20-run campaign overrun a $1.00
+        ceiling by 6.5-19.2 % while their own ledgers reported them under it.
+        """
+        text = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        _LOG.warning(
+            "%s cut a streaming response mid-body; keeping the %d characters that arrived rather "
+            "than regenerating them, and NOT caching them. %s", self.base_url, len(text),
+            "The provider reported no usage for it, so this call is recorded as UNPRICED — real "
+            "spend that this run's ledger cannot state and the endpoint's invoice will."
+            if not usage.get("priced") else
+            "The provider had already reported usage, so it is priced normally.")
 
     def _model_params(self) -> dict:
         """The generation's model_parameters (Langfuse generation metadata): sampling temperature +

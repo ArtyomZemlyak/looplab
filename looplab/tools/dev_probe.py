@@ -840,6 +840,27 @@ class DevProbeTools:
                 + ". Move the editable tree out from under that path, or declare it as a mount. "
                 "Running without the fence is not the alternative: a probe that can read the "
                 "operator's tree is the incident this surface exists to prevent.")
+        # THE SWALLOWED NET, AT THE DERIVATION -- not only at `_install_fence`. `confine_grants`
+        # already refuses a grant that CONTAINS a root, so in correct code this never fires. It is
+        # here because BOTH halves of rule 1 project from THIS list, and only ONE of them re-derives
+        # `fence_inputs` and re-checks `swallowed`: the HOOK, through `_install_fence`. The KERNEL
+        # rung reads this list through `_read_allow`, which does NOT pass through `_install_fence` --
+        # so a `confine_grants` regression that returned a grant containing a root WITHOUT flagging
+        # it in `refused` (the drift this whole slice's history is about: "the derivation and the
+        # enforcement came apart") reached the kernel allow-list unchecked, and an allow-list holding
+        # the root's own ANCESTOR is rule 1 switched off in the kernel half -- caught today only by
+        # `_install_fence` happening to run afterward. Assert it where the single shared list is
+        # BUILT, so neither projection can be handed a swallower and the guarantee no longer depends
+        # on call ordering. `r.startswith(g)` flags a grant that is an ancestor of (or equal to) a
+        # root; a sanctioned carve-out UNDER a root is `g.startswith(r)` and is untouched. Refuse the
+        # RUN -- a probe may fail loudly, never run silently unfenced.
+        swallowers = sorted(g for g in grants if any(r.startswith(g) for r in roots))
+        if swallowers:
+            raise ProbeRefusal(
+                "refused to run: the read-confinement derivation produced a grant that contains "
+                f"the operator's source root ({', '.join(swallowers)}) -- an allow-list holding the "
+                "root's own ancestor is rule 1 disabled in the kernel half. This is a defect in the "
+                "probe's grant derivation, not in the task.")
         return grants
 
     @staticmethod

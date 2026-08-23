@@ -96,16 +96,24 @@ def test_the_window_is_a_tail_and_is_bounded():
 def test_one_window_governs_both_streams_of_the_scored_terminal():
     """`stdout_tail` and `stderr_tail` are two views of the SAME question — what did the eval say
     about the number — so they are one constant, not two. Two would drift, and the stream an eval
-    chooses to speak on is not a fact about how much of it is worth keeping. Asserted over the write
-    site's source because that is where a literal would reappear."""
+    chooses to speak on is not a fact about how much of it is worth keeping.
+
+    RE-DERIVED THROUGH `_redacted_tail` (2026-08-23): the cap moved off the stream expression and
+    into that helper's third argument when the redact-then-cap order was hoisted, so a test reading
+    `res.stdout[-…:]` would have gone green on a slice that no longer exists. The window is now the
+    ARGUMENT, and it is read from every call in the module — so a stdout window that grew its own
+    constant is still red, and so is one written as a bare number."""
+    tree = ast.parse(Path(inspect.getfile(ev)).read_text(encoding="utf-8"))
+    caps = [ast.unparse(node.args[2]) for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "_redacted_tail"]
+    assert sorted(caps) == ["_DURABLE_EVIDENCE_CHARS",
+                            "_SCORED_EVIDENCE_CHARS", "_SCORED_EVIDENCE_CHARS"], (
+        f"the two scored-terminal streams must share ONE named window; found {sorted(caps)}")
     # Over the SUBSCRIPTS, not the file text: this module's own comments quote the old
     # `res.stdout[-500:]` as the history it is explaining, and a substring test would either forbid
     # writing that history down or pass on it. What must not exist is the SLICE.
-    tree = ast.parse(Path(inspect.getfile(ev)).read_text(encoding="utf-8"))
     slices = {ast.unparse(n) for n in ast.walk(tree)
               if isinstance(n, ast.Subscript) and ast.unparse(n.value) in ("res.stdout", "res.stderr")}
-    assert "res.stdout[-_SCORED_EVIDENCE_CHARS:]" in slices, \
-        f"the scored terminal's stdout window must read the shared constant; found {sorted(slices)}"
     assert "res.stdout[-500:]" not in slices, \
         "500 was measured too short for a 745-character metric line — see _SCORED_EVIDENCE_CHARS"
     # …and the PROMPT's window on the failure path is deliberately untouched: `_eval_failure_text`
@@ -119,6 +127,35 @@ def test_the_column_goes_through_the_same_redactor_before_the_cap():
     hands the redactor a truncated stub the shape rule no longer matches."""
     kept = _evidence("connecting with password=hunter2 to the index\n" + "tail\n" * 50)
     assert "hunter2" not in kept and "***" in kept
+
+
+def test_a_secret_straddling_the_cut_is_not_left_as_a_fragment():
+    """THE ASSERTION ABOVE CANNOT SEE THE ORDER, and that is why this one exists.
+
+    Its fixture is ~250 characters, so the cap is a no-op on it and `redact(text[-N:])` and
+    `redact(text)[-N:]` return the same bytes — the test passed identically against the order its
+    own name forbids. The property only becomes observable when the cut lands INSIDE a secret, which
+    a tail cut does by severing the secret's HEAD: `sk-live-A9fQ2xLm7ZpR4tVw8YbN1cJdKe` cut eleven
+    characters in leaves `Q2xLm7ZpR4tVw8YbN1cJdKe`, which matches no prefix rule and is shorter than
+    what the entropy rule fires on, so the redactor returns it verbatim onto a durable row.
+
+    Driven against the REAL `core/redact.py` rather than a `.replace()` double, because what is on
+    trial is exactly which shapes that module recognizes. The control is the same secret redacted
+    whole: it must be masked, or the fixture is not a secret and the case proves nothing.
+    """
+    from looplab.core.redact import redact_secrets
+
+    secret = "sk-live-A9fQ2xLm7ZpR4tVw8YbN1cJdKe"
+    line = "export TOKEN=" + secret
+    assert "***" in redact_secrets(line), "the fixture is not a secret this redactor knows"
+
+    tail = "\nharmless tail\n"
+    # A window that severs the token eleven characters in, i.e. mid-secret.
+    chars = len(secret) - 11 + len(tail)
+    engine = type("E", (), {"_redact": staticmethod(redact_secrets)})()
+    kept = ev._redacted_tail(engine._redact, "x" * 400 + line + tail, chars)
+    assert secret[11:] not in kept, (
+        f"a secret fragment survived the cut: {kept!r} — the redactor must see the whole stream")
 
 
 def test_nothing_to_keep_is_the_empty_string_and_not_a_fabricated_line():

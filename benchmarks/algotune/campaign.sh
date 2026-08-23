@@ -188,6 +188,52 @@ PYEOF
     exit 2
   fi
   echo "arm A budget: spend_limit=$A_LIMIT (matches BUDGET_USD)"
+
+  # ARM A MUST ACTUALLY REACH THE METER, and whether it does is a property of its config ENTRY.
+  #
+  # `run_one` gives both arms the same per-task meter URL, arm B through LOOPLAB_LLM_BASE_URL and
+  # arm A through OPENAI_BASE_URL. That second half only works for an entry litellm treats as a
+  # generic OpenAI endpoint. AlgoTuner picks the litellm model name at `AlgoTuner/main.py:270`,
+  # `llm_model_name = model_info.get("model_name", desired_model_name)` -- so an entry with NO
+  # `model_name` is named by its own config KEY. For an `openrouter/...` key litellm resolves the
+  # base as `api_base or litellm.api_base or OPENROUTER_API_BASE or "https://openrouter.ai/api/v1"`
+  # (`litellm/main.py:3250`) and OPENAI_BASE_URL appears nowhere in that chain.
+  #
+  # The default `ALGOTUNE_MODEL_KEY` at the top of this file is exactly such a key, and the
+  # `openrouter/deepseek/deepseek-v4-flash-0731` entry shipped in this checkout carries no
+  # `model_name`. So the DEFAULT configuration with METER_BASE set sends arm A straight to
+  # openrouter.ai: no shared RPM queue, no shared price table, no per-task attribution, zero rows in
+  # meter.jsonl -- while the banner below still prints "(metered, per-task paths)" for both arms.
+  # Every cost number the campaign then reports compares one arm's metered spend against the other
+  # arm's absence, which is the one failure this whole meter exists to prevent.
+  #
+  # So it REFUSES rather than warns: an unmetered arm A is not a slower measurement, it is a
+  # different experiment, and it is invisible afterwards. `setup_gateway_arm.py` writes the entry
+  # that works (`model_name: "openai/<model>"`, no api_base, base URL from the environment).
+  if [ -n "$METER_BASE" ]; then
+    A_LITELLM_NAME="$(python3 - "$AT" "$ALGOTUNE_MODEL_KEY" <<'PYMETER'
+import sys, yaml
+cfg = yaml.safe_load(open(f"{sys.argv[1]}/AlgoTuner/config/config.yaml")) or {}
+entry = (cfg.get("models") or {}).get(sys.argv[2]) or {}
+# AlgoTuner/main.py:270 -- the same resolution, re-derived rather than assumed.
+print(entry.get("model_name", sys.argv[2]))
+PYMETER
+)"
+    case "$A_LITELLM_NAME" in
+      openai/*) echo "arm A meter: model_name=$A_LITELLM_NAME honours OPENAI_BASE_URL" ;;
+      *)
+        echo "arm A would BYPASS the meter: '$ALGOTUNE_MODEL_KEY' resolves to litellm model" >&2
+        echo "  '$A_LITELLM_NAME', which is not an openai/* endpoint, so the OPENAI_BASE_URL this" >&2
+        echo "  driver sets per task is ignored and the calls go to the provider directly." >&2
+        echo "  Arm B WOULD be metered, so the two arms would be priced, rate-limited and" >&2
+        echo "  attributed by different machinery -- not a comparison." >&2
+        echo "  Give the entry an OpenAI-shaped model_name:" >&2
+        echo "  python3 $REPO/benchmarks/meter/setup_gateway_arm.py --algotune-root $AT \\" >&2
+        echo "      --key $ALGOTUNE_MODEL_KEY --model ${LOOPLAB_LLM_MODEL}" >&2
+        echo "  (or unset METER_BASE and accept that neither arm is metered)." >&2
+        exit 2 ;;
+    esac
+  fi
 fi
 export PYTHONPATH="$REPO"
 mkdir -p "$OUT" "$WS"
@@ -297,12 +343,41 @@ refuse_to_start() {   # $1 = marker path (NOT written), $2 = wall, $3 = cpus, $4
   echo "      the cause is in the last lines of ${1%.done}.log." >&2
 }
 
-final_banner() {   # $1 = out dir, $2 = arm, $3 = task count. Returns 3 if anything refused to start.
+final_banner() {   # $1 = out dir, $2 = arm, $3 = task count, $4 = task list. 3 if anything is short.
   # The banner is a FUNCTION so it can be driven by tests/test_campaign_marker_evidence.py: the
   # property that matters is "the driver does not say COMPLETE over an arm that never ran", and the
   # only honest way to check that is to run it over a directory that holds a refusal.
   REFUSED_N="$(ls "$1/$2"-*.refused 2>/dev/null | wc -l)"
   DONE_N="$(ls "$1/$2"-*.done 2>/dev/null | wc -l)"
+
+  # A MISSING MARKER IS NOT A REFUSAL, AND UNTIL 2026-08-23 ONLY REFUSALS COULD STOP THIS BANNER.
+  # `record_done` writes NOTHING for rc 130/137/143 -- "interrupted; the task is still owed" -- and
+  # writes no `.refused` either, by design: a `.refused` is specifically an exit-2-with-no-event-log.
+  # So the whole interrupted family fell through both counters and the arm was declared COMPLETE.
+  # Reproduced on this box 2026-08-23 with a one-task arm whose task exited 1: the driver printed
+  # `===== arm A COMPLETE (0/1 markers) =====` and exited 0, with the marker count printed inside its
+  # own success banner. And it is not hypothetical at 20 tasks: `campaign-paired/` currently holds 17
+  # `.done` against 20 `B-*.log`, zero `.refused`, and pagerank + rbf_interpolation have a full
+  # `.final.json` each and no marker at all.
+  #
+  # This driver's own header says exit 0 means "every task-arm reached a terminal state", so the
+  # marker count IS the predicate and it is now checked against the task count.
+  MISSING=""
+  for T in ${4:-}; do
+    [ -s "$1/$2-$T.done" ] || MISSING="$MISSING $T"
+  done
+  if [ "$REFUSED_N" -eq 0 ] && [ -n "$MISSING" ]; then
+    # "UNFINISHED", never "INCOMPLETE": a watcher greps this log for `arm $ARM COMPLETE` and
+    # "INCOMPLETE" CONTAINS it -- the same trap the refusal banner below was already written around.
+    echo "[$(date +%H:%M:%S)] ===== arm $2 UNFINISHED: $DONE_N of $3 task-arms have a .done marker ====="
+    echo "  no marker, so still owed:$MISSING"
+    echo "  record_done writes no marker for an interrupted task-arm (rc 130/137/143 and anything"
+    echo "  it does not recognise) -- these have no verdict, and any B-<task>.final.json left behind"
+    echo "  for them was written BEFORE that was decided. compare_arms.py reads these same markers"
+    echo "  and will report those rows as owed rather than as scores."
+    echo "  Re-run this arm: no marker was written, so exactly these are retried."
+    return 3
+  fi
   if [ "$REFUSED_N" -gt 0 ]; then
     # "NOT MEASURED", not "INCOMPLETE": a watcher greps this log for `arm $ARM COMPLETE`, and
     # "INCOMPLETE" CONTAINS that string -- the failure banner would have matched the success one.
@@ -326,6 +401,18 @@ run_one() {                       # $1 = task, $2 = cpu list
   if [ -n "$METER_BASE" ]; then
     # Both arms, same meter, one path segment apart. Arm A reaches it through OPENAI_BASE_URL,
     # which litellm honours for an `openai/<model>` entry that carries no api_base of its own.
+    # OPEN[meter-path-cannot-separate-two-attempts-at-one-task] the meter attributes by
+    # (arm, task) and by nothing else, so a task-arm that is RE-RUN adds to the same bucket and no
+    # reader can tell the attempts apart. Measured 2026-08-23 on `meter/meter.jsonl`: `kcenters`
+    # holds $2.0086 over 816 calls in FOUR sessions (13:18-13:37, 14:08-14:59, 15:30-16:02,
+    # 16:20-17:56) against ONE `.done` marker whose run is the last of them at $1.0070 -- so a naive
+    # per-task cost reads 2x the ceiling and looks like a budget breach that never happened.
+    # `discrete_log` has six sessions and `count_riemann_zeta_zeros` fourteen. DEFERRED because the
+    # fix is a new path segment (`/m/$ARM/$T/$ATTEMPT/v1`), which re-keys attribution for a campaign
+    # that is 7,700 calls in: the rows already written would be under the old key and the ones after
+    # it under the new, which is worse than one key that is honestly coarse. Between campaigns, the
+    # segment plus a matching `_split_path` in `meter/proxy.py` closes it.
+    # proof:absent:/m/$ARM/$T/$ATTEMPT@benchmarks/algotune/campaign.sh
     export LOOPLAB_LLM_BASE_URL="$METER_BASE/m/$ARM/$T/v1"
     export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"
     export OPENAI_BASE_URL="$LOOPLAB_LLM_BASE_URL"
@@ -405,7 +492,7 @@ for T in $TASKS; do
 done
 wait
 reap_orphan_workers
-final_banner "$OUT" "$ARM" "$NTASKS"
+final_banner "$OUT" "$ARM" "$NTASKS" "$TASKS"
 CAMPAIGN_RC=$?
 
 # The runtime disk does not survive a container restart and an arm is hours of measurement that

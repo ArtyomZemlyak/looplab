@@ -44,15 +44,43 @@ if [ -d "$SRC/AlgoTune/.git" ]; then
 fi
 
 # 2. Measurements. These are the irreplaceable half.
+#
+# A MISSING SOURCE IS REPORTED, NOT SKIPPED. `copy` used to `return 0` on a path that was not there,
+# so a snapshot that copied nothing at all still printed PROVENANCE.txt and exited 0, and
+# `campaign.sh`'s `|| echo "(snapshot failed...)"` could never fire. An archive that is silently
+# empty is worse than no archive: it is one somebody will restore from.
+MISSING=0
 copy() {  # $1 = path under $SRC (or absolute), $2 = label
-  [ -e "$1" ] || return 0
+  if [ ! -e "$1" ]; then
+    echo "  MISSING              $2 -- $1 does not exist, so it is NOT in this snapshot"
+    MISSING=$((MISSING + 1)); return 0
+  fi
   cp -r "$1" "$OUT/" 2>/dev/null && echo "  $2 $(du -sh "$OUT/$(basename "$1")" | cut -f1)"
 }
 copy "$SRC/AlgoTune/reports"                     "reports              "
 copy "$SRC/looplab/benchmarks/algotune/.baseline_times" "baseline_times       "
-copy "$SRC/campaign"                             "campaign             "
 copy "$SRC/meter"                                "meter                "
 copy "$SRC/logs"                                 "logs                 "
+
+# EVERY campaign directory, DISCOVERED, because the name is the operator's (`CAMPAIGN_OUT`) and this
+# script used to hardcode one of them. Measured 2026-08-23: the snapshot taken at 03:21 that morning
+# held a directory called `campaign` containing arm A's 102 markers and logs from a run that FINISHED
+# on 2026-08-20, and held nothing at all from `campaign-paired/` -- the live campaign, whose 17
+# `.done` markers and 19 `B-*.final.json` scores were the entire arm-B result set and the one thing
+# on the box that cannot be recomputed. So the archive was 84 MB of a bundle that regenerates from
+# git, beside a stale copy of a dead campaign, under a header saying "everything that cannot be
+# regenerated". The failure needs no bug: a campaign is pointed at a new CAMPAIGN_OUT and the
+# hardcoded name goes quietly out of date.
+FOUND_CAMPAIGN=0
+for D in "$SRC"/campaign*; do
+  [ -d "$D" ] || continue
+  FOUND_CAMPAIGN=$((FOUND_CAMPAIGN + 1))
+  copy "$D" "$(printf '%-21s' "$(basename "$D")")"
+done
+if [ "$FOUND_CAMPAIGN" = 0 ]; then
+  echo "  MISSING              no $SRC/campaign* directory -- NO campaign markers or scores archived"
+  MISSING=$((MISSING + 1))
+fi
 
 # 3. Which commit of OUR repo produced them, and what the box looked like.
 {
@@ -68,3 +96,12 @@ KEEP="${SNAPSHOT_KEEP:-8}"
 ls -1d "$DEST"/2* 2>/dev/null | head -n -"$KEEP" | while read -r old; do
   echo "  pruning $old"; rm -rf "$old"
 done
+
+# The EXIT CODE is the claim. Anything this snapshot could not copy makes it a partial one, and the
+# caller (`campaign.sh`, `snapshot_timer.sh`) is the only place left that can say so out loud.
+if [ "$MISSING" -gt 0 ]; then
+  echo "  INCOMPLETE SNAPSHOT: $MISSING source(s) missing (listed above). Do not restore from this"
+  echo "  one without checking what it is short of."
+  exit 1
+fi
+exit 0

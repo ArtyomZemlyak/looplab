@@ -284,6 +284,63 @@ def test_an_empty_cross_run_store_says_so_rather_than_blaming_the_query(tmp_path
     assert "no query will match" in answer
 
 
+class _CapturingClient:
+    """Captures the messages a role builds, then raises so the role's own fallback path ends the
+    call. `complete_tool` is what `parse_structured("tool_call", ...)` reaches."""
+
+    def __init__(self):
+        self.messages: list[list[dict]] = []
+
+    def complete_tool(self, messages, json_schema):
+        self.messages.append(messages)
+        raise RuntimeError("stop here — the prompt is the property")
+
+    def chat(self, messages, tools, tool_choice="auto"):
+        self.messages.append(messages)
+        raise RuntimeError("stop here — the prompt is the property")
+
+
+def _system_prompt_of(role, state):
+    from looplab.core.models import Node
+    try:
+        role.propose(state, None if not state.nodes else next(iter(state.nodes.values()), None))
+    except Exception:                       # noqa: BLE001 - every role degrades rather than raising
+        pass
+    assert role.client.messages, "the role never built a prompt"
+    return role.client.messages[0][0]["content"]
+
+
+def test_the_tools_rule_reaches_only_a_role_that_HAS_tools():
+    """`_CONTEXT_BEFORE_TOOLS_RULE` says "a tool answers what is inside one of those things" and
+    "re-ask one after something HAPPENED". That is an instruction about a surface, and its own
+    definition says it is "appended wherever a role is offered tools".
+
+    `roles.py::LLMResearcher` is the single-shot structured role: no `tools` argument, no
+    attribute, no loop. Splicing the rule there tells a model with an empty tool list to go and
+    re-read one — the same reasoning that already took the clause off the repo Developer. Driven,
+    not pinned: both prompts are built by really calling `propose`, so a future assembly that
+    reintroduces the rule through a different constant still fails.
+    """
+    from looplab.agents.agent import ToolUsingResearcher
+    from looplab.agents.roles import _CONTEXT_BEFORE_TOOLS_RULE, LLMResearcher
+
+    state = RunState(goal="g", direction="max")
+    state.task_id = "toy_quadratic"
+
+    plain = LLMResearcher(_CapturingClient())
+    assert not hasattr(plain, "tools"), (
+        "LLMResearcher grew a tool surface — re-derive this test rather than deleting it")
+    plain_system = _system_prompt_of(plain, state)
+    assert _CONTEXT_BEFORE_TOOLS_RULE not in plain_system, (
+        "the toolless Researcher's system prompt tells the model to consult and re-read tools it "
+        "was never offered")
+
+    # ...and the variant that DOES have the surface still carries it, or this test would be
+    # satisfied by deleting the rule outright.
+    agentic = ToolUsingResearcher(_CapturingClient(), CompositeTools([RunTools()]))
+    assert _CONTEXT_BEFORE_TOOLS_RULE in _system_prompt_of(agentic, state)
+
+
 def test_every_agent_side_toolset_is_composed_through_the_one_helper():
     """`Settings.hide_empty_tools` is implemented on `CompositeTools`, so a call site that builds
     one by hand silently opts its whole phase out of the flag.

@@ -31,8 +31,19 @@ It DOES shape traffic, and that is deliberate: one shared RPM budget and one 429
 both arms (see `RateLimiter`), because the endpoint's own limit is shared and each framework would
 otherwise absorb it with its own private backoff.
 
-A streamed response is forwarded frame by frame and priced from its usage frame; a stream that
-carries no usage frame is recorded `metered=false` -- never as $0.
+A streamed response is forwarded frame by frame and priced from its usage frame; a stream the
+GATEWAY cut without one is priced from the content deltas it forwarded, labelled
+`cost_basis: estimated_from_deltas`; a stream that produced neither is recorded `metered=false`
+-- never as $0.
+
+    OPEN[meter-delta-estimator-is-uncalibrated] `estimated_from_deltas` charges ONE token per
+    content delta; this proxy's own log says that is low by a length-dependent factor. Over 4,874
+    complete streams carrying both numbers, deltas/completion_tokens has median 0.156 (<100 tokens),
+    0.803 (1k-5k) and 0.996 (>20k), and the counter is blind to `delta.tool_calls` entirely.
+    DEFERRED: the 23 aborted streams on record are 6.9 % of a live campaign's $21.21 of metered
+    spend, so re-pricing them mid-campaign charges the tasks before and after the change by two
+    different instruments. The rate is derivable in-process from streams already priced.
+    proof:absent:tokens_per_delta@benchmarks/meter/proxy.py
 
 USAGE
 -----
@@ -235,6 +246,83 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         self._proxy(self.rfile.read(length) if length else b"")
 
+    # THE NGINX ASYMMETRY, and why this exists.
+    #
+    # The gateway in front of the models is nginx with `proxy_read_timeout` at 300 s: measured
+    # 2026-08-23, forty non-streaming arm-A calls returned `504 Gateway Time-out` at latency
+    # 300.011 s each, byte-identical nginx HTML. A STREAM keeps bytes flowing, so it survives to the
+    # model server's own ~1800 s limit -- which is why arm B (100% streaming) never saw a 504 and
+    # arm A (0% streaming) saw forty. One task-arm, `count_riemann_zeta_zeros`, spent three and a
+    # half of its four wall-clock hours inside those timeouts and reached $0.14 of its $1.00.
+    #
+    # That is a difference between TRANSPORTS, not between agents, and neither framework chose it.
+    # Fixing it inside either one would mean editing a thing under measurement, so it is fixed here:
+    # the meter asks upstream for a stream on the client's behalf and hands back the ordinary
+    # non-streaming JSON the client asked for. Both arms then face the same gateway window.
+    #
+    # OFF BY DEFAULT (`METER_STREAM_ADAPT=1` to enable). Turning it on mid-campaign would split an
+    # arm into two halves measured through two transports, which is the defect it exists to remove.
+    def _adapt_to_stream(self, payload: dict) -> tuple:
+        """`(upstream_body, adapted)` — the same request, asked for as a stream."""
+        if os.environ.get("METER_STREAM_ADAPT") != "1" or payload.get("stream"):
+            return None, False
+        out = dict(payload)
+        out["stream"] = True
+        opts = dict(out.get("stream_options") or {})
+        opts["include_usage"] = True             # or the reassembled answer carries no usage at all
+        out["stream_options"] = opts
+        return json.dumps(out).encode(), True
+
+    @staticmethod
+    def _reassemble(frames: list) -> dict:
+        """One non-streaming completion, rebuilt from the deltas of a streamed one.
+
+        Content, role, finish_reason, usage and tool_call fragments, in arrival order. A field this
+        does not know about is carried from the LAST frame that had it, so an unfamiliar extension
+        survives instead of being silently dropped -- the client is the framework under measurement
+        and must see what the provider sent.
+        """
+        content: list = []
+        tool_calls: dict = {}
+        finish = None
+        usage = None
+        base: dict = {}
+        for f in frames:
+            if not isinstance(f, dict):
+                continue
+            for k, v in f.items():
+                if k not in ("choices", "usage", "object"):
+                    base[k] = v
+            if isinstance(f.get("usage"), dict):
+                usage = f["usage"]
+            for ch in (f.get("choices") or []):
+                if ch.get("finish_reason"):
+                    finish = ch["finish_reason"]
+                d = ch.get("delta") or {}
+                if d.get("content"):
+                    content.append(d["content"])
+                for tc in (d.get("tool_calls") or []):
+                    idx = tc.get("index", 0)
+                    slot = tool_calls.setdefault(idx, {"index": idx, "type": tc.get("type", "function"),
+                                                       "id": tc.get("id"),
+                                                       "function": {"name": "", "arguments": ""}})
+                    if tc.get("id"):
+                        slot["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        slot["function"]["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        slot["function"]["arguments"] += fn["arguments"]
+        message = {"role": "assistant", "content": "".join(content)}
+        if tool_calls:
+            message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+        out = dict(base)
+        out["object"] = "chat.completion"
+        out["choices"] = [{"index": 0, "message": message, "finish_reason": finish}]
+        if usage is not None:
+            out["usage"] = usage
+        return out
+
     def _proxy(self, body: bytes) -> None:
         t0 = time.time()
         arm, task, tail = self._split_path()
@@ -272,6 +360,20 @@ class Handler(BaseHTTPRequestHandler):
 
         if streaming:
             self._proxy_stream(req, arm, task, tail, model, t0)
+            return
+
+        # The client asked for a whole answer. With the adapter on, ask UPSTREAM for a stream (so
+        # nginx's 300 s read window never fires) and give the client the whole answer regardless.
+        adapted_body, adapted = (None, False)
+        if tail.endswith("/chat/completions"):
+            try:
+                adapted_body, adapted = self._adapt_to_stream(json.loads(body) if body else {})
+            except (ValueError, TypeError):
+                adapted_body, adapted = None, False
+        if adapted:
+            req = urllib.request.Request(url, data=adapted_body, headers=req_headers,
+                                         method=self.command)
+            self._proxy_stream(req, arm, task, tail, model, t0, collect_for_client=True)
             return
 
         attempts, queued_s = 1, 0.0
@@ -384,7 +486,8 @@ class Handler(BaseHTTPRequestHandler):
                 time.sleep(delay)
                 waited += delay
 
-    def _proxy_stream(self, req, arm: str, task: str, tail: str, model: str, t0: float) -> None:
+    def _proxy_stream(self, req, arm: str, task: str, tail: str, model: str, t0: float,
+                      *, collect_for_client: bool = False) -> None:
         """Forward an SSE stream chunk-by-chunk, pricing the usage frame on its way past.
 
         LoopLab streams by default (`Settings.llm_stream`) and AlgoTuner does not. Metering only
@@ -397,6 +500,12 @@ class Handler(BaseHTTPRequestHandler):
         """
         row = {"ts": time.time(), "arm": arm, "task": task, "path": tail, "model": model,
                "stream": True}
+        if collect_for_client:
+            # The client is NOT expecting SSE. Frames are collected here and answered as one
+            # JSON body, so nothing about this is visible to it except that the call did not
+            # time out at nginx's 300 s read window.
+            row["stream_adapted"] = True
+        collected: list = []
         try:
             resp, attempts, queued_s = self._open_upstream(req)
             row.update({"attempts": attempts, "queued_s": round(queued_s, 2)})
@@ -412,21 +521,32 @@ class Handler(BaseHTTPRequestHandler):
             self._fail(502, f"upstream {type(exc).__name__}: {exc}", arm, task, t0)
             return
 
-        self.send_response(resp.status)
-        for key, value in resp.headers.items():
-            if key.lower() in HOP_BY_HOP:
-                continue
-            self.send_header(key, value)
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
+        if not collect_for_client:
+            self.send_response(resp.status)
+            for key, value in resp.headers.items():
+                if key.lower() in HOP_BY_HOP:
+                    continue
+                self.send_header(key, value)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
 
         def emit(payload: bytes) -> None:
+            if collect_for_client:      # the client gets ONE JSON body at the end, not frames
+                return
             self.wfile.write(b"%x\r\n" % len(payload) + payload + b"\r\n")
             self.wfile.flush()
 
         pin = pout = 0
         cost = 0.0
         basis = ""
+        # Content deltas SEEN, counted as they pass. They are the only evidence left when a stream
+        # ends without its usage frame, and measured 2026-08-22 that is not a corner case: this
+        # gateway CUTS a generation at ~1800 s (eight streams ended at 1817-1824 s, status 200, no
+        # exception on our side and therefore not our socket timeout). LoopLab prices from
+        # `usage.cost`, so a stream with no usage frame produced NO `llm_usage` event at all -- the
+        # run's own accounting was short four calls on one task and never said so. A budget that
+        # silently under-counts is worse than one that stops early: the arm looks cheap.
+        deltas = 0
         try:
             for line in resp:
                 out = line
@@ -435,6 +555,13 @@ class Handler(BaseHTTPRequestHandler):
                         frame = json.loads(line[6:])
                     except ValueError:
                         frame = None
+                    if isinstance(frame, dict) and collect_for_client:
+                        collected.append(frame)
+                    if isinstance(frame, dict):
+                        for ch in (frame.get("choices") or []):
+                            d = ch.get("delta") or {}
+                            if d.get("content") or d.get("reasoning_content"):
+                                deltas += 1
                     if isinstance(frame, dict) and isinstance(frame.get("usage"), dict):
                         usage = frame["usage"]
                         pin = int(usage.get("prompt_tokens") or 0)
@@ -450,8 +577,55 @@ class Handler(BaseHTTPRequestHandler):
                         usage["cost_source"] = self.server.pricing.fetched_at
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
+            if not basis and deltas:
+                # THE STREAM PRODUCED TOKENS AND NOBODY PRICED THEM. Synthesise the usage frame the
+                # gateway did not send, from the deltas actually forwarded, and label it for what it
+                # is. Injected rather than merely logged because the arm's accountant reads the
+                # stream, not this file: logging it here would fix the report and leave the run's own
+                # `llm_budget_usd` blind, which is the defect, not a smaller version of it.
+                #
+                # WHAT ONE DELTA IS WORTH, measured against this proxy's OWN log rather than assumed.
+                # This block used to assert "one delta per token is the SSE shape every provider on
+                # this box emits". That is false as a general claim and the evidence is in
+                # `meter/meter.jsonl`: 4,874 COMPLETE streams carry both `deltas_seen` and the
+                # gateway's authoritative `completion_tokens`, and the ratio has a strong length
+                # dependence -- median 0.156 below 100 completion tokens, 0.384 at 100-1k, 0.803 at
+                # 1k-5k, 0.981 at 5k-20k and 0.996 above 20k (overall median 0.476, and deltas are
+                # BELOW completion_tokens on 99.88 % of rows). The short-stream gap is structural,
+                # not noise: this counter reads `delta.content` / `delta.reasoning_content` and a
+                # completion delivered as a TOOL CALL arrives on `delta.tool_calls[].function
+                # .arguments`, which it never sees. 505 complete streams of >500 completion tokens
+                # spent under 20 % of them on content deltas -- 1.17 M tokens this estimator would
+                # have valued at less than a fifth.
+                #
+                # It is still a FLOOR in every one of those directions, which is the honest side to
+                # be wrong on for a budget, and the 23 aborts actually on record are all long
+                # runaway generations (226k-238k deltas at 1817-1830 s) where the ratio is ~1.0. But
+                # a floor that is 5x low on a tool-call stream is a different instrument from the one
+                # the old comment described, so the number is not corrected here: the open item
+                # in this module's docstring holds the measurement and says why it is deferred.
+                rate_in, rate_out, est_basis = self.server.pricing.rate(model or "")
+                pin, pout = 0, deltas
+                cost = deltas * rate_out
+                basis = "estimated_from_deltas"
+                emit(b"data: " + json.dumps({
+                    "id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
+                    "choices": [], "usage": {
+                        "prompt_tokens": 0, "completion_tokens": deltas, "total_tokens": deltas,
+                        "cost": cost, "cost_basis": basis,
+                        "cost_source": self.server.pricing.fetched_at,
+                        "meter_note": "upstream ended the stream without a usage frame; "
+                                      "completion_tokens is a FLOOR counted from forwarded deltas"},
+                }).encode() + b"\n\n")
             emit(b"")           # terminating zero-length chunk
-            self.wfile.flush()
+            if collect_for_client:
+                # ONE body, built from the frames, with the usage frame this proxy already priced
+                # in place — so the client sees exactly the shape it asked for and the ledger sees
+                # exactly what it would have seen either way.
+                whole = json.dumps(self._reassemble(collected)).encode()
+                self._send(resp.status, whole, {"Content-Type": "application/json"})
+            else:
+                self.wfile.flush()
         except Exception as exc:  # noqa: BLE001 - a broken client must not take the server down
             row["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -461,10 +635,27 @@ class Handler(BaseHTTPRequestHandler):
         row.update({"status": resp.status, "latency_ms": latency_ms, "prompt_tokens": pin,
                     "completion_tokens": pout, "cost": cost, "cost_basis": basis,
                     "metered": bool(basis)})
-        if not basis:
-            # No usage frame arrived: the client did not ask for one (`stream_options.
-            # include_usage`). Unpriced, and recorded as unpriced -- never as $0.
-            row["note"] = "streamed response carried no usage frame"
+        row["deltas_seen"] = deltas
+        if basis == "estimated_from_deltas":
+            row["note"] = ("upstream ended the stream with no usage frame after "
+                           f"{latency_ms/1000:.0f}s; priced from {deltas} forwarded deltas (a FLOOR)")
+            row["stream_aborted"] = True
+        elif not basis and row.get("error"):
+            # THE ROW MUST NOT CONTRADICT ITSELF. The synthesis above lives inside the `try`, so any
+            # exception while forwarding -- a client that hung up is the one that happens; five
+            # `BrokenPipeError` rows are in `meter/meter.jsonl` -- skips it and lands here. Two of
+            # those five carry `deltas_seen` 3149 and 1 while the note beside them said, in words,
+            # that there were no deltas. Whether those tokens should be PRICED is a separate
+            # question (the client left; the provider still generated and still billed) and this
+            # branch deliberately does not answer it -- `metered` stays false and `cost` stays 0.0,
+            # which is the module's "unpriced, never $0" rule. What it must not do is state a fact
+            # about the row that the field next to it falsifies.
+            row["note"] = (f"stream ended in an error after {deltas} forwarded delta(s) and no "
+                           f"usage frame; nothing was priced ({row['error']})")
+        elif not basis:
+            # No usage frame AND no deltas: nothing was produced to price. Unpriced, and recorded as
+            # unpriced -- never as $0.
+            row["note"] = "streamed response carried no usage frame and no deltas"
         if pout:
             row["tok_per_s"] = round(pout / max(latency_ms / 1000.0, 1e-6), 2)
         self.server.meter.record(row)
@@ -474,6 +665,27 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     address_family = socket.AF_INET
+
+    # A CLIENT HANGING UP IS NOT AN INCIDENT. `http.server` prints a full traceback for every
+    # exception in a handler thread, and an httpx/aiohttp connection pool closes idle keep-alive
+    # sockets constantly: measured 2026-08-23, 1,301 `ConnectionResetError` tracebacks — 2,604 log
+    # entries — in one campaign's meter log, every one of them raised at `handle_one_request`'s
+    # `readline` while WAITING for a request that never came. Not one was a lost call.
+    #
+    # They are suppressed rather than reduced because a log that is 99% noise is a log nobody reads
+    # the exception in, and this file's whole purpose is to be believed about money. Anything else
+    # still prints, including the same error class raised anywhere other than an idle socket.
+    def handle_error(self, request, client_address) -> None:      # noqa: D102 - stdlib override
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+            tb = sys.exc_info()[2]
+            frames = []
+            while tb is not None:
+                frames.append(tb.tb_frame.f_code.co_name)
+                tb = tb.tb_next
+            if "handle_one_request" in frames or "readline" in frames:
+                return
+        super().handle_error(request, client_address)
 
 
 def main() -> int:

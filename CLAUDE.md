@@ -98,14 +98,22 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    research task and the evaluation children run on a timer precisely so they overlap that wait.
    "Nothing at all happened" is a strict superset of "nothing this proposal's receipt asserts
    moved", and the set difference IS the concurrent writers. The commit now compares
-   `card_reservation.py::_proposal_receipt_fence` — the search epoch and the exact parent
-   generations, i.e. only what `card_added` goes on to assert — beside the two absolutes (a
-   lifecycle stop, a moved node-slot ceiling). Dropped with the seq fence: `_proposal_cue_fence`
-   (hints/research/strategy are prompt INPUTS that no receipt field records, and a hint landing
-   mid-proposal is still pending for the next one) and `best_node_id` equality (the receipt names
-   `scored_against`, whose identity `_plan_native_card` re-derives from the COMMIT fold and refuses
-   when unscorable). Re-derived over the same 20 logs, the four surviving doors moved in 0 of the
-   56. **The rule to carry forward is that a fence over the log's LENGTH is not a fence over what a
+   `card_reservation.py::_proposal_receipt_fence` — the search epoch, the exact parent generations
+   and the SCORE ANCHOR triple (`scored_against`/`_generation`/`_empty`), i.e. only what
+   `card_added` goes on to assert — beside the two absolutes (a lifecycle stop, a moved node-slot
+   ceiling). Dropped with the seq fence: `_proposal_cue_fence` (hints/research/strategy are prompt
+   INPUTS that no receipt field records, and a hint landing mid-proposal is still pending for the
+   next one) and `best_node_id` EQUALITY — which is not the same thing as the anchor triple, and
+   for one day (2026-08-22) the fence carried neither. **What `_plan_native_card` re-derives is not
+   a fence**: it refuses only when the anchor is UNSCORABLE, so it admits the two moves that make
+   the receipt FALSE rather than stale — a `node_reset` of the anchor (a CONTROL event, so it lands
+   from an out-of-band writer; the commit then records the NEW generation, which has produced no
+   metric, and `core/cards.py::card_score_fence_state` reads the card `current` instead of `stale`)
+   and an empty board acquiring a champion (`_card_score_snapshot(state, None)` answers with
+   whoever is champion NOW). Measured over `/var/tmp/looplab-bench/runs-B`, 20 runs of that code:
+   2 of 68 staged Cards assert a `scored_against` their proposal never read. The anchor is now
+   pinned by the CALLER and passed to both evaluations, and re-derived over the original 20 logs
+   the surviving doors moved in 0 of the 56. **The rule to carry forward is that a fence over the log's LENGTH is not a fence over what a
    decision READ.** When you add a non-folded
    event, the question to ask is not "does the fold read it?" but **"does any reader key on its
    position?"**: the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under

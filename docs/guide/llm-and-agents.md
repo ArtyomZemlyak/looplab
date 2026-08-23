@@ -443,6 +443,21 @@ is genuinely unreachable, a Developer session crashes (`developer_crash`); the e
 the whole run** on the *first* such crash (an `EV_PAUSE`) rather than rapid-firing dozens of dead
 nodes — resume once the endpoint is back.
 
+**A stream the gateway CUTS mid-answer is kept, not re-asked.** A proxy whose own upstream dies
+half-way through a generation reports it *in band* — a `data: {"error": …}` frame inside a response
+that already returned HTTP 200 and has been streaming for minutes — so the client is holding a real,
+truncated answer, not a failed request. It keeps it: the reassembled body comes back with
+`finish_reason` `truncated`, the call reaches the accountant (as **unpriced** when the cut arrived
+before the provider's usage frame, which is the usual case, since that frame is the last thing on
+the wire), and it is deliberately **never cached**, so a later identical temperature-0 ask re-issues
+instead of being served an amputated answer. Only a cut that produced *nothing at all* is retried —
+and that retry drops SSE for the next attempt, exactly as a stalled stream does. The split is what
+keeps the retries affordable: re-asking happens only where re-asking is free. Measured on a 20-run
+AlgoTune campaign, 26 cut streams burned **13.15 hours** — 18.7–94.6 % of each affected run's
+lifetime — and $1.66 that reached no ledger; one task spent 94.6 % of its run inside six of them
+and produced zero nodes. Each cut is announced at **WARNING**, because a shorter answer and a
+missing price are both invisible from the call site.
+
 The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
 rather than a build. A failed repair *call* is not a repair, in any of the four ways the call can
 fail to produce one: the Developer returns the in-band `(developer error: …)` sentinel, the call
@@ -709,7 +724,7 @@ Give the agentic Researcher extra context and tools:
 | `researcher_tools` | (on) Read its own experiments + the task data mid-loop |
 | `cross_run_tools` | (on) Read-only tools over sibling runs (same task id, same run-root). Fails **closed**: with no authoritative task id — an unbound provider, or a legacy log whose `run_started` carried none — it lists and serves nothing, rather than widening to every task |
 | `all_runs_tools` | (on) Read-only tools over every run **under this run-root**, across ALL tasks — read any experiment's code + result to reuse it. Bound to the configured run-root, not the machine, so absence here is not machine-wide absence |
-| `hide_empty_tools` | `false` | Stop ADVERTISING a tool whose provider reports it holds nothing right now. Only the OFFER is withheld — a hidden tool still dispatches if called — and the check is re-made once per agent PHASE. Only a definite `0` hides; a store that could not be counted stays offered. The prompt publishes the same counts either way. |
+| `hide_empty_tools` | (off) Stop ADVERTISING a tool whose provider reports it holds nothing right now. Only the OFFER is withheld — a hidden tool still dispatches if called — and the check is re-made once per agent PHASE. Only a definite `0` hides; a store that could not be counted stays offered. The prompt publishes the same counts either way. |
 | `literature_search` | An arXiv search tool (network-optional) |
 | `web_search` | Web search/fetch for the Deep-Research stage (network-optional) |
 

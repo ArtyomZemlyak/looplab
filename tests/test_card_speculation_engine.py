@@ -1381,12 +1381,12 @@ def test_rejected_raw_proposal_runs_once_then_returns_after_held_eval_boundary(
     assert engine._spec_raw_stage_result is None
 
 
-def _seed_evaluated_node_zero(engine) -> None:
+def _seed_evaluated_node_zero(engine, node_id: int = 0) -> None:
     """One built-but-unscored node, so a terminal can move `best` WITHOUT moving the id ceiling."""
     engine.store.append(EV_NODE_BUILDING, {
-        "node_id": 0, "operator": "draft", "parent_ids": []})
+        "node_id": node_id, "operator": "draft", "parent_ids": []})
     engine.store.append(EV_NODE_CREATED, {
-        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "node_id": node_id, "parent_ids": [], "operator": "draft",
         "idea": {"operator": "draft", "hypothesis": "an experiment already on the board"},
         "code": "pass", "files": {}})
 
@@ -1422,21 +1422,38 @@ def test_a_paid_raw_proposal_survives_every_row_a_concurrent_task_may_append(tmp
     exhaustive against it for the same reason.
 
     `node_evaluated` is the load-bearing NON-registry row. It is not selection-neutral — it moves
-    `best`, and the old fence killed 39 of the 56 windows on exactly that — but it cannot falsify
-    anything this Card's own receipt asserts, so it must not void a proposal either. It is appended
-    against a node that already existed when the snapshot was taken, which is what the campaign logs
-    show: the ceiling moved in 0 of the 56.
+    `best`, and the old fence killed 39 of the 56 windows on exactly that — but a terminal on a
+    node this proposal did not name falsifies nothing the Card's own receipt asserts, so it must not
+    void a proposal either. It is appended against a node that already existed when the snapshot was
+    taken, which is what the campaign logs show: the ceiling moved in 0 of the 56.
+
+    The receipt's own anchor is asserted at the end, and that is what makes this case NARROW rather
+    than a blanket "a terminal is harmless": a terminal that lands on the anchor ITSELF, or one that
+    gives an empty board its first champion, does change what the receipt would assert, and
+    `test_a_late_commit_never_mints_a_score_anchor_the_proposal_never_read` owns those two.
     """
     from looplab.events.types import BACKGROUND_APPENDABLE
 
     engine, _producer = _engine(tmp_path / "raw-authority-tail", depth=1)
     _start(engine)
     engine._ensure_speculation_state()
+    # TWO built nodes and an incumbent, so the concurrent terminal below moves `best` off the node
+    # this proposal was scored against WITHOUT moving that node's own identity — and without moving
+    # the id ceiling either. That separation is the point: "a better champion appeared" is RANKING
+    # information (`core/cards.py::card_score_fence_state` deleted it as a blocker on 2026-08-13,
+    # measured: two fresh cards could never coexist, so `eval_parallel > 1` had nothing to dispatch),
+    # while the anchor's OWN generation is a claim the receipt makes and is fenced. Seeding an EMPTY
+    # board here instead would conflate the two, because `_card_score_snapshot(state, None)` answers
+    # with whoever is champion NOW — see `test_a_late_commit_never_mints_a_score_anchor_...`.
     _seed_evaluated_node_zero(engine)
+    _seed_evaluated_node_zero(engine, node_id=1)
+    engine.store.append(EV_NODE_EVALUATED, {
+        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0})
 
     proposal_events = engine.store.read_all()
     proposal_state = fold(proposal_events)
-    assert proposal_state.best_node_id is None
+    assert proposal_state.best_node_id == 0
+    proposal_anchor = engine._card_score_snapshot(proposal_state, proposal_state.best_node_id)
     result = _raw_stage_result(
         engine, proposal_events, proposal_state, "raw_committed_audit_test",
         Idea(operator="draft", params={"x": 0.4, "y": -1.0},
@@ -1457,25 +1474,113 @@ def test_a_paid_raw_proposal_survives_every_row_a_concurrent_task_may_append(tmp
         engine.store.append(event_type, payload)
     engine.store.append(EV_LLM_COST, {"cost": 0.01})
     # Not background-appendable and deliberately included: the node terminal that moved `best` in 39
-    # of the 56 discarded windows, and the diagnostic pair that fires from the same eval.
+    # of the 56 discarded windows, and the diagnostic pair that fires from the same eval. ToyTask is
+    # `direction="min"`, so 0.5 beats the incumbent's 1.0 and the champion genuinely changes.
     engine.store.append(EV_NODE_EVALUATED, {
-        "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0})
-    engine.store.append("stage_finished", {"node_id": 0, "stage": "train", "status": "ok"})
+        "node_id": 1, "generation": 0, "metric": 0.5, "eval_seconds": 0.0})
+    engine.store.append("stage_finished", {"node_id": 1, "stage": "train", "status": "ok"})
     engine.store.append(EV_POLICY_DECISION, {
         "scores": {}, "chosen": None, "reason": "the policy recorded a choice mid-proposal"})
 
     committed = fold(engine.store.read_all())
-    assert committed.best_node_id == 0, "the fixture did not actually move `best`"
+    assert committed.best_node_id == 1, "the fixture did not actually move `best`"
+    assert engine._card_score_snapshot(committed, 0) == proposal_anchor, (
+        "the fixture moved the proposal's own anchor, so it is testing the other property")
     assert committed.pending_hints and committed.research, "the fixture did not move the old cues"
 
     engine._spec_raw_stage_result = result
     assert engine._serve_raw_card_stage() == (True, True), (
         "a proposal the run already paid for was discarded because the world it did not read "
         "moved on")
-    committed_types = [event.type for event in engine.store.read_all()]
+    committed_rows = engine.store.read_all()
+    committed_types = [event.type for event in committed_rows]
     assert committed_types.count("card_added") == 1
     assert committed_types.index("card_added") < committed_types.index(
         "raw_committed_audit_test")
+    staged = next(event.data for event in committed_rows if event.type == "card_added")
+    assert (staged.get("scored_against"), staged.get("scored_against_generation"),
+            bool(staged.get("scored_against_empty"))) == proposal_anchor, (
+        "the champion moved and the receipt followed it — the staged Card must still name the "
+        "baseline its proposal actually read")
+
+
+@pytest.mark.parametrize("world_change",
+                         ["the anchor was re-attempted", "the empty board gained a champion"])
+def test_a_late_commit_never_mints_a_score_anchor_the_proposal_never_read(tmp_path, world_change):
+    """The receipt's SCORE ANCHOR must describe the proposal, not the commit.
+
+    `card_added` asserts `scored_against` / `_generation` / `_empty`, and `core/cards.py::
+    card_score_fence_state` reads that triple back to answer "is the node this proposal was scored
+    against still the same experiment it was scored against?". So the triple is a claim about what
+    the PROPOSAL read, and `_plan_native_card` re-derives it from the COMMIT fold — refusing only
+    when the anchor is UNSCORABLE. That leaves exactly two world-changes that make the claim FALSE
+    while every other door stays shut, and this test is one case per shape:
+
+      * the anchor is RE-ATTEMPTED under the proposal. `node_reset` is a CONTROL event
+        (`serve/protocol.py::CONTROL_EVENTS`), so it lands from an out-of-band writer at any moment,
+        and it bumps `Node.attempt` while clearing the metric. The commit then records the NEW
+        generation — one that has produced no number at all — and the fold reads the card `current`
+        rather than `freshness_stale`, i.e. the receipt launders staleness into currency.
+      * the board was EMPTY when the proposal was authored and a concurrent `node_evaluated` gave it
+        a champion. `_card_score_snapshot(state, None)` answers with whoever is champion NOW, so
+        `scored_against_empty=True` is re-derived as `scored_against=<that node>`.
+
+    THE ASSERTION IS THE RECEIPT, not the refusal, so this survives a re-spelling of the fence: for
+    every `card_added` the lane writes, the recorded triple must equal the snapshot taken at
+    PROPOSAL time. Refusing is how the shipped code satisfies that (a Card minted with the honest
+    proposal-time triple would be blocked `freshness_stale` forever, i.e. dead durable inventory),
+    and the count is asserted beside the property so a lane that simply stopped writing anything
+    cannot pass. The control arm runs the identical fixture WITHOUT the mid-window append over a
+    fresh run dir and requires the Card to be staged — without it, an anchor the proposal could
+    never score against would read as a correct refusal.
+    """
+    def _served(run_dir, *, moved: bool):
+        engine, _producer = _engine(run_dir, depth=1)
+        _start(engine)
+        engine._ensure_speculation_state()
+        _seed_evaluated_node_zero(engine)
+        if world_change == "the anchor was re-attempted":
+            # The proposal needs a live incumbent to have been scored against at all.
+            engine.store.append(EV_NODE_EVALUATED, {
+                "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0})
+        proposal_events = engine.store.read_all()
+        proposal_state = fold(proposal_events)
+        proposal_anchor = engine._card_score_snapshot(
+            proposal_state, proposal_state.best_node_id)
+        result = _raw_stage_result(
+            engine, proposal_events, proposal_state, "raw_anchor_audit_test",
+            Idea(operator="draft", params={"x": 0.55, "y": -1.0},
+                 rationale="a proposal the run has already paid for",
+                 hypothesis="its receipt names the baseline the proposal actually read"))
+        if moved:
+            if world_change == "the anchor was re-attempted":
+                engine.store.append("node_reset", {
+                    "node_id": 0, "generation": 0, "from_stage": "eval",
+                    "reason": "an operator re-ran the incumbent mid-proposal"})
+            else:
+                engine.store.append(EV_NODE_EVALUATED, {
+                    "node_id": 0, "generation": 0, "metric": 1.0, "eval_seconds": 0.0})
+        engine._spec_raw_stage_result = result
+        outcome = engine._serve_raw_card_stage()
+        receipts = [event.data for event in engine.store.read_all()
+                    if event.type == "card_added"]
+        return outcome, proposal_anchor, receipts
+
+    def _recorded(receipt):
+        return (receipt.get("scored_against"), receipt.get("scored_against_generation"),
+                bool(receipt.get("scored_against_empty")))
+
+    control, control_anchor, control_receipts = _served(
+        tmp_path / "anchor-live", moved=False)
+    assert control == (True, True) and len(control_receipts) == 1, (
+        f"the {world_change!r} control never staged, so its moved case proves nothing")
+    assert _recorded(control_receipts[0]) == control_anchor
+
+    moved, moved_anchor, moved_receipts = _served(tmp_path / "anchor-moved", moved=True)
+    assert all(_recorded(receipt) == moved_anchor for receipt in moved_receipts), (
+        f"a Card was staged asserting a score anchor its proposal never read: "
+        f"{[_recorded(r) for r in moved_receipts]} against a proposal-time {moved_anchor}")
+    assert moved == (True, False) and not moved_receipts
 
 
 @pytest.mark.parametrize("door", ["epoch", "ceiling", "lifecycle", "parent"])

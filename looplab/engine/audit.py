@@ -275,6 +275,12 @@ class AuditMixin:
         `_scored_output_evidence`), `eval_dispatch.py`'s `run_setup_finished.stderr_tail` and its
         RuntimeError message, `train_monitor`/`asha_monitor`'s reason), so the split lands once.
 
+        ORDER, for the three that CAP: `evaluate.py::_redacted_tail` calls this on the WHOLE stream
+        and slices afterwards. Capping first severs a straddling secret's head and hands this
+        function a fragment its shape rules no longer match — driven in
+        `tests/test_scored_output_evidence.py`. `_eval_failure_text`'s 500-char prompt window is the
+        stated exception and says why there.
+
         **`self._redact_output` no longer gates the whole pass** — see `core/redact.py`'s docstring.
         It defaults to False, so gating everything on it meant the DEFAULT path persisted a
         `print(api_key)` verbatim into `events.jsonl`, the trace, the UI and every export, while

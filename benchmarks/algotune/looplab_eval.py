@@ -394,6 +394,104 @@ def _no_speedup(reason: str, *, stderr: str = "", task: str = "",
     return out
 
 
+# ------------------------------------------------------------------------------------------------
+# THE SPLIT IS A CLAIM ABOUT A THIRD-PARTY FILE, so it is read off that file and never asserted.
+# ------------------------------------------------------------------------------------------------
+# `--subset train` does not do anything by itself. `scripts/evaluate_results.py` HARDCODES the test
+# half at four sites and has no argument for the split; `patch_eval_subset.py` rewrites those sites
+# to consult `ALGOTUNE_EVAL_SUBSET`. On an UNPATCHED checkout the environment variable is inert and
+# the evaluator scores on TEST -- which is upstream's own behaviour and therefore silent.
+#
+# Until 2026-08-23 this file printed `"subset": args.subset` unconditionally. So a checkout that had
+# been reverted (`git checkout scripts/`, a re-clone, `patch_eval_subset.py --revert`, or simply a
+# `setup_algotune.sh` that ran the patches in a different order) would have scored EVERY node of
+# arm B on the graded split while every `score.log` said `"subset": "train"`. That is the train/test
+# leak `patch_eval_subset.py`'s own docstring calls "the exact class of thing this whole comparison
+# exists to exclude", wearing a record that denies it -- one arm optimising against the set it is
+# graded on, with nothing anywhere to notice.
+#
+# WHY THE MARKER AND NOT THE EVALUATOR'S OWN LOG LINE. The patch logs
+# `LOOPLAB scoring on the 'train' split (N problems)`, which would be the better evidence -- the
+# thing that RAN saying what it did. It cannot be read: that statement is inside
+# `evaluate_single_model_task`, which runs in a `ProcessPoolExecutor` child started under
+# `forkserver`, so `setup_logging` never ran there and `logging.lastResort` prints WARNING and above
+# only. Measured on the 104 KB recording in `tests/fixtures/algotune_eval_invalid_results_stderr.txt`
+# (a real 458 s evaluator run): ZERO occurrences of `LOOPLAB scoring`, and zero of
+# `test problems for`, the INFO line four lines below it -- while the PARENT's INFO lines
+# (`Evaluation complete`, `Updated summary for`) are all there. Raising that one call to WARNING
+# would make the stronger evidence reachable and is a change to `patch_eval_subset.py`, not to this
+# file; until a checkout carries it, the marker in the source is what decides.
+_SUBSET_PATCH_MARKER = "# --- LOOPLAB EVAL SUBSET (benchmarks/algotune/patch_eval_subset.py) ---"
+# What an unpatched `evaluate_results.py` scores on, whatever it was asked for.
+_UPSTREAM_SUBSET = "test"
+
+
+def subset_actually_scored(evaluator: Path, asked: str) -> tuple[str, dict[str, Any]]:
+    """`(the split that will really be scored, the evidence for saying so)`.
+
+    Reads the evaluator this bridge is about to invoke. The evidence travels as ONE NESTED object
+    for the same reason `no_speedup` does: `runtime/sandbox.py::json_line_extras` sweeps every
+    top-level NUMERIC key on this line into the node's `extra_metrics` as an undeclared `auto`
+    measurement, so `subset_problems`-shaped facts must not sit at the top level. (Booleans it
+    skips -- `isinstance(v, bool)` -- but a dict keeps the whole family out by construction.)
+    """
+    try:
+        source = evaluator.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        # Unreadable is NOT "unpatched": one is a fact about the arena, the other about this box.
+        return asked, {"asked": asked, "verified": False, "reason": "evaluator_unreadable",
+                       "detail": f"{type(exc).__name__}: {exc}"}
+    if _SUBSET_PATCH_MARKER in source:
+        return asked, {"asked": asked, "verified": True, "reason": "patch_marker_present",
+                       "marker": _SUBSET_PATCH_MARKER}
+    return _UPSTREAM_SUBSET, {
+        "asked": asked, "verified": False, "reason": "evaluator_not_patched",
+        "scored": _UPSTREAM_SUBSET,
+        "detail": ("scripts/evaluate_results.py carries no patch_eval_subset.py marker, so "
+                   "ALGOTUNE_EVAL_SUBSET is inert and this score is on the upstream default "
+                   f"({_UPSTREAM_SUBSET!r}), not on {asked!r}"),
+    }
+
+
+# The line the patched evaluator logs from INSIDE the worker that chose the split (see
+# `patch_eval_subset.py`, which emits it at WARNING precisely so it survives `logging.lastResort`).
+# This is the STRONGER evidence -- the process that did the thing saying what it did, with the
+# instance count beside it -- and it is read off the same stderr the verdict is read off.
+_SUBSET_SCORED_RE = re.compile(
+    r"LOOPLAB scoring on the '(?P<subset>train|test)' split \((?P<n>\d+) problems\)")
+
+
+def subset_from_stderr(stderr: str, evidence: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    """Upgrade `evidence` with what the evaluator SAID, or leave it exactly as it was.
+
+    Three outcomes and they are not the same fact:
+      * the line is absent          -- unchanged; the marker check above is all there is;
+      * it names the asked-for half -- `verified` on the strongest evidence there is;
+      * it names the OTHER half     -- `subset_mismatch`, which is the leak actually happening, and
+        the returned split is the one the evaluator named, never the one we asked for.
+    The LAST match wins: a stream can carry more than one evaluator phase and the newest statement
+    is about the scoring pass we just ran.
+    """
+    matches = list(_SUBSET_SCORED_RE.finditer(stderr or ""))
+    if not matches:
+        return None, evidence
+    said = matches[-1].group("subset")
+    out = dict(evidence)
+    out["scored"] = said
+    out["problems"] = int(matches[-1].group("n"))
+    asked = evidence.get("asked")
+    if said == asked:
+        out["verified"] = True
+        out["reason"] = "evaluator_said_so"
+        out.pop("detail", None)
+    else:
+        out["verified"] = False
+        out["reason"] = "subset_mismatch"
+        out["detail"] = (f"asked for {asked!r} and the evaluator logged that it scored {said!r} -- "
+                         "this score is on a different half of the dataset than the record claimed")
+    return said, out
+
+
 # The per-invocation artefacts this bridge creates in the THIRD-PARTY checkout, removed on the way
 # out. They exist because LoopLab evaluates nodes concurrently and a fixed `--model LoopLab` made
 # two nodes overwrite each other's solver and summary (see `main`), but nothing ever removed them:
@@ -505,7 +603,9 @@ def main() -> int:
                     help="Dataset half to score on. Default TRAIN, mirroring AlgoTuner's own agent, "
                          "which iterates on train and touches test only for its final number — "
                          "scoring every node on test would let this arm optimise against the graded "
-                         "split while the other arm does not. Requires patch_eval_subset.py.")
+                         "split while the other arm does not. Requires patch_eval_subset.py -- and "
+                         "the emitted `subset` is what the evaluator will ACTUALLY score, with the "
+                         "evidence for it under `subset_evidence` (see subset_actually_scored).")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
     ap.add_argument("--enforce-rules", action="store_true",
                     help="Run AlgoTune's OWN solver validator (AlgoTuner.security.code_validator) "
@@ -520,6 +620,13 @@ def main() -> int:
         _emit({"speedup": 0.0, "error": f"no evaluate_results.py under {root}",
                "no_speedup": _no_speedup("no_evaluator")})
         return 0
+
+    # THE SPLIT, decided by the file that will honour it (see `subset_actually_scored`). Everything
+    # below reports `subset`, never `args.subset`: what was ASKED for is on the evidence object and
+    # what was SCORED is on the line.
+    subset, subset_evidence = subset_actually_scored(evaluator, args.subset)
+    if not subset_evidence.get("verified"):
+        print(f"looplab_eval: {subset_evidence.get('detail', subset_evidence)}", file=sys.stderr)
 
     src = Path(args.solver).resolve()
     if not src.exists():
@@ -577,6 +684,8 @@ def main() -> int:
     # The split is carried in the ENVIRONMENT rather than as a flag: `evaluate_results.py` hardcodes
     # it at three sites and has no argument for it, so `patch_eval_subset.py` reads this name. An
     # unpatched checkout ignores it and scores on test, which is upstream's own behaviour.
+    # What was ASKED for, deliberately -- a patched checkout honours it and an unpatched one ignores
+    # it, and `subset_evidence` above has already recorded which of those this checkout is.
     env = dict(os.environ, ALGOTUNE_EVAL_SUBSET=args.subset)
 
     started = time.time()
@@ -597,15 +706,27 @@ def main() -> int:
         partial = exc.stderr or ("" if isinstance(exc.stderr, str) else b"")
         if isinstance(partial, bytes):
             partial = partial.decode("utf-8", "replace")
+        # A partial stderr can already carry the split statement -- the evaluator logs it before
+        # it starts timing anything -- so the timed-out line says which half it was timing.
+        said, subset_evidence = subset_from_stderr(partial, subset_evidence)
         _emit({"speedup": 0.0, "eval_seconds": round(time.time() - started, 1),
-               "subset": args.subset,
+               "subset": said or subset, "subset_evidence": subset_evidence,
                "error": f"evaluator exceeded --timeout {args.timeout}s",
                "stderr_tail": partial[-1000:],
                "no_speedup": _no_speedup("evaluator_timeout", stderr=partial, task=args.task)})
         return 0
     elapsed = round(time.time() - started, 1)
 
-    out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": args.subset}
+    # The evaluator's own statement outranks the marker: one is what the file CAN do, the other is
+    # what this invocation DID. A mismatch is reported, never silently preferred away.
+    said, subset_evidence = subset_from_stderr(proc.stderr, subset_evidence)
+    if said is not None:
+        subset = said
+        if subset_evidence.get("reason") == "subset_mismatch":
+            print(f"looplab_eval: {subset_evidence['detail']}", file=sys.stderr)
+
+    out: dict[str, Any] = {"speedup": 0.0, "eval_seconds": elapsed, "subset": subset,
+                           "subset_evidence": subset_evidence}
 
     if not summary.exists():
         out["error"] = "evaluate_summary.json not produced"
@@ -639,7 +760,21 @@ def main() -> int:
     # Parity: remember this task's baseline the first time it is measured, and report the
     # cached value on later calls so an out-of-process bridge does not re-pay a cost the
     # in-process reference loop pays once. The SOLVER time is always freshly measured.
-    cache_key = f"{args.task}"
+    # THE SUBSET IS PART OF THE KEY. The train and test halves are DIFFERENT REFERENCE SETS, and
+    # `patch_baseline_cache.py`'s own docstring says so in as many words -- "It never caches across
+    # TASKS or across the train/test SUBSET split ... one standing in for another would corrupt
+    # every speedup computed from it". That is true of the per-INSTANCE cache it patches, whose key
+    # is `<task>__<subset>...`, and it was NOT true of this aggregate one, whose key was the task
+    # alone. The campaign scores every node on train and the champion once on test through this same
+    # default cache file, so the first train baseline would have become the denominator of the
+    # graded test score.
+    #
+    # It has never fired: `evaluate_summary.json`'s entire payload is `{"final_speedup": "<str>"}`
+    # (see `_find_result`), so `baseline_time_ms` is absent, the `else` branch below runs every time
+    # and `.baseline_cache.json` does not exist on this box at all. That is why this is a repair and
+    # not an incident -- and it is exactly the shape that becomes one the day upstream restores the
+    # field, which is the reason those two reads are there in the first place.
+    cache_key = f"{args.task}__{subset}"
     if not args.no_cache:
         cache = _load_cache(args.baseline_cache)
         cached = cache.get(cache_key)

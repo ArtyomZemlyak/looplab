@@ -1151,16 +1151,24 @@ class CardReservationMixin:
             return retry_tail_cas(self.store, _plan, on_exhaust=lambda: None)
 
     @classmethod
-    def _proposal_receipt_fence(cls, state: RunState, action: dict):
+    def _proposal_receipt_fence(cls, state: RunState, action: dict, *, scored_against):
         """What a staged proposal's own ``card_added`` receipt ASSERTS about the world, or None.
 
         THE SHAPE IS THE POINT. A staged Card is INVENTORY: it reserves no node, spends nothing and
         runs nothing, so the only way a late commit can be WRONG is by writing a receipt that is
         FALSE. Everything else a concurrent append can change makes the proposal less INFORMED —
         a different and much cheaper problem, because the run has ALREADY PAID for this one and the
-        next proposal reads the newer world anyway. This fence therefore carries exactly the two
-        values `_card_added_payload` goes on to assert and nothing else: the search epoch the
-        proposal belongs to, and the exact parent generations its action names.
+        next proposal reads the newer world anyway. This fence therefore carries exactly the values
+        `_card_added_payload` goes on to assert and nothing else: the search epoch the proposal
+        belongs to, the exact parent generations its action names, and the SCORE ANCHOR identity
+        (`scored_against` / `_generation` / `_empty`) the receipt records for it.
+
+        `scored_against` IS AN ARGUMENT AND NOT `state.best_node_id`, which is the whole reason this
+        fence can be evaluated twice. The commit-side call must ask about the ANCHOR THE PROPOSAL
+        NAMED; re-reading the champion from the commit fold would compare the receipt against a
+        question the proposal never asked, and `_card_score_snapshot(state, None)` answers with
+        WHOEVER IS CHAMPION NOW — which is how a proposal authored against an empty board came to
+        mint `scored_against=0`. Callers pass `proposal_state.best_node_id`, unchanged, to both.
 
         MEASURED, `/var/tmp/looplab-bench/runs-armb` (20 AlgoTune runs, 2026-08-20): the isolated
         raw proposal lane staged **0 Cards out of 56 paid proposals**, $3.89. All 56 windows had a
@@ -1176,8 +1184,23 @@ class CardReservationMixin:
             ONLY reader of a pending hint and staging consumes none of them, so a directive that
             lands mid-proposal is still pending for the next one. Nothing is lost by staging this.
           * `state.best_node_id` moving to a DIFFERENT node. The receipt does not name the champion;
-            it names `scored_against`, whose identity `_plan_native_card` re-derives from the COMMIT
-            fold and refuses (disposition `invalid`) when it is unscorable.
+            it names `scored_against`, and this fence pins THAT — the anchor id the proposal was
+            written against, its generation and the empty flag — so an unrelated node outscoring the
+            incumbent mid-proposal changes nothing here. What is NOT delegated to `_plan_native_card`
+            is the anchor's own identity: it re-derives the triple from the COMMIT fold and refuses
+            only when the anchor is UNSCORABLE (tombstoned/aborted/out of range), so on its own it
+            admits the two changes that make the receipt FALSE rather than merely stale — an anchor
+            RE-ATTEMPTED under the proposal (`node_reset` is a control event and lands from an
+            out-of-band writer, so `scored_against_generation` is re-derived as the NEW generation,
+            which has produced no metric at all, and `core/cards.py::card_score_fence_state` then
+            reads the card `current` instead of `stale`) and an empty board acquiring a champion
+            (`scored_against_empty=True` is re-derived as `scored_against=<the new champion>`).
+            Measured over `/var/tmp/looplab-bench/runs-B` (20 AlgoTune runs of this code): 2 of the
+            68 staged Cards carry a `scored_against` that differs from the best node at their
+            `propose` span's start, i.e. 2 receipts that assert a comparison their proposal never
+            made. Both are refused here now, and refusing is the only available answer — minting the
+            PROPOSAL-time triple instead would publish a Card the fold blocks `freshness_stale`
+            forever, which is dead durable inventory rather than a saved proposal.
           * a max-seq over the whole log (`_proposal_authority_seq`, which this call site no longer
             takes). "Nothing at all happened" is a strict superset of "nothing this receipt asserts
             moved", and the set difference is precisely the concurrent research task and the node
@@ -1186,17 +1209,24 @@ class CardReservationMixin:
             `_reserve_node_build`, where it fences a CAS retry loop inside `_id_lock` and no paid
             proposal is at risk.
 
-        A STALE-WORLD PROPOSAL STILL FAILS, and these are the four doors it fails through: an epoch
+        A STALE-WORLD PROPOSAL STILL FAILS, and these are the five doors it fails through: an epoch
         bump (an explicit "everything before this is superseded"), a parent that was re-attempted or
-        tombstoned under it, a node id ceiling that moved (someone took the slot this proposal was
-        written against), and a lifecycle stop — plus `_plan_native_card`'s own duplicate/attach
-        re-derivation, which is computed against the COMMIT state and not fenced at all.
+        tombstoned under it, a SCORE ANCHOR that moved the same two ways, a node id ceiling that
+        moved (someone took the slot this proposal was written against), and a lifecycle stop —
+        plus `_plan_native_card`'s own duplicate/attach re-derivation, which is computed against the
+        COMMIT state and not fenced at all.
         """
 
         parent = cls._build_parent_snapshot(state, action)
         if parent is None:
             return None
-        return state.search_epoch, parent
+        # `is None` BEFORE unpacking, per `_card_score_snapshot`'s contract: a bare None is "this
+        # anchor is not scorable", which is a refusal, while `(None, None, True)` is the valid
+        # empty-board snapshot and must compare equal to itself across the two folds.
+        score = cls._card_score_snapshot(state, scored_against)
+        if score is None:
+            return None
+        return state.search_epoch, parent, score
 
     def _stage_prepared_card(self, action: dict, idea: Idea, *, proposal_state: RunState,
                              proposal_node_ceiling: int, at_node: int, source: str,
@@ -1206,7 +1236,8 @@ class CardReservationMixin:
         Layer 5 needs durable inventory *before* it can elect a request-driven producer.  Proposal is
         slow and therefore happens outside ``_id_lock``; this short commit re-folds and accepts the
         result only while the run is live and everything the Card's own receipt asserts is still
-        true — its epoch, its parent generations and the node-slot ceiling it was written against.
+        true — its epoch, its parent generations, the score anchor it names and the node-slot
+        ceiling it was written against.
         `_proposal_receipt_fence` states that rule and carries the measurement that narrowed it; both
         lanes (the serial outer batch and the isolated RAW producer) now answer to the SAME fence,
         because "which caller am I" was never a property of what makes a proposal stale.
@@ -1227,14 +1258,16 @@ class CardReservationMixin:
         bounded_steering = normalize_steering_context(steering_context)
         if bounded_steering is None:
             return None
-        expected_receipt = self._proposal_receipt_fence(proposal_state, action)
-        # An unscorable baseline at PROPOSAL time is still refused here rather than at commit: the
-        # proposal named a `scored_against` that was already tombstoned/aborted when it was written,
-        # which is a malformed action and not a race. The COMMIT-time reading of the same identity is
-        # `_plan_native_card`'s, deliberately — see `_proposal_receipt_fence`.
-        if (expected_receipt is None
-                or self._card_score_snapshot(
-                    proposal_state, proposal_state.best_node_id) is None):
+        # THE ANCHOR IS PINNED HERE and handed to both evaluations of the fence. `_plan_native_card`
+        # below is passed the same value, so the receipt, the proposal and the commit-time check all
+        # name ONE node — see `_proposal_receipt_fence` for what re-reading the champion instead did.
+        score_anchor = proposal_state.best_node_id
+        expected_receipt = self._proposal_receipt_fence(
+            proposal_state, action, scored_against=score_anchor)
+        # An unscorable baseline at PROPOSAL time is refused by that same call: the proposal named a
+        # `scored_against` that was already tombstoned/aborted when it was written, which is a
+        # malformed action and not a race.
+        if expected_receipt is None:
             return None
         expected_parent = expected_receipt[1]
 
@@ -1254,7 +1287,8 @@ class CardReservationMixin:
             state = _fold(events)
             if (state.paused or state.finished or state.stop_requested
                     or self._node_id_ceiling(events, state) != proposal_node_ceiling
-                    or self._proposal_receipt_fence(state, action) != expected_receipt):
+                    or self._proposal_receipt_fence(
+                        state, action, scored_against=score_anchor) != expected_receipt):
                 return None
             kind, parents, parent_generations = expected_parent
             del kind
@@ -1264,7 +1298,7 @@ class CardReservationMixin:
                 clean,
                 parents=parents,
                 parent_generations=parent_generations,
-                scored_against=proposal_state.best_node_id,
+                scored_against=score_anchor,
                 source=source,
                 at_node=at_node,
                 steering_context=bounded_steering,

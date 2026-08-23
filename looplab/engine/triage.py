@@ -159,6 +159,11 @@ def _shallow_fingerprint(path) -> str:
 # from symptoms. Deliberately a closed set and deliberately tiny: every member has to be a fact the
 # eval knows and the engine cannot see, and has to be one whose only use by a candidate would be to
 # harm itself (see the trust note in `_failure_reason`).
+#
+# MEMBERSHIP IS HALF THE RULE; the other half is WHERE the branch reading it sits. The channel is
+# the eval's stdout and the candidate's code shares it, so a member must be safe to be FORGED, and
+# that is only true because the branch is ordered below every authenticated engine flag — it can
+# rename a residual and nothing else. A second member has to be argued against both halves.
 DECLARABLE_REASONS: frozenset = frozenset({"rules_violation"})
 
 
@@ -174,6 +179,10 @@ def _failure_reason(res) -> str:
     signatures — were deleted on 2026-08-20; see the note above and
     `engine/failure_diagnosis.py`'s module docstring for the rule that replaced them.
 
+    ONE BRANCH IS NOT OF THAT KIND and its POSITION is what contains it: `declared_reason` is read
+    out of the eval's stdout, which the candidate's own code shares. It sits below every
+    authenticated flag deliberately, so it can only rename a RESIDUAL — see the block above it.
+
     THE LAST TWO BRANCHES ARE RESIDUALS, NOT DIAGNOSES, and that is the whole reason the
     diagnostician exists. `crash` says only "this process exited non-zero" and `no_metric` only "it
     exited zero and no reader found a number"; both are true and neither says what happened.
@@ -185,31 +194,6 @@ def _failure_reason(res) -> str:
     debug-anchor map, `events/card_ledger.py::_card_debuggable_leaf_candidate_ids`.
     `unclassified` is not produced here either: it is minted by `_evaluate` when a WIRED
     diagnostician could not answer, which is a fact about the diagnostician and not about the eval.)"""
-    # THE OPERATOR-PINNED EVAL'S OWN VERDICT, and it goes first because it is the one branch here
-    # that does not read a symptom. Everything below infers WHY a run produced no metric from what
-    # the run did; this reads what the EVAL COMMAND stated. The command is the operator's
-    # (`task.eval`), not the candidate's, so the fact is authenticated in the sense docs/44 means:
-    # it comes from the channel that DECIDED the outcome, not from prose about it.
-    #
-    # It exists for one shape the rest of this function cannot express — a candidate that was never
-    # ELIGIBLE. `benchmarks/algotune/looplab_eval.py --enforce-rules` runs the arena's own submission
-    # validator and refuses to score a solver that breaks its rules; that is not a crash, not a
-    # timeout and not a zero, and repairing it is the wrong move: the coverage guard's own criterion
-    # is that no reason should end a node unrepaired unless it is evidence the HYPOTHESIS is wrong,
-    # and "this arena will not accept a solver built this way" is exactly that evidence.
-    #
-    # Trust: the candidate's own code runs inside the evaluator and could in principle print this
-    # key too. The only thing it buys is ENDING ITS OWN NODE with no repair — there is no version of
-    # that which advantages a candidate, which is why this is safe to read at all while
-    # `usage.cost`-shaped self-reports are not.
-    # The literal is spelled out, like every other return here, so the registry cross-check in
-    # `tests/test_inline_repair_reason_coverage.py` can keep deriving this function's vocabulary
-    # from its own source. A second declarable reason therefore needs its own branch — and if one
-    # is added to the registry without it, that same test goes red with "registry names X, which no
-    # producer ever emits", which is the failure this shape exists to guarantee.
-    _declared = getattr(res, "declared_reason", None) or ""
-    if _declared == "rules_violation" and _declared in DECLARABLE_REASONS:
-        return "rules_violation"
     if getattr(res, "drift", None) is not None:
         return "drift"
     if res.timed_out:
@@ -233,6 +217,47 @@ def _failure_reason(res) -> str:
         return "diverged"
     if getattr(res, "stalled", False):
         return "stalled"
+    # THE OPERATOR-PINNED EVAL'S OWN VERDICT, and it goes HERE — below every authenticated
+    # engine-measured flag and above the residuals — rather than first.
+    #
+    # It exists for one shape the rest of this function cannot express — a candidate that was never
+    # ELIGIBLE. `benchmarks/algotune/looplab_eval.py --enforce-rules` runs the arena's own submission
+    # validator and refuses to score a solver that breaks its rules; that is not a crash, not a
+    # timeout and not a zero, and repairing it is the wrong move: the coverage guard's own criterion
+    # is that no reason should end a node unrepaired unless it is evidence the HYPOTHESIS is wrong,
+    # and "this arena will not accept a solver built this way" is exactly that evidence. On that
+    # path the bridge returns exit code 2 having never imported the solver, so nothing above this
+    # line has fired and the branch is reached exactly as intended — placing it BELOW the
+    # `exit_code != 0` residual instead would classify the shipped case as `crash`.
+    #
+    # WHY NOT FIRST, which is where it was written on 2026-08-22. `declared_reason` is read by
+    # `runtime/command_eval.py::declared_failure_reason` out of the LAST JSON LINE OF STDOUT — the
+    # same channel the metric reader parses, and the channel the CANDIDATE's own code writes to,
+    # because the arena imports and runs `solver.py` inside the evaluator process. So this is not an
+    # authenticated fact and must never outrank one: above `drift`, a candidate whose two readers
+    # disagreed printed one line and its reason became `rules_violation`, which is NOT in
+    # `metric_salvage.NEVER_SALVAGED_REASONS` — measured on a `RunResult` with `drift` set and exit
+    # 0, `salvage_condition` went `None` -> `eval_failed`, i.e. one printed line re-opened the
+    # salvage door that the drift gate exists to close, and under `metric_salvage="select"` that
+    # number competes for champion. `setup` is the identical pair. This is the same round trip the
+    # `"setup failed:\n"` stderr prefix was deleted for on 2026-08-20 (see the note on
+    # `setup_failed` below), running in the ADMITTING direction instead of the suppressing one.
+    #
+    # What the branch can still do from here is turn a `crash` / `no_metric` / stage-contract
+    # residual into `rules_violation`, and that residue is the trust note's real content: the only
+    # thing it buys a candidate is ENDING ITS OWN NODE with no repair and no salvage (a non-zero
+    # exit is refused by `salvage_condition` regardless of the label), which advantages nothing.
+    # `metric_salvage.py` reads the drift and setup FLAGS directly beside this, for the same reason
+    # it already reads `diverged`/`timed_out` directly: the label is not the fact.
+    #
+    # The literal is spelled out, like every other return here, so the registry cross-check in
+    # `tests/test_inline_repair_reason_coverage.py` can keep deriving this function's vocabulary
+    # from its own source. A second declarable reason therefore needs its own branch — and if one
+    # is added to the registry without it, that same test goes red with "registry names X, which no
+    # producer ever emits", which is the failure this shape exists to guarantee.
+    _declared = getattr(res, "declared_reason", None) or ""
+    if _declared == "rules_violation" and _declared in DECLARABLE_REASONS:
+        return "rules_violation"
     if res.exit_code != 0:
         return "crash"          # the process died; nothing out of band saw WHY
     # A declared-contract failure is its OWN reason. Both contract branches in

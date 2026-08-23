@@ -1098,7 +1098,20 @@ class LLMResearcher:
                             bool(getattr(self, "_gpu_footprint_cue", False)))
                         + _OPERATOR_NOTE
                         + "Respond ONLY with the requested structured fields." + hyp_sys
-                        + _UNTRUSTED_MEMORY_RULE + _CONTEXT_BEFORE_TOOLS_RULE
+                        # `_UNTRUSTED_MEMORY_RULE` and NOT `_CONTEXT_BEFORE_TOOLS_RULE`, and the
+                        # difference is this class: `LLMResearcher` is the single-shot structured
+                        # role and it has NO `tools` — no constructor argument, no attribute, no
+                        # loop. The memory rule applies because this prompt really does splice
+                        # untrusted cross-run cues; the tools rule tells a model with no tools that
+                        # "a tool answers what is inside one of those things" and to "re-ask one
+                        # after something HAPPENED", which is an invitation to call something that
+                        # is not in the request. The rule's own definition says "appended wherever a
+                        # role is offered tools" — this is the one splice site where that is false.
+                        # `agent.py::ToolUsingResearcher` is the variant that HAS the surface and
+                        # carries it; the same evidence already took the clause off the repo
+                        # Developer (`tests/test_stage_splitting_guidance.py`), where the rule
+                        # A/B'd to nothing while `answered_by_context`'s DATA moved 41.3 -> 17.7.
+                        + _UNTRUSTED_MEMORY_RULE
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,
                                                      digest_cap=getattr(self, "_digest_cap", 0),

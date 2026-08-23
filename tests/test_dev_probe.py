@@ -621,6 +621,44 @@ def test_a_grant_list_that_swallows_a_root_is_never_installed_as_a_fence(monkeyp
     assert "source root" in result.content
 
 
+def test_the_kernel_rungs_grant_list_is_itself_refused_a_swallower_not_only_the_hook(monkeypatch):
+    """The swallowed net must live at the DERIVATION, not only at `_install_fence`.
+
+    `_confined_allow` is the ONE list both halves of rule 1 project from. The HOOK re-derives
+    `fence_inputs` in `_install_fence` and re-checks `swallowed`; the KERNEL rung reads the same
+    list through `_read_allow`, which does NOT pass through `_install_fence`. So a `confine_grants`
+    regression that returned a grant CONTAINING a root without flagging it in `refused` -- the exact
+    "the derivation and the enforcement came apart" drift this slice's history is about -- reached
+    the kernel allow-list unchecked, and an allow-list holding the root's own ANCESTOR is rule 1
+    switched off in the kernel half. Before the fix, `_confined_allow` returned it silently and only
+    `_install_fence`'s separate, order-dependent re-check stood between it and a run.
+
+    Driven by injecting that regression into `confine_grants` directly (empty `refused`), so the
+    property is proven at the derivation and does not depend on any real filesystem layout."""
+    root = "/opt/looplab-swallow-guard/repo"      # a normal 2+ component root, not `_too_broad`
+
+    def buggy_confine_grants(candidates, roots):
+        # Keep the root's ANCESTOR verbatim and flag nothing -- a future derivation bug.
+        rootv = tuple(r for r in (read_fence._norm_root(x) for x in roots) if r)
+        kept = {read_fence._norm_root(c) for c in candidates}
+        kept.discard(None)
+        kept.add("/opt/")                          # the swallower: an ancestor of the root
+        return tuple(sorted(kept)), ()
+
+    monkeypatch.setattr(read_fence, "confine_grants", buggy_confine_grants)
+    tools = DevProbeTools({"editables": [{"name": ".", "path": root}]}, timeout_s=5)
+
+    # (1) the KERNEL rung's own grant list must refuse to be built -- not merely `_install_fence`.
+    with pytest.raises(dev_probe.ProbeRefusal) as caught:
+        tools._read_allow(Path(tempfile.gettempdir()) / "swallow-guard" / "work")
+    assert "/opt/" in str(caught.value) and "source root" in str(caught.value)
+
+    # (2) end to end, the probe refuses the RUN rather than handing `/opt/` to the kernel allow-list.
+    result = tools.execute_result("run_probe", {"code": "print('the-probe-executed')"})
+    assert result.is_error and "the-probe-executed" not in result.content
+    assert "source root" in result.content
+
+
 def test_the_hook_and_the_kernel_are_told_the_same_thing_about_every_path():
     """THE property. Two enforcement points for one rule, and the day their lists differ the weaker
     one is the boundary. Both halves are projections of `_confined_allow`, so this drives them

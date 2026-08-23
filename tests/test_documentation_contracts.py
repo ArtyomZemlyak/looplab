@@ -261,7 +261,77 @@ def test_the_package_map_names_each_package_exactly_once():
 # The number-words the three surfaces below spell out. Short on purpose: a registry that outgrew
 # this map would be a registry whose enumerations should stop being written by hand at all.
 _COUNT_WORDS = {8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
-                14: "fourteen"}
+                14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen"}
+
+
+def _table_cells(line: str):
+    """The cells of one markdown table row, or None when the line is not one.
+
+    Split on BARE pipes only: a `\\|` is an escaped literal (`min \\| max`) and a pipe inside a
+    code span is data, not a column edge — mis-counting either turns a correct row into a finding
+    and teaches the reader to widen the guard.
+    """
+    s = line.strip()
+    if not s.startswith("|"):
+        return None
+    if s.endswith("|") and not s.endswith("\\|"):
+        s = s[:-1]
+    cells, buf, in_code, escaped = [], [], False, False
+    for ch in s[1:]:
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            buf.append(ch)
+            continue
+        if ch == "`":
+            in_code = not in_code
+        if ch == "|" and not in_code:
+            cells.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    cells.append("".join(buf))
+    return cells
+
+
+def test_every_guide_table_row_has_the_columns_its_header_declares():
+    """A row with an EXTRA cell loses it — silently, and exactly where a reader needs it.
+
+    Markdown renders a row against the header's column count and DROPS the overflow. The
+    `hide_empty_tools` row landed in llm-and-agents.md's two-column "Setting | What it adds" table
+    as three cells (`| key | \`false\` | Stop ADVERTISING ... |`), so the only place that guide
+    explained the setting rendered as the single word `false` and the whole explanation was thrown
+    away by the renderer. `mkdocs build --strict` does not warn: the table is well-formed, it just
+    means something else. Nothing in the suite could see it, because every check on that guide reads
+    the SOURCE, where the text is still present.
+
+    Only whole guide pages are scanned, and only against their own header — this is a shape rule,
+    not a content one.
+    """
+    problems = []
+    for path in sorted((DOCS / "guide").glob("*.md")):
+        width = None
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            cells = _table_cells(line)
+            if cells is None:                       # a non-row ends the table
+                width = None
+                continue
+            if width is None:                       # the header decides the column count
+                width = len(cells)
+                continue
+            joined = "".join(cells).strip()
+            if joined and set(joined) <= set("-: "):        # the `|---|---|` separator
+                continue
+            if len(cells) != width:
+                problems.append(
+                    f"{path.relative_to(ROOT)}:{number} has {len(cells)} cells in a "
+                    f"{width}-column table (the renderer keeps {width}): {line.strip()[:110]}")
+    assert not problems, (
+        "markdown table rows whose extra cells are dropped when rendered:\n  "
+        + "\n  ".join(problems))
 
 
 def test_every_failure_reason_surface_names_all_of_them():
@@ -298,7 +368,12 @@ def test_every_failure_reason_surface_names_all_of_them():
 
     reasons = list(REPAIRABLE_REASONS)
     word = _COUNT_WORDS.get(len(reasons))
-    assert word, f"FAILURE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
+    assert word, f"REPAIRABLE_REASONS has {len(reasons)} members — extend _COUNT_WORDS"
+    # The REGISTRY's own size, which is a different number from the eligible one as soon as any
+    # member is non-repairable — and the two being different is exactly what let a surface keep
+    # saying "ALL <eligible-count> FAILURE_REASONS" after the registry grew past it.
+    registry_word = _COUNT_WORDS.get(len(FAILURE_REASONS))
+    assert registry_word, f"FAILURE_REASONS has {len(FAILURE_REASONS)} members — extend _COUNT_WORDS"
     problems = []
 
     # 1. The settings table's DEFAULT cell, parsed as the JSON array it is printed as.
@@ -320,10 +395,16 @@ def test_every_failure_reason_surface_names_all_of_them():
     # registry-derivation check that a REFLOW can redden teaches "re-wrap until green", which is the
     # opposite of what it is for — the rule is about which reasons are named, never about where the
     # line ends.
-    bullet = re.search(r"\*\*any but one\*\* of the \w+ `FAILURE_REASONS`(.{0,600}?)"
+    bullet = re.search(r"\*\*any but one\*\* of the (\w+) `FAILURE_REASONS`(.{0,600}?)"
                        r"mechanical\s+three", concepts, re.S)
     assert bullet, "the concepts.md inline-repair bullet moved — re-derive this check"
-    missing = [r for r in reasons if f"`{r}`" not in bullet.group(1)]
+    # The count word here is the REGISTRY's, not the eligible subset's ("any but one OF the N"),
+    # and it was matched as a bare `\w+` — i.e. not checked at all. A surface that names a count
+    # has to name the right one, which is the whole rule this test exists for.
+    if bullet.group(1).lower() != registry_word:
+        problems.append(f"docs/guide/concepts.md says FAILURE_REASONS has "
+                        f"{bullet.group(1)!r} members, not {registry_word!r}")
+    missing = [r for r in reasons if f"`{r}`" not in bullet.group(2)]
     # ...and the exception has to be NAMED, right after the list it is an exception to. A bullet
     # that says "any but one" without saying which one is worse than the miscounts this guard was
     # written for: the reader now knows there is a rule they have not been told.
@@ -335,14 +416,44 @@ def test_every_failure_reason_surface_names_all_of_them():
         problems.append(f"docs/guide/concepts.md's inline-repair list omits {missing}")
 
     # 3. The process diagram (CLAUDE.md: stale diagram is a bug, in the SAME change).
+    #
+    # BOTH counts, and the exclusion BY NAME — the same three obligations the concepts.md half
+    # above carries, because this surface is the one that got them wrong. When the registry gained
+    # `rules_violation` the diagram kept saying "ALL FOURTEEN FAILURE_REASONS": the eligible count
+    # was still fourteen, so a check that read only the count word stayed GREEN while the sentence
+    # around it had become false — `FAILURE_REASONS` was fifteen and "ALL" of it was no longer the
+    # default. A count word is not the claim; the claim is the whole phrase, so the phrase is what
+    # is derived here. `ALL` is refused outright while any member is non-repairable, in the text
+    # rather than through the count, because that is the word that made the sentence a lie.
     diagram = (DOCS / "infographic" / "agent-architecture.html").read_text(encoding="utf-8")
-    block = re.search(r"reasons = ALL (\w+) FAILURE_REASONS by default \(([^)]*)\)", diagram)
-    assert block, "the diagram's inline-repair block moved — re-derive this check"
-    if block.group(1).lower() != word:
-        problems.append(f"the process diagram says 'ALL {block.group(1)}', not '{word.upper()}'")
-    missing = [r for r in reasons if r not in block.group(2)]
-    if missing:
-        problems.append(f"the process diagram's inline-repair list omits {missing}")
+    claim = re.search(r"reasons = [^·(]*?FAILURE_REASONS by default", diagram)
+    assert claim, "the diagram's inline-repair block moved — re-derive this check"
+    if NON_REPAIRABLE_REASONS and re.search(r"\bALL\b", claim.group(0)):
+        problems.append(
+            f"the process diagram claims ALL of FAILURE_REASONS are repairable by default, but "
+            f"{list(NON_REPAIRABLE_REASONS)} are not: {claim.group(0)!r}")
+    block = re.search(r"reasons = (\w+) of the (\w+) FAILURE_REASONS by default(.{0,500}?)"
+                      r"inline_repair_reasons narrows it", diagram, re.S)
+    if block is None:
+        # An unparseable claim is only tolerated when the sentence has ALREADY been convicted
+        # above — otherwise the block genuinely moved and this check has to be re-derived rather
+        # than silently skipped.
+        assert problems, "the diagram's inline-repair block moved — re-derive this check"
+    else:
+        eligible, registry, listed = block.group(1).lower(), block.group(2).lower(), block.group(3)
+        if eligible != word:
+            problems.append(f"the process diagram says {eligible!r} reasons are eligible, "
+                            f"not {word!r}")
+        if registry != registry_word:
+            problems.append(f"the process diagram says FAILURE_REASONS has {registry!r} members, "
+                            f"not {registry_word!r}")
+        missing = [r for r in reasons if r not in listed]
+        if missing:
+            problems.append(f"the process diagram's inline-repair list omits {missing}")
+        for excluded in NON_REPAIRABLE_REASONS:
+            if excluded not in listed:
+                problems.append(f"the process diagram excludes {excluded} from repair without "
+                                "naming it beside the list")
 
     assert not problems, (
         "FAILURE_REASONS surfaces disagree with the registry — update them in the SAME change as "

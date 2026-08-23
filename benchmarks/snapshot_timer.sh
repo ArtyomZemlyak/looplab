@@ -21,7 +21,14 @@ INTERVAL="${2:-1800}"
 
 fingerprint() {
   # Cheap "has anything been measured since last time": newest mtime + size of the outputs.
-  find "$ROOT/campaign" "$ROOT/AlgoTune/reports" "$ROOT/meter" \
+  #
+  # EVERY campaign directory, for the same reason `snapshot.sh` discovers them rather than naming
+  # one: `$ROOT/campaign` held a run that finished on 2026-08-20 and nothing in it has changed
+  # since, so this fingerprint was watching a directory that cannot move while the LIVE campaign
+  # wrote into `campaign-paired/`. It kept firing only because `meter/` and `.baseline_times/` also
+  # change -- i.e. the campaign's own progress was never one of the signals, and a quiet meter would
+  # have stopped snapshotting the one thing worth snapshotting.
+  find "$ROOT"/campaign* "$ROOT/AlgoTune/reports" "$ROOT/meter" \
        "$ROOT/looplab/benchmarks/algotune/.baseline_times" \
        -type f -newermt '-1 day' -printf '%T@ %s\n' 2>/dev/null | sort | tail -20 | md5sum
 }

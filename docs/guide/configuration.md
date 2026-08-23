@@ -76,13 +76,7 @@ file's `settings:` **>** env/`.env` **>** defaults.
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
 server-owned curated catalogue with **186 of the 219 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **183 of the 216 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **183 of the 216 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
-server-owned curated catalogue with **183 of the 216 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 18 high-frequency keys; search spans all 176 catalogued keys.
+**Essential** disclosure mode contains 18 high-frequency keys; search spans all 186 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,

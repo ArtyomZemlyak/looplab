@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +45,16 @@ class TamperingDetector:
         "__builtins__", "ast", "builtins", "collections", "ctypes_not_this_one",
         "numpy", "ortools", "os", "scipy", "sys", "sympy", "typing",
     }
+    # The SECOND table. `rules_clause` was silent about it for the whole first campaign -- see
+    # `test_the_ban_on_runtime_code_generation_is_stated`.
+    DISALLOWED_CALLS = {"exec", "eval", "compile", "gc.get_objects"}
 '''
+
+# The same fake with the second table REMOVED, so the "no table, no claim" half is driven rather
+# than argued: an arena that stops having the rule must stop being quoted as having it.
+_FAKE_VALIDATOR_NO_CALLS = "\n".join(
+    line for line in _FAKE_VALIDATOR.splitlines()
+    if "DISALLOWED_CALLS" not in line and not line.strip().startswith("#")) + "\n"
 
 # Imports in the four shapes that matter to `reference_libraries`: plain, dotted `from`, an aliased
 # stdlib module, and the registration boilerplate every real reference carries.
@@ -77,13 +87,14 @@ class Ref(Task):
 '''
 
 
-def _make_root(tmp_path: Path, task: str, reference: str = _FAKE_REFERENCE) -> Path:
+def _make_root(tmp_path: Path, task: str, reference: str = _FAKE_REFERENCE,
+               validator: str = _FAKE_VALIDATOR) -> Path:
     root = tmp_path / "AlgoTune"
     sec = root / "AlgoTuner" / "security"
     sec.mkdir(parents=True, exist_ok=True)   # several tests build the same root more than once
     (root / "AlgoTuner" / "__init__.py").write_text("", encoding="utf-8")
     (sec / "__init__.py").write_text("", encoding="utf-8")
-    (sec / "code_validator.py").write_text(_FAKE_VALIDATOR, encoding="utf-8")
+    (sec / "code_validator.py").write_text(validator, encoding="utf-8")
     task_dir = root / "AlgoTuneTasks" / task
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "description.txt").write_text("Find the thing.\n", encoding="utf-8")
@@ -92,9 +103,9 @@ def _make_root(tmp_path: Path, task: str, reference: str = _FAKE_REFERENCE) -> P
 
 
 def _goal(tmp_path: Path, *flags: str, task: str = "fake_task",
-          reference: str = _FAKE_REFERENCE) -> str:
+          reference: str = _FAKE_REFERENCE, validator: str = _FAKE_VALIDATOR) -> str:
     """Run the REAL generator and return the goal it wrote."""
-    root = _make_root(tmp_path, task, reference)
+    root = _make_root(tmp_path, task, reference, validator)
     # One workspace per flag combination: `make_task` never clobbers an existing solver.py, so
     # sharing a directory between two calls in one test would hide a stub regression.
     out = tmp_path / ("ws_" + ("_".join(f.lstrip("-") for f in flags) or "default"))
@@ -237,3 +248,124 @@ def test_no_clause_ships_an_unsubstituted_placeholder(tmp_path, flags):
     `{`), and neither is visible in a source read."""
     goal = _goal(tmp_path, *flags)
     assert "{" not in goal and "}" not in goal
+
+
+# ------------------------------------------------------------------------------------------------
+# defect (c): the rules clause promised a complete list and read one table of three
+# ------------------------------------------------------------------------------------------------
+# `rules_clause`'s docstring said "This reads `AlgoTuner.security.code_validator`'s own tables, so
+# the sentence and the check cannot disagree." It read `PROTECTED_MODULES` and nothing else, so
+# `DISALLOWED_CALLS` -- `exec`, `eval`, `compile`, `gc.get_objects` -- reached no goal card ever
+# shipped. Checked against the live campaign's own `ws-B/algotune_spectral_clustering.json`: the
+# letters exec/eval/compile occur ten times in that goal and every one of them is "evaluator".
+#
+# The cost is one experiment. `--enforce-rules` makes the bridge print
+# `looplab_failure_reason: rules_violation`, which `engine/triage.py::DECLARABLE_REASONS` ends the
+# node on WITHOUT spending a repair -- and a $1.00 run buys three or four cards.
+
+
+def test_the_ban_on_runtime_code_generation_is_stated(tmp_path):
+    goal = _goal(tmp_path, "--enforce-rules")
+    for call in ("`exec`", "`eval`", "`compile`", "`gc.get_objects`"):
+        assert call in goal, f"{call} is refused by the arena and the goal does not say so"
+
+
+def test_an_arena_without_that_table_is_not_quoted_as_having_the_rule(tmp_path):
+    """DERIVED means derived in both directions: no table, no sentence. A hand-written list would
+    keep promising a rule the arena dropped, which is the half of staleness that costs nothing to
+    the solver and everything to the operator reading the goal."""
+    goal = _goal(tmp_path, "--enforce-rules", validator=_FAKE_VALIDATOR_NO_CALLS)
+    assert "ARENA RULES" in goal, "the rest of the clause must survive"
+    assert "`exec`" not in goal and "runtime code generation" not in goal, goal
+
+
+def test_the_calls_ban_rides_with_enforce_rules_and_not_otherwise(tmp_path):
+    assert "`gc.get_objects`" not in _goal(tmp_path)
+    assert "`gc.get_objects`" not in _goal(tmp_path, "--one-card")
+
+
+# The REAL arena, when one is on the box: every prohibition the goal states is one the shipped
+# validator actually enforces, checked by RUNNING it on code that breaks the rule. This is the only
+# form of this check that cannot drift -- a table read and a sentence written can still disagree
+# about what the AST visitor does, and three of the four prohibitions have no table at all.
+_REAL_ROOT = Path("/var/tmp/looplab-bench/AlgoTune")
+_PROBES = {
+    "`import ctypes`": "import ctypes\nclass Solver:\n    def solve(self, p): return 1\n",
+    "`sys.modules`": ("import sys\nclass Solver:\n"
+                      "    def solve(self, p): return sys.modules['os']\n"),
+    "`is_solution`": ("class Solver:\n    def solve(self, p):\n"
+                      "        p.is_solution = lambda *a: True\n        return 1\n"),
+    "`compile`": ("class Solver:\n    def solve(self, p):\n"
+                  "        return compile('1', '<s>', 'eval')\n"),
+    "`eval`": "class Solver:\n    def solve(self, p): return eval('1')\n",
+    "`exec`": "class Solver:\n    def solve(self, p):\n        exec('x=1')\n        return 1\n",
+}
+
+
+@pytest.mark.skipif(not (_REAL_ROOT / "AlgoTuner" / "security" / "code_validator.py").exists(),
+                    reason="no AlgoTune checkout on this box")
+@pytest.mark.parametrize("named,code", sorted(_PROBES.items()))
+def test_every_prohibition_the_goal_states_is_one_the_real_validator_enforces(tmp_path, named, code):
+    """Tier 1: the goal says the arena refuses this, so hand the arena code that does it.
+
+    A goal that forbids what the arena permits excludes a family for nothing -- the measured cost of
+    the retired "write ordinary algorithmic Python" sentence, four tasks stuck at 0.29-0.36.
+    """
+    goal = _goal(tmp_path, "--enforce-rules")
+    assert named.strip("`").split(".")[0] in goal or named in goal, (
+        f"{named} is no longer in the goal; delete its probe or restore the sentence")
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1])\n"
+         "from AlgoTuner.security.code_validator import check_code_for_tampering as chk\n"
+         "print(repr(chk(sys.argv[2])))",
+         str(_REAL_ROOT), code],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() != "None", (
+        f"the goal tells the model {named} is NOT SCORED and this arena scores it:\n{code}")
+
+
+@pytest.mark.skipif(not (_REAL_ROOT / "AlgoTuner" / "security" / "code_validator.py").exists(),
+                    reason="no AlgoTune checkout on this box")
+def test_a_plain_solver_is_not_refused_by_the_arena():
+    """The other direction, so the probes above are not passing because everything is refused."""
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, sys.argv[1])\n"
+         "from AlgoTuner.security.code_validator import check_code_for_tampering as chk\n"
+         "print(repr(chk(sys.argv[2])))",
+         str(_REAL_ROOT),
+         "import numpy as np\nclass Solver:\n"
+         "    def solve(self, p): return np.asarray(p['a']).sum()\n"],
+        capture_output=True, text=True, timeout=120)
+    assert proc.stdout.strip() == "None", proc.stdout + proc.stderr
+
+
+@pytest.mark.skipif(not (_REAL_ROOT / "AlgoTuner" / "security" / "code_validator.py").exists(),
+                    reason="no AlgoTune checkout on this box")
+def test_the_calls_the_goal_names_are_exactly_the_calls_the_real_arena_refuses(tmp_path):
+    """BOTH directions against the shipped table, parsed back out of the shipped SENTENCE.
+
+    Under-stating costs the solver an experiment (that is defect (c)); over-stating excludes a
+    family for nothing (that is defect (b), measured at four tasks stuck between 0.29 and 0.36). A
+    list typed into the prose can drift either way and this is the check that notices, because it
+    reads the goal that was actually generated and the table that is actually enforced.
+    """
+    root = _make_root(tmp_path, "fake_task")
+    real = json.loads(subprocess.run(
+        [sys.executable, "-c",
+         "import json, sys; sys.path.insert(0, sys.argv[1])\n"
+         "from AlgoTuner.security.code_validator import TamperingDetector as T\n"
+         "print(json.dumps(sorted(T.DISALLOWED_CALLS)))", str(_REAL_ROOT)],
+        capture_output=True, text=True, timeout=120, check=True).stdout)
+    module = _module()
+    clause = module.rules_clause(_REAL_ROOT)
+    match = re.search(r"No call to ([^—]+)—", clause)
+    assert match is not None, f"the calls sentence is gone from the clause:\n{clause[-400:]}"
+    named = sorted(re.findall(r"`([^`]+)`", match.group(1)))
+    assert named == sorted(real), (
+        f"the goal names {named} and the arena refuses {sorted(real)}; a goal that forbids what the "
+        "arena permits excludes a family for nothing, and one that permits what it forbids costs a "
+        "node")
+    assert root  # the hermetic root is built so this test cannot pass by accident on an empty tree
