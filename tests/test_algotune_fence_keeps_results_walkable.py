@@ -91,3 +91,23 @@ def test_chmod_000_would_have_failed_this_test(tmp_path):
     finally:
         victim.chmod(0o755)
         shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_closing_twice_does_not_strand_the_directories(tmp_path):
+    """`close` is called twice in a real launch, and the second call must not lose the first's work.
+
+    `check_leaks.sh` fences before it audits, then `run_final.sh` fences again before it launches.
+    The first implementation truncated its state file on entry, so the second `close` recorded
+    nothing — and `open` then restored nothing, leaving all seventeen tracked directories in the
+    holding area. Observed: state file empty, 17 directories stranded, `results/` down to 5.
+    """
+    at, results, env = _fenced_tree(tmp_path)
+    assert _fence(env, "close").returncode == 0
+    assert _fence(env, "close").returncode == 0          # the second one, which used to erase the record
+
+    assert _fence(env, "check").returncode == 0
+    assert _fence(env, "open").returncode == 0
+    assert _walk_like_the_arena(results) == {"Claude Opus 4.1": ["convex_hull"],
+                                             "o4-mini": ["pagerank"],
+                                             "RuleCheck-1": ["convex_hull"]}
+    assert not (tmp_path / "held").exists(), "the holding area still has directories in it"

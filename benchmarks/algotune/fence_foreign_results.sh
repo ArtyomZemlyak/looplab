@@ -27,7 +27,19 @@ HOLD=${FENCE_HOLD:-/var/tmp/looplab-bench/.foreign_results_held}
 
 case "${1:-}" in
   close)
+    # THE HOLD DIRECTORY IS THE STATE, and the state file is only a record of it. `close` used to
+    # truncate `$STATE` on entry, so calling it twice — which the driver does, because
+    # `check_leaks.sh` fences before `run_final.sh` fences again — erased the list of what had been
+    # moved and stranded all seventeen directories where `open` would never look for them. The fork
+    # would have been left permanently short of 2,831 tracked files.
+    #
+    # So `close` is idempotent: anything already held stays held and is re-recorded, never dropped.
+    mkdir -p "$HOLD"
     : > "$STATE"
+    for H in "$HOLD"/*/; do
+      [ -d "$H" ] && printf '%s\n' "$(basename "$H")" >> "$STATE"
+    done
+    held=$(wc -l < "$STATE")
     n=0
     for D in "$AT/results"/*/; do
       B="$(basename "$D")"
@@ -36,16 +48,21 @@ case "${1:-}" in
       mkdir -p "$HOLD"
       mv "$D" "$HOLD/$B"; n=$((n+1))
     done
-    echo "closed $n foreign result directories"
+    echo "closed $n foreign result directories${held:+ (${held} already held)}"
     ;;
   open)
-    [ -s "$STATE" ] || { echo "no state file — nothing to restore"; exit 0; }
-    while IFS= read -r B; do
-      [ -n "$B" ] || continue
-      [ -d "$HOLD/$B" ] && mv "$HOLD/$B" "$AT/results/$B"
-    done < "$STATE"
+    # Restores from the HOLD DIRECTORY, not from the state file — everything held goes back, whether
+    # or not the record of it survived. Losing the record must never mean losing the data.
+    [ -d "$HOLD" ] || { echo "nothing held — nothing to restore"; exit 0; }
+    n=0
+    for H in "$HOLD"/*/; do
+      [ -d "$H" ] || continue
+      B="$(basename "$H")"
+      if [ -e "$AT/results/$B" ]; then echo "  REFUSING to overwrite existing $B"; continue; fi
+      mv "$H" "$AT/results/$B"; n=$((n+1))
+    done
     rmdir "$HOLD" 2>/dev/null || true
-    echo "restored $(wc -l < "$STATE") directories"
+    echo "restored $n directories"
     rm -f "$STATE"
     ;;
   check)
