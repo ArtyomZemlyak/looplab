@@ -31,6 +31,8 @@ from looplab.core.cards import (
     _card_action_digest as __card_action_digest,
     card_action_digest as _card_action_digest_v2,
     card_child_rollup,
+    card_lineage_brief,
+    card_rollup_brief,
     card_is_direction,
     card_kind_of,
     card_ownership_receipt as _card_ownership_receipt,
@@ -641,6 +643,29 @@ class Idea(BaseModel):
     # node_created -> Idea(**d["idea"]) for free and old logs fold identically. The engine stamps it from
     # its receipt-bound Card mint; legacy/external writers may still leave it absent.
     card_id: Optional[str] = None
+    # The research DIRECTION this experiment serves — the card-level edge `Card.parent_card_id`
+    # publishes (see `core/cards.py` for what the relation is and why it is not `belief_id`). The
+    # Researcher AUTHORS it: a direction is a board row that owns no action, so it can never be
+    # CLAIMED the way `card_id` above is claimed, and the only way an experiment gets filed under
+    # one is by naming it. Advisory and nullable exactly like `card_id`: the fold refuses a self
+    # edge, an unknown target and a cycle, so a wrong value costs a missing link and never a
+    # malformed board. Rides `durable_idea_payload` -> `card_added` -> `Card.parent_card_id` and
+    # `node_created` -> `Idea(**d["idea"])` for free; None => the card is a root, today's behaviour.
+    # NOT part of any digest — `IDEA_PROPOSAL_DIGEST_V1_FIELDS` and the card action digests are
+    # fixed tuples that do not name it, so two proposals differing only in the direction they serve
+    # are still the same executable action, which is what makes filing one free.
+    # The DESCRIPTION is the contract surface, not decoration: `IdeaEmission` inherits this field
+    # and `agents/agent.py` hands `model_json_schema()` to the model as the emit tool's parameters,
+    # so this sentence is what the Researcher actually reads about the edge.
+    parent_card_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional. The DIRECTION_ID of the open research direction this experiment is meant to "
+            "answer, exactly as shown in the OPEN RESEARCH DIRECTIONS block. A direction is a broad "
+            "question that owns no runnable action; filing an experiment under one is how a family "
+            "of minimal-change experiments is tracked to a shared verdict. Never put a DIRECTION_ID "
+            "in card_id, and never name this experiment's own card here."),
+    )
     # Hypothesis-card Kanban (docs/23, Layer 1b): the Researcher-PROPOSED resource footprint for this
     # experiment — {gpus, gpu_mem_mib, ...}. Audit-only in Layer 1 (surfaced on the card as proposed_by=
     # 'researcher'); the Developer FINALIZES it and the bin-packing scheduler CONSUMES it only in Layer 4.
@@ -649,7 +674,7 @@ class Idea(BaseModel):
     # eval_timeout, clamped to a Settings ceiling (docs/23 owner decision 3).
     footprint: Optional[dict] = None
 
-    @field_validator("card_id", mode="before")
+    @field_validator("card_id", "parent_card_id", mode="before")
     @classmethod
     def _read_bounded_card_id(cls, value):
         # card linkage is advisory. A future/corrupt scalar must not reject node_created and
@@ -778,12 +803,16 @@ class IdeaEmission(Idea):
     def _strict_raw_concept_envelope(cls, value):
         if not isinstance(value, dict):
             raise ValueError("Idea emission must be an object")
-        raw_card_id = value.get("card_id")
-        if raw_card_id is not None:
-            if (not isinstance(raw_card_id, str) or raw_card_id != raw_card_id.strip()
-                    or not raw_card_id or len(raw_card_id) > 256
-                    or not raw_card_id.isprintable()):
-                raise ValueError("card_id must be a bounded printable string")
+        # BOTH card edges, and both strict for the same reason: base `Idea`'s validator HEALS a
+        # malformed id to None, which is right for a durable log and wrong for a live producer —
+        # the model would silently lose the link it authored and never be asked to try again.
+        for field in ("card_id", "parent_card_id"):
+            raw_card_id = value.get(field)
+            if raw_card_id is not None:
+                if (not isinstance(raw_card_id, str) or raw_card_id != raw_card_id.strip()
+                        or not raw_card_id or len(raw_card_id) > 256
+                        or not raw_card_id.isprintable()):
+                    raise ValueError(f"{field} must be a bounded printable string")
         raw_footprint = value.get("footprint")
         if raw_footprint is not None and not valid_researcher_footprint(raw_footprint):
             raise ValueError("footprint must contain only bounded integer gpus/gpu_mem_mib")

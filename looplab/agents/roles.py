@@ -16,6 +16,7 @@ from typing import Optional, Protocol
 
 from looplab.core.advisory_payloads import memo_verdict_cue
 from looplab.core.models import (Idea, IdeaEmission, Node, RunState,
+                                 card_is_direction,
                                  developer_artifact_footprint, hypothesis_statement_digest,
                                  normalize_researcher_footprint)
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
@@ -851,22 +852,54 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
         # predicted-value order, so the search tests the most promising one first and the [:5] cap now
         # drops the LOWEST-payoff cards, not arbitrary insertion-order ones. No ranking -> insertion
         # order (unchanged). Replay-safe: only the resulting node's `idea.hypothesis` is recorded.
-        lines.append("Untested hypotheses on the board (registered by the operator or deep research"
-                     + (", ordered by predicted payoff — best first" if hyp_order else "")
-                     + " — none has evidence yet):")
-        for card in open_hyps:
-            lines.append(
-                f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
-                f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
-        if for_proposal:
-            # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
-            # also feeds the crash-triage judge (`engine/crash_repair.py`) and the macro-action
-            # chooser (`engine/node_build.py`), whose replies are a verdict string and an index —
-            # neither has a `card_id` field to return one in, so for them this sentence is an
-            # instruction that cannot be followed, competing with the one that can.
-            lines.append("If your next experiment tests one of these, return its CARD_ID in "
-                         "`card_id`. The engine restores the complete immutable seed; do not use "
-                         "display edits as semantic identity.")
+        # TWO KINDS OF ROW, TWO DIFFERENT CONTRACTS, and until 2026-08-24 they were one list.
+        # `open_research_beliefs()` returns every open untested card, and a card is either an
+        # EXPERIMENT (it owns an executable action, so it can be claimed and built) or a
+        # DIRECTION (it owns none — a deep-research `recommended_direction`, an operator's broad
+        # question — so it can NEVER be built, no matter what the model returns). Rendering them
+        # together offered a claim contract that is false for half the rows: measured on
+        # `runs/e5small-dr-unified-v5`, 5 of 5 rows the proposer saw were directions, and a
+        # `card_id` naming any of them resolves to a card that owns no action.
+        #
+        # The split gives the direction the contract it CAN honour: not "claim this", but "propose a
+        # minimal-change experiment that ANSWERS this, and file it under the direction". That is
+        # what turns a direction from a row that clogs the board into the source of the next
+        # experiment — and it is the only way the `Card.parent_card_id` edge is ever authored,
+        # since nothing can infer from a proposal's text which question it was written to answer.
+        directions = [card for card in open_hyps if card_is_direction(card)]
+        work_items = [card for card in open_hyps if not card_is_direction(card)]
+        if directions:
+            lines.append("OPEN RESEARCH DIRECTIONS (broad questions with no experiment yet"
+                         + (", ordered by predicted payoff — best first" if hyp_order else "")
+                         + " — these are NOT experiments and cannot be run as they stand):")
+            for card in directions:
+                lines.append(
+                    f"- DIRECTION_ID={card.id} "
+                    f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+            if for_proposal:
+                lines.append(
+                    "To pursue one, propose ONE concrete minimal-change experiment that would move "
+                    "it forward and return its DIRECTION_ID in `parent_card_id`. Do NOT put a "
+                    "DIRECTION_ID in `card_id` — a direction owns no action and cannot be claimed. "
+                    "Several experiments may be filed under the same direction over time; that is "
+                    "what it is for.")
+        if work_items:
+            lines.append("Untested hypotheses on the board (registered by the operator or deep research"
+                         + (", ordered by predicted payoff — best first" if hyp_order else "")
+                         + " — none has evidence yet):")
+            for card in work_items:
+                lines.append(
+                    f"- CARD_ID={card.id} BELIEF_ID={card.belief_id or ''} "
+                    f"SEED_STATEMENT_JSON={json.dumps(card.seed_statement, ensure_ascii=False)}")
+            if for_proposal:
+                # A CLAIM CONTRACT, and only a caller whose answer is an `Idea` can honour it. This brief
+                # also feeds the crash-triage judge (`engine/crash_repair.py`) and the macro-action
+                # chooser (`engine/node_build.py`), whose replies are a verdict string and an index —
+                # neither has a `card_id` field to return one in, so for them this sentence is an
+                # instruction that cannot be followed, competing with the one that can.
+                lines.append("If your next experiment tests one of these, return its CARD_ID in "
+                             "`card_id`. The engine restores the complete immutable seed; do not use "
+                             "display edits as semantic identity.")
     # …and the OTHER half of the board, which nothing showed until now: the questions that already
     # have an experiment against them. See `attempted_board_prompt_cards` for what it cost that a
     # card disappeared from this prompt the instant it got a node — including a node still RUNNING,
@@ -911,8 +944,24 @@ def board_prompt_lines(state: RunState, hyp_order: Optional[list[str]] = None,
 
 
 def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
-    """Resolve a model claim to a visible Card and restore its immutable semantic seed."""
+    """Resolve a model claim to a visible Card and restore its immutable semantic seed.
+
+    TWO independent edges, resolved against the SAME visible set. `card_id` is a CLAIM on a work
+    item — the model says "this experiment IS that board row" — and it is nulled when it names
+    nothing visible. `parent_card_id` is a FILING: "this experiment answers that research
+    direction". They are resolved separately because they can be right or wrong independently, and
+    because a direction is exactly the row a `card_id` claim must NOT resolve to (it owns no action,
+    so claiming it would hand the engine an unbuildable work item — the failure the two prompt
+    blocks were split to prevent).
+    """
     by_id = {card.id: card for card in cards}
+    parent = by_id.get(idea.parent_card_id) if idea.parent_card_id else None
+    # A card names its parent, never itself. The fold refuses a self edge anyway, but nulling it
+    # here keeps the durable payload from carrying a link the board will silently drop.
+    if parent is not None and parent.id == idea.card_id:
+        parent = None
+    parent_update = ({} if (parent.id if parent else None) == idea.parent_card_id
+                     else {"parent_card_id": parent.id if parent else None})
     chosen = by_id.get(idea.card_id) if idea.card_id else None
     if chosen is None and idea.hypothesis:
         matches = [card for card in cards if card.seed_statement == idea.hypothesis]
@@ -921,9 +970,11 @@ def bind_idea_to_board_card(idea: Idea, cards: list) -> Idea:
         return idea.model_copy(update={
             "card_id": chosen.id,
             "hypothesis": chosen.seed_statement,
+            **parent_update,
         })
-    if idea.card_id is not None:
-        return idea.model_copy(update={"card_id": None})
+    if idea.card_id is not None or parent_update:
+        return idea.model_copy(update={
+            **({"card_id": None} if idea.card_id is not None else {}), **parent_update})
     return idea
 
 

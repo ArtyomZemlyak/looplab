@@ -600,6 +600,14 @@ class CardReservationMixin:
             # Card action deliberately stays compact, but two repo rationales or implementation budgets must not
             # collapse merely because their params/profile happen to match.
             "proposal_ref": proposal_ref,
+            # The research DIRECTION this work item serves — the ONE card->card edge that is not a
+            # retry. Emitted only when the Researcher named one, so a run whose proposals name no
+            # direction writes byte-identical payloads to the ones already on disk (which is also
+            # what keeps `_card_event_matches` able to recognise a pre-upgrade crash-prefix mint).
+            # Deliberately OUTSIDE `action` and therefore outside every digest: filing an experiment
+            # under a direction must not change its executable identity, or two proposals that are
+            # the same experiment would stop deduping the moment one of them named its parent.
+            **({"parent_card_id": idea.parent_card_id} if idea.parent_card_id else {}),
             **({"implementation_ref": implementation_ref} if implementation_ref else {}),
             **({"cross_run_receipt": advisory_receipt} if advisory_receipt else {}),
         }

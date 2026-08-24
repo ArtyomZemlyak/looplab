@@ -17,7 +17,8 @@ from typing import Optional
 from looplab.events import digest
 from looplab.core.advisory_payloads import (MAX_RESEARCH_CLAIMS, VERDICT_UNVERIFIED,
                                             memo_verification_view, verdict_tally)
-from looplab.core.models import NodeStatus, RunState, extra_metric_channel
+from looplab.core.models import (NodeStatus, RunState, card_lineage_brief,
+                                 extra_metric_channel)
 from looplab.tools._base import RESULT_CAP, clip, fit_rows, fn_spec
 from looplab.tools._runcache import RunStateCache
 
@@ -343,6 +344,15 @@ class RunTools:
             out.append(f"failure={n.error_reason}: {(n.error or '')[:300]}")
         if n.trials:
             out.append(self._sweep_view(n, trials_arg, st.direction))
+        # THE RESEARCH QUESTION THIS EXPERIMENT ANSWERS, which this surface did not carry at all.
+        # A reader could see what ran and never which board row it belongs to, which direction that
+        # row serves, or what the other experiments under the same direction have already found —
+        # so the sibling evidence was one `list_experiments` + a human join away, every time.
+        # Absent card / absent link renders nothing, so a run whose proposals name no direction is
+        # byte-identical here.
+        lineage = card_lineage_brief(st.cards.get(n.idea.card_id or ""), st.cards)
+        if lineage:
+            out.append(f"research: {lineage}")
         if n.idea.rationale:
             out.append(f"rationale: {n.idea.rationale.strip()[:400]}")
         text = "\n".join(out)

@@ -895,6 +895,72 @@ def card_child_rollup(children) -> dict | None:
     }
 
 
+def card_rollup_brief(rollup) -> str:
+    """One line of a direction's progress, or "" — the shared spelling of the counts.
+
+    Written once because three surfaces state it (the agent's `read_experiment`, the operator's
+    board, the text digest) and three hand-rolled versions of "how is this direction doing" is how
+    they come to disagree about what `failed` counts. Zero buckets are OMITTED: a direction with
+    twelve evaluated children and no failures should not have to carry `0 no-result` forever.
+    """
+    if not isinstance(rollup, dict):
+        return ""
+    total = rollup.get("children")
+    if not isinstance(total, int) or total <= 0:
+        return ""
+    parts = [f"{total} experiment(s)"]
+    for key, label in (("open", "open"), ("running", "running"), ("evaluated", "evaluated"),
+                       ("failed", "no result"), ("dropped", "dropped")):
+        count = rollup.get(key)
+        if isinstance(count, int) and count > 0:
+            parts.append(f"{count} {label}")
+    best = rollup.get("best_delta")
+    if isinstance(best, float) and math.isfinite(best):
+        owner = rollup.get("best_card_id")
+        parts.append(f"best {best:+.6g}" + (f" by {owner}" if isinstance(owner, str) and owner else ""))
+    return ", ".join(parts)
+
+
+def card_lineage_brief(card, cards_by_id=None, *, statement_chars: int = 120) -> str:
+    """"card-9 <kind> … under DIRECTION dir-1 "…" (4 experiment(s), 1 running, best +0.004)", or "".
+
+    The join a reader needs and could not make: `read_experiment` rendered a node with no mention of
+    the card at all, so an agent could see WHAT ran and never which question it was answering or
+    which siblings had already answered part of it. `cards_by_id` is optional because two of the
+    three callers hold one card and not the board; without it the parent is named but not described,
+    which is still strictly more than the nothing that was there before.
+    """
+    cid = str(getattr(card, "id", "") or "")
+    if not cid:
+        return ""
+    kind = card_kind_of(card)
+    parts = [f"{cid} ({kind})"]
+    statement = str(getattr(card, "seed_statement", "") or getattr(card, "statement", "") or "")
+    if statement:
+        parts[0] += f" {_clip(statement, statement_chars)!r}"
+    parent_id = getattr(card, "parent_card_id", None)
+    if isinstance(parent_id, str) and parent_id:
+        parent = (cards_by_id or {}).get(parent_id)
+        line = f"under DIRECTION {parent_id}"
+        parent_statement = str(getattr(parent, "seed_statement", "")
+                               or getattr(parent, "statement", "") or "") if parent else ""
+        if parent_statement:
+            line += f" {_clip(parent_statement, statement_chars)!r}"
+        siblings = card_rollup_brief(getattr(parent, "child_rollup", None)) if parent else ""
+        if siblings:
+            line += f" [{siblings}]"
+        parts.append(line)
+    own = card_rollup_brief(getattr(card, "child_rollup", None))
+    if own:
+        parts.append(f"children: {own}")
+    return " — ".join(parts)
+
+
+def _clip(text: str, limit: int) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def surviving_work_item_aliases(card) -> list[str]:
     """The ids folded into ``card`` that may still own EXECUTABLE work — the `merged_work_items` set.
 
