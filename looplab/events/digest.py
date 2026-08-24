@@ -327,11 +327,20 @@ def _node_line(n, state=None) -> str:
     parents = list(getattr(n, "parent_ids", None) or [])
     if parents and state is not None:
         by_id = getattr(state, "nodes", None) or {}
-        moved = node_knob_delta(n, by_id.get(parents[0]), by_id)
-        shown = ", ".join(k.rsplit(".", 1)[-1] for k in moved[:4])
-        more = f" +{len(moved) - 4}" if len(moved) > 4 else ""
-        delta = (f" [Δ{len(moved)} vs #{parents[0]}: {shown}{more}]" if moved
-                 else f" [Δ0 vs #{parents[0]} — the difference is in CODE, not params]")
+        # EVERY parent, not just the first. A merge descends from two, and reporting only
+        # `parents[0]` hides half of what it combined — on the live run node 13 read "Δ0 vs #11"
+        # while also descending from #10. (`resolved_params` still resolves through parents[0]
+        # alone, because that is the workspace this node inherited; different question.)
+        shown = []
+        all_zero = True
+        for pid in parents[:3]:
+            moved = node_knob_delta(n, by_id.get(pid), by_id)
+            all_zero = all_zero and not moved
+            names = ", ".join(k.rsplit(".", 1)[-1] for k in moved[:4])
+            more = f" +{len(moved) - 4}" if len(moved) > 4 else ""
+            shown.append(f"Δ{len(moved)} vs #{pid}" + (f": {names}{more}" if moved else ""))
+        note = " — the difference is in CODE, not params" if all_zero else ""
+        delta = f" [{'; '.join(shown)}{note}]"
     # Δ BEFORE the coordinates, deliberately: it is the most compressed decision-relevant fact on
     # the line ("did this node test one thing or five?"), and the coordinate list is long enough to
     # push anything after it out of a reader's first glance and out of the char budget.

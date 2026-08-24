@@ -134,3 +134,57 @@ def test_zero_delta_says_the_difference_is_in_code():
         node.concepts = []
     line = _node_line(child, SimpleNamespace(nodes={3: parent, 9: child}))
     assert "Δ0 vs #3 — the difference is in CODE, not params" in line
+
+
+def test_a_merge_reports_against_EVERY_parent():
+    """Found by reading the diff, not by a red test. A merge descends from two nodes and the first
+    version printed only `parents[0]`: on the live run node 13 read "Δ0 vs #11" while also
+    descending from #10, which it differs from by three knobs. Half the lineage was invisible on the
+    one line a reader uses to judge what an experiment tested."""
+    from looplab.events.digest import _node_line
+
+    a = _n(10, {"x": 1.0, "y": 1.0})
+    b = _n(11, {"x": 1.0, "y": 2.0}, parents=[10])
+    m = _n(13, {"x": 1.0, "y": 2.0}, parents=[11, 10])
+    for node in (a, b, m):
+        node.status = None
+        node.operator = "merge"
+        node.metric = 0.5
+        node.robust_metric = 0.5
+        node.trials = None
+        node.triage_rationale = ""
+        node.theme = ""
+        node.concepts = []
+    line = _node_line(m, SimpleNamespace(nodes={10: a, 11: b, 13: m}))
+    assert "Δ0 vs #11" in line, line
+    assert "Δ1 vs #10" in line, "the SECOND parent must not be silent"
+
+
+def test_the_code_note_appears_only_when_EVERY_parent_delta_is_zero():
+    """Otherwise a merge that matches one parent and differs from the other would claim its
+    difference is in code while a knob is visibly named beside it."""
+    from looplab.events.digest import _node_line
+
+    a = _n(10, {"x": 1.0})
+    b = _n(11, {"x": 1.0}, parents=[10])
+    m = _n(13, {"x": 1.0}, parents=[11, 10])
+    for node in (a, b, m):
+        node.status = None
+        node.operator = "merge"
+        node.metric = 0.5
+        node.robust_metric = 0.5
+        node.trials = None
+        node.triage_rationale = ""
+        node.theme = ""
+        node.concepts = []
+    assert "difference is in CODE" in _node_line(m, SimpleNamespace(nodes={10: a, 11: b, 13: m}))
+
+    # The discriminating ORDER: a non-zero parent FIRST and a zero parent LAST. A "last parent
+    # wins" accumulator passes every other arrangement — it took a mutation to notice, because the
+    # first version of this test put the zero parent first and stayed green under exactly that bug.
+    a.idea = SimpleNamespace(params={"x": 9.0})          # #10 now differs by one knob
+    m.parent_ids = [10, 11]                              # …and the ZERO parent is last
+    line = _node_line(m, SimpleNamespace(nodes={10: a, 11: b, 13: m}))
+    assert "Δ1 vs #10" in line and "Δ0 vs #11" in line, line
+    assert "difference is in CODE" not in line, (
+        "one parent matching cannot license 'the difference is in code'")

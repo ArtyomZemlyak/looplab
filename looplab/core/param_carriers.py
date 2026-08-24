@@ -524,7 +524,13 @@ def resolved_params(node, nodes_by_id, *, _depth: int = 0) -> dict:
         return {}
     parents = list(getattr(node, "parent_ids", None) or [])
     base: dict = {}
-    for pid in parents[:1]:             # the PRIMARY parent is the one whose workspace was seeded
+    # `parents[0]` and not "every parent": `orchestrator.py` (~5510) states the merge contract —
+    # "parent[0]'s working code + entrypoint carry over and the idea directs blending in the other
+    # parent" — so the FIRST parent is the workspace this node inherited. Resolving through both
+    # would invent coordinates from a tree that never seeded this build. Verified against that line
+    # rather than assumed; `node_knob_delta` still reports against EVERY parent, which is a
+    # different question.
+    for pid in parents[:1]:
         base = resolved_params(nodes_by_id.get(pid), nodes_by_id, _depth=_depth + 1)
     merged = dict(base)
     merged.update(effective_params(node))
@@ -538,10 +544,15 @@ def node_knob_delta(node, parent, nodes_by_id=None) -> list[str]:
     Compared on EFFECTIVE values (see `effective_params`), because the question is what the two
     experiments differed by when they RAN, not what was asked for. On
     `runs/e5small-dr-unified-v4` node 8 vs node 3 that is exactly one path
-    (`train.training.max_grad_norm`) — the card claims a one-knob delta and the delta is one. Read
-    off the DECLARATIONS instead it looks like three, because node 3's proposal says 8192/2/15 while
-    it ran 4096/4/3; the author of this function made that mistake and called a clean experiment
-    confounded.
+    (`train.training.max_grad_norm`) — the card claims a one-knob delta and the delta is one.
+
+    TWO different mistakes produce a wrong answer here and this docstring named the wrong one until
+    it was re-measured. (a) Comparing the two DECLARATIONS gives 15, not 3: node 8 declares a single
+    path and node 3 declares fourteen, so absence reads as change — that is what `resolved_params`
+    below exists to stop. (b) Comparing node 8's declaration against node 3's DECLARED coordinates
+    (8192/2/15) rather than its APPLIED ones (4096/4/3) is the separate error that made the author
+    of this function call a clean experiment confounded. Both are fixed by comparing resolved,
+    applied values; neither is fixed by the other.
 
     It is also the deterministic test for whether a repair changed the HYPOTHESIS or merely fitted
     it to the machine: intersect this list with the paths the hypothesis names. Empty intersection
