@@ -491,3 +491,72 @@ def node_params_brief(node, *, cap: int = 12) -> str:
     # numbers that ran" is only trustworthy if the reader is also told how many of them moved.
     note = f" [{len(moved)} of {len(applied)} moved from the proposal]" if moved else ""
     return ", ".join(parts) + tail + note
+
+
+def effective_params(node) -> dict:
+    """The coordinates a node actually ran at: the applied record where it exists, the declaration
+    where it does not. ONE spelling, so every reader answers "what were this node's numbers?" the
+    same way instead of half of them reading the proposal."""
+    provenance = getattr(node, "metric_provenance", None)
+    record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+    applied = record.get("applied") if isinstance(record, dict) else None
+    declared = dict(getattr(getattr(node, "idea", None), "params", None) or {})
+    if isinstance(applied, dict) and applied:
+        merged = dict(declared)
+        merged.update(applied)          # applied WINS; a declared-only path survives as context
+        return merged
+    return declared
+
+
+def resolved_params(node, nodes_by_id, *, _depth: int = 0) -> dict:
+    """A node's coordinates RESOLVED up its lineage — its own record layered over its parent's.
+
+    A node inherits its parent's workspace (`repo_developer.implement_from` hands the parent's files
+    to the build), so a path ABSENT from a node's own record means "inherited", never "differs".
+    Comparing bare records reads absence as change and produces nonsense: on
+    `runs/e5small-dr-unified-v4`, node 8 — a card that claims ONE knob and is one — came out as a
+    fifteen-knob delta from node 3, purely because node 3's record names twelve paths that node 8's
+    one-line declaration does not repeat.
+
+    Cycle- and depth-guarded: `parent_ids` is persisted data, and a malformed chain must cost a
+    shallower answer, never a hang."""
+    if node is None or _depth > 64:
+        return {}
+    parents = list(getattr(node, "parent_ids", None) or [])
+    base: dict = {}
+    for pid in parents[:1]:             # the PRIMARY parent is the one whose workspace was seeded
+        base = resolved_params(nodes_by_id.get(pid), nodes_by_id, _depth=_depth + 1)
+    merged = dict(base)
+    merged.update(effective_params(node))
+    return merged
+
+
+def node_knob_delta(node, parent, nodes_by_id=None) -> list[str]:
+    """Which coordinates this node moved relative to its parent — the arbiter of "one hypothesis,
+    minimal change".
+
+    Compared on EFFECTIVE values (see `effective_params`), because the question is what the two
+    experiments differed by when they RAN, not what was asked for. On
+    `runs/e5small-dr-unified-v4` node 8 vs node 3 that is exactly one path
+    (`train.training.max_grad_norm`) — the card claims a one-knob delta and the delta is one. Read
+    off the DECLARATIONS instead it looks like three, because node 3's proposal says 8192/2/15 while
+    it ran 4096/4/3; the author of this function made that mistake and called a clean experiment
+    confounded.
+
+    It is also the deterministic test for whether a repair changed the HYPOTHESIS or merely fitted
+    it to the machine: intersect this list with the paths the hypothesis names. Empty intersection
+    means the same card still describes the experiment; non-empty means it does not.
+
+    Returns sorted paths, both directions (added, removed and changed). Empty when there is no
+    parent, or when nothing moved."""
+    if parent is None:
+        return []
+    if nodes_by_id:
+        a = resolved_params(node, nodes_by_id)
+        b = resolved_params(parent, nodes_by_id)
+    else:
+        # No lineage to resolve against: compare the child's OWN paths only. Absence on either side
+        # is "inherited", so a path the child never mentions cannot be a change it made.
+        a, b = effective_params(node), effective_params(parent)
+        return sorted({k for k in a if a.get(k) != b.get(k)})
+    return sorted({k for k in set(a) | set(b) if a.get(k) != b.get(k)})
