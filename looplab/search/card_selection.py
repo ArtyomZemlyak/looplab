@@ -534,7 +534,6 @@ def _card_generation_fences_current(state: RunState, card: Card) -> bool:
             and card.scored_against not in state.aborted_nodes
         ),
         anchor_attempt=None if scored is None else scored.attempt,
-        board_empty=state.best_node_id is None,
     ) == "current"
 
 

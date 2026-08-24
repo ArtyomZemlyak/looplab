@@ -696,6 +696,55 @@ def _output_fingerprint(outputs) -> Optional[str]:
     return "|".join(sorted(parts))
 
 
+@app.command(name="repair-candidates")
+def repair_candidates(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
+                      show_nodes: bool = typer.Option(
+                          False, "--nodes", help="List the node ids behind each row.")):
+    """Which files this run's nodes had to fix, ranked by how many DISTINCT nodes fixed them.
+
+    THE LEDGER EXISTED AND NOTHING SHOWED IT. `RunState.repair_candidates()` has been derived on
+    every fold since the repair ledger landed and had no CLI, no route and no panel — so the one
+    question it answers ("what belongs in the source repo rather than in one node?") could only be
+    asked by opening a Python REPL over the event log.
+
+    Why DISTINCT NODES and not repair count, in the model's own words: one node repairing the same
+    file four times is one discovery, and four nodes repairing it once each is a property of the
+    repo. Measured by running this command on `runs/e5small-dr-unified-v4`: SIX nodes repaired
+    `looplab_stages.json` and FIVE repaired `vectorsearch/configs/config.yaml`, four of those for
+    `oom`, across 19 repair rows. A node inherits its PARENT's files
+    and can never inherit a fix a SIBLING found, because a node becomes a parent only by winning on
+    metric, so the same fix is paid for again on every branch.
+
+    It RANKS and decides nothing, exactly as the model says. Promoting a fix into the source repo
+    moves the substrate every later node is measured on: that is the operator's call, and it has to
+    be recorded as an event or the comparability key cannot tell nodes on either side of it apart.
+    """
+    store = _require_run_dir(run_dir)
+    _echo_log_integrity(store, run_dir)
+    state = fold(store.read_all())
+    rows = state.repair_candidates()
+    if not rows:
+        # Two very different facts, and an operator acting on this must not confuse them: a run
+        # whose nodes never needed a repair, and a log written before the ledger existed.
+        typer.echo("no repaired files recorded in this run"
+                   + ("." if state.repair_ledger else
+                      " (and the repair ledger is empty — a pre-ledger log records none)."))
+        return
+    typer.echo(f"repaired files: {len(rows)}  repair rows: {len(state.repair_ledger)}")
+    for row in rows:
+        reasons = ", ".join(f"{k}x{v}" for k, v in row["reasons"].items())
+        typer.echo(f"  {row['node_count']:>2} node(s)  {row['path']}"
+                   + (f"  [{reasons}]" if reasons else ""))
+        if show_nodes and row["nodes"]:
+            typer.echo("       nodes: " + ", ".join(str(n) for n in row["nodes"]))
+    top = rows[0]
+    if top["node_count"] >= 2:
+        typer.echo("")
+        typer.echo(f"{top['node_count']} separate experiments fixed {top['path']}. A fix rediscovered "
+                   "per branch is one the repo owes them; promoting it is an operator decision and "
+                   "must be recorded so later comparisons know which side of it a node ran on.")
+
+
 @app.command(name="stage-dups")
 def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
     """Duplicated stage work in a run, and what a cross-node reuse key would have done (read-only).

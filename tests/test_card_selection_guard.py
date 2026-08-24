@@ -523,12 +523,22 @@ def test_short_lived_expanded_v1_receipt_remains_current_during_v2_upgrade():
     assert card.selection_ready is True
 
 
-def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_empty():
-    """The EMPTY score authority still requires an empty board — deliberately, and only here.
+def test_explicit_empty_score_fence_survives_the_board_filling_but_not_a_malformed_receipt():
+    """An EMPTY score authority stays CURRENT once a champion exists — it anchors nothing.
 
+    THE NAME AND THE ASSERTION BOTH FLIPPED ON 2026-08-24, and the old ones are the defect.
     ``card_score_fence_state`` dropped the champion-equality clause from the INCUMBENT branch on
-    2026-08-13; this branch keeps its equivalent (``best_node_id is None``) on purpose, and that
-    helper's docstring owns the reason. Pin the asymmetry so it stays a decision rather than drift.
+    2026-08-13; this branch kept its equivalent (``best_node_id is None``) and this test pinned the
+    asymmetry "so it stays a decision rather than drift". The decision was wrong, and the price is
+    on the record: replayed over every event log in ``runs/``, TEN nodes ever died
+    ``node_failed reason=superseded`` and NINE were carrying a card with ``scored_against_empty:
+    true`` and no anchor — each one BUILT, paid for with a Developer call, and discarded before it
+    entered a sandbox, because some unrelated node had scored and the board had stopped being empty.
+
+    What this test now holds is the DISCRIMINATION rather than the asymmetry: an action with no
+    incumbent survives the board filling, and a receipt claiming empty authority AND an anchor
+    generation is still malformed and still stale. The anchored branch is untouched — the tenth
+    death (v8 #7, anchor node 1 generation 0) is a genuine staleness other tests here still pin.
     """
     statement = "first seed"
     action = {
@@ -554,8 +564,9 @@ def test_explicit_empty_score_and_parent_fences_are_current_only_while_run_is_em
     assert empty.selection_ready is True
 
     with_best = fold(_events([*_baseline(), added])).cards["first-seed"]
-    assert with_best.selection_provenance.freshness == "stale"
-    assert with_best.selection_ready is False
+    assert with_best.selection_provenance.freshness == "current", (
+        "a card formed with no incumbent anchors nothing, so a later champion cannot stale it")
+    assert with_best.selection_ready is True
 
     # …and a receipt claiming empty authority AND an anchor generation is malformed, never merely
     # empty: stale even on the empty board that would otherwise make it current.

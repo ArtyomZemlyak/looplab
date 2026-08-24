@@ -1081,7 +1081,6 @@ def _card_action_freshness(st: RunState, card: Card) -> str:
             and card.scored_against not in st.aborted_nodes
         ),
         anchor_attempt=None if scored_node is None else scored_node.attempt,
-        board_empty=st.best_node_id is None,
     )
 
     states = {parent_state, score_state}

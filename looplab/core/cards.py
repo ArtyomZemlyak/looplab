@@ -1009,7 +1009,6 @@ def card_score_fence_state(
     *,
     anchor_live: bool,
     anchor_attempt: Optional[int],
-    board_empty: bool,
 ) -> str:
     """The score half of the Card freshness fence: ``current`` | ``stale`` | ``unknown``.
 
@@ -1059,19 +1058,24 @@ def card_score_fence_state(
     consumer that wants it (``card.scored_against != state.best_node_id``) without a fold-level
     blocker that no path can clear.
 
-    **The EMPTY branch keeps its board check, and that is a scoped decision, not an oversight.**
-    ``board_empty`` is ``state.best_node_id is None``, so requiring it is literally the same
-    champion-equality clause for the case where the recorded champion was "none", and by the argument
-    above it should go too: an action formed with no incumbent anchors nothing, so nothing about it
-    can die. It stays for now because (a) the only window it can cost anything in is bootstrap —
-    a draft staged before the FIRST evaluation lands, which the forced seed prefix builds long before
-    that on any real cadence — and (b) removing it makes an empty-authority Card whose build head
-    closed ``skipped="stale"`` survive and be RE-ELECTED, and the paired-run calibration receipt
-    protocol cannot express that: ``search/speculation_quality.py::_validate_calibration_card_owners``
-    requires the build-request ledger to map one-to-one onto the ``card_added`` registrations, in
-    order, so a second request for the same card is refused outright. That is a change to a receipt
-    protocol whose revision costs six GPU runs, and it belongs to that module's owner rather than to
-    a fix for an idle second GPU.
+    **The EMPTY branch no longer consults the board.** This docstring used to explain why an extra
+    ``board_empty`` conjunct stayed on the empty branch, and it conceded in its own second sentence
+    that the argument above applies: ``board_empty`` was ``state.best_node_id is None``, i.e. the
+    same champion-equality clause for the case where the recorded champion was "none". What kept it
+    was a belief that the only window it could cost anything in was bootstrap, and a worry about the
+    paired-run calibration receipt. The branch body below records how both were settled — the first
+    by replaying every ``superseded`` death on the box (9 of 10 were this clause), the second by the
+    byte-comparison that module prescribes for a changed derivation.
+
+    **One thing the fix revealed and did not create.** With the phantom staleness gone, a prefetched
+    node is ADMITTED in the session that built it instead of idling until the next outer turn. That
+    was never a deliberate boundary: ``speculation.py::CardSessionLanes.open_for_production`` closes
+    PAID producer work on the first terminal (a provider call would hold the session open), while
+    ``open_for_admission`` only closes on ``stopping`` — so what actually stopped the dispatch of
+    already-built work was this clause. Dispatching costs no provider call and evals outlive their
+    session, so the boundary that matters still holds: the two engine tests that moved keep their
+    ``producer.calls`` and ``card_build_done`` counts unchanged and differ only in the prefetched
+    node's status.
 
     Pure and total, so the fold's tri-state and the selection-time recheck state the rule ONCE. The
     caller owns the state lookups because the two live on opposite sides of the layer boundary
@@ -1083,11 +1087,26 @@ def card_score_fence_state(
             return "unknown"
         # Modern complete EMPTY authority: the action was formed with no incumbent at all. A receipt
         # that claims empty authority AND an anchor generation is malformed, never merely empty.
-        return (
-            "current"
-            if scored_against_generation is None and board_empty
-            else "stale"
-        )
+        #
+        # `board_empty` USED TO BE A CONJUNCT HERE and its removal is this branch's whole change.
+        # The argument was already written above and only two doubts held it back. An action formed
+        # with no incumbent anchors nothing, so nothing about it can go stale; keeping the clause
+        # meant a card went stale the instant the FIRST node scored — not because anything it
+        # depended on moved, but because the board stopped being empty — and the node already BUILT
+        # for it was discarded before it ever entered a sandbox.
+        #
+        # THE FIRST DOUBT ("the only window it can cost anything in is bootstrap") IS FALSIFIED.
+        # Replayed over every event log in `runs/` on 2026-08-24: TEN nodes died
+        # `node_failed reason=superseded`, and NINE were carrying a card with
+        # `scored_against_empty: true` and no anchor at all — v2 #3, v4 #2, v7 #3/#4/#5/#6/#7 (five
+        # nodes of one run), v8 #2, v9 #2. The tenth (v8 #7) names a real anchor — node 1,
+        # generation 0 — and is a genuine staleness the branch below still refuses, byte for byte.
+        # That discrimination is what makes this safe: the anchored branch is untouched.
+        #
+        # THE SECOND DOUBT WAS THE CALIBRATION RECEIPT, and the proof that module demands was run:
+        # `canonical_json(analyze_speculation_run(run))` over all six preserved calibration runs
+        # (`runs/specgate*`), with and without this change — byte-identical. No issued receipt moves.
+        return "current" if scored_against_generation is None else "stale"
     if not anchor_live:
         return "stale"
     if scored_against_generation is None:

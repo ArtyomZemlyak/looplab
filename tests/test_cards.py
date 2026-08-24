@@ -1544,39 +1544,45 @@ def test_grouped_beliefs_unions_evidence_in_ascending_node_order():
         # --- no incumbent at mint time.
         ("legacy row with no fence at all",
          dict(scored_against=None, scored_against_generation=None, scored_against_empty=False,
-              anchor_live=False, anchor_attempt=None, board_empty=True), "unknown"),
+              anchor_live=False, anchor_attempt=None), "unknown"),
         ("complete empty authority on a still-empty board",
          dict(scored_against=None, scored_against_generation=None, scored_against_empty=True,
-              anchor_live=False, anchor_attempt=None, board_empty=True), "current"),
-        # Deliberately asymmetric with the incumbent branch below — the helper's docstring owns why.
-        ("complete empty authority once a champion exists",
+              anchor_live=False, anchor_attempt=None), "current"),
+        # THIS ROW SAID "stale" UNTIL 2026-08-24 and the flip is the fix, not a relaxation. An action
+        # formed with no incumbent anchors nothing, so nothing about it can go stale — and the old
+        # answer killed a card the instant some UNRELATED node scored and the board stopped being
+        # empty. Measured over `runs/`: 9 of the 10 nodes that ever died `superseded` were built,
+        # paid for with a Developer call, and discarded before dispatch on exactly this row. The
+        # tenth names a real anchor and is still refused two rows down, which is what makes the flip
+        # safe rather than a loosening.
+        ("complete empty authority once a champion exists — still current, it anchors nothing",
          dict(scored_against=None, scored_against_generation=None, scored_against_empty=True,
-              anchor_live=False, anchor_attempt=None, board_empty=False), "stale"),
+              anchor_live=False, anchor_attempt=None), "current"),
         ("empty authority claiming an anchor generation is malformed",
          dict(scored_against=None, scored_against_generation=0, scored_against_empty=True,
-              anchor_live=False, anchor_attempt=None, board_empty=True), "stale"),
+              anchor_live=False, anchor_attempt=None), "stale"),
         ("a non-bool empty marker is not an empty authority",
          dict(scored_against=None, scored_against_generation=None, scored_against_empty="yes",
-              anchor_live=False, anchor_attempt=None, board_empty=True), "unknown"),
+              anchor_live=False, anchor_attempt=None), "unknown"),
         # --- with an incumbent: an ANCHOR liveness question, and nothing else.
         ("live anchor at the exact attempt it was scored on",
          dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
-              anchor_live=True, anchor_attempt=0, board_empty=False), "current"),
+              anchor_live=True, anchor_attempt=0), "current"),
         ("…and still current after some other node became champion",
          dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
-              anchor_live=True, anchor_attempt=0, board_empty=False), "current"),
+              anchor_live=True, anchor_attempt=0), "current"),
         ("dead anchor: missing, tombstoned or aborted",
          dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
-              anchor_live=False, anchor_attempt=None, board_empty=False), "stale"),
+              anchor_live=False, anchor_attempt=None), "stale"),
         ("the anchor was reset and re-ran under a new attempt",
          dict(scored_against=1, scored_against_generation=0, scored_against_empty=False,
-              anchor_live=True, anchor_attempt=1, board_empty=False), "stale"),
+              anchor_live=True, anchor_attempt=1), "stale"),
         ("legacy row with an anchor but no generation",
          dict(scored_against=1, scored_against_generation=None, scored_against_empty=False,
-              anchor_live=True, anchor_attempt=0, board_empty=False), "unknown"),
+              anchor_live=True, anchor_attempt=0), "unknown"),
         ("a non-int generation can never match an attempt",
          dict(scored_against=1, scored_against_generation=True, scored_against_empty=False,
-              anchor_live=True, anchor_attempt=1, board_empty=False), "stale"),
+              anchor_live=True, anchor_attempt=1), "stale"),
     ],
 )
 def test_card_score_fence_state_truth_table(case, kwargs, expected):

@@ -84,6 +84,7 @@ from looplab.core.models import (
 from looplab.events.eventstore import MAX_EVENT_BATCH_BYTES, decode_event_record
 from looplab.events.replay import FoldCursor, flagged_node_ids, fold, promotion_eligible_nodes
 from looplab.events.types import (
+    EV_CARD_AUTO_DROPPED,
     ALL_EVENT_TYPES,
     EV_BUDGET,
     EV_BUDGET_EXTEND,
@@ -309,6 +310,24 @@ _CALIBRATION_COMMON_EVENT_TYPES = frozenset({
 })
 _CALIBRATION_TREATMENT_EVENT_TYPES = frozenset({
     EV_CARD_BUILD_REQUESTED,
+    # The engine's OWN retirement of a Card whose reservation it gave up on
+    # (`engine/card_reservation.py`, the `_plan`/CAS drop helper — "a failed drop LEAKS: the caller
+    # has already given up on this Card"). It is admitted for the reason the two rows below were,
+    # and it became necessary on 2026-08-24: with the empty-authority freshness clause gone, a
+    # pre-commit build head can no longer close `skipped="stale"` merely because the board filled,
+    # so the only remaining way a speculative reservation ends without a node — and RELEASES its
+    # budget slot, which is what lets the next staging carry canonical Greedy authority — is the
+    # producer abandoning the Card and the engine retiring it. Without this row that sequence reads
+    # as "outside the clean calibration protocol" and the pre-commit accounting has no reachable
+    # case left to be measured on at all.
+    #
+    # SOURCE REVIEW, as this allow-list demands: it retires a Card and can therefore only REMOVE a
+    # candidate from selection, never add one or move a metric; the fold applies it through the same
+    # `_apply_card_drops` path as an operator drop; and it carries no cost, no metric and no node.
+    # Like the widening recorded above it only RAISES what is admitted — the allow-list is not an
+    # input to the receipt body, so `canonical_json(body)` over any log that validated before this
+    # change is byte-identical after it.
+    EV_CARD_AUTO_DROPPED,
     # The paid-attempt receipt a speculative Card producer writes BEFORE it can reach a provider
     # (`feat(durability) 7a2a2ff4`). It is emitted on exactly the path this allow-list exists to
     # admit, but that commit landed five days after this set was last touched (`8d9952a1`), so every
