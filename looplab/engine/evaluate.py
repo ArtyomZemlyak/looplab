@@ -3348,8 +3348,20 @@ class EvaluateMixin:
                     # "two runs that recorded nothing are the same evaluation" is the exact statement
                     # this mechanism exists to refuse.
                     _inputs_prov = getattr(res, "eval_inputs", None)
+                    # …and the SUBSTRATE this number was produced on. Read from the LIVE workspace
+                    # fingerprint rather than the folded pin: the pin is what `run_started` recorded
+                    # and is blind to a fix the operator promoted into the editable repo an hour ago,
+                    # which is exactly the move that has to split two nodes. It is a discriminator
+                    # only — see `comparability.py::comparability_record` — so a wrong or missing
+                    # answer can never CERTIFY a comparison, and a task with no editable repo simply
+                    # records none. Best-effort by construction: this must not cost a node its
+                    # terminal, so any failure degrades to "no substrate", i.e. unknown.
+                    try:
+                        _substrate = self._workspace_fingerprint() if self._repo_spec else None
+                    except Exception:  # noqa: BLE001 — an unreadable tree is `unknown`, never a failure
+                        _substrate = None
                     _cmp = comparability_record(task=self._task_snapshot_for_comparability(),
-                                                inputs_prov=_inputs_prov)
+                                                inputs_prov=_inputs_prov, substrate=_substrate)
                     if isinstance(_inputs_prov, dict) or _cmp is not None:
                         _merged = dict(_eval_payload.get("metric_provenance") or {})
                         if isinstance(_inputs_prov, dict):

@@ -236,7 +236,7 @@ def inferred_material(task) -> Optional[list]:
             [str(token)[:256] for token in command], [str(path)[:256] for path in paths]]
 
 
-def comparability_record(*, task=None, inputs_prov=None) -> Optional[dict]:
+def comparability_record(*, task=None, inputs_prov=None, substrate=None) -> Optional[dict]:
     """The record that rides beside a metric — `{"version", "authority", "keys"}` — or `None`.
 
     `None` when no family could be built at all, which is `unknown` at every consumer. It is a
@@ -262,7 +262,26 @@ def comparability_record(*, task=None, inputs_prov=None) -> Optional[dict]:
     if not keys:
         return None
     authority = next(name for name in AUTHORITIES if name in keys)
-    return {"version": KEY_VERSION, "authority": authority, "keys": keys}
+    record = {"version": KEY_VERSION, "authority": authority, "keys": keys}
+    # THE SUBSTRATE — the editable source tree this number was produced ON, as a digest.
+    #
+    # It is deliberately NOT an authority and is kept OUTSIDE `keys`. An authority answers "may
+    # these two numbers be read on one scale", and equality at one is a positive statement: SAME.
+    # Equal substrate says nothing of the kind — two nodes built from the same repo against
+    # different corpora are not the same evaluation — so admitting it to `keys` would let a code
+    # match certify a comparison the data refutes. It can only DISCRIMINATE: a DIFFERENT substrate
+    # makes two nodes incomparable no matter how their authorities line up.
+    #
+    # Why this exists at all: `RunState.repair_candidates()` ranks the files a run's nodes keep
+    # re-fixing precisely so an operator will promote one into the source repo, and promoting moves
+    # the ground every later node is measured on. Before this the record could not say which side of
+    # that move a node ran on. Absent when nothing was fingerprinted, which is every task with no
+    # editable repo and every log written before this shipped — and absence is `unknown`, never
+    # "the same", exactly as it is for every authority.
+    digest = _digest(substrate) if substrate else None
+    if digest:
+        record["substrate"] = digest
+    return record
 
 
 def record_of(node) -> Optional[dict]:
@@ -294,6 +313,7 @@ def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     """`SAME` | `DIFFERENT` | `UNKNOWN` for two comparability records. Never raises.
 
     THE RULE, in one place, so no surface may write a second one:
+      * both carry a SUBSTRATE and they DIFFER       -> DIFFERENT   (checked FIRST, see below)
       * either side absent, or no shared authority   -> UNKNOWN
       * the shared authority's keys DIFFER           -> DIFFERENT   (at every authority)
       * they are equal at a CERTIFYING authority     -> SAME
@@ -305,6 +325,15 @@ def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
     """
     if not isinstance(this, dict) or not isinstance(other, dict):
         return UNKNOWN
+    # THE SUBSTRATE IS CHECKED FIRST AND CAN ONLY REFUSE. Two numbers produced from different source
+    # trees are not on one scale whatever their input keys say — that is the whole point of recording
+    # it — so a substrate mismatch outranks even a `measured` agreement. It never CERTIFIES: falling
+    # through a matching substrate changes nothing below, because equal code with different data is
+    # not the same evaluation. Both sides must carry one; a missing substrate is `unknown` and
+    # deliberately not "the same", which is what keeps every pre-2026-08-24 log reading as it did.
+    mine, theirs = this.get("substrate"), other.get("substrate")
+    if isinstance(mine, str) and isinstance(theirs, str) and mine and theirs and mine != theirs:
+        return DIFFERENT
     authority = _common_authority(this, other)
     if authority is None:
         return UNKNOWN
@@ -315,6 +344,10 @@ def comparability_status(this: Optional[dict], other: Optional[dict]) -> str:
 
 # What an operator is told, per status. The `DIFFERENT` sentence is the one that has to be checkable:
 # it names the authority, because "different key" alone cannot be told apart from a bug in this file.
+_SUBSTRATE_NOTICE = (
+    "NOT COMPARABLE: {who}ran on a different source tree (substrate {theirs} vs {mine}). A fix "
+    "promoted into the editable repo moves the ground every later experiment is measured on, so the "
+    "two values are not on one scale whatever their input keys say.")
 _NOTICES = {
     DIFFERENT: ("NOT COMPARABLE: {who}measured its number against a different evaluation "
                 "({authority} key {theirs} vs {mine}). The two values are not on one scale and "
@@ -340,6 +373,14 @@ def comparability_notice(this: Optional[dict], other: Optional[dict], *,
         return ""
     who = f"run {other_run_id} " if other_run_id else "the other measurement "
     if status == DIFFERENT:
+        # THE SUBSTRATE MISMATCH GETS ITS OWN SENTENCE, for the reason recorded above `_NOTICES`: a
+        # `DIFFERENT` that names an authority must be checkable against that authority's keys, and
+        # here those keys may be IDENTICAL — the refusal came from the source tree, not from them.
+        # Falling through would print "different inferred key" with two `?` placeholders, which is
+        # exactly the "cannot be told apart from a bug in this file" failure that comment forbids.
+        mine, theirs = (this or {}).get("substrate"), (other or {}).get("substrate")
+        if isinstance(mine, str) and isinstance(theirs, str) and mine and theirs and mine != theirs:
+            return _SUBSTRATE_NOTICE.format(who=who, theirs=theirs, mine=mine)
         authority = _common_authority(this or {}, other or {}) or AUTHORITY_INFERRED
         return _NOTICES[DIFFERENT].format(
             who=who, authority=authority,
@@ -370,7 +411,17 @@ def group_token(record: Optional[dict]) -> str:
     authority = str(record.get("authority") or "")
     keys = record.get("keys")
     key = keys.get(authority) if isinstance(keys, dict) else None
-    return f"{authority}:{key}" if key else ""
+    if not key:
+        return ""
+    # The SUBSTRATE is part of the partition, and it has to be: `comparability_status` refuses a
+    # pair whose source trees differ, so a token that ignored it would put those two rows in ONE
+    # group and let a surface rank numbers the rule right above declares incomparable. Appended
+    # rather than woven in, so a record with no substrate produces the byte-identical token it
+    # always did — every log written before this shipped keeps its exact grouping.
+    substrate = record.get("substrate")
+    if isinstance(substrate, str) and substrate:
+        return f"{authority}:{key}@{substrate}"
+    return f"{authority}:{key}"
 
 
 def run_split_by_key(nodes) -> bool:
