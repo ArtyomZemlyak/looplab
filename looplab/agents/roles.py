@@ -932,10 +932,21 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  *, for_proposal: bool = True, memo_verdicts: bool = False) -> str:
     best = state.best()
     lines = [f"Goal: {state.goal}", f"Optimize direction: {state.direction}."]
+    # THE COORDINATES THAT RAN, not the ones that were asked for. `Idea.params` is a PROPOSAL, and
+    # under `params_style: "none"` the Developer realises it by editing the repo — so a repair that
+    # fits a run into memory moves the numbers while the proposal stays frozen. These two lines fed
+    # the proposal to every proposal cycle: on `runs/e5small-dr-unified-v4` the Researcher was told
+    # its champion ran `batch_size 8192 / accum 2 / n_epochs 15` for four days, when node 3 had
+    # applied `4096 / 4 / 3`. Every idea sized "one knob off the champion" was sized off a recipe
+    # that never existed. `node_params_brief` puts the applied value first and the proposal in
+    # brackets beside the ones that moved.
+    from looplab.core.param_carriers import node_params_brief
     if best is not None:
-        lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
+        lines.append(f"Best so far: node {best.id} metric={best.metric} "
+                     f"params={node_params_brief(best)}")
     if parent is not None:
-        lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
+        lines.append(f"Refine from node {parent.id}: params={node_params_brief(parent)} "
+                     f"metric={parent.metric}")
     # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
     # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
     # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent

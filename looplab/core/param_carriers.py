@@ -443,3 +443,51 @@ def resolve_declaration_python(paths: dict, parts) -> dict:
             value, line = entry
             out.setdefault(float(value), int(line))
     return out
+
+
+def node_params_brief(node, *, cap: int = 12) -> str:
+    """What this node's coordinates WERE, with what was proposed in brackets where the two differ.
+
+    THE ORDER IS THE POINT. `Idea.params` is a PROPOSAL — with `params_style: "none"` the engine
+    applies nothing and the Developer realises it by editing the repo, so a repair that fits a run
+    into memory silently moves the coordinates and the proposal stays frozen at what was asked for.
+    Every reader that printed `idea.params` was therefore printing a wish.
+
+    Measured on `runs/e5small-dr-unified-v4` node 3, the run's own long-standing champion: proposed
+    `batch_size 8192 / accum 2 / n_epochs 15`, APPLIED `4096 / 4 / 3` after six repairs — a quarter
+    of the effective batch and a fifth of the schedule. `agents/roles.py::_state_brief` fed the
+    proposal to the Researcher on every single proposal cycle as "Best so far: … params=…", so every
+    later idea was sized against a recipe that never ran. (The same reading cost the author of this
+    function an hour and a wrong "the experiment is confounded" claim about node 8, which is in fact
+    a clean one-knob delta from node 3's APPLIED coordinates.)
+
+    Falls back to the declaration, unmarked, when no applied record exists — a pre-2026-08-20 node,
+    or one whose metric was never bound. Absent evidence is not evidence of agreement, so nothing is
+    bracketed in that case: the reader sees exactly what it saw before.
+    """
+    idea = getattr(node, "idea", None)
+    declared = dict(getattr(idea, "params", None) or {})
+    provenance = getattr(node, "metric_provenance", None)
+    record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+    applied = record.get("applied") if isinstance(record, dict) else None
+    if not isinstance(applied, dict) or not applied:
+        return repr(declared) if declared else "(none recorded)"
+    diverged = record.get("diverged") if isinstance(record, dict) else None
+    moved = {}
+    if isinstance(diverged, list):
+        for row in diverged:
+            if isinstance(row, dict) and isinstance(row.get("param"), str):
+                moved[row["param"]] = row.get("declared")
+    parts = []
+    for name in sorted(applied)[:max(0, cap)]:
+        value = applied[name]
+        if name in moved:
+            parts.append(f"{name}={value} (proposed {moved[name]})")
+        else:
+            parts.append(f"{name}={value}")
+    omitted = max(0, len(applied) - cap)
+    tail = f", +{omitted} more" if omitted else ""
+    # Name the divergence COUNT even when the diverged entries fall outside the cap: "these are the
+    # numbers that ran" is only trustworthy if the reader is also told how many of them moved.
+    note = f" [{len(moved)} of {len(applied)} moved from the proposal]" if moved else ""
+    return ", ".join(parts) + tail + note
