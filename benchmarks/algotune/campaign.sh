@@ -50,6 +50,13 @@ AT="${ALGOTUNE_ROOT:-/root/benchmarks/AlgoTune}"
 OUT="${CAMPAIGN_OUT:-/root/benchmarks/campaign}"
 WS="${CAMPAIGN_WS:-/root/benchmarks/looplab_ws}"
 RUNS_ROOT="${CAMPAIGN_RUNS:-/root/benchmarks/camp-runs}"
+
+# `$OUT` holds the markers, the per-task logs AND the append-only attempt ledger, and nothing was
+# creating it. It existed by luck; the moment a reset wiped it, every task's FIRST `next_attempt`
+# write failed with "No such file or directory" and the ledger stayed empty — so `N` recomputed as
+# 1 on the next attempt too, and the attempt ids the markers carry (`a1`, `a2`, ...) would repeat
+# instead of counting. Observed on the 09:02 launch: four tasks, four failed ledger writes.
+mkdir -p "$OUT"
 BUDGET_USD="${BUDGET_USD:-0.02}"
 # The AlgoTuner config KEY for the model (an exact `config["models"].get(name)` lookup, not a suffix
 # match). Defaults to the OpenRouter shape the campaign was designed with; a box whose model comes
