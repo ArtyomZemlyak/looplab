@@ -443,3 +443,131 @@ def resolve_declaration_python(paths: dict, parts) -> dict:
             value, line = entry
             out.setdefault(float(value), int(line))
     return out
+
+
+def node_params_brief(node, *, cap: int = 12) -> str:
+    """What this node's coordinates WERE, with what was proposed in brackets where the two differ.
+
+    THE ORDER IS THE POINT. `Idea.params` is a PROPOSAL — with `params_style: "none"` the engine
+    applies nothing and the Developer realises it by editing the repo, so a repair that fits a run
+    into memory silently moves the coordinates and the proposal stays frozen at what was asked for.
+    Every reader that printed `idea.params` was therefore printing a wish.
+
+    Measured on `runs/e5small-dr-unified-v4` node 3, the run's own long-standing champion: proposed
+    `batch_size 8192 / accum 2 / n_epochs 15`, APPLIED `4096 / 4 / 3` after six repairs — a quarter
+    of the effective batch and a fifth of the schedule. `agents/roles.py::_state_brief` fed the
+    proposal to the Researcher on every single proposal cycle as "Best so far: … params=…", so every
+    later idea was sized against a recipe that never ran. (The same reading cost the author of this
+    function an hour and a wrong "the experiment is confounded" claim about node 8, which is in fact
+    a clean one-knob delta from node 3's APPLIED coordinates.)
+
+    Falls back to the declaration, unmarked, when no applied record exists — a pre-2026-08-20 node,
+    or one whose metric was never bound. Absent evidence is not evidence of agreement, so nothing is
+    bracketed in that case: the reader sees exactly what it saw before.
+    """
+    idea = getattr(node, "idea", None)
+    declared = dict(getattr(idea, "params", None) or {})
+    provenance = getattr(node, "metric_provenance", None)
+    record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+    applied = record.get("applied") if isinstance(record, dict) else None
+    if not isinstance(applied, dict) or not applied:
+        return repr(declared) if declared else "(none recorded)"
+    diverged = record.get("diverged") if isinstance(record, dict) else None
+    moved = {}
+    if isinstance(diverged, list):
+        for row in diverged:
+            if isinstance(row, dict) and isinstance(row.get("param"), str):
+                moved[row["param"]] = row.get("declared")
+    parts = []
+    for name in sorted(applied)[:max(0, cap)]:
+        value = applied[name]
+        if name in moved:
+            parts.append(f"{name}={value} (proposed {moved[name]})")
+        else:
+            parts.append(f"{name}={value}")
+    omitted = max(0, len(applied) - cap)
+    tail = f", +{omitted} more" if omitted else ""
+    # Name the divergence COUNT even when the diverged entries fall outside the cap: "these are the
+    # numbers that ran" is only trustworthy if the reader is also told how many of them moved.
+    note = f" [{len(moved)} of {len(applied)} moved from the proposal]" if moved else ""
+    return ", ".join(parts) + tail + note
+
+
+def effective_params(node) -> dict:
+    """The coordinates a node actually ran at: the applied record where it exists, the declaration
+    where it does not. ONE spelling, so every reader answers "what were this node's numbers?" the
+    same way instead of half of them reading the proposal."""
+    provenance = getattr(node, "metric_provenance", None)
+    record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+    applied = record.get("applied") if isinstance(record, dict) else None
+    declared = dict(getattr(getattr(node, "idea", None), "params", None) or {})
+    if isinstance(applied, dict) and applied:
+        merged = dict(declared)
+        merged.update(applied)          # applied WINS; a declared-only path survives as context
+        return merged
+    return declared
+
+
+def resolved_params(node, nodes_by_id, *, _depth: int = 0) -> dict:
+    """A node's coordinates RESOLVED up its lineage — its own record layered over its parent's.
+
+    A node inherits its parent's workspace (`repo_developer.implement_from` hands the parent's files
+    to the build), so a path ABSENT from a node's own record means "inherited", never "differs".
+    Comparing bare records reads absence as change and produces nonsense: on
+    `runs/e5small-dr-unified-v4`, node 8 — a card that claims ONE knob and is one — came out as a
+    fifteen-knob delta from node 3, purely because node 3's record names twelve paths that node 8's
+    one-line declaration does not repeat.
+
+    Cycle- and depth-guarded: `parent_ids` is persisted data, and a malformed chain must cost a
+    shallower answer, never a hang."""
+    if node is None or _depth > 64:
+        return {}
+    parents = list(getattr(node, "parent_ids", None) or [])
+    base: dict = {}
+    # `parents[0]` and not "every parent": `orchestrator.py` (~5510) states the merge contract —
+    # "parent[0]'s working code + entrypoint carry over and the idea directs blending in the other
+    # parent" — so the FIRST parent is the workspace this node inherited. Resolving through both
+    # would invent coordinates from a tree that never seeded this build. Verified against that line
+    # rather than assumed; `node_knob_delta` still reports against EVERY parent, which is a
+    # different question.
+    for pid in parents[:1]:
+        base = resolved_params(nodes_by_id.get(pid), nodes_by_id, _depth=_depth + 1)
+    merged = dict(base)
+    merged.update(effective_params(node))
+    return merged
+
+
+def node_knob_delta(node, parent, nodes_by_id=None) -> list[str]:
+    """Which coordinates this node moved relative to its parent — the arbiter of "one hypothesis,
+    minimal change".
+
+    Compared on EFFECTIVE values (see `effective_params`), because the question is what the two
+    experiments differed by when they RAN, not what was asked for. On
+    `runs/e5small-dr-unified-v4` node 8 vs node 3 that is exactly one path
+    (`train.training.max_grad_norm`) — the card claims a one-knob delta and the delta is one.
+
+    TWO different mistakes produce a wrong answer here and this docstring named the wrong one until
+    it was re-measured. (a) Comparing the two DECLARATIONS gives 15, not 3: node 8 declares a single
+    path and node 3 declares fourteen, so absence reads as change — that is what `resolved_params`
+    below exists to stop. (b) Comparing node 8's declaration against node 3's DECLARED coordinates
+    (8192/2/15) rather than its APPLIED ones (4096/4/3) is the separate error that made the author
+    of this function call a clean experiment confounded. Both are fixed by comparing resolved,
+    applied values; neither is fixed by the other.
+
+    It is also the deterministic test for whether a repair changed the HYPOTHESIS or merely fitted
+    it to the machine: intersect this list with the paths the hypothesis names. Empty intersection
+    means the same card still describes the experiment; non-empty means it does not.
+
+    Returns sorted paths, both directions (added, removed and changed). Empty when there is no
+    parent, or when nothing moved."""
+    if parent is None:
+        return []
+    if nodes_by_id:
+        a = resolved_params(node, nodes_by_id)
+        b = resolved_params(parent, nodes_by_id)
+    else:
+        # No lineage to resolve against: compare the child's OWN paths only. Absence on either side
+        # is "inherited", so a path the child never mentions cannot be a change it made.
+        a, b = effective_params(node), effective_params(parent)
+        return sorted({k for k in a if a.get(k) != b.get(k)})
+    return sorted({k for k in set(a) | set(b) if a.get(k) != b.get(k)})

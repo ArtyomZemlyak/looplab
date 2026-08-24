@@ -311,7 +311,40 @@ def _node_line(n, state=None) -> str:
     # next proposal then reacts to "the idea is unsound because X", not a bare taxonomy label.
     triage = getattr(n, "triage_rationale", "") if n.status is NodeStatus.failed else ""
     triage = f" — triage: {' '.join(triage.split())[:100]}" if triage else ""
-    return f"  #{n.id} {n.operator} {outcome} {fmt_params(n.idea.params)}{swept}{theme}{triage}"
+    # THE COORDINATES THAT RAN, and HOW MANY OF THEM this node actually moved.
+    #
+    # `fmt_params(n.idea.params)` printed the PROPOSAL. Under `params_style: "none"` a repair moves
+    # the numbers and the proposal stays frozen, so this line told the Researcher that node 3 ran
+    # `batch 8192 / 15 epochs` when it ran `4096 / 3`.
+    #
+    # The knob count is the arbiter of "one hypothesis, minimal change": node 8 reads Δ1 and its card
+    # claims one knob; node 4 reads Δ3 and its card claims one, which is exactly the confound that
+    # made its 0.789365 unable to answer the question it was proposed to answer. Δ0 with a different
+    # metric is its own signal — the difference was in CODE, not coordinates.
+    from looplab.core.param_carriers import node_knob_delta, node_params_brief
+    params = node_params_brief(n, cap=6)
+    delta = ""
+    parents = list(getattr(n, "parent_ids", None) or [])
+    if parents and state is not None:
+        by_id = getattr(state, "nodes", None) or {}
+        # EVERY parent, not just the first. A merge descends from two, and reporting only
+        # `parents[0]` hides half of what it combined — on the live run node 13 read "Δ0 vs #11"
+        # while also descending from #10. (`resolved_params` still resolves through parents[0]
+        # alone, because that is the workspace this node inherited; different question.)
+        shown = []
+        all_zero = True
+        for pid in parents[:3]:
+            moved = node_knob_delta(n, by_id.get(pid), by_id)
+            all_zero = all_zero and not moved
+            names = ", ".join(k.rsplit(".", 1)[-1] for k in moved[:4])
+            more = f" +{len(moved) - 4}" if len(moved) > 4 else ""
+            shown.append(f"Δ{len(moved)} vs #{pid}" + (f": {names}{more}" if moved else ""))
+        note = " — the difference is in CODE, not params" if all_zero else ""
+        delta = f" [{'; '.join(shown)}{note}]"
+    # Δ BEFORE the coordinates, deliberately: it is the most compressed decision-relevant fact on
+    # the line ("did this node test one thing or five?"), and the coordinate list is long enough to
+    # push anything after it out of a reader's first glance and out of the char budget.
+    return f"  #{n.id} {n.operator} {outcome}{delta} {params}{swept}{theme}{triage}"
 
 
 def trust_reflection(state: RunState, max_shown: int = 2) -> str:
