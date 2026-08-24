@@ -36,6 +36,8 @@ from looplab.core.concepts import (
 )
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
+                     CARD_CHILD_LIMIT, CARD_LINEAGE_MAX_DEPTH,
+                     card_child_rollup, card_kind_of,
                      CARD_IDEA_CONCEPT_FIELDS,
                      CARD_STATEMENT_MAX_CHARS,
                      INHERITABLE_CONCEPT_PROVENANCE as _INHERITABLE_CONCEPT_PROVENANCE,
@@ -624,6 +626,21 @@ def _proposal_card_concept_source(
     )
 
 
+def _bounded_card_ref(value: object) -> str | None:
+    """One card id as a foreign key, or None. SHAPE only — existence is not knowable from one row.
+
+    The same bound `_seed_cards_from_receipts` applies to a card's own id (non-empty, <= 256 chars),
+    so an edge can never name something that could not itself be a card id. Printability is required
+    because these ids are rendered into prompts and a terminal.
+    """
+    if not isinstance(value, str):
+        return None
+    ref = value.strip()
+    if not ref or len(ref) > 256 or not ref.isprintable():
+        return None
+    return ref
+
+
 def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
     """Tolerantly decode one bounded, node-less card action snapshot."""
     idea = d.get("idea") if isinstance(d.get("idea"), dict) else d
@@ -708,6 +725,16 @@ def _card_added_snapshot(d: dict) -> tuple[dict, bool]:
         steering = normalize_steering_context(d.get("steering_context"))
         if steering is not None:
             snapshot["steering_context"] = steering
+    # The RESEARCH-LINEAGE edge, decoded at the top level exactly like `steering_context` above and
+    # for the same reason: it is not an executable member. It deliberately does NOT set `owns_action`
+    # — naming the direction you serve is not owning an action, and if it counted as one a pure
+    # research direction that happened to be filed under a broader one would become an "action owner"
+    # and its `action_owner_missing` blocker would silently turn into `action_receipt_incomplete`.
+    # The edge is validated for SHAPE here and for legality (self-edge, cycle, unknown target,
+    # merged-away target) in `_apply_card_lineage`, which is the only place that can see every card.
+    parent_card_id = _bounded_card_ref(d.get("parent_card_id"))
+    if parent_card_id is not None:
+        snapshot["parent_card_id"] = parent_card_id
     return snapshot, owns_action
 
 
@@ -2683,6 +2710,124 @@ def _apply_card_selection_readiness(st: RunState, ledger: _CardLedger, aliases: 
         c.selection_ready = not blockers
 
 
+def _apply_card_lineage(ledger: _CardLedger, aliases: _CardAliases) -> None:
+    """Publish the DIRECTION -> EXPERIMENT forest: `card_kind`, `parent_card_id`, `child_card_ids`,
+    `child_rollup`.
+
+    THE RELATION THIS ADDS, and why the board needed it. Two facts had no way to be said together:
+    a Card is one minimal-change hypothesis (that is the whole point of the card/node split), and
+    research is done in FAMILIES of them under one broad question. A direction like "distil from a
+    stronger teacher" is not a minimal change and can never be made into one, so it was written to
+    the board as a row that owns no action — `identity_not_native`, `action_owner_missing` — sitting
+    among the work items forever, unbuildable by construction. Measured on
+    `runs/e5small-dr-unified-v5`: 5 of 5 rows were directions, 0 were buildable, and the board
+    nevertheless read as full. The previous grouping key was `belief_id`, a hash of the seed
+    statement TEXT, which put 140 cards of one run into 31 groups with 19 singletons: paraphrase is
+    a new belief, so it grouped nothing an operator would call the same question.
+
+    ORDERING. This phase runs AFTER `_apply_card_selection_readiness` — the only hard ordering
+    constraint in the whole ledger besides step 9's — because `card_kind` is derived from
+    `selection_provenance.action_source`, which that step writes. It runs BEFORE
+    `_publish_visible_cards` so the fields are on the rows the wire actually carries. Nothing later
+    reads them.
+
+    THE EDGES ALWAYS FORM A FOREST, and that is enforced here rather than promised. Four refusals,
+    each of which a hostile, corrupt or merely old log can produce:
+
+      * an edge naming a card that does not exist (a target dropped from a truncated log);
+      * a SELF edge, including one that becomes a self edge only after canonicalization — a card
+        merged INTO its own declared parent resolves to itself, which is exactly the case a
+        "`raw != cid`" check at decode time would miss;
+      * an edge that lies ON a cycle — every edge of the cycle, because there is no principled
+        way to elect one of three mutually-referring cards as the mistake. A card hanging OFF a
+        cycle member keeps its edge: the cycle members become roots, so its chain terminates;
+      * a chain already `CARD_LINEAGE_MAX_DEPTH` deep, which becomes its own root rather than
+        deepening a tree no consumer is willing to walk.
+
+    A refused edge leaves `parent_card_id` None — the card is a root, which is what it was before
+    this phase existed. Refusal is never an exception: one malformed row must not brick the fold.
+
+    THE ROLLUP IS NOT A STATUS, and this is the operator-visible half. Giving a parent its children's
+    worst/latest lane would park a broad direction in **Running** for months because one of two
+    hundred experiments under it is training. `card_child_rollup` returns COUNTS instead, exact even
+    where `child_card_ids` clips at `CARD_CHILD_LIMIT`.
+    """
+    cards = ledger.cards
+    _canon = aliases.canon
+
+    # 1) Kind for every row, and a clean slate for the derived halves. Reset FIRST and
+    #    unconditionally: these are derived overlays, and a row that lost its edge this fold must not
+    #    keep the one it had last fold (the ledger object is rebuilt per fold today, so this is a
+    #    fence rather than a live case — but a stale inverse edge is invisible once written).
+    for cid, c in cards.items():
+        c.card_kind = card_kind_of(c)
+        c.child_card_ids = []
+        c.child_rollup = None
+
+    # 2) Resolve every declared edge to a canonical, existing, non-self target.
+    declared: dict[str, str] = {}
+    for cid, c in cards.items():
+        raw = c.parent_card_id
+        c.parent_card_id = None
+        if not isinstance(raw, str) or not raw:
+            continue
+        target = _canon(raw)
+        if target not in cards or target == _canon(cid):
+            continue
+        declared[cid] = target
+
+    # 3) Refuse every edge that lies ON a cycle — and ONLY those. The first draft walked up from each
+    #    edge's target and refused any edge whose walk came back around, which reads right and is
+    #    wrong twice: in a pure 3-cycle EVERY edge comes back around, so all three were refused and
+    #    the "keep the rest of the chain" promise was empty; and a perfectly legal card hanging off a
+    #    cycle member lost its edge as collateral, because its walk cannot terminate either. Peeling
+    #    is exact instead of approximate. In this functional graph (one parent each) the nodes with no
+    #    CHILD can never be on a cycle, so removing them repeatedly leaves precisely the cyclic cores.
+    #
+    #    A pure cycle loses all of its edges deliberately: there is no principled way to pick which
+    #    of three mutually-referring cards is "the" mistake, and picking one would make the published
+    #    board depend on dict iteration order. Corrupt input becomes roots, not an arbitrary tree.
+    child_count: dict[str, int] = {}
+    for target in declared.values():
+        child_count[target] = child_count.get(target, 0) + 1
+    peel = [cid for cid in declared if child_count.get(cid, 0) == 0]
+    while peel:
+        cid = peel.pop()
+        target = declared[cid]
+        child_count[target] = child_count.get(target, 1) - 1
+        if child_count[target] == 0 and target in declared:
+            peel.append(target)
+    on_cycle = {cid for cid in declared if child_count.get(cid, 0) > 0}
+
+    # 4) With the cycles gone every remaining chain terminates, so depth is measurable. A card whose
+    #    ancestor chain already reaches the bound becomes a ROOT: the top `CARD_LINEAGE_MAX_DEPTH`
+    #    levels stay a tree and anything past them is published as its own family rather than
+    #    silently deepening one no consumer is willing to walk.
+    for cid, target in declared.items():
+        if cid in on_cycle:
+            continue
+        walk: str | None = target
+        depth = 0
+        while walk is not None and walk not in on_cycle and depth < CARD_LINEAGE_MAX_DEPTH:
+            walk = declared.get(walk)
+            depth += 1
+        if depth < CARD_LINEAGE_MAX_DEPTH:
+            cards[cid].parent_card_id = target
+
+    # 5) The inverse edge and the parent's rollup. `sorted` so two folds of the same log publish the
+    #    same list; the rollup is computed over EVERY child while only the first
+    #    `CARD_CHILD_LIMIT` ids are published, so a clipped parent still states its true size.
+    children: dict[str, list[str]] = {}
+    for cid, c in cards.items():
+        if c.parent_card_id:
+            children.setdefault(c.parent_card_id, []).append(cid)
+    for parent_id, kids in children.items():
+        kids.sort()
+        parent = cards[parent_id]
+        parent.child_card_ids = kids[:CARD_CHILD_LIMIT]
+        parent.child_rollup = card_child_rollup([cards[k] for k in kids])
+
+
 def _publish_visible_cards(
         st: RunState, ledger: _CardLedger, control_ids: dict[str, set[str]]) -> None:
     cards = ledger.cards
@@ -2718,8 +2863,10 @@ def derive_cards(
     The numbered phases below are the SAME sequence this function ran inline until doc 25 EV-01 split
     them out, in the same order, and the order is load-bearing: ``_card_identity_map`` must see the
     whole log before any Card exists, the merge fold must run before verdicts (evidence is unioned),
-    the operator overlay must run after enrichment and ranking (docs/23 decision 27), and
-    ``actionable`` / ``selection_ready`` read the FINAL status. ``_apply_card_belief_lineage`` is the
+    the operator overlay must run after enrichment and ranking (docs/23 decision 27),
+    ``actionable`` / ``selection_ready`` read the FINAL status, and ``_apply_card_lineage`` must run
+    AFTER selection readiness because ``card_kind`` is derived from the ``selection_provenance``
+    that step writes. ``_apply_card_belief_lineage`` is the
     one phase with NO ordering constraint of its own — it writes only the two derived research-direction
     identities (``belief_id``/``retry_of``) and no later phase reads them — so it sits where the
     sequence stays readable as "derive every projected field, then gate on the final values".
@@ -2745,4 +2892,5 @@ def derive_cards(
     _apply_card_belief_lineage(st, ledger, aliases)
     _apply_card_actionable(ledger)
     _apply_card_selection_readiness(st, ledger, aliases, building_card_nodes)
+    _apply_card_lineage(ledger, aliases)
     _publish_visible_cards(st, ledger, control_ids)

@@ -763,6 +763,17 @@ class CardIdentityProvenance(BaseModel):
         return self
 
 
+# The two things a board row can BE. See `Card.card_kind` for why the distinction is first-class and
+# why it is derived from action ownership rather than declared by whoever wrote the row.
+CARD_KIND_DIRECTION = "direction"
+CARD_KIND_EXPERIMENT = "experiment"
+CARD_KINDS = frozenset({CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT})
+# How many child ids one parent PUBLISHES. The rollup counts stay exact past this bound.
+CARD_CHILD_LIMIT = 256
+# How deep a lineage chain may be walked. Two levels is the shipped shape (direction -> experiment);
+# the bound exists so a corrupt or hostile log cannot make the fold walk forever.
+CARD_LINEAGE_MAX_DEPTH = 16
+
 CardSelectionBlocker = Literal[
     "identity_not_native", "action_owner_missing", "action_owner_ambiguous",
     "action_receipt_incomplete", "freshness_unknown", "freshness_stale",
@@ -791,6 +802,97 @@ class CardSelectionProvenance(BaseModel):
         if self.action_complete and self.action_owner_count != 1:
             raise ValueError("only one exact action owner can be complete")
         return self
+
+
+def card_kind_of(card) -> str:
+    """`direction` or `experiment` — WHICH OF THE TWO THINGS a board row is.
+
+    ONE predicate, and it is action OWNERSHIP, not readiness: a card owns an executable action iff
+    ``selection_provenance.action_source`` is not ``"none"`` (the model enforces the equivalence with
+    ``action_owner_count > 0``). Readiness is transient — a native work item is not-ready while it is
+    stale, incomplete, in flight or terminal — so a ``not selection_ready`` test would re-label a
+    perfectly ordinary experiment as a direction every time it was blocked, which is precisely the
+    confusion this function exists to end. ``engine/research_cadence.py::is_pure_belief`` applies the
+    SAME test at the append site and now calls through here, so the gate that refuses to mint a
+    duplicate direction and the board that renders one cannot drift apart.
+
+    Total by construction: an unknown/None card reads as an ``experiment``, the conservative answer,
+    because the only thing the ``direction`` label unlocks is being EXCLUDED from the work accounting
+    and given a rollup instead. Mislabelling work as a direction would hide it; the reverse merely
+    renders a question in the wrong column.
+    """
+    provenance = getattr(card, "selection_provenance", None)
+    source = getattr(provenance, "action_source", None)
+    if isinstance(source, str) and source and source != "none":
+        return CARD_KIND_EXPERIMENT
+    if provenance is None:
+        return CARD_KIND_EXPERIMENT
+    return CARD_KIND_DIRECTION
+
+
+def card_is_direction(card) -> bool:
+    """``card_kind_of(card) == CARD_KIND_DIRECTION``, spelled once for readers that want a predicate."""
+    return card_kind_of(card) == CARD_KIND_DIRECTION
+
+
+# The lifecycle lanes a child can be in, folded into the four buckets a PARENT is asked about. The
+# mapping is deliberately total over `Card.status`'s open vocabulary: an unrecognised future lane
+# counts into `children` and into no bucket, so the four never overstate what was actually seen and
+# `children` never disagrees with the number of rows.
+_ROLLUP_BUCKETS = {
+    "proposed": "open", "speculating": "open", "built-awaiting-commit": "open", "coded": "open",
+    "building": "running", "running": "running",
+    "evaluated": "evaluated",
+    "failed": "failed", "gated": "failed",
+    "dropped": "dropped",
+}
+
+
+def card_child_rollup(children) -> dict | None:
+    """A direction's own progress, summed from the children that answer it. ``None`` for no children.
+
+    WHY A ROLLUP AND NOT A DERIVED STATUS. The obvious design gives a parent the "worst" or "latest"
+    lane of its children, and the operator named the failure it produces before it was built: a broad
+    direction would then sit in **Running** for months because one of two hundred experiments under it
+    happens to be training. A lane is a statement about ONE piece of work. A direction is not one
+    piece of work, so it gets counts — which is also the only form that stays honest as the family
+    grows: ``17 done · 2 running · 4 no-result`` says more at 23 children than any single word could.
+
+    ``children`` is EXACT even when ``Card.child_card_ids`` clips at ``CARD_CHILD_LIMIT``: the count
+    is what an operator reasons about, the id list is only what the UI can draw.
+
+    ``best_delta`` is the best improvement-over-parent any child measured, with the child that owns
+    it — the direction's actual research answer, and the one number worth putting beside its title.
+    A child with no measurement contributes nothing rather than a zero.
+    """
+    rows = [c for c in (children or []) if c is not None]
+    if not rows:
+        return None
+    counts = {"open": 0, "running": 0, "evaluated": 0, "failed": 0, "dropped": 0}
+    nodes = 0
+    best_delta: float | None = None
+    best_card_id: str | None = None
+    for child in rows:
+        bucket = _ROLLUP_BUCKETS.get(str(getattr(child, "status", "") or ""))
+        if bucket is not None:
+            counts[bucket] += 1
+        evidence = getattr(child, "evidence", None)
+        if isinstance(evidence, list):
+            nodes += len(evidence)
+        delta = getattr(child, "best_delta", None)
+        # `isinstance(True, float)` is False, so a bool cannot pose as a delta here; NaN/inf are
+        # refused because a direction headlined "best +inf" is worse than one headlined nothing.
+        if isinstance(delta, float) and math.isfinite(delta):
+            if best_delta is None or delta > best_delta:
+                best_delta = delta
+                best_card_id = str(getattr(child, "id", "") or "") or None
+    return {
+        "children": len(rows),
+        **counts,
+        "nodes": nodes,
+        "best_delta": best_delta,
+        "best_card_id": best_card_id,
+    }
 
 
 def surviving_work_item_aliases(card) -> list[str]:
@@ -1082,6 +1184,40 @@ class Card(BaseModel):
     # The immediate edge only, never a walked chain — node parents are always older than their children,
     # so the edges form a DAG, and publishing one hop keeps it that way for every consumer.
     retry_of: Optional[str] = None
+    # --- RESEARCH LINEAGE: the one card->card edge that is NOT a retry (DERIVED; `card_ledger.py`).
+    #
+    # `retry_of` above answers "is this the same question again?" and `belief_id` answers it by TEXT.
+    # Neither can say "this experiment serves that broad research direction", and that is the relation
+    # the board was missing: a direction like "cross-distillation from a stronger teacher" is not one
+    # minimal-change hypothesis and can never be one — it is the QUESTION a family of minimal-change
+    # hypotheses answers. Until this edge existed the two lived in one flat list, so a direction was
+    # rendered as an unbuildable work item (`identity_not_native`, `action_owner_missing`) and the
+    # board looked full of work nothing could execute. Measured on `runs/e5small-dr-unified-v5`:
+    # 5 of 5 board rows were directions and none of them was buildable.
+    #
+    # `parent_card_id` is DURABLE-derived — decoded from the `card_added` payload's own
+    # `parent_card_id` member, and re-pointable by a `card_relinked` control event. It is deliberately
+    # NOT part of the action digest: a research-lineage annotation must never change the executable
+    # identity, exactly as `steering_context` does not. It is canonicalized through merges, may never
+    # be a self-edge, and may never close a cycle — `_apply_card_lineage` walks the chain and refuses
+    # the edge that would close one, so these edges always form a forest.
+    parent_card_id: Optional[str] = None
+    # The inverse edge, DERIVED and sorted. Bounded because a direction with a thousand children is a
+    # rendering problem, not a research one; the counts in `child_rollup` stay EXACT when this clips.
+    child_card_ids: list[str] = Field(default_factory=list, max_length=CARD_CHILD_LIMIT)
+    # A direction's own progress, rolled up from its children so a parent never has to borrow a
+    # child's lifecycle lane. That is the whole reason the rollup exists instead of a derived
+    # `status`: an operator must not see a months-long direction sitting in "Running" because one of
+    # its two hundred experiments is. None on a card with no children. See `card_child_rollup`.
+    child_rollup: Optional[dict] = None
+    # WHICH OF THE TWO THINGS THIS ROW IS (DERIVED, from `selection_provenance.action_source`):
+    # `direction` — owns no executable action, so it is a research question children answer;
+    # `experiment` — owns one action, the minimal-change hypothesis the engine can actually run.
+    # Identity, never readiness: a native work item that is merely stale/in-flight/terminal is still
+    # an `experiment`. This is the SAME predicate `engine/research_cadence.py::is_pure_belief` applies
+    # at the append site, published here so the board, the prompts, the tools and that gate read ONE
+    # spelling. Frozen vocabulary for the UI contract: kinds may be added, never re-spelled.
+    card_kind: str = CARD_KIND_EXPERIMENT
     # Identity / lineage.
     merged_into: Optional[str] = None                   # canonical id if this card was merged away
     aliases: list[str] = Field(default_factory=list)    # ids folded INTO this canonical card

@@ -35,7 +35,8 @@ _SKIP = object()
 # this is the explicit wire DTO. Adding a Card or event field does not publish it until this
 # boundary is reviewed; fixed order also makes byte output deterministic across event/mapping order.
 _FIELDS = (
-    "id", "belief_id", "retry_of", "status", "status_nodes", "verdict", "actionable", "identity",
+    "id", "belief_id", "retry_of", "card_kind", "parent_card_id", "child_rollup",
+    "status", "status_nodes", "verdict", "actionable", "identity",
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
     "seed_statement", "source",
@@ -65,7 +66,8 @@ _TEXT_LIMITS = {
     "dropped_reason": 800,
 }
 _REF_FIELDS = {
-    "id", "belief_id", "retry_of", "source", "status", "verdict", "merged_into", "dropped_by", "operator",
+    "id", "belief_id", "retry_of", "card_kind", "parent_card_id",
+    "source", "status", "verdict", "merged_into", "dropped_by", "operator",
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
@@ -82,6 +84,19 @@ _REF_LIST_FIELDS = {"aliases", "belief_aliases", "concept_tags", "lesson_refs", 
 # it on the wire a returned card reads `proposed` with no evidence — i.e. indistinguishable from one
 # that was never built at all — and the operator loses the only record that the run paid for it.
 _INT_LIST_FIELDS = {"evidence", "parent_ids", "status_nodes", "discarded_nodes"}
+# The direction rollup's closed vocabulary (`core/cards.py::card_child_rollup`).
+#
+# `Card.child_card_ids` is deliberately NOT on this wire. Every edge it inverts is already published
+# — one `parent_card_id` per card — so a client rebuilds the child list itself from the same card
+# map it is already holding, exactly as it rebuilds the node->card join. Publishing it as well would
+# put up to `CARD_CHILD_LIMIT` ids on every parent to say something the response already contains,
+# and would collide with `_ref_list_kind`'s 32-item lossless bound: a healthy direction with forty
+# experiments under it would then report its whole card projection INCOMPLETE for a list nobody
+# needed. The COUNTS below stay exact regardless of how many ids any layer chose to carry.
+_ROLLUP_KEYS = frozenset({
+    "children", "open", "running", "evaluated", "failed", "dropped", "nodes",
+    "best_delta", "best_card_id",
+})
 _FOOTPRINT_KEYS = {"gpus", "gpu_mem_mib", "proposed_by", "finalized_by", "pinned_by"}
 _NOVELTY_KEYS = {"grade", "level", "near_node", "near_generation", "recommendation"}
 _PRIOR_RUN_KEYS = {
@@ -1001,6 +1016,7 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
         lambda value: None if value is None else _generations(value),
         lambda raw, bounded: (isinstance(raw, dict) and len(raw) <= _MAX_ITEMS
                               and _generations(raw) == raw == bounded)),
+    "child_rollup": _named_scalars_kind(_ROLLUP_KEYS),
     "footprint": _named_scalars_kind(_FOOTPRINT_KEYS),
     "resource_pin": _named_scalars_kind(_FOOTPRINT_KEYS),
     "novelty_verdict": _named_scalars_kind(_NOVELTY_KEYS, free_text=True),
