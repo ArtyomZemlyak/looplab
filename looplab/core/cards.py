@@ -1331,6 +1331,27 @@ class Card(BaseModel):
     space: dict[str, list[float]] = Field(default_factory=dict)
     eval_profile: Optional[str] = None
     eval_timeout: Optional[float] = Field(default=None, gt=0)
+    # WHAT ACTUALLY RAN, beside the PROPOSAL `params` above (DERIVED; `card_ledger.py`).
+    #
+    # `params` is receipt-bound — it is inside the action digest, so it cannot be corrected without
+    # unmaking the card's identity, and that is right: the receipt records what was PROPOSED. What
+    # was wrong is that nothing beside it recorded what the experiment then ran at. Under
+    # `params_style: "none"` the engine applies nothing and the Developer realises the idea by
+    # editing the repo, so a repair that fits a training into memory moves the numbers while the
+    # proposal stays frozen. Measured over every log on disk: 457 comparisons, 41 diverged, 18 of
+    # them on nodes that produced a metric — and the e5 champion at 0.793426 is recorded as
+    # batch 8192 / accum 2 / 15 epochs and RAN batch 512 / accum 32 / 3 epochs.
+    #
+    # The readers were fixed in August (`param_carriers.node_params_brief`, the digest's node line),
+    # but they read a NODE. A card is the row an operator and the Researcher both reason about, and
+    # it still published the proposal alone.
+    #
+    # `applied_params_node` is not decoration: this is a claim about coordinates, so it must name
+    # the experiment it is a claim ABOUT. When a card owns several evidence nodes the LATEST
+    # evaluated one wins and its id is published, rather than merging several nodes' numbers into a
+    # composite no single run ever occupied.
+    applied_params: dict[str, float] = Field(default_factory=dict)
+    applied_params_node: Optional[int] = None
     concept_tags: list[str] = Field(default_factory=list)
     # exact, additive ownership receipt for concept_tags.  Without it a merged card could
     # show the union/override from several evidence nodes beside one misleading scalar provenance tier.

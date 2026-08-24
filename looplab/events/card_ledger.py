@@ -2233,6 +2233,50 @@ def _recompact_card_enrichment(
     return {card_id for (card_id, _field), count in omitted.items() if count > 0}
 
 
+def _apply_card_applied_params(st: RunState, ledger: _CardLedger) -> None:
+    """Publish, beside every card's PROPOSED `params`, the coordinates its experiment actually ran at.
+
+    `Card.params` is receipt-bound and stays exactly as it was minted — the receipt records what was
+    proposed and correcting it would unmake the card's identity. What was missing is the other half.
+    Under `params_style: "none"` the engine applies nothing and the Developer realises the idea by
+    editing the repo, so a repair that fits a training into memory moves the numbers while the
+    proposal stays frozen: 457 comparisons across the corpus, 41 diverged, 18 on nodes that produced
+    a metric, and the e5 champion recorded at batch 8192 / accum 2 / 15 epochs ran 512 / 32 / 3.
+
+    THE LATEST EVALUATED EVIDENCE NODE WINS, and its id is published with the numbers. Two rules,
+    each refusing a tempting alternative:
+
+      * MERGING several evidence nodes' applied maps would mint a coordinate set no single run ever
+        occupied — the same fabrication as reading the proposal, one step subtler.
+      * Picking the BEST node would need the run direction and would make the row move when an
+        unrelated node scored. "What this card most recently ran at" is a fact about the card; "what
+        its best attempt ran at" is a fact about a ranking, and the two must not share a field.
+
+    `effective_params` is NOT used here, deliberately: it falls back to the DECLARATION when no
+    applied record exists, which is right for a reader asking "what were this node's numbers" and
+    wrong for a field whose entire purpose is to be distinguishable from the declaration. A card
+    whose nodes predate the applied record (or never bound a metric) publishes NOTHING and the empty
+    map means "not recorded", never "the same as proposed".
+    """
+    for card in ledger.cards.values():
+        card.applied_params = {}
+        card.applied_params_node = None
+        for node_id in sorted(card.evidence, reverse=True):
+            node = st.nodes.get(node_id)
+            if node is None or node.status is not NodeStatus.evaluated:
+                continue
+            provenance = getattr(node, "metric_provenance", None)
+            record = provenance.get("applied_params") if isinstance(provenance, dict) else None
+            applied = record.get("applied") if isinstance(record, dict) else None
+            if not isinstance(applied, dict) or not applied:
+                continue
+            bounded = normalize_extra_metrics(applied, max_items=64)
+            if bounded:
+                card.applied_params = bounded
+                card.applied_params_node = node_id
+            break
+
+
 def _apply_card_enrichment(
     st: RunState,
     ledger: _CardLedger,
@@ -2885,6 +2929,7 @@ def derive_cards(
     dropped = _apply_card_drops(st, ledger, aliases)
     building_card_nodes = _card_building_ids(st, ledger, aliases)
     _apply_card_status(st, ledger, dropped, building_card_nodes)
+    _apply_card_applied_params(st, ledger)
     _apply_card_enrichment(st, ledger, aliases, card_enrichment_omissions)
     _apply_card_ranking(st, identity, ledger, aliases)
     _apply_card_operator_overlays(st, ledger, aliases)

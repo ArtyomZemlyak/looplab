@@ -45,7 +45,8 @@ _FIELDS = (
     "belief_aliases",
     "dropped_reason", "dropped_by", "parent_id", "parent_ids", "parent_generations",
     "scored_against", "scored_against_generation", "scored_against_empty", "operator",
-    "params", "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
+    "params", "applied_params", "applied_params_node",
+    "space", "eval_profile", "eval_timeout", "concept_tags", "priority", "pinned",
     "foresight_rank", "confidence",
     "footprint", "resource_pin", "novelty_verdict", "cross_run_prior", "research_origin", "lesson_refs",
     "claim_refs", "steering_context", "provenance_tier",
@@ -70,7 +71,8 @@ _REF_FIELDS = {
     "source", "status", "verdict", "merged_into", "dropped_by", "operator",
     "eval_profile", "research_origin", "provenance_tier",
 }
-_INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority", "foresight_rank"}
+_INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority",
+               "foresight_rank", "applied_params_node"}
 _NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
@@ -1011,6 +1013,10 @@ _FIELD_KINDS: dict[str, _FieldKind] = {
         _card_selection_provenance, _card_selection_provenance_lossless),
     "selection_blockers": _FieldKind(_card_selection_blockers, _card_selection_blockers_lossless),
     "params": _mapping_kind(_params),
+    # Same projector as `params` on purpose: the pair is only useful when a reader can put the
+    # two maps side by side, and two bounding rules would let one of them clip where the other
+    # did not and make an agreement look like a divergence.
+    "applied_params": _mapping_kind(_params),
     "space": _mapping_kind(_space),
     "parent_generations": _FieldKind(
         lambda value: None if value is None else _generations(value),
