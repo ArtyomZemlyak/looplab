@@ -56,7 +56,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# FIND OUR OWN PACKAGE. Every driver script runs this file with ALGOTUNE's interpreter -- seven of
+# them do, because the summary reads the arena's reports and that is the venv nearest to hand -- and
+# `looplab` is not installed there. The result was `ModuleNotFoundError: No module named 'looplab'`
+# at the last step of a campaign that had already run for hours: the comparison table, the whole
+# point of the exercise, was never printed, and the arms had to be compared by hand.
+#
+# Fixing the seven call sites would leave the eighth to get it wrong. This file sits at
+# `<repo>/benchmarks/algotune/`, so it can say where its own package lives and does. `parents[2]`
+# resolves against the tree this copy belongs to, which matters: run from the pinned `looplab-armb`
+# checkout it must import THAT tree's `looplab`, not the working clone's.
+_REPO = Path(__file__).resolve().parents[2]
+if (_REPO / "looplab" / "__init__.py").exists() and str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
 
 
 def _to_float(value):
