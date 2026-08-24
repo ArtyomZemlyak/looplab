@@ -89,13 +89,59 @@ NTASKS="$(echo $TASKS | wc -w)"
 [ "$MAX_LANES" -gt "$NTASKS" ] && MAX_LANES=$NTASKS
 LANE_COUNT="${LANES:-$MAX_LANES}"
 
-# One dedicated, non-overlapping core range per lane.
+# One dedicated core range per lane -- OVER WHOLE PHYSICAL CORES, not over CPU NUMBERS.
+#
+# THE DEFECT THIS REPLACES, and it invalidated every number the arena produced before 2026-08-24.
+# A contiguous `LO-HI` range assumes CPU numbering is a partition of the hardware. On this box
+# (AMD EPYC 9454P, 48 physical cores, SMT 2) it is not: cpus 0-47 are the FIRST thread of each
+# physical core and 48-95 are their siblings, so `0-21` and `44-65` — lanes 1 and 3 — sat on the
+# SAME SILICON (cpu0 pairs with cpu48, cpu17 with cpu65). Every lane shared physical cores with
+# another; `taskset` separated the numbers and nothing separated the hardware.
+#
+# What that cost: re-scoring ONE unchanged solver under a quiet machine against the number the
+# campaign recorded for it under four live lanes gave **57.36 against 1.0103**. A speedup is
+# `baseline_ms / solver_ms` with the baseline taken at one moment and the solver at another, so a
+# neighbour on your own physical core does not add noise — it moves the answer by a factor of 57.
+#
+# The lane is therefore built from SIBLING PAIRS: 11 whole physical cores = 22 logical, four lanes
+# = 44 of the 48, and the remaining four physical cores carry the meter, the watchdog and any
+# diagnostic. `CORE_OFFSET` still shifts the allocation, now in units of physical cores.
 declare -a LANE_CPUS
-for L in $(seq 0 $((LANE_COUNT - 1))); do
-  LO=$(( CORE_OFFSET + L * CORES_PER_LANE ))
-  HI=$(( LO + CORES_PER_LANE - 1 ))
-  LANE_CPUS[$L]="${LO}-${HI}"
-done
+_LANE_PLAN="$(python3 - "$LANE_COUNT" "$CORES_PER_LANE" "$CORE_OFFSET" <<'PYEOF'
+import sys
+
+lanes, per_lane, offset = (int(x) for x in sys.argv[1:4])
+phys_per_lane = max(1, per_lane // 2)          # a lane owns whole cores; 22 logical = 11 physical
+pairs = []
+seen = set()
+for cpu in range(4096):
+    try:
+        with open(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list") as fh:
+            sibs = tuple(sorted(int(x) for x in fh.read().strip().split(",")))
+    except OSError:
+        break
+    if sibs not in seen:
+        seen.add(sibs)
+        pairs.append(sibs)
+need = offset + lanes * phys_per_lane
+if need > len(pairs):                          # not enough physical cores: fall back and SAY SO
+    print("FALLBACK", file=sys.stderr)
+    for lane in range(lanes):
+        lo = offset + lane * per_lane
+        print(f"{lo}-{lo + per_lane - 1}")
+    raise SystemExit(0)
+for lane in range(lanes):
+    chunk = pairs[offset + lane * phys_per_lane: offset + (lane + 1) * phys_per_lane]
+    print(",".join(str(c) for pair in chunk for c in sorted(pair)))
+PYEOF
+)"
+_L=0
+while IFS= read -r _line; do
+  [ -n "$_line" ] || continue
+  LANE_CPUS[$_L]="$_line"
+  _L=$((_L + 1))
+done <<< "$_LANE_PLAN"
+[ "$_L" = "$LANE_COUNT" ] || { echo "lane plan produced $_L ranges for $LANE_COUNT lanes"; exit 2; }
 
 cd "$AT"
 # shellcheck disable=SC1091

@@ -283,6 +283,7 @@ _LAYOUT = {
     "regression": "adapters",
     "repair_verify": "engine",  # did a repair DO what its rationale said? (deterministic rung)
     "replay": "events",
+    "stop_account": "events",
     "repo_developer": "adapters",
     "repo_task": "adapters",
     "repo_write_tools": "adapters",
