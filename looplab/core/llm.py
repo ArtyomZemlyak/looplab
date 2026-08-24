@@ -66,7 +66,8 @@ from looplab.core.llm_transient import (  # noqa: F401
     _err_body, _inband_stream_error, _is_reasoning_reject, _is_stream_options_reject,
     _is_throttle_403, _retry_after_of, _retry_after_seconds, _sdk_transient, classify_llm_failure)
 from looplab.core.llm_streaming import (  # noqa: F401
-    _chunk_has_content, _shutdown_pool_sockets, _stream_raw_socket, _stream_with_idle_guard)
+    _chunk_has_content, _shutdown_pool_sockets, _sse_is_done, _sse_is_error, _stream_raw_socket,
+    _stream_with_idle_guard, defer_inband_error)
 from looplab.core.llm_toolcall import (  # noqa: F401
     _ANSWER_FIELDS, _CODE_SPAN_RE, _FINAL_NAMES, _NATIVE_INVOKE_RE, _NATIVE_OPEN_RE,
     _NATIVE_PARAM_RE, _apply_native_tool_calls, _args_complete, _assistant_text, _clean_thinking,
@@ -592,6 +593,32 @@ def _interrupted_stream_is_salvageable(*, produced_content: bool, produced_tool_
     be a knob defending against a case this rule already removes.
     """
     return produced_content or produced_tool_calls or produced_reasoning
+
+
+def salvaged_lengths(message: Optional[dict]) -> dict[str, int]:
+    """How much of a salvaged answer is WHERE, in characters. One rule, because a notice that
+    measures the wrong part of an answer is how a working fix gets read as a broken one.
+
+    The first version of `_note_truncated_stream` measured `message["content"]` alone and reported
+    `keeping the 0 characters that arrived` about a call that had in fact retained 220,685 deltas —
+    all of them REASONING. That is the normal shape here, not a corner: a reasoning model cut by a
+    gateway mid-think has spent everything on `reasoning_content` and has not begun its answer, and
+    `_keepalive_stall` already names that case a real-if-truncated response. The notice said nothing
+    was kept, and the salvage was reported as a failure on live fire.
+
+    So all three carriers are counted, and separately, because they mean different things to a
+    reader: `content` is the answer, `reasoning` is what the model spent the money thinking, and
+    `tool_arguments` is an answer delivered as a call — a completion that never touches `content` at
+    all, which is also why `benchmarks/meter`'s delta counter under-reads a tool-call stream fivefold.
+    """
+    msg = message or {}
+    calls = msg.get("tool_calls") or []
+    return {
+        "content": len(msg.get("content") or ""),
+        "reasoning": len(msg.get("reasoning") or ""),
+        "tool_arguments": sum(len((c.get("function") or {}).get("arguments") or "")
+                              for c in calls if isinstance(c, dict)),
+    }
 
 
 def _envelope_is_truncated(body: Optional[dict]) -> bool:
@@ -1202,6 +1229,11 @@ class OpenAICompatibleClient:
         finish = None
         usage: dict = {}
         truncated = False
+        # Read the stream to its END even if it reports a failure part-way through: the usage frame
+        # a gateway synthesises for a cut generation arrives AFTER its error frame, and the SDK's own
+        # iteration would close the response at the error and lose it forever. See
+        # `llm_streaming.defer_inband_error` for the measurement that cost.
+        inband = defer_inband_error(stream)
         try:
             for ev in _stream_with_idle_guard(stream, idle_limit, first_byte_limit):
                 if getattr(ev, "usage", None):
@@ -1236,11 +1268,18 @@ class OpenAICompatibleClient:
             # NARROW twice over. `openai.APIError` (not `Exception`) for the reason
             # `_policy_unparseable` states: a ValueError/AttributeError out of the merge code above
             # is OUR bug and must propagate loudly rather than be laundered into a plausible-looking
-            # partial answer. Then `_inband_stream_error` again, so a stall or a reset keeps
+            # partial answer. Then the family test again, so a stall or a reset keeps
             # `_policy_connection`'s answer and only the family this fix has evidence about changes.
-            if not (_inband_stream_error(exc) and _interrupted_stream_is_salvageable(
-                    produced_content=bool(content), produced_tool_calls=bool(tcs),
-                    produced_reasoning=bool(reasoning))):
+            #
+            # `inband` wins over the exception's own class. Once the endpoint has said in band that
+            # it failed, that IS why this call ended; if the socket then went silent and the idle
+            # guard fired, the APITimeoutError is a fact about the socket arriving after the fact
+            # about the call. Reading the class alone would send a 220k-token cut generation to
+            # `_policy_connection` and re-buy thirty minutes of it.
+            if not ((_inband_stream_error(exc) or "held" in inband)
+                    and _interrupted_stream_is_salvageable(
+                        produced_content=bool(content), produced_tool_calls=bool(tcs),
+                        produced_reasoning=bool(reasoning))):
                 raise
             truncated = True
         if truncated:
@@ -1631,25 +1670,37 @@ class OpenAICompatibleClient:
         request's key would be served to every later identical ask for the rest of the process, so
         one cut stream becomes a permanently amputated answer — the T7 cache's own reason for
         existing (a retry, a panel re-ask, a verify pass) is exactly the traffic that would hit it.
-        And it usually arrives UNPRICED: the provider's usage frame is the LAST thing on the wire,
-        so a stream cut before it carries no token counts at all. `CostAccountant.add` has already
-        run, which is the fix that matters — the call now counts (`calls` +1) and counts as
-        unpriced (`priced_calls` +0) instead of never reaching the ledger at all. What it cannot do
-        is state an amount, and `cost_is_reported`'s rule is that UNPRICED IS NOT FREE.
+        And it may arrive UNPRICED. The provider's usage frame is the LAST thing on the wire, so
+        whether a cut call can be priced at all depends on whether anything followed the failure.
+        `defer_inband_error` is what makes that question winnable — it reads the stream to its end
+        rather than stopping at the error frame — so a gateway that synthesises usage for what it
+        already forwarded now prices the call normally, and the run's ledger reconciles to the cent
+        instead of reporting 4.8 % of a $1.00 ceiling against a real 11.0 %. When nothing follows,
+        `CostAccountant.add` has still run: the call counts (`calls` +1) and counts as unpriced
+        (`priced_calls` +0) rather than never reaching the ledger at all. What it must never do is
+        invent an amount — `cost_is_reported`'s rule is that UNPRICED IS NOT FREE, and a token count
+        this client derived from its own delta count would be a number nobody measured (`meter`'s
+        own delta estimator reads five times low on a tool-call stream).
+
+        The notice therefore says WHICH of the two happened, because they ask different things of
+        the operator: a priced cut is spend the budget will enforce, an unpriced one is spend only
+        the invoice will ever show.
 
         WARNING, at the level and for the reason `_policy_throttled`'s backoff notice uses: it is
         what logging's `lastResort` handler puts on stderr in a CLI run that configured no logging,
         and a silent under-count is what let five arms of one 20-run campaign overrun a $1.00
         ceiling by 6.5-19.2 % while their own ledgers reported them under it.
         """
-        text = ((body.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        kept = salvaged_lengths(((body.get("choices") or [{}])[0] or {}).get("message"))
         _LOG.warning(
-            "%s cut a streaming response mid-body; keeping the %d characters that arrived rather "
-            "than regenerating them, and NOT caching them. %s", self.base_url, len(text),
+            "%s cut a streaming response mid-body; keeping the %d characters that arrived "
+            "(%s) rather than regenerating them, and NOT caching them. %s",
+            self.base_url, sum(kept.values()),
+            " + ".join(f"{n} {where}" for where, n in kept.items() if n) or "nothing usable",
+            f"Priced at ${usage['cost']:.6f} from the usage the stream did report."
+            if usage.get("priced") else
             "The provider reported no usage for it, so this call is recorded as UNPRICED — real "
-            "spend that this run's ledger cannot state and the endpoint's invoice will."
-            if not usage.get("priced") else
-            "The provider had already reported usage, so it is priced normally.")
+            "spend that this run's ledger cannot state and the endpoint's invoice will.")
 
     def _model_params(self) -> dict:
         """The generation's model_parameters (Langfuse generation metadata): sampling temperature +
@@ -1754,6 +1805,13 @@ class OpenAICompatibleClient:
                             # socket stayed open until GC, so a UI reader that navigates away mid-answer
                             # leaked a live connection out of the shared pool.
                             _stream = self._bounded_create(kwargs, header_join)
+                            # Same reorder as `_accumulate_stream`, for the same money rule: the
+                            # usage frame a gateway synthesises for a cut generation arrives after
+                            # its error frame, and `_stream_envelope_is_billable`'s `usage_observed`
+                            # row is worth nothing if the SDK closes the response before we reach it.
+                            # Keeping the two streaming paths on ONE rule is also the point — them
+                            # disagreeing about a cut stream is the defect this whole change fixes.
+                            defer_inband_error(_stream)
                             _body = self._streaming_body()
                             _body.__enter__()
                             try:

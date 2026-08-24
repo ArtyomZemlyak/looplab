@@ -211,6 +211,51 @@ def _fmt(value: float | None) -> str:
     return "--" if value is None else f"{value:.4f}"
 
 
+# ARM A'S OWN WORD FOR "THE SOLVER WAS WRONG SOMEWHERE".
+#
+# The two arms enforce the same rule — 100% instance validity or no speedup — but they RECORD the
+# outcome differently, and until 2026-08-24 this file turned that into a scoring asymmetry. Arm B
+# writes `{"speedup": 0.0, "no_speedup": {"reason": "invalid_results"}}`, which is a measured zero
+# and was averaged in. Arm A writes `final_speedup: "N/A"` into the summary and the REASON into
+# `reports/agent_failures.json`, which nothing here read — so its zero printed as `--` and dropped
+# out of the means. Live on one task: `A-spectral_clustering` 98/100 valid, `B-spectral_clustering`
+# 95/100 valid; the first vanished, the second scored 0.0. Both directions favoured arm A.
+#
+# The choice is to COUNT BOTH AS ZERO rather than to exclude both. The arena's rule is that a solver
+# wrong on any instance is not scored, and a framework that submits one has failed the task — that
+# is a result, not a missing measurement. Excluding it would let an arm escape the consequence of
+# its own wrong answers, which is the larger distortion of the two.
+#
+# `missing_metrics` with `final_eval_success=True` is the shape that means it: the evaluation RAN
+# and produced no valid speedup. A reason that does not mean that leaves the row `--`, because a
+# task-arm that never got to submit is genuinely unmeasured.
+_ARM_A_SOLVER_FAULT = frozenset({"missing_metrics"})
+
+
+def arm_a_failure(algotune_root: Path, task: str) -> tuple:
+    """`(is_solver_fault, reason, stamp)` for arm A on this task, from the arena's own record.
+
+    The file is a MERGE TARGET — `AlgoTuner/main.py::update_failure_json` loads it and `setdefault`s
+    into it — so rows from earlier campaigns survive a rerun. The timestamp is returned with the
+    reason so a caller can say which campaign it belongs to instead of assuming this one.
+    """
+    try:
+        raw = json.loads((algotune_root / "reports" / "agent_failures.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return (False, "", "")
+    row = raw.get(task) or {}
+    if not isinstance(row, dict):
+        return (False, "", "")
+    for _model, rec in row.items():
+        if not isinstance(rec, dict):
+            continue
+        reason = str(rec.get("reason") or "")
+        if reason in _ARM_A_SOLVER_FAULT and "final_eval_success=True" in str(rec.get("details") or ""):
+            return (True, reason, str(rec.get("timestamp_utc") or ""))
+        return (False, reason, str(rec.get("timestamp_utc") or ""))
+    return (False, "", "")
+
+
 def marker_state(final_dir: Path | None, arm: str, task: str) -> str:
     """What `campaign.sh` says about this task-arm: `"done"`, `"refused"` or `"unfinished"`.
 
@@ -324,7 +369,23 @@ def main() -> int:
             vb, why = _arm_b_final(args.final_dir / f"B-{task}.final.json")
         else:
             vb, why = _arm_b_train(args.runs_root / task / "run"), ""
+        # BOTH ARMS' MARKERS, and the same words for both. Until 2026-08-24 this line read only
+        # arm B's, so the wall-cut exclusion, the WALL-CUT banner and the "still owed" line were
+        # arm-B-only — and in the campaign of 2026-08-23 arm A was wall-cut on 13 of 19 tasks
+        # against arm B's 3. All thirteen printed as `--`, indistinguishable from "arm A was never
+        # run", and the mean a reader takes away said nothing about one arm hitting the clock on two
+        # thirds of the suite.
         state = marker_state(args.final_dir, "B", task)
+        state_a = marker_state(args.final_dir, "A", task)
+        if va is None:
+            fault, a_reason, a_stamp = arm_a_failure(args.algotune_root.resolve(), task)
+            if fault:
+                # Scored, not dropped — the same treatment arm B's `invalid_results` already gets.
+                va = 0.0
+                why = why or f"arm A {a_reason} ({a_stamp[:10]}) — wrong on some instances, scored 0"
+        if va is not None and state_a in ("unfinished", "refused"):
+            why = why or f"arm A {state_a} (campaign.sh wrote no .done marker)"
+            va = None
         if vb is not None and state in ("unfinished", "refused"):
             # The driver's verdict outranks the leftover file. A score written before the task-arm
             # was interrupted is not a measurement of a $1.00 run, and printing it beside seventeen
@@ -338,10 +399,14 @@ def main() -> int:
             # because the operator needs to see that the wall is binding at all: three of the five
             # cuts measured on 2026-08-23 had not reached the budget, one of them at $0.14 of $1.00.
             why = why or "arm B cut at the wall clock (rc=124), not by the budget"
-        rows.append((task, va, vb, why, state))
-        # A wall-cut row is PRINTED (above) and not PAIRED: the mean is the one number a reader
-        # takes away, and it may only contain task-arms that ran to the ceiling they are compared at.
-        if va is not None and vb is not None and state != "wall_cut":
+        if va is not None and state_a == "wall_cut":
+            why = why or "arm A cut at the wall clock (rc=124), not by the budget"
+        cut = "wall_cut" in (state, state_a)
+        rows.append((task, va, vb, why, "wall_cut" if cut else state))
+        # A wall-cut row on EITHER side is PRINTED (above) and not PAIRED: the mean is the one number
+        # a reader takes away, and it may only contain task-arms that ran to the ceiling they are
+        # compared at. Which arm hit the clock does not change that.
+        if va is not None and vb is not None and not cut:
             paired.append((va, vb))
 
     if args.final_dir is None:

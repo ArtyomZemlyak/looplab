@@ -607,6 +607,11 @@ def main() -> int:
                          "the emitted `subset` is what the evaluator will ACTUALLY score, with the "
                          "evidence for it under `subset_evidence` (see subset_actually_scored).")
     ap.add_argument("--timeout", type=int, default=7200, help="Seconds to allow the evaluator.")
+    ap.add_argument("--solver-file-only", action="store_true",
+                    help="Submit ONLY --solver, the way this bridge behaved before 2026-08-24. "
+                         "Default is to submit every file the node wrote beside it and to run the "
+                         "arena's own `setup.py build_ext --inplace` over them, which is the "
+                         "editing surface the other arm has always had.")
     ap.add_argument("--enforce-rules", action="store_true",
                     help="Run AlgoTune's OWN solver validator (AlgoTuner.security.code_validator) "
                          "on the candidate before scoring, and refuse to score a violation. OFF by "
@@ -665,6 +670,44 @@ def main() -> int:
     dest_dir.mkdir(parents=True, exist_ok=True)
     _ARTEFACTS.append(root / "results" / model_dir)
     shutil.copy2(src, dest_dir / "solver.py")
+
+    # THE WHOLE SUBMISSION, not one file — and the build the arena runs for its own agent.
+    #
+    # Arm A's editing surface is a DIRECTORY: it may write `.pyx`, Pythran and DaCe sources and a
+    # `setup.py`, and `editor_functions.py::_verify_and_recompile_if_needed` compiles them with
+    # `python setup.py build_ext --inplace`. On AlgoTune those compiled paths are a primary source
+    # of the large speedups in the published table. This bridge copied ONE file, so arm B could not
+    # reach any of them — a capability difference our harness invented, not the arena.
+    #
+    # The build is invoked HERE rather than by importing the arena's editor, for the reason the
+    # comment below already gives about `BaselineManager`: importing AlgoTuner in this process
+    # before the evaluator builds its worker pool crashes every evaluation. Same command, same
+    # `--inplace`, same 1800 s ceiling the editor uses.
+    _submitted = []
+    if not args.solver_file_only:
+        for extra in sorted(src.parent.iterdir()):
+            if extra.name == src.name or extra.is_dir():
+                continue
+            # The two files the operator PLANTED are not the candidate's submission, and copying
+            # them would put the grader's own source inside the scored directory.
+            if extra.name == "description.txt" or extra.name.startswith("reference_"):
+                continue
+            shutil.copy2(extra, dest_dir / extra.name)
+            _submitted.append(extra.name)
+    build_note = ""
+    if any(n.endswith((".pyx", ".pyi")) for n in _submitted) or "setup.py" in _submitted \
+            or "pyproject.toml" in _submitted:
+        cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
+        try:
+            built = subprocess.run(cmd, cwd=str(dest_dir), capture_output=True, text=True,
+                                   timeout=1800)
+            build_note = ("ok" if built.returncode == 0
+                          else f"failed rc={built.returncode}: {(built.stderr or '')[-400:]}")
+        except subprocess.TimeoutExpired:
+            build_note = "timeout after 1800s"
+        except OSError as exc:                      # no setup.py, no compiler, no python
+            build_note = f"not run: {type(exc).__name__}: {exc}"
+        print(f"looplab_eval: build_ext {build_note}", file=sys.stderr)
 
     # The summary path is per-invocation for the same reason: `evaluate_results.py` writes one
     # shared `reports/evaluate_summary.json`, so concurrent bridges would read each other's.

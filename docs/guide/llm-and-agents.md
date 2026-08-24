@@ -447,16 +447,23 @@ nodes — resume once the endpoint is back.
 half-way through a generation reports it *in band* — a `data: {"error": …}` frame inside a response
 that already returned HTTP 200 and has been streaming for minutes — so the client is holding a real,
 truncated answer, not a failed request. It keeps it: the reassembled body comes back with
-`finish_reason` `truncated`, the call reaches the accountant (as **unpriced** when the cut arrived
-before the provider's usage frame, which is the usual case, since that frame is the last thing on
-the wire), and it is deliberately **never cached**, so a later identical temperature-0 ask re-issues
-instead of being served an amputated answer. Only a cut that produced *nothing at all* is retried —
+`finish_reason` `truncated`, the call reaches the accountant, and it is deliberately **never
+cached**, so a later identical temperature-0 ask re-issues instead of being served an amputated
+answer. **The stream is read to its END, not to its error frame** — the openai SDK treats the first
+error frame as terminal and closes the response, so a gateway that reports the failure and *then*
+reports what it billed for the tokens it already forwarded would have its price thrown away
+permanently. The client holds that frame back, reads the rest, and lets the SDK raise it last, so
+such a call is priced normally; only a cut with genuinely nothing behind it is recorded as
+**unpriced**, which is not the same as free. Only a cut that produced *nothing at all* is retried —
 and that retry drops SSE for the next attempt, exactly as a stalled stream does. The split is what
 keeps the retries affordable: re-asking happens only where re-asking is free. Measured on a 20-run
 AlgoTune campaign, 26 cut streams burned **13.15 hours** — 18.7–94.6 % of each affected run's
 lifetime — and $1.66 that reached no ledger; one task spent 94.6 % of its run inside six of them
-and produced zero nodes. Each cut is announced at **WARNING**, because a shorter answer and a
-missing price are both invisible from the call site.
+and produced zero nodes. Each cut is announced at **WARNING** naming what was kept and what it
+cost, because a shorter answer and a missing price are both invisible from the call site — and
+"what was kept" counts reasoning and tool-call arguments, not just `content`: a reasoning model cut
+mid-think has spent everything on its chain of thought and has not begun its answer, which is the
+normal shape of a cut here rather than a corner.
 
 The same circuit-breaker covers a provider that stops working **mid-run**, during an *inline repair*
 rather than a build. A failed repair *call* is not a repair, in any of the four ways the call can

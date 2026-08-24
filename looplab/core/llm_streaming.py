@@ -1,8 +1,10 @@
 """SSE/stream machinery for the LLM clients (split out of `core.llm`).
 
-The idle-guard watchdog that interrupts a stalled stream (`_stream_with_idle_guard`) and the
+The idle-guard watchdog that interrupts a stalled stream (`_stream_with_idle_guard`), the
 raw-socket plumbing it needs (`_stream_raw_socket` / `_shutdown_pool_sockets` — only
-socket.shutdown() unblocks a recv() wedged in the kernel). `core.llm` re-imports every name under
+socket.shutdown() unblocks a recv() wedged in the kernel), and `defer_inband_error`, which makes a
+stream that reports a failure IN BAND still readable to its end so the usage frame behind that
+report can be billed. `core.llm` re-imports every name under
 its original name, so `looplab.core.llm._stream_with_idle_guard` (and the flat `looplab.llm.…`)
 READ the same objects — tests and callers import and call through those paths.
 
@@ -206,3 +208,87 @@ def _stream_with_idle_guard(stream, idle_limit: float, first_byte_limit: float =
         except Exception:  # noqa: BLE001 - the .request property raises RuntimeError when unset
             _req = None
         raise openai.APIConnectionError(message=str(e) or e.__class__.__name__, request=_req) from e
+
+
+def defer_inband_error(stream) -> dict:
+    """Let an SSE stream be read to its END even after it reports a failure in band. Returns a box
+    whose `"held"` key appears once such a frame has been seen and held back.
+
+    An error frame ends the STREAM; it does not end the FRAMES. The openai SDK's `Stream.__stream__`
+    treats the first `data: {"error": …}` payload as terminal — it raises there and its `finally`
+    closes the response — so everything the endpoint sent AFTERWARDS is unreachable, permanently:
+    once the response is closed the body cannot be re-read. Measured 2026-08-24, that cost real
+    money. A metering gateway that cuts a runaway generation at ~1800 s forwards its upstream's
+    error frame and THEN emits the usage frame it synthesised for the 220,685 deltas it had already
+    counted (`cost 0.0617918`, `cost_basis=estimated_from_deltas`). The client raised at the error
+    frame, never decoded the usage, and the run's ledger recorded $0.0482 of a $1.00 ceiling against
+    a real $0.1100 — 56 % of that task's spend, invisible.
+
+    The fix is a REORDER, not a re-implementation: hold the error frame back, yield everything else,
+    then yield the held frame last so the SDK raises exactly the exception it would have raised —
+    same class, same message, same `body` — only after the rest of the stream has been read. Nothing
+    about the SDK's error semantics, `[DONE]` handling or typed-model construction is duplicated
+    here, which is the whole point; the alternative (driving `_iter_events` and rebuilding
+    `__stream__`) forks five behaviours to change one.
+
+    ONE private name (`Stream._iter_events`) and it fails SOFT: `__stream__` looks the method up on
+    `self` at first iteration, so rebinding the instance attribute redirects it, and an object
+    without that attribute (a plain test iterator, a future SDK, a foreign client) is left exactly
+    as it was and the caller's `"held"` key simply never appears. `tests/test_llm_truncated_stream.py`
+    drives the real SDK over real bytes, so a rename goes red rather than silently reverting.
+
+    The caller must treat `"held"` as authoritative about WHY the stream ended even if a different
+    exception arrives: after the error frame the endpoint may keep the socket open and say nothing,
+    in which case the idle guard fires and the APITimeoutError is a fact about the socket, not about
+    the call. The endpoint already told us what happened.
+    """
+    box: dict = {}
+    original = getattr(stream, "_iter_events", None)
+    if not callable(original):
+        return box                       # not an SDK Stream — nothing to reorder, nothing to lose
+
+    def _reordered():
+        held = None
+        for sse in original():
+            # `[DONE]` is the one frame that must not be allowed past a held error: `__stream__`
+            # BREAKS on it, so anything queued behind it is never seen and the call would come back
+            # as an ordinary complete answer — billed, but with no truncation mark, therefore
+            # CACHEABLE and silent. That is worse than the defect this function fixes, and it is
+            # what the first draft of this function did (caught on a replay of the live wire, where
+            # the gateway sends `[DONE]` after its usage frame).
+            if held is not None and _sse_is_done(sse):
+                yield held               # raise here instead, with everything before it already read
+                return
+            if _sse_is_error(sse):
+                if held is None:
+                    held = sse
+                    box["held"] = sse    # visible to the caller the moment it is seen
+                continue                 # keep reading: what follows may be ours to bill
+            yield sse
+        if held is not None:
+            yield held                   # stream ended without `[DONE]`: raise at the end
+
+    stream._iter_events = _reordered
+    return box
+
+
+def _sse_is_done(sse) -> bool:
+    """`Stream.__stream__`'s own terminator test, spelled once so the reorder above cannot disagree
+    with the loop it is feeding."""
+    try:
+        return bool(sse.data.startswith("[DONE]"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _sse_is_error(sse) -> bool:
+    """Is this decoded SSE the payload `Stream.__stream__` raises on? Mirrors its own test — a
+    non-`[DONE]` frame whose JSON is a mapping carrying a truthy `error` — and answers False for
+    anything it cannot decode, because a frame we cannot read is not a frame we may suppress."""
+    try:
+        if _sse_is_done(sse):
+            return False
+        data = sse.json()
+    except Exception:  # noqa: BLE001 — malformed telemetry is the SDK's business, not ours to eat
+        return False
+    return isinstance(data, dict) and bool(data.get("error"))

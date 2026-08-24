@@ -107,6 +107,26 @@ HOP_BY_HOP = {
     "host",
 }
 
+# The `finish_reason` this proxy stamps on a completion it watched the gateway CUT -- one word for
+# both transports, the streamed frame and the reassembled body, because the two saying different
+# things about the same cut is half of the defect this constant was added for.
+#
+# It is deliberately the SAME word `looplab/core/llm.py::STREAM_TRUNCATED_FINISH_REASON` already
+# stamps on its own salvaged envelopes, for the reason stated there: not OpenAI's `"length"`, which
+# names a token limit the MODEL ran into and would assert something false about the generation on
+# every gateway cut. This file is a standalone script (it imports no `looplab`), so the word is
+# COPIED rather than imported -- `tests/test_meter_stream_adapter.py` asserts the two spellings are
+# equal, so the copy cannot drift in silence.
+#
+# Neither arm reads the VALUE, which is what makes the honest word free: LoopLab reads only a
+# finish_reason's PRESENCE (`_envelope_is_truncated`, `_keepalive_stall`), and AlgoTuner names
+# `finish_reason` only in a retry-pattern list matched against ERROR STRINGS. Measured 2026-08-24
+# against that arm's own litellm 1.97.0: `ModelResponse` accepts it, logs `Unmapped finish_reason
+# 'truncated', defaulting to 'stop'` and normalises it away. So the mark is honest on the wire, in
+# the meter row and to a human reading either -- and the half of this fix arm A's ACCOUNTANT reads
+# is the `usage` beside it, never this word.
+STREAM_TRUNCATED_FINISH_REASON = "truncated"
+
 
 class Pricing:
     """The price table, loaded once. A reload would let two arms be priced differently."""
@@ -324,12 +344,23 @@ class Handler(BaseHTTPRequestHandler):
     def _reassemble(frames: list) -> dict:
         """One non-streaming completion, rebuilt from the deltas of a streamed one.
 
-        Content, role, finish_reason, usage and tool_call fragments, in arrival order. A field this
-        does not know about is carried from the LAST frame that had it, so an unfamiliar extension
-        survives instead of being silently dropped -- the client is the framework under measurement
-        and must see what the provider sent.
+        Content, REASONING, role, finish_reason, usage and tool_call fragments, in arrival order. A
+        field this does not know about is carried from the LAST frame that had it, so an unfamiliar
+        extension survives instead of being silently dropped -- the client is the framework under
+        measurement and must see what the provider sent.
+
+        Reasoning is carried under the delta's OWN key (`reasoning_content` here, `reasoning` on an
+        OpenRouter-shaped stream) rather than folded into `content`, because they are different
+        fields to every reader and merging them would put a model's private thinking into the answer
+        the arm parses for commands. It has to be carried at all for the reason this whole path
+        exists: a reasoning model the gateway cuts mid-think has spent EVERYTHING on
+        `reasoning_content` with `content` still empty -- one real cut on this box carried 220,685
+        deltas, all of them reasoning -- so dropping it handed the client an empty answer for a call
+        that had produced a great deal. `looplab/core/llm.py::salvaged_lengths` is the same reading
+        one layer up, and the arm's own litellm keeps the key (measured 2026-08-24, 1.97.0).
         """
         content: list = []
+        reasoning: dict = {}
         tool_calls: dict = {}
         finish = None
         usage = None
@@ -348,6 +379,9 @@ class Handler(BaseHTTPRequestHandler):
                 d = ch.get("delta") or {}
                 if d.get("content"):
                     content.append(d["content"])
+                for key in ("reasoning_content", "reasoning"):
+                    if d.get(key):
+                        reasoning.setdefault(key, []).append(d[key])
                 for tc in (d.get("tool_calls") or []):
                     idx = tc.get("index", 0)
                     slot = tool_calls.setdefault(idx, {"index": idx, "type": tc.get("type", "function"),
@@ -361,6 +395,8 @@ class Handler(BaseHTTPRequestHandler):
                     if fn.get("arguments"):
                         slot["function"]["arguments"] += fn["arguments"]
         message = {"role": "assistant", "content": "".join(content)}
+        for key, parts in reasoning.items():
+            message[key] = "".join(parts)
         if tool_calls:
             message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
         out = dict(base)
@@ -577,6 +613,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
 
+        # NOTHING A CLIENT MUST SEE MAY LEAVE THROUGH `emit()` ALONE. It is the SSE writer and it
+        # returns immediately while collecting, so a frame this proxy MINTS -- as opposed to one it
+        # forwards, which `collected` already holds -- reaches the streaming client and nobody else.
+        # That is exactly how the `estimated_from_deltas` usage frame below came to be dropped on
+        # the one path that had no other copy of it. Mint into a variable, then route it BOTH ways.
         def emit(payload: bytes) -> None:
             if collect_for_client:      # the client gets ONE JSON body at the end, not frames
                 return
@@ -586,6 +627,10 @@ class Handler(BaseHTTPRequestHandler):
         pin = pout = 0
         cost = 0.0
         basis = ""
+        # Did the GATEWAY send a usage frame? Its own flag rather than `bool(basis)`, because the
+        # synthesis below overwrites `basis` and the reassembled body has to be able to tell "the
+        # provider closed the books on this call" from "we closed them for it".
+        usage_frame_seen = False
         # Content deltas SEEN, counted as they pass. They are the only evidence left when a stream
         # ends without its usage frame, and measured 2026-08-22 that is not a corner case: this
         # gateway CUTS a generation at ~1800 s (eight streams ended at 1817-1824 s, status 200, no
@@ -610,6 +655,7 @@ class Handler(BaseHTTPRequestHandler):
                             if d.get("content") or d.get("reasoning_content"):
                                 deltas += 1
                     if isinstance(frame, dict) and isinstance(frame.get("usage"), dict):
+                        usage_frame_seen = True
                         usage = frame["usage"]
                         pin = int(usage.get("prompt_tokens") or 0)
                         pout = int(usage.get("completion_tokens") or 0)
@@ -624,7 +670,9 @@ class Handler(BaseHTTPRequestHandler):
                         usage["cost_source"] = self.server.pricing.fetched_at
                         out = b"data: " + json.dumps(frame).encode() + b"\n"
                 emit(out)
-            if not basis and deltas:
+            if usage_frame_seen:
+                pass                            # the gateway priced it; nothing to estimate
+            elif not basis and deltas:
                 # THE STREAM PRODUCED TOKENS AND NOBODY PRICED THEM. Synthesise the usage frame the
                 # gateway did not send, from the deltas actually forwarded, and label it for what it
                 # is. Injected rather than merely logged because the arm's accountant reads the
@@ -655,15 +703,28 @@ class Handler(BaseHTTPRequestHandler):
                 pin, pout = 0, deltas
                 cost = deltas * rate_out
                 basis = "estimated_from_deltas"
-                emit(b"data: " + json.dumps({
+                # BUILT ONCE, DELIVERED BY WHICHEVER ROUTE THE CLIENT IS ON. Writing it through
+                # `emit()` alone is how it came to be lost: `emit()` returns immediately when the
+                # client is being collected for, so the adapted (non-streaming) client got a body
+                # with no `usage` at all and a null finish reason — a truncated answer arriving as a
+                # clean 200 with nothing for that arm's accountant to read. That is the very leak the
+                # estimate exists to close, one layer up, and it was untested because the fake
+                # upstream in the guard test always sent a usage frame.
+                estimate = {
                     "id": "meter-estimate", "object": "chat.completion.chunk", "model": model,
-                    "choices": [], "usage": {
+                    "choices": [{"index": 0, "delta": {},
+                                 "finish_reason": STREAM_TRUNCATED_FINISH_REASON}],
+                    "usage": {
                         "prompt_tokens": 0, "completion_tokens": deltas, "total_tokens": deltas,
                         "cost": cost, "cost_basis": basis,
                         "cost_source": self.server.pricing.fetched_at,
                         "meter_note": "upstream ended the stream without a usage frame; "
                                       "completion_tokens is a FLOOR counted from forwarded deltas"},
-                }).encode() + b"\n\n")
+                }
+                if collect_for_client:
+                    collected.append(estimate)
+                else:
+                    emit(b"data: " + json.dumps(estimate).encode() + b"\n\n")
             emit(b"")           # terminating zero-length chunk
             if collect_for_client:
                 # ONE body, built from the frames, with the usage frame this proxy already priced

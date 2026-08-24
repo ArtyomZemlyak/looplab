@@ -845,3 +845,114 @@ def test_a_pre_state_marker_is_still_a_wall_cut_to_compare_arms(tmp_path):
     (legacy / "B-fine.done").write_text("wall=100 rc=0 state=ran_to_completion cpus=0-1\n",
                                         encoding="utf-8")
     assert CA.marker_state(legacy, "B", "fine") == "done"
+
+
+def _run_compare(*argv: str) -> int:
+    """Drive the real `main()` over a real argv, the way an operator does."""
+    import sys
+    old = sys.argv
+    sys.argv = ["compare_arms.py", *argv]
+    try:
+        return CA.main()
+    finally:
+        sys.argv = old
+
+
+def _mk(final: Path, task: str, *, a_done: str = None, b_done: str = None,
+        b_speedup=None, b_reason: str = None) -> None:
+    """One task's worth of campaign output, in the shapes the driver really writes."""
+    final.mkdir(parents=True, exist_ok=True)
+    if a_done is not None:
+        (final / f"A-{task}.done").write_text(a_done, encoding="utf-8")
+    if b_done is not None:
+        (final / f"B-{task}.done").write_text(b_done, encoding="utf-8")
+    if b_speedup is not None or b_reason:
+        body = {"speedup": b_speedup, "subset": "test"}
+        if b_reason:
+            body["no_speedup"] = {"reason": b_reason}
+        (final / f"B-{task}.final.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_a_wall_cut_is_excluded_whichever_arm_hit_the_clock(tmp_path, capsys):
+    """Until 2026-08-24 only arm B's markers were read, and arm A was wall-cut on 13 of 19 tasks
+    against arm B's 3. All thirteen printed as `--`, indistinguishable from "never run", and the
+    mean said nothing about one arm losing two thirds of the suite to a clock."""
+    cmp_mod = CA
+    final = tmp_path / "campaign"
+    runs = tmp_path / "runs-B"
+    at = tmp_path / "AlgoTune"
+    (at / "reports").mkdir(parents=True)
+
+    ok = "wall=100 rc=0 state=ran_to_completion\n"
+    cut = "wall=14400 rc=124 state=wall_cut\n"
+    for t, a_marker in (("clean", ok), ("a_was_cut", cut)):
+        (runs / t / "run").mkdir(parents=True)
+        _mk(final, t, a_done=a_marker, b_done=ok, b_speedup=2.0)
+    (at / "reports" / "agent_summary.json").write_text(json.dumps(
+        {t: {"deepseek-v4-flash": {"final_speedup": "4.0"}} for t in ("clean", "a_was_cut")}),
+        encoding="utf-8")
+
+    rc = _run_compare("--algotune-root", str(at), "--runs-root", str(runs), "--final-dir", str(final))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mean over 1 complete pair" in out or "over 1 " in out, out
+    assert "a_was_cut" in out and "wall" in out.lower()
+
+
+def test_a_solver_wrong_on_some_instances_scores_zero_for_EITHER_arm(tmp_path, capsys):
+    """The arena's rule is 100% validity or no speedup, and both arms enforce it. Only the RECORDING
+    differed: arm B wrote a measured `0.0` that was averaged in, arm A wrote `"N/A"` plus a reason
+    in `agent_failures.json` that nothing read, so its zero vanished from the means. Measured on one
+    task: A 98/100 valid disappeared, B 95/100 valid scored 0.0 — both directions favouring arm A."""
+    cmp_mod = CA
+    final = tmp_path / "campaign"
+    runs = tmp_path / "runs-B"
+    at = tmp_path / "AlgoTune"
+    (at / "reports").mkdir(parents=True)
+    ok = "wall=100 rc=0 state=ran_to_completion\n"
+
+    (runs / "a_wrong" / "run").mkdir(parents=True)
+    _mk(final, "a_wrong", a_done=ok, b_done=ok, b_speedup=3.0)
+    (at / "reports" / "agent_summary.json").write_text(json.dumps(
+        {"a_wrong": {"deepseek-v4-flash": {"final_speedup": "N/A"}}}), encoding="utf-8")
+    (at / "reports" / "agent_failures.json").write_text(json.dumps(
+        {"a_wrong": {"deepseek-v4-flash": {"reason": "missing_metrics",
+                                           "details": "final_eval_success=True",
+                                           "timestamp_utc": "2026-08-24T00:00:00Z"}}}),
+        encoding="utf-8")
+
+    assert _run_compare("--algotune-root", str(at), "--runs-root", str(runs), "--final-dir", str(final)) == 0
+    out = capsys.readouterr().out
+    # It is PAIRED and scored zero, not dropped. Assert on the ROW, not on the whole page: a bare
+    # `"0.0000" in out` passed even when arm A's value was dropped, because the string occurs
+    # elsewhere — the first version of this test could not tell the fix from its absence.
+    row = next(l for l in out.splitlines() if l.startswith("a_wrong"))
+    assert "0.0000" in row and "3.0000" in row, row
+    assert "--" not in row.split("3.0000")[0], row
+    # and it must actually reach the mean, which is the number a reader takes away
+    assert "over 1 complete pair" in out or "over 1 pair" in out, out
+    assert "missing_metrics" in out
+
+
+def test_an_arm_a_failure_that_is_NOT_the_solvers_fault_stays_unmeasured(tmp_path, capsys):
+    """The control that keeps the rule honest. A reason that does not mean "the evaluation ran and
+    the answer was wrong" must leave the row `--`: a task-arm that never got to submit is genuinely
+    unmeasured, and scoring it zero would punish an arm for the harness's own failure."""
+    cmp_mod = CA
+    final = tmp_path / "campaign"
+    runs = tmp_path / "runs-B"
+    at = tmp_path / "AlgoTune"
+    (at / "reports").mkdir(parents=True)
+    ok = "wall=100 rc=0 state=ran_to_completion\n"
+    (runs / "a_broke" / "run").mkdir(parents=True)
+    _mk(final, "a_broke", a_done=ok, b_done=ok, b_speedup=3.0)
+    (at / "reports" / "agent_summary.json").write_text(json.dumps(
+        {"a_broke": {"deepseek-v4-flash": {"final_speedup": "N/A"}}}), encoding="utf-8")
+    (at / "reports" / "agent_failures.json").write_text(json.dumps(
+        {"a_broke": {"deepseek-v4-flash": {"reason": "provider_unreachable",
+                                           "details": "final_eval_success=False"}}}),
+        encoding="utf-8")
+
+    assert _run_compare("--algotune-root", str(at), "--runs-root", str(runs), "--final-dir", str(final)) == 0
+    out = capsys.readouterr().out
+    assert "0.0000" not in out.split("a_broke")[1].split("\n")[0]

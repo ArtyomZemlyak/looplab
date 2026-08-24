@@ -60,7 +60,54 @@ ALGOTUNE_MODEL_KEY="${ALGOTUNE_MODEL_KEY:-openrouter/${LOOPLAB_LLM_MODEL:-deepse
 # metered.
 # e.g. METER_BASE=http://127.0.0.1:8801  ->  http://127.0.0.1:8801/m/B/svm/a1/v1
 METER_BASE="${METER_BASE:-}"
-HARD_TIMEOUT="${HARD_TIMEOUT:-14400}"
+# THE WALL IS OFF BY DEFAULT, and a STALL bound replaces it. Measured 2026-08-24 on a full campaign:
+# the 4 h wall cut 13 of arm A's 19 task-arms and 3 of arm B's, and three of those cuts had not spent
+# the budget they were being compared at — one reached $0.14 of $1.00. So the clock, not the money,
+# was deciding most of arm A's rows, and a table that says "both arms at $1.00" was true of the
+# CEILING and false of the SPEND ($0.042 against $1.619 on the nine serially-evaluated tasks).
+#
+# But "no bound at all" is not the answer either: a lane that HANGS holds one of four lanes forever
+# and the campaign never finishes, which is the failure the wall was there for. The two cases look
+# nothing alike from outside and only one of them deserves a kill:
+#
+#   SLOW   — the run is producing events, paying for calls, evaluating nodes. It just needs longer,
+#            because it evaluates 100 instances at 46 s each. Killing it destroys real work.
+#   HUNG   — no event, no child process, no LLM call, for many minutes. Observed: a lane sat in
+#            `poll()` on an idle socket for 18 minutes after a stream was cut.
+#
+# So `HARD_TIMEOUT=0` (the default now) means no wall, and `STALL_TIMEOUT` bounds SILENCE instead:
+# the lane is killed only when its own event log has not grown for that long. `HARD_TIMEOUT` is kept
+# as an opt-in backstop for anyone who wants a hard ceiling anyway.
+HARD_TIMEOUT="${HARD_TIMEOUT:-0}"
+STALL_TIMEOUT="${STALL_TIMEOUT:-2400}"        # 40 min of total silence = hung, not slow
+
+# `timeout 0` means "no timeout" to GNU coreutils, so one spelling serves both settings and there is
+# no second code path to keep in step.
+run_bounded() {   # run_bounded <events-file-or-empty> <cmd…>
+  local watch="$1"; shift
+  if [ -z "$watch" ] || [ "${STALL_TIMEOUT:-0}" = "0" ]; then
+    timeout "$HARD_TIMEOUT" "$@"
+    return $?
+  fi
+  timeout "$HARD_TIMEOUT" "$@" &
+  local job=$!
+  ( while kill -0 "$job" 2>/dev/null; do
+      sleep 60
+      # The stall clock reads the RUN's own log, not the wall clock: a run that is writing is alive.
+      local now last
+      now=$(date +%s)
+      last=$(stat -c %Y "$watch" 2>/dev/null || echo "$now")
+      if [ $((now - last)) -gt "$STALL_TIMEOUT" ]; then
+        echo "STALL: $watch has not grown in $((now - last))s — killing this lane" >&2
+        kill -TERM "$job" 2>/dev/null; sleep 5; kill -KILL "$job" 2>/dev/null
+        return 0
+      fi
+    done ) &
+  local guard=$!
+  wait "$job"; local rc=$?
+  kill "$guard" 2>/dev/null
+  return $rc
+}
 # A `.done` written for rc=124 means "the wall clock cut this", and by default that is still
 # terminal -- see `already_measured` for why, and for what this flag costs.
 RETRY_WALL_CUT="${RETRY_WALL_CUT:-0}"
@@ -587,7 +634,12 @@ run_one() {                       # $1 = task, $2 = cpu list
   fi
   if [ "$ARM" = "A" ]; then
     S=$(date +%s)
-    timeout "$HARD_TIMEOUT" taskset -c "$CPUS" ./algotune.sh agent --standalone \
+    # Arm A keeps no event log, so its OWN lane log is the liveness signal — it is this arm's
+    # stdout and it grows on every message, every edit and every evaluation. An empty watch path
+    # would have left this arm with no bound at all now that the wall is off, which is worse than
+    # the wall was: one hung lane and the campaign never finishes.
+    : > "$OUT/A-$T.log"
+    run_bounded "$OUT/A-$T.log" taskset -c "$CPUS" ./algotune.sh agent --standalone \
         "$ALGOTUNE_MODEL_KEY" "$T" > "$OUT/A-$T.log" 2>&1
     RC=$?
     record_done "$MARKER" "$RC" "$S" "$CPUS" ""
@@ -606,7 +658,7 @@ run_one() {                       # $1 = task, $2 = cpu list
     # and AlgoTuner has no equivalent -- left shared, arm B would reach task 12 with eleven prior
     # runs to read, measuring a capability the other arm does not have rather than the loop.
     LOOPLAB_MEMORY_DIR="$TASK_ROOT/memory" LOOPLAB_KNOWLEDGE_DIR="$TASK_ROOT/knowledge" \
-      timeout "$HARD_TIMEOUT" taskset -c "$CPUS" python -m looplab.cli run \
+      run_bounded "$TASK_ROOT/run/events.jsonl" taskset -c "$CPUS" python -m looplab.cli run \
         "$WS/algotune_$T.json" --out "$TASK_ROOT/run" --backend llm --max-nodes 20 \
         > "$OUT/B-$T.log" 2>&1
     RC=$?   # captured HERE: the champion extraction and the test scoring below both clobber $?

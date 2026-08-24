@@ -189,22 +189,26 @@ ONE_CARD = (
     "you learned INTO the idea as a stated fact. What does not count as a hypothesis, in any "
     "wording: \"first read the reference\", \"extract the exact contract\", \"establish a "
     "correctness baseline harness\", \"land a faithful port so the contract becomes readable\". "
-    "None of those names a change to solver.py, and this run gets three or four experiments in "
-    "total. Those two files are also the WHOLE of the reading: the evaluator, the timer and the "
-    "instance generator are fenced and are not yours to look at, and a solver written from them "
-    "would not be a result.\n"
+    "None of those names a change to solver.py, and every one of them spends a turn that could have "
+    "been an experiment. Those two files are also the WHOLE of the reading: the evaluator and the timer are "
+    "fenced and are not yours to look at. `reference_{task}.py` DOES contain this task's instance "
+    "generator as well as its `solve()` and `is_solution()`, and you may read all of it -- it is "
+    "the file you were handed. What you may not do is write a solver that recognises the generator "
+    "output instead of solving the problem: the arena's validator refuses that, and it would not "
+    "be a result.\n"
     "(1) ONE HYPOTHESIS. The Researcher may consider any number of directions in its own reasoning, "
     "but it ends its turn having committed to EXACTLY ONE concrete idea, and the run works that one "
     "idea. Not a menu, not \"A, and if that fails B\", not a decision tree with an unresolved branch "
     "condition. If the idea rests on something nobody here knows yet, STATE THE ASSUMPTION inside the "
     "idea and commit anyway -- an assumption that turns out wrong is a finished experiment with a "
     "result, which is what this loop reads and builds on.\n"
-    "(2) THE ONLY TEST IS THE SUBMITTED CODE. Nothing is 'checked', 'verified', 'compared' or "
-    "'benchmarked' by any other means. There is no exploratory probing to find out which approach is "
-    "faster, no timing harness written on the side, no trying two variants to see which wins: you "
-    "write the solver, you submit it, and the evaluation tells you. That report is the evidence, and "
-    "it is the ONLY evidence. If you catch yourself measuring something in order to decide what to "
-    "write, stop -- write the committed idea instead and let the evaluation answer.\n"
+    "(2) THE SCORE COMES FROM THE SUBMITTED CODE, AND ONLY FROM THERE. The evaluation is run on the "
+    "file you submit, against instances that are not on this machine, and its report is the only "
+    "evidence about SPEED that exists. So a timing you take here measures your guess about the "
+    "input, not the score -- but if you want to check that something imports, that an API returns "
+    "the shape you expect, or that your answer is CORRECT on a case you built, do it: correctness "
+    "you can establish locally and speed you cannot. Spend the run on submissions, because that is "
+    "what the loop reads and builds on.\n"
     "(3) THE DEVELOPER IMPLEMENTS THE IDEA IT WAS GIVEN. Mechanically, once, exactly as named. It "
     "does not pick between algorithms, does not benchmark alternatives, does not redesign the "
     "approach, and does not use any tool to decide WHAT to write -- only, at most, to make the named "
@@ -428,7 +432,15 @@ def main() -> int:
                  + (solution_space_clause(ref, args.task) if args.enforce_rules else "")),
         "direction": "max",
         "editable_path": str(ws),
-        "edit_surface": ["solver.py"],
+        # THE SAME SURFACE THE OTHER ARM HAS. `["solver.py"]` was our pin, not the arena's: arm A
+        # edits a DIRECTORY — arbitrary files, `.pyx` compiled by `setup.py build_ext --inplace`,
+        # Pythran, DaCe — and on AlgoTune those compiled paths are a primary source of the large
+        # speedups in the published table. One arm could reach the technique that wins this
+        # benchmark and the other could not, entirely because of this line.
+        #
+        # `protect` still holds: the two files the operator planted are read-only, and
+        # `looplab_eval.py` refuses to submit them even if they change.
+        "edit_surface": ["solver.py", "*.py", "*.pyx", "*.pxd", "setup.py", "pyproject.toml"],
         "protect": [ref_name, "description.txt"],
         "eval": {
             # DECLARED AS A ONE-STAGE PIPELINE, not as a bare `command`, and the difference is not

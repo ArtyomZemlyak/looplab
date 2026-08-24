@@ -35,6 +35,7 @@ import openai
 import pytest
 
 import looplab.core.llm as llm
+import looplab.core.llm_streaming as llm_streaming
 import looplab.core.llm_transient as llm_transient
 from looplab.core.llm import LLMError, OpenAICompatibleClient
 
@@ -65,6 +66,46 @@ def _usage_frame(cost: float) -> dict:
     return {"id": "1", "object": "chat.completion.chunk", "model": "m", "choices": [],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30,
                       "cost": cost}}
+
+
+def _done() -> bytes:
+    return b"data: [DONE]\n\n"
+
+
+def _meter_estimate(cost: float, tokens: int) -> dict:
+    """The frame `benchmarks/meter/proxy.py` synthesises for a stream its upstream cut: the tokens
+    it actually forwarded, priced as a FLOOR. It is emitted AFTER the upstream's error frame,
+    because the proxy only knows the stream ended once its forward loop has drained — which is
+    exactly why reaching it is the whole problem."""
+    return {"id": "meter-estimate", "object": "chat.completion.chunk", "model": "m", "choices": [],
+            "usage": {"prompt_tokens": 0, "completion_tokens": tokens, "total_tokens": tokens,
+                      "cost": cost, "cost_basis": "estimated_from_deltas",
+                      "meter_note": "completion_tokens is a FLOOR counted from forwarded deltas"}}
+
+
+class _FakeSSE:
+    """The two attributes `Stream.__stream__` and the reorder read off a decoded SSE."""
+
+    def __init__(self, data: str, event=None):
+        self.data = data
+        self.event = event
+
+    def json(self):
+        return json.loads(self.data)
+
+
+def _chunk(data: dict):
+    """An SDK-shaped streaming chunk built from a raw frame, for the few tests that must drive
+    `_accumulate_stream` without a transport."""
+    choices = []
+    for raw in (data.get("choices") or []):
+        d = raw.get("delta") or {}
+        delta = type("D", (), {"content": d.get("content"), "tool_calls": d.get("tool_calls"),
+                               "reasoning": d.get("reasoning"),
+                               "reasoning_content": d.get("reasoning_content")})()
+        choices.append(type("C", (), {"delta": delta,
+                                      "finish_reason": raw.get("finish_reason")})())
+    return type("Ev", (), {"choices": choices, "usage": data.get("usage")})()
 
 
 class _Transport:
@@ -305,16 +346,23 @@ def test_a_stream_that_was_NOT_cut_says_nothing(caplog, no_sleep):
     assert [r.getMessage() for r in caplog.records if r.levelname == "WARNING"] == []
 
 
-def test_the_notice_does_not_cry_unpriced_when_the_call_WAS_priced(no_sleep):
-    """The complement, because a notice that is wrong half the time is a notice people learn to
-    ignore: a cut that still carried its usage frame is priced normally and must say so."""
-    transport = _Transport(_sse(_delta(content="hi"), _usage_frame(0.25), _error_frame()))
-    client = _client(transport)
-    said: list[str] = []
-    client._note_truncated_stream = lambda body, usage: said.append(str(usage.get("priced")))
+def test_the_notice_names_the_price_when_the_cut_WAS_priced(caplog, no_sleep):
+    """The complement, and since the reorder it is the LIVE branch, not the rare one.
 
-    client.complete_text([{"role": "user", "content": "go"}])
-    assert said == ["1"], "the notice was handed a usage payload that lost its priced marker"
+    A notice that is wrong half the time is one people learn to ignore, and "UNPRICED — real spend
+    this run's ledger cannot state" is a serious claim to make about a call that was in fact priced
+    to the cent. The two readings ask different things of the operator: a priced cut is spend
+    `llm_budget_usd` will enforce, an unpriced one is spend only the invoice will ever show.
+    """
+    transport = _Transport(_sse(_delta(content="hi"), _error_frame(),
+                                _meter_estimate(0.0617918, 220685)) + _done())
+    client = _client(transport)
+    with caplog.at_level("WARNING", logger="looplab.core.llm"):
+        client.complete_text([{"role": "user", "content": "go"}])
+
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"][0]
+    assert "0.061792" in said, "the notice does not name the price the endpoint stated"
+    assert "UNPRICED" not in said, "a priced call is being reported as money nobody can account"
 
 
 def test_a_truncated_answer_is_never_served_from_the_deterministic_cache(no_sleep):
@@ -481,3 +529,218 @@ def test_the_cut_still_classifies_as_a_protocol_failure():
     exc.__cause__ = openai.APIError(LITELLM_CUT, request=_REQ, body=None)
     assert llm.classify_llm_failure(exc) == "protocol"
     assert "protocol" in llm.LLM_FAILURE_CAUSES
+
+
+# --------------------------------------------------------------------------------------------
+# Round two, from live fire (2026-08-24). The first fix kept the run alive and marked the envelope
+# truncated, but it stopped reading at the error frame — so the meter's synthesised usage frame,
+# which arrives AFTER it, was still lost — and it measured the salvage with the wrong ruler.
+#
+# The run: `count_riemann_zeta_zeros` arm B a1, cut at 1819.2 s after 220,685 forwarded deltas
+# priced $0.0617918 (`cost_basis=estimated_from_deltas`). Its span records `status OK`,
+# `output ""`, `thinking` at the 64,000-char trace cap and `usage {0,0,0}` — the answer was
+# reasoning-only, the salvage worked, and the money did not land.
+# --------------------------------------------------------------------------------------------
+
+def test_the_usage_frame_BEHIND_the_error_frame_still_reaches_the_ledger(no_sleep):
+    """The reconciliation the coordinator ran, as a property.
+
+    Every other lane matched the meter to the cent; only the truncated call did not
+    ($0.0482 recorded against $0.1100 real, so the run believed it had spent 4.8 % of a $1.00
+    ceiling when it had spent 11.0 %). The cause is positional, not arithmetic: the SDK treats the
+    first error frame as terminal and closes the response, and the usage frame is BEHIND it.
+    """
+    transport = _Transport(_sse(_delta(reasoning_content="think "),
+                                _error_frame(),
+                                _meter_estimate(0.0617918, 220685)) + _done())
+    client = _client(transport)
+
+    client.complete_text([{"role": "user", "content": "go"}])
+
+    assert client.accountant.spent == pytest.approx(0.0617918), (
+        "the price the endpoint stated for this call is still not in the ledger")
+    assert client.accountant.priced_calls == 1 and client.accountant.calls == 1
+    assert client.accountant.completion_tokens == 220685
+    assert len(transport.requests) == 1, "reading to the end of the stream cost an extra call"
+
+
+def test_a_cut_that_is_priced_is_STILL_marked_truncated_and_still_uncached(no_sleep):
+    """The trap the `[DONE]` frame sets, and the reason this test exists at its own name.
+
+    `Stream.__stream__` BREAKS on `[DONE]`. A reorder that simply queues the error frame behind
+    everything else therefore never delivers it at all: the call comes back as an ordinary complete
+    answer — correctly billed, but with no truncation mark, so it is CACHEABLE and silent. That is
+    strictly worse than the defect being fixed, and it is what the first draft of
+    `defer_inband_error` did (caught by replaying the live wire, which ends `usage` then `[DONE]`).
+    """
+    transport = _Transport(_sse(_delta(content="half "), _error_frame(),
+                                _meter_estimate(0.05, 1000)) + _done())
+    client = _client(transport, cache=True)
+    messages = [{"role": "user", "content": "go"}]
+
+    body = client._post({"model": "m", "messages": messages, "temperature": 0.0})
+    assert body["choices"][0]["finish_reason"] == llm.STREAM_TRUNCATED_FINISH_REASON, (
+        "a priced cut lost its truncation mark — `[DONE]` swallowed the deferred error")
+    assert not client._cache, "a truncated answer is cacheable again"
+    assert client.accountant.spent == pytest.approx(0.05)
+
+
+def test_the_error_still_arrives_when_the_stream_ends_without_a_done_frame(no_sleep):
+    """The other termination: the connection simply ends. The held frame must be delivered at the
+    end of the iteration too, or a cut stream with no `[DONE]` loses its mark the same way."""
+    transport = _Transport(_sse(_delta(content="half "), _error_frame(),
+                                _meter_estimate(0.05, 1000)))       # no [DONE]
+    body = _client(transport)._post({"model": "m", "messages": [{"role": "user", "content": "go"}],
+                                     "temperature": 0.0})
+    assert body["choices"][0]["finish_reason"] == llm.STREAM_TRUNCATED_FINISH_REASON
+    assert body["usage"]["cost"] == pytest.approx(0.05)
+
+
+def test_a_barren_cut_still_raises_even_though_the_stream_was_read_to_the_end(no_sleep):
+    """Reading further must not turn a failure into an answer. Nothing salvageable is still nothing
+    salvageable, and `_policy_stream_interrupted` still owns it — with the ENDPOINT's own words, not
+    a generic 'empty body after N attempts'."""
+    transport = _Transport(_sse(_error_frame(), _meter_estimate(0.01, 50)) + _done())
+    client = _client(transport, max_retries=0)
+
+    with pytest.raises(LLMError, match="Not enough data"):
+        client.complete_text([{"role": "user", "content": "go"}])
+
+
+def test_a_reasoning_only_cut_reports_what_it_kept_not_what_it_lacks(caplog, no_sleep):
+    """The misreport, as a property. The notice read `keeping the 0 characters that arrived` about a
+    call that had retained 220,685 deltas of reasoning, and the fix was read as broken on live fire.
+
+    A reasoning model cut mid-think is the NORMAL shape here, not a corner: it has spent everything
+    on `reasoning_content` and has not begun its answer, which is the case `_keepalive_stall`
+    already refuses to call a stall.
+    """
+    transport = _Transport(_sse(_delta(reasoning_content="x" * 30), _error_frame()))
+    client = _client(transport)
+    with caplog.at_level("WARNING", logger="looplab.core.llm"):
+        msg = client.chat([{"role": "user", "content": "go"}], tools=[])
+
+    assert msg.get("content") == "" and len(msg.get("reasoning") or "") == 30, (
+        "precondition: this is a reasoning-only truncation, exactly like the live one")
+    said = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"][0]
+    assert "30 characters" in said and "30 reasoning" in said, said
+    assert "the 0 characters" not in said, "the notice still measures only `content`"
+
+
+@pytest.mark.parametrize("message,expected", [
+    ({"content": "abc"}, {"content": 3, "reasoning": 0, "tool_arguments": 0}),
+    ({"content": "", "reasoning": "think"}, {"content": 0, "reasoning": 5, "tool_arguments": 0}),
+    ({"content": "", "tool_calls": [{"function": {"name": "emit", "arguments": '{"a":1}'}}]},
+     {"content": 0, "reasoning": 0, "tool_arguments": 7}),
+    ({}, {"content": 0, "reasoning": 0, "tool_arguments": 0}),
+    (None, {"content": 0, "reasoning": 0, "tool_arguments": 0}),
+])
+def test_the_salvaged_length_table(message, expected):
+    """Three carriers, counted separately: `content` is the answer, `reasoning` is what the money
+    was spent thinking, `tool_arguments` is an answer that never touches `content` at all."""
+    assert llm.salvaged_lengths(message) == expected
+
+
+def test_the_reorder_leaves_a_healthy_stream_byte_identical(no_sleep):
+    """Blast radius. `defer_inband_error` rebinds a private on EVERY streaming call this client
+    makes, so a stream with no error frame must come back exactly as it did before."""
+    ok = _sse(_delta(content="hello"),
+              {"id": "1", "object": "chat.completion.chunk", "model": "m",
+               "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+               "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10,
+                         "cost": 0.01}}) + _done()
+    client = _client(_Transport(ok))
+    body = client._post({"model": "m", "messages": [{"role": "user", "content": "go"}],
+                         "temperature": 0.0})
+
+    assert body["choices"][0]["message"]["content"] == "hello"
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert client.accountant.spent == pytest.approx(0.01) and not llm._envelope_is_truncated(body)
+
+
+def test_the_hook_is_inert_on_anything_that_is_not_an_sdk_stream():
+    """It fails SOFT by construction: a plain iterator (every `_accumulate_stream` unit test, a
+    foreign client, a future SDK that renames the method) is left exactly as it was, and the caller
+    simply never sees a held frame. A hook that raised here would take out the whole client."""
+    plain = iter([1, 2, 3])
+    assert llm_streaming.defer_inband_error(plain) == {}
+    assert list(plain) == [1, 2, 3]
+    assert llm_streaming.defer_inband_error(object()) == {}
+
+
+def test_the_reorder_hooks_the_method_the_sdk_actually_calls():
+    """The one private name this depends on, checked against the REAL SDK rather than assumed:
+    `__stream__` looks `_iter_events` up on `self` at first iteration, which is what makes rebinding
+    the instance attribute reach the live call instead of being a silent no-op."""
+    import inspect
+
+    assert "_iter_events" in inspect.getsource(openai.Stream.__stream__), (
+        "the SDK no longer routes its iteration through `_iter_events`; the reorder is a no-op")
+    assert callable(getattr(openai.Stream, "_iter_events", None))
+
+
+def test_an_inband_error_wins_over_a_later_socket_timeout(no_sleep):
+    """The hazard the reorder introduces, closed with it.
+
+    Holding the error frame back means the read continues; if the endpoint then says nothing and
+    keeps the socket open, the idle guard fires and an APITimeoutError arrives INSTEAD. Classifying
+    on the exception alone would hand a 220k-token cut generation to `_policy_connection` and re-buy
+    thirty minutes of it. The endpoint already told us what happened, so the held frame decides.
+    """
+    class _CutThenSilent:
+        """An SDK-shaped stream: content, an in-band error, then the watchdog's own exception."""
+
+        def __init__(self):
+            self.box = {}
+
+        def _iter_events(self):
+            yield _FakeSSE(json.dumps({"id": "1", "object": "chat.completion.chunk", "model": "m",
+                                       "choices": [{"index": 0, "delta": {"content": "kept"},
+                                                    "finish_reason": None}]}))
+            yield _FakeSSE(json.dumps({"error": {"message": LITELLM_CUT}}))
+            raise openai.APITimeoutError(request=_REQ)
+
+        def __iter__(self):
+            for sse in self._iter_events():
+                data = json.loads(sse.data)
+                if data.get("error"):
+                    raise openai.APIError(data["error"]["message"], request=_REQ, body=data["error"])
+                yield _chunk(data)
+
+    stream = _CutThenSilent()
+    body = OpenAICompatibleClient._accumulate_stream(stream)
+    assert body["choices"][0]["message"]["content"] == "kept"
+    assert body["choices"][0]["finish_reason"] == llm.STREAM_TRUNCATED_FINISH_REASON, (
+        "the socket's own timeout overruled what the endpoint had already said in band")
+
+
+def test_the_caller_still_sees_the_FIRST_error_the_stream_reported(no_sleep):
+    """Which exception the reorder finally delivers is not arbitrary. `Stream.__stream__` raises on
+    the FIRST error frame it meets; a reorder that held one and then let a later one through would
+    quietly change the diagnosis the operator reads — a gateway's own upstream error replaced by
+    whatever it said next."""
+    # A BARREN cut, so the held exception is the whole answer rather than being salvaged away.
+    transport = _Transport(_sse(_error_frame("FIRST: the upstream cut the stream"),
+                                _error_frame("SECOND: and then the gateway gave up")) + _done())
+    client = _client(transport, max_retries=0)
+
+    with pytest.raises(LLMError, match="FIRST") as caught:
+        client.complete_text([{"role": "user", "content": "go"}])
+    assert "SECOND" not in str(caught.value)
+
+
+@pytest.mark.parametrize("data,is_error,is_done", [
+    ('{"error": {"message": "boom"}}', True, False),
+    ('{"error": null}', False, False),
+    ('{"choices": [], "usage": {"cost": 1}}', False, False),
+    ('[DONE]', False, True),
+    ('not json at all', False, False),
+    ('"a bare string"', False, False),
+])
+def test_the_frame_classifier_table(data, is_error, is_done):
+    """The two frame tests the reorder turns on, stated where they can be read. A frame we cannot
+    decode is not a frame we may suppress — answering True there would hold back arbitrary payloads
+    and never deliver them."""
+    sse = _FakeSSE(data)
+    assert llm_streaming._sse_is_error(sse) is is_error
+    assert llm_streaming._sse_is_done(sse) is is_done

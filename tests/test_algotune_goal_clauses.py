@@ -155,7 +155,27 @@ def test_the_precondition_does_not_reopen_the_read_fence(tmp_path):
     among them — or it licenses the spree it is standing next to."""
     goal = _goal(tmp_path, "--one-card")
     assert "WHOLE of the reading" in goal
-    assert "the evaluator, the timer and the instance generator are fenced" in goal
+    # The harness must still be named as out of bounds...
+    assert "the evaluator and the timer are" in goal and "fenced" in goal
+
+    # ...but the card may not claim a fence it does not have. `make_task.py` copies the task module
+    # into the workspace VERBATIM, and on the real tasks the instance generator is about two thirds
+    # of it (11,681 of 17,677 characters on `convex_hull`). The card used to tell the model that the
+    # generator "is fenced and not yours to look at" while handing it over in the same breath — a
+    # statement the model can check and find false, in the one document it is supposed to trust.
+    # So this is a two-way pin: whatever the card says about the generator must match what the
+    # generator actually does, and it is derived from the copy rather than restated.
+    import re as _re
+    ws_ref = next(p for p in tmp_path.rglob("reference_*.py")
+                  if "ws_" in str(p.parent.parent) or "ws_" in str(p.parent))
+    shipped = ws_ref.read_text(encoding="utf-8")
+    generator_is_shipped = "def generate_problem" in shipped
+    claims_fenced = _re.search(r"instance generator[^.]{0,80}fenced", goal) is not None
+    assert not (generator_is_shipped and claims_fenced), (
+        "the card calls the instance generator fenced while shipping it in the workspace")
+    if generator_is_shipped:
+        assert "DOES contain this task's instance generator" in goal, (
+            "the generator is in the workspace, so the card must say so rather than imply otherwise")
     # And it must not have grown into a general licence to investigate.
     for licence in ("investigate the environment", "read as much as you", "explore the workspace"):
         assert licence not in goal.lower()
