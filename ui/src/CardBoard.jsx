@@ -27,6 +27,8 @@ import {
   resolveSelectedCard,
 } from './cardBoardModel.js'
 import { cardAttemptCoverage, cardAttemptIndex } from './cardBoardViewModel.js'
+import { CARD_KIND_DIRECTION, UNFILED_GROUP_ID, cardIsDirection, cardLineageViews,
+  directionGroups, rollupChips } from './cardLineageModel.js'
 import { cardTraceNotice, cardTraceSections } from './cardTraceModel.js'
 import { nodeTraceSubject } from './traceSurfaceModel.js'
 import { isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
@@ -136,7 +138,7 @@ function _CardProjectionNotice({ projection, cards }) {
 function _CardKanbanCard({
   card, receipt, onSelect, onClose, onControl, controlState, controlsLocked,
   presentation = 'full', selected = false, onOpen = null, attempts = null,
-  attemptCoverage = null, onRecover = null, state = null,
+  attemptCoverage = null, onRecover = null, state = null, lineage = null,
 }) {
   // Item 6's two derivations. `state` is optional on purpose: a lane card is a summary, and the
   // legacy pre-Card fallback board has no run state to pass — both then simply render nothing extra
@@ -411,6 +413,42 @@ function _CardKanbanCard({
       {blockers.length > 5 && <span className="muted">+{blockers.length - 5}</span>}
     </div>}
     {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
+    {/* WHICH RESEARCH QUESTION THIS ROW BELONGS TO — above the node Lineage below, because the two
+        are different relations and were easy to confuse while only one of them was rendered. This
+        one is card->card: the DIRECTION this experiment answers, or the experiments answering this
+        direction. The row below is node->node: which experiment this one was bred from.
+        A parent id we hold but cannot resolve says so; it must NOT read as "unfiled", which is a
+        different and false statement (see `cardLineageModel.js::cardLineageView`). */}
+    {lineage && (lineage.parentId || lineage.children.length > 0
+      || lineage.kind === CARD_KIND_DIRECTION) && <div className="card-kanban-fact">
+      <span className="card-kanban-k">Research</span>
+      <span>
+        {lineage.kind === CARD_KIND_DIRECTION
+          ? <span className="chip xs chip-direction">direction</span> : null}
+        {lineage.parentId ? <>
+          {' answers '}
+          {lineage.parent && onOpen
+            ? <button type="button" className="btn xs ghost"
+                title={_cardText(lineage.parent.statement) || lineage.parentId}
+                onClick={e => onOpen(lineage.parentId, e.currentTarget)}>
+                {_cardText(lineage.parent.statement) || lineage.parentId}
+              </button>
+            : <span>{lineage.parentId}{lineage.parent ? '' : ' (not on this page)'}</span>}
+        </> : null}
+        {lineage.children.length > 0 ? <>
+          {lineage.parentId ? ' · ' : ' '}
+          {rollupChips(lineage.rollup).map(chip => (
+            <span key={chip.key} className="chip xs">{chip.label}</span>
+          ))}
+          {rollupChips(lineage.rollup).length === 0
+            ? `${lineage.children.length} experiment${lineage.children.length === 1 ? '' : 's'}`
+            : null}
+        </> : null}
+        {/* An unanswered direction says so rather than rendering an empty row. */}
+        {lineage.kind === CARD_KIND_DIRECTION && lineage.children.length === 0
+          ? ' — no experiment proposed against this yet' : null}
+      </span>
+    </div>}
     {(parents.length > 0 || scoredAgainst != null) && <div className="card-kanban-fact">
       <span className="card-kanban-k">Lineage</span>
       <span>{parents.length ? `parent ${parentLineage}` : ''}
@@ -781,6 +819,15 @@ function _CardKanban({
 }) {
   const [optim, setOptim] = useState({})
   const [addDraft, setAddDraft] = useState('')
+  // HOW THE BOARD IS GROUPED, and why there is a choice at all rather than a replacement. The lanes
+  // answer "what is the machine doing right now"; they are the right default and nothing here
+  // changes them. They cannot answer "what are we trying to find out", because that question is one
+  // level up: a research DIRECTION owns no runnable action, so the fold gives it no meaningful lane
+  // and the Kanban drew it among the work items as a card that would never move. Measured on
+  // `runs/e5small-dr-unified-v5`, 5 of the 5 rows an operator saw were exactly that.
+  // Not persisted deliberately: this is a way of LOOKING at the current board, not a preference —
+  // an operator who opened the run to see what is running should find the lanes, every time.
+  const [grouping, setGrouping] = useState('lanes')
   const inFlight = useRef(new Set())
   const activeRef = useRef(true)
   useEffect(() => {
@@ -1055,6 +1102,66 @@ function _CardKanban({
     <button className="btn sm primary" onClick={addCard}
       disabled={readOnly || !addDraft.trim()}>+ Add</button>
   </div>
+  // The DIRECTIONS view. One section per research direction, its experiments nested under it, and
+  // the experiments nobody filed in a bucket of their own that is never merged away — "unfiled" is
+  // a fact an operator acts on, and folding it into a total would claim a coverage the run does not
+  // have. The direction header wears COUNTS and never a lifecycle lane: giving a parent its
+  // children's worst status parks a months-long direction in "Running" because one of two hundred
+  // experiments under it is training, which is the failure the operator named before this existed.
+  // ONE walk of the edges for the whole board, mirroring why `attemptsByCard` is hoisted:
+  // the per-card `cardLineageView` rebuilds the index from the card list every call, so using it
+  // here would be O(cards^2) on a board the wire already lets reach 256 rows.
+  const lineageByCard = cardLineageViews(visibleCards)
+  const renderCard = card => <_CardKanbanCard key={card.id} card={card}
+    lineage={lineageByCard.get(card.id) || null}
+    receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
+    controlState={optim[card.id]}
+    controlsLocked={readOnly || (globalPending && !optim[card.id]?.pending)}
+    onSelect={onSelect} onClose={onClose} onControl={control}
+    presentation={view ? 'lane' : 'full'} state={view ? null : state}
+    selected={view && selectedCardId === card.id} onOpen={openDetails}
+    attempts={attemptsByCard?.get(card.id) || null}
+    attemptCoverage={cardAttemptCoverage(
+      attemptsByCard?.get(card.id) || [], receipts[card.id])} />
+  const groups = directionGroups(visibleCards, _cardOrder)
+  const directionsBoard = <div className="card-directions" role="region"
+    aria-label="Research directions and the experiments under them">
+    {groups.map(group => {
+      const unfiled = group.id === UNFILED_GROUP_ID
+      const headId = `card-direction-${encodeURIComponent(group.id)}`
+      const chips = unfiled ? [] : rollupChips(group.direction?.child_rollup)
+      return <section key={group.id} className="card-direction" aria-labelledby={headId}>
+        <header className="card-direction-h">
+          <h3 id={headId}>
+            {unfiled ? 'Not filed under any direction' : (
+              _cardText(group.direction?.statement) || group.direction?.id)}
+          </h3>
+          {!unfiled && <span className={'chip' + (cardIsDirection(group.direction) ? ' chip-direction' : '')}>
+            {cardIsDirection(group.direction) ? 'direction' : 'experiment'}
+          </span>}
+          {/* The counts, and NOT a status lane — see the comment above this block. */}
+          {chips.map(chip => <span key={chip.key} className="chip muted">{chip.label}</span>)}
+          {unfiled && <span className="chip muted">
+            {group.children.length} experiment{group.children.length === 1 ? '' : 's'}
+          </span>}
+        </header>
+        {/* A direction with no experiment yet is the most actionable row on this view, so it keeps
+            its section and says so rather than being filtered out for being empty. */}
+        {group.children.length === 0
+          ? <div className="muted card-empty">no experiment proposed against this yet</div>
+          : <div className="card-direction-rows">{group.children.map(renderCard)}</div>}
+      </section>
+    })}
+    {groups.length === 0 && <div className="muted card-empty">no work items yet</div>}
+  </div>
+  const groupingBar = <div className="toolbar card-grouping" role="group"
+    aria-label="Group the board by">
+    {[['lanes', 'Lanes', 'lifecycle status — what the machine is doing now'],
+      ['directions', 'Directions', 'research directions and the experiments filed under them'],
+    ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
+      className={'btn sm' + (grouping === key ? ' primary' : '')}
+      aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
+  </div>
   const board = <div className="card-board" role="region" aria-label="Card lifecycle kanban">
     {lanes.map(([key, label, hint]) => {
       const rows = visibleCards.filter(card => _cardStatus(card) === key).sort(_cardOrder)
@@ -1064,16 +1171,7 @@ function _CardKanban({
         <h3 id={laneId} className="card-col-h" title={hint}>
           {label} <span className="muted">{rows.length}</span>
         </h3>
-        {rows.map(card => <_CardKanbanCard key={card.id} card={card}
-          receipt={isRecord(receipts[card.id]) ? receipts[card.id] : null}
-          controlState={optim[card.id]}
-          controlsLocked={readOnly || (globalPending && !optim[card.id]?.pending)}
-          onSelect={onSelect} onClose={onClose} onControl={control}
-          presentation={view ? 'lane' : 'full'} state={view ? null : state}
-          selected={view && selectedCardId === card.id} onOpen={openDetails}
-          attempts={attemptsByCard?.get(card.id) || null}
-          attemptCoverage={cardAttemptCoverage(
-            attemptsByCard?.get(card.id) || [], receipts[card.id])} />)}
+        {rows.map(renderCard)}
         {rows.length === 0 && <div className="muted card-empty">—</div>}
       </section>
     })}
@@ -1090,9 +1188,10 @@ function _CardKanban({
         <div className="card-lanes-head">
           <span className="muted">{sub}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
+          {groupingBar}
         </div>
         {addBar}
-        {board}
+        {grouping === 'directions' ? directionsBoard : board}
       </div>
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
         tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
@@ -1136,8 +1235,9 @@ function _CardKanban({
   // narrower window gets a panel that fits rather than one clipped by the browser edge.
   return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
+    {groupingBar}
     {addBar}
-    {board}
+    {grouping === 'directions' ? directionsBoard : board}
   </Panel>
 }
 

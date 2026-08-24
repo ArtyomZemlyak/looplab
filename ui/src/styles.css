@@ -607,6 +607,27 @@ button { font: inherit; }
 .card-col.card-failed .card-col-h { color: color-mix(in srgb, var(--fail) 48%, var(--fg)); }
 .card-col.card-gated .card-col-h { color: var(--alarm-text); }
 .card-col.card-dropped .card-col-h { color: var(--fg-mut); }
+/* THE DIRECTIONS VIEW — a VERTICAL list of research questions, deliberately not a second kanban.
+   The lanes are columns because a card MOVES between them; a direction never moves, so columns
+   would be a shape carrying no information. Each section is one question with its experiments
+   nested under it, which is also what makes an empty one legible: a heading with a "no experiment
+   proposed against this yet" line is the most actionable row on the view. */
+.card-directions { display: flex; flex-direction: column; gap: 10px; padding: 1px 1px 8px; }
+.card-direction { background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px; min-width: 0; }
+.card-direction-h { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  margin: 0 0 8px; }
+.card-direction-h h3 { font-size: 12px; font-weight: 600; margin: 0; min-width: 0;
+  overflow-wrap: anywhere; }
+/* The direction's own kind chip. Toned like a question rather than like work, because the one thing
+   an operator must not read here is a lifecycle status. */
+.chip-direction { background: color-mix(in srgb, var(--accent) 14%, var(--bg-3));
+  color: var(--fg); border-color: color-mix(in srgb, var(--accent) 34%, var(--border)); }
+/* The experiments under one direction reflow into columns on a wide viewport and stack on a narrow
+   one, so a direction with twenty children is scannable without a horizontal scroll of its own. */
+.card-direction-rows { display: grid; gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(225px, 1fr)); align-items: start; }
+.card-grouping { gap: 4px; margin: 0; }
 .card-kanban-card { min-width: 0; margin-bottom: 6px; padding: 7px; border: 1px solid var(--border);
   border-radius: 7px; background: var(--bg-3); font-size: 11px; overflow-wrap: anywhere; }
 /* These two rules were DEAD: no module ever emitted `card-outcome-*`, so the per-card marker their

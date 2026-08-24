@@ -138,7 +138,18 @@ export function rollupChips(rollup) {
 // direction — its own rollup. Returns nulls rather than throwing so the panel can render a card
 // that arrived before its neighbours did.
 export function cardLineageView(cards, cardId) {
-  const { byId, childrenByParent } = cardLineageIndex(cards)
+  return viewFromIndex(cardLineageIndex(cards), cardId)
+}
+
+// Every card's view from ONE walk of the edges. The board needs all of them at once, and calling
+// `cardLineageView` per card rebuilds the index each time — O(cards^2) on a board the wire already
+// lets reach 256 rows (`PUBLIC_CARD_MAX_COUNT`). Same answers, one pass.
+export function cardLineageViews(cards) {
+  const index = cardLineageIndex(cards)
+  return new Map([...index.byId.keys()].map(id => [id, viewFromIndex(index, id)]))
+}
+
+function viewFromIndex({ byId, childrenByParent }, cardId) {
   const card = byId.get(cardId) || null
   if (!card) return { card: null, kind: null, parent: null, parentId: null, children: [], rollup: null }
   const parentId = cardParentId(card)

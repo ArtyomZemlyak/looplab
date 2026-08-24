@@ -10,7 +10,7 @@ import { test } from 'node:test'
 import {
   CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT, UNFILED_GROUP_ID,
   cardIsDirection, cardKind, cardLineageIndex, cardLineageView, cardParentId,
-  directionGroups, rollupChips,
+  cardLineageViews, directionGroups, rollupChips,
 } from '../src/cardLineageModel.js'
 
 const direction = (id, extra = {}) => ({ id, card_kind: 'direction', ...extra })
@@ -147,4 +147,20 @@ test('the inspector view resolves both directions of the edge', () => {
 test('a card that has not arrived yet renders as empty rather than throwing', () => {
   const view = cardLineageView([], 'missing')
   assert.deepEqual(view, { card: null, kind: null, parent: null, parentId: null, children: [], rollup: null })
+})
+
+test('every card\'s view from ONE walk agrees with the per-card one', () => {
+  // The board needs all of them at once and the per-card helper rebuilds the index each call, which
+  // is O(cards^2) at the wire's 256-row cap. Same answers is the property; the speed is the point.
+  const cards = [
+    direction('dir-1', { child_rollup: { children: 2, running: 1 } }),
+    experiment('a', { parent_card_id: 'dir-1' }),
+    experiment('b', { parent_card_id: 'dir-1' }),
+    experiment('lone'), experiment('orphan', { parent_card_id: 'gone' }),
+  ]
+  const bulk = cardLineageViews(cards)
+  assert.deepEqual([...bulk.keys()].sort(), ['a', 'b', 'dir-1', 'lone', 'orphan'])
+  for (const card of cards) {
+    assert.deepEqual(bulk.get(card.id), cardLineageView(cards, card.id), card.id)
+  }
 })
