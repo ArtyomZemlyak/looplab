@@ -4269,6 +4269,87 @@ Same shape both times: the mechanism is intact end to end, the bound cuts the TA
 is at the tail. A bound that removes the answer is worse than no answer, because the caller cannot
 tell a short record from a truncated one.
 
+## An EMPTY-authority card dies the moment the board stops being empty, and its prefetched node is killed before it ever runs
+
+Measured on `runs/e5small-dr-unified-v4`, 2026-08-24. `card-2` — "complete a teacher/self-mined
+hard-negative run", the idea this run's own Deep-Research still labels **"NEW (highest value)"** four
+days later — was created 08-20 05:53 with EMPTY authority (no incumbent existed yet), prefetched into
+node 2 at 06:46, and at 09:29 node 2 was terminalized:
+
+    node_failed  reason=superseded  error="superseded by Card freshness gate"
+
+It never entered a sandbox. The card has been `selection_blockers=['freshness_stale']` ever since —
+four days — and the hypothesis has never been tested.
+
+**The clause is one this repo already argued should go.** `core/cards.py::_card_action_freshness`
+shed the same champion-equality rule from its INCUMBENT branch on 2026-08-13, with the measured case
+of `rubertlite-dr-unified-v6` (a card whose only defect was that an unrelated node had outscored the
+champion it was proposed under; GPU 1 idle for the whole run). The EMPTY branch kept it, and its own
+docstring says it "should go too", deferring on the argument that **"the only window it can cost
+anything in is bootstrap"**. This run falsifies that: the window caught the most valuable seeded
+hypothesis on the board and held it for the whole run. An action formed with no incumbent anchors
+nothing, so nothing about it can die — the docstring's own words.
+
+**Why it was not simply removed here.** The deferral's OTHER reason is current, not stale prose, and
+it was re-checked against the tree rather than taken from the comment:
+`search/speculation_quality.py::_validate_calibration_card_owners` requires every node to carry a
+UNIQUE native `card_id` ("calibration nodes require unique native Card owners"). Un-staling an
+empty-authority card makes it selectable again, a second node claims the same card, and the paired-run
+calibration receipt is refused outright. That protocol's revision is priced in its own module at six
+GPU runs and assigned to that module's owner. Breaking it as a side effect of an idle-GPU fix is
+exactly the trade this entry exists to NOT make silently.
+
+**What is NOT the defect, checked and excluded.** The six action-less cards beside it
+(`source=deep_research`) are not a wiring gap: `open_research_beliefs()` returns all of them, so the
+Researcher has had "teacher re-mining, highest value" in its proposal feed every cycle and has
+proposed temperature sweeps and merges instead. That is a choice, not a broken channel.
+
+**[2026-08-24 — RE-MEASURED OVER THE WHOLE CORPUS, AND THE RECEIPT PRICE IS ZERO.]** Two of this
+entry's own claims were checked against every event log in `runs/` and the results move the item
+from "priced at six GPU runs" to "priced at three test decisions".
+
+*The blast radius is 9 of 10, not one card.* Replaying every `node_failed reason=superseded` on the
+box: TEN nodes ever died that way, and NINE were carrying a card with `scored_against_empty: true`
+and no anchor at all — `e5small-dr-unified-v2` #3, `-v4` #2, `rubertlite-dr-unified-v7` #3/#4/#5/#6/#7
+(five nodes of one run), `-v8` #2, `-v9` #2. Each was BUILT — a paid Developer call, code committed
+to the node — and discarded before dispatch. The tenth, v8 #7, names a real anchor (node 1,
+generation 0) and is a genuine staleness the rule is right to refuse, which is the discrimination
+that makes the change safe to state: removing `board_empty` does not weaken the anchored branch by
+a byte. "The only window it can cost anything in is bootstrap" is now falsified twice over.
+
+*The six-GPU-run price does not apply, and the proof is the one this repo demands for that module.*
+`canonical_json(analyze_speculation_run(run))` was compared over all six preserved calibration runs
+(`runs/specgate/`, `runs/specgate2/`) with and without the change: **byte-identical**. No issued
+receipt moves. **But the honest half of that result is that the corpus is ALREADY revoked for an
+unrelated reason** — all six refuse with `config fields differ from the exact calibration snapshot`,
+missing `asha_live_kill_confidence`, `auto_extra_metrics`, `cadence_while_evaluating`,
+`developer_probe`, `eval_deadline_grace_s` and more, i.e. ordinary `Settings` additions made over
+weeks, long before this change. So the comparison proves the change makes nothing worse; it cannot
+prove neutrality on a corpus that no longer validates. That second finding is its own open item.
+
+*What the change actually costs is three test decisions, and they are why it is still not shipped.*
+Driven on a working tree with `board_empty` removed: `tests/test_cards.py`'s freshness truth table
+goes green after flipping the one row that asserts the old rule (correct — a deliberate rule
+change), and three others fail. `test_card_selection_guard.py::test_explicit_empty_score_and_parent_
+fences_are_current_only_while_run_is_empty` asserts the old rule in its NAME and is the same flip.
+`test_speculation_quality_gate.py::test_stale_precommit_is_kept_in_the_request_denominator` builds a
+fixture whose own comment describes the race this change abolishes ("elected while node 0 was still
+in flight, then that evaluation moved the score/parent authority"), so it must manufacture staleness
+a way that is still real — a reset or aborted anchor — rather than by the board filling. And two
+`test_card_speculation_engine.py` cases now end with the prefetched node `evaluated` where they
+asserted `pending`: the built node is no longer left undispatched, which is plausibly the fix
+working and is a change to WHEN a session dispatches speculation, i.e. wider than "stop killing
+built nodes". That last one was not run to ground and is the reason this is a measurement rather
+than a merge.
+
+OPEN[empty-authority-card-dies-when-the-board-fills] an action with no incumbent anchors nothing, yet the empty branch still requires the board to be empty NOW — 9 of the 10 nodes ever killed `superseded` died on it. proof:`present:if scored_against_generation is None and board_empty@looplab/core/cards.py`
+
+  The fix is two words in `_card_action_freshness` and a decision that does not belong to it: either
+  the calibration receipt protocol admits a re-elected empty-authority card, or the empty branch
+  gains a build-ledger guard (one `card_build_requested` per card) so re-election cannot produce a
+  second request. The measured cost of leaving it is one untested top-ranked hypothesis per run that
+  seeds a card before its first metric lands.
+
 OPEN[tail-truncation-drops-the-payload] no rule stops the next bounded surface putting its answer past its own cut. proof:present:RESULT_CAP@looplab/tools/_base.py
 
   Both fixes are LOCAL: memos gained sections, the case record leads with its params. Neither
