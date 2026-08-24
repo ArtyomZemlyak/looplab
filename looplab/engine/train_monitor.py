@@ -1075,7 +1075,8 @@ def projected_overrun_s(span_s, eta_s, wall_s) -> Optional[float]:
     return overrun if overrun > 0 else None
 
 
-def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan) -> None:
+def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan,
+                            *, grace_cap=None) -> None:
     """Put the projection beside the verdict on the durable alert row, when there is one to put.
 
     A separate function for the same reason `trajectory_row` is one: the alert is assembled inside a
@@ -1094,6 +1095,27 @@ def stamp_projected_overrun(alert: dict, trajectory, resolved, log_plan) -> None
         return
     alert["projected_overrun_s"] = round(over, 1)
     alert["stage_wall_s"] = round(float(wall), 1)
+    # …AND WHETHER ANYONE SHOULD BE WOKEN, decided HERE because this is the only place that holds
+    # both facts. `projected_overrun_s` is deliberately unfiltered — it is the engine's record that
+    # it knew — but a 40-second overrun on a ten-hour stage is not a thing to interrupt an operator
+    # about, and "is it big enough" has exactly one principled answer already in the tree: the
+    # deadline GRACE that will actually be granted when the wall arrives. An overrun the grace
+    # absorbs needs no human; one that exceeds it will end the node no matter who is watching.
+    #
+    # Reusing `runtime/sandbox.resolve_deadline_grace` rather than re-deriving is what keeps the two
+    # from drifting: under the AUTO sentinel the grant is 10% of the wall capped at 30 minutes, and
+    # a second copy of that arithmetic here would decide to wake an operator on a bar the rescue no
+    # longer uses. Absent/blank cap => no grace => any projected overrun is beyond it, which is the
+    # fail-closed direction: it can only surface a real projection, never suppress one.
+    try:
+        from looplab.runtime.sandbox import resolve_deadline_grace
+        grace = float(resolve_deadline_grace(grace_cap, wall))
+    except Exception:  # noqa: BLE001 — an unreadable cap means "no grace", never "it fits"
+        grace = 0.0
+    beyond = over - max(0.0, grace)
+    if beyond > 0:
+        alert["overrun_beyond_grace_s"] = round(beyond, 1)
+        alert["stage_grace_s"] = round(max(0.0, grace), 1)
 
 
 def trajectory_row(trajectory: Optional[LossTrajectory]) -> Optional[dict]:
@@ -2984,7 +3006,8 @@ class TrainingMonitorMixin:
                                 # is right to refuse a run two hours short; this is the first one.
                                 # Additive and fold-ignored — it records that the engine knew.
                                 stamp_projected_overrun(
-                                    alert, trajectory, resolved, log_plan)
+                                    alert, trajectory, resolved, log_plan,
+                                    grace_cap=getattr(self, "eval_deadline_grace_s", None))
                             if trajectory_veto:
                                 alert["trajectory_veto"] = True
                             if role_withheld:

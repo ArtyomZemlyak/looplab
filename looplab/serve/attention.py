@@ -64,6 +64,21 @@ def _integer(value) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def _number(value, *, positive: bool = False) -> float | None:
+    """A finite float off an untrusted event row, or None. `positive=True` also rejects <= 0.
+
+    `bool` is excluded explicitly: `isinstance(True, int)` is True and `float(True)` is 1.0, so a
+    row carrying `overrun_beyond_grace_s: true` would otherwise read as a one-second overrun and
+    open an attention item nobody can act on.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number if not positive or number > 0 else None
+
+
 def _timestamp(value) -> float:
     try:
         parsed = float(value)
@@ -286,6 +301,34 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             return "recovery"
         return "invalid"
 
+    def classify_train_overrun(data: dict) -> str:
+        """A stage projected to MISS its own wall by more than the grace that will be granted.
+
+        A DIFFERENT FACT from the health verdict above, which is why it is a second family over the
+        same rows rather than another branch of `classify_train_monitor`. A node can be training
+        perfectly — `healthy` every tick — and still be heading 42 hours past a wall that will kill
+        it; classified by `status` alone that node reads as `recovery` and the feed stays silent
+        while the GPU burns. Measured: node 6 was recorded at "6% of a ~10h run" SEVEN HOURS before
+        its 28000 s wall discarded 7.78 GPU-hours, and node 9's 42.6 h projection was confirmed to
+        the minute when it died on its own 36000 s wall.
+
+        The bar is `overrun_beyond_grace_s`, stamped by `engine/train_monitor.py` where both the
+        projection and the run's `eval_deadline_grace_s` are in hand. An overrun the deadline grace
+        will absorb is not a thing to wake anyone about; one that exceeds it ends the node whoever
+        is watching.
+
+        `invalid` — not `recovery` — for a row with NO projection: the projection is silent whenever
+        any of the span/ETA/stage/wall is unknowable, and `projected_overrun_s`'s own docstring says
+        a caller may treat a positive answer as real and may NOT treat absence as "it fits". A row
+        that DID compute a projection which the grace absorbs is a real recovery statement and
+        closes the episode.
+        """
+        if _number(data.get("overrun_beyond_grace_s"), positive=True) is not None:
+            return "bad"
+        if _number(data.get("projected_overrun_s")) is not None:
+            return "recovery"
+        return "invalid"
+
     def classify_asha(data: dict) -> str:
         if "underperforming" not in data:
             return "bad"  # legacy rows predate the explicit edge bit and represented warnings
@@ -351,6 +394,57 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             # derived=False: this item IS backed by a real appended EV_TRAIN_MONITOR_ALERT (a real
             # seq), unlike the synthesized-liveness signals. It must be False for `notifyEligible`
             # (browser && !derived && !stale) to fire the one-time desktop notification.
+            "active": True,
+            "derived": False,
+            "node_id": nid,
+            "node_generation": gen,
+        })
+
+    # WALL OVERRUN: a stage heading past the wall that will kill it, by more than the deadline grace
+    # can absorb. Same rows as the health family above and a different question — see
+    # `classify_train_overrun`. This is the FIRST line; the deadline judge at the wall is the last,
+    # and it is right to refuse a run two hours short. Seven hours earlier it was still cheap to act.
+    overrun_episodes = open_alert_episodes(
+        EV_TRAIN_MONITOR_ALERT, classify_train_overrun,
+    )
+    for (nid, gen), (episode_number, anchor) in sorted(overrun_episodes.items()):
+        # Only while THIS lifecycle is still running. Unlike the health family there is no
+        # "stopped by the monitor" case to keep open: nothing stops a node for overrunning, which is
+        # the whole defect — once the node is terminal the projection is history, not a decision.
+        cur = state.nodes.get(nid)
+        if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
+                or cur.tombstoned or nid in state.aborted_nodes):
+            continue
+        anchor_seq = _integer(anchor.seq)
+        if not rid or len(generation) != 64 or anchor_seq is None:
+            continue
+        data = anchor.data if isinstance(anchor.data, dict) else {}
+        beyond = _number(data.get("overrun_beyond_grace_s"), positive=True) or 0.0
+        wall = _number(data.get("stage_wall_s"), positive=True)
+        # HOURS, because the numbers that matter here are hours and an operator reading "153360 s"
+        # has to do arithmetic before they can decide anything.
+        over_h = beyond / 3600.0
+        wall_note = f" against a {wall / 3600.0:.1f}h wall" if wall else ""
+        items.append({
+            "id": _opaque_id(
+                rid, generation, nid,
+                (f"train_overrun:{gen}" if episode_number == 1
+                 else f"train_overrun:{gen}:episode:{anchor_seq}"),
+            ),
+            "kind": "train_overrun",
+            "severity": "warning",
+            "title": "Experiment will miss its wall",
+            # The numbers are the engine's OWN measurement of its own stage — a span, an ETA and a
+            # declared wall — not model-authored log prose, so they may ride in the envelope where
+            # the health family's verdict text deliberately may not.
+            "detail": (f"Experiment #{nid} is projected to overrun by {over_h:.1f}h beyond the "
+                       f"deadline grace{wall_note}. It will be killed with nothing to show unless "
+                       "the wall is raised or the experiment is stopped now."),
+            "run_id": rid,
+            "generation": generation,
+            "seq": anchor_seq,
+            "created": _timestamp(anchor.ts),
+            "browser": True,
             "active": True,
             "derived": False,
             "node_id": nid,

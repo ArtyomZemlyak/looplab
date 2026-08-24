@@ -8,13 +8,21 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/
 
 export const ATTENTION_KINDS = new Set([
   'approval', 'approval_incomplete', 'spec_approval', 'failure_spike', 'run_failed',
-  'budget_exhausted', 'finished', 'stopped', 'finalization_stalled', 'stalled', 'train_monitor', 'asha',
+  'budget_exhausted', 'finished', 'stopped', 'finalization_stalled', 'stalled', 'train_monitor',
+  // A stage heading past the wall that will kill it, by more than the deadline grace can absorb.
+  // A SEPARATE kind from `train_monitor` because it is a separate question: that one asks whether
+  // the training is broken, this one asks whether it will finish, and a node can be perfectly
+  // healthy and doomed at the same time (node 6 burned 7.78 GPU-hours reading `healthy` throughout).
+  'train_overrun', 'asha',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
 const SEVERITY_PRIORITY = Object.freeze({ danger: 4, action: 3, warning: 2, success: 1 })
 const NEEDS_ACTION = new Set([
   'approval', 'approval_incomplete', 'spec_approval', 'failure_spike', 'run_failed',
   'finalization_stalled', 'stalled', 'assistant_permission', 'train_monitor',
+  // NEEDS_ACTION, and the action is time-critical in a way the others are not: the window closes
+  // when the wall arrives, and after that there is nothing to decide.
+  'train_overrun',
 ])
 
 const COPY = Object.freeze({
@@ -29,6 +37,8 @@ const COPY = Object.freeze({
   finalization_stalled: ['Finalization needs recovery', 'The engine stopped before durable wrap-up completed.', 'Open Events'],
   stalled: ['Run engine stopped', 'No engine process is advancing this run.', 'Open Events'],
   train_monitor: ['Training looks broken', 'The live-log monitor judged this training likely wasted. Open the run to inspect the log and verdict.', 'Inspect training'],
+  // The server sends the measured hours in `detail`; this is the fallback shown when it does not.
+  train_overrun: ['Experiment will miss its wall', 'This experiment is projected to be killed by its own deadline before it finishes. Raise the wall or stop it.', 'Inspect training'],
   asha: ['ASHA rank warning', 'Inspect the live curve. Automatic stopping requires peers at the same declared progress.', 'Inspect experiment'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
@@ -57,7 +67,8 @@ export function attentionHref(item) {
   } else if (item.kind === 'run_failed') {
     state.panel = 'failures'
     if (hasExactNode) state.nodeId = exactNodeId
-  } else if ((item.kind === 'train_monitor' || item.kind === 'asha') && hasExactNode) {
+  } else if ((item.kind === 'train_monitor' || item.kind === 'train_overrun'
+              || item.kind === 'asha') && hasExactNode) {
     state.nodeId = exactNodeId          // deep-link to the evaluating node (its live training curve)
   } else state.panel = 'events'
   // A run generation can contain several lifecycles for the same numeric node after a reset/retry.
